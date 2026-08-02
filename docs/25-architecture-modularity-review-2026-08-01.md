@@ -237,6 +237,7 @@ synthetic task adapters (RA-06).
 - **AG-07** agents↔search cycle held apart only by import placement, direction undocumented.
 - **SR-12** router-to-router private imports and late-bound `srv.*_fn` attribute wiring (also XP-05).
 - **AG-03** the Strategy field set synchronized across five encodings with no registry test —
+  *(resolved 2026-08-02 — `tests/test_strategy_field_registry.py`.)*
   the exact failure class the repo's registry convention exists to prevent.
 
 ### T5 — Over-engineering / excessive logic
@@ -1812,7 +1813,25 @@ Scope: `looplab/agents/`: roles.py, tool_loop.py, agent.py, cli_agent.py, unifie
 
 #### AG-03 · MEDIUM · inconsistency · effort: medium
 
-**Strategy field set is manually synchronized across five parallel encodings with no registry/source-scan guard, contrary to the codebase's own convention**
+**Strategy field set is manually synchronized across five parallel encodings with no registry/source-scan guard, contrary to the codebase's own convention** — **RESOLVED (2026-08-02)**
+
+*Resolution:* `tests/test_strategy_field_registry.py` walks the real encodings rather than
+restating them (the TypedDict via AST, `_StrategyOut.model_fields`, and the unparsed bodies of
+`_assemble_strategy` / `validate_strategy` / `engine/strategy.py`), and asserts each
+silent-drop direction separately: every proposable field reaches the LLM schema, every schema field
+is copied by assembly, every Strategy field survives the validator whitelist, and every one is
+named by `_apply_strategy`. A `NOT_LLM_PROPOSABLE` set makes "the model must not set this" an
+explicit statement per key (provenance, free-form dicts, the backend factory key, the two legacy
+parallel aliases), and is itself guarded against stale or contradictory entries — a stale exemption
+is how a genuinely-missing schema field would hide.
+
+Verified to have teeth by adding a field to `_StrategyOut` and the TypedDict and forgetting it
+everywhere else: the exact failure the finding describes, now three red assertions.
+
+`NOVELTY_STANCES` / `CARD_SCORING_STANCES` are deliberately NOT collapsed. A card-scoring stance
+and a novelty stance are separate dials that share a vocabulary today; merging them would couple
+two knobs the Strategist sets independently. Their equality is pinned instead, so a future
+divergence is a decision rather than a surprise.
 
 *Locations:* `looplab/agents/strategist.py:74-104`, `looplab/agents/strategist.py:223-310`, `looplab/agents/strategist.py:542-567`, `looplab/agents/strategist.py:657-693`, `looplab/agents/strategist.py:460-477`, `looplab/agents/strategist.py:622-634`, `looplab/agents/strategist.py:42-43`
 
