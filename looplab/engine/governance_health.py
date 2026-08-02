@@ -253,16 +253,40 @@ def _semantic_digest(payload: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _curation_source_key(*, run_id: str, task_id: str, finish_seq: int | None) -> str:
+def curation_source_key(*, run_id: str, task_id: str, finish_seq: int | None) -> str:
+    """The CONTENT-ADDRESSED identity binding a finalize receipt to the run source that paid for it.
+
+    This is a durable identity, not a cache key: `_validate_v2_curation_row` recomputes it and
+    REJECTS any row whose stored `source_key` differs. So writer and validator must derive it
+    identically forever — a changed field, a different key order, a flipped `ensure_ascii` and every
+    previously valid row in the ledger starts failing, which surfaces as `GovernanceLedgerUnavailable`
+    on reads that used to work. It was written out twice (here and in `lessons.py`) with nothing but
+    convention holding the copies together; `tests/test_curation_identity.py` now pins the digests
+    (doc 25 EM-04).
+    """
     return "source:v1:" + _semantic_digest({
         "v": 1, "run_id": run_id, "task_id": task_id, "finish_seq": finish_seq,
     })
 
 
-def _facets_curation_key(task_id: str) -> str:
+def facets_curation_key(task_id: str) -> str:
+    """The task-facets identity — same durable-identity contract as `curation_source_key`.
+
+    Deliberately keyed on the task ALONE: facets describe a task family, so any run of that task
+    reuses the same paid overlay rather than re-purchasing it per run.
+    """
+    tid = str(task_id or "")
+    if not tid:
+        raise ValueError("task facets require an exact task_id")
     return "facets:v2:" + _semantic_digest({
-        "v": 2, "kind": "facets", "task_id": task_id,
+        "v": 2, "kind": "facets", "task_id": tid,
     })
+
+
+# The private spellings stay as aliases: this module's own validators use them and several are
+# reached by name from tests.
+_curation_source_key = curation_source_key
+_facets_curation_key = facets_curation_key
 
 
 def _valid_required_text(value, *, maximum: int) -> bool:

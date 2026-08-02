@@ -561,15 +561,17 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
 
     @classmethod
     def _curation_source_key(cls, final: RunState) -> str:
-        source = {
-            "v": 1,
-            "run_id": str(final.run_id or ""),
-            "task_id": str(final.task_id or ""),
-            "finish_seq": cls._curation_finish_seq(final),
-        }
-        encoded = json.dumps(
-            source, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        return "source:v1:" + hashlib.sha256(encoded).hexdigest()
+        """Derived by `governance_health`, which is also what VALIDATES it on every ledger read.
+
+        The two used to compute it independently. They cannot be allowed to disagree: the validator
+        recomputes this key and rejects any row that does not match, so a drift would retroactively
+        invalidate every receipt already on disk (doc 25 EM-04).
+        """
+        from looplab.engine.governance_health import curation_source_key
+
+        return curation_source_key(
+            run_id=str(final.run_id or ""), task_id=str(final.task_id or ""),
+            finish_seq=cls._curation_finish_seq(final))
 
     @staticmethod
     def _portfolio_curation_key(kind: str, input_digest: str) -> str:
@@ -581,13 +583,10 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
 
     @staticmethod
     def _facets_curation_key(task_id: str) -> str:
-        tid = str(task_id or "")
-        if not tid:
-            raise ValueError("task facets require an exact task_id")
-        encoded = json.dumps(
-            {"v": 2, "kind": "facets", "task_id": tid}, ensure_ascii=False,
-            sort_keys=True, separators=(",", ":")).encode("utf-8")
-        return "facets:v2:" + hashlib.sha256(encoded).hexdigest()
+        """Derived by `governance_health` — same reason as `_curation_source_key`."""
+        from looplab.engine.governance_health import facets_curation_key
+
+        return facets_curation_key(task_id)
 
     @classmethod
     def _diagnostic_curation_key(cls, kind: str, final: RunState) -> str:

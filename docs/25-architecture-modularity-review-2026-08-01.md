@@ -1059,6 +1059,25 @@ campaign keeps finding:
 
 *Recommendation:* Move the two key functions to governance_health.py (the module already owning the schema constants) and have lessons.py import them; keep a source-scan test asserting a golden digest so an accidental change is a red test, not a silent ledger poisoning.
 
+*Resolution (2026-08-02):* `governance_health.py` owns `curation_source_key` and
+`facets_curation_key` (its private spellings kept as aliases for its own validators);
+`LessonMemory._curation_source_key` / `_facets_curation_key` delegate. The module that VALIDATES an
+identity now also derives it, which is the only arrangement that cannot drift.
+
+The failure mode is what makes this worth more than its line count. These are durable
+content-addressed identities, not cache keys: `_validate_v2_curation_row` recomputes `source_key`
+and rejects any row that does not match. A drift between the two copies — a field dropped, a key
+order changed, `ensure_ascii` flipped — would not break the write that introduced it. It would
+retroactively invalidate every receipt already on disk, surfacing much later as
+`GovernanceLedgerUnavailable` on reads that used to work.
+
+`tests/test_curation_identity.py` adds 11 tests. The golden digests are computed from the
+PRE-extraction derivation at HEAD, so they prove the move changed nothing rather than merely pinning
+whatever the new code happens to produce. Three deliberate breaks were caught: dropping `finish_seq`
+from the identity, coercing an absent `finish_seq` to zero (which makes "never finished" and
+"finished at seq 0" the same source), and letting an empty task id mint a shared facets key — which
+would serve one task's paid overlay to another.
+
 #### EM-05 · MEDIUM · inconsistency · effort: medium
 
 **Two parallel governance-append implementations; the shared one is homed in the wrong module**
