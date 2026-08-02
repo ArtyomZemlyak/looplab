@@ -537,7 +537,8 @@ export function GroupSummary({
   const themes = [...new Set(members.map(node => nodeTheme(node, state)).filter(Boolean))]
   return <>
     <div className="tabs">
-      <div className="tab active">Group · {groupKey}</div>
+      <h2 className="tab active group-summary-title" tabIndex={-1}
+        data-group-summary-title>Group · {groupKey}</h2>
       <span className="spacer" />
       <button className="btn sm ghost" onClick={onClose} title="close group view" aria-label="Close group details">✕</button>
     </div>
@@ -556,7 +557,8 @@ export function GroupSummary({
           <div className="section-h">{aggregate.filterActive ? 'Matching members' : 'Members'} <span className="pill">{countLabel}</span></div>
           <DataTable caption="Group member results" card={false}><table className="tbl"><thead><tr><th>node</th><th>operator</th><th>metric</th><th>status</th></tr></thead>
             <tbody>{members.map(n => <tr key={n.id}>
-              <td><button type="button" className="btn xs ghost" onClick={() => onSelectNode(n.id)}>#{n.id}</button></td>
+              <td><button type="button" className="btn xs ghost" data-group-member-id={n.id}
+                aria-label={`Open experiment #${n.id}`} onClick={() => onSelectNode(n.id)}>#{n.id}</button></td>
               <td>{n.operator}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td><td>{n.status}</td></tr>)}</tbody></table></DataTable>
         </>}
     </div>

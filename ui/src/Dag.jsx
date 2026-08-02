@@ -295,7 +295,8 @@ function GroupSuper({ data }) {
     : `${count} experiments`
   const metricText = zeroMatch ? 'no matching experiments' : `best ${fmt(best)}`
   return (
-    <SuperShell tint={tint} selected={selected} dimmed={zeroMatch} onClick={() => onSelect(label)}
+    <SuperShell tint={tint} selected={selected} dimmed={zeroMatch} selectKey={label}
+      onClick={() => onSelect(label)}
       title={`Select collapsed group ${label}, ${matchText}, ${metricText}`}>
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
       <div className="row">
@@ -690,14 +691,27 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
               {key} · {collapsed.has(key) ? 'collapsed' : 'expanded'}
             </option>)}
           </select>
-          <button type="button" className="btn sm ghost grp-picker-action"
+          <button type="button" className={'btn sm grp-picker-action'
+                    + (compact && activeGroupActionKey ? ' primary' : ' ghost')}
                   disabled={!activeGroupActionKey}
                   aria-label={activeGroupActionKey
-                    ? `${collapsed.has(activeGroupActionKey) ? 'Expand' : 'Collapse'} group ${activeGroupActionKey}`
-                    : 'Choose a group before collapsing or expanding it'}
-                  onClick={() => activeGroupActionKey && onToggleGroup?.(activeGroupActionKey)}>
+                    ? compact ? `Open group ${activeGroupActionKey}`
+                      : `${collapsed.has(activeGroupActionKey) ? 'Expand' : 'Collapse'} group ${activeGroupActionKey}`
+                    : compact ? 'Choose a group before opening it'
+                      : 'Choose a group before collapsing or expanding it'}
+                  onClick={() => {
+                    if (!activeGroupActionKey) return
+                    if (compact) {
+                      // Large-run cards can become too small to tap reliably on a phone. Keep the
+                      // native picker keyboard-friendly, then use this explicit action as the stable
+                      // compact entry point. Reset after activation so the same group can reopen.
+                      onSelectGroup?.(activeGroupActionKey)
+                      setGroupActionKey('')
+                    } else onToggleGroup?.(activeGroupActionKey)
+                  }}>
             {activeGroupActionKey
-              ? collapsed.has(activeGroupActionKey) ? 'expand' : 'collapse'
+              ? compact ? 'open group'
+                : collapsed.has(activeGroupActionKey) ? 'expand' : 'collapse'
               : 'choose group'}
           </button>
           <button className="btn sm ghost" title="collapse all groups" onClick={() => onCollapseAll && onCollapseAll(groupKeys)}>⊟ all</button>

@@ -129,6 +129,49 @@ const RUN_CONFIG_REQUEST_TIMEOUT_MS = 15_000
 const HISTORICAL_SNAPSHOT_REQUEST_TIMEOUT_MS = 15_000
 const START_OVER_REQUEST_TIMEOUT_MS = 15_000
 const START_OVER_AUTO_RETRY_LIMIT = 3
+const RUN_GROUP_HISTORY_KEY = 'looplab.runGroupNavigation'
+const RUN_GROUP_HISTORY_MODES = new Set(['theme', 'operator', 'metric', 'niche'])
+const RUN_GROUP_KEY_LIMIT = 512
+const RUN_GROUP_CONTROL_RE = /[\u0000-\u001f\u007f]/
+
+function normalizeRunGroupNavigation(value, runId, generation = null) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  if (value.runId !== String(runId) || !/^[0-9a-f]{64}$/.test(String(value.generation || ''))
+      || (generation && value.generation !== generation)
+      || !RUN_GROUP_HISTORY_MODES.has(value.mode)
+      || typeof value.key !== 'string' || !value.key || value.key.length > RUN_GROUP_KEY_LIMIT
+      || RUN_GROUP_CONTROL_RE.test(value.key)) return null
+  const returnNodeId = value.returnNodeId == null ? null : Number(value.returnNodeId)
+  if (returnNodeId != null && (!Number.isSafeInteger(returnNodeId) || returnNodeId < 0)) return null
+  const rawScrollTop = Number(value.scrollTop)
+  const scrollTop = Number.isFinite(rawScrollTop) && rawScrollTop >= 0
+    ? Math.min(rawScrollTop, 10_000_000) : 0
+  return {
+    runId: String(runId), generation: value.generation, mode: value.mode, key: value.key,
+    returnNodeId, scrollTop,
+  }
+}
+
+function readRunGroupNavigation(runId, generation = null) {
+  if (typeof history === 'undefined') return null
+  const state = history.state
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return null
+  return normalizeRunGroupNavigation(state[RUN_GROUP_HISTORY_KEY], runId, generation)
+}
+
+function writeRunGroupNavigation(value, mode = 'replace') {
+  if (typeof history === 'undefined' || typeof location === 'undefined') return false
+  try {
+    const state = history.state && typeof history.state === 'object' && !Array.isArray(history.state)
+      ? history.state : {}
+    const next = { ...state }
+    if (value) next[RUN_GROUP_HISTORY_KEY] = value
+    else delete next[RUN_GROUP_HISTORY_KEY]
+    history[mode === 'push' ? 'pushState' : 'replaceState'](next, '', location.href)
+    return true
+  } catch { return false }
+}
+
 const hubMenuId = label => `panel-hub-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
 const restoredStartOverState = runId => {
   const restored = loadRunStartOverIntent(runId)
@@ -220,6 +263,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // Keep this compatibility argument null until the old aggregate API is removed; Concepts owns the
   // only active semantic filter and is propagated separately through conceptHighlight.
   const themeFilter = null
+  const [groupNavigation, setGroupNavigation] = useState(
+    () => readRunGroupNavigation(runId))
+  const groupNavigationRef = useRef(groupNavigation)
+  groupNavigationRef.current = groupNavigation
+  const selectedGroup = groupNavigation?.key ?? null
   const routeFenceBlocked = generationMismatch || generationPending
   const historyActive = viewSeq != null
   const landedRef = useRef(false)                            // auto-land on Report once, on finish
@@ -228,7 +276,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // Choose Report in the same render that first observes terminal readiness. Waiting for the passive
   // URL effect would start DAG chunks and the owner log-page request for a surface never displayed.
   const autoReport = !historyActive && liveTerminalReady && !landedRef.current
-    && !deepLinkLandingRef.current && !runRouteStateHasTarget(routeState, { reviewMode })
+    && !deepLinkLandingRef.current && !groupNavigation
+    && !runRouteStateHasTarget(routeState, { reviewMode })
   // review capabilities do not expose concept frames. Owner history does, through an
   // exact seq; redirect only the unsupported review route instead of hiding owner history.
   const requestedView = reviewMode && requestedRouteView === 'concepts' ? 'dag' : requestedRouteView
@@ -347,15 +396,72 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     setAttemptFenceNotice('')
   }, [route.navigationRevision])
   const [copyFallback, setCopyFallback] = useState('')
-  const [groupMode, setGroupMode] = useState('theme')
+  const [groupModePreference, setGroupModePreference] = useState('theme')
   const [collapsed, setCollapsed] = useState(() => new Set())
-  const [selectedGroup, setSelectedGroup] = useState(null)
+  const groupMode = groupNavigation?.mode ?? groupModePreference
+  const groupSurfaceReady = runStatus === 'ready' && !!live && !routeFenceBlocked
+    && (!historyActive || (historyMatches(history, viewSeq, generation) && history.status === 'ready'))
+  const [groupExitFocus, setGroupExitFocus] = useState(null)
+  const groupExitFocusAppliedRef = useRef(null)
+  const groupSurfaceFocusAppliedRef = useRef(null)
+  const groupInspectorFocusSequenceRef = useRef(0)
+  const groupInspectorFocusAppliedRef = useRef(null)
+  const [groupInspectorFocusRequest, setGroupInspectorFocusRequest] = useState(null)
+  const commitGroupNavigation = (next, { mode = 'replace', focusExit = false } = {}) => {
+    const normalized = next
+      ? normalizeRunGroupNavigation(next, runId, generation) : null
+    const previous = groupNavigationRef.current
+    if (focusExit && previous?.key) {
+      setGroupExitFocus({ mode: previous.mode, key: previous.key })
+    } else if (normalized) setGroupExitFocus(null)
+    if (!normalized) setGroupInspectorFocusRequest(null)
+    writeRunGroupNavigation(normalized, mode)
+    groupNavigationRef.current = normalized
+    setGroupNavigation(normalized)
+    if (normalized?.mode) setGroupModePreference(normalized.mode)
+    return normalized
+  }
+  useEffect(() => {
+    const hydrateGroupNavigation = () => {
+      const previous = groupNavigationRef.current
+      const browserState = window.history.state
+      const hasSnapshot = !!browserState && typeof browserState === 'object'
+        && !Array.isArray(browserState)
+        && Object.prototype.hasOwnProperty.call(browserState, RUN_GROUP_HISTORY_KEY)
+      const next = readRunGroupNavigation(runId, generation)
+      if (hasSnapshot && !next) writeRunGroupNavigation(null, 'replace')
+      const previousBelongsHere = previous?.runId === String(runId)
+        && (!generation || previous.generation === generation)
+      if (previous?.key && previousBelongsHere && !next) {
+        setGroupExitFocus({ mode: previous.mode, key: previous.key })
+      } else if (next) setGroupExitFocus(null)
+      if (!next) setGroupInspectorFocusRequest(null)
+      groupNavigationRef.current = next
+      setGroupNavigation(next)
+      if (next?.mode) setGroupModePreference(next.mode)
+    }
+    hydrateGroupNavigation()
+    window.addEventListener('popstate', hydrateGroupNavigation)
+    return () => window.removeEventListener('popstate', hydrateGroupNavigation)
+  }, [runId, generation])
+  useLayoutEffect(() => {
+    if (!groupNavigation) return
+    setGroupModePreference(groupNavigation.mode)
+    setCollapsed(current => current.has(groupNavigation.key)
+      ? current : new Set(current).add(groupNavigation.key))
+  }, [groupNavigation?.mode, groupNavigation?.key])
   // View 2: the set of graph nodes matching the concept-chip-bar selection (null = no concept filter).
   // Set by ConceptChipBar, consumed by the Dag to dim non-matching nodes. setState is a stable setter.
   const [conceptHighlight, setConceptHighlight] = useState(null)
   const graphPreferenceTouchedRef = useRef(false)
   const largeOverviewAppliedRef = useRef(false)
   const liveNodeCount = Object.keys(live?.nodes || {}).length
+  const selectedLiveGroupValid = useMemo(() => {
+    if (!groupNavigation || !generation || groupNavigation.generation !== generation || !live?.nodes) {
+      return false
+    }
+    return computeGroups(live.nodes, groupNavigation.mode, live).has(groupNavigation.key)
+  }, [live, generation, groupNavigation?.generation, groupNavigation?.mode, groupNavigation?.key])
   // Theme labels are agent-authored and often fragment a large search into dozens of one-off groups.
   // Start a previously untouched 80+ node run as a small operator-aggregate overview. It is truthful,
   // bounded, and fully reversible through the group selector / Expand all.
@@ -364,7 +470,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     const decision = initialDagOverviewDecision({
       ready: runStatus === 'ready',
       nodeCount: liveNodeCount,
-      explicitContext: selectedId != null || selectedGroup != null || historyActive,
+      // A direct node/history route keeps its exact canvas. Group drill-down already declares its
+      // grouping mode; for the large-run operator overview, rebuilding the normal collapsed overview
+      // is more faithful than reloading one collapsed group amid dozens of tiny expanded cards.
+      explicitContext: historyActive || (selectedId != null && !selectedLiveGroupValid)
+        || (selectedLiveGroupValid && groupMode !== 'operator'),
     })
     if (decision === 'wait') return
     // Decide exactly once from the first authoritative non-empty snapshot. A run first seen at 79 nodes
@@ -373,10 +483,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     if (decision === 'preserve') return
     const groups = computeGroups(live.nodes, 'operator', live)
     if (!groups.size) return
-    setGroupMode('operator')
+    setGroupModePreference('operator')
     setCollapsed(new Set(groups.keys()))
-    setSelectedGroup(null)
-  }, [live, liveNodeCount, runStatus, selectedId, selectedGroup, historyActive])
+  }, [live, liveNodeCount, runStatus, selectedId, selectedGroup, selectedLiveGroupValid,
+    groupMode, historyActive])
   useEffect(() => {
     if (panel && !panelAllowed(panel)) {
       setRouteNotice(current => [current, historyActive
@@ -439,6 +549,17 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const sideRailRef = useRef(null)
   const timelineCollapseRef = useRef(null)
   const workspaceFocusOwnerRef = useRef(null)
+  const focusInspectorFromGroup = (nodeId) => {
+    const targetId = Number(nodeId)
+    if (!Number.isSafeInteger(targetId) || targetId < 0) return
+    setGroupInspectorFocusRequest({
+      id: targetId, sequence: ++groupInspectorFocusSequenceRef.current,
+    })
+  }
+  const collapseSideInspector = () => {
+    setSideC(true)
+    requestAnimationFrame(() => sideRailRef.current?.focus({ preventScroll: true }))
+  }
   const closeCompactInspector = () => {
     setCompactInspectorOpen(false)
     requestAnimationFrame(() => {
@@ -453,7 +574,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   useDialogFocus(compactInspectorRef, closeCompactInspector,
     compactWorkspace && compactInspectorOpen && !overlayPanelOpen, { modal: false })
   useLayoutEffect(() => {
-    if (!compactWorkspace || !compactInspectorOpen || overlayPanelOpen) return
+    if (!groupSurfaceReady || !compactWorkspace || !compactInspectorOpen || overlayPanelOpen) return
     // Route hydration can schedule main-focus before the drawer commit. Reassert the explicit
     // destination after that commit without turning this coexisting surface back into a modal.
     const frame = requestAnimationFrame(() => {
@@ -465,7 +586,163 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         .focus({ preventScroll: true })
     })
     return () => cancelAnimationFrame(frame)
-  }, [compactWorkspace, compactInspectorOpen, overlayPanelOpen, route.navigationRevision])
+  }, [groupSurfaceReady, compactWorkspace, compactInspectorOpen, overlayPanelOpen,
+    route.navigationRevision])
+  useLayoutEffect(() => {
+    if (!groupSurfaceReady || !groupInspectorFocusRequest
+        || groupInspectorFocusAppliedRef.current === groupInspectorFocusRequest
+        || selectedId !== groupInspectorFocusRequest.id
+        || view !== 'dag' || overlayPanelOpen) return
+    const request = groupInspectorFocusRequest
+    let cancelled = false
+    let userInteracted = false
+    let attempts = 0
+    let stableFrames = 0
+    let lastTarget = null
+    const onUserIntent = () => { userInteracted = true }
+    const stopTrackingUserIntent = () => {
+      window.removeEventListener('keydown', onUserIntent, true)
+      window.removeEventListener('pointerdown', onUserIntent, true)
+    }
+    const finish = () => {
+      groupInspectorFocusAppliedRef.current = request
+      stopTrackingUserIntent()
+    }
+    window.addEventListener('keydown', onUserIntent, true)
+    window.addEventListener('pointerdown', onUserIntent, true)
+    const focus = () => {
+      if (cancelled) return
+      if (userInteracted) { finish(); return }
+      const surface = compactInspectorRef.current
+      const target = surface?.querySelector('[role="tab"][aria-selected="true"]')
+        || surface?.querySelector('.insp-body')
+      if (target && !document.querySelector('[aria-modal="true"]')) {
+        if (target !== lastTarget || document.activeElement !== target) {
+          target.focus({ preventScroll: true })
+          stableFrames = 0
+          lastTarget = target
+        } else {
+          stableFrames += 1
+        }
+        if (document.activeElement === target && stableFrames >= 12) {
+          finish()
+          return
+        }
+      }
+      attempts += 1
+      if (attempts < 120) requestAnimationFrame(focus)
+      else finish()
+    }
+    const frame = requestAnimationFrame(focus)
+    return () => { cancelled = true; cancelAnimationFrame(frame); stopTrackingUserIntent() }
+  }, [groupSurfaceReady, groupInspectorFocusRequest, selectedId, view, overlayPanelOpen])
+  useLayoutEffect(() => {
+    if (!groupSurfaceReady || view !== 'dag' || selectedId != null
+        || !groupNavigation || groupSurfaceFocusAppliedRef.current === groupNavigation
+        || overlayPanelOpen) return
+    const navigation = groupNavigation
+    if (compactWorkspace) setCompactInspectorOpen(true)
+    else setSideC(false)
+    let cancelled = false
+    let userInteracted = false
+    let attempts = 0
+    const onUserIntent = () => { userInteracted = true }
+    const stopTrackingUserIntent = () => {
+      window.removeEventListener('keydown', onUserIntent, true)
+      window.removeEventListener('pointerdown', onUserIntent, true)
+    }
+    const finish = () => {
+      groupSurfaceFocusAppliedRef.current = navigation
+      stopTrackingUserIntent()
+    }
+    window.addEventListener('keydown', onUserIntent, true)
+    window.addEventListener('pointerdown', onUserIntent, true)
+    const focus = () => {
+      if (cancelled) return
+      if (userInteracted) { finish(); return }
+      const surface = compactInspectorRef.current
+      const body = surface?.querySelector('.insp-body')
+      const member = navigation.returnNodeId == null ? null
+        : [...(surface?.querySelectorAll('[data-group-member-id]') || [])]
+          .find(element => element.dataset.groupMemberId === String(navigation.returnNodeId))
+      const target = member || surface?.querySelector('[data-group-summary-title]')
+      const modalBlocksFocus = !!document.querySelector('[aria-modal="true"]')
+      if (!surface || !target || modalBlocksFocus) {
+        attempts += 1
+        if (attempts < 120) requestAnimationFrame(focus)
+        else finish()
+        return
+      }
+      if (body) body.scrollTop = Math.min(navigation.scrollTop, Math.max(0, body.scrollHeight - body.clientHeight))
+      target.focus({ preventScroll: true })
+      if (member && body) {
+        const memberRect = member.getBoundingClientRect()
+        const bodyRect = body.getBoundingClientRect()
+        if (memberRect.top < bodyRect.top || memberRect.bottom > bodyRect.bottom) {
+          member.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+        }
+      }
+      finish()
+    }
+    const frame = requestAnimationFrame(focus)
+    return () => { cancelled = true; cancelAnimationFrame(frame); stopTrackingUserIntent() }
+  }, [view, selectedId, groupNavigation, groupSurfaceReady, compactWorkspace, overlayPanelOpen])
+  useLayoutEffect(() => {
+    if (!groupSurfaceReady || groupNavigation || !groupExitFocus
+        || groupExitFocusAppliedRef.current === groupExitFocus
+        || selectedId != null || view !== 'dag') return
+    const returning = groupExitFocus
+    let cancelled = false
+    let userInteracted = false
+    let attempts = 0
+    let stableFrames = 0
+    let lastTarget = null
+    const onUserIntent = () => { userInteracted = true }
+    const stopTrackingUserIntent = () => {
+      window.removeEventListener('keydown', onUserIntent, true)
+      window.removeEventListener('pointerdown', onUserIntent, true)
+    }
+    const finish = () => {
+      groupExitFocusAppliedRef.current = returning
+      stopTrackingUserIntent()
+    }
+    window.addEventListener('keydown', onUserIntent, true)
+    window.addEventListener('pointerdown', onUserIntent, true)
+    const focus = () => {
+      if (cancelled) return
+      if (userInteracted) { finish(); return }
+      const target = [...(document.querySelectorAll('[data-group-select-key]') || [])]
+        .find(element => element.dataset.groupSelectKey === returning.key)
+      if (target) {
+        if (target !== lastTarget || document.activeElement !== target) {
+          if (target.dataset.restoredFocus !== 'true') {
+            target.dataset.restoredFocus = 'true'
+            const clearMarker = () => { if (target.isConnected) delete target.dataset.restoredFocus }
+            target.addEventListener('blur', clearMarker, { once: true })
+            target.addEventListener('pointerdown', clearMarker, { once: true })
+          }
+          target.focus({ preventScroll: true })
+          stableFrames = 0
+          lastTarget = target
+        } else {
+          stableFrames += 1
+        }
+        if (document.activeElement === target && stableFrames >= 12) {
+          finish()
+          return
+        }
+      }
+      attempts += 1
+      if (attempts < 120) {
+        requestAnimationFrame(focus)
+        return
+      }
+      routeMainRef.current?.focus({ preventScroll: true })
+      finish()
+    }
+    const frame = requestAnimationFrame(focus)
+    return () => { cancelled = true; cancelAnimationFrame(frame); stopTrackingUserIntent() }
+  }, [groupSurfaceReady, groupNavigation, groupExitFocus, selectedId, view, groupMode])
   useEffect(() => {
     const rememberWorkspaceFocus = event => {
       const target = event.target
@@ -817,7 +1094,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     landedRef.current = false
     deepLinkLandingRef.current = false
     largeOverviewAppliedRef.current = false
-    setSelectedGroup(null)
+    commitGroupNavigation(null, { mode: 'replace' })
     setConceptHighlight(null)
     setCompactInspectorOpen(false)
     setCompactTimelineOpen(false)
@@ -914,20 +1191,50 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     })
     return () => cancelAnimationFrame(frame)
   }, [startOverRecovery.kind])
+  const groupState = historyActive ? hist : live
+  useEffect(() => {
+    if (!groupSurfaceReady || !groupNavigation || !groupState?.nodes) return
+    const groups = computeGroups(groupState.nodes, groupNavigation.mode, groupState)
+    const members = groups.get(groupNavigation.key)
+    if (!members) {
+      const staleKey = groupNavigation.key
+      commitGroupNavigation(null, { mode: 'replace' })
+      setCollapsed(current => {
+        if (!current.has(staleKey)) return current
+        const next = new Set(current)
+        next.delete(staleKey)
+        return next
+      })
+      setRouteNotice(current => [current,
+        `Saved group “${staleKey}” is no longer available in this run state; opened the graph.`]
+        .filter(Boolean).join(' '))
+      if (selectedId == null) {
+        setCompactInspectorOpen(false)
+        requestAnimationFrame(() => routeMainRef.current?.focus({ preventScroll: true }))
+      }
+      return
+    }
+    if (groupNavigation.returnNodeId != null
+        && !members.some(id => Number(id) === groupNavigation.returnNodeId)) {
+      commitGroupNavigation({ ...groupNavigation, returnNodeId: null, scrollTop: 0 },
+        { mode: 'replace' })
+    }
+  }, [groupSurfaceReady, groupState, groupNavigation?.mode, groupNavigation?.key,
+    groupNavigation?.returnNodeId, selectedId])
   // Members of the selected group — memoized so unrelated re-renders (toast, live ticks) don't
   // re-walk all nodes; only recomputes when the node set / mode / selection actually changes.
   const groupMembers = useMemo(() => {
-    const st = hist || live
-    const ns = st?.nodes
+    const ns = groupState?.nodes
     return (selectedGroup != null && ns)
-      ? (computeGroups(ns, groupMode, st).get(selectedGroup) || []) : []
-  }, [hist, live, groupMode, selectedGroup])
-  // Node selection clears any group selection (the side panel shows one or the other).
+      ? (computeGroups(ns, groupMode, groupState).get(selectedGroup) || []) : []
+  }, [groupState, groupMode, selectedGroup])
+  // The Inspector takes visual precedence while a node is selected. A per-entry group snapshot can
+  // therefore stay attached as its Back/Forward parent without rendering two detail surfaces at once.
   const selectNode = (id) => {
     setSelectedId(id)
     if (id != null) {
+      if (groupNavigationRef.current) commitGroupNavigation(null, { mode: 'replace' })
       setRouteNotice('')
-      setSelectedGroup(null)
       if (compactWorkspace) setCompactInspectorOpen(true)
       else setSideC(false)
     }
@@ -988,7 +1295,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     mergeReturnFocusRef.current = null
     setComparePair(null)
     setOpenHub(null)
-    setSelectedGroup(null)
+    commitGroupNavigation(null, { mode: 'replace' })
     if (history.status === 'ready') {
       route.update(current => {
         const nextNode = reconcileHistoricalSelection(current.nodeId, history.data)
@@ -1066,9 +1373,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     // Initial hydration and Back/Forward are navigation, not a hidden selection: reveal the actual
     // Inspector destination even when a persisted desktop rail or a compact drawer was closed.
     if (selectedId == null) return
-    setSelectedGroup(null)
     if (compactWorkspace) setCompactInspectorOpen(true)
     else setSideC(false)
+    if (groupNavigationRef.current) focusInspectorFromGroup(selectedId)
   }, [route.navigationRevision])
   const pendingDescendants = (rootId) => {   // for "kill branch": abort the node + its PENDING subtree
     const ns = live2?.nodes || {}
@@ -1191,7 +1498,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h)
   }, [mergeFrom])
   // Drill-down from the dock/timeline: select a node, optionally open a tab + jump the scrubber.
-  const focusNode = (id, tab, eventSeq) => {
+  const focusNode = (id, tab, eventSeq, { preserveGroup = false } = {}) => {
     const value = Number(eventSeq)
     const targetSeq = eventSeq == null || value >= seq ? null
       : Number.isSafeInteger(value) && value >= 0 ? value : null
@@ -1204,12 +1511,28 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         commentId: preserveComment ? current.commentId : null,
         sequence: reviewMode ? null : targetSeq }
     })
-    setSelectedGroup(null)
+    if (!preserveGroup && groupNavigationRef.current) {
+      commitGroupNavigation(null, { mode: 'replace' })
+    }
     if (compactWorkspace) {
       setCompactTimelineOpen(false)
       setCompactInspectorOpen(true)
     }
     else setSideC(false)     // drill-down means "show me the inspector" — un-fold a collapsed panel
+  }
+  const focusGroupMember = (id, tab, eventSeq) => {
+    const memberId = Number(id)
+    const current = groupNavigationRef.current
+    if (current && Number.isSafeInteger(memberId) && memberId >= 0) {
+      const body = compactInspectorRef.current?.querySelector('.insp-body')
+      commitGroupNavigation({
+        ...current,
+        returnNodeId: memberId,
+        scrollTop: body?.scrollTop || 0,
+      }, { mode: 'replace' })
+    }
+    focusNode(id, tab, eventSeq, { preserveGroup: true })
+    if (current) focusInspectorFromGroup(memberId)
   }
   // --- semantic-zoom grouping controls ---
   const toggleGroup = (key) => {
@@ -1218,7 +1541,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }
   const changeMode = (m) => {
     graphPreferenceTouchedRef.current = true
-    setGroupMode(m); setCollapsed(new Set()); setSelectedGroup(null)
+    setGroupModePreference(m)
+    setCollapsed(new Set())
+    if (groupNavigationRef.current) {
+      // Grouping is a canvas preference, not an addressable route. Replacing the attached group
+      // context avoids a Forward entry that cannot truthfully reconstruct this no-group mode.
+      commitGroupNavigation(null, { mode: 'replace' })
+    }
   }
   const collapseAllGroups = keys => {
     graphPreferenceTouchedRef.current = true
@@ -1230,11 +1559,31 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }
   const selectGroup = (key) => {
     if (key != null) graphPreferenceTouchedRef.current = true
-    setSelectedGroup(key)
     if (key != null) {
-      setSelectedId(null)
+      const next = normalizeRunGroupNavigation({
+        runId, generation, mode: groupMode, key, returnNodeId: null, scrollTop: 0,
+      }, runId, generation)
+      if (!next) return
+      const current = groupNavigationRef.current
+      if (selectedId == null && current?.mode === next.mode && current.key === next.key) {
+        setCollapsed(value => value.has(key) ? value : new Set(value).add(key))
+        if (compactWorkspace) setCompactInspectorOpen(true)
+        else setSideC(false)
+        return
+      }
+      const opensNewRoute = selectedId != null
+      if (opensNewRoute) setSelectedId(null)
+      commitGroupNavigation(next, { mode: opensNewRoute ? 'replace' : 'push' })
+      setCollapsed(current => current.has(key) ? current : new Set(current).add(key))
       if (compactWorkspace) setCompactInspectorOpen(true)
+      else setSideC(false)
+      return
     }
+    if (!groupNavigationRef.current) return
+    commitGroupNavigation(null, {
+      mode: selectedId != null ? 'replace' : 'push', focusExit: true,
+    })
+    setCompactInspectorOpen(false)
   }
   // Phase 0: auto-collapse settled groups into the existing `collapsed` Set (one-shot fill, not a live
   // policy — so it never fights the user's manual toggles). Keeps the champion/selected/working groups
@@ -1310,7 +1659,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       commentId: comment.id,
       panel: null,
     }))
-    setSelectedGroup(null)
+    commitGroupNavigation(null, { mode: 'replace' })
     if (compactWorkspace) setCompactInspectorOpen(true)
     else setSideC(false)
   }
@@ -1335,6 +1684,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const workspaceRouteLabel = `${live?.label || live?.run_id || runId} run workspace · ${
     view === 'concepts' ? 'Concepts' : view === 'report' ? 'Report' : 'Search'}`
   useEffect(() => {
+    if (view === 'dag' && groupNavigationRef.current && !overlayPanelOpen) return undefined
     const frame = requestAnimationFrame(() => {
       if (!document.querySelector('[aria-modal="true"], [data-route-focus-guard="true"]')) {
         ;(routeMainRef.current || document.querySelector('[data-route-main]'))
@@ -1543,6 +1893,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     : ['error', 'stale'].includes(activeConfigResource?.status) ? activeConfigResource.status : null
   const cost = state.llm_cost
   const hasInspectorContext = selectedId != null || selectedGroup != null
+  const groupDetailsOpen = selectedId == null && selectedGroup != null
   const showInspector = compactWorkspace ? (compactInspectorOpen && hasInspectorContext) : (!sideC && hasInspectorContext)
   const activateReportTimeline = () => {
     if (reportTimelineActivated) return
@@ -1838,7 +2189,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                 onPickNode={(id) => {
                   route.update(current => ({ ...current, view: 'dag', nodeId: id,
                     nodeGeneration: null, commentId: null }))
-                  setSelectedGroup(null)
+                  commitGroupNavigation(null, { mode: 'replace' })
                   if (compactWorkspace) setCompactInspectorOpen(true)
                   else setSideC(false)
                 }} />
@@ -1851,7 +2202,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               sequence={historyActive ? viewSeq : null} state={state} onPickNode={(id) => {
               route.update(current => ({ ...current, view: 'dag', nodeId: id,
                 nodeGeneration: null, commentId: null }))
-              setSelectedGroup(null)
+              commitGroupNavigation(null, { mode: 'replace' })
               if (compactWorkspace) setCompactInspectorOpen(true)
               else setSideC(false)
             }} />
@@ -1882,40 +2233,40 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         </div>
         {compactWorkspace && !showInspector && hasInspectorContext &&
           <button ref={compactInspectorTriggerRef} className="workspace-pane-toggle" onClick={() => setCompactInspectorOpen(true)}
-                  aria-label={`Open ${selectedGroup != null ? 'group' : 'inspector'} panel`}>
-            {selectedGroup != null ? 'Group' : `Inspector · #${selectedId}`}
+                  aria-label={`Open ${groupDetailsOpen ? 'group' : 'inspector'} panel`}>
+            {groupDetailsOpen ? 'Group' : `Inspector · #${selectedId}`}
           </button>}
         {compactWorkspace && showInspector &&
           <button className="workspace-scrim" onClick={closeCompactInspector}
                   aria-label="Close inspector panel" />}
         {!compactWorkspace && hasInspectorContext && !showInspector
           ? <button ref={sideRailRef} className="side-rail" title="show panel"
-              onClick={() => setSideC(false)}>‹ {selectedGroup != null ? 'group' : 'inspector'}</button>
+              onClick={() => setSideC(false)}>‹ {groupDetailsOpen ? 'group' : 'inspector'}</button>
           : showInspector && <>
               {!compactWorkspace && <div className="splitter v" onPointerDown={startDrag('side')} onKeyDown={resizeWithKeys('side')}
                 role="separator" tabIndex={0} aria-orientation="vertical" aria-label="Resize inspector"
                 aria-valuemin={280} aria-valuemax={Math.max(280, window.innerWidth - 486)} aria-valuenow={Math.round(sideW)} title="Drag or use arrow keys to resize" />}
               <aside className={'side' + (compactWorkspace ? ' compact-drawer' : '')} style={{ width: sideW }}
                      ref={compactInspectorRef} tabIndex={compactWorkspace ? -1 : undefined}
-                     aria-label={selectedGroup != null ? 'Group details' : 'Experiment inspector'}
+                     aria-label={groupDetailsOpen ? 'Group details' : 'Experiment inspector'}
                      role={compactWorkspace ? 'dialog' : 'complementary'}
                      data-route-focus-guard={compactWorkspace ? 'true' : undefined}>
                 <div className="pane-grip">
-                  <span className="muted">{selectedGroup != null ? 'group' : 'inspector'}</span>
+                  <span className="muted">{groupDetailsOpen ? 'group' : 'inspector'}</span>
                   <span className="spacer" style={{ flex: 1 }} />
                   <button ref={compactInspectorCloseRef} className="btn sm ghost"
                           data-dialog-initial-focus={compactWorkspace ? true : undefined}
                           title={compactWorkspace ? 'close panel' : 'collapse panel'}
-                          aria-label={`${compactWorkspace ? 'Close' : 'Collapse'} ${selectedGroup != null ? 'group details' : 'experiment inspector'}`}
-                          onClick={() => compactWorkspace ? closeCompactInspector() : setSideC(true)}>⟩</button>
+                          aria-label={`${compactWorkspace ? 'Close' : 'Collapse'} ${groupDetailsOpen ? 'group details' : 'experiment inspector'}`}
+                          onClick={() => compactWorkspace ? closeCompactInspector() : collapseSideInspector()}>⟩</button>
                 </div>
-                <LazyBoundary label={selectedGroup != null ? 'group details' : 'experiment inspector'}
-                  resetKey={selectedGroup != null ? `group:${selectedGroup}` : `node:${selectedId}`}>
-                  {selectedGroup != null
+                <LazyBoundary label={groupDetailsOpen ? 'group details' : 'experiment inspector'}
+                  resetKey={groupDetailsOpen ? `group:${selectedGroup}` : `node:${selectedId}`}>
+                  {groupDetailsOpen
                     ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
                         state={state} themeFilter={themeFilter} highlightIds={conceptHighlight}
-                        onSelectNode={focusNode}
-                        onClose={() => { setSelectedGroup(null); closeCompactInspector() }} />
+                        onSelectNode={focusGroupMember}
+                        onClose={() => selectGroup(null)} />
                     : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
                          tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}
                          draftStore={inspectorDraftStoreRef.current}

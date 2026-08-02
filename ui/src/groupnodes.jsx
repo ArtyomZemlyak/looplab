@@ -51,11 +51,12 @@ export function GroupRegion({
 }
 
 // Collapsed-group card shell. Caller supplies the body (children) and the click/selected state.
-export function SuperShell({ tint, selected, dimmed = false, onClick, title, children }) {
+export function SuperShell({ tint, selected, dimmed = false, onClick, title, selectKey, children }) {
   return (
     <div className={'grp-super' + (selected ? ' sel' : '') + (dimmed ? ' dim' : '')} style={{ '--grp-tint': tint }}
          title={title}>
       {onClick && <button type="button" className="grp-super-select" onClick={onClick}
+        data-group-select-key={selectKey == null ? undefined : String(selectKey)}
         aria-label={title || 'Open collapsed group'} aria-pressed={!!selected} />}
       {children}
     </div>
