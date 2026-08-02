@@ -19,8 +19,12 @@ const currentPermission = {
   action: { command: 'RAW_SECRET', scope: 'private/RAW_SECRET' },
   preview: 'preview:RAW_SECRET',
 }
+// `snapshot_id`, `stale` and `active_action_count` are required envelope fields — a page missing any
+// of them is protocol-invalid and dropped WHOLE, which made the run source read stale immediately
+// and the "retained until its own deadline" assertion fail on validation rather than on timing.
 const page = items => ({
   schema: 1, generated_at: 1_700_000_100, items,
+  snapshot_id: 'f'.repeat(64), stale: false, active_action_count: 0,
   truncated: false, next_cursor: null, partial: false,
 })
 const response = body => ({
@@ -35,6 +39,9 @@ async function waitFor(predicate, message, timeoutMs = 30) {
   }
   assert.fail(message)
 }
+
+// The compressed stand-in for ATTENTION_REQUEST_TIMEOUT_MS (8000).
+const DEADLINE_MS = 60
 
 test('a hung Attention source times out without delaying or freezing its sibling', async () => {
   const realSetTimeout = globalThis.setTimeout
@@ -61,8 +68,10 @@ test('a hung Attention source times out without delaying or freezing its sibling
     Event: dom.window.Event,
     location: dom.window.location,
     fetch: fetchStub,
+    // Compress the 8s request deadline so the test does not wait on it, staying comfortably above
+    // the 30ms `waitFor` window that proves the healthy source was not blocked by the hung one.
     setTimeout: (callback, delay, ...args) =>
-      realSetTimeout(callback, delay === 8000 ? 40 : delay, ...args),
+      realSetTimeout(callback, delay === 8000 ? DEADLINE_MS : delay, ...args),
     IS_REACT_ACT_ENVIRONMENT: true,
   }
   const previous = Object.fromEntries(Object.keys(installed)
@@ -98,7 +107,7 @@ test('a hung Attention source times out without delaying or freezing its sibling
     assert.doesNotMatch(JSON.stringify(latest), /RAW_SECRET/)
 
     await React.act(async () => {
-      await new Promise(resolve => setTimeout(resolve, 55))
+      await new Promise(resolve => setTimeout(resolve, DEADLINE_MS * 2))
     })
     assert.equal(latest.runStale, true)
     assert.equal(latest.permissionsStale, false)
@@ -114,7 +123,7 @@ test('a hung Attention source times out without delaying or freezing its sibling
     assert.equal(latest.permissionsStale, false)
 
     await React.act(async () => {
-      await new Promise(resolve => setTimeout(resolve, 55))
+      await new Promise(resolve => setTimeout(resolve, DEADLINE_MS * 2))
     })
     assert.equal(latest.runStale, false)
     assert.equal(latest.permissionsStale, true)

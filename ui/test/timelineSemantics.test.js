@@ -34,7 +34,12 @@ test('historical state reloads and renders only for the displayed run generation
   const runView = await source('RunView.jsx')
   assert.match(runView, /requestHistory\(want, generation\)/)
   assert.match(runView, /resolveHistory\(current, want, generation, p\)/)
-  assert.match(runView, /rejectHistory\(current, want, generation, e\)/)
+  // The catch now distinguishes a TIMEOUT from a transport error before rejecting, so the operator
+  // is told the snapshot request ran out of time rather than shown a raw failure. The `e` parameter
+  // name went with it; pin the substitution and the distinction rather than the old spelling.
+  assert.match(runView, /rejectHistory\(current, want, generation, failure\)/)
+  assert.match(runView, /error\?\.name === 'TimeoutError'\s*\?\s*new Error\('Historical snapshot loading timed out\./,
+    'a historical snapshot deadline must read as a timeout, not as an opaque transport failure')
   assert.match(runView, /\[viewSeq, runId, historyRetry, generation, routeFenceBlocked, reviewMode\]/)
   assert.match(runView, /historyMatches\(history, viewSeq, generation\)/)
 })
