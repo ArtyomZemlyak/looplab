@@ -729,6 +729,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const projectsToggleRef = useRef(null)
   const projectsCloseRef = useRef(null)
   const projectsDialogRef = useRef(null)
+  const previousCompactNavRef = useRef(compactNav)
+  const projectsBreakpointFocusRef = useRef(null)
   const listBusy = !!listMutation?.busy
   const navigationBusy = listBusy || projectBusy || menuBusy
   const startOverRecoveryByRun = new Map([
@@ -854,6 +856,41 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   }
   // Keep the compact drawer active while any list or menu mutation is pending.
   useDialogFocus(projectsDialogRef, navigationBusy ? null : () => setProjectsOpen(false), compactNav && projectsOpen)
+  useEffect(() => {
+    const rememberProjectsFocus = event => {
+      const target = event.target
+      projectsBreakpointFocusRef.current = projectsDialogRef.current?.contains(target)
+        || projectsToggleRef.current?.contains(target) ? target : null
+    }
+    document.addEventListener('focusin', rememberProjectsFocus)
+    return () => document.removeEventListener('focusin', rememberProjectsFocus)
+  }, [])
+  useEffect(() => {
+    const wasCompact = previousCompactNavRef.current
+    if (wasCompact === compactNav) return
+    previousCompactNavRef.current = compactNav
+    setProjectsOpen(false)
+
+    const previousFocus = projectsBreakpointFocusRef.current
+    const focusBelongedToProjects = previousFocus && (
+      projectsDialogRef.current?.contains(previousFocus)
+      || projectsToggleRef.current?.contains(previousFocus)
+    )
+    if (!focusBelongedToProjects) return
+
+    const preservedDesktopFocus = !compactNav
+      && previousFocus !== projectsCloseRef.current
+      && projectsDialogRef.current?.contains(previousFocus)
+      && previousFocus.isConnected
+      ? previousFocus
+      : null
+    const target = compactNav
+      ? projectsToggleRef.current
+      : preservedDesktopFocus || projectsAllRef.current
+    const focusTarget = target?.isConnected && target.getClientRects().length
+      && !target.matches?.(':disabled') ? target : runsMainRef.current
+    focusTarget?.focus?.({ preventScroll: true })
+  }, [compactNav])
   // Run creation is no longer a modal here — it happens INSIDE the assistant (the bottom command bar's
   // "/new" asks the assistant to propose a run, which renders as an inline launch card in the chat).
 
