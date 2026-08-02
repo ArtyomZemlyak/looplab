@@ -2755,6 +2755,17 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 @media (max-width: 480px) {
   .asst-side-panel .asst-drawer-h { gap: 4px; }
   .asst-side-panel .asst-ctxtok { margin-left: 0; }
+  .chat-dock .dock-tabs {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto 44px;
+    grid-template-rows: auto auto; column-gap: 6px; row-gap: 0; align-items: center;
+  }
+  .chat-dock .dock-tabs .chat-label { grid-column: 1; grid-row: 1; min-width: 0; }
+  .chat-dock .dock-tabs .hist-tag-mini {
+    grid-column: 1; grid-row: 2; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  }
+  .chat-dock .dock-tabs > .spacer { display: none; }
+  .chat-dock .dock-tabs > .btn:not(.dock-collapse) { grid-column: 2; grid-row: 1 / span 2; }
+  .chat-dock .dock-tabs > .dock-collapse { grid-column: 3; grid-row: 1 / span 2; }
   /* Keep all four workspace destinations legible after Back, Copy and Energy claim the first row. */
   .run-head .view-toggle { flex: 1 0 100%; width: 100%; max-width: 100%; }
   /* The compact command dock needs two deliberate rows. A recovery action plus four touch targets
