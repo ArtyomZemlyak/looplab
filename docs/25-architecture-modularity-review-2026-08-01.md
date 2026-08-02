@@ -1859,6 +1859,18 @@ path, the same reason `serve/engine_proc.py` imports it inside its functions.
 
 *Recommendation:* Add `generation_conflict(expected, current, *, message, remediation)` and share `_cursor_error` from one place (serve/protocol.py). This also stabilizes the wire contract the UI matches on.
 
+*Resolution (2026-08-02, the comment half):* `serve/http.py` now owns `comment_cursor_error(exc)`
+and `comment_filter_invalid()`, shared by `routers/collaboration.py` and `routers/reviews.py`. The
+reviewer surface was re-inlining both envelopes rather than importing the helper that already
+existed next door, which is the shape of divergence that matters here: a reviewer able to filter or
+paginate more loosely than the owner surfaces comments the owner's own view excludes.
+
+The cursor split is contract, not cosmetics — 400 says the cursor was never valid, 409 says it was
+valid for a run state that has since moved, and only the second is worth re-fetching page one for.
+
+**Still open:** the `generation_conflict` sweep over the ~26 hand-built `run_generation_changed`
+409s. Three of them were already collapsed by SR-04's `_assert_lens_generation`.
+
 #### SR-10 · MEDIUM · duplication · effort: small
 
 **Attempt-fenced node-metrics read copy-pasted between owner and reviewer routes**
@@ -1868,6 +1880,26 @@ path, the same reason `serve/engine_proc.py` imports it inside its functions.
 *Evidence:* The three-way receipt decision — `receipt is None -> read only if attempt==0; receipt[0]==current_attempt -> read_node_metrics(since_wall_time=receipt[1]); else -> {}` — is duplicated line-for-line between `node_metrics` (runs.py) and `review_node_metrics` (reviews.py). The reviews.py comment explicitly says 'Fence on the attempt receipt exactly as the owner route (runs.py node_metrics) does', i.e. the invariant is maintained by comment discipline rather than shared code; a future receipt-format change must be fixed twice or the two surfaces silently diverge on which attempt's evidence they serve.
 
 *Recommendation:* Extract `fenced_node_metrics(node_dir, current_attempt) -> dict` into serve/metrics_adapters.py (or core/node_evidence.py next to `metrics_attempt_receipt`); the deliberate difference (owner 409s on concurrent reset, reviewer returns empty) stays in the routes.
+
+*Resolution (2026-08-02):* `serve/metrics_adapters.py::fenced_node_metrics(node_dir,
+current_attempt)` owns the three-way receipt decision; both routes call it and keep only what
+genuinely differs — the owner 409s on a concurrent reset, the reviewer returns an empty series
+because a read-only observer has no way to resolve an error. It lives in `serve/` rather than beside
+`metrics_attempt_receipt` in `core/` because it needs `read_node_metrics`, and `core` may not import
+`serve`.
+
+`tests/test_shared_serve_projections.py` adds 11 tests. Six deliberate breaks were each caught; two
+are worth naming. Dropping the `since_wall_time` window still returns a plausible non-empty series —
+just the PREVIOUS attempt's curve under the current attempt's label — and swapping the receipt tuple
+`(attempt, started_at)` passes a plausible integer as a wall-time, which silently empties the window
+for every live node. Neither raises.
+
+The extraction also retired a patch seam, exactly as the CLAUDE.md contract note warns: three tests
+in `test_review_capabilities.py` patched `reviews_router.read_node_metrics`, which no longer exists
+there. They are re-pointed at `serve/metrics_adapters.read_node_metrics` and RE-VERIFIED rather than
+just made green — the attempt-fence test still fails when the fence is broken (two of the three
+breaks; the third, "read unwindowed for any attempt", is caught by the new tests instead, because
+that test's no-receipt case only exercises attempt zero).
 
 #### SR-11 · MEDIUM · duplication · effort: small
 
@@ -1898,6 +1930,18 @@ path, the same reason `serve/engine_proc.py` imports it inside its functions.
 *Evidence:* `_scope_action_lease_marker_exists` (reports.py:418) has zero callers anywhere in looplab/ or tests/ (verified by repo-wide grep). `POST /api/research` (genesis.py) is referenced by no ui/src file and no TUI code — only tests exercise it; its function (LLM topic brief) is subsumed by the assistant and /api/genesis. `GET /api/runs/{run_id}/agents_md` (runs.py) likewise has no ui/src or TUI caller (grep for 'agents_md'/'AGENTS' in ui/src returns nothing) — only tests/test_server.py. `_portfolio_identity` (cross_run.py) is a compat wrapper used only by tests/test_cross_run_server.py, which could call `_resolved_portfolio_identity` directly.
 
 *Recommendation:* Delete `_scope_action_lease_marker_exists` now. For /api/research and /agents_md, confirm no external API consumers, then remove or mark deprecated; fold `_portfolio_identity` into its test callers.
+
+*Resolution (2026-08-02):* `_scope_action_lease_marker_exists` is already gone from `master` (a
+repo-wide grep finds no definition and no caller). `_portfolio_identity` — a two-field compat
+wrapper whose only callers were two lines of `tests/test_cross_run_server.py` — is deleted and those
+tests now call `_resolved_portfolio_identity` directly.
+
+`POST /api/research` and `GET /api/runs/{id}/agents_md` are marked `deprecated=True` with the reason
+in their docstrings, NOT deleted. A repo-wide grep confirms neither appears in `ui/src` or the TUI,
+which is the whole of what this repository can see — they are public HTTP routes, and the OpenAPI
+deprecation flag is precisely the mechanism for giving a caller this repository cannot enumerate
+notice before removal. Deleting them on the strength of a first-party grep would be treating
+"I cannot see a consumer" as "there is no consumer".
 
 #### SR-14 · LOW · duplication · effort: small
 

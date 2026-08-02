@@ -17,7 +17,7 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient as _FastApiTestClient  # noqa: E402
 
-from looplab.serve.routers.cross_run import _portfolio_identity  # noqa: E402
+from looplab.serve.routers.cross_run import _resolved_portfolio_identity  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
 
 
@@ -40,7 +40,7 @@ class TestClient(_FastApiTestClient):
 
     @staticmethod
     def _portfolio_id() -> str:
-        return _portfolio_identity(Path(os.environ["LOOPLAB_MEMORY_DIR"]))[1]
+        return _resolved_portfolio_identity(Path(os.environ["LOOPLAB_MEMORY_DIR"]))[1]
 
     def post(self, url, *args, **kwargs):
         path = str(url).split("?", 1)[0]
@@ -159,7 +159,7 @@ def test_delayed_governance_write_cannot_cross_portfolio_reconfiguration(
     replacement = tmp_path / "replacement-memory"
     replacement.mkdir()
     monkeypatch.setenv("LOOPLAB_MEMORY_DIR", str(replacement))
-    replacement_id = _portfolio_identity(replacement)[1]
+    replacement_id = _resolved_portfolio_identity(replacement)[1]
     assert replacement_id != first_id and first != replacement
 
     response = raw_client.post("/api/cross-run/concept-merge", json={

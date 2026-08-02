@@ -10,8 +10,9 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, SecretStr, StrictBool
 
-from looplab.core.node_evidence import metrics_attempt_receipt, node_attempt
-from looplab.serve.metrics_adapters import read_node_metrics
+from looplab.core.node_evidence import node_attempt
+from looplab.serve.http import comment_cursor_error, comment_filter_invalid
+from looplab.serve.metrics_adapters import fenced_node_metrics
 from looplab.events.comment_projection import (
     CommentCursorError, comments_page, project_comments)
 from looplab.events.replay import fold
@@ -409,11 +410,7 @@ def build_router(srv) -> APIRouter:
         """Current, redacted comments only; review capabilities never expose prior revisions."""
         with _bound_run(request) as (_record_value, rd):
             if (node_id is None) != (node_generation is None):
-                raise HTTPException(400, {
-                    "code": "comment_filter_invalid",
-                    "message": "node_id and node_generation must be supplied together",
-                    "remediation": "select an exact experiment lifecycle or remove both filters",
-                })
+                raise comment_filter_invalid()
             events = srv.events(rd)
             generation = run_generation_token(events)
             comments, _history = project_comments(events)
@@ -423,11 +420,7 @@ def build_router(srv) -> APIRouter:
                     node_id=node_id, node_generation=node_generation,
                     include_resolved=include_resolved)
             except CommentCursorError as exc:
-                raise HTTPException(409 if exc.stale else 400, {
-                    "code": "comment_cursor_stale" if exc.stale else "invalid_comment_cursor",
-                    "message": str(exc),
-                    "remediation": "refresh comments from the first page",
-                }) from exc
+                raise comment_cursor_error(exc) from exc
             for comment in payload["comments"]:
                 comment["editable"] = False
             # Current-only is still untrusted free-form text: use the same recursive scrub as every
@@ -473,15 +466,8 @@ def build_router(srv) -> APIRouter:
             # read-only observer, so the honest answer to "which attempt is this?" is an empty
             # series, not an error the review UI has no way to resolve.
             current_attempt = node_attempt(srv.state(rd), nid)
-            receipt = metrics_attempt_receipt(node_dir)
             try:
-                if receipt is None:
-                    raw = read_node_metrics(str(node_dir)) if current_attempt == 0 else {}
-                elif receipt[0] == current_attempt:
-                    raw = read_node_metrics(str(node_dir), since_wall_time=receipt[1])
-                else:
-                    raw = {}
-                metrics = _review_metrics(raw)
+                metrics = _review_metrics(fenced_node_metrics(node_dir, current_attempt))
             except Exception:  # noqa: BLE001 - observability must not take down a review
                 metrics = {}
             return {"metrics": metrics}

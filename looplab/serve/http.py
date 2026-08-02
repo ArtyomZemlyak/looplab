@@ -73,3 +73,37 @@ async def json_object(request, subject: str = "request body", *,
     except Exception as exc:  # noqa: BLE001 - an unreadable body is still the client's
         raise _bad_request(f"{subject} must be valid JSON") from exc
     return json_object_bytes(raw, subject, absent_is_empty=absent_is_empty)
+
+
+def comment_filter_invalid() -> "HTTPException":  # noqa: F821 - see `_bad_request`
+    """`node_id` and `node_generation` name ONE experiment lifecycle and are meaningless apart.
+
+    Accepting one without the other would silently widen the filter to "every attempt of that node",
+    which is the opposite of what a caller pinning a lifecycle asked for. Shared because the owner
+    and reviewer comment feeds must refuse identically — a reviewer who can filter more loosely than
+    the owner sees comments the owner's own view would have excluded.
+    """
+    from fastapi import HTTPException
+
+    return HTTPException(400, {
+        "code": "comment_filter_invalid",
+        "message": "node_id and node_generation must be supplied together",
+        "remediation": "select an exact experiment lifecycle or remove both filters",
+    })
+
+
+def comment_cursor_error(exc) -> "HTTPException":  # noqa: F821 - see `_bad_request`
+    """A cursor that is malformed (400) or belongs to another generation/scope (409).
+
+    The split matters to a client: 400 says the cursor was never valid, 409 says it was valid for a
+    run state that has since moved — only the second is worth re-fetching page one for. Both comment
+    surfaces must answer the same way, which is why this stopped being a private helper of one of
+    them (doc 25 SR-09).
+    """
+    from fastapi import HTTPException
+
+    return HTTPException(409 if exc.stale else 400, {
+        "code": "comment_cursor_stale" if exc.stale else "invalid_comment_cursor",
+        "message": str(exc),
+        "remediation": "refresh comments from the first page",
+    })

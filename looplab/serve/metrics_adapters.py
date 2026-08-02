@@ -107,3 +107,33 @@ def read_node_metrics(node_dir: str, *, since_wall_time: float | None = None) ->
     for tag in merged:
         merged[tag].sort(key=lambda p: p["step"])
     return merged
+
+
+def fenced_node_metrics(node_dir, current_attempt: int) -> dict[str, list[dict]]:
+    """The node's metric series for THIS attempt only — the receipt fence, in one place.
+
+    Both readers of a node's metric sidecar need the same three-way decision and must not drift,
+    because a disagreement means one surface serves a reset node's superseded curves as if they
+    were the current attempt's:
+
+    * no receipt at all — legacy attempt-zero runs predate receipts and stay readable, but a LATER
+      attempt without its exact marker is unknown, not old-but-fine, so it yields nothing;
+    * the receipt names this attempt — read from its start wall-time, which drops reset-era points;
+    * the receipt names another attempt — the on-disk series belongs to a lifecycle nobody asked
+      about, so it yields nothing.
+
+    Observability must never take down the request, so any read failure is an empty series. The
+    routes keep what genuinely differs between them: the owner 409s on a concurrent reset, the
+    reviewer returns an empty series because a read-only observer has no way to resolve an error.
+    """
+    from looplab.core.node_evidence import metrics_attempt_receipt
+
+    receipt = metrics_attempt_receipt(node_dir)
+    try:
+        if receipt is None:
+            return read_node_metrics(str(node_dir)) if current_attempt == 0 else {}
+        if receipt[0] == current_attempt:
+            return read_node_metrics(str(node_dir), since_wall_time=receipt[1])
+        return {}
+    except Exception:  # noqa: BLE001 - observability must never 500 / take down a review
+        return {}

@@ -53,12 +53,6 @@ def _resolved_portfolio_identity(memory_dir: object) -> tuple[str, str, bool]:
     return canonical, "portfolio-sha256:" + hashlib.sha256(material).hexdigest(), initialized
 
 
-def _portfolio_identity(memory_dir: object) -> tuple[str, str]:
-    """Compatibility helper returning the public two-field portfolio identity tuple."""
-    target, portfolio_id, _initialized = _resolved_portfolio_identity(memory_dir)
-    return target, portfolio_id
-
-
 def _public_cross_run_row(value):
     """One schema-preserving, bounded/redacted cross-run row for an HTTP response."""
     return sanitize_cross_run_projection(

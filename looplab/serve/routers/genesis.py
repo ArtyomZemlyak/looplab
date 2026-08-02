@@ -80,11 +80,17 @@ def build_router(srv) -> APIRouter:
     root = srv.root
 
     # ------------------------------------------------------------------ pre-research a topic
-    @router.post("/api/research")
+    @router.post("/api/research", deprecated=True)
     async def research(request: Request):
-        """Best-effort LLM brief for a research topic, to prime a run. Optionally saved as a
-        knowledge note (markdown) so the agentic-retrieval Researcher can read it (ADR-16).
-        Degrades cleanly when no model endpoint is reachable."""
+        """DEPRECATED. Best-effort LLM brief for a research topic, to prime a run. Optionally saved
+        as a knowledge note (markdown) so the agentic-retrieval Researcher can read it (ADR-16).
+        Degrades cleanly when no model endpoint is reachable.
+
+        No first-party client calls this: it is absent from `ui/src` and from the TUI, and its job —
+        an LLM topic brief — is subsumed by the assistant and by `/api/genesis`. It is marked
+        deprecated rather than deleted because it is a PUBLIC route and this repository cannot see
+        who else may be posting to it; the OpenAPI flag is what gives such a caller notice
+        (doc 25 SR-13)."""
         body = await json_object(request)
         topic = (body.get("topic") or "").strip()
         if not topic:

@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from looplab.core.atomicio import atomic_write_text, strict_fsync
 from looplab.core.config import (
     RUN_START_PINNED_FIELDS, Settings, run_start_pinned_settings, settings_from_snapshot)
-from looplab.core.node_evidence import metrics_attempt_receipt, node_attempt
+from looplab.core.node_evidence import node_attempt
 from looplab.core.run_deletion import (
     RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed,
     load_run_deletion_fence, run_deletion_snapshot_token)
@@ -2096,7 +2096,7 @@ def build_router(srv) -> APIRouter:
         norms, lr, …), not just the objective — read via the pluggable metrics adapters (TensorBoard
         today). The response is fenced to ``node_id`` + lifecycle ``attempt``; reset-era points are
         excluded by the engine's attempt receipt. Empty until current-attempt logs appear."""
-        from looplab.serve.metrics_adapters import read_node_metrics
+        from looplab.serve.metrics_adapters import fenced_node_metrics
         rd = _run_dir(run_id)
         current_attempt = _node_attempt(srv.state(rd), nid)
         if current_attempt is None:
@@ -2110,19 +2110,7 @@ def build_router(srv) -> APIRouter:
                 "message": "The node was reset before its metric evidence was read.",
                 "remediation": "Reload node state and request the current attempt.",
             })
-        node_dir = _node_dir(rd, nid)
-        receipt = metrics_attempt_receipt(node_dir)
-        try:
-            # Legacy attempt-zero runs predate receipts and remain readable. A later attempt without
-            # its exact marker is known-stale/unknown and therefore returns no series, never old data.
-            if receipt is None:
-                m = read_node_metrics(str(node_dir)) if current_attempt == 0 else {}
-            elif receipt[0] == current_attempt:
-                m = read_node_metrics(str(node_dir), since_wall_time=receipt[1])
-            else:
-                m = {}
-        except Exception:  # noqa: BLE001 - observability must never 500
-            m = {}
+        m = fenced_node_metrics(_node_dir(rd, nid), current_attempt)
         after_attempt = _node_attempt(srv.state(rd), nid)
         if after_attempt != current_attempt:
             raise HTTPException(409, {
@@ -2997,8 +2985,13 @@ def build_router(srv) -> APIRouter:
         st = srv.state(_run_dir(run_id))
         return st.llm_cost or {"cost": 0.0, "calls": 0, "total_tokens": 0}
 
-    @router.get("/api/runs/{run_id}/agents_md")
+    @router.get("/api/runs/{run_id}/agents_md", deprecated=True)
     def agents_md(run_id: str):
+        """DEPRECATED. Serve a run's AGENTS.md.
+
+        No first-party client reads this — neither `ui/src` nor the TUI mentions it. Marked
+        deprecated rather than deleted because it is a PUBLIC route whose outside callers this
+        repository cannot see (doc 25 SR-13)."""
         rd = _run_dir(run_id)
         f = rd / "AGENTS.md"
         # Same defence-in-depth the /log and /log-page routes above apply to events.jsonl: `run_dir`

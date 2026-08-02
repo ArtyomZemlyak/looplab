@@ -7,15 +7,8 @@ from fastapi import APIRouter, HTTPException, Query, Response
 
 from looplab.events.comment_projection import (
     CommentCursorError, comments_page, history_page, project_comments)
+from looplab.serve.http import comment_cursor_error, comment_filter_invalid
 from looplab.serve.run_commands import run_generation_token
-
-
-def _cursor_error(exc: CommentCursorError) -> HTTPException:
-    return HTTPException(409 if exc.stale else 400, {
-        "code": "comment_cursor_stale" if exc.stale else "invalid_comment_cursor",
-        "message": str(exc),
-        "remediation": "refresh comments from the first page",
-    })
 
 
 def _stable_events(srv, rd):
@@ -72,11 +65,7 @@ def build_router(srv) -> APIRouter:
                       include_resolved: bool = True):
         rd = srv.run_dir(run_id)
         if (node_id is None) != (node_generation is None):
-            raise HTTPException(400, {
-                "code": "comment_filter_invalid",
-                "message": "node_id and node_generation must be supplied together",
-                "remediation": "select an exact experiment lifecycle or remove both filters",
-            })
+            raise comment_filter_invalid()
         events, generation = _stable_events(srv, rd)
         comments, _history = project_comments(events)
         try:
@@ -85,7 +74,7 @@ def build_router(srv) -> APIRouter:
                 node_id=node_id, node_generation=node_generation,
                 include_resolved=include_resolved)
         except CommentCursorError as exc:
-            raise _cursor_error(exc) from exc
+            raise comment_cursor_error(exc) from exc
         _assert_still_current(srv, rd, generation)
         response.headers["Cache-Control"] = "no-store"
         return payload
@@ -108,7 +97,7 @@ def build_router(srv) -> APIRouter:
                 comment_id, histories.get(comment_id, []), generation=generation,
                 limit=limit, cursor=cursor)
         except CommentCursorError as exc:
-            raise _cursor_error(exc) from exc
+            raise comment_cursor_error(exc) from exc
         _assert_still_current(srv, rd, generation)
         response.headers["Cache-Control"] = "no-store"
         return payload

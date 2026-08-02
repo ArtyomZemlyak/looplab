@@ -11,6 +11,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from looplab.events.eventstore import EventStore, iter_jsonl  # noqa: E402
+from looplab.serve import metrics_adapters as metrics_module  # noqa: E402
 from looplab.serve import reviews as reviews_module  # noqa: E402
 from looplab.serve.routers import reviews as reviews_router  # noqa: E402
 from looplab.serve.reviews import ReviewError, ReviewStore  # noqa: E402
@@ -433,7 +434,7 @@ def test_review_metrics_are_bounded_finite_numeric_projections(tmp_path, monkeyp
                "path": "C:/private/customer/data", "note": "password=metricssecret"}
               for i in range(5_002)]
     points.append({"step": 9_999, "value": float("nan"), "wall_time": 1})
-    monkeypatch.setattr(reviews_router, "read_node_metrics", lambda _: {
+    monkeypatch.setattr(metrics_module, "read_node_metrics", lambda _, **_kw: {
         "loss": points,
         f"token={KEY_CREDENTIAL_A}": [
             {"step": 1, "value": 0.5, "wall_time": 1.0, "raw": "metricssecret"}],
@@ -470,12 +471,12 @@ def test_slow_review_projection_does_not_block_generation_replacement(tmp_path, 
     release_read = threading.Event()
     replacement_done = threading.Event()
 
-    def slow_metrics(_path):
+    def slow_metrics(_path, **_kw):
         entered.set()
         assert release_read.wait(2)
         return {"loss": [{"step": 1, "value": 0.5, "wall_time": 1.0}]}
 
-    monkeypatch.setattr(reviews_router, "read_node_metrics", slow_metrics)
+    monkeypatch.setattr(metrics_module, "read_node_metrics", slow_metrics)
     responses = []
     reader = threading.Thread(target=lambda: responses.append(client.get(
         "/api/review/nodes/0/metrics", headers={"X-LoopLab-Review": token})))
@@ -616,7 +617,7 @@ def test_reviewer_metrics_are_attempt_fenced_like_the_owner_route(tmp_path, monk
         windows.append(since_wall_time)
         return {"loss": [{"step": 1, "value": 0.5, "wall_time": 7.0}]}
 
-    monkeypatch.setattr(reviews_router, "read_node_metrics", _read)
+    monkeypatch.setattr(metrics_module, "read_node_metrics", _read)
     client = TestClient(make_app(tmp_path))
     headers = {"X-LoopLab-Review": _create(client)["token"]}
     url = "/api/review/nodes/0/metrics"
