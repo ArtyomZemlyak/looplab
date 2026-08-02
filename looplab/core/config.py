@@ -1,4 +1,4 @@
-﻿"""Engine config: the schema (what settings exist). (I0, ADR-11)
+"""Engine config: the schema (what settings exist). (I0, ADR-11)
 
 One pydantic-settings class declaring every engine knob, its default, and its docs. The loader —
 how a run file / CLI / env becomes a `Settings` — is `looplab.core.appconfig`, which also owns
@@ -290,6 +290,19 @@ def default_agent_control() -> dict[str, list[str]]:
     default — so "Engine() == shipped defaults" can't drift if the copy depth ever needs to change
     (e.g. nested values requiring copy.deepcopy), instead of two verbatim copy expressions."""
     return {k: list(v) for k, v in DEFAULT_AGENT_CONTROL.items()}
+
+
+# The closed set of `developer_backend` values: "default" (the in-house Developer) plus the external
+# coding-agent keys `agents/cli_agent.py::PRESETS` implements. It lives HERE, in the bottom layer,
+# because `Settings` validation needs it on every construction and `core` imports nothing above
+# itself — validating against the agents registry directly made this the ONE upward import out of
+# core in the tree, so an import-time error anywhere in agents/cli_agent.py broke ALL config
+# loading (doc 25 XP-04).
+#
+# The authority is not lost, it is inverted: `agents/cli_agent.py` asserts its PRESETS match this
+# set, and `tests/test_developer_backend_registry.py` checks BOTH directions. Adding a preset
+# without adding it here is a red test, not a backend that silently downgrades to the default.
+DEVELOPER_BACKENDS: tuple[str, ...] = ("default", "aider", "continue", "goose", "opencode")
 
 
 class Settings(BaseSettings):
@@ -1372,13 +1385,12 @@ class Settings(BaseSettings):
         # coding-agent keys in agents/cli_agent.py::PRESETS. The CLI --developer-backend flag guards it
         # (_DEV_BACKENDS), but a file/env/`--set` value reached here unchecked and adapters/tasks.py then
         # silently wired the DEFAULT developer for anything not in PRESETS. Validate against the SAME
-        # authoritative registry the runtime consumer uses (imported lazily to keep config import-light),
-        # so a typo fails loud instead of downgrading — mirroring the `backend` guard above.
-        from looplab.agents.cli_agent import PRESETS as _DEV_PRESETS
-        _dev_backends = ("default", *_DEV_PRESETS)
-        if self.developer_backend not in _dev_backends:
+        # closed set below, which `agents/cli_agent.py` asserts its PRESETS match — so a typo still
+        # fails loud instead of downgrading, WITHOUT core executing agents-package code on every
+        # Settings construction (doc 25 XP-04: this was the one upward import out of core).
+        if self.developer_backend not in DEVELOPER_BACKENDS:
             raise ValueError(
-                f"developer_backend must be {'|'.join(_dev_backends)}, "
+                f"developer_backend must be {'|'.join(DEVELOPER_BACKENDS)}, "
                 f"got {self.developer_backend!r}")
         # `parse_structured` resolves an unknown name to the DEFAULT fallback order, so a typo'd
         # llm_parser is indistinguishable from asking for the default. Validate against the parser

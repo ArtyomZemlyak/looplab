@@ -2413,7 +2413,7 @@ fields they omit and why, against that definition.
 
 *Recommendation:* Move machine_runs_tools (or at least its mutation/spawn paths) into serve/, or extract run_config_write_lock and the liveness/spawn contract into a serve-independent module both can import downward.
 
-#### XP-04 · LOW · layering · effort: small
+#### XP-04 · LOW · layering · effort: small — **RESOLVED (2026-08-02)**
 
 **core/config.py imports looplab.agents at validation time, violating the documented 'core imports nothing above itself' rule**
 
@@ -2422,6 +2422,18 @@ fields they omit and why, against that definition.
 *Evidence:* Settings validation runs `from looplab.agents.cli_agent import PRESETS as _DEV_PRESETS` to validate developer_backend. The inline comment justifies validating against the authoritative registry and keeping the import lazy, but not the direction: core (the bottom layer) now executes agents-package code on every Settings construction, and an import-time error in agents/cli_agent.py breaks all config loading. This is the single upward import out of core in the whole tree.
 
 *Recommendation:* Move the closed set of developer-backend keys into core (e.g. core/task_kinds or a small constants module) and have agents/cli_agent assert its PRESETS match it (same two-way pattern the other registries use), restoring the documented layering without losing the fail-loud validation.
+
+*Resolution:* `core.config.DEVELOPER_BACKENDS` is the closed set; `agents/cli_agent.py` asserts at
+IMPORT time that its PRESETS are covered, so the authority over "which backends exist" is inverted
+rather than lost. `core/` now imports nothing above itself anywhere in the tree.
+
+`tests/test_developer_backend_registry.py` checks both directions, because each fails silently on
+its own: a preset missing from the set makes a REAL backend unconfigurable (Settings rejects it as a
+typo), and a set entry with no preset is worse — Settings accepts it and `adapters/tasks.py` wires
+the DEFAULT developer instead, the exact silent downgrade the original validation existed to stop.
+A third test asserts the layering rule for the WHOLE `core/` package rather than just the one import
+that broke it. Verified to have teeth against all three: an unlisted preset, a preset-less set
+entry, and a fresh upward import from `core/parse.py`.
 
 #### XP-05 · MEDIUM · under-decomposition · effort: large
 

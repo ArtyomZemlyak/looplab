@@ -1,4 +1,4 @@
-﻿"""External CLI coding agents as a Developer backend (ADR-7), tool-agnostic.
+"""External CLI coding agents as a Developer backend (ADR-7), tool-agnostic.
 
 A `CliAgentDeveloper` runs any terminal coding agent head-less as a subprocess that
 edits a single `solution.py` in a throwaway dir, pointed at our local OpenAI-compatible
@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from looplab.core.config import DEVELOPER_BACKENDS
 from looplab.core.models import Idea, developer_artifact_footprint
 from looplab.core.validate import AgentRun
 
@@ -504,3 +505,15 @@ def _git_seed(wd: Path) -> Optional[str]:
             "commit", "-q", "-m", "seed") != 0:
         return None
     return _git_out(wd, "rev-parse", "HEAD").strip() or None
+
+
+# Two-way with `core.config.DEVELOPER_BACKENDS`, which `Settings` validates against. Core cannot
+# import this module (it is the bottom layer), so the closed set lives there and the AUTHORITY —
+# which presets actually exist — is asserted here, at import time, where a mismatch is impossible to
+# miss. Adding a preset without adding its key there would otherwise make the new backend
+# unconfigurable: `Settings` would reject it as a typo.
+_MISSING = set(PRESETS) - set(DEVELOPER_BACKENDS)
+assert not _MISSING, (
+    f"cli_agent PRESETS {sorted(_MISSING)} are not in core.config.DEVELOPER_BACKENDS, so Settings "
+    "would reject them as typos — add them there in the same change")
+del _MISSING
