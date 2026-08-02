@@ -1746,6 +1746,31 @@ test that guards the property they broke.
 
 *Recommendation:* Extract a `serve/concept_lens.py` service plus one `_assert_lens_generation(rd, core, expected)` helper for the preamble; the four endpoints become thin.
 
+*Resolution (2026-08-02, the preamble):* `_assert_lens_generation(srv, rd, *, core_generation,
+expected_generation, stale_message, stale_remediation, prepared_message)` replaces the three
+hand-built copies inside `recover_concept_lens_receipt`, `abandon_recovered_concept_lens` and
+`abandon_concept_lens`. It returns the VALIDATED run dir alongside the generation, because
+`validate_paths` may re-resolve the path and a sequenced section that kept using the pre-validation
+one would be fencing one directory while writing to another. Only the prose differs per endpoint and
+it is client-visible, so it is passed in rather than flattened.
+
+The two checks are not redundant and the helper keeps both: the first says the CALLER is stale (a tab
+acting on a generation the run has moved past), the second says the SERVER's own projection is (the
+run moved between materializing the concept core and taking the sequencer). `derive_concept_lens`
+deliberately does NOT use the helper — it is the paying path and reports a missing identity as its
+own `run_generation_unavailable` code, because for a caller about to spend money "the run has no
+identity" and "the run moved" are different problems with different fixes.
+
+`tests/test_lens_generation_fence.py` adds 7 tests; four deliberate breaks — drop the prepared
+check, allow an empty generation to match, discard the validated dir, read the generation before
+validating the paths — were each caught. The empty-generation break is instructive: it is dead code
+today because `expected_generation` is regex-validated as 64 hex upstream, and the test that gives
+it teeth had to say so, pinning the fence's behaviour if that validation is ever relaxed rather than
+pretending the clause was already load-bearing.
+
+**Still open:** the ~1,000-line concept-lens subsystem still lives inside `routers/runs.py`; the
+`serve/concept_lens.py` service extraction is a separate change.
+
 #### SR-05 · MEDIUM · duplication · effort: small
 
 **_json_object body parser copy-pasted 4x at module level plus ~10 inline re-implementations**

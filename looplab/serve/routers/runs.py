@@ -339,6 +339,45 @@ async def _concept_lens_json_body(request: Request) -> dict:
     return json_object_bytes(text)
 
 
+def _assert_lens_generation(srv, rd: Path, *, core_generation: Optional[str],
+                            expected_generation: str, stale_message: str,
+                            stale_remediation: str, prepared_message: str) -> tuple[Path, str]:
+    """The paid-concept-lens generation fence, re-checked INSIDE the run sequencer.
+
+    Three endpoints — recover, resolve-recovered, abandon — each wrote this out: validate the run
+    paths, read the current generation, refuse if it is missing or moved since the caller looked,
+    then refuse AGAIN if the concept projection this handler prepared was built against a different
+    generation. Two checks, because they answer different questions: the first says the CALLER is
+    stale, the second says the SERVER's own projection is.
+
+    Only the prose differs per endpoint, and it is client-visible, so it is passed in rather than
+    flattened. `derive_concept_lens` deliberately does NOT use this: it is the paying path, and it
+    reports "no durable generation identity" as its own `run_generation_unavailable` code rather
+    than folding that into "changed" — for a caller about to spend money, "the run has no identity"
+    and "the run moved" are different problems with different fixes.
+
+    Returns the validated run dir (``validate_paths`` may re-resolve it) and the current generation.
+    """
+    rd = srv.commands.validate_paths(rd)
+    current_generation = srv.commands.run_generation(rd)
+    if not current_generation or current_generation != expected_generation:
+        raise HTTPException(409, {
+            "code": "run_generation_changed",
+            "expected_generation": expected_generation,
+            "current_generation": current_generation or None,
+            "message": stale_message,
+            "remediation": stale_remediation,
+        })
+    if core_generation != current_generation:
+        raise HTTPException(409, {
+            "code": "run_generation_changed",
+            "expected_generation": expected_generation,
+            "current_generation": current_generation,
+            "message": prepared_message,
+        })
+    return rd, current_generation
+
+
 def _concept_lens_ledger(events, generation: str):
     """Fold durable paid-lens claims without trusting malformed or conflicting receipts."""
     claims: dict[str, str] = {}
@@ -1459,23 +1498,12 @@ def build_router(srv) -> APIRouter:
         response.headers["Vary"] = "X-LoopLab-Token, Authorization"
 
         with srv.commands.sequence(rd):
-            rd = srv.commands.validate_paths(rd)
-            current_generation = srv.commands.run_generation(rd)
-            if not current_generation or current_generation != expected_generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected_generation,
-                    "current_generation": current_generation or None,
-                    "message": "The run changed before paid-lens recovery was inspected.",
-                    "remediation": "Reload Concepts and inspect only the current generation.",
-                })
-            if core[RUN_GENERATION_FIELD] != current_generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected_generation,
-                    "current_generation": current_generation,
-                    "message": "The run changed while its recovery projection was prepared.",
-                })
+            rd, current_generation = _assert_lens_generation(
+                srv, rd, core_generation=core[RUN_GENERATION_FIELD],
+                expected_generation=expected_generation,
+                stale_message="The run changed before paid-lens recovery was inspected.",
+                stale_remediation="Reload Concepts and inspect only the current generation.",
+                prepared_message="The run changed while its recovery projection was prepared.")
 
             store = EventStore(rd / "events.jsonl")
             claims, terminals, unresolved, conflict = _concept_lens_recovery_ledger(
@@ -1590,23 +1618,13 @@ def build_router(srv) -> APIRouter:
         def _resolve():
             nonlocal rd
             with srv.commands.sequence(rd):
-                rd = srv.commands.validate_paths(rd)
-                current_generation = srv.commands.run_generation(rd)
-                if not current_generation or current_generation != expected_generation:
-                    raise HTTPException(409, {
-                        "code": "run_generation_changed",
-                        "expected_generation": expected_generation,
-                        "current_generation": current_generation or None,
-                        "message": "The run changed before the recovered claim could be resolved.",
-                        "remediation": "Reload recovery; never resolve a claim from another generation.",
-                    })
-                if generation != current_generation:
-                    raise HTTPException(409, {
-                        "code": "run_generation_changed",
-                        "expected_generation": expected_generation,
-                        "current_generation": current_generation,
-                        "message": "The run changed while its recovery frame was prepared.",
-                    })
+                rd, current_generation = _assert_lens_generation(
+                    srv, rd, core_generation=generation,
+                    expected_generation=expected_generation,
+                    stale_message="The run changed before the recovered claim could be resolved.",
+                    stale_remediation=(
+                        "Reload recovery; never resolve a claim from another generation."),
+                    prepared_message="The run changed while its recovery frame was prepared.")
 
                 store = EventStore(rd / "events.jsonl")
                 claims, terminals, unresolved, conflict = _concept_lens_recovery_ledger(
@@ -1728,23 +1746,13 @@ def build_router(srv) -> APIRouter:
         def _inspect():
             nonlocal rd
             with srv.commands.sequence(rd):
-                rd = srv.commands.validate_paths(rd)
-                current_generation = srv.commands.run_generation(rd)
-                if not current_generation or current_generation != expected_generation:
-                    raise HTTPException(409, {
-                        "code": "run_generation_changed",
-                        "expected_generation": expected_generation,
-                        "current_generation": current_generation or None,
-                        "message": "The run changed before the paid claim could be abandoned.",
-                        "remediation": "Reload Concepts; never abandon a receipt from another generation.",
-                    })
-                if generation != current_generation:
-                    raise HTTPException(409, {
-                        "code": "run_generation_changed",
-                        "expected_generation": expected_generation,
-                        "current_generation": current_generation,
-                        "message": "The run changed while the concept frame was being prepared.",
-                    })
+                rd, current_generation = _assert_lens_generation(
+                    srv, rd, core_generation=generation,
+                    expected_generation=expected_generation,
+                    stale_message="The run changed before the paid claim could be abandoned.",
+                    stale_remediation=(
+                        "Reload Concepts; never abandon a receipt from another generation."),
+                    prepared_message="The run changed while the concept frame was being prepared.")
                 computed_id = _concept_lens_identity(rd, current_generation, idempotency_key)
                 if not hmac.compare_digest(request_id, computed_id):
                     raise HTTPException(409, {
