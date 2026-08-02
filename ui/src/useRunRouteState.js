@@ -8,6 +8,8 @@ const browserLocation = () => (typeof location === 'undefined'
   ? { pathname: '', search: '', hash: '' }
   : location)
 
+export const RUN_PANEL_HISTORY_STATE_KEY = '__looplabRunPanelEntry'
+
 function read(reviewMode) {
   const parsed = parseRunRouteState(browserLocation().hash, { reviewMode })
   return { ...parsed, navigationRevision: 0 }
@@ -21,11 +23,19 @@ export function useRunRouteState({ generation = null, reviewMode = false } = {})
 
   const write = useCallback((state, mode = 'push', { forceGeneration = false } = {}) => {
     if (typeof window === 'undefined') return false
+    const previousHref = `${window.location.pathname}${window.location.search}${window.location.hash}`
     const nextHash = hashWithRunRouteState(window.location.hash, state, { reviewMode, forceGeneration })
     if (nextHash === window.location.hash) return true
     const href = `${window.location.pathname}${window.location.search}${nextHash}`
+    const currentHistoryState = window.history.state
+    const nextHistoryState = currentHistoryState && typeof currentHistoryState === 'object'
+      ? { ...currentHistoryState } : {}
+    if (!state.panel) delete nextHistoryState[RUN_PANEL_HISTORY_STATE_KEY]
+    else if (mode !== 'replace') {
+      nextHistoryState[RUN_PANEL_HISTORY_STATE_KEY] = { version: 1, previousHref }
+    }
     try {
-      window.history[mode === 'replace' ? 'replaceState' : 'pushState'](window.history.state, '', href)
+      window.history[mode === 'replace' ? 'replaceState' : 'pushState'](nextHistoryState, '', href)
       hydratedHashRef.current = nextHash
       return true
     } catch {

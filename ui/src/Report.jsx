@@ -79,7 +79,7 @@ function VerdictBanner({ v, onOpenPanel, canOpenPanel }) {
           const openable = canOpen(c.panel)
           return <button key={i} className={'caveat-chip ' + c.severity}
             disabled={!openable} title={openable ? `see ${c.panel} →` : 'Unavailable in this read-only view'}
-            onClick={() => { if (canOpen(c.panel)) onOpenPanel(c.panel) }}>
+            onClick={event => { if (canOpen(c.panel)) onOpenPanel(c.panel, event.currentTarget) }}>
             <OpIcon name="alert" size={11} /> {c.text}
           </button>
         })}

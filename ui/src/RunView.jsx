@@ -3,7 +3,7 @@ import React, {
 } from 'react'
 import { useMediaQuery, useRunState } from './hooks.js'
 import { useTimeline } from './useTimeline.js'
-import { useRunRouteState } from './useRunRouteState.js'
+import { RUN_PANEL_HISTORY_STATE_KEY, useRunRouteState } from './useRunRouteState.js'
 import { reviewInspectorTabs, reviewPanelAllowed, runRouteStateHasTarget } from './runRouteState.js'
 import { deadlineGet, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback, createIdempotencyKey, resetRun,
   storageGet, storageSet } from './util.js'
@@ -340,15 +340,16 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     if (startOverMutationBlocked) return START_OVER_SAFE_PANELS.has(name)
     return true
   }
+  const routeWithSelectedNode = (current, next) => ({
+    ...current,
+    nodeId: next,
+    nodeGeneration: next === current.nodeId ? current.nodeGeneration : null,
+    inspectTab: next == null ? 'Overview' : current.inspectTab,
+    commentId: next === current.nodeId ? current.commentId : null,
+  })
   const setSelectedId = (value, options = {}) => route.update(current => {
     const next = typeof value === 'function' ? value(current.nodeId) : value
-    return {
-      ...current,
-      nodeId: next,
-      nodeGeneration: next === current.nodeId ? current.nodeGeneration : null,
-      inspectTab: next == null ? 'Overview' : current.inspectTab,
-      commentId: next === current.nodeId ? current.commentId : null,
-    }
+    return routeWithSelectedNode(current, next)
   }, options)
   const setInspectTab = (value, options = {}) => route.update(current => {
     const next = typeof value === 'function' ? value(current.inspectTab) : value
@@ -498,15 +499,20 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     }
   }, [panel, reviewMode, reviewEvidence, historyActive])
   const panelReturnFocusRef = useRef(null)
+  const panelBackCloseRef = useRef(false)
   const hubTriggerRef = useRef(null)
   const hubMenuRef = useRef(null)
   const closePanel = () => {
-    setPanel(null)
-    requestAnimationFrame(() => {
-      const target = panelReturnFocusRef.current
-      if (target && document.contains(target)) target.focus()
-      panelReturnFocusRef.current = null
-    })
+    if (panelBackCloseRef.current) return
+    // App-opened panels own one marked history entry, so dismissing them should consume that entry.
+    // A panel reached from a copied/deep link has no marker and is safely dismissed in place instead.
+    const panelEntry = window.history.state?.[RUN_PANEL_HISTORY_STATE_KEY]
+    if (panelEntry?.version === 1 && window.history.length > 1) {
+      panelBackCloseRef.current = true
+      window.history.back()
+      return
+    }
+    setPanel(null, { mode: 'replace' })
   }
   const [openHub, setOpenHub] = useState(null)               // which panel-hub dropdown is open
   const closeHub = (restoreFocus = false) => {
@@ -1233,14 +1239,28 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }, [groupState, groupMode, selectedGroup])
   // The Inspector takes visual precedence while a node is selected. A per-entry group snapshot can
   // therefore stay attached as its Back/Forward parent without rendering two detail surfaces at once.
-  const selectNode = (id) => {
-    setSelectedId(id)
+  const revealSelectedNode = id => {
     if (id != null) {
       if (groupNavigationRef.current) commitGroupNavigation(null, { mode: 'replace' })
       setRouteNotice('')
       if (compactWorkspace) setCompactInspectorOpen(true)
       else setSideC(false)
     }
+  }
+  const selectNode = id => {
+    setSelectedId(id)
+    revealSelectedNode(id)
+  }
+  // Panel rows call onSelect and then onClose. Commit the selection and dismissal atomically into
+  // the panel's current route entry so Back returns to the pre-panel workspace. The trailing child
+  // onClose becomes a harmless no-op because the route already has no panel.
+  const selectNodeFromPanel = id => {
+    panelReturnFocusRef.current = null
+    route.update(current => ({
+      ...routeWithSelectedNode(current, id), view: 'dag', panel: null,
+    }), { mode: 'replace' })
+    revealSelectedNode(id)
+    if (id != null) focusInspectorFromGroup(id)
   }
   // U3 · canvas as a control surface: right-click actions + drag-to-merge + a "merge with…" arm mode.
   const [mergeIntent, setMergeIntent] = useState(null)
@@ -1658,6 +1678,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       showToast(`This comment belongs to attempt ${comment.nodeGeneration}; the current node is attempt ${currentAttempt ?? 'unavailable'}.`)
       return
     }
+    // This is a deliberate drill-down destination, not a panel dismissal. Let route focus move into
+    // the workspace instead of restoring the hub button that originally opened Comments.
+    panelReturnFocusRef.current = null
     route.update(current => ({
       ...current,
       view: 'dag',
@@ -1692,15 +1715,23 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const workspaceRouteLabel = `${live?.label || live?.run_id || runId} run workspace · ${
     view === 'concepts' ? 'Concepts' : view === 'report' ? 'Report' : 'Search'}`
   useEffect(() => {
-    if (view === 'dag' && groupNavigationRef.current && !overlayPanelOpen) return undefined
+    // The dialog owns focus while it is mounting and open. Keeping the opener intact here also lets
+    // an explicit Close consume the panel's history entry and restore the exact launching control.
+    if (overlayPanelOpen) return undefined
+    panelBackCloseRef.current = false
+    const panelTarget = panelReturnFocusRef.current
+    panelReturnFocusRef.current = null
+    if (view === 'dag' && groupNavigationRef.current) return undefined
     const frame = requestAnimationFrame(() => {
       if (!document.querySelector('[aria-modal="true"], [data-route-focus-guard="true"]')) {
-        ;(routeMainRef.current || document.querySelector('[data-route-main]'))
+        ;(panelTarget && document.contains(panelTarget)
+          ? panelTarget
+          : routeMainRef.current || document.querySelector('[data-route-main]'))
           ?.focus({ preventScroll: true })
       }
     })
     return () => cancelAnimationFrame(frame)
-  }, [routeFocusPhase, route.navigationRevision])
+  }, [routeFocusPhase, route.navigationRevision, overlayPanelOpen])
 
   if (!live && startOverRecovery.kind !== 'none' && !startOverIntent) return <div className="app">
     <div className="topbar run-head">
@@ -2208,7 +2239,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                 observedSeq={historyActive ? history.resolvedSeq : seq}
                 expectedGeneration={reportGeneration}
                 readOnlyReason={mutationReadOnlyReason} evidenceAvailable={!reviewMode || reviewEvidence}
-                onOpenPanel={p => { if (panelAllowed(p)) setPanel(p) }}
+                onOpenPanel={(p, returnFocus) => {
+                  if (!panelAllowed(p)) return
+                  panelReturnFocusRef.current = returnFocus || null
+                  setPanel(p)
+                }}
                 canOpenPanel={panelAllowed}
                 onPickNode={(id) => {
                   route.update(current => ({ ...current, view: 'dag', nodeId: id,
@@ -2367,17 +2402,17 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         mode="overlay" resetKey={`${panel}:${runId}@${generation || 'pending'}`} onClose={closePanel}>
       <>
       {panel === 'overview' && panelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval} onClose={closePanel}
-        onOpenPanel={p => { if (panelAllowed(p)) setPanel(p) }} />}
+        onOpenPanel={p => { if (panelAllowed(p)) setPanel(p, { mode: 'replace' }) }} />}
       {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId} onToast={showToast} onClose={closePanel} />}
-      {panel === 'trust' && panelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} readOnly={mutationReadOnlyMode} />}
-      {panel === 'queue' && panelAllowed('queue') && <QueuePanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
+      {panel === 'trust' && panelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} readOnly={mutationReadOnlyMode} />}
+      {panel === 'queue' && panelAllowed('queue') && <QueuePanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} />}
       {panel === 'hypotheses' && panelAllowed('hypotheses') && <HypothesisBoard state={state}
-        runId={runId} runGeneration={generation} onSelect={selectNode} onToast={showToast}
+        runId={runId} runGeneration={generation} onSelect={selectNodeFromPanel} onToast={showToast}
         onClose={closePanel} />}
-      {panel === 'sensitivity' && panelAllowed('sensitivity') && <SensitivityPanel state={state} onSelect={selectNode} onClose={closePanel} />}
+      {panel === 'sensitivity' && panelAllowed('sensitivity') && <SensitivityPanel state={state} onSelect={selectNodeFromPanel} onClose={closePanel} />}
       {panel === 'importance' && panelAllowed('importance') && <HyperImportancePanel state={state} onClose={closePanel} />}
-      {panel === 'failures' && panelAllowed('failures') && <FailuresPanel state={state} onSelect={selectNode} onClose={closePanel} />}
-      {panel === 'pareto' && panelAllowed('pareto') && <ParetoPanel state={state} onSelect={selectNode} onClose={closePanel} />}
+      {panel === 'failures' && panelAllowed('failures') && <FailuresPanel state={state} onSelect={selectNodeFromPanel} onClose={closePanel} />}
+      {panel === 'pareto' && panelAllowed('pareto') && <ParetoPanel state={state} onSelect={selectNodeFromPanel} onClose={closePanel} />}
       {panel === 'data' && panelAllowed('data') && <DataQualityPanel state={state} onClose={closePanel} />}
       {panel === 'compare' && panelAllowed('compare') && <ComparePanel state={state} runId={runId} initialPair={comparePair}
         onClose={() => { closePanel(); setComparePair(null) }} />}
