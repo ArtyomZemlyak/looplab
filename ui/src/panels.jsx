@@ -3792,20 +3792,121 @@ const explorerEvent = event => {
   const bytes = omitted ? Number(event._log_page.raw_bytes || 0) : 0
   if (omitted) {
     const preview = `details omitted · ${bytes.toLocaleString()} source bytes exceed page limit`
-    return { event, preview, search: `${event.type || ''} ${preview}`.toLowerCase(), omitted: true }
+    return {
+      event, preview, searchType: String(event.type || '').toLowerCase(),
+      searchData: preview.toLowerCase(), omitted: true, serialized: null,
+    }
   }
   let serialized = '{}'
   try { serialized = JSON.stringify(event.data || {}) } catch { serialized = '[unserializable event data]' }
   const preview = serialized.length > 500 ? serialized.slice(0, 500) + '…' : serialized
-  return { event, preview, search: `${event.type || ''} ${serialized.slice(0, 4_000)}`.toLowerCase(), omitted: false }
+  return {
+    event, preview, serialized, searchType: String(event.type || '').toLowerCase(),
+    searchData: serialized.slice(0, 4_000).toLowerCase(), omitted: false,
+  }
 }
 const explorerEventKey = item => timelineEventKey(item.event)
 
+const explorerPreviewForQuery = (item, query) => {
+  if (!query || item.omitted || !item.serialized) return item.preview
+  const match = item.searchData.indexOf(query)
+  if (match < 0) return item.preview
+  // Put the hit near the beginning so it remains visible in the single-line desktop preview. The
+  // rest of the 500-character window supplies useful context after the match.
+  const start = Math.max(0, match - 24)
+  const end = Math.min(item.serialized.length, start + Math.max(500, query.length + 24))
+  return `${start ? '…' : ''}${item.serialized.slice(start, end)}${end < item.serialized.length ? '…' : ''}`
+}
+
+const highlightedExplorerText = (value, query) => {
+  if (!query) return value
+  const lower = value.toLowerCase()
+  const parts = []
+  let from = 0
+  let match = lower.indexOf(query)
+  while (match >= 0) {
+    if (match > from) parts.push(value.slice(from, match))
+    parts.push(<mark className="event-explorer-hit" key={`${match}:${parts.length}`}>
+      {value.slice(match, match + query.length)}
+    </mark>)
+    from = match + query.length
+    match = lower.indexOf(query, from)
+  }
+  if (from < value.length) parts.push(value.slice(from))
+  return parts.length ? parts : value
+}
+
 export function EventExplorer({ runId, timeline, historyActive = false, onReturnToLive = null, onClose }) {
   const [f, setF] = useState('')
+  const [expandedPayload, setExpandedPayload] = useState(null)
+  const [copyStatus, setCopyStatus] = useState(null)
+  const copyRequestRef = useRef(0)
+  const payloadRef = useRef(null)
+  const detailIdPrefix = useId()
   const query = f.trim().toLowerCase()
   const indexed = useMemo(() => timeline.rows.map(explorerEvent), [timeline.rows])
-  const rows = useMemo(() => indexed.filter(item => !query || item.search.includes(query)), [indexed, query])
+  const rows = useMemo(() => indexed.filter(item => !query
+    || item.searchType.includes(query) || item.searchData.includes(query)), [indexed, query])
+  const explorerIdentity = `${runId}:${timeline.generation || 'pending'}`
+  const expandedKey = expandedPayload?.identity === explorerIdentity ? expandedPayload.key : null
+  useEffect(() => {
+    copyRequestRef.current += 1
+    setExpandedPayload(null)
+    setCopyStatus(null)
+  }, [explorerIdentity])
+  useEffect(() => {
+    if (expandedKey == null || rows.some(item => (
+      explorerEventKey(item) === expandedKey && !item.omitted && item.serialized !== '{}'
+    ))) return
+    copyRequestRef.current += 1
+    setExpandedPayload(null)
+    setCopyStatus(null)
+  }, [expandedKey, rows])
+  const togglePayload = item => {
+    const key = explorerEventKey(item)
+    const opening = expandedKey !== key
+    if (opening && !historyActive && timeline.followingTail) timeline.setFollowingTail(false)
+    copyRequestRef.current += 1
+    setCopyStatus(null)
+    setExpandedPayload(opening ? { identity: explorerIdentity, key } : null)
+  }
+  const copyPayload = async item => {
+    const key = explorerEventKey(item)
+    const request = copyRequestRef.current + 1
+    copyRequestRef.current = request
+    setCopyStatus({ identity: explorerIdentity, key, state: 'copying' })
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable')
+      await navigator.clipboard.writeText(item.serialized)
+      if (copyRequestRef.current === request) {
+        setCopyStatus({ identity: explorerIdentity, key, state: 'copied' })
+      }
+    } catch {
+      if (copyRequestRef.current === request) {
+        setCopyStatus({ identity: explorerIdentity, key, state: 'error' })
+      }
+    }
+  }
+  const selectPayload = item => {
+    const key = explorerEventKey(item)
+    const element = payloadRef.current
+    const selection = window.getSelection?.()
+    if (!element || expandedKey !== key || !selection) {
+      setCopyStatus({ identity: explorerIdentity, key, state: 'selection-error' })
+      return
+    }
+    copyRequestRef.current += 1
+    try {
+      element.focus({ preventScroll: true })
+      const range = document.createRange()
+      range.selectNodeContents(element)
+      selection.removeAllRanges()
+      selection.addRange(range)
+      setCopyStatus({ identity: explorerIdentity, key, state: 'selected' })
+    } catch {
+      setCopyStatus({ identity: explorerIdentity, key, state: 'selection-error' })
+    }
+  }
   const totalLabel = timeline.totalEvents == null
     ? `${timeline.rows.length} loaded events`
     : `${timeline.rows.length} loaded of ${timeline.totalEvents} events`
@@ -3849,11 +3950,56 @@ export function EventExplorer({ runId, timeline, historyActive = false, onReturn
               onFollowingTailChange={value => { if (!historyActive) timeline.setFollowingTail(value) }}
               onJumpToLive={onReturnToLive || timeline.jumpToLive}
               estimateSize={42}
-              renderRow={item => <div className={'event-explorer-row' + (item.omitted ? ' omitted' : '')}>
-                <span className="event-explorer-seq">{item.event.seq}</span>
-                <span className="event-explorer-type">{item.event.type}</span>
-                <span className="event-explorer-data">{item.preview}</span>
-              </div>} />}
+              renderRow={item => {
+                const key = explorerEventKey(item)
+                const open = expandedKey === key
+                const expandable = !item.omitted && item.serialized !== '{}'
+                const detailsId = `${detailIdPrefix}-${item.event.seq}`
+                const status = copyStatus?.identity === explorerIdentity && copyStatus.key === key
+                  ? copyStatus.state : null
+                const preview = explorerPreviewForQuery(item, query)
+                return <div className={'event-explorer-row' + (item.omitted ? ' omitted' : '')}>
+                  {expandable
+                    ? <button type="button" className="event-explorer-toggle" aria-expanded={open}
+                        aria-controls={detailsId}
+                        aria-label={`${open ? 'Hide' : 'Show'} full payload for event ${item.event.seq}`}
+                        onClick={() => togglePayload(item)}>
+                        <span aria-hidden="true">{open ? '▾' : '▸'}</span>
+                      </button>
+                    : <span className="event-explorer-toggle-placeholder" aria-hidden="true" />}
+                  <span className="event-explorer-seq">{item.event.seq}</span>
+                  <span className="event-explorer-type">
+                    {highlightedExplorerText(String(item.event.type || ''), query)}
+                  </span>
+                  <span className="event-explorer-data">{highlightedExplorerText(preview, query)}</span>
+                  {open && <div id={detailsId} className="event-explorer-detail">
+                    <div className="event-explorer-detail-tools">
+                      <span>Full payload · {item.serialized.length.toLocaleString()} characters</span>
+                      <div className="event-explorer-detail-actions">
+                        <button type="button" className="btn sm ghost" onClick={() => selectPayload(item)}>
+                          Select payload
+                        </button>
+                        <button type="button" className="btn sm ghost" disabled={status === 'copying'}
+                          onClick={() => copyPayload(item)}>
+                          {status === 'copying' ? 'Copying…' : status === 'copied' ? 'Copied' : 'Copy payload'}
+                        </button>
+                      </div>
+                    </div>
+                    {status === 'copied' && <div className="event-explorer-copy-status" role="status">Payload copied.</div>}
+                    {status === 'selected' && <div className="event-explorer-copy-status" role="status">
+                      Payload selected. Press Ctrl+C to copy it.
+                    </div>}
+                    {status === 'error' && <div className="event-explorer-copy-status error" role="status">
+                      Copy failed. Use Select payload, then press Ctrl+C.
+                    </div>}
+                    {status === 'selection-error' && <div className="event-explorer-copy-status error" role="status">
+                      Payload selection is unavailable in this browser.
+                    </div>}
+                    <pre ref={payloadRef} className="event-explorer-json" role="region" tabIndex={0}
+                      aria-label={`Full payload for event ${item.event.seq}`}>{item.serialized}</pre>
+                  </div>}
+                </div>
+              }} />}
     </Panel>
   )
 }
