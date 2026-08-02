@@ -1,4 +1,4 @@
-import React, { lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, { lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun,
   createIdempotencyKey, submitRunDeletion,
   listSupertasks, createSupertask, renameSupertask, deleteSupertask, assignSupertask,
@@ -37,6 +37,70 @@ const LIST_PAGE_SIZE = 200
 const RUN_GENERATION_RE = /^[0-9a-f]{64}$/
 const RUN_DELETION_TIMEOUT_MS = 12_000
 const RUN_DELETION_POLL_MS = 2_500
+const LIST_SORT_KEYS = new Set(['time', 'name', 'metric', 'task', 'nodes', 'phase'])
+const LIST_VIEWS = new Set(['list', 'map', 'compare'])
+const LIST_STATUSES = new Set(['all', 'running', 'finalizing', 'paused', 'approval', 'stalled', 'unknown', 'finished'])
+
+function mapNavigationSignature(projects, runs) {
+  let hash = 0x811c9dc5
+  const feed = value => {
+    const text = String(value ?? '')
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index)
+      hash = Math.imul(hash, 0x01000193)
+    }
+    hash ^= 0xff
+    hash = Math.imul(hash, 0x01000193)
+  }
+  projects.forEach(project => {
+    feed('project'); feed(project.id); feed(project.parent_id); feed(project.name)
+  })
+  runs.forEach(run => {
+    feed('run'); feed(run.run_id); feed(run.project_id)
+  })
+  return `${projects.length}:${runs.length}:${(hash >>> 0).toString(36)}`
+}
+
+function normalizeListNavigation(value) {
+  const saved = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const text = (candidate, fallback) => typeof candidate === 'string' ? candidate : fallback
+  const compare = Array.isArray(saved.compare)
+    ? [...new Set(saved.compare.filter(id => typeof id === 'string' && id).slice(0, 8))] : []
+  const mapCollapse = Array.isArray(saved.mapCollapse)
+    ? saved.mapCollapse.filter(entry => Array.isArray(entry) && typeof entry[0] === 'string'
+      && typeof entry[1] === 'boolean').slice(0, 500) : []
+  const rawLimit = Number.isSafeInteger(saved.listLimit) ? saved.listLimit : LIST_PAGE_SIZE
+  const rawScroll = typeof saved.scrollTop === 'number' && Number.isFinite(saved.scrollTop)
+    ? saved.scrollTop : 0
+  const mapViewport = saved.mapViewport && typeof saved.mapViewport === 'object'
+    && !Array.isArray(saved.mapViewport)
+    && Number.isFinite(saved.mapViewport.x) && Number.isFinite(saved.mapViewport.y)
+    && Number.isFinite(saved.mapViewport.zoom)
+    ? {
+        x: Math.min(Math.max(saved.mapViewport.x, -1_000_000), 1_000_000),
+        y: Math.min(Math.max(saved.mapViewport.y, -1_000_000), 1_000_000),
+        zoom: Math.min(Math.max(saved.mapViewport.zoom, 0.15), 1.6),
+        signature: typeof saved.mapViewport.signature === 'string'
+          ? saved.mapViewport.signature.slice(0, 128) : '',
+      }
+    : null
+  return {
+    project: text(saved.project, ALL),
+    query: text(saved.query, ''),
+    task: text(saved.task, ALL),
+    status: LIST_STATUSES.has(saved.status) ? saved.status : 'all',
+    supertask: text(saved.supertask, ALL),
+    sort: LIST_SORT_KEYS.has(saved.sort) ? saved.sort : 'time',
+    direction: saved.direction === 'asc' ? 'asc' : 'desc',
+    view: LIST_VIEWS.has(saved.view) ? saved.view : 'list',
+    compare,
+    mapCollapse,
+    mapViewport,
+    activeSavedView: text(saved.activeSavedView, ''),
+    listLimit: Math.min(Math.max(rawLimit, LIST_PAGE_SIZE), 10_000),
+    scrollTop: Math.max(rawScroll, 0),
+  }
+}
 
 export function useResource(read, initial) {
   const [data, setData] = useState(initial)
@@ -666,13 +730,20 @@ function SuperTaskModal({ supertasks, state, onRetry, onCreate, onRename, onDele
   </Modal>
 }
 
-export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
+export default function RunList({ onOpen, onSettings, onResearchAtlas,
+  initialNavigationState = null, restoreFocusRunId = null,
+  onNavigationStateChange = null, onNavigationRestored = null }) {
+  const initialNavigationRef = useRef()
+  if (initialNavigationRef.current === undefined) {
+    initialNavigationRef.current = normalizeListNavigation(initialNavigationState)
+  }
+  const initialNavigation = initialNavigationRef.current
   const compactNav = useMediaQuery('(max-width: 900px)')
   const [runs, runsState, loadRuns] = useResource(
     signal => get('/api/runs', { signal, cache: 'no-store' }), null)
   const [proj, projectsState, loadProjects] = useResource(
     signal => listProjects({ signal }), { projects: [], assignments: {} })
-  const [sel, setSel] = useState(ALL)
+  const [sel, setSel] = useState(() => initialNavigation.project)
   const [expanded, setExpanded] = useState(() => new Set())
   const [renaming, setRenaming] = useState(null)   // project id being renamed (inline)
   const [projectBusy, projectError, saveProjectRename, clearProjectError] = useMutation()
@@ -683,8 +754,10 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const projectsAllRef = useRef(null)
   const [dragRun, setDragRun] = useState(null)
   const compareDragGuardRef = useRef(null)
-  const [view, setView] = useState('list')
-  const [mapCollapseOverrides, setMapCollapseOverrides] = useState(() => new Map())
+  const [view, setView] = useState(() => initialNavigation.view)
+  const [mapCollapseOverrides, setMapCollapseOverrides] = useState(
+    () => new Map(initialNavigation.mapCollapse))
+  const [mapViewport, setMapViewport] = useState(() => initialNavigation.mapViewport)
   const [projModal, setProjModal] = useState(null) // {parent_id} → show create-project popup
   const projectModalReturnRef = useRef(null)
   const [runMenu, setRunMenu] = useState(null)     // exact run-list snapshot whose ⋮ menu is open
@@ -705,26 +778,29 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const [deletionRecoveries, setDeletionRecoveries] = useState(() => new Map(
     listRunDeletionRecoveries().map(item => [item.runId, item])))
   // Sort + filter of the run list (client-side over the loaded summaries).
-  const [sortKey, setSortKey] = useState('time')
-  const [sortDir, setSortDir] = useState('desc')
-  const [query, setQuery] = useState('')
-  const [taskFilter, setTaskFilter] = useState(ALL)
-  const [statusFilter, setStatusFilter] = useState('all')
-  const [stFilter, setStFilter] = useState(ALL)
+  const [sortKey, setSortKey] = useState(() => initialNavigation.sort)
+  const [sortDir, setSortDir] = useState(() => initialNavigation.direction)
+  const [query, setQuery] = useState(() => initialNavigation.query)
+  const [taskFilter, setTaskFilter] = useState(() => initialNavigation.task)
+  const [statusFilter, setStatusFilter] = useState(() => initialNavigation.status)
+  const [stFilter, setStFilter] = useState(() => initialNavigation.supertask)
   const [superdata, superState, loadSupers] = useResource(
     signal => listSupertasks({ signal }), { supertasks: [], assignments: {} })
   const [stModal, setStModal] = useState(false)             // manage-super-tasks popup open?
   const [showReport, setShowReport] = useState(false)       // cross-run scope-report panel open?
-  const [compareIds, setCompareIds] = useState(() => new Set())
+  const [compareIds, setCompareIds] = useState(() => new Set(initialNavigation.compare))
   const [compareColumns, setCompareColumns] = useState(
     () => normalizeCompareColumns(storageGet(COMPARE_COLUMNS_KEY)))
   const [savedViews, setSavedViews] = useState(
     () => decodePortfolioViews(storageGet(SAVED_VIEWS_KEY, '[]')))
-  const [activeSavedView, setActiveSavedView] = useState('')
+  const [activeSavedView, setActiveSavedView] = useState(() => initialNavigation.activeSavedView)
   const [viewModal, setViewModal] = useState(false)
   const [viewMessage, setViewMessage] = useState('')
-  const [listLimit, setListLimit] = useState(LIST_PAGE_SIZE)
+  const [listLimit, setListLimit] = useState(() => initialNavigation.listLimit)
   const savedViewReturnRef = useRef(null)
+  const runListRef = useRef(null)
+  const listScrollTopRef = useRef(initialNavigation.scrollTop)
+  const navigationRestoreStartedRef = useRef(false)
   const [projectsOpen, setProjectsOpen] = useState(false)   // compact-screen Projects drawer
   const projectsToggleRef = useRef(null)
   const projectsCloseRef = useRef(null)
@@ -936,6 +1012,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
     .filter(recovery => !renderedDeletionIds.has(recovery.runId))
   const mapRuns = useMemo(() => visible.filter(run => !deletionRecoveries.has(run.run_id)),
     [visible, deletionRecoveries])
+  const mapViewportSignature = useMemo(
+    () => mapNavigationSignature(proj.projects, mapRuns), [proj.projects, mapRuns])
   const compareRuns = useMemo(() => {
     const byId = new Map((runs || []).map(run => [run.run_id, run]))
     return [...compareIds].filter(id => !deletionRecoveries.has(id))
@@ -943,6 +1021,10 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   }, [runs, compareIds, deletionRecoveries])
   const metricSortAvailable = taskFilter !== ALL && metricComparable(filtered)
   const hasActiveFilters = !!query.trim() || taskFilter !== ALL || statusFilter !== 'all' || stFilter !== ALL
+  const listCriteriaKey = JSON.stringify([
+    sel, query, taskFilter, statusFilter, stFilter, sortKey, sortDir,
+  ])
+  const previousListCriteriaKeyRef = useRef(listCriteriaKey)
   const clearFilters = () => {
     setQuery(''); setTaskFilter(ALL); setStatusFilter('all'); setStFilter(ALL)
   }
@@ -959,21 +1041,125 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
     })
   }, [runs])
   useEffect(() => {
-    if (view === 'compare' && compareRuns.length < 2) setView('list')
-  }, [view, compareRuns.length])
+    if (runs && view === 'compare' && compareRuns.length < 2) setView('list')
+  }, [runs, view, compareRuns.length])
   useEffect(() => {
     if (projectsState === 'ready' && sel !== ALL && sel !== UNASSIGNED
         && !proj.projects.some(project => project.id === sel)) setSel(ALL)
     if (superState === 'ready' && stFilter !== ALL && stFilter !== UNASSIGNED
         && !superdata.supertasks.some(task => task.id === stFilter)) setStFilter(ALL)
   }, [projectsState, proj.projects, sel, superState, superdata.supertasks, stFilter])
-  useEffect(() => setListLimit(LIST_PAGE_SIZE),
-    [sel, query, taskFilter, statusFilter, stFilter, sortKey, sortDir])
+  useEffect(() => {
+    if (previousListCriteriaKeyRef.current === listCriteriaKey) return
+    previousListCriteriaKeyRef.current = listCriteriaKey
+    setListLimit(LIST_PAGE_SIZE)
+  }, [listCriteriaKey])
 
   const portfolioState = {
     project: sel, query, task: taskFilter, status: statusFilter, supertask: stFilter,
     sort: sortKey, direction: sortDir, view, compare: [...compareIds], columns: compareColumns,
   }
+  const captureNavigationState = useCallback(() => ({
+    project: sel,
+    query,
+    task: taskFilter,
+    status: statusFilter,
+    supertask: stFilter,
+    sort: sortKey,
+    direction: sortDir,
+    view,
+    compare: [...compareIds],
+    mapCollapse: [...mapCollapseOverrides],
+    mapViewport,
+    activeSavedView,
+    listLimit,
+    scrollTop: initialNavigationState && !navigationRestoreStartedRef.current
+      ? listScrollTopRef.current
+      : runListRef.current?.scrollTop ?? listScrollTopRef.current,
+  }), [sel, query, taskFilter, statusFilter, stFilter, sortKey, sortDir, view,
+    compareIds, mapCollapseOverrides, mapViewport, activeSavedView, listLimit,
+    initialNavigationState])
+  const publishNavigationState = useCallback((options = null) => {
+    const snapshot = captureNavigationState()
+    onNavigationStateChange?.(snapshot, options)
+    return snapshot
+  }, [captureNavigationState, onNavigationStateChange])
+  const publishNavigationStateRef = useRef(publishNavigationState)
+  publishNavigationStateRef.current = publishNavigationState
+  const captureNavigationStateRef = useRef(captureNavigationState)
+  captureNavigationStateRef.current = captureNavigationState
+  const navigationCallbacksRef = useRef({ onNavigationStateChange, onNavigationRestored })
+  navigationCallbacksRef.current = { onNavigationStateChange, onNavigationRestored }
+  useLayoutEffect(() => { publishNavigationState() }, [publishNavigationState])
+  useEffect(() => {
+    const persistCurrentNavigation = () => publishNavigationStateRef.current()
+    window.addEventListener('pagehide', persistCurrentNavigation)
+    window.addEventListener('beforeunload', persistCurrentNavigation)
+    return () => {
+      window.removeEventListener('pagehide', persistCurrentNavigation)
+      window.removeEventListener('beforeunload', persistCurrentNavigation)
+    }
+  }, [])
+
+  const openRun = useCallback((id, href = null) => {
+    onOpen?.(id, publishNavigationState(), href)
+  }, [onOpen, publishNavigationState])
+  const openSettings = useCallback(() => {
+    onSettings?.(publishNavigationState())
+  }, [onSettings, publishNavigationState])
+  const openResearchAtlas = useCallback(() => {
+    onResearchAtlas?.(publishNavigationState())
+  }, [onResearchAtlas, publishNavigationState])
+
+  useLayoutEffect(() => {
+    if (!initialNavigationState) return
+    const active = document.activeElement
+    if (!active || active === document.body || active === document.documentElement) {
+      runsMainRef.current?.focus({ preventScroll: true })
+    }
+  }, [initialNavigationState])
+
+  const navigationResourcesSettled = runsState !== 'loading'
+    && projectsState !== 'loading' && superState !== 'loading'
+  useLayoutEffect(() => {
+    if (!initialNavigationState || navigationRestoreStartedRef.current
+        || !navigationResourcesSettled || !runListRef.current) return undefined
+    navigationRestoreStartedRef.current = true
+    const list = runListRef.current
+    list.scrollTop = initialNavigation.scrollTop
+    listScrollTopRef.current = list.scrollTop
+    let frame = null
+    let attempts = 0
+    const finish = () => {
+      const snapshot = captureNavigationStateRef.current()
+      navigationCallbacksRef.current.onNavigationStateChange?.(snapshot)
+      navigationCallbacksRef.current.onNavigationRestored?.(snapshot)
+    }
+    const restoreFocus = () => {
+      const active = document.activeElement
+      const visibleExternalFocus = active && active !== document.body
+        && active !== document.documentElement && !runsMainRef.current?.contains(active)
+        && active.getClientRects?.().length
+      if (visibleExternalFocus) { finish(); return }
+      const target = restoreFocusRunId
+        ? [...(runsMainRef.current?.querySelectorAll('[data-run-open-id]') || [])]
+          .find(element => element.dataset.runOpenId === String(restoreFocusRunId)
+            && element.getClientRects().length && element.getAttribute('aria-disabled') !== 'true'
+            && !element.matches(':disabled'))
+        : null
+      if (!target && restoreFocusRunId && attempts < 20) {
+        attempts += 1
+        frame = requestAnimationFrame(restoreFocus)
+        return
+      }
+      ;(target || runsMainRef.current)?.focus({ preventScroll: true })
+      finish()
+    }
+    frame = requestAnimationFrame(restoreFocus)
+    return () => { if (frame != null) cancelAnimationFrame(frame) }
+  }, [initialNavigationState, initialNavigation.scrollTop, navigationResourcesSettled,
+    restoreFocusRunId])
+
   const activeView = savedViews.find(item => item.name === activeSavedView)
   const activeViewDirty = !!activeView
     && portfolioViewSignature(activeView) !== portfolioViewSignature(portfolioState)
@@ -1342,10 +1528,10 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           <ThemeSwitcher />
           <EnergyToggle />
           <button type="button" className="btn sm ghost" disabled={navigationBusy} title="Read the experimental bounded portfolio preview"
-                  aria-label="Open Research Atlas preview" onClick={() => onResearchAtlas?.()}>
+                  aria-label="Open Research Atlas preview" onClick={openResearchAtlas}>
             <OpIcon name="compass" className="t-ic" /> Atlas preview
           </button>
-          <button className="btn sm ghost" disabled={navigationBusy} title="settings" onClick={() => onSettings && onSettings()}><OpIcon name="gear" className="t-ic" /> Settings</button>
+          <button className="btn sm ghost" disabled={navigationBusy} title="settings" onClick={openSettings}><OpIcon name="gear" className="t-ic" /> Settings</button>
         </div>
       </div>
       {missingStartOverRecoveries.map(item => <div key={item.runId}
@@ -1356,7 +1542,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           : ' is not loaded in the run list yet.'} {item.kind === 'corrupt'
             ? 'Its saved recovery evidence is invalid.'
             : 'Its exact request is still preserved in this tab.'}</span>
-        <button type="button" className="btn sm primary" onClick={() => onOpen(item.runId)}>
+        <button type="button" className="btn sm primary" data-run-open-id={item.runId}
+          onClick={() => openRun(item.runId)}>
           Open recovery
         </button>
       </div>)}
@@ -1418,7 +1605,11 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           </div>
         </aside>
 
-        <div className={'runlist' + (view === 'map' ? ' map-list-shell' : '')}>
+        <div ref={runListRef} className={'runlist' + (view === 'map' ? ' map-list-shell' : '')}
+          onScroll={event => {
+            listScrollTopRef.current = event.currentTarget.scrollTop
+            publishNavigationState({ persist: false })
+          }}>
           <div className="crumbs">
             <button type="button" className="crumb" disabled={navigationBusy} onClick={() => chooseProject(ALL)}>All runs</button>
             {breadcrumb.map(p => <React.Fragment key={p.id}><span className="sep">/</span>
@@ -1524,8 +1715,14 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           </div>}
           {view === 'map' && ['ready', 'stale'].includes(projectsState) && runs && mapRuns.length > 0 && <div className="map-stage">
             <LazyBoundary label="run map" resetKey={`map:${sel}`}>
-              <MapView onOpen={id => { if (!navigationBusy) onOpen(id) }} runs={mapRuns} projects={proj.projects}
+              <MapView onOpen={id => { if (!navigationBusy) openRun(id) }} runs={mapRuns} projects={proj.projects}
                 collapsed={mapCollapsed} onToggle={toggleMapCluster}
+                initialViewport={mapViewport?.signature === mapViewportSignature
+                  ? { x: mapViewport.x, y: mapViewport.y, zoom: mapViewport.zoom } : null}
+                onViewportChange={next => setMapViewport(current => current
+                  && current.x === next.x && current.y === next.y && current.zoom === next.zoom
+                  && current.signature === mapViewportSignature
+                  ? current : { ...next, signature: mapViewportSignature })}
                 scopeLabel={scope?.label || (sel === ALL ? 'All runs' : sel === UNASSIGNED ? 'Unassigned' : (projName[sel] || sel))} />
             </LazyBoundary>
           </div>}
@@ -1533,7 +1730,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
             resetKey={compareRuns.map(run => run.run_id).join(':')}>
             <RunCompare runs={compareRuns} columns={compareColumns}
               names={{ projects: projName, supertasks: stName }}
-              onColumns={setCompareColumns} onRemove={toggleCompare} />
+              onColumns={setCompareColumns} onRemove={toggleCompare}
+              onOpen={(id, href) => openRun(id, href)} />
           </LazyBoundary>}
           {view === 'list' && runs && displayedRuns.map(r => {
             const deletionRecovery = deletionRecoveries.get(r.run_id)
@@ -1612,12 +1810,13 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                                 : status === 'finalizing' ? 'wrapping up report, lessons, and cost'
                                 : status === 'paused' ? 'paused intentionally' : undefined}>{status}</span>
               })()}
-              <a className="run-card-main" href={`#/run/${encodeURIComponent(r.run_id)}`}
+              <a className="run-card-main" data-run-open-id={r.run_id}
+                   href={`#/run/${encodeURIComponent(r.run_id)}`}
                    draggable={false}
                    aria-disabled={navigationBusy || undefined}
                    onClick={event => {
                      if (navigationBusy) { event.preventDefault(); return }
-                     followClientRoute(event, () => onOpen(r.run_id))
+                     followClientRoute(event, () => openRun(r.run_id))
                    }}
                    aria-label={`Open run ${r.label || r.run_id}`}>
                 <div><b>{r.label || r.run_id}</b> <span className="muted">· {r.label ? r.run_id + ' · ' : ''}{r.task_id}</span>
@@ -1643,7 +1842,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                         }}>⋮</button>
                 {openMenuRun && <RunMenu r={openMenuRun} projects={proj.projects} supertasks={superdata.supertasks}
                   anchor={runMenuTriggerRef.current}
-                  onOpen={onOpen} onMove={moveRun} onSetSuper={assignToSuper} onManageSupers={() => openSuperTasks(runMenuTriggerRef.current)}
+                  onOpen={openRun} onMove={moveRun} onSetSuper={assignToSuper} onManageSupers={() => openSuperTasks(runMenuTriggerRef.current)}
                   onRename={openRunRename} onDelete={openRunDeletion} onReconcile={reconcileAll}
                   onClose={closeRunMenu} onBusyChange={setMenuBusy}
                   mutationLocked={menuMutationLocked}
@@ -1692,7 +1891,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
       {showReport && scope && <LazyBoundary label="scope report" mode="overlay" resetKey={scope.label}
         onClose={() => setShowReport(false)}>
         <ScopeReport scope={scope}
-          onOpen={(id) => { setShowReport(false); onOpen(id) }} onClose={() => setShowReport(false)} />
+          onOpen={(id) => { setShowReport(false); openRun(id) }} onClose={() => setShowReport(false)} />
       </LazyBoundary>}
     </main>
   )

@@ -1,4 +1,4 @@
-import React, { lazy, useEffect, useState } from 'react'
+import React, { lazy, useCallback, useEffect, useRef, useState } from 'react'
 import OwnerAuth from './OwnerAuth.jsx'
 import LazyBoundary from './LazyBoundary.jsx'
 import OwnerWorkspace from './OwnerWorkspace.jsx'
@@ -33,6 +33,74 @@ function parseHash() {
   if (sh) return { view: 'shared', id: safeDecode(sh[1]) }
   const m = h.match(/^#\/run\/(.+)$/)
   return m ? { view: 'run', id: safeDecode(m[1]) } : { view: 'list' }
+}
+
+const LIST_HISTORY_KEY = 'looplab.listNavigation'
+const LIST_HISTORY_CACHE_LIMIT = 128
+const listHistoryCache = new Map()
+let listHistorySequence = 0
+
+function rawListHistory() {
+  const state = history.state
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return null
+  const saved = state[LIST_HISTORY_KEY]
+  return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : null
+}
+
+function nextListHistoryEntryId() {
+  listHistorySequence += 1
+  return `${Date.now().toString(36)}-${listHistorySequence.toString(36)}`
+}
+
+function cacheListHistory(entryId, navigation) {
+  if (!entryId || !navigation || typeof navigation !== 'object' || Array.isArray(navigation)) return
+  listHistoryCache.delete(entryId)
+  listHistoryCache.set(entryId, navigation)
+  while (listHistoryCache.size > LIST_HISTORY_CACHE_LIMIT) {
+    listHistoryCache.delete(listHistoryCache.keys().next().value)
+  }
+}
+
+function readListHistory() {
+  const saved = rawListHistory()
+  if (!saved) return null
+  const entryId = typeof saved.entryId === 'string' && saved.entryId && saved.entryId.length <= 128
+    ? saved.entryId : null
+  const candidate = (entryId && listHistoryCache.get(entryId)) || saved.navigation
+  const navigation = candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+    ? candidate : null
+  return { ...saved, entryId, navigation }
+}
+
+function writeListHistory(navigation, originRunId = null) {
+  if (!navigation || typeof navigation !== 'object' || Array.isArray(navigation)) return
+  try {
+    const state = history.state && typeof history.state === 'object' && !Array.isArray(history.state)
+      ? history.state : {}
+    const current = rawListHistory()
+    const entryId = typeof current?.entryId === 'string' && current.entryId && current.entryId.length <= 128
+      ? current.entryId : nextListHistoryEntryId()
+    cacheListHistory(entryId, navigation)
+    history.replaceState({
+      ...state,
+      [LIST_HISTORY_KEY]: {
+        navigation,
+        originRunId: typeof originRunId === 'string' && originRunId ? originRunId : null,
+        entryId,
+      },
+    }, '', location.href)
+  } catch { /* The in-memory snapshot remains authoritative if history state is unavailable. */ }
+}
+
+function cacheCurrentListHistory(navigation, originRunId = null) {
+  const current = rawListHistory()
+  const entryId = typeof current?.entryId === 'string' && current.entryId && current.entryId.length <= 128
+    ? current.entryId : null
+  if (entryId) {
+    cacheListHistory(entryId, navigation)
+    return
+  }
+  writeListHistory(navigation, originRunId)
 }
 
 function ReviewRoute({ token }) {
@@ -80,14 +148,15 @@ function ReviewRoute({ token }) {
   </LazyBoundary>
 }
 
-function RouteFocus({ label, routeKey, children }) {
+function RouteFocus({ label, routeKey, children, autoFocus = true }) {
   useEffect(() => {
     document.title = `${label} · LoopLab`
+    if (!autoFocus) return undefined
     const frame = requestAnimationFrame(() => {
       if (!document.querySelector('[aria-modal="true"]')) document.querySelector('[data-route-main]')?.focus()
     })
     return () => cancelAnimationFrame(frame)
-  }, [routeKey, label])
+  }, [routeKey, label, autoFocus])
   return <>
     <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{label}</div>
     {children}
@@ -95,9 +164,33 @@ function RouteFocus({ label, routeKey, children }) {
 }
 
 export default function App() {
+  const initialListHistoryRef = useRef()
+  if (initialListHistoryRef.current === undefined) {
+    initialListHistoryRef.current = readListHistory() || null
+  }
+  const listNavigationRef = useRef(initialListHistoryRef.current?.navigation || null)
+  const listOriginRunRef = useRef(initialListHistoryRef.current?.originRunId || null)
   const [route, setRoute] = useState(parseHash())
   useEffect(() => {
-    const on = () => setRoute(parseHash())
+    const on = () => {
+      const next = parseHash()
+      const saved = readListHistory()
+      if (saved?.navigation) {
+        const originRunId = next.view === 'run' ? next.id
+          : next.view === 'list' && typeof saved.originRunId === 'string' ? saved.originRunId : null
+        listNavigationRef.current = saved.navigation
+        listOriginRunRef.current = originRunId
+        // Materialize any newer entry-cache snapshot into the destination entry too. This keeps a
+        // subsequent reload exact and normalizes origins copied by direct hash navigation.
+        writeListHistory(saved.navigation, originRunId)
+      } else if (listNavigationRef.current) {
+        const originRunId = next.view === 'run' ? next.id
+          : next.view === 'list' ? listOriginRunRef.current : null
+        listOriginRunRef.current = originRunId
+        writeListHistory(listNavigationRef.current, originRunId)
+      }
+      setRoute(next)
+    }
     window.addEventListener('hashchange', on)
     window.addEventListener('popstate', on)
     return () => {
@@ -115,10 +208,53 @@ export default function App() {
     : route.view === 'research-atlas' ? 'Research Atlas preview'
     : route.view === 'shared' ? 'Shared Assistant chat'
     : route.view === 'review' ? 'Read-only run review' : 'Runs'
-  const open = (id) => { location.hash = `#/run/${encodeURIComponent(id)}` }
-  const back = () => { location.hash = '' }
-  const settings = () => { location.hash = '#/settings' }
-  const researchAtlas = () => { location.hash = '#/atlas' }
+  const rememberListNavigation = useCallback((snapshot, options = null) => {
+    if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
+      listNavigationRef.current = snapshot
+      if (route.view === 'list') {
+        const current = readListHistory()
+        const originRunId = current && Object.prototype.hasOwnProperty.call(current, 'originRunId')
+          ? current.originRunId : listOriginRunRef.current
+        if (options?.persist === false) cacheCurrentListHistory(snapshot, originRunId)
+        else writeListHistory(snapshot, originRunId)
+      }
+    }
+  }, [route.view])
+  const finishListRestore = useCallback(snapshot => {
+    const originRunId = listOriginRunRef.current
+    rememberListNavigation(snapshot)
+    writeListHistory(listNavigationRef.current, originRunId)
+    listOriginRunRef.current = null
+  }, [rememberListNavigation])
+  const navigateWithListState = useCallback((hash, snapshot, originRunId = null) => {
+    const navigation = snapshot || listNavigationRef.current
+    if (navigation) {
+      listNavigationRef.current = navigation
+      listOriginRunRef.current = originRunId
+      writeListHistory(navigation, originRunId)
+    }
+    location.hash = hash
+    if (navigation) writeListHistory(navigation, originRunId)
+  }, [])
+  const open = useCallback((id, snapshot, href = null) => {
+    const runId = String(id)
+    const target = typeof href === 'string' && href.startsWith('#/run/')
+      ? href : `#/run/${encodeURIComponent(runId)}`
+    navigateWithListState(target, snapshot, runId)
+  }, [navigateWithListState])
+  const back = useCallback(() => {
+    location.hash = ''
+    if (listNavigationRef.current) {
+      writeListHistory(listNavigationRef.current, listOriginRunRef.current)
+    }
+  }, [])
+  const settings = useCallback(snapshot => {
+    navigateWithListState('#/settings', snapshot, null)
+  }, [navigateWithListState])
+  const researchAtlas = useCallback(snapshot => {
+    navigateWithListState('#/atlas', snapshot, null)
+  }, [navigateWithListState])
+  const restoreListNavigation = route.view === 'list' && !!listNavigationRef.current
 
   // Public review/share views own the whole screen and return before any owner-plane component mounts.
   // Everywhere else (list / run / settings) the persistent assistant and attention inbox stay available.
@@ -147,11 +283,16 @@ export default function App() {
   else if (route.view === 'research-atlas') content = <LazyBoundary label="Research Atlas preview" mode="route" focusOnReady resetKey={routeKey}>
     <ResearchAtlas onBack={back} />
   </LazyBoundary>
-  else content = <LazyBoundary label="runs" mode="route" focusOnReady resetKey={routeKey}>
-    <RunList onOpen={open} onSettings={settings} onResearchAtlas={researchAtlas} />
+  else content = <LazyBoundary label="runs" mode="route" focusOnReady={!restoreListNavigation} resetKey={routeKey}>
+    <RunList initialNavigationState={listNavigationRef.current}
+      restoreFocusRunId={listOriginRunRef.current}
+      onNavigationStateChange={rememberListNavigation}
+      onNavigationRestored={finishListRestore}
+      onOpen={open} onSettings={settings} onResearchAtlas={researchAtlas} />
   </LazyBoundary>
 
-  return <OwnerAuth label={routeLabel}><RouteFocus label={routeLabel} routeKey={routeKey}>
+  return <OwnerAuth label={routeLabel}><RouteFocus label={routeLabel} routeKey={routeKey}
+    autoFocus={!restoreListNavigation}>
     {/* OwnerWorkspace is stable across list/run/settings/Atlas changes. Its one Assistant instance keeps
         conversation and draft state; public review/share returns above before owner pollers mount. */}
     <OwnerWorkspace route={route}>{content}</OwnerWorkspace>

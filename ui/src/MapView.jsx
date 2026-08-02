@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo } from 'react'
+import React, { useEffect, useMemo, useRef } from 'react'
 import {
   ReactFlow, Background, Controls, Handle, MiniMap, Panel, Position, useReactFlow,
 } from '@xyflow/react'
@@ -25,7 +25,8 @@ function RunNode({ data }) {
   const stalled = status === 'stalled'
   const open = () => data.onOpen(run.run_id)
   return (
-    <a className="run-node nodrag nopan" href={`#/run/${encodeURIComponent(run.run_id)}`}
+    <a className="run-node nodrag nopan" data-run-open-id={run.run_id}
+         href={`#/run/${encodeURIComponent(run.run_id)}`}
          onClick={event => followClientRoute(event, open)}
          aria-label={`Open ${run.label || run.run_id}, ${status}, ${run.task_id || 'unknown task'}`}
          title={run.goal}>
@@ -162,18 +163,28 @@ export function buildGraph(projects, runs, collapsed, onOpen, onToggle) {
   return { nodes: [...regions, ...graphNodes], edges }
 }
 
-function FitVisible({ signature }) {
-  const { fitView } = useReactFlow()
+function FitVisible({ signature, initialViewport }) {
+  const { fitView, setViewport } = useReactFlow()
+  const initialViewportRef = useRef(initialViewport)
   useEffect(() => {
-    const frame = requestAnimationFrame(() => fitView({ padding: 0.16, maxZoom: 1 }))
+    const frame = requestAnimationFrame(() => {
+      if (initialViewportRef.current) {
+        const saved = initialViewportRef.current
+        initialViewportRef.current = null
+        setViewport(saved)
+      } else {
+        fitView({ padding: 0.16, maxZoom: 1 })
+      }
+    })
     return () => cancelAnimationFrame(frame)
     // fitView changes the React Flow store; keying only on the visible node signature prevents a
     // fit→render→fit feedback loop while the run-list polling refreshes object identities.
-  }, [signature])
+  }, [signature, fitView, setViewport])
   return null
 }
 
-export default function MapView({ onOpen, runs = [], projects = [], collapsed = new Set(), onToggle, scopeLabel = 'All runs' }) {
+export default function MapView({ onOpen, runs = [], projects = [], collapsed = new Set(), onToggle,
+  scopeLabel = 'All runs', initialViewport = null, onViewportChange = null }) {
   const { nodes, edges } = useMemo(
     () => buildGraph(projects, runs, collapsed, onOpen, onToggle),
     [projects, runs, collapsed, onOpen, onToggle])
@@ -187,8 +198,9 @@ export default function MapView({ onOpen, runs = [], projects = [], collapsed = 
     <div className="mapwrap">
       <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes}
                   minZoom={0.15} maxZoom={1.6} proOptions={{ hideAttribution: true }} nodesDraggable={false}
-                  nodesFocusable={false} onlyRenderVisibleElements>
-        <FitVisible signature={signature} />
+                  nodesFocusable={false} onlyRenderVisibleElements
+                  onMoveEnd={(_, viewport) => onViewportChange?.(viewport)}>
+        <FitVisible signature={signature} initialViewport={initialViewport} />
         <Background color="var(--line)" gap={22} />
         <Controls showInteractive={false} />
         <MiniMap pannable zoomable className="run-minimap" nodeColor={node => node.type === 'run' ? 'var(--accent)' : 'var(--line-2)'} />

@@ -79,9 +79,12 @@ const valueFor = (id, run, detail, names) => {
   return state?.best_node_id == null ? '—' : `#${state.best_node_id}`
 }
 
-const openComparisonRoute = href => { location.hash = href }
+const openComparisonRoute = (onOpen, runId, href) => {
+  if (onOpen) onOpen(runId, href)
+  else location.hash = href
+}
 
-export default function RunCompare({ runs, columns, names, onColumns, onRemove }) {
+export default function RunCompare({ runs, columns, names, onColumns, onRemove, onOpen = null }) {
   const [resource, setResource] = useState({ status: 'loading', details: [], loadedAt: 0 })
   const [retry, setRetry] = useState(0)
   const identity = runs.map(run => `${run.run_id}@${normalizeRunGeneration(run.generation) || '?'}`)
@@ -146,8 +149,8 @@ export default function RunCompare({ runs, columns, names, onColumns, onRemove }
             const championHref = championRunHref(run, detail)
             return <tr key={run.run_id} className={isBest ? 'best-row' : ''}>
               <th scope="row" className="compare-pinned">
-                <button type="button" className="compare-link"
-                  onClick={() => openComparisonRoute(
+                <button type="button" className="compare-link" data-run-open-id={run.run_id}
+                  onClick={() => openComparisonRoute(onOpen, run.run_id,
                     `#/run/${encodeURIComponent(run.run_id)}`)}>{label}</button>
                 {isBest && <span className="pill compare-best">Best</span>}
                 {run.label && <small>{run.run_id}</small>}
@@ -155,7 +158,7 @@ export default function RunCompare({ runs, columns, names, onColumns, onRemove }
               </th>
               {columns.map(id => <td key={id}>{id === 'champion' && championHref
                 ? <button type="button" className="compare-link"
-                    onClick={() => openComparisonRoute(championHref)}
+                    onClick={() => openComparisonRoute(onOpen, run.run_id, championHref)}
                     aria-label={`Open champion experiment ${detail.state.best_node_id} in ${label}`}>
                     #{detail.state.best_node_id}</button>
                 : valueFor(id, run, detail, names)}</td>)}
