@@ -1035,6 +1035,8 @@ button.ptree-row { width: 100%; border: 0; background: transparent; color: inher
 /* Run-list sort + filter toolbar */
 .runbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
 .runbar .text.runbar-q { width: auto; flex: 1 1 180px; min-width: 140px; }
+.runbar-super-control, .runbar-sort-control { display: inline-flex; align-items: center; gap: 6px; }
+.runbar-spacer { flex: 1; }
 .runbar-count { font-size: 12px; font-variant-numeric: tabular-nums; }
 .portfolio-viewbar, .compare-selection { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   margin-bottom: 10px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px;
@@ -2598,20 +2600,31 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 
 @media (max-width: 600px) {
   .topbar { padding-inline: 8px; }
+  .home-head { gap: 4px; }
   .home-subtitle, .home-new-hint, .home-head > .spacer,
   .home-actions > .fx-switch { display: none; }
   .home-head .brand { margin-right: auto; }
   .home-actions { flex: 1 1 100%; margin-left: auto; justify-content: flex-end; }
   .home-actions .btn { min-height: 44px; padding-inline: 8px; }
-  .home-head .seg button, .new-run-cta, .projects-toggle { min-height: 44px; }
+  .home-head .seg button, .home-head .new-run-cta.btn.sm,
+  .home-head .projects-toggle.btn.sm { min-height: 44px; }
+  .home-head .projects-toggle .t-ic { display: none; }
   .settings-page button, .settings-page input, .settings-page select,
   .settings-actions button { min-height: 44px; }
 
   .runlist { padding: 10px; }
   .crumbs { margin-bottom: 10px; }
   .runbar { gap: 6px; }
-  .runbar .sel { min-width: 0; max-width: 100%; }
+  .crumbs .crumb, .portfolio-viewbar .sel, .portfolio-viewbar .btn.sm,
+  .runbar .text, .runbar .sel, .runbar .btn.sm { min-height: 44px; }
+  .portfolio-viewbar .btn.sm { flex: 1 1 120px; justify-content: center; }
+  .compare-selection > .btn { min-height: 44px; flex: 1 1 120px; justify-content: center; }
+  .runbar > .sel { min-width: 0; max-width: 100%; flex: 1 1 130px; }
   .runbar .text.runbar-q { flex-basis: calc(100% - 22px); }
+  .runbar-super-control, .runbar-sort-control { min-width: 0; flex: 1 1 100%; }
+  .runbar-super-control .sel, .runbar-sort-control .sel { min-width: 0; max-width: none; flex: 1; }
+  .runbar-super-control .btn, .runbar-sort-control .btn { min-width: 44px; justify-content: center; }
+  .runbar-spacer { display: none; }
   .run-card { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: start;
     gap: 8px 10px; padding: 11px; }
   .compare-toggle { grid-column: 1; grid-row: 1; align-self: start; margin: -7px 0 0 -7px; }
@@ -2632,7 +2645,16 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .run-delete-dialog .modal-actions .btn { width: 100%; justify-content: center; }
   .run-delete-identity > div { grid-template-columns: minmax(72px, .3fr) minmax(0, 1fr); }
   .portfolio-viewbar label, .portfolio-viewbar .sel { width: 100%; }
-  .compare-head > .btn, .compare-columns { flex: 1; }
+  .compare-head { align-items: stretch; }
+  .compare-head > div:first-child { min-width: 0; flex: 1 1 100%; }
+  .compare-head > .btn, .compare-columns { min-width: 0; flex: 1 1 calc(50% - 5px); }
+  .compare-head > .btn { min-height: 44px; justify-content: center; }
+  .compare-columns > summary, .compare-config > summary {
+    display: flex; min-height: 44px; align-items: center;
+  }
+  .compare-columns > summary { justify-content: center; }
+  .compare-columns label { min-height: 44px; }
+  .compare-table .compare-link { display: inline-flex; min-height: 44px; align-items: center; }
   .compare-columns fieldset { position: fixed; inset: auto 10px 72px; width: auto; }
 
   .side.compact-drawer { width: 100% !important; max-width: none; border-left: 0; }

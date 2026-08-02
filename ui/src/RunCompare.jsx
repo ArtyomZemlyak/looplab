@@ -111,7 +111,7 @@ export default function RunCompare({ runs, columns, names, onColumns, onRemove }
     <div className="compare-head">
       <div>
         <h2 id="run-compare-title">Run comparison</h2>
-        <p>{runs.length} runs · Run stays pinned; choose the evidence columns you need.</p>
+        <p>{runs.length} runs · The Run column stays pinned; choose the evidence columns you need.</p>
       </div>
       <details className="compare-columns">
         <summary>Columns · {columns.length}</summary>
@@ -124,7 +124,7 @@ export default function RunCompare({ runs, columns, names, onColumns, onRemove }
       <button className="btn sm" onClick={() => setRetry(value => value + 1)}>Refresh snapshot</button>
     </div>
     <div className="compare-receipt" role="status" aria-live="polite">
-      {resource.status === 'loading' ? 'Loading generation-fenced run details…'
+      {resource.status === 'loading' ? 'Loading a consistent run snapshot…'
         : resource.status === 'error' ? 'Run details are unavailable. Summary fields remain visible.'
         : `Snapshot loaded ${new Date(resource.loadedAt).toLocaleTimeString()}`
           + (resource.details.some(detail => detail.partial) ? ' · some detail is unavailable or changed generation' : '')}

@@ -1425,37 +1425,41 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
               <option value={ALL}>all tasks</option>
               {tasks.map(t => <option key={t} value={t}>{t}</option>)}
             </select>
-            <select className="sel" aria-label="Filter by super-task" value={stFilter} onChange={e => setStFilter(e.target.value)}>
-              <option value={ALL}>all super-tasks</option>
-              <option value={UNASSIGNED}>— no super-task —</option>
-              {superdata.supertasks.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
-            <button className="btn sm ghost" disabled={navigationBusy} aria-label="Create or manage super-tasks"
-              title="create / manage super-tasks" onClick={event => openSuperTasks(event.currentTarget)}><OpIcon name="target" className="t-ic" /> ＋</button>
-            <span style={{ flex: 1 }} />
-            <span className="muted runbar-count">{visible.length}/{scoped.length}</span>
-            <select className="sel" aria-label="Sort runs by" value={sortKey} onChange={e => {
-              setSortKey(e.target.value)
-              if (e.target.value === 'metric') setSortDir('asc')
-            }}>
-              <option value="time">time</option>
-              <option value="name">name</option>
-              <option value="metric" disabled={!metricSortAvailable}>best metric{metricSortAvailable ? '' : ' (select one task)'}</option>
-              <option value="task">task</option>
-              <option value="nodes">nodes</option>
-              <option value="phase">phase</option>
-            </select>
-            <button className="btn sm ghost"
-                    aria-label={`Sort ${sortKey === 'metric' ? (sortDir === 'asc' ? 'best first' : 'worst first') : (sortDir === 'asc' ? 'ascending' : 'descending')}`}
-                    title={sortKey === 'metric' ? (sortDir === 'asc' ? 'best first' : 'worst first') : (sortDir === 'asc' ? 'ascending' : 'descending')}
-                    onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')}>
-              {sortKey === 'metric' ? (sortDir === 'asc' ? 'best' : 'worst') : (sortDir === 'asc' ? '↑' : '↓')}
-            </button>
+            <div className="runbar-super-control">
+              <select className="sel" aria-label="Filter by super-task" value={stFilter} onChange={e => setStFilter(e.target.value)}>
+                <option value={ALL}>all super-tasks</option>
+                <option value={UNASSIGNED}>— no super-task —</option>
+                {superdata.supertasks.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+              <button className="btn sm ghost" disabled={navigationBusy} aria-label="Create or manage super-tasks"
+                title="create / manage super-tasks" onClick={event => openSuperTasks(event.currentTarget)}><OpIcon name="target" className="t-ic" /> ＋</button>
+            </div>
+            <span className="runbar-spacer" />
+            <div className="runbar-sort-control">
+              <span className="muted runbar-count">{visible.length}/{scoped.length}</span>
+              <select className="sel" aria-label="Sort runs by" value={sortKey} onChange={e => {
+                setSortKey(e.target.value)
+                if (e.target.value === 'metric') setSortDir('asc')
+              }}>
+                <option value="time">time</option>
+                <option value="name">name</option>
+                <option value="metric" disabled={!metricSortAvailable}>best metric{metricSortAvailable ? '' : ' (select one task)'}</option>
+                <option value="task">task</option>
+                <option value="nodes">nodes</option>
+                <option value="phase">phase</option>
+              </select>
+              <button className="btn sm ghost"
+                      aria-label={`Sort ${sortKey === 'metric' ? (sortDir === 'asc' ? 'best first' : 'worst first') : (sortDir === 'asc' ? 'ascending' : 'descending')}`}
+                      title={sortKey === 'metric' ? (sortDir === 'asc' ? 'best first' : 'worst first') : (sortDir === 'asc' ? 'ascending' : 'descending')}
+                      onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')}>
+                {sortKey === 'metric' ? (sortDir === 'asc' ? 'best' : 'worst') : (sortDir === 'asc' ? '↑' : '↓')}
+              </button>
+            </div>
           </div>}
           {compareIds.size > 0 && view !== 'compare' && <div className="compare-selection" role="status">
             <b>{compareRuns.length}/8 selected</b>
             <span className="muted">{compareRuns.length < 2
-              ? 'Select one more run to compare.' : 'Ready to compare generation-fenced details.'}</span>
+              ? 'Select one more run to compare.' : 'Ready to compare run details.'}</span>
             <button className="btn sm primary" disabled={compareRuns.length < 2}
               onClick={() => setView('compare')}>Compare runs</button>
             <button className="btn sm ghost" onClick={() => setCompareIds(new Set())}>Clear</button>
