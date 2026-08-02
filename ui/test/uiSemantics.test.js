@@ -141,7 +141,10 @@ test('compact drawers and nested popups expose only the active modal layer', asy
   assert.match(runList, /aria-modal=\{compactNav && projectsOpen && !projModal \? 'true' : undefined\}/)
   assert.match(runList, /aria-hidden=\{compactNav && \(!projectsOpen \|\| !!projModal\) \? 'true' : undefined\}/)
   assert.match(runList, /inert=\{compactNav && \(!projectsOpen \|\| !!projModal\) \? '' : undefined\}/)
-  assert.match(runList, /useDialogFocus\(projectsDialogRef, navigationBusy \? null : \(\) => setProjectsOpen\(false\), compactNav && projectsOpen\)/)
+  // The call wrapped onto two lines and gained an explicit layer priority, which is what keeps the
+  // projects drawer from stealing focus from a modal opened above it. A single-line regex ending at
+  // `projectsOpen)` could see neither.
+  assert.match(runList, /useDialogFocus\(projectsDialogRef, navigationBusy \? null : \(\) => setProjectsOpen\(false\),\s*compactNav && projectsOpen, \{ priority: DIALOG_PRIORITY\.NAVIGATION \}\)/)
   assert.match(runList, /project-backdrop" disabled=\{projectBusy\} aria-disabled=\{navigationBusy \|\| undefined\}/)
   assert.match(runList, /onClick=\{\(\) => \{ if \(!navigationBusy\) setProjectsOpen\(false\) \}\}/,
     'the compact modal layer cannot dismiss any authoritative list mutation in flight')

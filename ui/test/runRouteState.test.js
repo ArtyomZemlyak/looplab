@@ -141,11 +141,22 @@ test('comment deep links round-trip only with an exact node attempt and the Comm
     assert.equal(rejected.state.commentId, null)
     assert.match(rejected.issues.join(' '), /comment|attempt/i)
   }
-  const danglingAttempt = parseRunRouteState(`#/run/demo?gen=${GEN}&node=7&attempt=2`)
-  assert.equal(danglingAttempt.state.nodeGeneration, null)
-  assert.match(danglingAttempt.issues.join(' '), /attempt/i)
+  // `attempt` is no longer only half of a comment deep link — it is a standalone exact
+  // node-lifecycle fence (see runRouteState.js), so a node+attempt link with no comment is now a
+  // VALID target that must survive the round trip rather than being stripped as dangling.
+  const standaloneAttempt = parseRunRouteState(`#/run/demo?gen=${GEN}&node=7&attempt=2`)
+  assert.deepEqual(standaloneAttempt.issues, [])
+  assert.equal(standaloneAttempt.state.nodeGeneration, 2)
   assert.equal(hashWithRunRouteState(`#/run/demo?gen=${GEN}&node=7&attempt=2`,
-    danglingAttempt.state), `#/run/demo?gen=${GEN}&node=7`)
+    standaloneAttempt.state), `#/run/demo?gen=${GEN}&node=7&attempt=2`)
+
+  // What is still rejected: an attempt with no node to pin it to, and an unparseable one.
+  const orphanAttempt = parseRunRouteState(`#/run/demo?gen=${GEN}&attempt=2`)
+  assert.equal(orphanAttempt.state.nodeGeneration, null)
+  assert.match(orphanAttempt.issues.join(' '), /attempt/i)
+  const brokenAttempt = parseRunRouteState(`#/run/demo?gen=${GEN}&node=7&attempt=x`)
+  assert.equal(brokenAttempt.state.nodeGeneration, null)
+  assert.match(brokenAttempt.issues.join(' '), /attempt/i)
 })
 
 test('an explicit generation-only exact view survives canonical hydration', () => {
