@@ -286,9 +286,45 @@ is what makes the remainder worth treating as a real defect class:
   of a fail-closed SET as if it were the contract. Fixed by asserting the set plus the invariants
   that never vary (one Popen, one shared `start_id`).
 
-*Recommendation:* treat each remaining case the same way — reproduce under parallel load with
-thread-stack dumps (the technique that found the 405), and fix the stall. Every guard added by this
-campaign is worth less while the suite is intermittently red for reasons no one has read.
+*Diagnosed (2026-08-02) — it is GIL starvation of the command-monitor thread, not a logic bug.*
+Reproduced deterministically: run the failing test in a loop with one CPU-burning thread per core in
+the same process. It fails within ~6 attempts, always with the same signature — the record sits at
+`status: "executing"` for the full 60 s poll.
+
+What the instrumentation showed, in order, because two of the three readings were misleading and the
+record of a wrong turn is worth as much as the answer:
+
+1. Every clause of the `finished_and_stopped` postcondition is SATISFIED at the moment the test
+   gives up — `finished`, engine stopped, `stop_reason="aborted"`, `stop_requested`, no incomplete
+   finalize scope, `attached` with a matching intent seq and digest. Evaluating `_postcondition`
+   against the ON-DISK record at that instant returns **True**.
+2. A first measurement suggested the postcondition returned False. That was an artifact: it was
+   evaluated against the record as projected over HTTP, which omits
+   `attached_semantic_payload_digest`, so `_attached_finalize_intact` fails closed. The monitor uses
+   the on-disk record and is unaffected. Recorded because the same mistake is easy to repeat.
+3. A second hypothesis — that the worker thread holds a pre-attach copy of the record, since the
+   monitor loop never reloads it — is also WRONG: logging the worker's own dict shows `attached`
+   and the digest both present.
+
+The actual cause is scheduling. Logging every 200th loop iteration shows only `iter=1` across a
+25 s stall, and a `faulthandler` dump catches the worker inside `_heartbeat_execution`'s
+`os.utime`. The monitor polls at `poll_interval` (10 ms) and does real work each pass — a full
+`_observe` (read + fold) plus file stats — all of which release and re-acquire the GIL. With
+CPU-bound threads saturating the interpreter, it is starved to a handful of iterations over tens of
+seconds. In the real suite the "burn threads" are simply other tests' work in the same pytest
+process, which is why this is load-dependent, appears in unrelated subsystems, and always passes in
+isolation.
+
+*Recommendation, now that the mechanism is known:* raising ceilings again is still the wrong fix,
+but so is treating it as a test bug. The durable record's status should not depend on a background
+thread winning a scheduling race when any reader can already prove the postcondition holds. The
+worker's own terminalization path (`run_commands.py`, around the `sequence(rd)` re-load before a
+`timed_out` write) already carries a comment acknowledging that "a completion arriving at the
+deadline could be promoted to succeeded by GET" — so the read path is understood to be capable of
+promoting. Making a GET evaluate a satisfied postcondition and promote would remove this entire
+flake family, and would also be correct behaviour for a real operator polling a finalize while the
+box is loaded. Left unimplemented here deliberately: it touches the at-most-once command protocol,
+and it deserves its own change with the same byte-level differential treatment as EM-02/EC-01.
 
 ### T9 — The UI suite's source-regex idiom had silently retired 30 assertions (added 2026-08-02, RESOLVED)
 
