@@ -784,3 +784,40 @@ def loop_opts_from_settings(settings) -> dict:
         except Exception:  # noqa: BLE001 - invalid optional config stays local, never bills main
             opts["summary_client"] = _SUMMARY_LOCAL_ONLY
     return opts
+
+
+def resilient(attempt, fallback, *, on_error=None):
+    """Run `attempt()`; on any non-budget failure return `fallback()` instead (doc 25 AG-06).
+
+    This is the package's containment rule, written down once. Every agentic entry point needs it and
+    it is currently restated at ~15 call sites, each with its own why-comment:
+
+        a hard budget stop PROPAGATES and ends the run; anything else DEGRADES to a caller-specific
+        safe value rather than crashing it.
+
+    The asymmetry is the whole point and is easy to get backwards. `BudgetExceeded` is not a failure
+    to contain — it is the operator's spend ceiling doing its job, and swallowing it would let a run
+    keep billing past the limit that was set to stop it. Everything else (a transport error, an
+    endpoint 5xx after retries, a parser giving up) is a *local* problem: the flagship agentic path
+    must degrade to a bounded default, because crashing the run loses every node already evaluated.
+
+    Deliberately NOT applied to the existing sites. Doc 25's own recommendation is to adopt this
+    opportunistically at new call sites rather than churning fifteen comment-bearing ones, and those
+    comments are load-bearing — each records why THAT fallback is safe (e.g. "`_fallback` is itself
+    resilient … so it can't re-raise the transport error"). Replacing them with a bare call would
+    trade fifteen small duplications for fifteen lost explanations.
+
+    `on_error` receives the contained exception for logging/telemetry. It must not raise; if it does,
+    the fallback still runs, because a broken observer must not become a broken agent.
+    """
+    try:
+        return attempt()
+    except BudgetExceeded:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the containment boundary this helper exists to be
+        if on_error is not None:
+            try:
+                on_error(exc)
+            except Exception:  # noqa: BLE001 - telemetry must never escalate a contained failure
+                pass
+        return fallback()

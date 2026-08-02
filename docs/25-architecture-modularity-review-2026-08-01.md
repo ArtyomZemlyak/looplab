@@ -2083,7 +2083,7 @@ divergence is a decision rather than a surprise.
 
 *Recommendation:* Add one helper in tool_loop or core.parse — forced_structured(client, messages, model_cls, parser, nudge, on_fail) — keeping each caller's nudge wording and default factory as arguments (prompt strings stay byte-identical); the four sites shrink to one call each.
 
-#### AG-06 · LOW · duplication · effort: small
+#### AG-06 · LOW · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **The 4-line 'except BudgetExceeded: raise / except Exception: fallback' idiom is copy-pasted at 9+ sites in the package**
 
@@ -2092,6 +2092,25 @@ divergence is a decision rather than a surprise.
 *Evidence:* The same containment idiom (hard budget stop propagates; anything else degrades to a caller-specific fallback) appears verbatim around every drive_tool_loop/parse call in the package, each with a re-worded why-comment. It also recurs in engine/novelty.py and engine/crash_repair.py. Each instance is small, but the rule lives in ~15 copies and a new caller can (and must remember to) re-derive it.
 
 *Recommendation:* Provide a tiny shared wrapper (e.g. tool_loop.resilient(fn, fallback) or a context manager) documented once with the budget-propagation rule; adopt opportunistically at new call sites rather than churning every existing comment-bearing site at once.
+
+*Resolution (2026-08-02):* `tool_loop.resilient(attempt, fallback, *, on_error=None)` states the
+rule once, and the fifteen existing sites are deliberately UNCHANGED — which is this finding's own
+recommendation ("adopt opportunistically … rather than churning every existing comment-bearing
+site"), and the right call under CLAUDE.md's load-bearing-comments rule. Each of those comments
+records why THAT fallback is safe (e.g. "`_fallback` is itself resilient … so it can't re-raise the
+transport error"); replacing them with a bare call would trade fifteen small duplications for
+fifteen lost explanations.
+
+The value is therefore the WRITTEN RULE plus a guard, not a line saving. The asymmetry is easy to
+get backwards and expensive in both directions: swallowing `BudgetExceeded` keeps a run billing past
+the ceiling an operator set to stop it, while propagating a transport blip crashes a run and loses
+every node already evaluated. `tests/test_agent_containment_rule.py` pins both directions plus three
+properties a bare try/except tends to miss — a contained failure is offered to an observer, a
+PROPAGATING budget stop is NOT (or telemetry counts a deliberate stop as an agent error), a broken
+observer cannot escalate a contained failure, and a failing FALLBACK is not swallowed (there is no
+safe value left, and hiding it hands the caller a silent `None`).
+
+11 tests; all four deliberate breaks fail loudly.
 
 #### AG-07 · LOW · layering · effort: medium — **RESOLVED (2026-08-02)**
 
