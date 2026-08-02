@@ -185,7 +185,8 @@ The copies where drift is a correctness event, not a style problem:
   2026-08-02 — `eventstore.decode_jsonl_line` / `scan_jsonl_region`.)*
 - **EV-06** `EventStore.append`/`append_many` duplicate the ~55-line critical section. *(resolved
   2026-08-02 — `EventStore._locked_append`.)*
-- **RA-03** Docker hardening argv mirrored by comment (already drifted once).
+- **RA-03** Docker hardening argv mirrored by comment (already drifted once). *(resolved
+  2026-08-02 — `sandbox.docker_run_argv` / `require_docker_cli`.)*
 - **RA-06** direction validator present in only 2 of 9 task models (objective-flip risk).
 - **ES-11** `"(developer error:"` magic-string protocol at 6 consumer sites, no shared constant.
 - **XP-02** file-identity stat tuple ×10+ across five packages.
@@ -1958,9 +1959,31 @@ Scope: `looplab/runtime/` and `looplab/adapters/`.
 
 *Recommendation:* Extract the staged loop into a _run_stages(ctx, stages, ...) helper returning (rc, out, err, to, sig, stage_results | early RunResult), and bundle the shared execution knobs (wrap, is_docker, grace, env, cancel, log_dir, tracer, stall settings, max_output_bytes) into a small context dataclass. That removes the cross-branch variable leakage and the triplicated timeout-fold/stall-window expressions.
 
-#### RA-03 · MEDIUM · duplication · effort: medium
+#### RA-03 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-02)**
 
 **Docker `run` hardening argv is duplicated between DockerSandbox.run and make_docker_wrap, kept in sync only by comments**
+
+*Resolution:* `runtime/sandbox.py::docker_run_argv(image, *, network, mount_root, workdir, runtime,
+gpu_args, mem, cpus, env_args, extra_mounts)` returns the hardened prefix through the image, and
+`require_docker_cli(what)` owns the presence check and its message. `DockerSandbox.run` and
+`make_docker_wrap` compose on it and append only their own in-container command. Every flag's reason
+is documented once in the builder. Behaviour-preserving: the only change is that `DockerSandbox`'s
+`-e` pairs now precede `-v`/`-w` instead of following them, and ordering among pre-image `docker
+run` options is not significant.
+
+The duplicated timed-out `RunResult` tail this entry also lists (`sandbox.py:1077-1080` vs
+`1150-1153`) is NOT merged: the two differ in what "timed out" means — the subprocess tier reads
+`_run_argv`'s flag, the Docker tier ORs in `docker_timed_out(rc)` for the 124/137 exit codes — and
+each carries a comment explaining its own nulling. Three lines of shared shape around two different
+predicates is not the drift risk the argv was.
+
+`tests/test_docker_hardening_parity.py` drives BOTH tiers with one configuration and asserts each
+boundary flag (`--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 1024`,
+`--network`, `--memory`, `--cpus`, `--runtime`) is present on each and lands BEFORE the image, that
+the absent `--user` stays a documented decision, that a missing docker CLI refuses loudly on both,
+and that neither tier re-spells `docker run` or a hardening flag itself. Verified to have teeth by
+reproducing the historical drift — dropping mem/cpus on the solution tier alone fails exactly the
+solution-tier cases.
 
 *Locations:* `looplab/runtime/sandbox.py:1107-1153`, `looplab/runtime/command_eval.py:617-715`, `looplab/runtime/sandbox.py:1110-1113`, `looplab/runtime/command_eval.py:636-639`, `looplab/runtime/sandbox.py:1077-1080`, `looplab/runtime/sandbox.py:1150-1153`
 

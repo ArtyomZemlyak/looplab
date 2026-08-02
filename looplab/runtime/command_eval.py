@@ -27,8 +27,10 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.runtime.sandbox import (RunResult, _to_float, docker_gpu_argv,
-                                     docker_gpu_env, docker_timed_out, finite_timeout, json_line_extras,
-                                     json_line_metric, json_line_trials, run_argv)
+                                     docker_gpu_env, docker_run_argv, docker_timed_out,
+                                     finite_timeout, json_line_extras,
+                                     json_line_metric, json_line_trials, require_docker_cli,
+                                     run_argv)
 
 # A stage name is interpolated into a log FILE PATH (`<name>.log`) and shown in the trace, so it must
 # be a short filesystem-safe SLUG — no path separators, drive letters, control chars, NUL, or dot
@@ -632,11 +634,7 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
     in the sandbox physically cannot write the operator's original, matching the write-tool gate
     (mega-review fix; the write gate alone couldn't stop a declared train stage from mutating the
     original through ./<name>)."""
-    import shutil as _sh
-    if not _sh.which("docker"):
-        raise RuntimeError(
-            "trust_mode='untrusted' needs the docker CLI to sandbox the eval, but it was not "
-            "found on PATH. Install Docker or use trust_mode='trusted_local'.")
+    require_docker_cli("eval")
     root = Path(mount_root).resolve()
     gpu_args = docker_gpu_argv(env, runtime=runtime)
     extra: list[str] = []
@@ -667,19 +665,6 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
         if rel == ".." or rel.startswith("../"):     # cwd outside the mounted root -> never escape
             raise ValueError(f"eval cwd {host_cwd!r} is outside the mounted workspace {str(root)!r}")
         cdir = "/work" if rel in (".", "") else f"/work/{rel}"
-        rt = ["--runtime", runtime] if runtime else []   # B4+ gVisor/Kata true-isolation tier
-        # Resource + privilege hardening for the untrusted tier — mirror sandbox.DockerSandbox.run
-        # so BOTH untrusted Docker tiers (this command-eval path and the solution.py path) bound
-        # memory/cpu, drop all Linux capabilities, and forbid privilege escalation. Without this an
-        # untrusted/hostile RepoTask candidate keeps default caps (setuid escalation) and can OOM the
-        # host / saturate every core (gVisor blocks kernel escape, NOT resource exhaustion). The two
-        # docs (generating-code.md untrusted-tier command, configuration.md sandbox_memory/cpus rows)
-        # promise exactly these flags for this tier — the engine now threads settings.sandbox_* here.
-        caps = ["--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
-        if mem:
-            caps += ["--memory", str(mem)]
-        if cpus:
-            caps += ["--cpus", str(cpus)]
         # Forward engine-provided env INTO the container: `docker run` does not inherit the host
         # client's environment, so without `-e` the LOOPLAB_EVAL_SEED (and any eval env) never
         # reaches the eval — every confirm seed would read the default seed and the variance gate
@@ -704,11 +689,16 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
         # console scripts is not worth breaking those. KNOWN LIMITS: importable Python packages
         # persist; a setup-installed console script and anything `apt-get` installs do not.
         envs += ["-e", f"PYTHONUSERBASE={_DOCKER_DEPS_DIR}", "-e", "PIP_USER=1"]
-        base = ["docker", "run", "--rm", "--network", network, *rt, *gpu_args,
-                "--pids-limit", "1024",       # fork-bomb guard (review C1: no pids limit before)
-                *caps, *envs,
-                "-v", f"{root.as_posix()}:/work", *extra, "-w", cdir]
-        return base + [image] + list(argv)
+        # Resource + privilege hardening comes from the ONE builder both untrusted Docker tiers
+        # share (`sandbox.docker_run_argv`), so this command-eval path and the solution.py path
+        # cannot drift apart again — they had, and this tier once ran with default caps as root.
+        # The two docs (generating-code.md untrusted-tier command, configuration.md
+        # sandbox_memory/cpus rows) promise exactly those flags for this tier; the engine threads
+        # settings.sandbox_* into `mem`/`cpus` here.
+        return docker_run_argv(
+            image, network=network, mount_root=str(root), workdir=cdir, runtime=runtime,
+            gpu_args=gpu_args, mem=mem, cpus=cpus, env_args=envs,
+            extra_mounts=extra) + list(argv)
 
     wrap._docker = True   # marks a real container wrap -> run_command_eval adds in-container timeout
     wrap._mount_root = str(root)   # host_score guards the held-out labels against the MOUNTED root

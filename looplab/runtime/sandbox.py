@@ -187,6 +187,74 @@ def finite_timeout(value, default: float = 600.0) -> float:
     return max(0.0, min(v, MAX_TIMEOUT_S))
 
 
+def require_docker_cli(what: str) -> None:
+    """Fail LOUDLY when the docker CLI is missing, rather than silently dropping the boundary.
+
+    Both untrusted tiers open with this check and with the same message modulo one noun (doc 25
+    RA-03). The message is part of the contract, not decoration: `trust_mode='untrusted'` is a
+    promise that arbitrary code runs behind a container, and the ONLY safe response to "the thing
+    that makes that true is not installed" is to refuse and say which knob turns it off.
+    """
+    import shutil
+    if not shutil.which("docker"):
+        raise RuntimeError(
+            f"trust_mode='untrusted' needs the docker CLI to sandbox the {what}, but it was not "
+            "found on PATH. Install Docker or use trust_mode='trusted_local'.")
+
+
+def docker_run_argv(image: str, *, network: str, mount_root: str, workdir: str,
+                    runtime: Optional[str] = None, gpu_args: Optional[list] = None,
+                    mem: Optional[str] = None, cpus: Optional[str] = None,
+                    env_args: Optional[list] = None,
+                    extra_mounts: Optional[list] = None) -> list[str]:
+    """The hardened `docker run` prefix BOTH untrusted tiers share, up to and including the image.
+
+    Everything here is a security boundary, and it used to exist twice — once in
+    `DockerSandbox.run` (the solution.py tier) and once in `command_eval.make_docker_wrap` (the
+    RepoTask command tier) — kept in step by a comment saying "mirror sandbox.DockerSandbox.run".
+    That comment is the evidence the arrangement does not work: the caps had ALREADY drifted once,
+    and for a while the solution.py path ran with default capabilities as root and no memory or CPU
+    bound (recorded in `DockerSandbox.__init__`). Security hardening gets exactly one home.
+
+    What each flag is doing, once:
+
+    * `--rm` — the container is per-run; leaving it behind leaks a writable layer per node.
+    * `--network` — the isolation the tier exists for; the caller passes the configured value so a
+      task that genuinely needs egress opts in explicitly rather than by default.
+    * `--pids-limit 1024` — fork-bomb guard (review C1: there was no pids limit before).
+    * `--cap-drop ALL --security-opt no-new-privileges` — no ambient Linux capabilities and no
+      setuid escalation from inside. `--user` is deliberately NOT set: the /work bind is host-owned,
+      so a non-root uid often cannot write the predictions/artifacts the eval must produce.
+    * `--memory` / `--cpus` — the point of this tier is to protect OTHER tenants, and gVisor/Kata
+      stop kernel escape but NOT resource exhaustion, so these matter even on the hostile runtime.
+      An empty/None value disables that cap, which is how both callers spell "unbounded".
+    * `--runtime` — B4+ gVisor ("runsc") / Kata true-isolation tier; absent = the default runtime.
+
+    The caller supplies `gpu_args` (from `docker_gpu_argv`) and `env_args` (`-e` pairs built from
+    `docker_gpu_env`, which is the single choke point that strips secret-named host vars) because
+    the command tier derives extra entries from the same reconciled dict. `workdir` is the
+    in-container `-w`, which differs per tier: the solution tier always runs at /work, the command
+    tier at the node's subdirectory under it. Ordering among pre-image flags is not significant to
+    `docker run`, so the two former spellings — which interleaved `-e` and `-v` differently — remain
+    equivalent under this one.
+    """
+    root = Path(mount_root).resolve()
+    caps = ["--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
+    if mem:
+        caps += ["--memory", str(mem)]
+    if cpus:
+        caps += ["--cpus", str(cpus)]
+    return ["docker", "run", "--rm", "--network", network,
+            *(["--runtime", runtime] if runtime else []),
+            *(gpu_args or []),
+            "--pids-limit", "1024",
+            *caps,
+            *(env_args or []),
+            "-v", f"{root.as_posix()}:/work", *(extra_mounts or []),
+            "-w", workdir,
+            image]
+
+
 def docker_timed_out(rc: int) -> bool:
     """True when a coreutils-``timeout``-wrapped docker exit code means THIS run hit its wall-clock
     deadline. `timeout` exits 124 when SIGTERM stopped the process at the deadline, and 137 (128+9)
@@ -1123,11 +1191,7 @@ class DockerSandbox:
 
     def run(self, code: str, workdir: str, timeout: float = 30.0,
             env: Optional[dict] = None, cancel=None) -> RunResult:
-        import shutil as _sh
-        if not _sh.which("docker"):
-            raise RuntimeError(
-                "trust_mode='untrusted' needs the docker CLI to sandbox the solution, but it "
-                "was not found on PATH. Install Docker or use trust_mode='trusted_local'.")
+        require_docker_cli("solution")
         wd = Path(workdir).resolve()
         wd.mkdir(parents=True, exist_ok=True)
         (wd / "solution.py").write_text(code, encoding="utf-8")
@@ -1146,20 +1210,12 @@ class DockerSandbox:
         # container exits at `timeout` and `--rm` removes it, so a runaway leaks at most ~timeout
         # seconds even if the host kills the client first. Host timeout gets a grace margin.
         secs = max(1, int(timeout))
-        rt = ["--runtime", self.runtime] if self.runtime else []   # B4+ gVisor/Kata isolation tier
-        # Resource + privilege hardening for the untrusted tier: bound memory/cpu, drop all Linux
-        # capabilities, and forbid privilege escalation. (--user is deliberately NOT set — the bind-
-        # mounted workdir is host-owned, so a non-root uid often can't write predictions/artifacts.)
-        caps = ["--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
-        if self.mem:
-            caps += ["--memory", str(self.mem)]
-        if self.cpus:
-            caps += ["--cpus", str(self.cpus)]
-        argv = (["docker", "run", "--rm", "--network", self.network, *rt, *gpu_args,
-                 "--pids-limit", "1024",      # fork-bomb guard (review C1: no pids limit before)
-                 *caps,
-                 "-v", f"{wd.as_posix()}:/work", "-w", "/work"] + envs
-                + [self.image, "timeout", "-k", "5", str(secs), "python", "solution.py"])
+        # Every hardening flag (network, runtime, pids-limit, caps, memory/cpus, mount) comes from
+        # the ONE builder both untrusted tiers share — see `docker_run_argv` for what each is for.
+        argv = docker_run_argv(
+            self.image, network=self.network, mount_root=str(wd), workdir="/work",
+            runtime=self.runtime, gpu_args=gpu_args, mem=self.mem, cpus=self.cpus,
+            env_args=envs) + ["timeout", "-k", "5", str(secs), "python", "solution.py"]
         rc, out, err, to = _run_argv(argv, str(wd), timeout + 15.0, None, self.max_output_bytes, cancel)
         # See docker_timed_out: both 124 (SIGTERM at deadline) and 137 (SIGKILL escalation past the
         # `-k 5` grace) are this run's wall-clock timeout, not an OOM.
