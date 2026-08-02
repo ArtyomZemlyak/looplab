@@ -27,6 +27,7 @@ from looplab.events.eventstore import (
 from looplab.events.replay import fold
 from looplab.events.types import EV_APPROVAL_GRANTED, EV_RESUME_REQUESTED, EV_SPEC_APPROVED
 from looplab.serve.appstate import _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX
+from looplab.serve.http import json_object
 from looplab.serve.engine_proc import (
     EngineSpawnOutcomeUnknown, _claim_and_spawn_resume, _engine_alive, _engine_liveness,
     _resolve_task_file, run_lifecycle_lock_http)
@@ -225,12 +226,7 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/runs/{run_id}/control")
     async def control(run_id: str, request: Request):
         rd = _run_dir(run_id)
-        try:
-            body = await request.json()
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise HTTPException(400, "control body must be valid JSON") from exc
-        if not isinstance(body, dict):
-            raise HTTPException(400, "control body must be a JSON object")
+        body = await json_object(request, "control body")
 
         def _append_control() -> dict:
             # Offloaded to a worker thread: ``sequence`` takes the cross-process flock (blocking up to
@@ -296,12 +292,7 @@ def build_router(srv) -> APIRouter:
     async def submit_command(run_id: str, request: Request, response: Response):
         _command_response_headers(response)
         rd = _run_dir(run_id)
-        try:
-            body = await request.json()
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise HTTPException(400, "command body must be valid JSON") from exc
-        if not isinstance(body, dict):
-            raise HTTPException(400, "command body must be a JSON object")
+        body = await json_object(request, "command body")
         idem = request.headers.get("Idempotency-Key", "")
         # submit() takes the run flock and folds the log — offload so it never blocks the event loop.
         return await anyio.to_thread.run_sync(lambda: srv.commands.submit(
@@ -328,12 +319,7 @@ def build_router(srv) -> APIRouter:
     async def resolve_activity_claims(run_id: str, request: Request, response: Response):
         """Guarded operator recovery for an ownership claim that cannot be proven dead."""
         _command_response_headers(response)
-        try:
-            body = await request.json()
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise HTTPException(400, "resolve-activity-claims body must be valid JSON") from exc
-        if not isinstance(body, dict):
-            raise HTTPException(400, "resolve-activity-claims body must be a JSON object")
+        body = await json_object(request, "resolve-activity-claims body")
         rd = _run_dir(run_id)
         confirmation = str(body.get("confirmation") or "")
         return await anyio.to_thread.run_sync(
@@ -696,12 +682,7 @@ def build_router(srv) -> APIRouter:
     async def resolve_start_claim(run_id: str, request: Request, response: Response):
         """Operator recovery for a crash-window claim whose child identity cannot be proven."""
         _command_response_headers(response)
-        try:
-            body = await request.json()
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise HTTPException(400, "resolve-claim body must be valid JSON") from exc
-        if not isinstance(body, dict):
-            raise HTTPException(400, "resolve-claim body must be a JSON object")
+        body = await json_object(request, "resolve-claim body")
         rd = (root / run_id).resolve()
         if (rd == root or rd.parent != root or rd.name.lower() in _RESERVED_RUN_IDS
                 or rd.name.lower().startswith(_RESET_RECEIPT_PREFIX)):

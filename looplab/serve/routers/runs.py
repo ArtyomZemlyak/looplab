@@ -32,6 +32,7 @@ from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed,
     load_run_reset_marker)
 from looplab.engine.finalize import incomplete_finalize_scope
+from looplab.serve.http import json_object, json_object_bytes
 from looplab.events.eventstore import (
     EventStore, EventStoreConcurrencyError, EventStoreLockError, JsonlRecordInvalid,
     _interprocess_lock, decode_jsonl_line, iter_event_jsonl)
@@ -329,13 +330,13 @@ async def _concept_lens_json_body(request: Request) -> dict:
                 "max_bytes": _CONCEPT_FRAME_MAX_LENS_BODY_BYTES,
             })
         raw_body.extend(chunk)
+    # The UTF-8 decode stays HERE, beside the byte cap: both are this route's own reading policy,
+    # and `json.loads` would otherwise accept BOM-marked UTF-16/32 that this endpoint never did.
     try:
-        body = json.loads(bytes(raw_body).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError, TypeError) as exc:
+        text = bytes(raw_body).decode("utf-8")
+    except UnicodeDecodeError as exc:
         raise HTTPException(400, "request body must be valid JSON") from exc
-    if not isinstance(body, dict):
-        raise HTTPException(400, "request body must be a JSON object")
-    return body
+    return json_object_bytes(text)
 
 
 def _concept_lens_ledger(events, generation: str):
@@ -2910,12 +2911,7 @@ def build_router(srv) -> APIRouter:
         snap = rd / "config.snapshot.json"
         if not snap.exists():
             raise HTTPException(404, "run has no config.snapshot.json (it predates self-describing runs)")
-        try:
-            body = await request.json()
-        except Exception as e:  # noqa: BLE001 - normalize every JSON decoder/content-type failure
-            raise HTTPException(400, "request body must be a JSON object") from e
-        if not isinstance(body, dict):
-            raise HTTPException(400, "request body must be a JSON object")
+        body = await json_object(request)
         has_expected_revision = "expected_revision" in body
         expected_revision = body.get("expected_revision")
         # An explicit null is treated as absent (no CAS), matching the now-nullable request schema; only

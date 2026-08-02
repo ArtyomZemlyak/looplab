@@ -33,6 +33,7 @@ from looplab.serve.appstate import (
     _DELETE_FENCE_PREFIX, _DELETE_QUARANTINE_PREFIX, _DELETE_RECEIPT_PREFIX,
     _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
+from looplab.serve.http import json_object
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
 from looplab.serve.reset_transaction import (
     RESET_ARTIFACT_NAMES, ResetReceiptError, complete_reset_if_observed,
@@ -925,13 +926,9 @@ def _reset_blocking(
 async def durable_reset_run(
         srv, run_id: str, request: Request, *,
         spawn_engine: Callable[..., Optional[int]]) -> dict[str, Any]:
-    try:
-        raw = await request.body()
-        body = json.loads(raw) if raw else {}
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise HTTPException(400, "reset body must be valid JSON") from exc
-    if not isinstance(body, dict):
-        raise HTTPException(400, "reset body must be a JSON object")
+    # An ABSENT body is "no options": every field here has a default, and the CLI/tests have always
+    # been allowed to POST nothing. A malformed one is still a 400.
+    body = await json_object(request, "reset body", absent_is_empty=True)
     expected_generation = body.get(EXPECTED_RUN_GENERATION_FIELD)
     operation_id = body.get("operation_id")
     # A BROWSER Replay must carry its own generation fence: the tab may be acting on a snapshot the

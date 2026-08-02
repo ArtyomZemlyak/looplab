@@ -35,6 +35,7 @@ from looplab.core.atomicio import (
 from looplab.core.config import Settings
 from looplab.core.pathsafe import is_reparse
 from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
+from looplab.serve.http import json_object
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.settings_store import (
     _ALLOWED_FIELDS, _SECRET_API_FIELDS, _SECRET_FIELDS,
@@ -1131,12 +1132,7 @@ def build_router(srv) -> APIRouter:
         openapi_extra=_request_body_contract(SettingsUpdateRequest, LegacySettingsUpdateRequest),
     )
     async def put_settings(request: Request):
-        try:
-            body = await request.json()
-        except Exception as exc:  # malformed JSON is a client error, never a server traceback
-            raise HTTPException(400, "settings payload must be valid JSON") from exc
-        if not isinstance(body, dict):
-            raise HTTPException(400, "settings payload must be a JSON object")
+        body = await json_object(request, "settings payload")
         expected_revision = _expected_revision(body)
         incoming = body.get("settings", body)
         if not isinstance(incoming, dict):
@@ -1226,12 +1222,7 @@ def build_router(srv) -> APIRouter:
         """Store (or clear) a secret credential securely. The value is written owner-only to
         secrets.json (never ui_settings.json / a run snapshot), atomically bound to the current
         endpoint, and exposed only to an authorized child spawn. The response never returns it."""
-        try:
-            body = await request.json()
-        except Exception as exc:
-            raise HTTPException(400, "secret payload must be valid JSON") from exc
-        if not isinstance(body, dict):
-            raise HTTPException(400, "secret payload must be a JSON object")
+        body = await json_object(request, "secret payload")
         allowed_body = {
             "key", "value", "expected_revision",
             "expected_settings_revision", "expected_secret_revision",

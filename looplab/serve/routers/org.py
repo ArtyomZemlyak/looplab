@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from looplab.serve.deletion_service import (
     begin_or_resume_run_deletion, get_run_deletion, validate_deletion_request)
+from looplab.serve.http import json_object
 from looplab.serve.projects import ProjectConflictError, ProjectError, ProjectStoreLockError
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
 
@@ -20,15 +21,6 @@ _RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
 def build_router(srv) -> APIRouter:
     router = APIRouter()
     _run_dir, projects = srv.run_dir, srv.projects
-
-    async def _json_object(request: Request) -> dict:
-        try:
-            body = await request.json()
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise HTTPException(400, "request body must be valid JSON") from exc
-        if not isinstance(body, dict):
-            raise HTTPException(400, "request body must be a JSON object")
-        return body
 
     # ------------------------------------------------------------------ projects (ClearML-style)
     def _project_call(fn):
@@ -143,14 +135,14 @@ def build_router(srv) -> APIRouter:
 
     @router.post("/api/projects")
     async def create_project(request: Request):
-        body = await _json_object(request)
+        body = await json_object(request)
         p = await _project_call_async(
             lambda: projects.create(body.get("name", ""), body.get("parent_id")))
         return p.model_dump()
 
     @router.patch("/api/projects/{pid}")
     async def patch_project(pid: str, request: Request):
-        body = await _json_object(request)
+        body = await json_object(request)
 
         def _apply():
             if "name" in body and body["name"] is not None:
@@ -167,7 +159,7 @@ def build_router(srv) -> APIRouter:
 
     @router.post("/api/runs/{run_id}/project")
     async def assign_run(run_id: str, request: Request):
-        body = await _json_object(request)
+        body = await json_object(request)
         expected_generation = _expected_run_generation(body)
         expected_project_id = _expected_organization_value(body, "project_id")
         await anyio.to_thread.run_sync(lambda: _run_project_call(
@@ -185,14 +177,14 @@ def build_router(srv) -> APIRouter:
 
     @router.post("/api/supertasks")
     async def create_supertask(request: Request):
-        body = await _json_object(request)
+        body = await json_object(request)
         st = await _project_call_async(
             lambda: projects.create_supertask(body.get("name", ""), body.get("task_id")))
         return st
 
     @router.patch("/api/supertasks/{sid}")
     async def patch_supertask(sid: str, request: Request):
-        body = await _json_object(request)
+        body = await json_object(request)
         await _project_call_async(lambda: projects.rename_supertask(sid, body.get("name", "")))
         return {"ok": True}
 
@@ -203,7 +195,7 @@ def build_router(srv) -> APIRouter:
 
     @router.post("/api/runs/{run_id}/supertask")
     async def assign_supertask(run_id: str, request: Request):
-        body = await _json_object(request)
+        body = await json_object(request)
         expected_generation = _expected_run_generation(body)
         expected_supertask_id = _expected_organization_value(body, "supertask_id")
         await anyio.to_thread.run_sync(lambda: _run_project_call(
@@ -216,7 +208,7 @@ def build_router(srv) -> APIRouter:
     @router.patch("/api/runs/{run_id}")
     async def rename_run(run_id: str, request: Request):
         """Set/clear a run's UI display label. Non-destructive: the run dir id is unchanged."""
-        body = await _json_object(request)
+        body = await json_object(request)
         expected_generation = _expected_run_generation(body)
         expected_label = _expected_organization_value(body, "label")
         await anyio.to_thread.run_sync(lambda: _run_project_call(
@@ -229,7 +221,7 @@ def build_router(srv) -> APIRouter:
     async def create_run_deletion(run_id: str, request: Request):
         """Delete one exact run generation through an operation-bound durable transaction."""
         operation_id, generation, expected_seq = validate_deletion_request(
-            await _json_object(request))
+            await json_object(request))
         result = await anyio.to_thread.run_sync(lambda: begin_or_resume_run_deletion(
             srv, run_id, operation_id=operation_id,
             expected_generation=generation, expected_seq=expected_seq))

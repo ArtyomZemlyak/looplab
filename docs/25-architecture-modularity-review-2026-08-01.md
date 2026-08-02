@@ -1756,6 +1756,42 @@ test that guards the property they broke.
 
 *Recommendation:* One `json_object(request, *, max_bytes=None)` helper in serve/protocol.py (or a new serve/http.py); the boss variant's extra field checks stay local.
 
+*Resolution (2026-08-02):* `looplab/serve/http.py` owns it —
+`json_object(request, subject="request body", *, absent_is_empty=False)` plus a
+`json_object_bytes` sibling for the routes that must read the body themselves. Sixteen call sites
+across assistant/genesis/boss/org/misc/runs/control and `reset_route` now go through it; the four
+module-level copies (three of which carried a docstring naming which OTHER router they mirrored) are
+gone, and 138 lines went with them. It landed in a new module rather than `serve/protocol.py`
+because protocol.py has no third-party imports today and the TUI client depends on that.
+
+Two things legitimately differ per route, so they are arguments rather than variants: the **subject
+noun** in the message (``"control body"``, ``"settings payload"``, …), which is client-visible
+contract; and whether an **absent** body means ``{}`` or a 400. Everything else collapsed, including
+one thing that had already drifted — `routers/misc.py`'s settings and secret writers caught
+`Exception` ("malformed JSON is a client error, never a server traceback") while the other twelve
+caught only `(ValueError, UnicodeDecodeError)`. The broad catch is right and is now the parser's
+rule, so the next copy cannot be narrower by accident. `CancelledError` is a `BaseException` and
+still propagates.
+
+Two sites deliberately did NOT fold and are named in the guard test: `/api/start` and its preflight
+answer with a structured ``{"code": "invalid_launch_request", "field_errors": {}}`` body the launch
+client parses by shape, and the author-file PUT, which is raw UTF-8 text and never JSON. The
+concept-lens route keeps its own UTF-8 decode beside its byte cap — both are that route's reading
+policy, and `json.loads` would otherwise have accepted BOM-marked UTF-16/32 that endpoint never did.
+
+Nothing in the suite asserted any of these 400 strings, which is exactly what makes collapsing
+copies risky, so `tests/test_serve_json_body.py` pins the parser's decision table (18 tests) and
+adds a grep-level guard that fails if a router starts reading `request.json()`/`request.body()`
+itself again. Five deliberate breaks — drop the object check, ignore `absent_is_empty`, hardcode the
+subject, narrow the catch, forgive emptiness everywhere — were each caught.
+
+One regression fell out on the way, and the existing guard caught it: the first version imported
+`HTTPException` at module scope, which `serve/server.py` pulls in through its router re-exports —
+so `make_app` stopped answering "pip install looplab[ui]" and raised an ImportError traceback
+instead. `test_event_types.py::test_server_reexports_and_cli_stay_friendly_without_ui_extra` failed
+on it. The 400 is now built in a `_bad_request` helper that imports fastapi lazily on the failure
+path, the same reason `serve/engine_proc.py` imports it inside its functions.
+
 #### SR-06 · MEDIUM · duplication · effort: medium
 
 **Five implementations of bounded/redacted projection of untrusted JSON**

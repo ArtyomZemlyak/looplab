@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from looplab.core.config import Settings
 from looplab.serve.assistant import safe_provider_failure
+from looplab.serve.http import json_object
 from looplab.serve.protocol import JOB_DONE, JOB_RUNNING, JOB_UNKNOWN
 from looplab.serve.schemas import _GenesisSpec
 from looplab.serve.serve_prompts import RESEARCH_BRIEF_SYSTEM, genesis_system
@@ -24,18 +25,6 @@ from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 from looplab.serve.routers.control import _defaults_backend_llm
 from looplab.serve.routers.reports import _prior_learnings_index
 from looplab.core.redact import is_secret_key_name, redact_persisted_text
-
-async def _json_object(request: Request) -> dict:
-    """Parse a request body as a JSON object or fail with 400 (mirrors routers/boss + control), so a
-    non-JSON / non-object body yields a clean 400 instead of a 500 from a later ``body.get(...)``."""
-    try:
-        body = await request.json()
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise HTTPException(400, "request body must be valid JSON") from exc
-    if not isinstance(body, dict):
-        raise HTTPException(400, "request body must be a JSON object")
-    return body
-
 
 def _evidence_text(value: object, cap: int) -> str:
     return redact_persisted_text(
@@ -96,7 +85,7 @@ def build_router(srv) -> APIRouter:
         """Best-effort LLM brief for a research topic, to prime a run. Optionally saved as a
         knowledge note (markdown) so the agentic-retrieval Researcher can read it (ADR-16).
         Degrades cleanly when no model endpoint is reachable."""
-        body = await _json_object(request)
+        body = await json_object(request)
         topic = (body.get("topic") or "").strip()
         if not topic:
             raise HTTPException(400, "topic is required")
@@ -199,7 +188,7 @@ def build_router(srv) -> APIRouter:
         /api/start, never here (creating a run spends real tokens). Refinement turns pass the prior
         `draft` so the boss edits it in place. Degrades cleanly when no model is reachable."""
         from looplab.adapters.tasks import kinds
-        body = await _json_object(request)
+        body = await json_object(request)
         raw_msgs = body.get("messages")
         msgs = raw_msgs if isinstance(raw_msgs, list) else []
         instruction = _evidence_text(body.get("instruction") or "", 4_000).strip()

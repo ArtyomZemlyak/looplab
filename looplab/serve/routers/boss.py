@@ -29,6 +29,7 @@ from looplab.events.types import (
     EV_RESUME, EV_RUN_ABORT, EV_SET_STRATEGY,
     EV_SPEC_APPROVED)
 from looplab.serve.assistant import safe_provider_failure
+from looplab.serve.http import json_object
 from looplab.serve.llm_context import (
     BOSS_EVIDENCE_GUARD, _client_tokens, _node_context, boss_prompt_parts)
 from looplab.serve.paid_work import (
@@ -451,15 +452,8 @@ def _plan_to_actions(plan: "_Plan", st) -> list[dict]:
 
 
 async def _json_object(request) -> dict:
-    """Parse a request body as a JSON object or fail with 400. Mirrors the guards in
-    ``routers/control.py`` so a non-JSON or non-object body (e.g. a bare ``[]``) yields a clean 400
-    instead of an ``AttributeError``/``JSONDecodeError`` surfacing as a 500."""
-    try:
-        body = await request.json()
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise HTTPException(400, "request body must be valid JSON") from exc
-    if not isinstance(body, dict):
-        raise HTTPException(400, "request body must be a JSON object")
+    """The shared body parse, plus the field shapes every boss endpoint reads."""
+    body = await json_object(request)
     # The outer-object check alone left the three fields every boss endpoint reads untyped, so valid
     # JSON like `{"instruction": 1}` reached `.strip()` and a scalar message entry reached `.get()`,
     # each surfacing as a 500. A 500 on a PAID advisory endpoint is the worst possible answer: the
@@ -518,12 +512,7 @@ def build_router(srv) -> APIRouter:
         so it survives a remount/reload. Single writer (this server) + a synchronous fsync'd append
         per request serialize within the process, so no cross-process lock is needed here."""
         rd = _run_dir(run_id)
-        try:
-            turn = await request.json()
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise HTTPException(400, "chat turn must be valid JSON") from exc
-        if not isinstance(turn, dict):
-            raise HTTPException(400, "chat turn must be a JSON object")
+        turn = await json_object(request, "chat turn")
         turn = _sanitize_chat_turn(turn)
         path = rd / "chat.jsonl"
 
@@ -880,12 +869,7 @@ def build_router(srv) -> APIRouter:
         (like scope-report generation): a slow model can outlast a UI proxy's gateway timeout,
         so it hands back {status:'running', job_id} the UI awaits via jobAwait instead of 504ing — a
         fast model still returns {ok, seq, content} inline within the wait."""
-        try:
-            body = await request.json()
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise HTTPException(400, "report refresh body must be valid JSON") from exc
-        if not isinstance(body, dict):
-            raise HTTPException(400, "report refresh body must be a JSON object")
+        body = await json_object(request, "report refresh body")
         expected = _normalize_report_generation(body.get(EXPECTED_RUN_GENERATION_FIELD))
         raw_idempotency_key = request.headers.get("Idempotency-Key", "")
         if not raw_idempotency_key or len(raw_idempotency_key) > 512:

@@ -124,6 +124,7 @@ _LAYOUT = {
     "holdout": "engine",
     "hybrid_merge": "search",
     "htmlview": "events",
+    "http": "serve",             # the shared control-plane JSON body parser (doc 25 SR-05)
     "jobs": "serve",
     "jupyter": "runtime",
     "kaggle_dl": "adapters",

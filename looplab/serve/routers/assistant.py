@@ -33,6 +33,7 @@ from looplab.serve.assistant import (
     safe_assistant_failure as _safe_assistant_failure,
     sanitize_assistant_message as _sanitize_assistant_message)
 from looplab.serve.engine_proc import _engine_alive
+from looplab.serve.http import json_object
 from looplab.serve.llm_context import _client_tokens
 from looplab.serve.protocol import (
     ASSISTANT_STREAM_END_SENTINEL, PERM_ALLOW_ALWAYS, PERM_ALLOW_ONCE, PERM_DENY,
@@ -48,27 +49,6 @@ ASSISTANT_SHARE_HEADER = "X-LoopLab-Share"
 # keepalive comment keeps a buffering proxy's idle read-timer from firing on a long LLM call.
 _ASSISTANT_STREAM_POLL_SECONDS = 0.05
 _ASSISTANT_STREAM_KEEPALIVE_SECONDS = 10.0
-
-
-async def _json_object(request: Request) -> dict:
-    """Parse a request body as a JSON object or fail with 400 (mirrors routers/boss + control), so a
-    non-JSON / non-object body (e.g. a bare ``[]``) yields a clean 400 instead of a 500 from a later
-    ``body.get(...)``."""
-    try:
-        body = await request.json()
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise HTTPException(400, "request body must be valid JSON") from exc
-    if not isinstance(body, dict):
-        raise HTTPException(400, "request body must be a JSON object")
-    return body
-
-
-async def _json_options(request: Request) -> dict:
-    """Like `_json_object`, but an ABSENT body means "no options" rather than a 400 — for routes
-    whose every field has a default and whose callers may legitimately send nothing at all."""
-    if not await request.body():
-        return {}
-    return await _json_object(request)
 
 
 _SHARED_CONTENT_MAX_CHARS = 200_000
@@ -568,12 +548,7 @@ def build_router(srv) -> APIRouter:
 
     @router.post("/api/assistant/permissions/{req_id}")
     async def assistant_resolve(req_id: str, request: Request):
-        try:
-            body = await request.json()
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise HTTPException(400, "permission body must be valid JSON") from exc
-        if not isinstance(body, dict):
-            raise HTTPException(400, "permission body must be a JSON object")
+        body = await json_object(request, "permission body")
         dec = body.get("decision", PERM_DENY)
         with _perm_lock:
             r = _perm_reqs.get(req_id)
@@ -614,7 +589,7 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/assistant/revert")
     async def assistant_revert(request: Request):
         """Undo one exact assistant change while its applied post-image is still current."""
-        body = await _json_object(request)
+        body = await json_object(request)
         path = body.get("path")
         if not isinstance(path, str) or not path:
             raise HTTPException(400, "path is required")
@@ -714,7 +689,7 @@ def build_router(srv) -> APIRouter:
 
     @router.post("/api/assistant/sessions")
     async def assistant_create(request: Request):
-        body = await _json_object(request)
+        body = await json_object(request)
         meta = _asst.create(title=(body.get("title") or ""),
                             mode=body.get("mode") or "plan")
         return meta
@@ -844,7 +819,8 @@ def build_router(srv) -> APIRouter:
         Body: `ttl_seconds` (default one week) and `live`. `live` is the explicit answer to "does the
         link follow the conversation?": the default false FREEZES it at the turns that exist now, so
         continuing to talk cannot retroactively publish what comes next."""
-        body = await _json_options(request)
+        # An ABSENT body means "no options": every field on this route has a default.
+        body = await json_object(request, absent_is_empty=True)
         live = body.get("live", False)
         if not isinstance(live, bool):
             raise _share_http_error(400, "assistant_share_invalid", "live must be a boolean")
@@ -1248,7 +1224,7 @@ def build_router(srv) -> APIRouter:
         """One assistant turn. Persists the user turn, drives the read-only tool loop as a BACKGROUND
         JOB (so a long turn returns {status:'running', job_id} the UI awaits via jobAwait instead of
         504ing), then persists the assistant reply. Soft-fails offline."""
-        body = await _json_object(request)
+        body = await json_object(request)
         (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn,
          turn_epoch, begin_live_ids) = _begin_turn(sid, body)
         try:
@@ -1294,7 +1270,7 @@ def build_router(srv) -> APIRouter:
         full result) — real token streaming for the Claude-Desktop feel. HITL still works: a mutating
         action pauses the worker on the permission registry while the client polls /permissions."""
         import queue as _queue
-        body = await _json_object(request)
+        body = await json_object(request)
         (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn,
          turn_epoch, begin_live_ids) = _begin_turn(sid, body)
         q: "_queue.Queue" = _queue.Queue()
