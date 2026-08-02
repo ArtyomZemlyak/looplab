@@ -175,7 +175,8 @@ The copies where drift is a correctness event, not a style problem:
 
 - **ES-02** node-creation commit epilogue ×3 (`orchestrator.py` — the same bug already fixed 3×).
 - **EC-03** developer-crash `node_failed`+`pause` pair ×5 (reason strings already drift).
-- **EV-03** completion-certificate invalidation ×5 in the fold (one drifted copy already shipped a selection bug).
+- **EV-03** completion-certificate invalidation ×5 in the fold (one drifted copy already shipped a
+  selection bug). *(resolved 2026-08-02 — `replay._invalidate_completion_certificates`.)*
 - **ES-07** tail-CAS append retry loop ×8 (inconsistent exhaustion behavior by accident).
 - **ES-06** eval-admission fence triplicated between serial/parallel dispatch.
 - **SR-01** durable paid-work idempotency protocol ×5+ across routers (byte-identical helper pairs prove the abstraction exists).
@@ -879,9 +880,27 @@ Scope: `looplab/events/`: eventstore.py, replay.py, types.py, projections, span_
 
 *Recommendation:* Make _card_added_snapshot consume the receipt shape _bounded_card_action produces (single shared decoder for the action block: one function returning the normalized action dict + owns_action flag), or at minimum extract shared helpers for the eval_timeout, space and parent_ids coercions so the two stages cannot drift (they already differ on top-K selection strategy).
 
-#### EV-03 · MEDIUM · duplication · effort: small
+#### EV-03 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **The completion-certificate invalidation block is copy-pasted at 5 sites, and a comment records a real bug caused by one site drifting**
+
+*Resolution:* `replay._invalidate_completion_certificates(st, ctx)` (over a smaller
+`_clear_approval(st)`) is called from all five handlers — `_on_node_created`,
+`_on_node_tombstoned`, `_on_node_reset`, `_on_node_abort` and `_on_resume_or_run_reopened`. The
+`_on_node_tombstoned` partial variant is deliberately NOT folded in: it clears the subject half and
+the grant half under two separate `in affected` conditions, which is a different rule; it now calls
+`_clear_approval` for the half it does clear. `_on_node_abort`'s finished-run branch likewise uses
+`_clear_approval` alone, because a FINISHED run's certificate is its result and only the grant
+naming the aborted node is void.
+
+`tests/test_completion_certificate_invalidation.py` asserts the shipped bug behaviourally rather
+than by field inspection. The certificate deliberately names the metric LOSER, which makes the
+confirm-override observable in `best_node_id`: while the certificate stands selection returns the
+confirmed node, and the moment it is retired selection falls back to the metric winner. Each of the
+five changes touches a THIRD node, so a surviving override is the stale certificate rather than the
+subject merely becoming ineligible. Verified to have teeth by reintroducing the exact historical
+half-clear (`confirmed_done` cleared, `ctx.best_confirmed` left) at the reopen site and again at the
+new-candidate site: each fails exactly its own case with `assert 2 == 1`.
 
 *Locations:* `looplab/events/replay.py:623-629`, `looplab/events/replay.py:1190-1196`, `looplab/events/replay.py:1341-1349`, `looplab/events/replay.py:3163-3174`, `looplab/events/replay.py:3298-3308`
 

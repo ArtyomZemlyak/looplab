@@ -620,13 +620,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         _invalidate_disclosed_holdout(st, fresh_node_ids={n.id})
         # A genuinely new candidate invalidates any confirmation/approval completed for the prior
         # candidate set — including when it is created just AFTER best_confirmed was appended.
-        ctx.best_confirmed = None
-        st.confirmed_done = False
-        st.approved = False
-        st.awaiting_approval = False
-        st.approval_subject = None
-        st.approval_generation = None
-        st.approved_node_id = None
+        _invalidate_completion_certificates(st, ctx)
     _clear_build_marker(st, d, n.id)   # the real node is here now — drop the "building" marker(s)
 
 def _nonneg_seconds(v) -> float:
@@ -1129,6 +1123,42 @@ def _invalidate_disclosed_holdout(
     return True
 
 
+def _clear_approval(st: RunState) -> None:
+    """Retract the operator's ratification AND any request still waiting for one.
+
+    Both halves are needed together. Leaving `approved` set hands a stale grant to a candidate set
+    the operator never saw; leaving `awaiting_approval` set with the subject gone parks the run on a
+    question about a node that no longer exists. The subject/generation/node_id fields are what the
+    approval was ABOUT, so they go with it — a retained `approval_subject` would let a later grant
+    attach to the wrong node.
+    """
+    st.approved = False
+    st.awaiting_approval = False
+    st.approval_subject = None
+    st.approval_generation = None
+    st.approved_node_id = None
+
+
+def _invalidate_completion_certificates(st: RunState, ctx: "_FoldCtx") -> None:
+    """Retire every "this search is finished" certificate because the candidate set just changed.
+
+    A confirmation and an approval are both statements about a SPECIFIC set of candidates: "these
+    were re-measured and this one won", "the operator ratified this one". A new candidate, a
+    tombstone, a reset, an abort, or a reopen all change that set, so both statements stop being
+    true — and neither is re-derived, they are carried until something clears them.
+
+    Two things must be cleared together, and this is the whole reason the sequence has one home
+    (doc 25 EV-03). `st.confirmed_done` is the FOLDED flag that lets the confirm phase re-run;
+    `ctx.best_confirmed` is the THREADED snapshot `_select_best`'s confirm-override reads. Clearing
+    only the flag leaves the override live, and an epoch-(N-1) certificate then keeps beating
+    epoch-N's metric winner — which is exactly the selection bug the reopen site shipped while
+    these five copies were kept in step by hand.
+    """
+    st.confirmed_done = False
+    ctx.best_confirmed = None
+    _clear_approval(st)
+
+
 def _on_node_tombstoned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Append-only delete (§6.3): mark the listed node ids (a node + its descendant subtree, computed
     # by the writer so the fold stays a pure, order-tolerant set op) as logically deleted. They REMAIN
@@ -1187,13 +1217,7 @@ def _on_node_tombstoned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
 
     # During an active search the candidate-set mutation invalidates completion certificates. If a
     # holdout was already disclosed, rotate now and re-evaluate every surviving incumbent.
-    st.confirmed_done = False
-    ctx.best_confirmed = None
-    st.approved = False
-    st.awaiting_approval = False
-    st.approval_subject = None
-    st.approval_generation = None
-    st.approved_node_id = None
+    _invalidate_completion_certificates(st, ctx)
     _invalidate_disclosed_holdout(st)
 
 def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -1338,15 +1362,9 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # A reset is itself the actual reopen edge. With no disclosed partition there are no raw
             # scores to invalidate, but confirmation/approval still belong to the prior search epoch.
             _rotate_search_epoch(st, requeue_partition_scores=False)
-        st.confirmed_done = False
         # `best_confirmed.generations` covers the whole candidate set. Resetting ANY competitor
         # invalidates the snapshot, even when the previously chosen winner itself was untouched.
-        ctx.best_confirmed = None
-        st.approved = False
-        st.awaiting_approval = False
-        st.approval_subject = None
-        st.approval_generation = None
-        st.approved_node_id = None
+        _invalidate_completion_certificates(st, ctx)
         # A reset means there is work to do again, so it RE-OPENS a finished run — else the
         # loop would see the stale run_finished and exit before re-running/re-scoring the node.
         # (Mirrors EV_RESUME's finished-clear; a later run_finished sets it again. `paused` is
@@ -3160,18 +3178,11 @@ def _on_resume_or_run_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
             _rotate_search_epoch(st, requeue_partition_scores=st.holdout_epoch_aware)
         else:
             _rotate_search_epoch(st, requeue_partition_scores=False)
-        # A reopen begins a new candidate epoch, so the prior epoch's confirmation certificate must not
-        # keep authorizing selection. Clear BOTH the folded flag AND the threaded ctx.best_confirmed the
-        # `_select_best` confirm-override reads — every other invalidation site (node_reset, tombstone,
-        # new-candidate) pairs these two, and omitting the ctx clear here let an epoch-(N-1) certificate
-        # keep overriding epoch-N's metric winner after confirmed_done reset.
-        st.confirmed_done = False
-        ctx.best_confirmed = None
-        st.approved = False
-        st.awaiting_approval = False
-        st.approval_subject = None
-        st.approval_generation = None
-        st.approved_node_id = None
+        # A reopen begins a new candidate epoch, so the prior epoch's confirmation certificate must
+        # not keep authorizing selection. Clearing only the folded flag and not the threaded
+        # `ctx.best_confirmed` here is what let an epoch-(N-1) certificate keep overriding epoch-N's
+        # metric winner — the bug this shared helper now makes unreachable from any one site.
+        _invalidate_completion_certificates(st, ctx)
         # P0-2 freshly-hidden per-epoch holdout: the prior epoch's holdout was DISCLOSED at the
         # finish (its scores drove the champion pick), so the reopened epoch must NOT re-score its
         # new candidates on that same partition — the engine rebuilds `_holdout_idx` for the new
@@ -3288,24 +3299,15 @@ def _on_node_abort(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.confirm_request_generations = [
             r for r in st.confirm_request_generations if r.get("node_id") != nid]
         if st.approval_subject == nid or st.approved_node_id == nid:
-            st.awaiting_approval = False
-            st.approved = False
-            st.approval_subject = None
-            st.approval_generation = None
-            st.approved_node_id = None
+            # A FINISHED run keeps its certificates; only the grant that named THIS node is void.
+            _clear_approval(st)
         if st.champion == nid:
             st.champion = None
         if st.finished:
             if ctx.best_confirmed == nid:
                 ctx.best_confirmed = None
             return
-        st.confirmed_done = False
-        ctx.best_confirmed = None
-        st.approved = False
-        st.awaiting_approval = False
-        st.approval_subject = None
-        st.approval_generation = None
-        st.approved_node_id = None
+        _invalidate_completion_certificates(st, ctx)
         _invalidate_disclosed_holdout(st)
 
 def _on_budget_extend(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
