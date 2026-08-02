@@ -14,6 +14,24 @@ from looplab.events.eventstore import EventStore  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
 
 
+def _delete_run(client, run_id: str, *, rd: Path, op: str = "1" * 8):
+    """Delete through the operation-bound transaction that replaced bodyless DELETE.
+
+    `DELETE /api/runs/{id}` is a 409 stub now ("deletion_identity_required") so no bodyless request
+    can destroy a REPLACEMENT generation nobody inspected. Its 409 is unconditional, so a test still
+    calling it never reaches the start-identity retirement, the rollback, or the lock behaviour it
+    is written for."""
+    from looplab.serve.run_commands import run_generation_token
+
+    events = EventStore(rd / "events.jsonl").read_all()
+    return client.post(f"/api/runs/{run_id}/deletions", json={
+        "operation_id": f"{op}-1111-4111-8111-{'1' * 12}",
+        "expected_generation": run_generation_token(events),
+        "expected_seq": events[-1].seq if events else -1,
+    })
+
+
+
 def _task() -> dict:
     return {"benchmark": "quadratic", "goal": "minimize", "direction": "min"}
 
@@ -455,7 +473,7 @@ def test_successful_delete_retires_start_identity_and_run_name_can_be_reused(tmp
     srv.commands.cancel_external_spawn(rd, f"start:{first['start_id']}")
     assert srv.commands.load_start_record(rd)["id"] == first["start_id"]
 
-    deleted = client.delete("/api/runs/reusable")
+    deleted = _delete_run(client, "reusable", rd=tmp_path / "reusable", op="1" * 8)
     assert deleted.status_code == 200
     assert not rd.exists()
     assert srv.commands.load_start_record(rd) is None
@@ -467,7 +485,17 @@ def test_successful_delete_retires_start_identity_and_run_name_can_be_reused(tmp
     assert len(calls) == 2
 
 
-def test_delete_sidecar_retirement_failure_leaves_run_intact(tmp_path, monkeypatch):
+def test_delete_metadata_failure_quarantines_the_run_bytes_without_claiming_success(
+        tmp_path, monkeypatch):
+    """A metadata step that fails leaves a resumable operation, not a half-deleted run.
+
+    Deletion is a durable transaction now: it moves the run OUT of the workspace first, then retires
+    its start identity. So "leaves the run intact" is no longer the contract — by the time metadata
+    retirement can fail, the bytes are already in the operation's quarantine. What must hold is that
+    nothing is destroyed and nothing is claimed: the bytes are recoverable byte-for-byte, the
+    response is `ok: false` (202, not a success), it names the exact operation to retry, and it says
+    which step is outstanding rather than reporting a delete that did not finish.
+    """
     app = make_app(tmp_path)
     srv = app.state.looplab
     client = TestClient(app)
@@ -481,14 +509,29 @@ def test_delete_sidecar_retirement_failure_leaves_run_intact(tmp_path, monkeypat
     srv.commands.cancel_external_spawn(rd, f"start:{started['start_id']}")
     monkeypatch.setattr(srv.commands, "retire_start_record", lambda *_args, **_kwargs: False)
 
-    deleted = client.delete("/api/runs/retire-denied")
-    assert deleted.status_code == 503
-    assert rd.exists()
-    assert (rd / "events.jsonl").exists()
-    assert srv.commands.load_start_record(rd)["id"] == started["start_id"]
+    log_before = (rd / "events.jsonl").read_bytes()
+    deleted = _delete_run(client, "retire-denied", rd=tmp_path / "retire-denied", op="2" * 8)
+
+    assert deleted.status_code == 202
+    body = deleted.json()
+    assert body["ok"] is False and body["status"] == "pending"
+    assert body["code"] == "delete_metadata_pending" and body["retryable"] is True
+    assert body["operation_id"] == f"{'2' * 8}-1111-4111-8111-{'1' * 12}"
+    quarantine = next(
+        path for path in tmp_path.iterdir()
+        if path.name.startswith(".looplab-delete-quarantine-") and path.is_dir())
+    assert (quarantine / "events.jsonl").read_bytes() == log_before
 
 
-def test_partial_delete_restores_exact_start_record(tmp_path, monkeypatch):
+def test_partial_delete_leaves_a_resumable_operation_owning_the_quarantine(tmp_path, monkeypatch):
+    """A purge that cannot complete is reported as outstanding, never as a finished delete.
+
+    `shutil.rmtree` neutered means the quarantine survives; the transaction refuses to advance past
+    `purging` and says a previous writer still owns it. This used to assert a 500 and a restored
+    start record, which the pre-transaction implementation produced by rolling the workspace back —
+    the durable version deliberately does not roll back, so asserting the old shape would only be
+    provable by pretending the rollback still happens.
+    """
     app = make_app(tmp_path)
     srv = app.state.looplab
     client = TestClient(app)
@@ -503,7 +546,15 @@ def test_partial_delete_restores_exact_start_record(tmp_path, monkeypatch):
     record_before = srv.commands.load_start_record(rd)
     monkeypatch.setattr("shutil.rmtree", lambda *_args, **_kwargs: None)
 
-    deleted = client.delete("/api/runs/delete-rollback")
-    assert deleted.status_code == 500
-    assert rd.exists()
-    assert srv.commands.load_start_record(rd) == record_before
+    log_before = (rd / "events.jsonl").read_bytes()
+    deleted = _delete_run(client, "delete-rollback", rd=tmp_path / "delete-rollback", op="3" * 8)
+
+    assert deleted.status_code == 202
+    body = deleted.json()
+    assert body["ok"] is False and body["code"] == "delete_purge_pending"
+    assert body["retryable"] is True and body["run_id"] == "delete-rollback"
+    quarantine = next(
+        path for path in tmp_path.iterdir()
+        if path.name.startswith(".looplab-delete-quarantine-") and path.is_dir())
+    assert (quarantine / "events.jsonl").read_bytes() == log_before
+    assert record_before is not None       # the pre-delete identity was real, not a vacuous compare

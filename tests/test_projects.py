@@ -207,7 +207,19 @@ def test_delete_run_acquires_project_lock_before_removing_run_bytes(tmp_path, mo
         yield  # pragma: no cover - contextmanager syntax only
 
     monkeypatch.setattr(eventstore, "_interprocess_lock", unavailable)
-    response = TestClient(make_app(tmp_path)).delete("/api/runs/demo")
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.run_commands import run_generation_token
+
+    # Bodyless DELETE is a 409 stub now; the real route is the operation-bound deletion transaction,
+    # and only it reaches the two required locks whose fail-closed behaviour this test pins. Read the
+    # identity BEFORE the lock is broken.
+    events = EventStore(tmp_path / "demo" / "events.jsonl").read_all()
+    client = TestClient(make_app(tmp_path))
+    response = client.post("/api/runs/demo/deletions", json={
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "expected_generation": run_generation_token(events),
+        "expected_seq": events[-1].seq if events else -1,
+    })
     assert response.status_code == 503
     # Delete takes TWO required locks in a fixed order — lifecycle, then project (see org.py) — so
     # either may be the one that reports unavailable. What matters is the fail-closed contract: a 503
