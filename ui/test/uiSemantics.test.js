@@ -22,7 +22,10 @@ test('ephemeral command results use polite atomic live regions', async () => {
 
 test('trace loading, partial, and unavailable states expose recovery semantics', async () => {
   const [inspector, dock, css] = await Promise.all([source('Inspector.jsx'), source('Dock.jsx'), source('styles.css')])
-  assert.match(inspector, /export function TraceUnavailable[\s\S]*?role="alert"[\s\S]*?>Retry trace<\/button>/)
+  assert.match(inspector, /export function TraceUnavailable[\s\S]*?role="alert"[\s\S]*?'Retrying…' : 'Retry trace'/,
+    'an unavailable trace must ANNOUNCE itself and offer a retry')
+  assert.match(inspector, /onClick=\{onRetry\} disabled=\{pending\}/,
+    'a retry already in flight must not be re-clickable into a second read')
   assert.match(inspector, /className="muted trace-small" role="status">loading…<\/div>/)
   assert.match(inspector, /className="notice compact" role="status">Trace projection is partial/)
   assert.match(inspector, /className="trace-live-status" role="status"/)
@@ -62,7 +65,7 @@ test('compact Inspector dialog has an explicit close or collapse accessible name
   const runView = await source('RunView.jsx')
   assert.match(runView, /role=\{compactWorkspace \? 'dialog' : 'complementary'\}/)
   assert.match(runView,
-    /aria-label=\{`\$\{compactWorkspace \? 'Close' : 'Collapse'\} \$\{selectedGroup != null \? 'group details' : 'experiment inspector'\}`\}/)
+    /aria-label=\{`\$\{compactWorkspace \? 'Close' : 'Collapse'\} \$\{groupDetailsOpen \? 'group details' : 'experiment inspector'\}`\}/)
 })
 
 test('run view modes are truthful toggles and merge has one explicit confirmation boundary', async () => {
@@ -204,7 +207,10 @@ test('temporary create and delete workflows retain a connected focus destination
   const runList = await source('RunList.jsx')
   assert.match(runList, /const projectModalReturnRef = useRef\(null\)/)
   assert.match(runList, /const closeProjectModal = \(\) => \{ setProjModal\(null\); restoreProjectModalFocus\(\) \}/)
-  assert.match(runList, /fallbackFocus\?\.isConnected \? fallbackFocus : runsMainRef\.current/)
+  // The single fallback became an ordered pair (next card, then previous), so the connectedness
+  // check moved onto `fallback.previous`. The property — focus never lands on a detached node — is
+  // unchanged, and is now asserted on the LAST link in that chain.
+  assert.match(runList, /fallback\?\.previous\?\.isConnected \? fallback\.previous : runsMainRef\.current/)
   assert.match(runList, /requestAnimationFrame\(\(\) => projectsAllRef\.current\?\.focus/)
   assert.match(runList, /if \(restoreFocus\) requestAnimationFrame/)
 })
@@ -256,11 +262,14 @@ test('displayed run generation participates in state dedupe and is published onl
 
 test('Config restart is one server-owned durable command and config load failure is retryable', async () => {
   const panels = await source('panels.jsx')
-  const restart = panels.slice(panels.indexOf('const onPauseResume = async'), panels.indexOf('const extendBudget'))
+  const restart = panels.slice(panels.indexOf('const onPauseResume = async'),
+    panels.indexOf('const setEvalCeiling = async'))
+  assert.ok(restart.length > 0 && restart.length < 2000, 'the restart slice must actually bound one handler')
   assert.match(restart, /await CONTROL\.restart\(submittedRunId\)/)
   assert.doesNotMatch(restart, /CONTROL\.pause|CONTROL\.resume|getRunCommand|setTimeout/)
   assert.doesNotMatch(panels, /restartPending|setRestartPending/)
-  assert.match(panels, /setLoadError\('Run settings could not be loaded\.[\s\S]*?\[runId, loadNonce\]/)
+  assert.match(panels, /setLoadError\('Run settings could not be loaded\.[\s\S]*?\[runId, expectedGeneration, loadNonce\]/,
+    'a retry must re-run the load effect, and the load must also re-run when the generation moves')
   assert.match(panels, /loadError[\s\S]*?role="alert"[\s\S]*?setLoadNonce\(value => value \+ 1\)/)
 })
 
@@ -339,8 +348,14 @@ test('live node-detail and per-node building-trace polls gate their setState on 
   // Inspector node-detail poll: callback receives (alive), rejects a STALER attempt (accepts fresher),
   // and only then writes. (R7: `>= nodeAttempt`, not exact — the detail endpoint often leads the poll.)
   assert.match(inspector, /const detailMatchesAttempt = value => !Number\.isSafeInteger\(nodeAttempt\)[\s\S]*?value\.attempt >= nodeAttempt/)
+  // The poll became an explicit effect with an owned in-flight request, which is a STRONGER form of
+  // the same rule: a superseded read is aborted rather than merely ignored, and the identity check
+  // (node + generation + attempt) still gates every write. `alive` is the effect's own latch.
   assert.match(inspector,
-    /usePoll\(\(alive\) => \{[\s\S]*?deadlineGet\(runNodeApiPath\(runId, nodeId, at\)\)[\s\S]*?timed\.promise\.then\(d => \{[\s\S]*?if \(alive\(\) && detailMatchesNode\(d\) && detailMatchesGeneration\(d\)[\s\S]*?detailMatchesAttempt\(d\)\)/)
+    /timed\.promise\.then\(value => \{[\s\S]*?const valid = detailMatchesNode\(value\)[\s\S]*?if \(valid && detailMatchesGeneration\(value\) && detailMatchesAttempt\(value\)\)/)
+  assert.match(inspector,
+    /return \(\) => \{\n\s*alive = false[\s\S]*?detailFlightRef\.current\.controller\.abort\(\)/,
+    'unmount/selection change must abort the in-flight detail read, not just discard its result')
   // Dock building-trace poll: the O(node) callback receives alive, and every state write is gated.
   // The error flag is cleared only on SUCCESS (inside the alive() guard), never eagerly per tick, so a
   // persistent failure does not flicker the error/Retry banner every 4s.
