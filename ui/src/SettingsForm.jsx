@@ -240,8 +240,16 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
 
   useEffect(() => {
     if (searching) return
-    tablistRef.current?.querySelector('[aria-selected="true"]')
-      ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    const tablist = tablistRef.current
+    const activeTab = tablist?.querySelector('[aria-selected="true"]')
+    if (!tablist || !activeTab) return
+
+    // Keep the selected tab visible without moving the settings page vertically. scrollIntoView()
+    // also scrolls ancestor containers, which made the mobile route open halfway down the page.
+    const listRect = tablist.getBoundingClientRect()
+    const tabRect = activeTab.getBoundingClientRect()
+    if (tabRect.left < listRect.left) tablist.scrollLeft -= listRect.left - tabRect.left
+    else if (tabRect.right > listRect.right) tablist.scrollLeft += tabRect.right - listRect.right
   }, [idx, searching])
 
   if (!groups.length) return <div className="settings-empty" role="status">
