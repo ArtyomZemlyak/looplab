@@ -64,6 +64,16 @@ def test_state_exposes_deprecated_hypotheses_compat_projection(tmp_path):
                         "rationale", "created_at_node", "best_delta", "priority"}
 
 
+def _artifact_generation(client, run_id: str = "demo") -> str:
+    """The run generation the artifact views are fenced to.
+
+    `/artifacts` and `/artifact` are attempt-scoped now and require `expected_generation`, so a
+    caller cannot be handed files from a run that was reset out from under the view it is showing.
+    Omitting it is a 422, which reads as "the endpoint broke" rather than "this read must name the
+    attempt it belongs to"."""
+    return client.get(f"/api/runs/{run_id}/state").json()["generation"]
+
+
 def test_artifacts_list_and_view(tmp_path):
     """Visible files: distinguish run workspace from live task paths, serve content, and stay bounded."""
     _build_run(tmp_path)                                   # tmp_path/demo with events.jsonl, nodes/, …
@@ -79,7 +89,7 @@ def test_artifacts_list_and_view(tmp_path):
         json.dumps({"kind": "repo", "editable_path": str(repo)}), encoding="utf-8")
 
     client = TestClient(make_app(tmp_path))
-    inventory = client.get("/api/runs/demo/artifacts").json()
+    inventory = client.get("/api/runs/demo/artifacts", params={"expected_generation": _artifact_generation(client)}).json()
     assert inventory["inventory_semantics"] == "live_workspace_snapshot"
     roots = {r["id"]: r for r in inventory["roots"]}
     assert "run" in roots and "editable:." in roots         # run dir + the separate repo path
@@ -91,20 +101,20 @@ def test_artifacts_list_and_view(tmp_path):
     assert {"train.py", "outputs/submission.csv"} <= repo_files
 
     # view a text file in the run dir
-    v = client.get("/api/runs/demo/artifact", params={"root": "run", "path": "out.txt"}).json()
+    v = client.get("/api/runs/demo/artifact", params={"expected_generation": _artifact_generation(client), "root": "run", "path": "out.txt"}).json()
     assert v["is_text"] is True and v["content"] == "hello artifact\n"
     # view a file under the SEPARATE repo root (incl. a nested subdir)
     v2 = client.get("/api/runs/demo/artifact",
-                    params={"root": "editable:.", "path": "outputs/submission.csv"}).json()
+                    params={"expected_generation": _artifact_generation(client), "root": "editable:.", "path": "outputs/submission.csv"}).json()
     assert "id,pred" in v2["content"]
     # binary file → flagged, no inline content
-    vb = client.get("/api/runs/demo/artifact", params={"root": "run", "path": "blob.bin"}).json()
+    vb = client.get("/api/runs/demo/artifact", params={"expected_generation": _artifact_generation(client), "root": "run", "path": "blob.bin"}).json()
     assert vb["is_text"] is False and vb["content"] is None
     # path-traversal and unknown root are both rejected
     assert client.get("/api/runs/demo/artifact",
-                      params={"root": "run", "path": "../../secret"}).status_code == 404
+                      params={"expected_generation": _artifact_generation(client), "root": "run", "path": "../../secret"}).status_code == 404
     assert client.get("/api/runs/demo/artifact",
-                      params={"root": "nope", "path": "x"}).status_code == 404
+                      params={"expected_generation": _artifact_generation(client), "root": "nope", "path": "x"}).status_code == 404
 
 
 def test_trace_internals_cannot_escape_through_artifact_aliases(tmp_path, monkeypatch):
@@ -158,7 +168,7 @@ def test_trace_internals_cannot_escape_through_artifact_aliases(tmp_path, monkey
         "references": [{"name": "parent", "path": str(tmp_path)}],
     }), encoding="utf-8")
     client = TestClient(make_app(tmp_path))
-    roots = {r["id"]: r for r in client.get("/api/runs/demo/artifacts").json()["roots"]}
+    roots = {r["id"]: r for r in client.get("/api/runs/demo/artifacts", params={"expected_generation": _artifact_generation(client)}).json()["roots"]}
     assert {"run", "editable:."} <= roots.keys()
     assert "reference:parent" not in roots
     run_files = {item["path"] for item in roots["run"]["files"]}
@@ -166,35 +176,35 @@ def test_trace_internals_cannot_escape_through_artifact_aliases(tmp_path, monkey
 
     assert "out.txt" in run_files
     assert "tree.html.archive/secret.txt" not in run_files
-    assert client.get("/api/runs/demo/artifact", params={
+    assert client.get("/api/runs/demo/artifact", params={"expected_generation": _artifact_generation(client), 
         "root": "run", "path": "tree.html.archive/secret.txt"}).status_code == 404
-    assert client.get("/api/runs/demo/artifact", params={
+    assert client.get("/api/runs/demo/artifact", params={"expected_generation": _artifact_generation(client), 
         "root": "reference:parent", "path": "demo/out.txt"}).status_code == 404
     for name in protected:
         assert name not in run_files
         assert client.get("/api/runs/demo/artifact",
-                          params={"root": "run", "path": name}).status_code == 404
+                          params={"expected_generation": _artifact_generation(client), "root": "run", "path": name}).status_code == 404
 
     assert {"spans.jsonl", "trace.json", "allowed.txt"} <= repo_files
     assert ".env" not in repo_files and ".aws/credentials" not in repo_files
     for secret_path in (".env", ".aws/credentials"):
-        assert client.get("/api/runs/demo/artifact", params={
+        assert client.get("/api/runs/demo/artifact", params={"expected_generation": _artifact_generation(client), 
             "root": "editable:.", "path": secret_path}).status_code == 404
     external = client.get("/api/runs/demo/artifact",
-                          params={"root": "editable:.", "path": "spans.jsonl"})
+                          params={"expected_generation": _artifact_generation(client), "root": "editable:.", "path": "spans.jsonl"})
     assert external.status_code == 200 and external.json()["content"] == "external spans\n"
 
     for ambiguous in ("spans.jsonl::$DATA", "spans.jsonl ", "spans.jsonl.", "SpAnS.JsOnL"):
         assert client.get("/api/runs/demo/artifact",
-                          params={"root": "run", "path": ambiguous}).status_code == 404
+                          params={"expected_generation": _artifact_generation(client), "root": "run", "path": ambiguous}).status_code == 404
 
     if hardlink_supported:
         assert "raw-hardlink.txt" not in repo_files
-        assert client.get("/api/runs/demo/artifact", params={
+        assert client.get("/api/runs/demo/artifact", params={"expected_generation": _artifact_generation(client), 
             "root": "editable:.", "path": "raw-hardlink.txt"}).status_code == 404
     if symlink_supported:
         assert "raw-symlink.txt" not in repo_files
-        assert client.get("/api/runs/demo/artifact", params={
+        assert client.get("/api/runs/demo/artifact", params={"expected_generation": _artifact_generation(client), 
             "root": "editable:.", "path": "raw-symlink.txt"}).status_code == 404
 
     # Simulate a writable-root swap after the pathname check: the opened descriptor points at the
@@ -209,7 +219,7 @@ def test_trace_internals_cannot_escape_through_artifact_aliases(tmp_path, monkey
 
     with monkeypatch.context() as patch:
         patch.setattr(builtins, "open", swapped)
-        assert client.get("/api/runs/demo/artifact", params={
+        assert client.get("/api/runs/demo/artifact", params={"expected_generation": _artifact_generation(client), 
             "root": "editable:.", "path": "allowed.txt"}).status_code == 404
 
 
@@ -247,9 +257,9 @@ def test_unprovable_artifact_policy_is_unavailable_not_empty(tmp_path, monkeypat
         return real_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "stat", denied)
-    listing = client.get("/api/runs/demo/artifacts")
+    listing = client.get("/api/runs/demo/artifacts", params={"expected_generation": _artifact_generation(client)})
     content = client.get("/api/runs/demo/artifact",
-                         params={"root": "run", "path": "out.txt"})
+                         params={"expected_generation": _artifact_generation(client), "root": "run", "path": "out.txt"})
     assert listing.status_code == 503
     assert content.status_code == 503
     assert "safe" not in listing.text
@@ -274,7 +284,8 @@ def test_artifact_opened_object_must_match_authorized_path(tmp_path, monkeypatch
         "kind": "repo", "editable_path": str(repo),
     }), encoding="utf-8")
     client = TestClient(make_app(tmp_path))
-    params = {"root": "editable:.", "path": "allowed.txt"}
+    params = {"root": "editable:.", "path": "allowed.txt",
+              "expected_generation": _artifact_generation(client)}
     assert client.get("/api/runs/demo/artifact", params=params).status_code == 200
 
     real_open = builtins.open
