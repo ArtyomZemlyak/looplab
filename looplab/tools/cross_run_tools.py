@@ -148,6 +148,28 @@ def _partial_claim_source_warning(claim_source: dict, research_source: dict) -> 
             + "). Retained evidence is a lower bound; one-sided states and absence are not exact.")
 
 
+def _partial_warnings(*, source: dict | None = None, scope: dict | None = None,
+                      claims: tuple | None = None) -> list[str]:
+    """Every applicable PARTIAL-coverage warning, in the order the receipts have always printed.
+
+    Each `_partial_*_warning` above already answers "" for a complete view, so every call site was
+    re-deriving that same `is not True` emptiness test by hand — a dozen times, in two spellings
+    (`view.get("source_complete") is not True` and a pre-computed `not source_complete`).
+
+    These lines are the sentence that tells a reader an ABSENCE is not proof, so a site that gets
+    the polarity backwards does not produce a visible error: it produces a confident-looking answer
+    with the caveat missing. Pass the views that apply and let one place decide what to print.
+    """
+    out = [
+        _partial_source_warning(source) if source is not None else "",
+        _partial_scope_warning(scope) if scope is not None else "",
+    ]
+    # The claim warning has no complete-view empty string of its own, so its guard lives here.
+    if claims is not None and claims[0].get("source_complete") is not True:
+        out.append(_partial_claim_source_warning(*claims))
+    return [warning for warning in out if warning]
+
+
 class CrossRunTools:
     """Read-only cross-run knowledge for the tool-loop. `role` ∈ {"researcher","developer"} scopes the
     claims to that role's lessons (+ shared/untagged); anything else sees all. Never raises from execute."""
@@ -511,830 +533,798 @@ class CrossRunTools:
                 include_concepts=include_concepts,
                 source_names=source_names,
             )
+        # One private method per verb, dispatched by name — the shape `RunControlTools` already
+        # uses. `_TOOL_NAMES` gates the lookup so an arbitrary `name` can never reach a same-named
+        # attribute of this class. The resolved governance snapshot is passed EXPLICITLY: it is the
+        # ledger the re-entry above pinned, and a tool that silently read a different one would be
+        # projecting rows the caller's receipt does not describe.
+        handler = getattr(self, f"_tool_{name}", None) if name in _TOOL_NAMES else None
+        if handler is None:
+            return "(unknown cross-run tool)"
+        return handler(args, _governance)
+
+    def _tool_cross_run_prior_attempts(self, args: dict, _governance: dict | None) -> str:
+        idea = args.get("idea")
+        if not isinstance(idea, str) or not idea.strip():
+            return "(cross-run tool error: idea must be a non-empty string)"
+        if len(idea) > 4000:
+            return "(cross-run tool error: idea exceeds 4000 characters)"
         from looplab.engine.memory import _portfolio_concept_overview_data
 
-        if name == "cross_run_prior_attempts":
-            idea = args.get("idea")
-            if not isinstance(idea, str) or not idea.strip():
-                return "(cross-run tool error: idea must be a non-empty string)"
-            if len(idea) > 4000:
-                return "(cross-run tool error: idea exceeds 4000 characters)"
-            qt = _toks(idea)
-            scoped_capsules = self._scoped_capsules()
-            scope_receipt = self._capsule_scope_receipt
-            governance = _governance
-            ov, concept_rows = _portfolio_concept_overview_data(
-                scoped_capsules, aliases=governance["aliases"],
-                splits=governance["splits"])
-            # rank concepts by keyword overlap with the idea (fall back to most-explored)
-            # the six-row tool envelope is the only result cap. Search the full retained
-            # canonical set first so a query for public-overview row #513 cannot yield an exact-looking miss.
-            scored = sorted(concept_rows,
-                            key=lambda e: (-(len(qt & _toks(e["concept"])) if qt else 0), -e["n_runs"]))
-            hits = [e for e in scored if (not qt) or (qt & _toks(e["concept"]))][:6]
-            if not hits:
-                if (ov.get("source_complete") is not True
-                        or scope_receipt.get("scope_complete") is not True):
-                    lines = ["(no retained scope-eligible prior run records these concepts; partial "
-                             "source/scope is not proof that no applicable run exists)"]
-                    if ov.get("source_complete") is not True:
-                        lines.append(_partial_source_warning(ov))
-                    if scope_receipt.get("scope_complete") is not True:
-                        lines.append(_partial_scope_warning(scope_receipt))
-                    return "\n".join(lines)
-                return "(no prior runs recorded these concepts yet)"
-            lines = [_partial_source_warning(ov)] if ov.get("source_complete") is not True else []
-            if scope_receipt.get("scope_complete") is not True:
-                lines.append(_partial_scope_warning(scope_receipt))
-            for e in hits:
-                runs = ", ".join(
-                    f"{_safe_text(r.get('run_id'), 100)!r}" +
-                    (f"={r['metric']:g}" if isinstance(r.get("metric"), (int, float))
-                     and not isinstance(r.get("metric"), bool) else "")
-                    for r in e["runs"][:5])
-                count_label = (f"tried in {e['n_runs']} run(s)"
-                               if scope_receipt.get("scope_complete") is True
-                               else f"retained in at least {e['n_runs']} scope-eligible run(s)")
-                lines.append(f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(e.get('concept'), 160)!r} — "
-                             f"{count_label}: {runs}")
-            return "TRIED BEFORE (untrusted persisted data; surface, not a block):\n" + "\n".join(lines)
-
-        if name == "cross_run_claims":
-            from looplab.engine.claims import (_filter_claim_assessments, claims_for_memory,
-                                               _safe_claim_source_summary,
-                                               _safe_research_source_summary)
-            claims = claims_for_memory(
-                self.dir, lessons=self._role_lessons(),
-                research_claims=self._role_research_claims(),
-                decisions=_governance["decisions"], structured=True)
-            claim_source = _safe_claim_source_summary(getattr(claims, "claim_source", None)) or {}
-            research_source = _safe_research_source_summary(
-                getattr(claims, "research_source", None)) or {}
-            claims = _filter_claim_assessments(
-                claims, lambda c: c.get("maturity") != "operator-rejected")  # honor operator verdicts
-            contested = args.get("contested", False)
-            if not isinstance(contested, bool):
-                return "(cross-run tool error: contested must be a boolean)"
-            if contested:
-                claims = _filter_claim_assessments(
-                    claims, lambda c: c["epistemic"] == "mixed")
-            query = args.get("query", "")
-            if not isinstance(query, str):
-                return "(cross-run tool error: query must be a string)"
-            if len(query) > 4000:
-                return "(cross-run tool error: query exceeds 4000 characters)"
-            qt = _toks(query)
-            if qt:
-                claims = _filter_claim_assessments(
-                    claims, lambda c: bool(qt & _toks(c["statement"])))
-            kept_claim_ids = {id(c) for c in claims[:8]}
-            claims = _filter_claim_assessments(
-                claims, lambda c: id(c) in kept_claim_ids)
-            if not claims:
-                if claim_source.get("source_complete") is not True:
-                    return ("(no retained matching cross-run claims; partial source is not proof of absence)\n"
-                            + _partial_claim_source_warning(claim_source, research_source))
-                return "(no matching cross-run claims yet)"
-            mark = {"supported": "supported", "refuted": "refuted", "mixed": "CONTESTED",
-                    "inconclusive": "inconclusive"}
-            def _claim_line(c):
-                refs = (c.get("support") or [])[:4] + (c.get("oppose") or [])[:4]
-                evidence = "[" + ", ".join(repr(_safe_text(ref, 120)) for ref in refs) + "]"
-                contradicts = "; ".join(
-                    repr(_safe_text(statement, 180)) for statement in (c.get("contradicts") or [])[:3])
-                maturity = _safe_text(c.get("maturity"), 40)
-                freshness = ""
-                if maturity.startswith("operator-"):
-                    value = {True: "current", False: "stale-evidence", None: "unknown"}.get(
-                        c.get("decision_fresh"), "unknown")
-                    freshness = f"; decision_freshness={value}"
-                return (f"[{mark.get(c['epistemic'], '?')}: {c['n_support']} for / "
-                        f"{c['n_oppose']} against] "
-                        f"UNTRUSTED_MEMORY={_safe_text(c['statement'], 240)!r}; "
-                        f"UNTRUSTED_MEMORY_EVIDENCE={evidence}; maturity={maturity!r}"
-                        + freshness
-                        + (f"; contradicts={contradicts}" if contradicts else ""))
-
-            lines = ([_partial_claim_source_warning(claim_source, research_source)]
-                     if claim_source.get("source_complete") is not True else [])
-            lines.extend(_claim_line(c) for c in claims)
-            return "\n".join(lines)
-
-        if name == "cross_run_atlas":
-            from looplab.engine.claims import atlas_for_memory
-            scoped_capsules = self._scoped_capsules()
-            scope_receipt = self._capsule_scope_receipt
-            atlas = atlas_for_memory(self.dir, lessons=self._role_lessons(),
-                                     capsules=scoped_capsules,
-                                     research_claims=self._role_research_claims(), structured=True,
-                                     _governance=_governance)
-            lines = [f"Bounded live projection: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
-                     f"{atlas['n_claims']} claim record(s), {atlas['n_contested']} mixed-evidence."]
-            claim_source = atlas.get("claim_source") if isinstance(atlas.get("claim_source"), dict) else {}
-            research_source = (atlas.get("research_source")
-                               if isinstance(atlas.get("research_source"), dict) else {})
-            if claim_source.get("source_complete") is not True:
-                lines.append(_partial_claim_source_warning(claim_source, research_source))
-            if atlas["explored"]:
-                lines.append("Most explored: "
-                             + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(e.get('concept'), 120)!r}"
-                                         f"(×{e['n_runs']})" for e in atlas["explored"][:6]))
-            # PART V Phase 1: use the context pack's tendency projection, which was computed from the
-            # FULL overview before ``explored`` was display-capped. This keeps the assistant and the
-            # Researcher on one eligible population as well as one threshold: a qualifying concept
-            # ranked ninth by frequency must not disappear only from this twin surface.
-            coverage = (atlas.get("context_pack") or {}).get("coverage") or {}
-            if coverage.get("source_complete") is not True:
-                lines.append(_partial_source_warning(coverage))
-            if scope_receipt.get("scope_complete") is not True:
-                lines.append(_partial_scope_warning(scope_receipt))
-            helps = (coverage.get("helps") or []) if scope_receipt.get("scope_complete") is True else []
-            hurts = (coverage.get("hurts") or []) if scope_receipt.get("scope_complete") is True else []
-            if helps or hurts:
-                seg = []
-                if helps:
-                    seg.append("tended to RANK BETTER: " + ", ".join(
-                        f"UNTRUSTED_MEMORY={_safe_text(c, 140)!r}" for c in helps[:6]))
-                if hurts:
-                    seg.append("tended to RANK WORSE: " + ", ".join(
-                        f"UNTRUSTED_MEMORY={_safe_text(c, 140)!r}" for c in hurts[:6]))
-                lines.append("Cross-run rank tendency (better/worse half of each run; advisory, not a rule): "
-                             + "; ".join(seg))
-            if atlas["thin_coverage"]:
-                lines.append("Observed in one returned run (not a coverage gap): "
-                             + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(x, 120)!r}"
-                                         for x in atlas["thin_coverage"][:8]))
-            if atlas["contradictions"]:
-                lines.append("Mixed-evidence claim records: "
-                             + "; ".join(f"UNTRUSTED_MEMORY={_safe_text(c.get('statement'), 160)!r}"
-                                         for c in atlas["contradictions"][:4]))
-            projection_omitted = (
-                int(atlas.get("explored_omitted", 0) or 0),
-                int(atlas.get("thin_coverage_omitted", 0) or 0),
-                int(atlas.get("contradictions_omitted", 0) or 0),
-            )
-            if any(projection_omitted):
-                lines.append("Bounded Atlas projection omitted: "
-                             f"{projection_omitted[0]} concept observation(s), "
-                             f"{projection_omitted[1]} single-run observation(s), "
-                             f"{projection_omitted[2]} mixed-evidence record(s).")
-            return "\n".join(lines)
-
-        if name == "cross_run_concept_map":
-            # PART V Phase 4/5: the caller-visible cross-run concept graph. Scoped to this run's task family when
-            # bound; portfolio-wide for an unbound (assistant/CLI) caller — the same _scoped_capsules the
-            # atlas uses. Aliases/splits honor the operator/steward taxonomy governance.
-            from looplab.engine.memory import portfolio_concept_graph
-            scoped_capsules = self._scoped_capsules()
-            scope_receipt = self._capsule_scope_receipt
-            governance = _governance
-            graph = portfolio_concept_graph(
-                scoped_capsules, aliases=governance["aliases"],
-                splits=governance["splits"])
-            # EXCLUDE the 0-run structural spine (materialized ancestor path prefixes) from the "explored"
-            # display — they are hierarchy scaffolding, not concepts any run touched.
-            explored = [e for e in graph["concepts"] if e.get("n_runs", 0) >= 1]
-            if not explored:
-                if (graph.get("source_complete") is not True
-                        or scope_receipt.get("scope_complete") is not True):
-                    lines = ["(no retained scope-eligible cross-run concepts; partial source/scope is not "
-                             "proof of absence)"]
-                    if graph.get("source_complete") is not True:
-                        lines.append(_partial_source_warning(graph))
-                    if scope_receipt.get("scope_complete") is not True:
-                        lines.append(_partial_scope_warning(scope_receipt))
-                    return "\n".join(lines)
-                return "(no cross-run concepts yet)"
-            n_explored = int(graph.get("n_explored_concepts", len(explored)) or 0)
-            map_label = "Task-family concept map" if self._bound else "Portfolio-wide concept map"
-            if len(explored) < n_explored:
-                lines = [f"{map_label}: showing {len(explored)} of {n_explored} explored concept(s) "
-                         f"across {graph['n_runs']} run(s)."]
-            else:
-                lines = [f"{map_label}: {n_explored} explored concept(s) "
-                         f"across {graph['n_runs']} run(s)."]
-            if graph.get("source_complete") is not True:
-                lines.append(_partial_source_warning(graph))
-            if scope_receipt.get("scope_complete") is not True:
-                lines.append(_partial_scope_warning(scope_receipt))
-            if graph.get("edge_source_complete") is not True:
-                lines.append("WARNING: PARTIAL edge source — hierarchy/co-occurrence edges cover only "
-                             f"{graph.get('edge_source_nodes_included', 0)} retained top graph node(s); "
-                             f"{graph.get('edge_source_nodes_pruned', 0)} node(s) were pruned and edges "
-                             "touching them are UNKNOWN.")
-            # the is_a hierarchy, surfaced as its top axes (the coarse structure of the map)
-            axes = sorted({str(e.get("concept") or "").split("/", 1)[0] for e in explored} - {""})
-            if axes:
-                lines.append("Axes: " + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(a, 80)!r}" for a in axes[:12]))
-            lines.append("Most explored: " + ", ".join(
-                f"UNTRUSTED_MEMORY={_safe_text(e.get('concept'), 120)!r}(×{e.get('n_runs', 0)})"
-                for e in explored[:12]))
-            cooc = [e for e in graph["edges"] if e.get("rel") == "co_occurs"]
-            if cooc:
-                lines.append("Concept pairs that co-occur across runs: " + "; ".join(
-                    f"UNTRUSTED_MEMORY={_safe_text(e.get('src'), 80)!r}+UNTRUSTED_MEMORY="
-                    f"{_safe_text(e.get('dst'), 80)!r}(×{e.get('n_runs', 0)})" for e in cooc[:8]))
-            # Concepts use the exact full retained-snapshot total. Edge omissions stay exact only inside the
-            # declared edge-source projection; the warning above separately keeps out-of-projection edges UNKNOWN.
-            hidden_c = max(0, n_explored - 12)
-            hidden_e = max(0, len(cooc) - 8) + graph.get("edges_omitted", 0)
-            if hidden_c or hidden_e:
-                edge_label = ("known retained-projection co-occurrence pair(s)"
-                              if graph.get("edge_source_complete") is not True
-                              else "more co-occurrence pair(s)")
-                lines.append(f"(+{hidden_c} more concept(s), {hidden_e} {edge_label} not shown)")
-            return "\n".join(lines)
-
-        if name == "cross_run_search":
-            from looplab.engine.claims import cross_run_retrieve
-            query = args.get("query")
-            if not isinstance(query, str) or not query.strip():
-                return "(cross-run tool error: query must be a non-empty string)"
-            if len(query) > 4000:
-                return "(cross-run tool error: query exceeds 4000 characters)"
-            intent = args.get("intent")
-            if intent is not None and not isinstance(intent, str):
-                return "(cross-run tool error: intent must be a string)"
-            if intent is not None and intent not in {"worked", "failed", "contested", "explore"}:
-                return "(cross-run tool error: intent must be worked, failed, contested, or explore)"
-            # Pass one fully-scoped snapshot. `_in_scope` already applies exact-task or bounded fingerprint
-            # transfer to every source; applying an additional exact scope_task filter here would silently
-            # discard the intentionally-related rows.
-            scoped_capsules = self._scoped_capsules()
-            scope_receipt = self._capsule_scope_receipt
-            r = cross_run_retrieve(self.dir, query, lessons=self._role_lessons(),
-                                   capsules=scoped_capsules,
-                                   research_claims=self._role_research_claims(),
-                                   intent=intent, structured=True,
-                                   scope_receipt=scope_receipt, _governance=_governance)
-            hits = r["results"][:8]
-            rc = r.get("receipt") or {}
-            source_complete = rc.get("source_complete") is True
-            scope_complete = rc.get("scope_complete") is True
-            claim_source = rc.get("claim_source") if isinstance(rc.get("claim_source"), dict) else {}
-            research_source = (rc.get("research_source")
-                               if isinstance(rc.get("research_source"), dict) else {})
-            claim_complete = claim_source.get("source_complete") is True
-            fully_complete = source_complete and scope_complete and claim_complete
-            if not hits:
-                lines = [("(no retained cross-run knowledge matched; partial source/scope is not proof "
-                          "that no matching concept exists or that no matching claim exists)")
-                         if not fully_complete
-                         else "(no cross-run knowledge matched)"]
-                if not source_complete:
-                    # a legacy/capped capsule may have omitted the matching concept entirely;
-                    # an empty retrieval is only absence from retained records, never proof of novelty.
-                    lines.append(_partial_source_warning(rc))
-                if not scope_complete:
-                    lines.append(_partial_scope_warning(rc))
-                if not claim_complete:
-                    lines.append(_partial_claim_source_warning(claim_source, research_source))
-                lines.append(f"[receipt corpus={_safe_text(rc.get('corpus_digest'), 40)} "
-                             f"intent={_safe_text(rc.get('intent'), 20)} hits=0 "
-                             f"source_complete={str(source_complete).lower()} "
-                             f"scope_complete={str(scope_complete).lower()} "
-                             f"claim_source_complete={str(claim_complete).lower()}]")
+        qt = _toks(idea)
+        scoped_capsules = self._scoped_capsules()
+        scope_receipt = self._capsule_scope_receipt
+        governance = _governance
+        ov, concept_rows = _portfolio_concept_overview_data(
+            scoped_capsules, aliases=governance["aliases"],
+            splits=governance["splits"])
+        # rank concepts by keyword overlap with the idea (fall back to most-explored)
+        # the six-row tool envelope is the only result cap. Search the full retained
+        # canonical set first so a query for public-overview row #513 cannot yield an exact-looking miss.
+        scored = sorted(concept_rows,
+                        key=lambda e: (-(len(qt & _toks(e["concept"])) if qt else 0), -e["n_runs"]))
+        hits = [e for e in scored if (not qt) or (qt & _toks(e["concept"]))][:6]
+        if not hits:
+            if (ov.get("source_complete") is not True
+                    or scope_receipt.get("scope_complete") is not True):
+                lines = ["(no retained scope-eligible prior run records these concepts; partial "
+                         "source/scope is not proof that no applicable run exists)"]
+                lines += _partial_warnings(source=ov, scope=scope_receipt)
                 return "\n".join(lines)
-            lines = [_partial_source_warning(rc)] if not source_complete else []
-            if not scope_complete:
-                lines.append(_partial_scope_warning(rc))
-            if not claim_complete:
-                lines.append(_partial_claim_source_warning(claim_source, research_source))
-            for h in hits:
-                if h["kind"] == "claim":
-                    contradicts = "; ".join(
-                        repr(_safe_text(statement, 180))
-                        for statement in (h.get("contradicts") or [])[:3])
-                    maturity = _safe_text(h.get("maturity"), 40)
-                    freshness = ""
-                    if maturity.startswith("operator-"):
-                        value = {True: "current", False: "stale-evidence", None: "unknown"}.get(
-                            h.get("decision_fresh"), "unknown")
-                        freshness = f"; maturity={maturity}; decision_freshness={value}"
-                    lines.append(f"[claim {h['epistemic']}: {h['n_support']}↑/{h['n_oppose']}↓; "
-                                 f"score={h.get('score')}] UNTRUSTED_MEMORY={_safe_text(h['text'], 160)!r}"
-                                 + freshness
-                                 + (f"; contradicts={contradicts}" if contradicts else ""))
-                else:
-                    count = (f"×{h['n_runs']} run(s)" if source_complete and scope_complete
-                             else f"retained in at least {h['n_runs']} run(s)")
-                    lines.append(f"[concept {count}; score={h.get('score')}] "
-                                 f"UNTRUSTED_MEMORY={_safe_text(h['text'], 120)!r}")
+            return "(no prior runs recorded these concepts yet)"
+        lines = _partial_warnings(source=ov, scope=scope_receipt)
+        for e in hits:
+            runs = ", ".join(
+                f"{_safe_text(r.get('run_id'), 100)!r}" +
+                (f"={r['metric']:g}" if isinstance(r.get("metric"), (int, float))
+                 and not isinstance(r.get("metric"), bool) else "")
+                for r in e["runs"][:5])
+            count_label = (f"tried in {e['n_runs']} run(s)"
+                           if scope_receipt.get("scope_complete") is True
+                           else f"retained in at least {e['n_runs']} scope-eligible run(s)")
+            lines.append(f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(e.get('concept'), 160)!r} — "
+                         f"{count_label}: {runs}")
+        return "TRIED BEFORE (untrusted persisted data; surface, not a block):\n" + "\n".join(lines)
+
+    def _tool_cross_run_claims(self, args: dict, _governance: dict | None) -> str:
+        from looplab.engine.claims import (_filter_claim_assessments, claims_for_memory,
+                                           _safe_claim_source_summary,
+                                           _safe_research_source_summary)
+        claims = claims_for_memory(
+            self.dir, lessons=self._role_lessons(),
+            research_claims=self._role_research_claims(),
+            decisions=_governance["decisions"], structured=True)
+        claim_source = _safe_claim_source_summary(getattr(claims, "claim_source", None)) or {}
+        research_source = _safe_research_source_summary(
+            getattr(claims, "research_source", None)) or {}
+        claims = _filter_claim_assessments(
+            claims, lambda c: c.get("maturity") != "operator-rejected")  # honor operator verdicts
+        contested = args.get("contested", False)
+        if not isinstance(contested, bool):
+            return "(cross-run tool error: contested must be a boolean)"
+        if contested:
+            claims = _filter_claim_assessments(
+                claims, lambda c: c["epistemic"] == "mixed")
+        query = args.get("query", "")
+        if not isinstance(query, str):
+            return "(cross-run tool error: query must be a string)"
+        if len(query) > 4000:
+            return "(cross-run tool error: query exceeds 4000 characters)"
+        qt = _toks(query)
+        if qt:
+            claims = _filter_claim_assessments(
+                claims, lambda c: bool(qt & _toks(c["statement"])))
+        kept_claim_ids = {id(c) for c in claims[:8]}
+        claims = _filter_claim_assessments(
+            claims, lambda c: id(c) in kept_claim_ids)
+        if not claims:
+            if claim_source.get("source_complete") is not True:
+                return ("(no retained matching cross-run claims; partial source is not proof of absence)\n"
+                        + _partial_claim_source_warning(claim_source, research_source))
+            return "(no matching cross-run claims yet)"
+        mark = {"supported": "supported", "refuted": "refuted", "mixed": "CONTESTED",
+                "inconclusive": "inconclusive"}
+        def _claim_line(c):
+            refs = (c.get("support") or [])[:4] + (c.get("oppose") or [])[:4]
+            evidence = "[" + ", ".join(repr(_safe_text(ref, 120)) for ref in refs) + "]"
+            contradicts = "; ".join(
+                repr(_safe_text(statement, 180)) for statement in (c.get("contradicts") or [])[:3])
+            maturity = _safe_text(c.get("maturity"), 40)
+            freshness = ""
+            if maturity.startswith("operator-"):
+                value = {True: "current", False: "stale-evidence", None: "unknown"}.get(
+                    c.get("decision_fresh"), "unknown")
+                freshness = f"; decision_freshness={value}"
+            return (f"[{mark.get(c['epistemic'], '?')}: {c['n_support']} for / "
+                    f"{c['n_oppose']} against] "
+                    f"UNTRUSTED_MEMORY={_safe_text(c['statement'], 240)!r}; "
+                    f"UNTRUSTED_MEMORY_EVIDENCE={evidence}; maturity={maturity!r}"
+                    + freshness
+                    + (f"; contradicts={contradicts}" if contradicts else ""))
+
+        lines = _partial_warnings(claims=(claim_source, research_source))
+        lines.extend(_claim_line(c) for c in claims)
+        return "\n".join(lines)
+
+    def _tool_cross_run_atlas(self, args: dict, _governance: dict | None) -> str:
+        from looplab.engine.claims import atlas_for_memory
+        scoped_capsules = self._scoped_capsules()
+        scope_receipt = self._capsule_scope_receipt
+        atlas = atlas_for_memory(self.dir, lessons=self._role_lessons(),
+                                 capsules=scoped_capsules,
+                                 research_claims=self._role_research_claims(), structured=True,
+                                 _governance=_governance)
+        lines = [f"Bounded live projection: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
+                 f"{atlas['n_claims']} claim record(s), {atlas['n_contested']} mixed-evidence."]
+        claim_source = atlas.get("claim_source") if isinstance(atlas.get("claim_source"), dict) else {}
+        research_source = (atlas.get("research_source")
+                           if isinstance(atlas.get("research_source"), dict) else {})
+        lines += _partial_warnings(claims=(claim_source, research_source))
+        if atlas["explored"]:
+            lines.append("Most explored: "
+                         + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(e.get('concept'), 120)!r}"
+                                     f"(×{e['n_runs']})" for e in atlas["explored"][:6]))
+        # PART V Phase 1: use the context pack's tendency projection, which was computed from the
+        # FULL overview before ``explored`` was display-capped. This keeps the assistant and the
+        # Researcher on one eligible population as well as one threshold: a qualifying concept
+        # ranked ninth by frequency must not disappear only from this twin surface.
+        coverage = (atlas.get("context_pack") or {}).get("coverage") or {}
+        lines += _partial_warnings(source=coverage, scope=scope_receipt)
+        helps = (coverage.get("helps") or []) if scope_receipt.get("scope_complete") is True else []
+        hurts = (coverage.get("hurts") or []) if scope_receipt.get("scope_complete") is True else []
+        if helps or hurts:
+            seg = []
+            if helps:
+                seg.append("tended to RANK BETTER: " + ", ".join(
+                    f"UNTRUSTED_MEMORY={_safe_text(c, 140)!r}" for c in helps[:6]))
+            if hurts:
+                seg.append("tended to RANK WORSE: " + ", ".join(
+                    f"UNTRUSTED_MEMORY={_safe_text(c, 140)!r}" for c in hurts[:6]))
+            lines.append("Cross-run rank tendency (better/worse half of each run; advisory, not a rule): "
+                         + "; ".join(seg))
+        if atlas["thin_coverage"]:
+            lines.append("Observed in one returned run (not a coverage gap): "
+                         + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(x, 120)!r}"
+                                     for x in atlas["thin_coverage"][:8]))
+        if atlas["contradictions"]:
+            lines.append("Mixed-evidence claim records: "
+                         + "; ".join(f"UNTRUSTED_MEMORY={_safe_text(c.get('statement'), 160)!r}"
+                                     for c in atlas["contradictions"][:4]))
+        projection_omitted = (
+            int(atlas.get("explored_omitted", 0) or 0),
+            int(atlas.get("thin_coverage_omitted", 0) or 0),
+            int(atlas.get("contradictions_omitted", 0) or 0),
+        )
+        if any(projection_omitted):
+            lines.append("Bounded Atlas projection omitted: "
+                         f"{projection_omitted[0]} concept observation(s), "
+                         f"{projection_omitted[1]} single-run observation(s), "
+                         f"{projection_omitted[2]} mixed-evidence record(s).")
+        return "\n".join(lines)
+
+    def _tool_cross_run_concept_map(self, args: dict, _governance: dict | None) -> str:
+        # PART V Phase 4/5: the caller-visible cross-run concept graph. Scoped to this run's task family when
+        # bound; portfolio-wide for an unbound (assistant/CLI) caller — the same _scoped_capsules the
+        # atlas uses. Aliases/splits honor the operator/steward taxonomy governance.
+        from looplab.engine.memory import portfolio_concept_graph
+        scoped_capsules = self._scoped_capsules()
+        scope_receipt = self._capsule_scope_receipt
+        governance = _governance
+        graph = portfolio_concept_graph(
+            scoped_capsules, aliases=governance["aliases"],
+            splits=governance["splits"])
+        # EXCLUDE the 0-run structural spine (materialized ancestor path prefixes) from the "explored"
+        # display — they are hierarchy scaffolding, not concepts any run touched.
+        explored = [e for e in graph["concepts"] if e.get("n_runs", 0) >= 1]
+        if not explored:
+            if (graph.get("source_complete") is not True
+                    or scope_receipt.get("scope_complete") is not True):
+                lines = ["(no retained scope-eligible cross-run concepts; partial source/scope is not "
+                         "proof of absence)"]
+                lines += _partial_warnings(source=graph, scope=scope_receipt)
+                return "\n".join(lines)
+            return "(no cross-run concepts yet)"
+        n_explored = int(graph.get("n_explored_concepts", len(explored)) or 0)
+        map_label = "Task-family concept map" if self._bound else "Portfolio-wide concept map"
+        if len(explored) < n_explored:
+            lines = [f"{map_label}: showing {len(explored)} of {n_explored} explored concept(s) "
+                     f"across {graph['n_runs']} run(s)."]
+        else:
+            lines = [f"{map_label}: {n_explored} explored concept(s) "
+                     f"across {graph['n_runs']} run(s)."]
+        lines += _partial_warnings(source=graph, scope=scope_receipt)
+        if graph.get("edge_source_complete") is not True:
+            lines.append("WARNING: PARTIAL edge source — hierarchy/co-occurrence edges cover only "
+                         f"{graph.get('edge_source_nodes_included', 0)} retained top graph node(s); "
+                         f"{graph.get('edge_source_nodes_pruned', 0)} node(s) were pruned and edges "
+                         "touching them are UNKNOWN.")
+        # the is_a hierarchy, surfaced as its top axes (the coarse structure of the map)
+        axes = sorted({str(e.get("concept") or "").split("/", 1)[0] for e in explored} - {""})
+        if axes:
+            lines.append("Axes: " + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(a, 80)!r}" for a in axes[:12]))
+        lines.append("Most explored: " + ", ".join(
+            f"UNTRUSTED_MEMORY={_safe_text(e.get('concept'), 120)!r}(×{e.get('n_runs', 0)})"
+            for e in explored[:12]))
+        cooc = [e for e in graph["edges"] if e.get("rel") == "co_occurs"]
+        if cooc:
+            lines.append("Concept pairs that co-occur across runs: " + "; ".join(
+                f"UNTRUSTED_MEMORY={_safe_text(e.get('src'), 80)!r}+UNTRUSTED_MEMORY="
+                f"{_safe_text(e.get('dst'), 80)!r}(×{e.get('n_runs', 0)})" for e in cooc[:8]))
+        # Concepts use the exact full retained-snapshot total. Edge omissions stay exact only inside the
+        # declared edge-source projection; the warning above separately keeps out-of-projection edges UNKNOWN.
+        hidden_c = max(0, n_explored - 12)
+        hidden_e = max(0, len(cooc) - 8) + graph.get("edges_omitted", 0)
+        if hidden_c or hidden_e:
+            edge_label = ("known retained-projection co-occurrence pair(s)"
+                          if graph.get("edge_source_complete") is not True
+                          else "more co-occurrence pair(s)")
+            lines.append(f"(+{hidden_c} more concept(s), {hidden_e} {edge_label} not shown)")
+        return "\n".join(lines)
+
+    def _tool_cross_run_search(self, args: dict, _governance: dict | None) -> str:
+        from looplab.engine.claims import cross_run_retrieve
+        query = args.get("query")
+        if not isinstance(query, str) or not query.strip():
+            return "(cross-run tool error: query must be a non-empty string)"
+        if len(query) > 4000:
+            return "(cross-run tool error: query exceeds 4000 characters)"
+        intent = args.get("intent")
+        if intent is not None and not isinstance(intent, str):
+            return "(cross-run tool error: intent must be a string)"
+        if intent is not None and intent not in {"worked", "failed", "contested", "explore"}:
+            return "(cross-run tool error: intent must be worked, failed, contested, or explore)"
+        # Pass one fully-scoped snapshot. `_in_scope` already applies exact-task or bounded fingerprint
+        # transfer to every source; applying an additional exact scope_task filter here would silently
+        # discard the intentionally-related rows.
+        scoped_capsules = self._scoped_capsules()
+        scope_receipt = self._capsule_scope_receipt
+        r = cross_run_retrieve(self.dir, query, lessons=self._role_lessons(),
+                               capsules=scoped_capsules,
+                               research_claims=self._role_research_claims(),
+                               intent=intent, structured=True,
+                               scope_receipt=scope_receipt, _governance=_governance)
+        hits = r["results"][:8]
+        rc = r.get("receipt") or {}
+        source_complete = rc.get("source_complete") is True
+        scope_complete = rc.get("scope_complete") is True
+        claim_source = rc.get("claim_source") if isinstance(rc.get("claim_source"), dict) else {}
+        research_source = (rc.get("research_source")
+                           if isinstance(rc.get("research_source"), dict) else {})
+        claim_complete = claim_source.get("source_complete") is True
+        fully_complete = source_complete and scope_complete and claim_complete
+        if not hits:
+            lines = [("(no retained cross-run knowledge matched; partial source/scope is not proof "
+                      "that no matching concept exists or that no matching claim exists)")
+                     if not fully_complete
+                     else "(no cross-run knowledge matched)"]
+            # a legacy/capped capsule may have omitted the matching concept entirely;
+            # an empty retrieval is only absence from retained records, never proof of novelty.
+            lines += _partial_warnings(source=rc, scope=rc,
+                                       claims=(claim_source, research_source))
             lines.append(f"[receipt corpus={_safe_text(rc.get('corpus_digest'), 40)} "
-                         f"intent={_safe_text(rc.get('intent'), 20)} hits={rc.get('n_hits', len(hits))} "
+                         f"intent={_safe_text(rc.get('intent'), 20)} hits=0 "
                          f"source_complete={str(source_complete).lower()} "
                          f"scope_complete={str(scope_complete).lower()} "
                          f"claim_source_complete={str(claim_complete).lower()}]")
             return "\n".join(lines)
+        lines = _partial_warnings(source=rc, scope=rc, claims=(claim_source, research_source))
+        for h in hits:
+            if h["kind"] == "claim":
+                contradicts = "; ".join(
+                    repr(_safe_text(statement, 180))
+                    for statement in (h.get("contradicts") or [])[:3])
+                maturity = _safe_text(h.get("maturity"), 40)
+                freshness = ""
+                if maturity.startswith("operator-"):
+                    value = {True: "current", False: "stale-evidence", None: "unknown"}.get(
+                        h.get("decision_fresh"), "unknown")
+                    freshness = f"; maturity={maturity}; decision_freshness={value}"
+                lines.append(f"[claim {h['epistemic']}: {h['n_support']}↑/{h['n_oppose']}↓; "
+                             f"score={h.get('score')}] UNTRUSTED_MEMORY={_safe_text(h['text'], 160)!r}"
+                             + freshness
+                             + (f"; contradicts={contradicts}" if contradicts else ""))
+            else:
+                count = (f"×{h['n_runs']} run(s)" if source_complete and scope_complete
+                         else f"retained in at least {h['n_runs']} run(s)")
+                lines.append(f"[concept {count}; score={h.get('score')}] "
+                             f"UNTRUSTED_MEMORY={_safe_text(h['text'], 120)!r}")
+        lines.append(f"[receipt corpus={_safe_text(rc.get('corpus_digest'), 40)} "
+                     f"intent={_safe_text(rc.get('intent'), 20)} hits={rc.get('n_hits', len(hits))} "
+                     f"source_complete={str(source_complete).lower()} "
+                     f"scope_complete={str(scope_complete).lower()} "
+                     f"claim_source_complete={str(claim_complete).lower()}]")
+        return "\n".join(lines)
 
-        if name == "similar_runs":
-            try:
-                limit = int(args.get("limit") or 10)
-            except (TypeError, ValueError):
-                limit = 10
-            limit = max(1, min(limit, 50))
-            from looplab.engine.concept_registry import canonicalize_concepts
+    def _tool_similar_runs(self, args: dict, _governance: dict | None) -> str:
+        try:
+            limit = int(args.get("limit") or 10)
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 50))
+        from looplab.engine.concept_registry import canonicalize_concepts
 
-            # visibility and identity are one retrieval boundary. A bound model may compare
-            # only `_scoped_capsules()` (task family + compatible direction), and both sides must use the
-            # SAME locked taxonomy snapshot so an alias/split/purge cannot change just one Jaccard operand.
-            taxonomy = _governance
-            aliases, splits = taxonomy["aliases"], taxonomy["splits"]
-            mine = set(canonicalize_concepts(
-                sorted(self._concepts), aliases=aliases, splits=splits))
-            caps = self._scoped_capsules()
-            scope_receipt = self._capsule_scope_receipt
-            from looplab.engine.memory import _capsule_source_summary, _filter_capsule_rows
-            prior_caps = _filter_capsule_rows(
-                caps, lambda cap: (not self._run_id
-                                   or str(cap.get("run_id") or "") != self._run_id))
-            source_summary = _capsule_source_summary(prior_caps)
-            scope = "bound_task_family" if self._bound else "portfolio"
-            direction = self._direction if self._bound else "any"
+        # visibility and identity are one retrieval boundary. A bound model may compare
+        # only `_scoped_capsules()` (task family + compatible direction), and both sides must use the
+        # SAME locked taxonomy snapshot so an alias/split/purge cannot change just one Jaccard operand.
+        taxonomy = _governance
+        aliases, splits = taxonomy["aliases"], taxonomy["splits"]
+        mine = set(canonicalize_concepts(
+            sorted(self._concepts), aliases=aliases, splits=splits))
+        caps = self._scoped_capsules()
+        scope_receipt = self._capsule_scope_receipt
+        from looplab.engine.memory import _capsule_source_summary, _filter_capsule_rows
+        prior_caps = _filter_capsule_rows(
+            caps, lambda cap: (not self._run_id
+                               or str(cap.get("run_id") or "") != self._run_id))
+        source_summary = _capsule_source_summary(prior_caps)
+        scope = "bound_task_family" if self._bound else "portfolio"
+        direction = self._direction if self._bound else "any"
 
-            def _receipt(*, matched: int, returned: int) -> str:
-                return (f"[receipt scope={scope} direction={direction or 'invalid'} "
-                        f"eligible_capsules={len(prior_caps)} matched={matched} returned={returned} "
-                        f"scope_complete={str(scope_receipt.get('scope_complete') is True).lower()} "
-                        f"scope_unknown_capsules={scope_receipt.get('scope_unknown_capsules', 0)} "
-                        f"taxonomy_revision={taxonomy['concept_governance_revision']}]")
+        def _receipt(*, matched: int, returned: int) -> str:
+            return (f"[receipt scope={scope} direction={direction or 'invalid'} "
+                    f"eligible_capsules={len(prior_caps)} matched={matched} returned={returned} "
+                    f"scope_complete={str(scope_receipt.get('scope_complete') is True).lower()} "
+                    f"scope_unknown_capsules={scope_receipt.get('scope_unknown_capsules', 0)} "
+                    f"taxonomy_revision={taxonomy['concept_governance_revision']}]")
 
-            if self._concept_projection_status == "unavailable":
-                return ("(current run concepts are UNAVAILABLE; similar_runs cannot infer overlap from "
-                        "a fallback empty set)\n" + self._concept_projection_note() + "\n"
-                        + _receipt(matched=0, returned=0))
-            partial_note = (self._concept_projection_note() + "\n"
-                            if self._concept_projection_status == "partial" else "")
-            if not mine and self._concept_projection_status == "partial":
-                return (partial_note
-                        + "(no reliable current-run concepts remain; this is not a complete zero)\n"
-                        + _receipt(matched=0, returned=0))
-            if not mine:
-                return ("(this run has no concepts yet after canonical taxonomy governance — "
-                        "similar_runs ranks by shared concept overlap)\n"
-                        + _receipt(matched=0, returned=0))
-            ranked = []
-            for cap in prior_caps:
-                rid = str(cap.get("run_id") or "")
-                if not rid:
-                    continue
-                theirs = set(canonicalize_concepts(
-                    cap.get("concepts") or [], aliases=aliases, splits=splits))
-                shared = mine & theirs
-                if not shared:
-                    continue
-                jac = len(shared) / len(mine | theirs)
-                ranked.append((jac, len(shared), rid, sorted(shared)))
-            if not ranked and self._concept_projection_status == "partial":
-                lines = [partial_note.rstrip(),
-                         "(no prior run shares a reliable concept with this one among retained capsules)"]
-                if source_summary.get("source_complete") is not True:
-                    lines.append(_partial_source_warning(source_summary))
-                if scope_receipt.get("scope_complete") is not True:
-                    lines.append(_partial_scope_warning(scope_receipt))
-                lines.append(_receipt(matched=0, returned=0))
-                return "\n".join(lines)
-            if not ranked:
-                lines = ["(no prior run shares a retained concept with this one)"]
-                if source_summary.get("source_complete") is not True:
-                    lines.append(_partial_source_warning(source_summary))
-                if scope_receipt.get("scope_complete") is not True:
-                    lines[0] = ("(no scope-eligible prior run shares a retained concept with this one; "
-                                "partial scope is not proof of absence)")
-                    lines.append(_partial_scope_warning(scope_receipt))
-                lines.append(_receipt(matched=0, returned=0))
-                return "\n".join(lines)
-            ranked.sort(key=lambda x: (-x[0], -x[1], x[2]))
-            returned = min(len(ranked), limit)
-            lines = ([partial_note.rstrip()] if partial_note else [])
-            lines.append(f"{returned} prior run(s) most similar by shared concepts (advisory):")
+        if self._concept_projection_status == "unavailable":
+            return ("(current run concepts are UNAVAILABLE; similar_runs cannot infer overlap from "
+                    "a fallback empty set)\n" + self._concept_projection_note() + "\n"
+                    + _receipt(matched=0, returned=0))
+        partial_note = (self._concept_projection_note() + "\n"
+                        if self._concept_projection_status == "partial" else "")
+        if not mine and self._concept_projection_status == "partial":
+            return (partial_note
+                    + "(no reliable current-run concepts remain; this is not a complete zero)\n"
+                    + _receipt(matched=0, returned=0))
+        if not mine:
+            return ("(this run has no concepts yet after canonical taxonomy governance — "
+                    "similar_runs ranks by shared concept overlap)\n"
+                    + _receipt(matched=0, returned=0))
+        ranked = []
+        for cap in prior_caps:
+            rid = str(cap.get("run_id") or "")
+            if not rid:
+                continue
+            theirs = set(canonicalize_concepts(
+                cap.get("concepts") or [], aliases=aliases, splits=splits))
+            shared = mine & theirs
+            if not shared:
+                continue
+            jac = len(shared) / len(mine | theirs)
+            ranked.append((jac, len(shared), rid, sorted(shared)))
+        if not ranked and self._concept_projection_status == "partial":
+            lines = [partial_note.rstrip(),
+                     "(no prior run shares a reliable concept with this one among retained capsules)"]
+            lines += _partial_warnings(source=source_summary, scope=scope_receipt)
+            lines.append(_receipt(matched=0, returned=0))
+            return "\n".join(lines)
+        if not ranked:
+            lines = ["(no prior run shares a retained concept with this one)"]
             if source_summary.get("source_complete") is not True:
                 lines.append(_partial_source_warning(source_summary))
             if scope_receipt.get("scope_complete") is not True:
+                lines[0] = ("(no scope-eligible prior run shares a retained concept with this one; "
+                            "partial scope is not proof of absence)")
                 lines.append(_partial_scope_warning(scope_receipt))
-            for jac, n, rid, shared in ranked[:limit]:
-                preview = ", ".join(
-                    f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(concept, 160)!r}"
-                    for concept in shared[:8]) + ("…" if len(shared) > 8 else "")
-                lines.append(f"  UNTRUSTED_MEMORY_RUN={_safe_text(rid, 100)!r}: "
-                             f"{n} shared ({jac:.0%}) — {preview}")
-            lines.append("Dig into one with cross_run_concept_map / cross_run_search.")
-            lines.append(_receipt(matched=len(ranked), returned=returned))
+            lines.append(_receipt(matched=0, returned=0))
             return "\n".join(lines)
+        ranked.sort(key=lambda x: (-x[0], -x[1], x[2]))
+        returned = min(len(ranked), limit)
+        lines = ([partial_note.rstrip()] if partial_note else [])
+        lines.append(f"{returned} prior run(s) most similar by shared concepts (advisory):")
+        lines += _partial_warnings(source=source_summary, scope=scope_receipt)
+        for jac, n, rid, shared in ranked[:limit]:
+            preview = ", ".join(
+                f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(concept, 160)!r}"
+                for concept in shared[:8]) + ("…" if len(shared) > 8 else "")
+            lines.append(f"  UNTRUSTED_MEMORY_RUN={_safe_text(rid, 100)!r}: "
+                         f"{n} shared ({jac:.0%}) — {preview}")
+        lines.append("Dig into one with cross_run_concept_map / cross_run_search.")
+        lines.append(_receipt(matched=len(ranked), returned=returned))
+        return "\n".join(lines)
 
-        if name == "find_concept_slugs":
-            from collections import Counter
-            raw_limit = args.get("limit")
-            if raw_limit is None:
-                limit = 12
-            elif isinstance(raw_limit, bool) or not isinstance(raw_limit, int):
-                return "(cross-run tool error: limit must be an integer)"
-            else:
-                limit = raw_limit
-            limit = max(1, min(limit, 50))
-            raw_query = args.get("query")
-            if raw_query is not None and not isinstance(raw_query, str):
-                return "(cross-run tool error: query must be a string)"
-            if isinstance(raw_query, str) and len(raw_query) > 256:
-                return "(cross-run tool error: query exceeds 256 characters)"
-            query = (raw_query or "").strip()
-            raw_scope = args.get("scope")
-            if raw_scope is not None and not isinstance(raw_scope, str):
-                return "(cross-run tool error: scope must be a string)"
-            want = (raw_scope or "all").strip().lower()
-            if want not in ("all", "own", "cross", "global"):
-                return "(cross-run tool error: scope must be all, own, cross, or global)"
-            # Vocabulary = every slug in prior concept capsules (available from node 0) + this run's live
-            # concepts (which only appear after the first evaluated node). Each slug gets a SCOPE:
-            #   own    — in THIS run's concept set
-            #   cross  — in a prior run that shares >=1 concept with this one (same direction)
-            #   global — only in unrelated prior runs (the wider world map; hunt cross-direction synergy here)
-            from looplab.engine.concept_registry import canonicalize_concepts
-            from looplab.engine.memory import _capsule_source_summary, _filter_capsule_rows
+    def _tool_find_concept_slugs(self, args: dict, _governance: dict | None) -> str:
+        from collections import Counter
+        raw_limit = args.get("limit")
+        if raw_limit is None:
+            limit = 12
+        elif isinstance(raw_limit, bool) or not isinstance(raw_limit, int):
+            return "(cross-run tool error: limit must be an integer)"
+        else:
+            limit = raw_limit
+        limit = max(1, min(limit, 50))
+        raw_query = args.get("query")
+        if raw_query is not None and not isinstance(raw_query, str):
+            return "(cross-run tool error: query must be a string)"
+        if isinstance(raw_query, str) and len(raw_query) > 256:
+            return "(cross-run tool error: query exceeds 256 characters)"
+        query = (raw_query or "").strip()
+        raw_scope = args.get("scope")
+        if raw_scope is not None and not isinstance(raw_scope, str):
+            return "(cross-run tool error: scope must be a string)"
+        want = (raw_scope or "all").strip().lower()
+        if want not in ("all", "own", "cross", "global"):
+            return "(cross-run tool error: scope must be all, own, cross, or global)"
+        # Vocabulary = every slug in prior concept capsules (available from node 0) + this run's live
+        # concepts (which only appear after the first evaluated node). Each slug gets a SCOPE:
+        #   own    — in THIS run's concept set
+        #   cross  — in a prior run that shares >=1 concept with this one (same direction)
+        #   global — only in unrelated prior runs (the wider world map; hunt cross-direction synergy here)
+        from looplab.engine.concept_registry import canonicalize_concepts
+        from looplab.engine.memory import _capsule_source_summary, _filter_capsule_rows
 
-            # identity, cross-run visibility, and display trust are one boundary. Resolve every
-            # operand through ONE governance snapshot; only a same-direction task-family capsule can make a
-            # run "cross", while the explicitly requested global tier remains the broader synergy surface.
-            taxonomy = _governance
-            aliases, splits = taxonomy["aliases"], taxonomy["splits"]
-            caps = self._all_capsules()
-            prior_caps = _filter_capsule_rows(
-                caps, lambda cap: (not self._run_id
-                                   or str(cap.get("run_id") or "") != self._run_id))
-            source_summary = _capsule_source_summary(prior_caps)
-            scoped_caps, unknown_scope_caps, scope_receipt = self._partition_capsules(prior_caps)
-            mine = set(canonicalize_concepts(
-                sorted(self._concepts), aliases=aliases, splits=splits))
-            canonical_by_capsule: dict[int, set[str]] = {
-                id(cap): set(canonicalize_concepts(
-                    cap.get("concepts") or [], aliases=aliases, splits=splits))
-                for cap in prior_caps
-            }
-            cross_run_ids: set[str] = set()
-            for cap in scoped_caps:
-                rid = str(cap.get("run_id") or "")
-                if rid and mine & canonical_by_capsule[id(cap)]:
-                    cross_run_ids.add(rid)
-            unknown_scope_run_ids = {
-                str(cap.get("run_id") or "") for cap in unknown_scope_caps
-                if str(cap.get("run_id") or "")
-            }
-            vocab: dict[str, dict] = {}
-            for cap in prior_caps:
-                rid = str(cap.get("run_id") or "")
-                if not rid:
-                    continue
-                bucket = ("cross_runs" if rid in cross_run_ids else
-                          "unknown_runs" if rid in unknown_scope_run_ids else "global_runs")
-                for concept in canonical_by_capsule[id(cap)]:
-                    meta = vocab.setdefault(
-                        concept, {"cross_runs": set(), "global_runs": set(),
-                                  "unknown_runs": set(), "own": False})
-                    meta[bucket].add(rid)
-            for concept in mine:
-                vocab.setdefault(
+        # identity, cross-run visibility, and display trust are one boundary. Resolve every
+        # operand through ONE governance snapshot; only a same-direction task-family capsule can make a
+        # run "cross", while the explicitly requested global tier remains the broader synergy surface.
+        taxonomy = _governance
+        aliases, splits = taxonomy["aliases"], taxonomy["splits"]
+        caps = self._all_capsules()
+        prior_caps = _filter_capsule_rows(
+            caps, lambda cap: (not self._run_id
+                               or str(cap.get("run_id") or "") != self._run_id))
+        source_summary = _capsule_source_summary(prior_caps)
+        scoped_caps, unknown_scope_caps, scope_receipt = self._partition_capsules(prior_caps)
+        mine = set(canonicalize_concepts(
+            sorted(self._concepts), aliases=aliases, splits=splits))
+        canonical_by_capsule: dict[int, set[str]] = {
+            id(cap): set(canonicalize_concepts(
+                cap.get("concepts") or [], aliases=aliases, splits=splits))
+            for cap in prior_caps
+        }
+        cross_run_ids: set[str] = set()
+        for cap in scoped_caps:
+            rid = str(cap.get("run_id") or "")
+            if rid and mine & canonical_by_capsule[id(cap)]:
+                cross_run_ids.add(rid)
+        unknown_scope_run_ids = {
+            str(cap.get("run_id") or "") for cap in unknown_scope_caps
+            if str(cap.get("run_id") or "")
+        }
+        vocab: dict[str, dict] = {}
+        for cap in prior_caps:
+            rid = str(cap.get("run_id") or "")
+            if not rid:
+                continue
+            bucket = ("cross_runs" if rid in cross_run_ids else
+                      "unknown_runs" if rid in unknown_scope_run_ids else "global_runs")
+            for concept in canonical_by_capsule[id(cap)]:
+                meta = vocab.setdefault(
                     concept, {"cross_runs": set(), "global_runs": set(),
-                              "unknown_runs": set(), "own": False})["own"] = True
+                              "unknown_runs": set(), "own": False})
+                meta[bucket].add(rid)
+        for concept in mine:
+            vocab.setdefault(
+                concept, {"cross_runs": set(), "global_runs": set(),
+                          "unknown_runs": set(), "own": False})["own"] = True
 
-            def _scope(meta: dict) -> str:
-                if meta["own"]:
-                    return "own"
-                if meta["cross_runs"]:
-                    return "cross"
-                if meta["unknown_runs"]:
-                    return "unknown"
-                return ("global" if self._concept_projection_status == "complete"
-                        else "unknown")
+        def _scope(meta: dict) -> str:
+            if meta["own"]:
+                return "own"
+            if meta["cross_runs"]:
+                return "cross"
+            if meta["unknown_runs"]:
+                return "unknown"
+            return ("global" if self._concept_projection_status == "complete"
+                    else "unknown")
 
-            def _run_count(meta: dict) -> int:
-                return ((1 if meta["own"] else 0)
-                        + len(meta["cross_runs"] | meta["global_runs"] | meta["unknown_runs"]))
+        def _run_count(meta: dict) -> int:
+            return ((1 if meta["own"] else 0)
+                    + len(meta["cross_runs"] | meta["global_runs"] | meta["unknown_runs"]))
 
-            def _receipt(*, candidates: int, returned: int) -> str:
-                direction = self._direction if self._bound else "any"
-                return (f"[receipt requested_scope={want} direction={direction or 'invalid'} "
-                        f"prior_capsules={len(prior_caps)} scoped_capsules={len(scoped_caps)} "
-                        f"scope_complete={str(scope_receipt.get('scope_complete') is True).lower()} "
-                        f"scope_unknown_capsules={scope_receipt.get('scope_unknown_capsules', 0)} "
-                        f"candidates={candidates} returned={returned} "
-                        f"taxonomy_revision={taxonomy['concept_governance_revision']}]")
+        def _receipt(*, candidates: int, returned: int) -> str:
+            direction = self._direction if self._bound else "any"
+            return (f"[receipt requested_scope={want} direction={direction or 'invalid'} "
+                    f"prior_capsules={len(prior_caps)} scoped_capsules={len(scoped_caps)} "
+                    f"scope_complete={str(scope_receipt.get('scope_complete') is True).lower()} "
+                    f"scope_unknown_capsules={scope_receipt.get('scope_unknown_capsules', 0)} "
+                    f"candidates={candidates} returned={returned} "
+                    f"taxonomy_revision={taxonomy['concept_governance_revision']}]")
 
-            concept_dependent_scope = want in {"own", "cross"}
-            capsule_scope_uncertain = (want in {"all", "cross", "global"}
-                                       and scope_receipt.get("scope_complete") is not True)
-            if concept_dependent_scope and self._concept_projection_status == "unavailable":
-                return (f"(current run concepts are UNAVAILABLE; scope '{want}' cannot be computed from "
-                        "a fallback empty set)\n" + self._concept_projection_note() + "\n"
-                        + _receipt(candidates=0, returned=0))
-            partial_note = (self._concept_projection_note() + "\n"
-                            if ((concept_dependent_scope
-                                 and self._concept_projection_status == "partial")
-                                or (want in {"all", "global"}
-                                    and self._concept_projection_status != "complete")) else "")
-            if want != "all":
-                if want == "global":
-                    # prior vocabulary stays usable; only its relationship to this
-                    # run is unknown until current membership materializes.
-                    vocab = {s: m for s, m in vocab.items()
-                             if not m["own"] and not m["cross_runs"]}
-                else:
-                    vocab = {s: m for s, m in vocab.items() if _scope(m) == want}
-            if not vocab:
-                message = (f"(no concept slugs in scope '{want}'"
-                           + ("; this run has no concepts yet" if want == "own" else "") + ")")
-                lines = ([partial_note.rstrip()] if partial_note else [])
-                lines.append(message)
-                if want != "own" and source_summary.get("source_complete") is not True:
-                    lines.append(_partial_source_warning(source_summary))
-                if capsule_scope_uncertain:
-                    lines.append(_partial_scope_warning(scope_receipt))
-                lines.append(_receipt(candidates=0, returned=0))
-                return "\n".join(lines)
-            if not query:
-                by_axis = Counter(s.split("/", 1)[0] for s in vocab)
-                lines = [f"Known concept AXES in scope '{want}' ({len(vocab)} slugs) — "
-                         "search within one: find_concept_slugs('<your concept>'):"]
-                ordered_axes = sorted(by_axis.items(), key=lambda item: (-item[1], item[0]))
-                # the validated response limit applies to the no-query axis listing too; many
-                # one-off axes must not bypass the tool's hard output bound.
-                lines += [f"  UNTRUSTED_MEMORY_AXIS={_safe_text(axis, 80)!r} ({count} slugs)"
-                          for axis, count in ordered_axes[:limit]]
-                if partial_note:
-                    lines.insert(0, partial_note.rstrip())
-                if want != "own" and source_summary.get("source_complete") is not True:
-                    lines.append(_partial_source_warning(source_summary))
-                if capsule_scope_uncertain:
-                    lines.append(_partial_scope_warning(scope_receipt))
-                # Candidate/returned units must match: this branch returns axes, while the heading already
-                # reports the underlying slug vocabulary size.
-                lines.append(_receipt(candidates=len(ordered_axes), returned=min(len(ordered_axes), limit)))
-                return "\n".join(lines)
-            qn = _slug_norm(query)
-            _rank = {"own": 0, "cross": 1, "global": 2, "unknown": 2}
-            scored = []
-            for slug, meta in vocab.items():
-                score = _slug_score(qn, slug)
-                if score >= _SLUG_MATCH_FLOOR:
-                    scored.append((_rank[_scope(meta)], -score, slug, meta))
-            if (not scored and partial_note
-                    and self._concept_projection_status == "partial"):
-                lines = [partial_note.rstrip(),
-                         f"No reliable existing slug matches {_safe_text(query, 256)!r} in scope '{want}'. "
-                         "Because the current projection is PARTIAL, this is not proof that the slug is new."]
-                if want != "own" and source_summary.get("source_complete") is not True:
-                    lines.append(_partial_source_warning(source_summary))
-                if capsule_scope_uncertain:
-                    lines.append(_partial_scope_warning(scope_receipt))
-                lines.append(_receipt(candidates=0, returned=0))
-                return "\n".join(lines)
-            if not scored:
-                if ((want != "own" and source_summary.get("source_complete") is not True)
-                        or capsule_scope_uncertain):
-                    warnings = []
-                    if want != "own" and source_summary.get("source_complete") is not True:
-                        warnings.append(_partial_source_warning(source_summary))
-                    if capsule_scope_uncertain:
-                        warnings.append(_partial_scope_warning(scope_receipt))
-                    return (f"No RETAINED slug matches {_safe_text(query, 256)!r} in scope '{want}'; "
-                            "the capsule source/scope is partial, so this is not proof the concept is new.\n"
-                            + "\n".join(warnings) + "\n"
-                            + _receipt(candidates=0, returned=0))
-                return (f"No existing slug matches {_safe_text(query, 256)!r} in scope '{want}' — "
-                        "it looks NEW. Mint it as `axis/name` (reuse an existing AXIS if one fits; call "
-                        "with no query to list axes).\n" + _receipt(candidates=0, returned=0))
-            # Sort by the ORDERABLE prefix only (rank, -score, slug). The 4th tuple element is a `meta`
-            # dict — never put it in the comparison key: `scored.sort()` would raise TypeError the moment
-            # the first three tie, and execute() would swallow it into "(cross-run tool unavailable)".
-            scored.sort(key=lambda t: (t[0], t[1], t[2]))   # own < cross < global; then best match first
-
-            _label = {"own": "this run", "cross": "cross-run", "global": "global map",
-                      "unknown": "relation to current run unknown"}
-            order = ("own→cross→global" if (self._concept_projection_status == "complete"
-                                             and scope_receipt.get("scope_complete") is True)
-                     else "own→cross→unknown")
-            lines = [f"Existing slugs matching {_safe_text(query, 256)!r} "
-                     f"({order}) — REUSE the closest, don't respell "
-                     "(call concept_card('<slug>') to decode one + see its track record):"]
+        concept_dependent_scope = want in {"own", "cross"}
+        capsule_scope_uncertain = (want in {"all", "cross", "global"}
+                                   and scope_receipt.get("scope_complete") is not True)
+        if concept_dependent_scope and self._concept_projection_status == "unavailable":
+            return (f"(current run concepts are UNAVAILABLE; scope '{want}' cannot be computed from "
+                    "a fallback empty set)\n" + self._concept_projection_note() + "\n"
+                    + _receipt(candidates=0, returned=0))
+        partial_note = (self._concept_projection_note() + "\n"
+                        if ((concept_dependent_scope
+                             and self._concept_projection_status == "partial")
+                            or (want in {"all", "global"}
+                                and self._concept_projection_status != "complete")) else "")
+        if want != "all":
+            if want == "global":
+                # prior vocabulary stays usable; only its relationship to this
+                # run is unknown until current membership materializes.
+                vocab = {s: m for s, m in vocab.items()
+                         if not m["own"] and not m["cross_runs"]}
+            else:
+                vocab = {s: m for s, m in vocab.items() if _scope(m) == want}
+        if not vocab:
+            message = (f"(no concept slugs in scope '{want}'"
+                       + ("; this run has no concepts yet" if want == "own" else "") + ")")
+            lines = ([partial_note.rstrip()] if partial_note else [])
+            lines.append(message)
+            lines += _partial_warnings(source=None if want == "own" else source_summary,
+                                       scope=scope_receipt if capsule_scope_uncertain else None)
+            lines.append(_receipt(candidates=0, returned=0))
+            return "\n".join(lines)
+        if not query:
+            by_axis = Counter(s.split("/", 1)[0] for s in vocab)
+            lines = [f"Known concept AXES in scope '{want}' ({len(vocab)} slugs) — "
+                     "search within one: find_concept_slugs('<your concept>'):"]
+            ordered_axes = sorted(by_axis.items(), key=lambda item: (-item[1], item[0]))
+            # the validated response limit applies to the no-query axis listing too; many
+            # one-off axes must not bypass the tool's hard output bound.
+            lines += [f"  UNTRUSTED_MEMORY_AXIS={_safe_text(axis, 80)!r} ({count} slugs)"
+                      for axis, count in ordered_axes[:limit]]
             if partial_note:
                 lines.insert(0, partial_note.rstrip())
-            if want != "own" and source_summary.get("source_complete") is not True:
-                lines.append(_partial_source_warning(source_summary))
-            if capsule_scope_uncertain:
-                lines.append(_partial_scope_warning(scope_receipt))
-            for _r, negscore, slug, meta in scored[:limit]:
-                lines.append(f"  [{_label[_scope(meta)]}] "
-                             f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(slug, 160)!r} "
-                             f"[{_run_count(meta)} run(s)] match={-negscore:.0%}")
-            lines.append(_receipt(candidates=len(scored), returned=min(len(scored), limit)))
+            lines += _partial_warnings(source=None if want == "own" else source_summary,
+                                       scope=scope_receipt if capsule_scope_uncertain else None)
+            # Candidate/returned units must match: this branch returns axes, while the heading already
+            # reports the underlying slug vocabulary size.
+            lines.append(_receipt(candidates=len(ordered_axes), returned=min(len(ordered_axes), limit)))
             return "\n".join(lines)
-
-        if name == "concept_card":
-            raw_slug = args.get("slug")
-            if not isinstance(raw_slug, str) or not raw_slug.strip():
-                return "(cross-run tool error: slug must be a non-empty string)"
-            if len(raw_slug) > 256:
-                return "(cross-run tool error: slug exceeds 256 characters)"
-            slug_in = raw_slug.strip()
-            from looplab.engine.concept_registry import (canonicalize_concepts,
-                                                         normalize_key, resolve_slug)
-            from looplab.engine.memory import (_capsule_source_summary,
-                                               _portfolio_concept_overview_data,
-                                               _filter_capsule_rows, concept_profit_tendencies,
-                                               portfolio_concept_graph)
-
-            taxonomy = _governance
-            aliases, splits = taxonomy["aliases"], taxonomy["splits"]
-            caps = self._all_capsules()
-            prior_caps = _filter_capsule_rows(
-                caps, lambda c: (not self._run_id
-                                 or str(c.get("run_id") or "") != self._run_id))
-            source_summary = _capsule_source_summary(prior_caps)
-            scoped_caps, _unknown_scope_caps, scope_receipt = self._partition_capsules(prior_caps)
-            # The DECODE vocabulary is GLOBAL (a concept means the same thing everywhere — the user's
-            # "world concept map"); the trustworthy relative-rank TENDENCY below is task-family scoped.
-            mine = set(canonicalize_concepts(sorted(self._concepts), aliases=aliases, splits=splits))
-            # keep the per-capsule canonical set. Besides avoiding repeated governance work,
-            # this lets a card compute the requested concept's counts from every matching run instead of
-            # looking it up in portfolio_concept_overview's intentionally display-capped top 512 rows.
-            canonical_caps = [
-                (cap, set(canonicalize_concepts(
-                    cap.get("concepts") or [], aliases=aliases, splits=splits)))
-                for cap in prior_caps
-            ]
-            global_vocab: set[str] = set(mine)
-            for _cap, concepts in canonical_caps:
-                global_vocab |= concepts
-
-            # Resolve the input to a known canonical concept. Exact-canonical first; then, only for an
-            # ESSENTIALLY-EXACT respelling (`rdrop` -> `regularization/r-drop`), decode it directly. A weaker
-            # fuzzy neighbour is NOT rendered as an authoritative card (that would print CNN's whole track
-            # record for `nn`); it is offered as a ranked "did you mean" list, mirroring find_concept_slugs,
-            # so the agent picks the exact slug. Purge is checked BEFORE any fuzzy step: a slug whose alias
-            # chain ends at a tombstone is deliberately retired and must never resolve to a live look-alike.
-            cc = canonicalize_concepts([slug_in], aliases=aliases, splits=splits)
-            canon = None
-            resolution = "exact"
-            if cc and cc[0] in global_vocab:
-                canon = cc[0]
-            elif normalize_key(slug_in) in aliases and resolve_slug(slug_in, aliases) is None:
-                return (f"Concept {_safe_text(slug_in, 120)!r} has been PURGED from the taxonomy — "
-                        "do not reuse it; mint a fresh `axis/name` if you need the idea.")
-            else:
-                qn = _slug_norm(slug_in)
-                scored = []
-                # Stable lexical traversal (set order is process-randomized) so equal-score spellings
-                # resolve to ONE card on every worker. Scoring is `_slug_score`, shared verbatim with
-                # find_concept_slugs — the two must agree or a slug becomes findable by a query that
-                # cannot then open its card.
-                for s in sorted(global_vocab):
-                    score = _slug_score(qn, s)
-                    if score >= _SLUG_MATCH_FLOOR:
-                        scored.append((score, s))
-                scored.sort(key=lambda t: (-t[0], t[1]))
-                if scored and scored[0][0] >= 0.97:
-                    canon, resolution = scored[0][1], "fuzzy"       # essentially the same slug -> decode it
-                elif scored:
-                    lines = [f"No exact concept card for {_safe_text(slug_in, 120)!r}; the closest existing "
-                             "slug(s) — call concept_card again with the exact one you mean:"]
-                    for sc, s in scored[:5]:
-                        lines.append(f"  UNTRUSTED_MEMORY_CONCEPT={_safe_text(s, 160)!r} match={sc:.0%}")
-                    return "\n".join(lines)
-            if canon is None:
-                from looplab.core.models import valid_concept_id
-                if not valid_concept_id(slug_in):
-                    return (f"No concept card for {_safe_text(slug_in, 120)!r}; that text is not a valid "
-                            "concept slug. Search descriptive prose with find_concept_slugs, then reuse its "
-                            "canonical `axis/name` result.")
-                if source_summary.get("source_complete") is not True:
-                    return (f"No RETAINED concept card for {_safe_text(slug_in, 120)!r}; the capsule source "
-                            "is partial, so this is not proof the concept is new.\n"
-                            + _partial_source_warning(source_summary))
-                return (f"No concept card for {_safe_text(slug_in, 120)!r} — no run has used it, so it "
-                        "looks NEW. Mint it as `axis/name` (call find_concept_slugs with no query to reuse "
-                        "an existing axis).")
-
-            axis, _, cname = canon.partition("/")
-            lines = [f"CONCEPT CARD: UNTRUSTED_MEMORY_CONCEPT={_safe_text(canon, 160)!r}"
-                     + ("" if resolution == "exact"
-                        else f"  (you asked for {_safe_text(slug_in, 80)!r} — resolved by fuzzy match)")]
-            lines.append(f"  axis={_safe_text(axis, 80)!r}"
-                         + (f"  name={_safe_text(cname, 120)!r}" if cname else "  (no axis prefix)"))
-
-            # Alternative spellings: every alias SOURCE whose chain resolves to this canonical.
-            alt = sorted({src for src in aliases
-                          if resolve_slug(src, aliases) == canon
-                          and normalize_key(src) != normalize_key(canon)})
-            if alt:
-                lines.append("  also seen as: "
-                             + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(a, 80)!r}" for a in alt[:6]))
-
-            # Track record: SCOPED overview = the trustworthy tendency; global count = portfolio context.
-            scoped_ids = {id(capsule) for capsule in scoped_caps}
-            scoped_canon_caps = [
-                c for c, concepts in canonical_caps
-                if canon in concepts and id(c) in scoped_ids]
-            global_canon_caps = [c for c, concepts in canonical_caps if canon in concepts]
-            # absence/completeness denominators include every eligible capsule, not only rows
-            # where this concept survived the bounded source projection. Matching rows still own the
-            # observed metrics/signs, but a non-matching partial row may have omitted this exact concept.
-            scoped_source_summary = _capsule_source_summary(scoped_caps)
-            _scoped_overview, scoped_rows = _portfolio_concept_overview_data(
-                scoped_canon_caps, aliases=aliases, splits=splits)
-            row = next((r for r in scoped_rows if r["concept"] == canon), None)
-            _global_overview, global_rows = _portfolio_concept_overview_data(
-                global_canon_caps, aliases=aliases, splits=splits)
-            # card lookup is exact-key aggregation, not a display projection. Resolve the
-            # requested row from the helper's complete retained aggregate, never its bounded first value.
-            grow = next((r for r in global_rows if r["concept"] == canon), None)
-            scoped_complete = (scoped_source_summary.get("source_complete") is True
-                               and scope_receipt.get("scope_complete") is True)
-            global_complete = source_summary.get("source_complete") is True
-            if scoped_source_summary.get("source_complete") is not True:
-                lines.append("  task-family " + _partial_source_warning(scoped_source_summary))
-            if scope_receipt.get("scope_complete") is not True:
-                lines.append("  task-family " + _partial_scope_warning(scope_receipt))
-            if row:
-                track_label = ("track record (your task family)" if scoped_complete
-                               else "track record (returned task-family observations)")
-                run_label = "run(s)" if scoped_complete else "retained run(s)"
-                lines.append(f"  {track_label}: {row['n_runs']} {run_label} — "
-                             f"ranked better {row['n_helped']} / middle {row['n_neutral']} / "
-                             f"ranked worse {row['n_hurt']}")
-                _sym = {1: "ranked-better", 0: "middle", -1: "ranked-worse"}
-                for r in row["runs"][:6]:
-                    m = r.get("metric")
-                    lines.append(f"    - run {_safe_text(r.get('run_id'), 60)!r} "
-                                 f"[{_sym.get(r.get('sign'), 'no-signal')}]"
-                                 + (f" metric={m}" if m is not None else "")
-                                 + f" ({_safe_text(r.get('direction'), 8)})")
-            if canon in mine:
-                lines.append("  NOTE: THIS run is already using this concept.")
-            if global_complete:
-                lines.append(f"  globally used in {grow['n_runs'] if grow else 0} prior run(s) "
-                             "across the whole portfolio.")
-            else:
-                lines.append(f"  globally RETAINED in {grow['n_runs'] if grow else 0} prior run(s) "
-                             "across returned portfolio records.")
-                lines.append("  global " + _partial_source_warning(source_summary))
-
-            # Use only the bound task-family row: global usage is context, never permission to let an
-            # incompatible task reverse the actionable tendency shown beside the scoped track record.
-            tend = concept_profit_tendencies([row] if row else [])
-            # an omitted matching row/sign can reverse a consistency claim. Keep the retained
-            # observations visible above, but emit a directional tendency only for an exact scoped source.
-            if scoped_complete and any(c == canon for c, _ in tend["helps"]):
-                lines.append("  cross-run tendency: consistently RANKED BETTER within comparable runs "
-                             "(advisory relative rank, not causal proof).")
-            elif scoped_complete and any(c == canon for c, _ in tend["hurts"]):
-                lines.append("  cross-run tendency: consistently RANKED WORSE within comparable runs — "
-                             "only revisit with a specific new hypothesis for why it would differ here.")
-
-            # Co-occurrence: concepts this one is usually paired with (scoped graph).
-            graph = portfolio_concept_graph(scoped_canon_caps, aliases=aliases, splits=splits)
-            partners: list[tuple] = []
-            for e in graph["edges"]:
-                if e.get("rel") != "co_occurs":
-                    continue
-                if e.get("src") == canon:
-                    partners.append((e.get("dst"), e.get("n_runs", 0)))
-                elif e.get("dst") == canon:
-                    partners.append((e.get("src"), e.get("n_runs", 0)))
-            partners.sort(key=lambda kv: (-kv[1], str(kv[0])))
-            if partners:
-                pair_label = "usually paired with" if scoped_complete else "paired in retained records with"
-                lines.append(f"  {pair_label}: " + ", ".join(
-                    f"UNTRUSTED_MEMORY={_safe_text(c, 80)!r}(×{n})" for c, n in partners[:6]))
-            if graph.get("edge_source_complete") is not True:
-                lines.append("  co-occurrence coverage: PARTIAL retained-node projection; "
-                             f"{graph.get('edge_source_nodes_pruned', 0)} graph node(s) were pruned and "
-                             "partners outside the projection are UNKNOWN.")
-
-            # Lessons that mention it (free-text pros/cons) — match the name token in the statement.
-            name_terms = _toks(cname or canon)
-            notes = [lz for lz in self._role_lessons()
-                     if name_terms and name_terms <= _toks(str(lz.get("statement") or ""))]
-            if notes:
-                lines.append("  what runs noted:")
-                for lz in notes[:3]:
-                    out = _safe_text(str(lz.get("outcome") or "noted"), 20)
-                    lines.append(f"    [{out}] "
-                                 f"UNTRUSTED_MEMORY={_safe_text(lz.get('statement'), 200)!r}")
-
-            lines.append("  (No authored prose/paper overview yet — this card is assembled from cross-run "
-                         "evidence; deep-research summarization is future work.)")
-            lines.append(f"  [receipt scope={'bound_task_family' if self._bound else 'portfolio'} "
-                         f"eligible_prior_runs={len(scoped_caps)} matching_scoped_runs="
-                         f"{len(scoped_canon_caps)} matching_global_runs={len(global_canon_caps)} "
-                         f"task_source_complete="
-                         f"{str(scoped_source_summary.get('source_complete') is True).lower()} "
-                         f"task_scope_complete="
-                         f"{str(scope_receipt.get('scope_complete') is True).lower()} "
-                         f"task_scope_unknown_capsules={scope_receipt.get('scope_unknown_capsules', 0)} "
-                         f"global_source_complete={str(global_complete).lower()} "
-                         f"cooccurrence_source_complete="
-                         f"{str(graph.get('edge_source_complete') is True).lower()} "
-                         f"cooccurrence_nodes_pruned={graph.get('edge_source_nodes_pruned', 0)} "
-                         f"taxonomy_revision={taxonomy['concept_governance_revision']}]")
+        qn = _slug_norm(query)
+        _rank = {"own": 0, "cross": 1, "global": 2, "unknown": 2}
+        scored = []
+        for slug, meta in vocab.items():
+            score = _slug_score(qn, slug)
+            if score >= _SLUG_MATCH_FLOOR:
+                scored.append((_rank[_scope(meta)], -score, slug, meta))
+        if (not scored and partial_note
+                and self._concept_projection_status == "partial"):
+            lines = [partial_note.rstrip(),
+                     f"No reliable existing slug matches {_safe_text(query, 256)!r} in scope '{want}'. "
+                     "Because the current projection is PARTIAL, this is not proof that the slug is new."]
+            lines += _partial_warnings(source=None if want == "own" else source_summary,
+                                       scope=scope_receipt if capsule_scope_uncertain else None)
+            lines.append(_receipt(candidates=0, returned=0))
             return "\n".join(lines)
+        if not scored:
+            if ((want != "own" and source_summary.get("source_complete") is not True)
+                    or capsule_scope_uncertain):
+                warnings = _partial_warnings(
+                    source=None if want == "own" else source_summary,
+                    scope=scope_receipt if capsule_scope_uncertain else None)
+                return (f"No RETAINED slug matches {_safe_text(query, 256)!r} in scope '{want}'; "
+                        "the capsule source/scope is partial, so this is not proof the concept is new.\n"
+                        + "\n".join(warnings) + "\n"
+                        + _receipt(candidates=0, returned=0))
+            return (f"No existing slug matches {_safe_text(query, 256)!r} in scope '{want}' — "
+                    "it looks NEW. Mint it as `axis/name` (reuse an existing AXIS if one fits; call "
+                    "with no query to list axes).\n" + _receipt(candidates=0, returned=0))
+        # Sort by the ORDERABLE prefix only (rank, -score, slug). The 4th tuple element is a `meta`
+        # dict — never put it in the comparison key: `scored.sort()` would raise TypeError the moment
+        # the first three tie, and execute() would swallow it into "(cross-run tool unavailable)".
+        scored.sort(key=lambda t: (t[0], t[1], t[2]))   # own < cross < global; then best match first
 
-        return "(unknown cross-run tool)"
+        _label = {"own": "this run", "cross": "cross-run", "global": "global map",
+                  "unknown": "relation to current run unknown"}
+        order = ("own→cross→global" if (self._concept_projection_status == "complete"
+                                         and scope_receipt.get("scope_complete") is True)
+                 else "own→cross→unknown")
+        lines = [f"Existing slugs matching {_safe_text(query, 256)!r} "
+                 f"({order}) — REUSE the closest, don't respell "
+                 "(call concept_card('<slug>') to decode one + see its track record):"]
+        if partial_note:
+            lines.insert(0, partial_note.rstrip())
+        lines += _partial_warnings(source=None if want == "own" else source_summary,
+                                   scope=scope_receipt if capsule_scope_uncertain else None)
+        for _r, negscore, slug, meta in scored[:limit]:
+            lines.append(f"  [{_label[_scope(meta)]}] "
+                         f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(slug, 160)!r} "
+                         f"[{_run_count(meta)} run(s)] match={-negscore:.0%}")
+        lines.append(_receipt(candidates=len(scored), returned=min(len(scored), limit)))
+        return "\n".join(lines)
+
+    def _tool_concept_card(self, args: dict, _governance: dict | None) -> str:
+        raw_slug = args.get("slug")
+        if not isinstance(raw_slug, str) or not raw_slug.strip():
+            return "(cross-run tool error: slug must be a non-empty string)"
+        if len(raw_slug) > 256:
+            return "(cross-run tool error: slug exceeds 256 characters)"
+        slug_in = raw_slug.strip()
+        from looplab.engine.concept_registry import (canonicalize_concepts,
+                                                     normalize_key, resolve_slug)
+        from looplab.engine.memory import (_capsule_source_summary,
+                                           _portfolio_concept_overview_data,
+                                           _filter_capsule_rows, concept_profit_tendencies,
+                                           portfolio_concept_graph)
+
+        taxonomy = _governance
+        aliases, splits = taxonomy["aliases"], taxonomy["splits"]
+        caps = self._all_capsules()
+        prior_caps = _filter_capsule_rows(
+            caps, lambda c: (not self._run_id
+                             or str(c.get("run_id") or "") != self._run_id))
+        source_summary = _capsule_source_summary(prior_caps)
+        scoped_caps, _unknown_scope_caps, scope_receipt = self._partition_capsules(prior_caps)
+        # The DECODE vocabulary is GLOBAL (a concept means the same thing everywhere — the user's
+        # "world concept map"); the trustworthy relative-rank TENDENCY below is task-family scoped.
+        mine = set(canonicalize_concepts(sorted(self._concepts), aliases=aliases, splits=splits))
+        # keep the per-capsule canonical set. Besides avoiding repeated governance work,
+        # this lets a card compute the requested concept's counts from every matching run instead of
+        # looking it up in portfolio_concept_overview's intentionally display-capped top 512 rows.
+        canonical_caps = [
+            (cap, set(canonicalize_concepts(
+                cap.get("concepts") or [], aliases=aliases, splits=splits)))
+            for cap in prior_caps
+        ]
+        global_vocab: set[str] = set(mine)
+        for _cap, concepts in canonical_caps:
+            global_vocab |= concepts
+
+        # Resolve the input to a known canonical concept. Exact-canonical first; then, only for an
+        # ESSENTIALLY-EXACT respelling (`rdrop` -> `regularization/r-drop`), decode it directly. A weaker
+        # fuzzy neighbour is NOT rendered as an authoritative card (that would print CNN's whole track
+        # record for `nn`); it is offered as a ranked "did you mean" list, mirroring find_concept_slugs,
+        # so the agent picks the exact slug. Purge is checked BEFORE any fuzzy step: a slug whose alias
+        # chain ends at a tombstone is deliberately retired and must never resolve to a live look-alike.
+        cc = canonicalize_concepts([slug_in], aliases=aliases, splits=splits)
+        canon = None
+        resolution = "exact"
+        if cc and cc[0] in global_vocab:
+            canon = cc[0]
+        elif normalize_key(slug_in) in aliases and resolve_slug(slug_in, aliases) is None:
+            return (f"Concept {_safe_text(slug_in, 120)!r} has been PURGED from the taxonomy — "
+                    "do not reuse it; mint a fresh `axis/name` if you need the idea.")
+        else:
+            qn = _slug_norm(slug_in)
+            scored = []
+            # Stable lexical traversal (set order is process-randomized) so equal-score spellings
+            # resolve to ONE card on every worker. Scoring is `_slug_score`, shared verbatim with
+            # find_concept_slugs — the two must agree or a slug becomes findable by a query that
+            # cannot then open its card.
+            for s in sorted(global_vocab):
+                score = _slug_score(qn, s)
+                if score >= _SLUG_MATCH_FLOOR:
+                    scored.append((score, s))
+            scored.sort(key=lambda t: (-t[0], t[1]))
+            if scored and scored[0][0] >= 0.97:
+                canon, resolution = scored[0][1], "fuzzy"       # essentially the same slug -> decode it
+            elif scored:
+                lines = [f"No exact concept card for {_safe_text(slug_in, 120)!r}; the closest existing "
+                         "slug(s) — call concept_card again with the exact one you mean:"]
+                for sc, s in scored[:5]:
+                    lines.append(f"  UNTRUSTED_MEMORY_CONCEPT={_safe_text(s, 160)!r} match={sc:.0%}")
+                return "\n".join(lines)
+        if canon is None:
+            from looplab.core.models import valid_concept_id
+            if not valid_concept_id(slug_in):
+                return (f"No concept card for {_safe_text(slug_in, 120)!r}; that text is not a valid "
+                        "concept slug. Search descriptive prose with find_concept_slugs, then reuse its "
+                        "canonical `axis/name` result.")
+            if source_summary.get("source_complete") is not True:
+                return (f"No RETAINED concept card for {_safe_text(slug_in, 120)!r}; the capsule source "
+                        "is partial, so this is not proof the concept is new.\n"
+                        + _partial_source_warning(source_summary))
+            return (f"No concept card for {_safe_text(slug_in, 120)!r} — no run has used it, so it "
+                    "looks NEW. Mint it as `axis/name` (call find_concept_slugs with no query to reuse "
+                    "an existing axis).")
+
+        axis, _, cname = canon.partition("/")
+        lines = [f"CONCEPT CARD: UNTRUSTED_MEMORY_CONCEPT={_safe_text(canon, 160)!r}"
+                 + ("" if resolution == "exact"
+                    else f"  (you asked for {_safe_text(slug_in, 80)!r} — resolved by fuzzy match)")]
+        lines.append(f"  axis={_safe_text(axis, 80)!r}"
+                     + (f"  name={_safe_text(cname, 120)!r}" if cname else "  (no axis prefix)"))
+
+        # Alternative spellings: every alias SOURCE whose chain resolves to this canonical.
+        alt = sorted({src for src in aliases
+                      if resolve_slug(src, aliases) == canon
+                      and normalize_key(src) != normalize_key(canon)})
+        if alt:
+            lines.append("  also seen as: "
+                         + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(a, 80)!r}" for a in alt[:6]))
+
+        # Track record: SCOPED overview = the trustworthy tendency; global count = portfolio context.
+        scoped_ids = {id(capsule) for capsule in scoped_caps}
+        scoped_canon_caps = [
+            c for c, concepts in canonical_caps
+            if canon in concepts and id(c) in scoped_ids]
+        global_canon_caps = [c for c, concepts in canonical_caps if canon in concepts]
+        # absence/completeness denominators include every eligible capsule, not only rows
+        # where this concept survived the bounded source projection. Matching rows still own the
+        # observed metrics/signs, but a non-matching partial row may have omitted this exact concept.
+        scoped_source_summary = _capsule_source_summary(scoped_caps)
+        _scoped_overview, scoped_rows = _portfolio_concept_overview_data(
+            scoped_canon_caps, aliases=aliases, splits=splits)
+        row = next((r for r in scoped_rows if r["concept"] == canon), None)
+        _global_overview, global_rows = _portfolio_concept_overview_data(
+            global_canon_caps, aliases=aliases, splits=splits)
+        # card lookup is exact-key aggregation, not a display projection. Resolve the
+        # requested row from the helper's complete retained aggregate, never its bounded first value.
+        grow = next((r for r in global_rows if r["concept"] == canon), None)
+        scoped_complete = (scoped_source_summary.get("source_complete") is True
+                           and scope_receipt.get("scope_complete") is True)
+        global_complete = source_summary.get("source_complete") is True
+        if scoped_source_summary.get("source_complete") is not True:
+            lines.append("  task-family " + _partial_source_warning(scoped_source_summary))
+        if scope_receipt.get("scope_complete") is not True:
+            lines.append("  task-family " + _partial_scope_warning(scope_receipt))
+        if row:
+            track_label = ("track record (your task family)" if scoped_complete
+                           else "track record (returned task-family observations)")
+            run_label = "run(s)" if scoped_complete else "retained run(s)"
+            lines.append(f"  {track_label}: {row['n_runs']} {run_label} — "
+                         f"ranked better {row['n_helped']} / middle {row['n_neutral']} / "
+                         f"ranked worse {row['n_hurt']}")
+            _sym = {1: "ranked-better", 0: "middle", -1: "ranked-worse"}
+            for r in row["runs"][:6]:
+                m = r.get("metric")
+                lines.append(f"    - run {_safe_text(r.get('run_id'), 60)!r} "
+                             f"[{_sym.get(r.get('sign'), 'no-signal')}]"
+                             + (f" metric={m}" if m is not None else "")
+                             + f" ({_safe_text(r.get('direction'), 8)})")
+        if canon in mine:
+            lines.append("  NOTE: THIS run is already using this concept.")
+        if global_complete:
+            lines.append(f"  globally used in {grow['n_runs'] if grow else 0} prior run(s) "
+                         "across the whole portfolio.")
+        else:
+            lines.append(f"  globally RETAINED in {grow['n_runs'] if grow else 0} prior run(s) "
+                         "across returned portfolio records.")
+            lines.append("  global " + _partial_source_warning(source_summary))
+
+        # Use only the bound task-family row: global usage is context, never permission to let an
+        # incompatible task reverse the actionable tendency shown beside the scoped track record.
+        tend = concept_profit_tendencies([row] if row else [])
+        # an omitted matching row/sign can reverse a consistency claim. Keep the retained
+        # observations visible above, but emit a directional tendency only for an exact scoped source.
+        if scoped_complete and any(c == canon for c, _ in tend["helps"]):
+            lines.append("  cross-run tendency: consistently RANKED BETTER within comparable runs "
+                         "(advisory relative rank, not causal proof).")
+        elif scoped_complete and any(c == canon for c, _ in tend["hurts"]):
+            lines.append("  cross-run tendency: consistently RANKED WORSE within comparable runs — "
+                         "only revisit with a specific new hypothesis for why it would differ here.")
+
+        # Co-occurrence: concepts this one is usually paired with (scoped graph).
+        graph = portfolio_concept_graph(scoped_canon_caps, aliases=aliases, splits=splits)
+        partners: list[tuple] = []
+        for e in graph["edges"]:
+            if e.get("rel") != "co_occurs":
+                continue
+            if e.get("src") == canon:
+                partners.append((e.get("dst"), e.get("n_runs", 0)))
+            elif e.get("dst") == canon:
+                partners.append((e.get("src"), e.get("n_runs", 0)))
+        partners.sort(key=lambda kv: (-kv[1], str(kv[0])))
+        if partners:
+            pair_label = "usually paired with" if scoped_complete else "paired in retained records with"
+            lines.append(f"  {pair_label}: " + ", ".join(
+                f"UNTRUSTED_MEMORY={_safe_text(c, 80)!r}(×{n})" for c, n in partners[:6]))
+        if graph.get("edge_source_complete") is not True:
+            lines.append("  co-occurrence coverage: PARTIAL retained-node projection; "
+                         f"{graph.get('edge_source_nodes_pruned', 0)} graph node(s) were pruned and "
+                         "partners outside the projection are UNKNOWN.")
+
+        # Lessons that mention it (free-text pros/cons) — match the name token in the statement.
+        name_terms = _toks(cname or canon)
+        notes = [lz for lz in self._role_lessons()
+                 if name_terms and name_terms <= _toks(str(lz.get("statement") or ""))]
+        if notes:
+            lines.append("  what runs noted:")
+            for lz in notes[:3]:
+                out = _safe_text(str(lz.get("outcome") or "noted"), 20)
+                lines.append(f"    [{out}] "
+                             f"UNTRUSTED_MEMORY={_safe_text(lz.get('statement'), 200)!r}")
+
+        lines.append("  (No authored prose/paper overview yet — this card is assembled from cross-run "
+                     "evidence; deep-research summarization is future work.)")
+        lines.append(f"  [receipt scope={'bound_task_family' if self._bound else 'portfolio'} "
+                     f"eligible_prior_runs={len(scoped_caps)} matching_scoped_runs="
+                     f"{len(scoped_canon_caps)} matching_global_runs={len(global_canon_caps)} "
+                     f"task_source_complete="
+                     f"{str(scoped_source_summary.get('source_complete') is True).lower()} "
+                     f"task_scope_complete="
+                     f"{str(scope_receipt.get('scope_complete') is True).lower()} "
+                     f"task_scope_unknown_capsules={scope_receipt.get('scope_unknown_capsules', 0)} "
+                     f"global_source_complete={str(global_complete).lower()} "
+                     f"cooccurrence_source_complete="
+                     f"{str(graph.get('edge_source_complete') is True).lower()} "
+                     f"cooccurrence_nodes_pruned={graph.get('edge_source_nodes_pruned', 0)} "
+                     f"taxonomy_revision={taxonomy['concept_governance_revision']}]")
+        return "\n".join(lines)

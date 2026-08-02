@@ -2289,6 +2289,34 @@ That also explains why the duplication survived — the natural place to put a s
 have the import it needed, and the failure mode was the generic `(cross-run tool unavailable)`
 swallow rather than an ImportError.
 
+*Resolution (2026-08-02, the split and the receipt):* `_execute` is now a seven-line dispatcher over
+one private method per verb — `_tool_cross_run_prior_attempts` … `_tool_concept_card` — the shape
+`RunControlTools` already used. The governance snapshot the re-entry resolved is passed EXPLICITLY
+to the handler rather than read from an enclosing scope, and `_TOOL_NAMES` gates the lookup so a
+model-supplied `name` cannot reach a same-spelled attribute of the class.
+
+The warning boilerplate collapsed into `_partial_warnings(source=, scope=, claims=)`. Each
+`_partial_*_warning` already returns "" for a complete view, so all fifteen call sites were
+re-deriving that same `is not True` emptiness test by hand, in two spellings
+(`view.get("source_complete") is not True` and a pre-computed `not source_complete`). These lines
+are the sentence that tells a reader an ABSENCE is not proof, so a site with the polarity backwards
+produces no error at all — it produces a confident-looking answer with the caveat missing. Four
+sites keep a genuine extra condition (`want != "own"` for a scope that has no cross-run
+denominator, `capsule_scope_uncertain`) and now express it by passing `None` for that view.
+
+Verified with a 209-case byte-level differential (every tool × bound/unbound × role × argument
+shape, over both a complete and a deliberately partial portfolio) against a worktree of the
+pre-split tree: **byte-identical**. `tests/test_cross_run_tool_dispatch.py` adds 14 tests for what
+the differential cannot see, and six deliberate breaks — drop the empty filter, flip the claim
+guard, swap the warning order, drop the registry gate, stop threading governance, print the scope
+caveat unconditionally — were each caught by exactly the test guarding that property.
+
+One process note worth keeping: the teeth loop timed out mid-run and its restore step never
+executed, so `handler(args, None)` (break T5) sat in the tree while later edits were made on top of
+it. The differential would have caught it at the next comparison; what actually caught it first was
+a NEW unit test failing for a reason its own change could not explain. Verification steps that
+mutate the tree need their restore to be a separate, unconditional command.
+
 Verified against the exact expression both branches used, over 120 query/slug pairs spanning
 separator and case variants, leaf-vs-path matches, unicode and empty input: zero mismatches. Four
 guards in `tests/test_cross_run_tools.py` pin one definition, the two-ratio max (concept keys are
