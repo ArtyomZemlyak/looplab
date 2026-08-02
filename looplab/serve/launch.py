@@ -98,14 +98,15 @@ def safe_run_dir(root: Path, run_id: Any, *, check_conflict: bool = True) -> Pat
             "message": "This run name is still owned by an unresolved deletion.",
             "field_errors": {"run_id": "retry or observe that exact deletion first"},
         })
-    # A run is a DIRECTORY. The events.jsonl check below cannot see a file conflict (a file has no
-    # events.jsonl child), so a run_id naming any server-owned file in the root — the settings/secrets/
-    # projects stores and their `.lock` siblings today, whatever is added later — reserved a start
-    # record and then wedged at mkdir instead of failing cleanly here. Name-based reservation above
-    # still carries the case where the file does not exist yet.
+    # A run is a DIRECTORY. Reject a file conflict separately so a run_id naming any server-owned
+    # file in the root — the settings/secrets/projects stores and their `.lock` siblings today,
+    # whatever is added later — fails with a path-specific error. Name-based reservation above still
+    # carries the case where the file does not exist yet.
     if resolved.exists() and not resolved.is_dir():
         _reject(409, "run_path_conflict", "run path is an existing file", "run_id")
-    if check_conflict and (resolved / "events.jsonl").exists():
+    # Partial/materialized starts and externally created empty directories own the namespace too.
+    # New starts must never infer availability merely from a missing events.jsonl and overwrite them.
+    if check_conflict and resolved.exists():
         _reject(409, "run_id_conflict", f"run {run_id!r} already exists", "run_id")
     return resolved
 

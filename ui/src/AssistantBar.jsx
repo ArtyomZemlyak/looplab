@@ -2285,10 +2285,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
         Ask anything — inspect the code, read your runs, steer or create runs{runId ? ` · run “${runId}” is open` : ''}.
       </div>
-      <div className="asst-hints">
+      {!input.trim() && <div className="asst-hints">
         {HINTS.map(h => <button key={h.label} className="asst-hint"
-          onClick={() => { setInput(h.text); inputRef.current?.focus() }}>{h.label}</button>)}
-      </div>
+          onClick={() => {
+            setInput(current => current.trim() ? current : h.text)
+            inputRef.current?.focus()
+          }}>{h.label}</button>)}
+      </div>}
     </div>}
     {msgs.map((m, i) => <React.Fragment key={i}>
       {m.role === 'user' && m.context && <div className="asst-ctx-cap" title="context attached to this message">
@@ -2309,10 +2312,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         onLaunchStarted={key => {
           setLaunchDrafts(current => removeLaunchDraft(current, key))
           setLaunchDisclosures(current => retainLaunchDisclosure(current, key, false))
-          // Starting a run means the user wants to ACT on it — lift the read-only 'plan' default straight to
-          // full 'Auto' (the assistant drives the run without asking) so the common path is frictionless.
-          // A mode the user EXPLICITLY chose (ask / auto-edit / auto) is preserved rather than overridden.
-          setMode(current => current === 'plan' ? 'auto' : current)
         }} />
     </React.Fragment>)}
     {!historical && pending.length > 0 && <div className="asst-perm-region" role="region"

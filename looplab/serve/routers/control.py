@@ -1236,15 +1236,17 @@ def build_router(srv) -> APIRouter:
                 "field_errors": {"run_id": "choose another run name"},
                 "remediation": "Use the card that owns the existing startup, or choose another name.",
             })
-        if same_key and status in {"accepted", "executing", "succeeded"}:
-            return
-        if status == "uncertain":
+        if status == "uncertain" or public.get("paid_effect_unknown") is True:
             raise HTTPException(409, {
                 "code": "start_uncertain",
                 "message": "the earlier startup may have crossed Popen; observe it before retrying",
                 "start_id": public.get("start_id"),
+                "status": status,
+                "paid_effect_unknown": bool(public.get("paid_effect_unknown")),
                 "remediation": "Use the startup status endpoint; do not submit another launch.",
             })
+        if status in {"accepted", "executing", "succeeded"}:
+            return
         if same_key:
             raise HTTPException(409, {
                 "code": "start_not_completed",
@@ -1355,9 +1357,10 @@ def build_router(srv) -> APIRouter:
                 srv.commands._reject_unresolved_reset(rd, "replay this run start")
                 record, public, same_key = _inspect_keyed_start(rd, key_digest, request_digest)
                 if record is not None:
-                    if same_key and public["status"] in {"accepted", "executing", "succeeded"}:
+                    if (same_key and public.get("paid_effect_unknown") is not True
+                            and public["status"] in {"accepted", "executing", "succeeded"}):
                         return JSONResponse(public)
-                    if same_key or public["status"] not in {"not_started", "failed"}:
+                    if same_key or public.get("can_retry") is not True:
                         _raise_existing_start(public, same_key=same_key)
             return None
 
@@ -1409,9 +1412,10 @@ def build_router(srv) -> APIRouter:
                     existing, public, same_key = _inspect_keyed_start(
                         rd, key_digest, request_digest)
                     if existing is not None:
-                        if same_key and public["status"] in {"accepted", "executing", "succeeded"}:
+                        if (same_key and public.get("paid_effect_unknown") is not True
+                                and public["status"] in {"accepted", "executing", "succeeded"}):
                             return JSONResponse(public)
-                        if same_key or public["status"] not in {"not_started", "failed"}:
+                        if same_key or public.get("can_retry") is not True:
                             _raise_existing_start(public, same_key=same_key)
 
                 # A crashed Replay can temporarily leave the direct run directory without events.jsonl.
@@ -1469,7 +1473,16 @@ def build_router(srv) -> APIRouter:
                 lease_started = False
                 popen_boundary_entered = False
                 try:
-                    rd.mkdir(parents=True, exist_ok=True)
+                    try:
+                        # Close the check-to-create race: only this exact reservation may create the
+                        # run directory, and no pre-existing directory may be materialized into.
+                        rd.mkdir(parents=False, exist_ok=False)
+                    except FileExistsError as exc:
+                        raise HTTPException(409, {
+                            "code": "run_id_conflict",
+                            "message": f"run {run_id!r} already exists",
+                            "field_errors": {"run_id": "choose another run name"},
+                        }) from exc
                     atomic_write_text(task_file, json.dumps(plan.canonical_document, indent=2))
                     meta = {"task_file": str(task_file)}
                     if plan.source_task_file:

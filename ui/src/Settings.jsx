@@ -11,6 +11,7 @@ import SettingsForm from './SettingsForm.jsx'
 import { OpIcon } from './icons.jsx'
 import { deadlineRequest } from './requestDeadline.js'
 import { installNavigationLossGuard } from './navigationLossGuard.js'
+import { publish as publishSettingsLaunchGuard } from './settingsLaunchGuard.js'
 
 const countLabel = (count, singular, plural = `${singular}s`) => `${count} ${count === 1 ? singular : plural}`
 const SETTINGS_READ_TIMEOUT_MS = 15_000
@@ -32,6 +33,72 @@ const navigationWarning = (busy, unknown = false, healthRecovery = false) => bus
       : healthRecovery
         ? 'An LLM provider outcome is unresolved. Leaving may discard the visible recovery warning; leave anyway?'
       : 'Discard unsaved settings changes and leave this page?'
+
+const launchGuardState = ({
+  loaded, loadError, invalidCount, unsaved, mutationBusy, mutationUnknown,
+  healthRecoveryBlocked,
+}) => {
+  if (mutationBusy === 'saving') return {
+    blocked: true,
+    status: 'saving',
+    reason: 'Settings are being saved. Wait for the server acknowledgement before starting a run.',
+  }
+  if (mutationBusy === 'reconciling' || mutationBusy === 'reloading settings') return {
+    blocked: true,
+    status: 'recovering',
+    reason: 'Saved settings are being refreshed. Wait for authoritative server state before starting a run.',
+  }
+  if (mutationBusy === 'clearing secret') return {
+    blocked: true,
+    status: 'saving',
+    reason: 'A saved credential change is in progress. Wait for its server acknowledgement before starting a run.',
+  }
+  if (mutationBusy === 'testing-llm') return {
+    blocked: true,
+    status: 'recovering',
+    reason: 'The active LLM check is still in progress. Wait for its verified outcome before starting a run.',
+  }
+  if (mutationBusy) return {
+    blocked: true,
+    status: 'saving',
+    reason: 'A Settings operation is still in progress. Wait for it to finish before starting a run.',
+  }
+  if (mutationUnknown) return {
+    blocked: true,
+    status: 'unknown',
+    reason: 'The outcome of a Settings update is unknown. Refresh server state before starting a run.',
+  }
+  if (healthRecoveryBlocked) return {
+    blocked: true,
+    status: 'unknown',
+    reason: 'An active LLM provider outcome is unresolved. Resolve or acknowledge it before starting a run.',
+  }
+  if (loadError) return {
+    blocked: true,
+    status: 'load-error',
+    reason: 'Settings could not be loaded or refreshed. Retry before starting a run.',
+  }
+  if (!loaded) return {
+    blocked: true,
+    status: 'loading',
+    reason: 'Settings are still loading. Wait for saved defaults before starting a run.',
+  }
+  if (invalidCount > 0) return {
+    blocked: true,
+    status: 'invalid',
+    reason: `${countLabel(invalidCount, 'invalid setting')} must be fixed before starting a run.`,
+  }
+  if (unsaved) return {
+    blocked: true,
+    status: 'unsaved',
+    reason: 'Save or discard the Settings draft before starting a run.',
+  }
+  return {
+    blocked: false,
+    status: 'ready',
+    reason: 'Settings are saved and ready for a new run.',
+  }
+}
 
 const releaseHealthRequest = active => {
   if (!active || active.released) return
@@ -546,6 +613,30 @@ export default function Settings({ onBack }) {
   // through that render gap.
   const healthRecoveryBlocked = healthRecoveryActive || !!readHealthRecovery()
   const navigationUnsafe = unsaved || !!mutationBusy || !!mutationUnknown || healthRecoveryBlocked
+  const launchDefaultsLoaded = !!form && !!schema && !!defaults && !!saved
+    && typeof revisions.settings === 'string' && revisions.settings.length > 0
+    && typeof revisions.secret === 'string' && revisions.secret.length > 0
+
+  // The persistent Assistant lives beside this route. Publish before paint so its paid launch CTA
+  // cannot observe one permissive frame while Settings is mounting or changing state.
+  useLayoutEffect(() => () => {
+    publishSettingsLaunchGuard({ active: false })
+  }, [])
+  useLayoutEffect(() => {
+    publishSettingsLaunchGuard({
+      active: true,
+      ...launchGuardState({
+        loaded: launchDefaultsLoaded,
+        loadError,
+        invalidCount,
+        unsaved,
+        mutationBusy,
+        mutationUnknown,
+        healthRecoveryBlocked,
+      }),
+    })
+  }, [healthRecoveryBlocked, invalidCount, launchDefaultsLoaded, loadError,
+    mutationBusy, mutationUnknown, unsaved])
 
   useEffect(() => {
     if (!navigationUnsafe) return undefined

@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
   clearDamagedLaunchTransport, clearLaunchTransport, createIdempotencyKey, getStartStatus,
   listLaunchTransports, loadLaunchTransport, preflightRunStart, saveLaunchTransport, startRun,
@@ -8,6 +8,9 @@ import {
   launchFingerprint, parseObjectJson, runtimeValue, summarizeLaunchTask, updateRuntimeValue,
 } from './launchDraft.js'
 import { launchStatusOutcome, pollLaunchStatus } from './launchRecovery.js'
+import {
+  getSnapshot as getSettingsLaunchGuard, subscribe as subscribeSettingsLaunchGuard,
+} from './settingsLaunchGuard.js'
 
 const messageOf = error => String(error?.message || 'Could not validate this run')
 const structuredDetail = error => error?.detail && typeof error.detail === 'object' ? error.detail : null
@@ -75,6 +78,7 @@ export default function LaunchCard({
   const [unknownStart, setUnknownStart] = useState(null)
   const [damagedRecovery, setDamagedRecovery] = useState(null)
   const [missingStart, setMissingStart] = useState(false)
+  const [startedRunId, setStartedRunId] = useState('')
   const [reservedRunId, setReservedRunId] = useState('')
   const [errors, setErrors] = useState({})
   const [notice, setNotice] = useState('Review the proposal, then validate it before starting.')
@@ -84,15 +88,26 @@ export default function LaunchCard({
   // Keep the proposal SIMPLE by default: the editable run settings are collapsed so a user can just Start.
   // "Configure settings" reveals them; they also auto-reveal whenever there is an error to fix.
   const [configOpen, setConfigOpen] = useState(() => retainedConfigOpen === true)
+  const settingsLaunchGuard = useSyncExternalStore(
+    subscribeSettingsLaunchGuard, getSettingsLaunchGuard, getSettingsLaunchGuard)
+  const settingsRouteActive = typeof location !== 'undefined' && location.hash.startsWith('#/settings')
+  const settingsLaunchBlocked = settingsLaunchGuard.active
+    ? settingsLaunchGuard.blocked : settingsRouteActive
+  const settingsLaunchReason = settingsLaunchGuard.active
+    ? settingsLaunchGuard.reason : 'Settings are still loading. Wait for saved defaults before starting a run.'
   const reactId = useId().replace(/:/g, '')
   const titleId = `launch-${reactId}-title`
   const errorId = `launch-${reactId}-errors`
   const runIdRef = useRef(null)
   const errorRef = useRef(null)
+  const validateActionRef = useRef(null)
+  const recoveryActionRef = useRef(null)
+  const startedActionRef = useRef(null)
   const validationRequestRef = useRef(0)
   const startRequestRef = useRef(null)
   const statusRequestRef = useRef(0)
   const statusFlightRef = useRef(null)
+  const settingsBlockedRef = useRef(settingsLaunchBlocked)
   const transportIdentityRef = useRef(transportIdentity)
   transportIdentityRef.current = transportIdentity
   useEffect(() => () => {
@@ -103,13 +118,29 @@ export default function LaunchCard({
   }, [])
 
   useEffect(() => {
+    const wasBlocked = settingsBlockedRef.current
+    settingsBlockedRef.current = settingsLaunchBlocked
+    if (settingsLaunchBlocked) {
+      validationRequestRef.current += 1
+      setValidating(false); setValidation(null); setWarnings([]); setPreview(null)
+      if (!startRequestRef.current && !unknownStart && !startedRunId && !damagedRecovery) {
+        setNotice(settingsLaunchReason)
+      }
+      return
+    }
+    if (wasBlocked && !startRequestRef.current && !unknownStart && !startedRunId && !damagedRecovery) {
+      setNotice('Settings are saved. Validate this proposal again before starting.')
+    }
+  }, [damagedRecovery, settingsLaunchBlocked, settingsLaunchReason, startedRunId, unknownStart])
+
+  useEffect(() => {
     validationRequestRef.current += 1
     statusRequestRef.current += 1
     statusFlightRef.current = null
     setValidating(false); setValidation(null); setChecking(false)
     const saved = loadLaunchTransport(transportIdentity)
     setStorageBlocked(false); setUnknownStart(null); setDamagedRecovery(null)
-    setMissingStart(false); setReservedRunId(''); setErrors({})
+    setMissingStart(false); setStartedRunId(''); setReservedRunId(''); setErrors({})
     if (saved?.invalid) {
       const damaged = listLaunchTransports().find(record => record.invalid
         && record.identity === transportIdentity) || { identity: transportIdentity, storageKey: '', invalid: true }
@@ -133,7 +164,7 @@ export default function LaunchCard({
   const validatedCurrent = !!validation?.token && validation.fingerprint === fingerprint
   const settingsParsed = parseObjectJson(draft.settings_json, 'Settings')
   const operationBusy = validating || starting || checking
-  const locked = operationBusy || !!unknownStart || !!damagedRecovery
+  const locked = operationBusy || !!unknownStart || !!damagedRecovery || !!startedRunId
   const taskRows = summarizeLaunchTask(draft)
 
   const focusFirstError = next => requestAnimationFrame(() => {
@@ -194,6 +225,11 @@ export default function LaunchCard({
   }
 
   const validate = async () => {
+    if (settingsLaunchBlocked) {
+      setValidation(null)
+      setNotice(settingsLaunchReason)
+      return
+    }
     const built = buildLaunchBody(draft, chat)
     if (!built.ok) {
       setValidation(null); setWarnings([]); setPreview(null); setErrors(built.errors)
@@ -247,12 +283,14 @@ export default function LaunchCard({
     const outcome = launchStatusOutcome(result, operation.runId)
     if (outcome.kind === 'started') {
       const cleared = clearRecovery(operation)
-      if (cleared) setUnknownStart(null)
+      setUnknownStart(null)
+      setStartedRunId(outcome.runId)
       setNotice(cleared
-        ? `Startup is proven for ${outcome.runId}. Opening the run…`
-        : `Startup is proven for ${outcome.runId}, but tab recovery storage could not be cleared. Opening the run…`)
+        ? `Startup is proven for ${outcome.runId}. This card is locked against another Start.`
+        : `Startup is proven for ${outcome.runId}. This card is locked, but tab recovery storage could not be cleared.`)
       onStarted?.(outcome.runId)
       location.hash = `#/run/${encodeURIComponent(outcome.runId)}`
+      requestAnimationFrame(() => startedActionRef.current?.focus())
       return
     }
     if (outcome.kind === 'unknown-paid') {
@@ -265,6 +303,7 @@ export default function LaunchCard({
       if (!clearRecovery(operation)) { setUnknownStart(operation); return }
       setUnknownStart(null); setMissingStart(false); setValidation(null); setErrors({})
       setNotice('The exact startup is proven not to have started. Review and validate again before sending a new Start.')
+      requestAnimationFrame(() => validateActionRef.current?.focus())
       return
     }
     setUnknownStart(operation); setMissingStart(false)
@@ -277,10 +316,11 @@ export default function LaunchCard({
     }
     setErrors({ form: 'The startup response could not be verified against this exact run identity.' })
     setNotice('Startup remains unknown. Keep this recovery identity and Check again; do not send another Start.')
+    requestAnimationFrame(() => errorRef.current?.focus())
   }
 
   const start = async () => {
-    if (startRequestRef.current || unknownStart) return
+    if (startRequestRef.current || unknownStart || startedRunId || settingsLaunchBlocked) return
     const built = buildLaunchBody(draft, chat)
     if (!built.ok || !validatedCurrent) {
       setValidation(null); setErrors(built.errors || { form: 'Validate this exact proposal before starting' })
@@ -341,10 +381,14 @@ export default function LaunchCard({
         setValidation(null)
         if (cleared) setNotice('The server rejected the launch. Your edits are preserved.')
         if (serverFields) focusFirstError(serverFields)
+        else requestAnimationFrame(() => errorRef.current?.focus())
       }
     } finally {
       if (startRequestRef.current === operation) startRequestRef.current = null
-      if (transportIdentityRef.current === operation.transportIdentity) setStarting(false)
+      if (transportIdentityRef.current === operation.transportIdentity) {
+        setStarting(false)
+        requestAnimationFrame(() => (startedActionRef.current || recoveryActionRef.current)?.focus())
+      }
     }
   }
 
@@ -623,27 +667,37 @@ export default function LaunchCard({
       <strong>Damaged startup recovery</strong>
       <span>Its outcome cannot be trusted. Inspect the run list and provider activity before releasing this exact local fence.</span>
     </div>}
+    {settingsLaunchBlocked && <div className="asst-launch-recovery" role="status">
+      <strong>Finish Settings first</strong>
+      <span>{settingsLaunchReason}</span>
+    </div>}
     <div className="asst-launch-progress" role="status" aria-live="polite" aria-atomic="true">{notice}</div>
     <p className="asst-launch-cost"><strong>Validate is free:</strong> it makes no model/provider call.
       <strong> Start may incur cost</strong> when it launches provider-backed work.</p>
 
     <div className="asst-perm-actions asst-launch-actions">
       <button type="button" className="btn xs ghost" disabled={locked} onClick={reset}>Reset proposal</button>
-      {damagedRecovery
+      {startedRunId
+        ? <button ref={startedActionRef} type="button" className="btn xs primary"
+          onClick={() => { location.hash = `#/run/${encodeURIComponent(startedRunId)}` }}>
+          Open started run</button>
+        : damagedRecovery
         ? <button type="button" className="btn xs ghost" disabled={operationBusy || !damagedRecovery.storageKey}
           onClick={releaseDamagedRecovery}>Release after inspection</button>
         : unknownStart
         ? <>
-          <button type="button" className="btn xs primary" disabled={operationBusy} onClick={checkStartup}>
+          <button ref={recoveryActionRef} type="button" className="btn xs primary" disabled={operationBusy}
+            onClick={checkStartup}>
             {checking ? 'Checking…' : starting ? 'Waiting for Start…' : 'Check startup'}</button>
           {(missingStart || unknownStart.paidEffectUnknown) && <button type="button" className="btn xs ghost"
             disabled={operationBusy} onClick={releaseStartupRecovery}>Release after inspection</button>}
         </>
         : <>
-          <button type="button" className="btn xs" disabled={locked} onClick={validate}>
+          <button ref={validateActionRef} type="button" className="btn xs"
+            disabled={locked || settingsLaunchBlocked} onClick={validate}>
             {validating ? 'Validating…' : validatedCurrent ? 'Validate again — free' : 'Validate — free'}</button>
           <button type="button" className="btn xs primary"
-            disabled={locked || storageBlocked || !validatedCurrent} onClick={start}>
+            disabled={locked || storageBlocked || settingsLaunchBlocked || !validatedCurrent} onClick={start}>
             {starting ? 'Starting…' : 'Start run'}</button>
         </>}
     </div>
