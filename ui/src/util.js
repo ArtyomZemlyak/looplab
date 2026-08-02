@@ -25,8 +25,8 @@ export function storageRemove(key) {
 export const ASSISTANT_MODES = [
   { id: 'plan', label: 'Plan', hint: 'read-only — inspect & propose (safe)' },
   { id: 'default', label: 'Ask', hint: 'confirm every change' },
-  { id: 'acceptEdits', label: 'Auto-edit', hint: 'edits apply; commands ask' },
-  { id: 'auto', label: 'Auto', hint: 'runs everything without asking' },
+  { id: 'acceptEdits', label: 'Auto-edit', hint: 'edits apply; commands and risky actions ask' },
+  { id: 'auto', label: 'Auto', hint: 'routine changes run; high-risk actions ask' },
 ]
 // One streamed token's text: the SSE stream sends {text} objects, but some paths hand back a bare
 // string — one reader so both assistant surfaces decode identically.

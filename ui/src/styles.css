@@ -480,6 +480,15 @@ button { font: inherit; }
 .cmdbar-ic { background: transparent; border: 1px solid var(--line-2); color: var(--accent); cursor: pointer;
   font-size: 15px; line-height: 1; padding: 5px 8px; border-radius: 6px; flex: none; }
 .cmdbar-ic:hover { background: var(--bg-3); border-color: var(--accent-dim); }
+.cmdbar-mode { flex: none; min-height: 30px; display: inline-flex; align-items: center; justify-content: center;
+  gap: 2px; padding: 5px 8px; border: 1px solid var(--line-2); border-radius: 7px;
+  background: var(--bg-2); color: var(--fg-dim); cursor: pointer; font: inherit; font-size: 11.5px;
+  white-space: nowrap; }
+.cmdbar-mode:hover { border-color: var(--accent-dim); background: var(--bg-3); color: var(--fg); }
+.cmdbar-mode:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cmdbar-mode.mode-auto { border-color: color-mix(in srgb, var(--working) 62%, var(--line));
+  background: color-mix(in srgb, var(--working) 10%, var(--bg-2)); color: var(--working-text); }
+.cmdbar-mode-prefix { color: var(--fg-mut); }
 .cmdbar-field { position: relative; flex: 1 1 auto; min-width: 0; display: flex; }
 .cmdbar-in { flex: 1; min-width: 0; background: var(--bg-1); border: 1px solid var(--line-2); outline: none;
   color: var(--fg); font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 7px; transition: border-color .15s, box-shadow .15s; }
@@ -2774,7 +2783,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .accessible-chart-actions .btn, .data-table-heading .btn, .chart-leg.pick,
   .chart-tools .btn, .chart-grp .btn, .metric-group-toggle,
   .run-metric-chip, .reset-stage-option, .ctx-chip, .data-table .btn.xs, .chip .chip-x,
-  .grp-pill, .grp-tab, .run-card .ic, .cmdbar-attach, .asst-attach, .cmdbar-go,
+  .grp-pill, .grp-tab, .run-card .ic, .cmdbar-mode, .cmdbar-attach, .asst-attach, .cmdbar-go,
   .cmdbar-drawer-btn, .asst-mode, .asst-side-panel .btn.sm, .asst-full .asst-main-h .btn,
   .asst-full .asst-side-h .btn, .asst-shared .asst-main-h .btn, .asst-sess-open, .asst-sess-x,
   .asst-session-resource .btn,
@@ -2822,7 +2831,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
      otherwise consumes the entire row and collapses the actual composer to a few characters. */
   .cmdbar-wrap { padding-inline: 8px; }
   .cmdbar-dock { flex-wrap: wrap; }
-  .cmdbar-dock > :is(.cmdbar-ic, .asst-launch-global, .cmdbar-attach, .cmdbar-drawer-btn) { order: 1; }
+  .cmdbar-dock > :is(.cmdbar-ic, .asst-launch-global, .cmdbar-mode, .cmdbar-attach, .cmdbar-drawer-btn) { order: 1; }
   .cmdbar-dock > .cmdbar-attach { margin-left: auto; }
   .cmdbar-dock > .cmdbar-status { order: 2; flex: 1 0 100%; max-width: 100%;
     flex-wrap: wrap; white-space: normal; }
@@ -2832,6 +2841,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .cmdbar-dock > .cmdbar-status.preview:not(.recovery) { display: none; }
   .cmdbar-dock > .cmdbar-field { order: 3; flex: 1 1 calc(100% - 50px); }
   .cmdbar-dock > .cmdbar-go { order: 3; }
+  .cmdbar-mode-prefix { display: none; }
   /* The comparison column sheet must clear the two-row persistent Assistant dock. */
   .compare-columns fieldset {
     bottom: calc(126px + env(safe-area-inset-bottom, 0px));

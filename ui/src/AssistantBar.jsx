@@ -2562,6 +2562,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     {view === 'bar' && <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (busy || commandBusy ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
       <button className="cmdbar-ic" aria-label="Open full Assistant" title="open the full assistant" onClick={openFull}>✦</button>
       {launchRecoveryButton}
+      <button type="button" className={`cmdbar-mode mode-${mode}`}
+        aria-label={`Assistant mode for the next message: ${activeMode.label}. ${activeMode.hint}. Open Assistant to inspect or change.`}
+        title={`${activeMode.label} · ${activeMode.hint}`} onClick={openSide}>
+        <span className="cmdbar-mode-prefix">Mode · </span><span>{activeMode.label}</span>
+      </button>
       <div className="cmdbar-field">
         {(refNodes(input).length > 0 || files.length > 0) && <div className="cmdbar-ctx">
           {runId && refNodes(input).map(id => <span key={id} className="chip xs">#{id}</span>)}
