@@ -723,15 +723,30 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     ...current, view: typeof value === 'function' ? value(current.view) : value,
   }), options)
   const changeViewSeq = (next) => {
-    if (reviewMode || routeFenceBlocked) return
+    if (reviewMode || routeFenceBlocked) return routeState
     const value = Number(next)
     const n = next == null || value >= seq ? null
       : Number.isSafeInteger(value) && value >= 0 ? value : null
-    route.update(current => ({ ...current, sequence: n }))
+    return route.update(current => ({ ...current, sequence: n }))
   }
   const returnToLive = () => {
-    changeViewSeq(null)
+    const nextRoute = changeViewSeq(null)
+    // A failed push leaves the historical address authoritative. Keep its notices and timeline state
+    // intact too, otherwise the visible workspace would claim to be live while reload remains historical.
+    if (nextRoute?.sequence != null) return false
+    // Historical route warnings describe the snapshot address that produced them. Once the user
+    // explicitly returns live, keeping that copy would misdescribe the visible state.
+    if (historyActive) {
+      setRouteNotice('')
+      setAttemptFenceNotice('')
+      attemptFenceFocusPendingRef.current = false
+    }
     timeline.jumpToLive()
+    return true
+  }
+  const returnToLiveAndFocusWorkspace = () => {
+    if (!returnToLive()) return
+    requestAnimationFrame(() => routeMainRef.current?.focus({ preventScroll: true }))
   }
   useLayoutEffect(() => {
     // The mutation boundary follows URL hydration too. A generation-fenced link is fail-closed until
@@ -2486,7 +2501,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       <span className="history-lock" aria-hidden="true">◷</span>
       <b>Historical snapshot · gen {gen} · seq {viewSeq} of {seq}</b>
       <span>read-only</span>
-      <button className="btn sm primary" onClick={returnToLive}>Return to live</button>
+      <button className="btn sm primary" onClick={returnToLiveAndFocusWorkspace}>Return to live</button>
     </div>
     <main className="history-resource" data-route-main tabIndex={-1}
       aria-labelledby="run-state">
@@ -2527,7 +2542,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const onEmptyAction = (action) => {
     if (action === 'events') { revealEvents(); return }
     if (action === 'report') { setView('report'); return }
-    if (action === 'return-live') { returnToLive(); return }
+    if (action === 'return-live') { returnToLiveAndFocusWorkspace(); return }
     if (action === 'retry-connection') { retryRun(); return }
     if (action === 'assistant') {
       if (!approvalCommand) { revealEvents(); showToast('Approval target is missing; inspect the timeline before acting.'); return }
@@ -2761,7 +2776,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <span className="history-lock" aria-hidden="true">◷</span>
         <b>Historical snapshot · gen {gen} · seq {history.resolvedSeq} of {seq}</b>
         <span>read-only · actions target live and are disabled</span>
-        <button className="btn sm primary" onClick={returnToLive}>Return to live</button>
+        <button className="btn sm primary" onClick={returnToLiveAndFocusWorkspace}>Return to live</button>
       </div>}
 
       {/* All actions now run through the chat (type a /command or just say what to do). The approval
