@@ -137,17 +137,40 @@ function ResourceNotice({ state, label, retry }) {
   </div>
 }
 
+// The ONE place a mutation alert reflects server text. Every other branch is client-owned copy,
+// because a generic failure carries nothing the operator can act on. These codes are the exception:
+// the fence conflicts describe WHICH identity moved under the request, and only the server knows.
+const FENCE_CONFLICT_CODES = new Set([
+  'run_generation_changed', 'run_generation_unavailable', 'invalid_run_generation',
+  'run_organization_changed', 'run_organization_unavailable', 'invalid_expected_organization',
+])
+
+// Reflected text is coerced and bounded on the same terms as `commandErrorMessage` in api.js — a
+// malformed body can put a non-string (or a very long one) in either field, and joining those raw
+// renders `[object Object]` into an alert. An envelope carrying neither field falls back to
+// client-owned copy rather than to the empty string, which is what an unguarded join produced: a
+// contentless alert exactly where the operator needed to be told their view had moved.
+const fenceConflictMessage = error => {
+  const parts = [error?.message, error?.remediation]
+    .filter(part => typeof part === 'string' && part.trim())
+    .map(part => part.trim())
+  return parts.length
+    ? parts.join(' ').slice(0, 500)
+    : 'The run or project changed under this request; refresh before retrying.'
+}
+
+// Exported for the reflection test: the coercion/bound/fallback rules are the point of the helper,
+// and a source-regex can only see that they are written, not that they hold.
+export const __testFenceConflictMessage = fenceConflictMessage
+
 const mutationMessage = (error, timedOut = false) => timedOut
   ? 'Save timed out; its outcome is unknown.'
   : error?.viewName
     ? 'Use a view name of 1–48 characters without control characters.'
   : error?.storage
     ? 'Browser storage is blocked or full; this view was not saved.'
-  : error?.code === 'run_generation_changed' || error?.code === 'run_generation_unavailable'
-      || error?.code === 'invalid_run_generation' || error?.code === 'run_organization_changed'
-      || error?.code === 'run_organization_unavailable'
-      || error?.code === 'invalid_expected_organization'
-    ? [error.message, error.remediation].filter(Boolean).join(' ')
+  : FENCE_CONFLICT_CODES.has(error?.code)
+    ? fenceConflictMessage(error)
   : error?.status === 409
     ? 'Conflict; current input or selection kept.'
     : error?.status === 503
@@ -228,12 +251,9 @@ function useMutation() {
 const focusSoon = target => requestAnimationFrame(() => target?.isConnected && target.focus({ preventScroll: true }))
 
 const listMutationMessage = (kind, error) => {
-  if (error?.code === 'run_generation_changed' || error?.code === 'run_generation_unavailable'
-      || error?.code === 'invalid_run_generation' || error?.code === 'run_organization_changed'
-      || error?.code === 'run_organization_unavailable'
-      || error?.code === 'invalid_expected_organization') {
-    return [error.message, error.remediation].filter(Boolean).join(' ')
-  }
+  // Same fence conflicts, same reflection rules — this was a second hand-maintained copy of both the
+  // code list and the raw join, so a hardening applied to one silently missed the other.
+  if (FENCE_CONFLICT_CODES.has(error?.code)) return fenceConflictMessage(error)
   if (kind === 'delete-run') return error?.status === 409
     ? 'This run is still live. Pause or stop it before deleting.'
     : 'Run deletion was not confirmed.'

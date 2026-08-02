@@ -14,29 +14,87 @@ const between = (text, start, end) => text.slice(text.indexOf(start), text.index
 
 test('the shared RunList mutation guard is single-flight, bounded, and honest about timeouts', async () => {
   const text = await source()
-  const copy = between(text, 'const mutationMessage', 'function useMutation')
+  const copy = between(text, 'const FENCE_CONFLICT_CODES', 'function useMutation')
+  const branches = between(text, 'const mutationMessage', 'function useMutation')
+  const reflection = between(text, 'const fenceConflictMessage', 'const mutationMessage')
   const hook = between(text, 'function useMutation', 'const focusSoon')
 
-  assert.match(copy, /error\?\.status === 409[\s\S]*error\?\.status === 503/)
-  assert.match(copy, /current input or selection kept/)
-  assert.match(copy, /outcome is unknown/)
+  assert.ok(copy && branches && reflection && hook, 'a source anchor moved; this test reads nothing')
+  assert.match(branches, /error\?\.status === 409[\s\S]*error\?\.status === 503/)
+  assert.match(branches, /current input or selection kept/)
+  assert.match(branches, /outcome is unknown/)
   assert.doesNotMatch(copy, /Refresh before retrying/,
     'the UI must not instruct a retry before it has actually reconciled the store')
-  assert.doesNotMatch(copy, /\.message|\.detail|String\(/,
-    'provider text must not be reflected into a mutation alert')
+
+  // Reflection is allowed in exactly one branch and nowhere else. This used to be a blanket ban on
+  // `.message`, which stopped holding when the fence-conflict codes were added — those describe
+  // WHICH identity moved under the request, which only the server knows. The rule is now the
+  // narrower true one: every OTHER branch is client-owned copy.
+  assert.doesNotMatch(branches, /\.message|\.detail|String\(/,
+    'only the fence-conflict helper may reflect server text; every other branch is client-owned')
+  assert.match(branches, /FENCE_CONFLICT_CODES\.has\(error\?\.code\)[\s\S]*fenceConflictMessage\(error\)/)
+  assert.doesNotMatch(reflection, /\.detail/,
+    'a raw provider `detail` is never the app-owned explanation these codes carry')
+  // ...and what it reflects is coerced, bounded, and has a fallback. A malformed body can put a
+  // non-string in either field, and joining those raw renders `[object Object]` into an alert;
+  // an envelope carrying neither used to produce an EMPTY alert precisely when the operator most
+  // needed to be told their view had moved.
+  assert.match(reflection, /typeof part === 'string'/)
+  assert.match(reflection, /\.slice\(0, 500\)/)
+  assert.match(reflection, /parts\.length\s*\?[\s\S]*:\s*'[^']+'/,
+    'the reflection helper must fall back to client-owned copy, never to the empty string')
   assert.match(hook, /if \(lock\.current\) return false/)
   assert.match(hook, /lock\.current = true; setState\(true\)/)
   assert.equal((hook.match(/settleWithin\(action, LIST_WRITE_TIMEOUT_MS\)/g) || []).length, 1,
     'a mutation intent is sent once through the bounded settlement guard')
-  assert.match(hook, /if \(!settlement\.ok\)[\s\S]*typeof reconcile === 'function'[\s\S]*settleWithin\(reconcile, LIST_RECONCILE_TIMEOUT_MS\)[\s\S]*Current data was refreshed[\s\S]*return false/,
+  assert.match(hook, /if \(!settlement\.ok\)[\s\S]*typeof reconcile === 'function'[\s\S]*settleWithin\(reconcile, LIST_RECONCILE_TIMEOUT_MS\)[\s\S]*mutationReconcileSuffix\(reconciliationStatus\(check\)\)[\s\S]*return false/,
     'a stalled write reconciles the affected store before the explicit retry path is re-armed')
-  assert.match(hook, /follow-up refresh timed out[\s\S]*follow-up refresh failed/)
+  // The per-status copy moved out of the hook into `mutationReconcileSuffix`; assert it where it
+  // lives now rather than where it used to, so the anchor tracks the code instead of decaying.
+  assert.match(copy, /follow-up refresh timed out[\s\S]*follow-up refresh failed/)
   assert.match(hook, /const outcome = settlement\.value[\s\S]*if \(outcome === false\)[\s\S]*return false/,
     'a stronger caller-owned reconciliation result cannot be relabeled as success')
   assert.match(hook, /catch \(error\)[\s\S]*settleWithin\(reconcile, LIST_RECONCILE_TIMEOUT_MS\)[\s\S]*setState\(message\); return false/)
   assert.match(hook, /finally \{ lock\.current = false \}/)
   assert.doesNotMatch(hook, /setTimeout|setInterval|while\s*\(/,
     'RunList must never schedule or loop an automatic mutation replay')
+
+  // Both alert paths — the shared mutation hook and the list-mutation copy — must reach the fence
+  // conflicts through the same set and the same reflection helper. They were two hand-maintained
+  // copies of an identical six-code list plus an identical raw join, which is how the hardening
+  // applied to one would have silently missed the other.
+  assert.doesNotMatch(text, /\[error\.message, error\.remediation\]/,
+    'the raw unbounded join is back; reflect through fenceConflictMessage instead')
+  assert.equal((text.match(/'invalid_expected_organization'/g) || []).length, 1,
+    'the fence-conflict codes are listed twice again; a fix to one list will miss the other')
+  assert.equal((text.match(/FENCE_CONFLICT_CODES\.has\(/g) || []).length, 2,
+    'both mutation-alert paths must consult the one fence-conflict set')
+  assert.equal((text.match(/fenceConflictMessage\(error\)/g) || []).length, 2,
+    'both mutation-alert paths must reflect through the one bounded helper')
+})
+
+test('reflected fence-conflict text is coerced, bounded, and never empty', async () => {
+  const vite = await createServer({ root: UI_ROOT, configFile: false, appType: 'custom',
+    logLevel: 'silent', server: { middlewareMode: true } })
+  try {
+    const { __testFenceConflictMessage: message } = await vite.ssrLoadModule('/src/RunList.jsx')
+    assert.ok(typeof message === 'function', 'RunList no longer exports the reflection helper')
+
+    assert.equal(message({ message: 'The run moved.', remediation: 'Refresh.' }),
+      'The run moved. Refresh.')
+    assert.equal(message({ remediation: 'Refresh.' }), 'Refresh.')
+    // A malformed body can put anything in either field. Joining raw rendered `[object Object]`
+    // straight into the alert; a body with neither field rendered nothing at all, precisely when
+    // the operator needed to be told their view had moved under them.
+    assert.equal(message({ message: { detail: 'x' }, remediation: ['y'] }).includes('object Object'),
+      false)
+    assert.match(message({}), /changed under this request/)
+    assert.match(message({ message: '   ' }), /changed under this request/)
+    assert.match(message(null), /changed under this request/)
+    assert.equal(message({ message: 'x'.repeat(4000) }).length, 500)
+  } finally {
+    await vite.close()
+  }
 })
 
 test('prompt dialogs retain their draft, focus layer, and controls until success', async () => {

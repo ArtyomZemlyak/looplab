@@ -21,9 +21,16 @@ test('RunList resources preserve last-good data and fence every settlement', asy
   assert.match(hook, /const owner = \+\+version\.current/)
   assert.match(hook, /deadlineRequest\(signal => read\(signal\), LIST_READ_TIMEOUT_MS\)/)
   assert.match(hook, /\.then\(value => \{[\s\S]*version\.current !== owner[\s\S]*setData\(value\); setState\('ready'\)/)
-  assert.match(hook, /\.catch\(\(\) => \{[\s\S]*version\.current !== owner[\s\S]*\['ready', 'stale'\]/)
+  // The catch takes the error now (callers render an actionable message from it) — what this pins
+  // is the fencing and the degradation, not the parameter list. Anchoring on `.catch(() => {`
+  // stopped matching the moment the error started propagating, which retired both assertions.
+  assert.match(hook, /\.catch\((?:\(\)|error) => \{[\s\S]*version\.current !== owner[\s\S]*\['ready', 'stale'\]/)
   assert.doesNotMatch(hook.slice(hook.indexOf('.catch')), /setData/,
     'a failed initial load or refresh must not overwrite the last successful payload')
+  assert.match(hook, /\.catch\(error => \{[\s\S]*return \{ ok: false, error \}/,
+    'a failed read must hand its error back so the caller can say what went wrong')
+  assert.match(hook, /superseded: true, error/,
+    'a superseded failure is still labelled superseded, so a late error cannot be shown as current')
   assert.match(text,
     /useResource\(\s*signal => listProjects\(\{ signal \}\), \{ projects: \[\], assignments: \{\} \}\)/)
   assert.match(text,
@@ -34,7 +41,13 @@ test('RunList resources preserve last-good data and fence every settlement', asy
 
 test('RunList exposes safe loading, error, stale, and retry semantics', async () => {
   const text = await source()
-  const notice = text.slice(text.indexOf('function ResourceNotice'), text.indexOf('// Module-scope'))
+  // Slice to the END OF THE FUNCTION, not to the next landmark comment far below it: the old
+  // `// Module-scope` bound swept in every helper declared in between, so the "no reflected provider
+  // text" rule below was silently policing unrelated code rather than this component.
+  const noticeStart = text.indexOf('function ResourceNotice')
+  const notice = text.slice(noticeStart, text.indexOf('\n}\n', noticeStart) + 3)
+  assert.ok(notice.includes('ResourceNotice') && notice.length < 1200,
+    'the ResourceNotice slice no longer bounds one function')
 
   assert.match(notice, /state === 'loading'[\s\S]*role="status">\{label\} loading/)
   assert.match(notice, /state === 'stale'/)

@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
   settingsSavePayload,
   settingsValidationErrors,
@@ -153,7 +154,11 @@ test('Settings loss guards and secret actions remain explicit and no recovery st
   assert.match(source, /Clear the stored API key and its endpoint binding now\? This is immediate, separate from Save/)
   assert.match(source, /publicSubmittedForm = form => \(\{ \.\.\.\(form \|\| \{\}\), llm_api_key: '' \}\)/)
   assert.match(source, /focusFirstInvalid\(\)/)
-  assert.match(panelSource, /publicConfigForm = form => \(\{ \.\.\.\(form \|\| \{\}\), llm_api_key: '' \}\)/)
+  // `publicConfigForm` grew a schema walk so it blanks EVERY declared secret, not only the one
+  // hardcoded name — a strictly stronger guarantee that this regex could not express, so it simply
+  // stopped matching and took the rest of this test's assertions with it. The property is now
+  // checked for real below.
+  assert.match(panelSource, /const publicConfigForm = \(form, settingsSchema = null\) =>/)
   assert.match(panelSource, /window\.confirm\(`\$\{warning\} Close the run settings panel anyway\?`\)/)
   assert.match(formSource, />Clear now<\/button>/)
   assert.match(formSource, /Clear now is immediate and separate from Save/)
@@ -196,4 +201,44 @@ test('every Part IV/V flag is visible and round-trips its boolean value', () => 
   assert.match(FIELD_BY_KEY.cross_run_curation.warning, /finalization latency.*paid model cost/i)
   assert.match(FIELD_BY_KEY.cross_run_curation_auto.warning, /never applies/i)
   assert.match(FIELD_BY_KEY.cross_run_curation_auto.help, /explicit operator/i)
+})
+
+test('a per-run config draft carries no secret from any schema-declared secret field', async () => {
+  const { createServer } = await import('vite')
+  const vite = await createServer({
+    root: fileURLToPath(new URL('..', import.meta.url)),
+    configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try {
+    const { __testPublicConfigForm: redact } = await vite.ssrLoadModule('/src/panels.jsx')
+    assert.ok(typeof redact === 'function', 'panels.jsx no longer exports the draft redactor')
+
+    // The shipped schema declares exactly one secret today, which is the same field the function
+    // blanks by name — so testing against it alone cannot distinguish the schema walk from the old
+    // hardcoded line. A second declared secret is what makes this test about the WALK.
+    const schema = { ...SETTINGS_SCHEMA, fieldByKey: {
+      ...SETTINGS_SCHEMA.fieldByKey,
+      provider_token: { key: 'provider_token', type: 'secret', label: 'Provider token' },
+    } }
+    const secrets = Object.values(schema.fieldByKey).filter(f => f.type === 'secret')
+    assert.ok(secrets.length >= 2, 'this test needs more than one secret field to mean anything')
+
+    const form = Object.fromEntries(Object.values(schema.fieldByKey)
+      .map(field => [field.key, field.type === 'secret' ? `RAW_${field.key.toUpperCase()}` : 'kept']))
+    const redacted = redact(form, schema)
+    for (const field of secrets) {
+      assert.equal(redacted[field.key], '',
+        `${field.key} survived into a persisted config draft`)
+    }
+    assert.doesNotMatch(JSON.stringify(redacted), /RAW_/)
+    assert.equal(redacted.max_nodes, 'kept', 'non-secret fields must survive the draft intact')
+
+    // Without a schema the one historically-hardcoded key must still be blanked: a draft written
+    // before the schema loaded would otherwise persist a typed key to browser storage.
+    assert.equal(redact({ llm_api_key: 'RAW_KEY', max_nodes: '3' }).llm_api_key, '')
+    assert.deepEqual(redact(null), { llm_api_key: '' })
+  } finally {
+    await vite.close()
+  }
 })

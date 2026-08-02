@@ -62,6 +62,11 @@ const publicConfigForm = (form, settingsSchema = null) => {
   }
   return sanitized
 }
+// Exported for test: the guarantee is "no secret field leaves the browser in a config draft", and
+// that is a property of the SCHEMA WALK, not of any one field name — a source regex can only see
+// that llm_api_key is mentioned.
+export const __testPublicConfigForm = publicConfigForm
+
 const publicConfigMeta = meta => ({
   configRevision: typeof meta?.configRevision === 'string' ? meta.configRevision : '',
   pinnedFields: new Set(meta?.pinnedFields instanceof Set ? meta.pinnedFields : []),
