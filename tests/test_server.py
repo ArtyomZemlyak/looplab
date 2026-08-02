@@ -305,12 +305,17 @@ def test_artifacts_token_gated(tmp_path, monkeypatch):
                       params={"root": "run", "path": "out.txt"}).status_code == 401
     # P1-3 deny-default: even a folded-projection GET now requires the token
     assert client.get("/api/runs/demo/state").status_code == 401
-    # with the token, content is served
+    # with the token, content is served. The artifact views are fenced to a run ATTEMPT now, so they
+    # require the generation the caller is looking at — the gate is asserted above without it,
+    # because a missing fence must never be the thing that keeps an untokened caller out.
     h = {"X-LoopLab-Token": "sekret"}
     assert client.get("/api/runs/demo/state", headers=h).status_code == 200
-    assert client.get("/api/runs/demo/artifacts", headers=h).status_code == 200
-    assert client.get("/api/runs/demo/artifact", params={"root": "run", "path": "out.txt"},
-                      headers=h).json()["content"] == "hi\n"
+    generation = client.get("/api/runs/demo/state", headers=h).json()["generation"]
+    assert client.get("/api/runs/demo/artifacts", headers=h,
+                      params={"expected_generation": generation}).status_code == 200
+    assert client.get("/api/runs/demo/artifact", headers=h,
+                      params={"root": "run", "path": "out.txt",
+                              "expected_generation": generation}).json()["content"] == "hi\n"
 
 
 def test_raw_content_read_routes_are_token_gated(tmp_path, monkeypatch):
@@ -328,13 +333,24 @@ def test_raw_content_read_routes_are_token_gated(tmp_path, monkeypatch):
                  "/api/runs/demo/trace/tail", "/api/runs/demo/trace/by_trace/t1",
                  "/api/runs/demo/nodes/0/conversation", "/api/prompts", "/api/skills",
                  "/api/knowledge", "/api/memory", "/api/assistant/permissions",
-                 # arch-review §4 P1-3: node DETAIL (full code/files/stdout_tail/parent code) and the
-                 # billable model-completion health check were open; gate them.
-                 "/api/runs/demo/nodes/0", "/api/llm/health"):
+                 # arch-review §4 P1-3: node DETAIL (full code/files/stdout_tail/parent code) was
+                 # open; gate it. (The billable health check is asserted below — it is a POST now.)
+                 "/api/runs/demo/nodes/0"):
         assert client.get(path).status_code == 401, f"{path} should be gated"
         assert client.get(path, headers={"X-LoopLab-Token": "sekret"}).status_code == 200, path
-    # unauthenticated health must NOT reach a (billable) model completion — 401 first
+    # The billable model-completion check is a revision-fenced POST, so it cannot ride the GET loop
+    # above. The property is unchanged and still worth pinning: an unauthenticated caller must be
+    # refused BEFORE anything can reach a paid provider call. Deny-default answers 401 ahead of
+    # routing, which is why even the retired GET spelling is still refused rather than 404'd.
+    _health_body = {"expected_settings_revision": "x", "expected_secret_revision": "y",
+                    "operation_id": "b2f6c1de-4a3e-4c1b-9f57-0d1e2a3b4c5d"}
+    assert client.post("/api/llm/health", json=_health_body).status_code == 401
     assert client.get("/api/llm/health").status_code == 401
+    # …and with the token it reaches the handler (409 here: the fabricated revisions do not match
+    # the saved snapshot), rather than being turned away by the gate.
+    _authed = client.post("/api/llm/health", json=_health_body,
+                          headers={"X-LoopLab-Token": "sekret"})
+    assert _authed.status_code != 401 and _authed.status_code != 404, _authed.status_code
     # assistant progress is gated too (session query required once past auth)
     assert client.get("/api/assistant/progress?session=x").status_code == 401
     # P1-3 deny-default: even LIGHT projection reads now require the token (a new sensitive route can no
