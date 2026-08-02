@@ -142,6 +142,7 @@ test('minted review links carry only scope-safe canonical context after the bear
   assert.match(panels, /reviewRouteStateForScope\(\{ \.\.\.\(reviewRouteState \|\| \{\}\),/)
   assert.match(panels, /generation: expectedGeneration \}, \{ evidence: includeEvidence \}\)/,
     'a minted link must carry the generation the OWNER validated, not one echoed back by the mint')
-  assert.match(panels, /hashWithRunRouteState\(target\.hash, scopedState,/)
+  assert.match(panels, /const routeQuery = encodeRunRouteState\(scopedState,\n\s*\{ reviewMode: true, forceGeneration: true \}\)/,
+    'a review link must encode the SCOPED state, in review mode, with the generation pinned')
   assert.match(api, /splitRouteHash\(loc\.hash \|\| ''\)\.path/)
 })

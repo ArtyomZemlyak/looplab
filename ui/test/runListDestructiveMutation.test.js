@@ -18,7 +18,8 @@ test('destructive and drag/drop writes stay authoritative, bounded, and recovera
   const projectDelete = between(text, 'const removeProject', 'const moveRun')
   const menuMove = between(text, 'const moveRun', 'const onDrop')
   const drop = between(text, 'const onDrop', 'const submitRunRename')
-  const runDelete = between(text, 'const removeRun', '// super-task CRUD')
+  const openDeletion = between(text, 'const openRunDeletion', 'const leaveDeleteDialogForRecovery')
+  const runDeleteRequest = between(text, 'const runDeletionRequest = async', '// super-task CRUD')
   const menu = between(text, 'function RunMenu', '// Manage super-tasks')
 
   assert.match(hook, /if \(lock\.current\) return false/)
@@ -39,14 +40,27 @@ test('destructive and drag/drop writes stay authoritative, bounded, and recovera
   assert.match(drop, /if \(!run \|\| listBusy\) return/)
   assert.match(menuMove, /return mutateList\('move-run'/)
   assert.match(menuMove, /mutateList\('move-run'[\s\S]*?\(\) => assignRun\(/)
-  assert.match(drop, /setDragRun\(null\)[\s\S]*await moveRun\(runId, project_id\)/,
+  assert.match(drop, /setDragRun\(null\)[\s\S]*await moveRun\(run, project_id\)/,
     'menu and drag/drop must share one authoritative move contract')
-  assert.match(runDelete, /confirm\([\s\S]*setRunMenu\(null\)[\s\S]*await mutateList\('delete-run'/)
-  assert.doesNotMatch(runDelete.slice(0, runDelete.indexOf('if (!confirm')), /setRunMenu\(null\)/)
-  assert.match(menu, /className="mi danger" onClick=\{\(\) => onDelete\(r\)\}/)
+  // Run deletion is no longer a `confirm()` + one-shot list mutation. It is an operation-id-bound
+  // durable transaction (the same identity the server's POST /deletions state machine resumes), so
+  // the assertions follow that contract instead of the retired one.
+  assert.match(openDeletion, /setRunMenu\(null\)/,
+    'opening the deletion dialog closes the menu it was launched from')
+  assert.match(openDeletion, /expectedGeneration: deletionGenerationOf\(r\), expectedSeq: r\.seq/,
+    'the dialog stages the EXACT generation and seq the operator saw, not whatever is current at submit')
+  assert.match(openDeletion, /operationId: null, invalidated: false/,
+    'no operation identity exists until the operator actually confirms')
+  assert.match(runDeleteRequest, /if \(!intent \|\| deletionRequestRef\.current\.has\(intent\.operationId\)\) return/,
+    'one operation id may have only one request in flight')
+  assert.match(runDeleteRequest, /submitRunDeletion\(\n\s*intent\.runId, intent\.expectedGeneration, intent\.expectedSeq,\n\s*intent\.operationId/,
+    'every continuation replays the exact persisted identity, which is what makes it idempotent')
+  assert.match(runDeleteRequest, /const receipt = exactRunDeletionReceipt\(rawReceipt, intent\)/,
+    'a receipt that does not match this exact intent is a protocol error, not a deletion')
+  assert.match(menu, /className="mi danger"[\s\S]*?onClick=\{\(\) => onDelete\(r\)\}/)
   assert.doesNotMatch(menu, /className="mi danger"[^\n]*close\(/,
-    'cancelling the native confirmation leaves the action menu and its focus target mounted')
-  assert.doesNotMatch(runDelete, /alert\(|\.message|\.detail|String\(/,
+    'opening the deletion dialog leaves the action menu focus target resolvable')
+  assert.doesNotMatch(runDeleteRequest, /alert\(/,
     'delete errors must remain inline and must not reflect backend text')
 
   assert.match(text, /listMutation\?\.busy[\s\S]*role="status"/)
