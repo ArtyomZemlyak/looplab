@@ -182,7 +182,8 @@ The copies where drift is a correctness event, not a style problem:
 - **SC-03** canonical run-path/run-id validation ×6, `_is_reparse` ×7, Windows reserved names ×4.
 - **EM-04** durable curation-key derivation duplicated between writer and validator (drift = ledger poisoning).
 - **EV-05** tolerant-JSONL-prefix scan ×4–5 (equivalence maintained by comments).
-- **EV-06** `EventStore.append`/`append_many` duplicate the ~55-line critical section.
+- **EV-06** `EventStore.append`/`append_many` duplicate the ~55-line critical section. *(resolved
+  2026-08-02 — `EventStore._locked_append`.)*
 - **RA-03** Docker hardening argv mirrored by comment (already drifted once).
 - **RA-06** direction validator present in only 2 of 9 task models (objective-flip risk).
 - **ES-11** `"(developer error:"` magic-string protocol at 6 consumer sites, no shared constant.
@@ -906,9 +907,21 @@ Scope: `looplab/events/`: eventstore.py, replay.py, types.py, projections, span_
 
 *Recommendation:* Extract one core scanner that yields (raw_line, start_offset, end_offset) with the stop-at-first-bad rule, and build iter_jsonl, _parse_jsonl_region, _scan_light and log_divergence's walk on top of it (each keeps its own payload handling: Event decode, light projection, divergence accounting). A shared equivalence test then covers all consumers at once.
 
-#### EV-06 · MEDIUM · duplication · effort: medium
+#### EV-06 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-02)**
 
 **EventStore.append and append_many duplicate the entire ~55-line critical section**
+
+*Resolution:* `EventStore._locked_append(build, *, expected_last_seq, require_lock,
+require_durable)` owns the section; both public methods now contribute only a payload builder.
+The recommendation's "pre-serialized payload" is a `build(cur)` CALLBACK instead: the seq is
+only knowable inside the critical section, so a payload serialized against a tail read outside
+it would carry a seq another writer already used. It returns `(payload_bytes,
+last_logical_seq, result)` — the newline-terminated bytes, the highest logical seq they carry
+(the LAST batch member, which is what an uncertain-sync reservation must fence), and the public
+method's return value. Pinned by `tests/test_append_critical_section_parity.py`: a source scan
+that fails if either public method re-grows a private critical section, plus a parity table that
+runs each rule (divergence fail-closed, CAS, torn-tail heal, required-lock failure, durable
+directory-entry publish, uncertain-sync fence) against BOTH appenders.
 
 *Locations:* `looplab/events/eventstore.py:950-1015`, `looplab/events/eventstore.py:1040-1107`
 

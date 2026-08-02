@@ -957,6 +957,96 @@ class EventStore:
             self._full_verified_bytes = 0
             self._divergence = None
 
+    def _locked_append(self, build, *, expected_last_seq: "int | None",
+                       require_lock: bool, require_durable: bool):
+        """Own the ONE critical section both public appenders need; return what ``build`` produced.
+
+        `append` and `append_many` used to carry a verbatim copy of this body (doc 25 EV-06), so
+        every rule below — the reset/deletion write fences, the fail-closed divergence check, the
+        torn-tail heal, the two-source seq derivation, the explicit-seq CAS, the accepted-bytes
+        reservation on a failed sync, the directory-entry publish, and the cache/stat bookkeeping —
+        existed twice. That is the shape where a durability fix lands on one spelling and is
+        silently absent from the other; both copies had already been extended several times.
+
+        ``build(cur)`` is called INSIDE the lock, after the tail seq is derived and the CAS has
+        passed, and returns ``(payload_bytes, last_logical_seq, result)``:
+
+        * ``payload_bytes`` — the exact bytes to append, INCLUDING the terminating newline (the
+          torn-tail contract is a per-record newline, so a builder that omits it writes a record
+          every reader stops at);
+        * ``last_logical_seq`` — the highest logical seq those bytes carry. This is what ``self._seq``
+          advances to and what an uncertain-sync reservation must fence; for a batch it is the LAST
+          member's seq, not the envelope's position.
+        * ``result`` — this method's return value, untouched.
+
+        It cannot run BEFORE the lock, which is why the doc's "pre-serialized payload" shape is a
+        callback here: `cur` is only knowable inside the critical section, and a payload serialized
+        against a tail read outside it would carry a seq another writer already used.
+        """
+        with self._append_lock, _interprocess_lock(
+                Path(str(self.path) + ".lock"), required=require_lock):
+            # Reset publishes its marker while owning this SAME append lock.  Checking inside the
+            # critical section closes marker-check -> append races, and the replacement engine is
+            # admitted only when it inherited the exact operation id.
+            assert_run_reset_write_allowed(self.path.parent)
+            assert_run_deletion_write_allowed(self.path.parent)
+            # Revalidate bytes written or replaced since the last read WHILE holding the writer lock.
+            # A construction-time snapshot is insufficient on FUSE/network mounts: corruption can
+            # appear mid-run, and appending after it would make every new event invisible to replay.
+            self.read_all()
+            if self._divergence is not None:
+                raise EventLogCorruptionError(self.path, self._divergence)
+            self._heal_torn_tail()
+            # Derive seq from max(in-memory, on-disk tail) so a concurrent writer can't collide.
+            # Single-process: _disk_last_seq == self._seq, so seq == self._seq + 1 (unchanged).
+            cur = max(self._seq, self._disk_last_seq())
+            # P1-12 explicit-seq CAS: reject the append if the tail moved since the caller read state.
+            # Inside the critical section, so the check + write are atomic against another writer.
+            if expected_last_seq is not None and cur != expected_last_seq:
+                raise EventStoreConcurrencyError(self.path, expected_last_seq, cur)
+            payload, last_logical_seq, result = build(cur)
+            accepted = False
+            written_stat = None
+            existed = os.path.exists(self.path)
+            try:
+                with open(self.path, "ab") as f:
+                    f.write(payload)
+                    # From here onward the record may reach disk even if flush, sync, or close
+                    # reports failure. Reserve its seq on every exceptional exit.
+                    accepted = True
+                    f.flush()
+                    # `require_durable` syncs the file CONTENTS, and `_publish_dir_entry` below adds
+                    # the parent DIRECTORY entry the first time it is needed. Content-only was a real
+                    # durability gap: when the durable append is the one that created events.jsonl —
+                    # or an earlier best-effort append created the link and it was never flushed — a
+                    # power loss can lose the WHOLE FILE even though the record's bytes were strictly
+                    # synced, which is exactly the "paid_work_claimed survives a crash before the
+                    # external side effect" contract this flag exists for. A durable paid claim could
+                    # vanish and be re-billed. `strict_atomic_write_bytes` has always paired the two.
+                    if require_durable:
+                        strict_fsync(f.fileno())
+                    else:
+                        best_effort_fsync(f.fileno())  # read tolerates a torn final line
+                    written_stat = os.fstat(f.fileno())
+            except BaseException:
+                if accepted:
+                    self._mark_uncertain_append(last_logical_seq)
+                raise
+            if require_durable:
+                self._publish_dir_entry(existed)
+            self._seq = last_logical_seq
+            if written_stat is not None:
+                self._trusted_growth_stat = (
+                    written_stat.st_dev, written_stat.st_ino, written_stat.st_size,
+                    written_stat.st_mtime_ns, written_stat.st_ctime_ns)
+            # Keep cache bytes + file identity synchronized with our own successful write. Without
+            # this top-up, a store that appended but had not yet read the new record could retain
+            # `_cache_identity=None`; replacing its one-record log with an empty file would then look
+            # indistinguishable from the original pre-create state and an OLD expected seq could pass.
+            # Incremental read makes this O(the single new record), not a full rescan.
+            self.read_all()
+        return result
+
     def append(self, type: str, data: dict[str, Any], *,
                trace_id: "str | None" = _UNSET_TRACE, span_id: "str | None" = _UNSET_TRACE,
                expected_last_seq: "int | None" = None, require_lock: bool = False,
@@ -995,72 +1085,15 @@ class EventStore:
         # explicit None means "no trace" (so it never inherits the ambient node/eval trace by accident).
         if trace_id is _UNSET_TRACE:
             trace_id, span_id = current_ids()
-        with self._append_lock, _interprocess_lock(
-                Path(str(self.path) + ".lock"), required=require_lock):
-            # Reset publishes its marker while owning this SAME append lock.  Checking inside the
-            # critical section closes marker-check -> append races, and the replacement engine is
-            # admitted only when it inherited the exact operation id.
-            assert_run_reset_write_allowed(self.path.parent)
-            assert_run_deletion_write_allowed(self.path.parent)
-            # Revalidate bytes written or replaced since the last read WHILE holding the writer lock.
-            # A construction-time snapshot is insufficient on FUSE/network mounts: corruption can
-            # appear mid-run, and appending after it would make every new event invisible to replay.
-            self.read_all()
-            if self._divergence is not None:
-                raise EventLogCorruptionError(self.path, self._divergence)
-            self._heal_torn_tail()
-            # Derive seq from max(in-memory, on-disk tail) so a concurrent writer can't collide.
-            # Single-process: _disk_last_seq == self._seq, so seq == self._seq + 1 (unchanged).
-            cur = max(self._seq, self._disk_last_seq())
-            # P1-12 explicit-seq CAS: reject the append if the tail moved since the caller read state.
-            # Inside the critical section, so the check + write are atomic against another writer.
-            if expected_last_seq is not None and cur != expected_last_seq:
-                raise EventStoreConcurrencyError(self.path, expected_last_seq, cur)
-            seq = cur + 1
-            e = Event(seq=seq, ts=time.time(), type=type, data=data,
+
+        def _build(cur: int) -> tuple[bytes, int, Event]:
+            e = Event(seq=cur + 1, ts=time.time(), type=type, data=data,
                       trace_id=trace_id, span_id=span_id)
-            line = orjson.dumps(e.model_dump(mode="json"))
-            accepted = False
-            written_stat = None
-            existed = os.path.exists(self.path)
-            try:
-                with open(self.path, "ab") as f:
-                    f.write(line + b"\n")
-                    # From here onward the record may reach disk even if flush, sync, or close
-                    # reports failure. Reserve its seq on every exceptional exit.
-                    accepted = True
-                    f.flush()
-                    # `require_durable` syncs the file CONTENTS, and `_publish_dir_entry` below adds
-                    # the parent DIRECTORY entry the first time it is needed. Content-only was a real
-                    # durability gap: when the durable append is the one that created events.jsonl —
-                    # or an earlier best-effort append created the link and it was never flushed — a
-                    # power loss can lose the WHOLE FILE even though the record's bytes were strictly
-                    # synced, which is exactly the "paid_work_claimed survives a crash before the
-                    # external side effect" contract this flag exists for. A durable paid claim could
-                    # vanish and be re-billed. `strict_atomic_write_bytes` has always paired the two.
-                    if require_durable:
-                        strict_fsync(f.fileno())
-                    else:
-                        best_effort_fsync(f.fileno())  # read tolerates a torn final line
-                    written_stat = os.fstat(f.fileno())
-            except BaseException:
-                if accepted:
-                    self._mark_uncertain_append(seq)
-                raise
-            if require_durable:
-                self._publish_dir_entry(existed)
-            self._seq = seq
-            if written_stat is not None:
-                self._trusted_growth_stat = (
-                    written_stat.st_dev, written_stat.st_ino, written_stat.st_size,
-                    written_stat.st_mtime_ns, written_stat.st_ctime_ns)
-            # Keep cache bytes + file identity synchronized with our own successful write. Without
-            # this top-up, a store that appended but had not yet read the new record could retain
-            # `_cache_identity=None`; replacing its one-record log with an empty file would then look
-            # indistinguishable from the original pre-create state and an OLD expected seq could pass.
-            # Incremental read makes this O(the single new record), not a full rescan.
-            self.read_all()
-        return e
+            return orjson.dumps(e.model_dump(mode="json")) + b"\n", e.seq, e
+
+        return self._locked_append(
+            _build, expected_last_seq=expected_last_seq,
+            require_lock=require_lock, require_durable=require_durable)
 
     def append_many(self, records: Sequence[tuple[str, dict[str, Any]]], *,
                     trace_id: "str | None" = _UNSET_TRACE,
@@ -1085,18 +1118,8 @@ class EventStore:
             raise ValueError("the internal event batch type is reserved")
         if trace_id is _UNSET_TRACE:
             trace_id, span_id = current_ids()
-        with self._append_lock, _interprocess_lock(
-                Path(str(self.path) + ".lock"), required=require_lock):
-            assert_run_reset_write_allowed(self.path.parent)
-            assert_run_deletion_write_allowed(self.path.parent)
-            self.read_all()
-            if self._divergence is not None:
-                raise EventLogCorruptionError(self.path, self._divergence)
-            self._heal_torn_tail()
-            cur = max(self._seq, self._disk_last_seq())
-            if expected_last_seq is not None and cur != expected_last_seq:
-                raise EventStoreConcurrencyError(self.path, expected_last_seq, cur)
 
+        def _build(cur: int) -> tuple[bytes, int, list[Event]]:
             events = [
                 Event(
                     seq=cur + offset,
@@ -1127,32 +1150,14 @@ class EventStore:
             payload = orjson.dumps(physical_envelope) + b"\n"
             if len(payload) > _MAX_EVENT_BATCH_BYTES:
                 raise ValueError(f"event batch exceeds {_MAX_EVENT_BATCH_BYTES} serialized bytes")
-            accepted = False
-            written_stat = None
-            existed = os.path.exists(self.path)
-            try:
-                with open(self.path, "ab") as f:
-                    f.write(payload)
-                    accepted = True
-                    f.flush()
-                    if require_durable:
-                        strict_fsync(f.fileno())
-                    else:
-                        best_effort_fsync(f.fileno())
-                    written_stat = os.fstat(f.fileno())
-            except BaseException:
-                if accepted:
-                    self._mark_uncertain_append(events[-1].seq)
-                raise
-            if require_durable:
-                self._publish_dir_entry(existed)
-            self._seq = events[-1].seq
-            if written_stat is not None:
-                self._trusted_growth_stat = (
-                    written_stat.st_dev, written_stat.st_ino, written_stat.st_size,
-                    written_stat.st_mtime_ns, written_stat.st_ctime_ns)
-            self.read_all()
-        return events
+            # The LAST member's seq, not the envelope's own: one physical record carries `count`
+            # logical events, and both `self._seq` and an uncertain-sync reservation must fence the
+            # whole run of them or the next append reuses a seq that is already on disk.
+            return payload, events[-1].seq, events
+
+        return self._locked_append(
+            _build, expected_last_seq=expected_last_seq,
+            require_lock=require_lock, require_durable=require_durable)
 
     def _read_prefix_windows(self, consumed: int) -> Optional[tuple[bytes, bytes]]:
         """The first and last `_CACHE_ANCHOR_BYTES` of the first `consumed` bytes on disk, or None if
