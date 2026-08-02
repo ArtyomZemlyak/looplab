@@ -150,17 +150,20 @@ def test_llm_health_never_reflects_configured_base_url_or_exception(tmp_path, mo
         "operation_id": "b2f6c1de-4a3e-4c1b-9f57-0d1e2a3b4c5d",
     })
 
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["ok"] is False
-    # The failure now surfaces from CLIENT CONSTRUCTION (the preflight), which is not the provider
-    # declining the request — so it is classified as a generic provider error rather than the
-    # `credentials` an explicit 401 rejection would carry. Pin the safe SET, not one member: the
-    # redaction contract is that the kind is drawn from the allow-list at all.
-    assert body["error_kind"] in {"credentials", "provider_error", "unavailable", "rate_limit"}
+    # A base URL carrying userinfo is now REFUSED outright (`normalize_llm_base_url`), so the probe
+    # never reaches client construction: the endpoint identity cannot be resolved and the operation
+    # is reported as an unverifiable precondition. That is strictly safer than the old
+    # `200 {ok: false, error_kind: ...}` — no provider call is attempted at all — but the property
+    # this test exists for is unchanged and still checked below: whatever the route answers, it must
+    # not reflect the configured URL, the credentials embedded in it, or the raw exception text.
+    assert response.status_code == 503, response.text
+    body = response.json()["detail"]
+    assert body["code"] == "llm_health_precondition_unavailable"
+    assert body["provider_attempted"] is False, "a refused endpoint must not be billed for"
     assert "base_url" not in body
     _assert_safe(body)
-    for secret in ("config-secret", "config-user", "config-token", "provider.example"):
+    for secret in ("config-secret", "config-user", "config-token", "provider.example",
+                   "userinfo"):
         assert secret not in json.dumps(body)
 
 

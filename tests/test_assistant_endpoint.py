@@ -190,7 +190,12 @@ def test_assistant_share_uses_strict_boolean_and_header_capability(tmp_path):
     assert client.get("/api/assistant/shared").status_code == 404
     response = client.get("/api/assistant/shared", headers={"X-LoopLab-Share": token})
     assert response.status_code == 200
-    assert response.json()["meta"]["title"] == "share me"
+    # The shared view titles itself from the first USER message, or a neutral default — never from
+    # the operator's private session title, which may name a client, an incident or an unreleased
+    # project and was previously served to anyone holding the link. Assert BOTH halves: the neutral
+    # default AND the absence of the private title, so restoring the leak fails here.
+    assert response.json()["meta"]["title"] == "Shared chat"
+    assert "share me" not in json.dumps(response.json())
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["referrer-policy"] == "no-referrer"
     assert "X-LoopLab-Share" in response.headers["vary"]
@@ -720,12 +725,16 @@ def test_allow_always_is_exact_scope_mode_and_current_turn_only(tmp_path, monkey
     monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0.01")
     first = tmp_path / "same.txt"
     second = tmp_path / "other.txt"
-    first.write_text("same", encoding="utf-8")
-    second.write_text("same", encoding="utf-8")
+    first.write_text("before", encoding="utf-8")
+    second.write_text("before", encoding="utf-8")
+    # The content must DIFFER from what is on disk. A write whose bytes match the file is a no-op
+    # and no longer raises a permission card at all, so the original fixture (writing "same" over
+    # "same") produced zero pending requests and this test timed out waiting for its first one —
+    # never reaching the grant-scope behaviour it is named for.
     scripted = [
-        _call("write_file", {"path": str(first), "content": "same"}),
-        _call("write_file", {"path": str(first), "content": "same"}),
-        _call("write_file", {"path": str(second), "content": "same"}),
+        _call("write_file", {"path": str(first), "content": "after"}),
+        _call("write_file", {"path": str(first), "content": "after"}),
+        _call("write_file", {"path": str(second), "content": "after"}),
         _final("done"),
     ]
     monkeypatch.setattr(
