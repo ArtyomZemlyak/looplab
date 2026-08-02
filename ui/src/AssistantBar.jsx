@@ -152,6 +152,12 @@ function preRoute(t) {
 // `#N` must start a token (not follow a word/# char) and end at a boundary — so `#3498db` (hex color),
 // URL fragments (`page#12`), and `x#5` don't fabricate an experiment reference.
 const refNodes = (t) => [...new Set([...(t || '').matchAll(/(?<![\w#])#(?:node-)?(\d+)\b/gi)].map(m => Number(m[1])))]
+const DIRECT_DRAFT_RE = new RegExp(`^/(?:${Object.keys(DIRECT).join('|')})\\b`, 'i')
+const composerUsesRun = (input, files = []) => files.length > 0
+  || DIRECT_DRAFT_RE.test(String(input || '').trim())
+  || !!preRoute(String(input || '').trim())
+  || refNodes(input).length > 0
+const composerRunKey = runId => runId == null ? '' : String(runId)
 const uiRunContext = (runId, refs) => {
   if (!runId) return ''
   const safe = String(runId).replace(/[\]"\r\n]/g, ' ').slice(0, 200)
@@ -175,7 +181,7 @@ const FILE_CHAR_CAP = 20000
 const MAX_FILE_BYTES = 2 * 1024 * 1024   // never readAsText a giant log/csv into the tab (OOM)
 const SECRET_RE = /(^|\/)\.env(\.|$)|\.pem$|\.key$|(^|\/)(id_rsa|id_ed25519)$|secret|credential/i
 const NEW_CHAT_COMPOSER_KEY = '__new__'
-const newComposerDraft = () => ({ input: '', files: [] })
+const newComposerDraft = () => ({ input: '', files: [], runScope: null })
 const ASSISTANT_SHARE_ID_RE = /^[0-9a-f]{32}$/
 const ASSISTANT_SHARE_URL_RE = /^#\/assistant\/shared\/([0-9a-f]{32})\.([A-Za-z0-9_-]{43})$/
 const ASSISTANT_SHARE_IDS_MAX = 4096
@@ -301,6 +307,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         ? 'Stale diagnostic link · open the current generation'
         : `History seq ${runAccess.seq} · return live`
   const [input, setInputState] = useState('')
+  const [draftRunScope, setDraftRunScope] = useState(null)
   const [sid, setSid] = useState(null)
   const [msgs, setMsgs] = useState([])
   // Editable Genesis task/settings can be sensitive.  Retain them only in this mounted Assistant's
@@ -412,14 +419,26 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const composerDraftRef = useRef(composerDraftsRef.current.get(NEW_CHAT_COMPOSER_KEY))
   const setInput = React.useCallback(update => {
     const draft = composerDraftRef.current
+    const usedRun = composerUsesRun(draft.input, draft.files)
     const next = typeof update === 'function' ? update(draft.input) : update
     draft.input = next
+    const usesRun = composerUsesRun(next, draft.files)
+    if (!usesRun) draft.runScope = null
+    else if (!usedRun || draft.runScope == null) draft.runScope = composerRunKey(currentRunIdRef.current)
     setInputState(next)
+    setDraftRunScope(draft.runScope)
   }, [])
   const updateComposerFiles = React.useCallback((draft, update) => {
+    const usedRun = composerUsesRun(draft.input, draft.files)
     const next = typeof update === 'function' ? update(draft.files) : update
     draft.files = next
-    if (composerDraftRef.current === draft) setFilesState(next)
+    const usesRun = composerUsesRun(draft.input, next)
+    if (!usesRun) draft.runScope = null
+    else if (!usedRun || draft.runScope == null) draft.runScope = composerRunKey(currentRunIdRef.current)
+    if (composerDraftRef.current === draft) {
+      setFilesState(next)
+      setDraftRunScope(draft.runScope)
+    }
   }, [])
   const setFiles = React.useCallback(update => {
     updateComposerFiles(composerDraftRef.current, update)
@@ -431,8 +450,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     composerDraftsRef.current.set(key, draft)
     composerKeyRef.current = key
     composerDraftRef.current = draft
+    if (draft.runScope == null && composerUsesRun(draft.input, draft.files)) {
+      draft.runScope = composerRunKey(currentRunIdRef.current)
+    }
     setInputState(draft.input)
     setFilesState(draft.files)
+    setDraftRunScope(draft.runScope)
     setSuggestionsDismissed(false)
     setSuggestionIndex(0)
   }, [])
@@ -1760,6 +1783,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     setPreview(''); setHasNew(false)
     const draftAtSend = composerDraftRef.current
     const inputAtSend = draftAtSend.input
+    const runScopeAtSend = draftAtSend.runScope
     const atts = retryFiles != null ? [...retryFiles] : [...draftAtSend.files]
     const effectiveMode = turnMode || mode
     const sessionSeq = openSessionSeqRef.current
@@ -1922,6 +1946,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               return [...current, ...atts.filter(file => !names.has(file.name))]
             })
           }
+          // Restoring a rejected A-scoped turn after navigation to B must never silently bind its
+          // command, node refs, or attachments to B. A mixed restored draft stays A-scoped and the
+          // route-mismatch interlock below requires the user to separate, clear, or explicitly rebind it.
+          draftAtSend.runScope = runScopeAtSend
+          if (composerDraftRef.current === draftAtSend) setDraftRunScope(runScopeAtSend)
           if (sidRef.current === id) {
             setMsgs(current => current.filter(message => message.localAttempt !== localAttempt))
             setPreview(previewAtSend); setHasNew(hasNewAtSend)
@@ -2060,6 +2089,21 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     location.hash = '#/settings'
   }
 
+  const currentComposerRunKey = composerRunKey(runId)
+  const draftRunMismatch = draftRunScope != null
+    && draftRunScope !== currentComposerRunKey && composerUsesRun(input, files)
+  const draftRunSource = draftRunScope ? `run “${draftRunScope}”` : 'the Runs overview'
+  const draftRunDestination = runId ? `run “${runId}”` : 'the Runs overview'
+  const draftRunMismatchMessage = `Draft belongs to ${draftRunSource} and will not be sent in ${draftRunDestination}.`
+  const useDraftHere = () => {
+    if (!composerUsesRun(input, files)) return
+    const draft = composerDraftRef.current
+    draft.runScope = currentComposerRunKey
+    setDraftRunScope(currentComposerRunKey)
+    flash(runId ? `Draft now targets run “${runId}”` : 'Draft detached from its previous run')
+    requestAnimationFrame(() => inputRef.current?.focus())
+  }
+
   const send = () => {
     if (historical) { flash(readOnlyAction); return }
     if (shareBusySid != null || shareActionSessionRef.current) {
@@ -2069,6 +2113,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const guardedSid = sidRef.current || sid
     if (guardedSid && shareUnknownSids.has(guardedSid)) {
       flash('Messaging paused · retry or revoke the unknown public-link state first')
+      return
+    }
+    const liveDraft = composerDraftRef.current
+    if (liveDraft.runScope != null && liveDraft.runScope !== composerRunKey(runId)
+        && composerUsesRun(liveDraft.input, liveDraft.files)) {
+      flash('Draft not sent · choose Use here or remove its run-specific context')
       return
     }
     const t = input.trim()
@@ -2421,6 +2471,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       {canRetryDirect && <button className="btn sm" onClick={retryDirect}>Retry same command</button>}
       {showDirectFailure && <button className="btn sm ghost" onClick={dismissDirectFailure}>Dismiss</button>}
     </div>}
+    {draftRunMismatch && <div className="assistant-command-pending error" role="alert"
+      aria-live="assertive" aria-atomic="true">
+      <span>{draftRunMismatchMessage}</span>
+      <button type="button" className="btn sm ghost" onClick={useDraftHere}>
+        {runId ? 'Use in this run' : 'Use without a run'}
+      </button>
+    </div>}
     {runId && refNodes(input).length > 0 && <div className="cmdbar-ctx">
       {refNodes(input).map(id => <span key={id} className="chip xs">#{id}
         <button className="chip-x" aria-label={`Detach experiment ${id}`} onClick={() => setInput(input.replace(new RegExp(`#(?:node-)?${id}\\b`, 'gi'), '').replace(/\s{2,}/g, ' ').trim())}>✕</button></span>)}
@@ -2439,7 +2496,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       {busy
         ? <button className="btn sm" aria-label="Stop Assistant" title="stop" onClick={stop}>■</button>
         : <button className="btn sm primary"
-            disabled={historical || commandBusy || sharePaused || (!input.trim() && files.length === 0)}
+            disabled={historical || commandBusy || sharePaused || draftRunMismatch
+              || (!input.trim() && files.length === 0)}
             onClick={send}>{shareUnknown ? 'Paused' : commandBusy || shareBusy ? 'Waiting…' : 'Send'}</button>}
     </div>
     {draftingNewRun && <div id="assistant-new-run-hint" className="asst-new-run-hint" role="note">
@@ -2567,6 +2625,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                   Dismiss
                 </button>
               </span>
+          : draftRunMismatch
+            ? <span className="cmdbar-status thinking recovery error" role="alert"
+                aria-live="assertive" aria-atomic="true" title={draftRunMismatchMessage}>
+                <span><span className="cmdbar-who">draft held</span> · from {draftRunSource}</span>
+                <button type="button" className="btn sm ghost" onClick={useDraftHere}>Use here</button>
+              </span>
           : liveShareActive
           ? <button className="cmdbar-status preview assistant-live-share" type="button"
               title="This chat has a live public link. Open the full Assistant to revoke it."
@@ -2583,9 +2647,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       {busy
         ? <button className="cmdbar-go stop" aria-label="Stop Assistant" title="stop the assistant" onClick={stop}>■</button>
         : <button className="cmdbar-go" aria-label="Send Assistant message"
-            title={shareUnknown ? 'Messaging paused until public-link status is verified'
+            title={draftRunMismatch ? draftRunMismatchMessage
+              : shareUnknown ? 'Messaging paused until public-link status is verified'
               : commandBusy ? 'Waiting for the current run command' : historical ? readOnlyShort : 'send (Enter)'}
-            disabled={historical || commandBusy || sharePaused || (!input.trim() && files.length === 0)} onClick={send}>▶</button>}
+            disabled={historical || commandBusy || sharePaused || draftRunMismatch
+              || (!input.trim() && files.length === 0)} onClick={send}>▶</button>}
       <button className="cmdbar-drawer-btn" aria-label="Open Assistant in side view"
         title="open chat on the right (side view)" onClick={openSide}><OpIcon name="chat" size={13} /></button>
       {visibleToast && <div className="cmdbar-toast" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
