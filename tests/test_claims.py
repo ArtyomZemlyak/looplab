@@ -1556,3 +1556,58 @@ def test_the_uid_retirement_scan_does_not_walk_the_whole_overlay_per_row():
     assert not walks, (
         "the per-row body walks `out.items()` — that is the quadratic re-index the reverse index "
         "was added to remove")
+
+
+# --- the claims_health split (doc 25 EM-01) ---------------------------------------------------
+
+def test_claims_health_is_a_leaf_of_the_claims_subsystem():
+    """The split is only worth anything if the direction holds.
+
+    `claims_health` owns the bounds, row validators and the `_safe_*` readers that turn an
+    unreadable store into an explicit UNKNOWN. A confident empty answer is the failure mode those
+    readers exist to prevent — "no claims oppose this" must never be indistinguishable from "the
+    claim store could not be read" — so the health layer must not depend on the governance ledger,
+    the durable store, the projections or the retrieval planner. It is imported BY all four.
+    """
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1]
+              / "looplab" / "engine" / "claims_health.py").read_text(encoding="utf-8")
+    upward = []
+    for node in ast.walk(ast.parse(source)):
+        module = getattr(node, "module", None) if isinstance(node, ast.ImportFrom) else None
+        names = ([module] if module else
+                 [a.name for a in node.names] if isinstance(node, ast.Import) else [])
+        for name in names:
+            if name and name.startswith("looplab.engine.claims"):
+                upward.append(f"line {node.lineno}: {name}")
+    assert not upward, (
+        "claims_health imports back into the claims subsystem it is the leaf of — that is a cycle, "
+        f"and it means the split bought nothing:\n  " + "\n  ".join(upward))
+
+
+def test_the_barrel_re_exports_the_same_objects():
+    """Both spellings must be the SAME object, or a test that monkeypatches one silently misses the
+    consumer reading the other — the seam hazard the `llm.py`/`agent.py` barrel pattern exists for."""
+    from looplab.engine import claims, claims_health
+
+    shared = [name for name in dir(claims_health) if not name.startswith("__")]
+    assert len(shared) >= 50, f"only {len(shared)} names in claims_health — the split lost content"
+    missing = [name for name in shared if not hasattr(claims, name)]
+    assert not missing, f"claims no longer re-exports {missing}; existing imports would break"
+    for name in shared:
+        assert getattr(claims, name) is getattr(claims_health, name), (
+            f"claims.{name} is a COPY of claims_health.{name}, not a re-export — patching one would "
+            "not be seen by consumers of the other")
+
+
+def test_the_private_names_other_packages_import_still_resolve_through_claims():
+    """`tools/`, `cli/` and `serve/` import these by their historical `engine.claims` path (they are
+    declared in tests/test_cross_package_private_seams.py). The split must not move them."""
+    from looplab.engine import claims
+
+    for name in ("_claim_source_rows", "_filter_claim_source_rows", "_safe_claim_source_summary",
+                 "_safe_research_source_summary", "_filter_claim_assessments",
+                 "_load_claim_source_path"):
+        assert hasattr(claims, name), f"engine.claims.{name} disappeared in the split"

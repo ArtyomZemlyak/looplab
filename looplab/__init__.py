@@ -58,7 +58,8 @@ _LAYOUT = {
     "research_targeting": "search",   # PART IV D2 axis-structured research targeting (offline)
     "taxonomy_dedup": "search",   # PART IV D4 taxonomy-aware board dedup analysis (offline)
     "crash_repair": "engine",
-    "claims": "engine",          # PART IV cross-run Step 4: evidence-grounded claim assessments (read-model)
+    "claims": "engine",
+    "claims_health": "engine",  # ...its source-row/read-health leaf (doc 25 EM-01 split)          # PART IV cross-run Step 4: evidence-grounded claim assessments (read-model)
     "claim_key": "engine",       # PART IV cross-run §21.20.13: structured scope+polarity-safe claim key
     "claim_steward": "engine",   # PART IV cross-run §22.4: agentic claim curator (LLM proposes ratify/reject/pin)
     "concept_registry": "engine",# PART IV cross-run CR1a: concept UID + alias resolver (merge/purge/split)

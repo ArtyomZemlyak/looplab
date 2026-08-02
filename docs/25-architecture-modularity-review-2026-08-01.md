@@ -259,14 +259,16 @@ synthetic task adapters (RA-06).
 
 ### T8 — Non-deterministic full-suite failures (added 2026-08-02)
 
-Three concurrency tests each failed EXACTLY ONCE across ~8 full-suite runs on 2026-08-02, and each
-passes 6–8/8 when run alone:
+FOUR concurrency tests have each failed EXACTLY ONCE across ~12 full-suite runs on 2026-08-02,
+and each passes 6–8/8 when run alone. They are in unrelated subsystems and each failure landed in a
+run whose only changes were elsewhere, so the common factor is load, not any one edit:
 
 | test | observed failure |
 |---|---|
 | `test_run_command_service.py::test_reload_finalize_reattaches_existing_record_without_event_or_spawn_duplication` | worker still `executing` when `_terminal` gave up |
 | `test_cross_run_server.py::test_concept_global_cas_fences_alias_and_split_ledgers` | CAS fence |
 | `test_lessons_fingerprint.py::test_run_writes_lessons_with_fingerprint` | — |
+| `test_report.py::test_scope_report_clear_fence_prevents_rebill_after_receipt_and_marker_loss` | paid-work clear fence |
 
 This is **not** a tight-budget problem, and raising ceilings again would only hide it. `_terminal`
 already allows **60 s** (raised from 15 s for exactly this symptom, per its own comment), and
@@ -769,7 +771,7 @@ Scope: `looplab/engine/`: memory.py, lessons.py, claims.py, concept_registry.py,
 - cross_run_index.py is a model module: pure deterministic projection, byte-identical rebuild guarantee, receipted incremental cache with explicit skip reasons, TOCTOU fences on digest/read, and honest degraded-provenance notes.
 - Load-bearing why-comments throughout (replay-safety notes, mega-review/CR references, named past bugs with their observed symptoms) make otherwise-subtle invariants auditable, and the mixin decomposition of LessonMemory (priors/distill/reconcile) preserved test monkeypatch seams with zero call-site churn.
 
-#### EM-01 · HIGH · under-decomposition · effort: large
+#### EM-01 · HIGH · under-decomposition · effort: large — **PARTIALLY RESOLVED (2026-08-02)**
 
 **claims.py is a 2896-line god-module spanning six distinct subsystems**
 
@@ -778,6 +780,25 @@ Scope: `looplab/engine/`: memory.py, lessons.py, claims.py, concept_registry.py,
 *Evidence:* One module contains: (1) source-row validation + read-health receipts (~lines 81-460: _ClaimSourceRows, _valid_claim_source_row ~100 lines, _safe_* validators); (2) the operator claim-decision governance ledger (965-1385: record_claim_decision, record_observed_claim_decision, load_claim_decisions with its own CAS/idempotency/locking); (3) the durable D8 research_claims.jsonl store (1401-1575: record_research_claims ~135 lines, load_research_claims); (4) three claim-assessment projections (1726-2113: _fuzzy_merge_claims, _structured_assessments ~175 lines, claim_assessments); (5) the context pack + CR2a retrieval planner (2115-2716: build_context_pack ~145 lines, cross_run_retrieve ~280 lines including inline scope-receipt validation, intent classification, quota-swap and receipt assembly); (6) portfolio_atlas + prompt rendering (2719-2896). These interact through module-private helpers, so any change forces navigating all six. The module docstring itself acknowledges it 'owns the durable store, governance decisions, health-aware readers and live API/prompt consumers'.
 
 *Recommendation:* Split along the already-visible seams: claims_health.py (row validation + read-health + receipt validators), claims_ledger.py (decision governance writes/replay), research_claims_store.py (D8 persistence), claims_assessments.py (the three projections), claims_retrieval.py (context pack + cross_run_retrieve + atlas + render). Each section is already comment-delimited; the split is mechanical and the back-compat import shim pattern (looplab/__init__.py _LAYOUT) already exists for exactly this.
+
+*Resolution (2026-08-02, first module):* `engine/claims_health.py` — 970 lines, 60 names — is
+extracted, and `claims.py` drops from 2,846 to 1,988. `claims.py` re-exports every name (the
+`llm.py`/`agent.py` barrel), `_LAYOUT` carries the new module, and the private names `tools/`,
+`cli/` and `serve/` import by their historical `engine.claims` path are unmoved.
+
+The sections are NOT a clean DAG — an AST sweep found seven back-edges. Six are calls a later
+section makes into an earlier one (fine within a module, deferred imports across). The seventh was
+`_MAX_DECISION_METRIC`, declared in the governance section but read by the leaf as well as by two
+sections above it; it moved down with the other bounds, which is what makes the leaf self-contained.
+
+Guarded in `tests/test_claims.py`: the leaf may not import back into the subsystem (AST, so a
+DEFERRED back-import is caught too — that one would not even raise), the barrel must re-export the
+SAME objects rather than copies (a copy silently defeats monkeypatching through either path), and
+the cross-package private names must still resolve. Verified to have teeth against all three.
+
+*Still open:* the remaining four modules (ledger, D8 store, assessments, retrieval). Their
+back-edges are call-level rather than constant-level, so each needs its forward calls turned into
+deferred imports deliberately — mechanical, but not the same change as lifting a leaf out.
 
 #### EM-02 · HIGH · duplication · effort: medium
 
