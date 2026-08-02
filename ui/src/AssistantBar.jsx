@@ -152,11 +152,12 @@ function preRoute(t) {
 // `#N` must start a token (not follow a word/# char) and end at a boundary — so `#3498db` (hex color),
 // URL fragments (`page#12`), and `x#5` don't fabricate an experiment reference.
 const refNodes = (t) => [...new Set([...(t || '').matchAll(/(?<![\w#])#(?:node-)?(\d+)\b/gi)].map(m => Number(m[1])))]
-const DIRECT_DRAFT_RE = new RegExp(`^/(?:${Object.keys(DIRECT).join('|')})\\b`, 'i')
-const composerUsesRun = (input, files = []) => files.length > 0
-  || DIRECT_DRAFT_RE.test(String(input || '').trim())
-  || !!preRoute(String(input || '').trim())
-  || refNodes(input).length > 0
+const NEW_RUN_DRAFT_RE = /^\/(?:new|genesis|run)\b/i
+const composerUsesRun = (input, files = [], pendingFileReads = 0) => {
+  const text = String(input || '').trim()
+  return files.length > 0 || pendingFileReads > 0
+    || (!NEW_RUN_DRAFT_RE.test(text) && text.length > 0)
+}
 const composerRunKey = runId => runId == null ? '' : String(runId)
 const uiRunContext = (runId, refs) => {
   if (!runId) return ''
@@ -181,7 +182,12 @@ const FILE_CHAR_CAP = 20000
 const MAX_FILE_BYTES = 2 * 1024 * 1024   // never readAsText a giant log/csv into the tab (OOM)
 const SECRET_RE = /(^|\/)\.env(\.|$)|\.pem$|\.key$|(^|\/)(id_rsa|id_ed25519)$|secret|credential/i
 const NEW_CHAT_COMPOSER_KEY = '__new__'
-const newComposerDraft = () => ({ input: '', files: [], runScope: null })
+const normalizeComposerMode = value => (
+  MODES.some(candidate => candidate.id === value) ? value : 'plan'
+)
+const newComposerDraft = (mode = 'plan') => ({
+  input: '', files: [], pendingFileReads: 0, runScope: null, mode: normalizeComposerMode(mode),
+})
 const ASSISTANT_SHARE_ID_RE = /^[0-9a-f]{32}$/
 const ASSISTANT_SHARE_URL_RE = /^#\/assistant\/shared\/([0-9a-f]{32})\.([A-Za-z0-9_-]{43})$/
 const ASSISTANT_SHARE_IDS_MAX = 4096
@@ -367,6 +373,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [shareBusySid, setShareBusySid] = useState(null)
   const [shareAckNotice, setShareAckNotice] = useState(null)
   const [files, setFilesState] = useState([])     // attached text files [{name,size,content,truncated}]
+  const [pendingFileReads, setPendingFileReads] = useState(0)
   const [sideW, setSideW] = useState(() => clampAssistantWidth(storageGet('ll.asstW', 440)))
 
   // A permission card cannot render in the collapsed composer bar. Reveal the side thread as soon as
@@ -419,45 +426,72 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const composerDraftRef = useRef(composerDraftsRef.current.get(NEW_CHAT_COMPOSER_KEY))
   const setInput = React.useCallback(update => {
     const draft = composerDraftRef.current
-    const usedRun = composerUsesRun(draft.input, draft.files)
+    const usedRun = composerUsesRun(draft.input, draft.files, draft.pendingFileReads)
     const next = typeof update === 'function' ? update(draft.input) : update
     draft.input = next
-    const usesRun = composerUsesRun(next, draft.files)
+    const usesRun = composerUsesRun(next, draft.files, draft.pendingFileReads)
     if (!usesRun) draft.runScope = null
     else if (!usedRun || draft.runScope == null) draft.runScope = composerRunKey(currentRunIdRef.current)
     setInputState(next)
     setDraftRunScope(draft.runScope)
   }, [])
-  const updateComposerFiles = React.useCallback((draft, update) => {
-    const usedRun = composerUsesRun(draft.input, draft.files)
+  const updateComposerFiles = React.useCallback((draft, update, runScope = undefined) => {
+    const usedRun = composerUsesRun(draft.input, draft.files, draft.pendingFileReads)
     const next = typeof update === 'function' ? update(draft.files) : update
     draft.files = next
-    const usesRun = composerUsesRun(draft.input, next)
+    const usesRun = composerUsesRun(draft.input, next, draft.pendingFileReads)
     if (!usesRun) draft.runScope = null
-    else if (!usedRun || draft.runScope == null) draft.runScope = composerRunKey(currentRunIdRef.current)
+    else if (!usedRun || draft.runScope == null) {
+      draft.runScope = runScope === undefined
+        ? composerRunKey(currentRunIdRef.current) : runScope
+    }
     if (composerDraftRef.current === draft) {
       setFilesState(next)
       setDraftRunScope(draft.runScope)
     }
   }, [])
+  const updatePendingFileReads = React.useCallback((draft, update) => {
+    const current = Math.max(0, Number(draft.pendingFileReads) || 0)
+    const nextValue = typeof update === 'function' ? update(current) : update
+    const next = Math.max(0, Number(nextValue) || 0)
+    draft.pendingFileReads = next
+    if (!composerUsesRun(draft.input, draft.files, next)) draft.runScope = null
+    if (composerDraftRef.current === draft) {
+      setPendingFileReads(next)
+      setDraftRunScope(draft.runScope)
+    }
+    return next
+  }, [])
   const setFiles = React.useCallback(update => {
     updateComposerFiles(composerDraftRef.current, update)
   }, [updateComposerFiles])
-  const activateComposer = React.useCallback((key, { clear = false } = {}) => {
+  const setComposerMode = React.useCallback(value => {
+    const next = normalizeComposerMode(value)
+    composerDraftRef.current.mode = next
+    setMode(next)
+  }, [])
+  const activateComposer = React.useCallback((key, { clear = false, seedMode = 'plan' } = {}) => {
     const draft = clear
       ? newComposerDraft()
-      : composerDraftsRef.current.get(key) || newComposerDraft()
+      : composerDraftsRef.current.get(key) || newComposerDraft(seedMode)
+    draft.mode = normalizeComposerMode(draft.mode ?? seedMode)
+    draft.pendingFileReads = Math.max(0, Number(draft.pendingFileReads) || 0)
     composerDraftsRef.current.set(key, draft)
     composerKeyRef.current = key
     composerDraftRef.current = draft
-    if (draft.runScope == null && composerUsesRun(draft.input, draft.files)) {
+    if (draft.runScope == null && composerUsesRun(
+      draft.input, draft.files, draft.pendingFileReads,
+    )) {
       draft.runScope = composerRunKey(currentRunIdRef.current)
     }
     setInputState(draft.input)
     setFilesState(draft.files)
+    setPendingFileReads(draft.pendingFileReads)
     setDraftRunScope(draft.runScope)
+    setMode(draft.mode)
     setSuggestionsDismissed(false)
     setSuggestionIndex(0)
+    return draft
   }, [])
   const bindComposerToSession = React.useCallback(id => {
     const previousKey = composerKeyRef.current
@@ -789,10 +823,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       }
       if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
       if (runningRef.current) { runningRef.current = false; setBusy(false); setPending([]) }
-      activateComposer(id)
+      activateComposer(id, { seedMode: s.meta?.mode })
       sidRef.current = id; setSid(id); setMsgs([]); setPreview('')
       storageSet('ll.asstSid', id)
-      setMsgs(arr); if (s.meta?.mode) setMode(s.meta.mode)
+      setMsgs(arr)
       const la = [...arr].reverse().find(m => m.role === 'assistant' && m.content)
       if (la) setPreview(previewText(la.content))
       // Reattach to a live worker after reload/session switching. If the durable transcript instead ends
@@ -1698,6 +1732,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // ── attached files ──
   const onFiles = async (list) => {
     const ownerDraft = composerDraftRef.current
+    const ownerRunScope = composerRunKey(currentRunIdRef.current)
     const picked = [...(list || [])]
     const bad = picked.filter(f => !TEXT_EXT.test(f.name))
     if (bad.length) flash(`skipped non-text: ${bad.map(f => f.name).join(', ')}`)
@@ -1707,10 +1742,21 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const big = txt.filter(f => !SECRET_RE.test(f.name) && f.size > MAX_FILE_BYTES)   // OOM guard BEFORE read
     if (big.length) flash(`too large (>2MB): ${big.map(f => f.name).join(', ')}`)
     const ok = txt.filter(f => !SECRET_RE.test(f.name) && f.size <= MAX_FILE_BYTES)
-    const read = (await Promise.all(ok.map(readFileText))).filter(Boolean)
-    if (read.length) updateComposerFiles(ownerDraft, f => {   // dedup by name (React key + removeFile both key on name)
-      const seen = new Set(f.map(x => x.name)); return [...f, ...read.filter(r => !seen.has(r.name))]
-    })
+    if (!ok.length) return
+    const nextPending = Math.max(0, Number(ownerDraft.pendingFileReads) || 0) + 1
+    if (ownerDraft.runScope == null && composerUsesRun(ownerDraft.input, ownerDraft.files, nextPending)) {
+      ownerDraft.runScope = ownerRunScope
+      if (composerDraftRef.current === ownerDraft) setDraftRunScope(ownerRunScope)
+    }
+    updatePendingFileReads(ownerDraft, nextPending)
+    try {
+      const read = (await Promise.all(ok.map(readFileText))).filter(Boolean)
+      if (read.length) updateComposerFiles(ownerDraft, f => {   // dedup by name (React key + removeFile both key on name)
+        const seen = new Set(f.map(x => x.name)); return [...f, ...read.filter(r => !seen.has(r.name))]
+      }, ownerRunScope)
+    } finally {
+      updatePendingFileReads(ownerDraft, current => current - 1)
+    }
   }
   const removeFile = (name) => setFiles(f => f.filter(x => x.name !== name))
   const filePreamble = (fs) => fs.length
@@ -1787,7 +1833,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const inputAtSend = draftAtSend.input
     const runScopeAtSend = draftAtSend.runScope
     const atts = retryFiles != null ? [...retryFiles] : [...draftAtSend.files]
-    const effectiveMode = turnMode || mode
+    const effectiveMode = turnMode || normalizeComposerMode(draftAtSend.mode)
     const sessionSeq = openSessionSeqRef.current
     let id = guardedSid
     if (!id) {
@@ -2093,12 +2139,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   const currentComposerRunKey = composerRunKey(runId)
   const draftRunMismatch = draftRunScope != null
-    && draftRunScope !== currentComposerRunKey && composerUsesRun(input, files)
+    && draftRunScope !== currentComposerRunKey && composerUsesRun(input, files, pendingFileReads)
   const draftRunSource = draftRunScope ? `run “${draftRunScope}”` : 'the Runs overview'
   const draftRunDestination = runId ? `run “${runId}”` : 'the Runs overview'
   const draftRunMismatchMessage = `Draft belongs to ${draftRunSource} and will not be sent in ${draftRunDestination}.`
   const useDraftHere = () => {
-    if (!composerUsesRun(input, files)) return
+    if (!composerUsesRun(input, files, pendingFileReads)) return
     const draft = composerDraftRef.current
     draft.runScope = currentComposerRunKey
     setDraftRunScope(currentComposerRunKey)
@@ -2119,8 +2165,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     }
     const liveDraft = composerDraftRef.current
     if (liveDraft.runScope != null && liveDraft.runScope !== composerRunKey(runId)
-        && composerUsesRun(liveDraft.input, liveDraft.files)) {
+        && composerUsesRun(liveDraft.input, liveDraft.files, liveDraft.pendingFileReads)) {
       flash('Draft not sent · choose Use here or remove its run-specific context')
+      return
+    }
+    if (liveDraft.pendingFileReads > 0) {
+      flash('Wait for the selected attachment to finish reading')
       return
     }
     const t = input.trim()
@@ -2411,8 +2461,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   const attachBtn = (cls) => <button className={cls} aria-label="Attach text files"
     title={historical ? readOnlyShort : shareUnknown ? 'Messaging paused until public-link status is verified'
-      : shareBusy ? 'Wait for the current public-link action' : 'attach text file(s)'}
-    disabled={historical || sharePaused} onClick={() => fileRef.current?.click()}>
+      : shareBusy ? 'Wait for the current public-link action'
+        : draftRunMismatch ? draftRunMismatchMessage
+          : pendingFileReads > 0 ? 'Wait for the selected attachment to finish reading' : 'attach text file(s)'}
+    disabled={historical || sharePaused || draftRunMismatch || pendingFileReads > 0}
+    onClick={() => fileRef.current?.click()}>
     <OpIcon name="clip" size={14} /></button>
 
   // mode selector row — placed BELOW the input in the side + full composers.
@@ -2422,7 +2475,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         className={'asst-mode' + (x.id === mode ? ' on' : '')}
         disabled={historical || sharePaused} title={historical ? readOnlyShort
           : shareUnknown ? 'Messaging paused until public-link status is verified' : x.hint}
-        onClick={() => setMode(x.id)}>{x.label}</button>)}
+        onClick={() => setComposerMode(x.id)}>{x.label}</button>)}
     </div>
     <span className="asst-modehint muted">{activeMode.hint}</span>
   </div>
@@ -2480,6 +2533,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {runId ? 'Use in this run' : 'Use without a run'}
       </button>
     </div>}
+    {pendingFileReads > 0 && <div className="assistant-command-pending" role="status"
+      aria-live="polite" aria-atomic="true">
+      Reading selected attachment…
+    </div>}
     {runId && refNodes(input).length > 0 && <div className="cmdbar-ctx">
       {refNodes(input).map(id => <span key={id} className="chip xs">#{id}
         <button className="chip-x" aria-label={`Detach experiment ${id}`} onClick={() => setInput(input.replace(new RegExp(`#(?:node-)?${id}\\b`, 'gi'), '').replace(/\s{2,}/g, ' ').trim())}>✕</button></span>)}
@@ -2498,9 +2555,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       {busy
         ? <button className="btn sm" aria-label="Stop Assistant" title="stop" onClick={stop}>■</button>
         : <button className="btn sm primary"
-            disabled={historical || commandBusy || sharePaused || draftRunMismatch
+            disabled={historical || commandBusy || sharePaused || draftRunMismatch || pendingFileReads > 0
               || (!input.trim() && files.length === 0)}
-            onClick={send}>{shareUnknown ? 'Paused' : commandBusy || shareBusy ? 'Waiting…' : 'Send'}</button>}
+            onClick={send}>{shareUnknown ? 'Paused' : commandBusy || shareBusy ? 'Waiting…'
+              : pendingFileReads > 0 ? 'Reading…' : 'Send'}</button>}
     </div>
     {draftingNewRun && <div id="assistant-new-run-hint" className="asst-new-run-hint" role="note">
       Describe the goal after /new, then Send. Send uses the configured model to draft a launch card.
@@ -2510,6 +2568,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   </div>
 
   const hiddenFileInput = <input ref={fileRef} type="file" multiple style={{ display: 'none' }}
+    disabled={historical || sharePaused || draftRunMismatch || pendingFileReads > 0}
     onChange={e => { onFiles(e.target.files); e.target.value = '' }} />
 
   useEffect(() => {
@@ -2638,6 +2697,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                 <span><span className="cmdbar-who">draft held</span> · from {draftRunSource}</span>
                 <button type="button" className="btn sm ghost" onClick={useDraftHere}>Use here</button>
               </span>
+          : pendingFileReads > 0
+            ? <span className="cmdbar-status thinking" role="status"
+                aria-live="polite" aria-atomic="true">
+                <span className="cmdbar-pip" /> reading selected attachment…
+              </span>
           : liveShareActive
           ? <button className="cmdbar-status preview assistant-live-share" type="button"
               title="This chat has a live public link. Open the full Assistant to revoke it."
@@ -2656,8 +2720,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         : <button className="cmdbar-go" aria-label="Send Assistant message"
             title={draftRunMismatch ? draftRunMismatchMessage
               : shareUnknown ? 'Messaging paused until public-link status is verified'
-              : commandBusy ? 'Waiting for the current run command' : historical ? readOnlyShort : 'send (Enter)'}
-            disabled={historical || commandBusy || sharePaused || draftRunMismatch
+              : commandBusy ? 'Waiting for the current run command' : historical ? readOnlyShort
+                : pendingFileReads > 0 ? 'Wait for the selected attachment to finish reading' : 'send (Enter)'}
+            disabled={historical || commandBusy || sharePaused || draftRunMismatch || pendingFileReads > 0
               || (!input.trim() && files.length === 0)} onClick={send}>▶</button>}
       <button className="cmdbar-drawer-btn" aria-label="Open Assistant in side view"
         title="open chat on the right (side view)" onClick={openSide}><OpIcon name="chat" size={13} /></button>
