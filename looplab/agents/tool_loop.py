@@ -821,3 +821,60 @@ def resilient(attempt, fallback, *, on_error=None):
             except Exception:  # noqa: BLE001 - telemetry must never escalate a contained failure
                 pass
         return fallback()
+
+
+def emit_loop(client, tools, messages: list, model_cls, settings, *, description: str,
+              fallback=None, on_step=None):
+    """Drive a tool loop whose only terminal is one `emit` call, and return the emitted model.
+
+    Two HTTP surfaces — the genesis planner and the boss command router — each hand-built the same
+    scaffolding around `drive_tool_loop`: an `emit` function spec whose parameters are a pydantic
+    model's JSON schema, a mutable cell for the result, a finalizer that filters the model's kwargs
+    to declared fields and degrades to an EMPTY model on junk, and the settings-driven turn/time
+    limits. Only the model, the tools and the prompts differed — and prompts are contracts, so they
+    stay verbatim at the call sites (doc 25 SR-11).
+
+    The junk degradation is the part worth having once. A model that emits a plausible-looking but
+    wrong-shaped payload must still yield a USABLE empty plan rather than an exception, because the
+    caller's next move is to render a card to a human; and unknown keys are dropped rather than
+    passed through, so a hallucinated field cannot reach a `model_cls` that permits extras.
+
+    `fallback(messages, emitted)` runs when the loop ends without an emit — the model drove tools
+    and stopped, or ignored them entirely. Its answer becomes the result, so a caller that forces a
+    final structured call there does not have to write into a cell of its own.
+    """
+    emitted: dict = {}
+
+    def _finalize(args):
+        try:
+            emitted["value"] = model_cls(**{key: value for key, value in (args or {}).items()
+                                            if key in model_cls.model_fields})
+        except Exception:  # noqa: BLE001 - junk emit -> empty model (still a usable card)
+            emitted["value"] = model_cls()
+        return emitted["value"]
+
+    def _fallback(pending):
+        answer = emitted.get("value")
+        if fallback is not None:
+            answer = fallback(pending, answer)
+        emitted["value"] = answer
+        return answer
+
+    # Resolve the driver through `agents/agent.py` at CALL time rather than binding this module's
+    # own global. That re-export is THE documented monkeypatch seam (CLAUDE.md, and
+    # `tests/test_prompt_injection_rule.py` asserts it by name): every prompt-injection and
+    # scope-redaction test intercepts agentic loops there. Calling the local name would have quietly
+    # retired that seam for the two surfaces this helper serves — and those are exactly the tests
+    # that check an untrusted prior report cannot reach a system prompt.
+    from looplab.agents import agent as _agent  # deferred: `agent` imports this module
+
+    _agent.drive_tool_loop(
+        client, tools, messages,
+        {"type": "function", "function": {
+            "name": "emit", "description": description,
+            "parameters": model_cls.model_json_schema()}},
+        max_turns=getattr(settings, "agent_max_turns", 0),
+        time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),
+        finalize=_finalize, fallback=_fallback, on_step=on_step,
+        **loop_opts_from_settings(settings))
+    return emitted.get("value")

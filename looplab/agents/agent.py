@@ -34,8 +34,8 @@ from looplab.agents.roles import (
 from looplab.agents.tool_loop import (  # noqa: F401
     CompositeTools, _PLAN_TOOL_NAME, _REPEAT_NOTE, _TRUNC_NOTE, _cap_tool_result,
     _flatten_transcript, _force_emit, _handoff_ctx, _plan_spec, _render_plan, _summarizer,
-    agentic_struct, agentic_text, drive_tool_loop, handoff_scope, loop_opts_from_settings,
-    summarize_phase)
+    agentic_struct, agentic_text, drive_tool_loop, emit_loop, handoff_scope,
+    loop_opts_from_settings, summarize_phase)
 
 
 # The "your idea space is the WHOLE experiment / the Developer owns HOW" guidance, as worded for

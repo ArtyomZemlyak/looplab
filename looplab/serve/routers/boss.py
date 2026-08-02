@@ -738,7 +738,7 @@ def build_router(srv) -> APIRouter:
             """Boss decision grounded by the run-introspection tools: it MAY read experiments / data
             before choosing, then emits ONE _Plan (reply + ordered actions). None when the model can't
             drive the tool loop (then the caller falls back to a plain single-call route)."""
-            from looplab.agents.agent import CompositeTools, drive_tool_loop, loop_opts_from_settings
+            from looplab.agents.agent import CompositeTools, emit_loop
             from looplab.tools.run_tools import RunTools, SiblingRunTools
             providers = [RunTools(), SiblingRunTools(rd.parent, rd.name)]
             try:                                  # DataTools needs the task; add it when we can load it
@@ -751,22 +751,10 @@ def build_router(srv) -> APIRouter:
                 pass
             tools = providers[0] if len(providers) == 1 else CompositeTools(providers)
             tools.bind_state(st, st.nodes.get(nid) if nid is not None else None)
-            emit_spec = {"type": "function", "function": {
-                "name": "emit", "description": "Emit the plan: a reply plus the ordered actions to "
-                "apply now (empty actions = advice only).",
-                "parameters": _Plan.model_json_schema()}}
             tool_sys = sys_prompt + ("\n\nThe context above (digest + report) usually has what you "
                 "need — prefer to `emit` your plan directly. ONLY call a read-only tool first "
                 "(read_experiment for a node's code/trials, find_analogous, data_schema/data_profile) "
                 "when you SPECIFICALLY need a detail it doesn't show. Call `emit` exactly once.")
-            box: dict = {}
-            def _fin(args):
-                try:
-                    box["c"] = _Plan(**{k: v for k, v in (args or {}).items()
-                                        if k in _Plan.model_fields})
-                except Exception:  # noqa: BLE001 - junk emit -> treat as advise (empty plan)
-                    box["c"] = _Plan()
-                return box["c"]
             # Loop limits are CONFIG-DRIVEN (Settings.agent_max_turns / agent_time_budget_s), default
             # UNLIMITED — never hardcoded. The old hardcoded 3-turn / 45s cap cut a slow reasoning
             # model (e.g. minimax-m3 with reasoning=high) off BEFORE it emitted, silently dropping the
@@ -775,16 +763,15 @@ def build_router(srv) -> APIRouter:
             # is bounded instead by running the WHOLE route as a BACKGROUND JOB below: a slow turn
             # returns {status:running} to the UI rather than 504ing behind a proxy. Set a positive cap
             # in settings only if you also want to hard-stop the loop itself.
-            drive_tool_loop(client, tools, [{"role": "system", "content": tool_sys},
-                                            *evidence,
-                                            {"role": "user", "content": user}],
-                            emit_spec, max_turns=getattr(s, "agent_max_turns", 0),
-                            time_budget_s=getattr(s, "agent_time_budget_s", 0.0),
-                            finalize=_fin, fallback=lambda _m: box.get("c"),
-                            **loop_opts_from_settings(s))     # B1 stuck (+ C1 self-plan / C2 if set)
-            # Return None (not an empty _Plan) when the loop produced no emit, so the caller falls
+            # Returns None (not an empty _Plan) when the loop produced no emit, so the caller falls
             # through to the forced-emit single-call route instead of short-circuiting to advisory.
-            return box.get("c")
+            return emit_loop(                                 # B1 stuck (+ C1 self-plan / C2 if set)
+                client, tools, [{"role": "system", "content": tool_sys},
+                                *evidence,
+                                {"role": "user", "content": user}],
+                _Plan, s,
+                description=("Emit the plan: a reply plus the ordered actions to "
+                             "apply now (empty actions = advice only)."))
 
         # All the LLM/agent work below is blocking + network-bound AND can outlast a UI proxy's
         # gateway timeout (the boss tool-loop's in-flight turn runs to its own client timeout — see

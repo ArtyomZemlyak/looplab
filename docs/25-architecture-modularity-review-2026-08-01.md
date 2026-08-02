@@ -1928,6 +1928,33 @@ that test's no-receipt case only exercises attempt zero).
 
 *Recommendation:* Add an `emit_loop(client, tools, messages, model_cls, settings, *, fallback, on_step)` helper in looplab/agents (next to drive_tool_loop) that owns emit_spec/box/_fin; both routers pass their exact prompts through unchanged.
 
+*Resolution (2026-08-02):* `agents/tool_loop.py::emit_loop(...)` owns the emit spec, the result
+cell, the finalizer and the settings-driven limits; it is re-exported through `agents/agent.py` like
+every other loop seam. Both routers pass their prompts through verbatim — those are contracts and
+none of their bytes moved.
+
+The degradation behaviour is the part worth having once. These loops end by rendering a card to a
+human, so a junk emit must yield a USABLE empty model rather than an exception that loses the whole
+turn including everything the model just read; and unknown keys are filtered by the HELPER rather
+than left to each caller's model config, so a hallucinated field cannot reach a model that permits
+extras. The fallback now takes `(messages, emitted)` and its answer becomes the result, which is
+what let the genesis planner stop writing into a mutable cell of its own.
+
+`tests/test_emit_loop.py` adds 17 tests. Five deliberate breaks were each caught, and the first two
+attempts at them were SILENT — which is the useful part of the record. Dropping the unknown-key
+filter is invisible against a model that ignores extras by default, and narrowing the junk guard to
+`ValueError` is invisible until the model emits a non-mapping (a bare scalar or a list makes
+`.items()` raise `AttributeError`). Both tests were strengthened to the cases that actually
+distinguish, rather than left as green assertions that proved nothing.
+
+The helper resolves `drive_tool_loop` through `agents/agent.py` at CALL time rather than binding
+`tool_loop`'s own global, and the fifth break is exactly that line. `agent.drive_tool_loop` is THE
+documented monkeypatch seam (CLAUDE.md; `tests/test_prompt_injection_rule.py` asserts it by name),
+and the first version of this helper quietly retired it for the two surfaces it serves — which
+surfaced as `test_genesis_prior_reports_are_redacted_untrusted_user_json` failing, i.e. the test
+that checks an untrusted prior report cannot reach a system prompt. A refactor that silently
+disconnects the injection tests from the loops they guard is worse than the duplication it removes.
+
 #### SR-12 · MEDIUM · layering · effort: medium
 
 **Router-to-router imports and side-effect late-binding seams couple the route modules**
