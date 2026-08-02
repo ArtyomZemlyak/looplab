@@ -1157,9 +1157,18 @@ Scope: `looplab/serve/`: run_commands.py, command_observation.py, engine_proc.py
 
 *Recommendation:* Extend ControlSpec into a real per-event strategy record: {event_type, engine_policy, postcondition, data_fields, normalize(fn), precondition(fn), decide(fn)}. The existing set-equality assertions then guarantee every event has all handlers, and the duplicate field tuples collapse into the single data_fields definition.
 
-#### SC-03 · HIGH · duplication · effort: medium
+#### SC-03 · HIGH · duplication · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
 **Canonical run-path / run-id validation is implemented at least six different ways**
+
+*Resolution (micro-helpers):* `core/pathsafe.py` now owns `is_reparse`, `WINDOWS_RESERVED` and
+`filesystem_identity`; all EIGHT `_is_reparse` copies (the review found seven; `misc.py`'s
+`_author_is_reparse` was a further one), all three duplicate reserved-name sets and all three
+case/Unicode-identity copies now call it. `grep 'def _is_reparse\|def _author_is_reparse'
+looplab/` returns nothing. Two of those copies were attribute-only and dropped the `S_ISLNK`
+half — the drift the finding predicted; their callers happened to OR it in separately, so
+converging removed a redundant double-check rather than fixing a live hole. **Still open:** the
+six full `validate_run_child`-shaped validators, which carry per-caller HTTP error vocabularies.
 
 *Locations:* `looplab/serve/appstate.py:142-202`, `looplab/serve/run_commands.py:1416-1451`, `looplab/serve/run_commands.py:2071-2097`, `looplab/serve/reset_route.py:924-949`, `looplab/serve/deletion_service.py:67-117`, `looplab/serve/launch.py:63-110`, `looplab/serve/scope_sources.py:242-260`
 
@@ -2188,6 +2197,12 @@ Scope: import graph, cross-package duplication, dead top-level code, registries,
 *Evidence:* At least three functions literally named _file_identity exist (core/run_deletion.py:54, engine/train_monitor.py:227, serve/scope_sources.py:134) plus inline tuples in _runcache.sig, appstate._sig/_state_cache key, the runs-router _summary_cache key, attention's signature, log_pages._metadata_signature, span_index and traceview.trace_file_revision. Each site re-derives the same 'mtime seconds are blind to same-size same-second rewrites; include inode/device and ctime' insight with its own multi-line why-comment, and the field sets already drift (train_monitor uses (dev, ino) only; log_pages splits identity vs metadata; runs.py caches 4 fields, appstate 5).
 
 *Recommendation:* Add one core helper (e.g. core/atomicio.file_identity(stat) returning the 5-tuple, with the canonical why-comment) and use it everywhere; sites that intentionally need fewer fields can document the subset against the shared definition.
+
+*Resolution (2026-08-02):* `core/atomicio.file_identity` shipped with the canonical why-comment
+(one bullet per field, each naming the swap it catches). The four sites using the exact 6-tuple —
+`core/run_reset`, `core/run_deletion`, `serve/reset_transaction`, `serve/routers/control` — now
+call it; the deliberate subsets (`train_monitor`, `log_pages`, `artifacts`) each state which
+fields they omit and why, against that definition.
 
 #### XP-03 · MEDIUM · layering · effort: medium
 

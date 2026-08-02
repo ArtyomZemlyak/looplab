@@ -43,7 +43,13 @@ class ArtifactPolicyUnavailable(OSError):
 
 
 def _artifact_file_identity(stt: os.stat_result) -> Optional[tuple[int, int]]:
-    """Return a usable same-file identity; zero inode means this filesystem cannot prove it."""
+    """Return a usable same-file identity; zero inode means this filesystem cannot prove it.
+
+    A deliberate SUBSET of `core/atomicio.file_identity`: the check here is "the path I validated is
+    the file I am about to stream", which must hold across a file that legitimately grows mid-read;
+    the canonical tuple would report a swap on every appended byte. None means unprovable, so the
+    caller fails closed rather than trusting a zero inode as a match.
+    """
     ino = int(getattr(stt, "st_ino", 0) or 0)
     if not ino:
         return None

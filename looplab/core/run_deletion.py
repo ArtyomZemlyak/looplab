@@ -12,12 +12,12 @@ import json
 import os
 import re
 import stat
-import sys
-import unicodedata
 from pathlib import Path
 from typing import Any, Optional
 
-from looplab.core.atomicio import strict_atomic_write_text, strict_fsync_parent
+from looplab.core.atomicio import (
+    file_identity, strict_atomic_write_text, strict_fsync_parent)
+from looplab.core.pathsafe import filesystem_identity, is_reparse
 
 
 RUN_DELETION_FENCE_PREFIX = ".looplab-delete-fence-"
@@ -43,19 +43,8 @@ class RunDeletionFenceError(RuntimeError):
 
 
 def run_deletion_key(run_dir: str | os.PathLike) -> str:
-    identity = str(Path(run_dir).resolve(strict=False))
-    if os.name == "nt":
-        identity = os.path.normcase(identity)
-    elif sys.platform == "darwin":
-        identity = unicodedata.normalize("NFD", identity).casefold()
+    identity = filesystem_identity(str(Path(run_dir).resolve(strict=False)))
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
-
-
-def _file_identity(info: os.stat_result) -> tuple[int, ...]:
-    return (
-        int(info.st_dev), int(info.st_ino), int(info.st_size), int(info.st_mtime_ns),
-        int(info.st_ctime_ns), int(getattr(info, "st_file_attributes", 0) or 0),
-    )
 
 
 def run_deletion_snapshot_token(
@@ -68,7 +57,7 @@ def run_deletion_snapshot_token(
     path = Path(events_path)
     try:
         before = path.lstat()
-        if (_is_reparse(before) or not stat.S_ISREG(before.st_mode)
+        if (is_reparse(before) or not stat.S_ISREG(before.st_mode)
                 or before.st_size != 0):
             raise RunDeletionStorageError(
                 "an empty run deletion identity requires a stable regular empty event log")
@@ -81,9 +70,9 @@ def run_deletion_snapshot_token(
     except (FileNotFoundError, OSError) as exc:
         raise RunDeletionStorageError(
             f"empty run deletion identity is unavailable: {exc}") from exc
-    identity = _file_identity(before)
+    identity = file_identity(before)
     if (data or not stat.S_ISREG(opened.st_mode) or opened.st_size != 0
-            or identity != _file_identity(opened) or identity != _file_identity(after)):
+            or identity != file_identity(opened) or identity != file_identity(after)):
         raise RunDeletionStorageError(
             "the empty event log changed while its deletion identity was inspected")
     material = json.dumps({
@@ -99,12 +88,6 @@ def run_deletion_fence_path(run_dir: str | os.PathLike) -> Path:
     return rd.parent / f"{RUN_DELETION_FENCE_PREFIX}{run_deletion_key(rd)}.json"
 
 
-def _is_reparse(info: os.stat_result) -> bool:
-    attributes = int(getattr(info, "st_file_attributes", 0) or 0)
-    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-    return stat.S_ISLNK(info.st_mode) or bool(attributes & reparse_flag)
-
-
 def load_run_deletion_fence(run_dir: str | os.PathLike) -> Optional[dict[str, Any]]:
     path = run_deletion_fence_path(run_dir)
     try:
@@ -113,7 +96,7 @@ def load_run_deletion_fence(run_dir: str | os.PathLike) -> Optional[dict[str, An
         return None
     except OSError as exc:
         raise RunDeletionStorageError(f"deletion fence cannot be inspected: {exc}") from exc
-    if _is_reparse(before) or not stat.S_ISREG(before.st_mode):
+    if is_reparse(before) or not stat.S_ISREG(before.st_mode):
         raise RunDeletionStorageError("deletion fence is not a regular service-owned file")
     if before.st_size > RUN_DELETION_FENCE_MAX_BYTES:
         raise RunDeletionStorageError("deletion fence exceeds its safety limit")

@@ -20,6 +20,35 @@ from pathlib import Path
 # fsync timeout (seconds) before we give up on it for the rest of the process. Env-overridable.
 # Parsed defensively: this module is imported transitively everywhere, so a garbage override
 # (LOOPLAB_FSYNC_TIMEOUT=abc) must degrade to the default, not crash `import looplab` at load.
+def file_identity(info: os.stat_result) -> tuple[int, ...]:
+    """The canonical "is this still the same file, unchanged?" tuple for a `stat`/`lstat`/`fstat`.
+
+    A read-then-verify sequence (open the receipt, read it, re-stat, compare) is only sound if the
+    comparison notices every way the bytes could have been swapped underneath it. Each field earns
+    its place:
+
+      * ``st_dev``/``st_ino`` — a REPLACEMENT: `os.replace` gives the name a different inode, so a
+        same-size same-mtime swap is invisible without these.
+      * ``st_size`` — the cheapest real change.
+      * ``st_mtime_ns`` — nanoseconds, not seconds: a same-size rewrite inside one second is
+        invisible to `st_mtime`, and on a fast local disk that is the COMMON case, not a corner.
+      * ``st_ctime_ns`` — catches a same-size rewrite that preserved mtime (a restore, a `touch -r`,
+        or an A/B/A edit); on Windows it is creation time, which serves the same purpose here.
+      * ``st_file_attributes`` — Windows only (``getattr`` default 0 elsewhere): a file that gained
+        a reparse point is no longer the file that was validated.
+
+    Ten-plus sites used to re-derive this insight inline with their own copy of the reasoning, and
+    the field sets had already drifted apart (doc 25 XP-02). A site that deliberately needs FEWER
+    fields — a cache key that must not churn on ctime, an identity shared by `lstat` and `fstat`
+    where Windows' ctime diverges — should say so against this definition rather than quietly
+    omitting one.
+    """
+    return (
+        int(info.st_dev), int(info.st_ino), int(info.st_size), int(info.st_mtime_ns),
+        int(info.st_ctime_ns), int(getattr(info, "st_file_attributes", 0) or 0),
+    )
+
+
 def _fsync_timeout() -> float:
     try:
         value = float(os.environ.get("LOOPLAB_FSYNC_TIMEOUT", "5") or 5)

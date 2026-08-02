@@ -33,6 +33,7 @@ from looplab.core.atomicio import (
     strict_atomic_write_text, strict_fsync_parent,
 )
 from looplab.core.config import Settings
+from looplab.core.pathsafe import is_reparse
 from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.settings_store import (
@@ -527,12 +528,6 @@ class _AuthoringFailure(RuntimeError):
         super().__init__(message)
 
 
-def _author_is_reparse(entry: os.stat_result) -> bool:
-    attributes = int(getattr(entry, "st_file_attributes", 0) or 0)
-    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-    return stat.S_ISLNK(entry.st_mode) or bool(attributes & reparse_flag)
-
-
 def _authoring_http_failure(exc: _AuthoringFailure, operation_id: str | None = None) -> HTTPException:
     detail: dict[str, Any] = {
         "code": exc.code,
@@ -575,7 +570,7 @@ def _author_state_parent(srv, *, create: bool) -> Path:
         raise _AuthoringFailure(
             503, "authoring_receipt_unavailable",
             "The authoring metadata namespace could not be inspected.", retryable=True) from exc
-    if _author_is_reparse(entry) or not stat.S_ISDIR(entry.st_mode):
+    if is_reparse(entry) or not stat.S_ISDIR(entry.st_mode):
         raise _AuthoringFailure(
             409, "authoring_receipt_invalid",
             "The authoring metadata namespace is not a trusted directory.", retryable=False)
@@ -600,7 +595,7 @@ def _author_operation_path(srv, operation_id: str) -> Path:
         raise _AuthoringFailure(
             503, "authoring_receipt_unavailable",
             "The authoring receipt store could not be inspected.", retryable=True) from exc
-    if _author_is_reparse(entry) or not stat.S_ISDIR(entry.st_mode):
+    if is_reparse(entry) or not stat.S_ISDIR(entry.st_mode):
         raise _AuthoringFailure(
             409, "authoring_receipt_invalid",
             "The authoring receipt store is not a trusted directory.", retryable=False)
@@ -617,7 +612,7 @@ def _author_operation_lock_path(srv) -> Path:
         raise _AuthoringFailure(
             503, "authoring_lock_unavailable",
             "The authoring operation lock could not be inspected.", retryable=True) from exc
-    if _author_is_reparse(entry) or not stat.S_ISREG(entry.st_mode):
+    if is_reparse(entry) or not stat.S_ISREG(entry.st_mode):
         raise _AuthoringFailure(
             409, "authoring_lock_invalid",
             "The authoring operation lock is not a trusted regular file.", retryable=False)
@@ -675,7 +670,7 @@ def _load_author_receipt(path: Path) -> dict[str, Any] | None:
         raise _AuthoringFailure(
             503, "authoring_receipt_unavailable",
             "The authoring receipt could not be inspected.", retryable=True) from exc
-    if _author_is_reparse(entry) or not stat.S_ISREG(entry.st_mode):
+    if is_reparse(entry) or not stat.S_ISREG(entry.st_mode):
         raise _AuthoringFailure(
             409, "authoring_receipt_invalid",
             "The authoring receipt path is not a trusted regular file.", retryable=False)
@@ -738,7 +733,7 @@ def _author_target_revision(target: Path) -> str:
         raise _AuthoringFailure(
             503, "authoring_target_unavailable",
             "The authored file could not be inspected.", retryable=True) from exc
-    if _author_is_reparse(entry) or not stat.S_ISREG(entry.st_mode):
+    if is_reparse(entry) or not stat.S_ISREG(entry.st_mode):
         raise _AuthoringFailure(
             409, "authoring_target_untrusted",
             "The authored path is not a trusted regular file.", retryable=False)
@@ -771,7 +766,7 @@ def _assert_author_receipt_capacity(srv) -> None:
         raise _AuthoringFailure(
             503, "authoring_receipt_unavailable",
             "The authoring receipt store could not be inspected.", retryable=True) from exc
-    if _author_is_reparse(entry) or not stat.S_ISDIR(entry.st_mode):
+    if is_reparse(entry) or not stat.S_ISDIR(entry.st_mode):
         raise _AuthoringFailure(
             409, "authoring_receipt_invalid",
             "The authoring receipt store is not a trusted directory.", retryable=False)

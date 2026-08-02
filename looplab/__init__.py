@@ -165,6 +165,7 @@ _LAYOUT = {
     # is deliberately NOT aliased — the in-repo callers were repointed instead.
     "panel": "search",
     "parse": "core",
+    "pathsafe": "core",
     "patch": "tools",
     "perm_modes": "tools",
     "policy": "search",

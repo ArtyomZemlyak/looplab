@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from looplab.core.atomicio import _windows_move_write_through, strict_fsync_parent
+from looplab.core.pathsafe import is_reparse, WINDOWS_RESERVED
 from looplab.core.run_deletion import (
     RUN_DELETION_OPERATION_RE, RunDeletionStorageError,
     assert_run_deletion_write_allowed, clear_run_deletion_fence,
@@ -39,10 +40,6 @@ from looplab.serve.run_files import run_config_write_lock
 
 
 _GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
-_WINDOWS_RESERVED = {
-    "CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
-    *(f"LPT{i}" for i in range(1, 10)),
-}
 _SERVICE_PREFIXES = (
     _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX, _RESET_RECEIPT_PREFIX,
     DELETE_RECEIPT_PREFIX, DELETE_QUARANTINE_PREFIX, ".looplab-delete-fence-",
@@ -68,7 +65,7 @@ def _plain_run_path(srv, run_id: str) -> Path:
     if (not isinstance(run_id, str) or not run_id or len(run_id) > 255
             or run_id != run_id.strip() or run_id.endswith((".", " "))
             or ":" in run_id or any(ord(ch) < 32 or ord(ch) == 127 for ch in run_id)
-            or run_id.split(".", 1)[0].upper() in _WINDOWS_RESERVED
+            or run_id.split(".", 1)[0].upper() in WINDOWS_RESERVED
             or Path(run_id).name != run_id or run_id in {".", ".."}
             or "/" in run_id or "\\" in run_id):
         raise HTTPException(404, _detail(
@@ -84,12 +81,6 @@ def _plain_run_path(srv, run_id: str) -> Path:
     return requested
 
 
-def _is_reparse(info: os.stat_result) -> bool:
-    attributes = int(getattr(info, "st_file_attributes", 0) or 0)
-    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-    return stat.S_ISLNK(info.st_mode) or bool(attributes & reparse_flag)
-
-
 def _strict_existing_run(srv, run_id: str) -> Path:
     requested = _plain_run_path(srv, run_id)
     try:
@@ -99,7 +90,7 @@ def _strict_existing_run(srv, run_id: str) -> Path:
         junction = bool(callable(is_junction) and is_junction())
     except (FileNotFoundError, OSError) as exc:
         raise HTTPException(404, _detail("run_not_found", "No such run.")) from exc
-    if (_is_reparse(entry) or junction or not stat.S_ISDIR(entry.st_mode)
+    if (is_reparse(entry) or junction or not stat.S_ISDIR(entry.st_mode)
             or canonical != requested.resolve(strict=False)
             or canonical.parent != srv.root.resolve()):
         raise HTTPException(404, _detail(
@@ -110,7 +101,7 @@ def _strict_existing_run(srv, run_id: str) -> Path:
         event_canonical = events.resolve(strict=True)
     except (FileNotFoundError, OSError) as exc:
         raise HTTPException(404, _detail("run_not_found", "No such run.")) from exc
-    if (_is_reparse(event_entry) or not stat.S_ISREG(event_entry.st_mode)
+    if (is_reparse(event_entry) or not stat.S_ISREG(event_entry.st_mode)
             or event_canonical.parent != canonical or event_canonical != events):
         raise HTTPException(404, _detail(
             "run_not_found", "The run event source is not a canonical regular file."))
@@ -127,7 +118,7 @@ def _strict_quarantine(path: Path) -> bool:
         return False
     except OSError as exc:
         raise DeletionReceiptError(f"deletion quarantine cannot be inspected: {exc}") from exc
-    if (_is_reparse(info) or junction or not stat.S_ISDIR(info.st_mode)
+    if (is_reparse(info) or junction or not stat.S_ISDIR(info.st_mode)
             or canonical != path.resolve(strict=False)):
         raise DeletionReceiptError("deletion quarantine is not a canonical service directory")
     return True
@@ -303,7 +294,7 @@ def _purge_recreated_writer_shell(rd: Path) -> bool:
         info = rd.lstat()
         junction_fn = getattr(rd, "is_junction", None)
         junction = bool(callable(junction_fn) and junction_fn())
-        if (_is_reparse(info) or junction or not stat.S_ISDIR(info.st_mode)
+        if (is_reparse(info) or junction or not stat.S_ISDIR(info.st_mode)
                 or rd.resolve(strict=True) != rd.resolve(strict=False)):
             return False
         children = list(rd.iterdir())
@@ -312,7 +303,7 @@ def _purge_recreated_writer_shell(rd: Path) -> bool:
         engine_lock = rd / "engine.lock"
         if engine_lock.exists():
             lock_info = engine_lock.lstat()
-            if _is_reparse(lock_info) or not stat.S_ISREG(lock_info.st_mode):
+            if is_reparse(lock_info) or not stat.S_ISREG(lock_info.st_mode):
                 return False
             try:
                 with _interprocess_lock(engine_lock, required=True, blocking=False):

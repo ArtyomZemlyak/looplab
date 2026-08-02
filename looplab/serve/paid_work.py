@@ -8,12 +8,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import os
-import sys
 import threading
-import unicodedata
 
 from looplab.engine.costs import (
     bind_run_client_cost, reconcile_cost_accountants, reconcile_usage_outbox)
+from looplab.core.pathsafe import filesystem_identity
 from looplab.events.eventstore import EventStore
 
 
@@ -148,9 +147,4 @@ def metered_run_client(srv, settings, run_dir, generation):
 
 def run_directory_identity(run_dir) -> str:
     """Stable direct-child identity with desktop filesystem case/Unicode semantics."""
-    identity = run_dir.name
-    if os.name == "nt":
-        return os.path.normcase(identity)
-    if sys.platform == "darwin":
-        return unicodedata.normalize("NFD", identity).casefold()
-    return identity
+    return filesystem_identity(run_dir.name)

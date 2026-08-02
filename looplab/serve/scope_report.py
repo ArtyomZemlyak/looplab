@@ -18,6 +18,7 @@ from typing import Callable, Optional
 from pydantic import BaseModel, Field
 
 from looplab.core.advisory_payloads import sanitize_report_payload
+from looplab.core.pathsafe import WINDOWS_RESERVED
 from looplab.core.comparison import canonical_comparison_contract, finite_measurement
 from looplab.core.redact import redact_persisted_text
 
@@ -31,11 +32,6 @@ DEFAULT_SCOPE_REPORT_TIME_S = 180.0
 MAX_SCOPE_REPORT_TIME_S = 600.0
 _MAX_ID_CHARS = 255
 _MAX_LIST_ITEMS = 32
-_WINDOWS_RESERVED_RUN_STEMS = {
-    "CON", "PRN", "AUX", "NUL",
-    *(f"COM{i}" for i in range(1, 10)),
-    *(f"LPT{i}" for i in range(1, 10)),
-}
 
 
 _SCOPE_REPORT_SYSTEM_PROMPT = (
@@ -168,7 +164,7 @@ def _safe_run_id(value: object) -> str | None:
         return None
     if (value != value.strip() or value.endswith((".", " ")) or ":" in value
             or "/" in value or "\\" in value or any(ord(ch) < 32 for ch in value)
-            or value.split(".", 1)[0].upper() in _WINDOWS_RESERVED_RUN_STEMS):
+            or value.split(".", 1)[0].upper() in WINDOWS_RESERVED):
         return None
     # known credential syntax must still fail closed, but generic entropy redaction is
     # inappropriate for authoritative opaque identities such as ULIDs and UUIDs.

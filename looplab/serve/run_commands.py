@@ -41,6 +41,7 @@ from looplab.core.concepts import (
 )
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.hardware import detect_gpus, gpu_free_mib_uncached
+from looplab.core.pathsafe import filesystem_identity
 from looplab.core.models import (
     Event, Idea, IdeaEmission, durable_idea_payload, effective_card_footprint,
 )
@@ -281,14 +282,9 @@ def _process_alive(pid: Optional[int]) -> Optional[bool]:
 
 def _lock_identity(path: Path) -> str:
     """Conservative per-run lock identity on common case-insensitive desktop filesystems."""
-    identity = str(path.resolve())
-    if os.name == "nt":
-        return os.path.normcase(identity)
-    if sys.platform == "darwin":
-        # Default APFS/HFS+ is case-insensitive and normalization-insensitive. A case-sensitive macOS
-        # volume is safely over-serialized; it must never get two locks for one default-volume run.
-        return unicodedata.normalize("NFD", identity).casefold()
-    return identity
+    # A case-sensitive macOS volume is safely over-serialized by the shared rule; it must never get
+    # two locks for one default-volume run.
+    return filesystem_identity(str(path.resolve()))
 
 
 _PROCESS_IDENTITY_SCHEMES = frozenset({"proc-start", "psutil", "windows-filetime"})

@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from looplab.serve import engine_proc as _engine_proc
 from looplab.core.atomicio import (
-    atomic_write_bytes, atomic_write_text, strict_atomic_write_bytes,
+    atomic_write_bytes, atomic_write_text, file_identity, strict_atomic_write_bytes,
     strict_atomic_write_text)
 from looplab.core.config import Settings
 from looplab.events.eventstore import (
@@ -494,12 +494,7 @@ def build_router(srv) -> APIRouter:
                 "remediation": "Inspect the trace-clear sidecar; do not submit a new clear.",
             }) from exc
         after = _trace_clear_regular_receipt(path)
-        identity = lambda info: (
-            info.st_dev, info.st_ino, info.st_size,
-            info.st_mtime_ns, info.st_ctime_ns,
-            int(getattr(info, "st_file_attributes", 0) or 0),
-        )
-        if after is None or identity(after) != identity(before):
+        if after is None or file_identity(after) != file_identity(before):
             raise HTTPException(503, {
                 "code": "trace_clear_receipt_unavailable",
                 "message": "The durable trace clear receipt changed while it was being read.",

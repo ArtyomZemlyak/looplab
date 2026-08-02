@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from looplab.core.atomicio import strict_atomic_write_text
+from looplab.core.pathsafe import is_reparse
 from looplab.core.run_deletion import RUN_DELETION_OPERATION_RE, run_deletion_key
 
 
@@ -55,12 +56,6 @@ def deletion_quarantine_path(srv, rd: Path, operation_id: str) -> Path:
     return srv.root.resolve() / f"{DELETE_QUARANTINE_PREFIX}{run_key}.{operation_id}"
 
 
-def _is_reparse(info: os.stat_result) -> bool:
-    attributes = int(getattr(info, "st_file_attributes", 0) or 0)
-    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-    return stat.S_ISLNK(info.st_mode) or bool(attributes & reparse_flag)
-
-
 def _regular_file(path: Path) -> Optional[os.stat_result]:
     try:
         info = path.lstat()
@@ -68,7 +63,7 @@ def _regular_file(path: Path) -> Optional[os.stat_result]:
         return None
     except OSError as exc:
         raise DeletionReceiptError(f"deletion receipt cannot be inspected: {exc}") from exc
-    if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
+    if is_reparse(info) or not stat.S_ISREG(info.st_mode):
         raise DeletionReceiptError("deletion receipt is not a regular service-owned file")
     return info
 

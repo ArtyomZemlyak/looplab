@@ -19,6 +19,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from looplab.core.pathsafe import is_reparse
+
 
 def _on_shared_hub() -> bool:
     """True when this process looks like a JupyterHub single-user server reached through
@@ -34,20 +36,13 @@ def _on_shared_hub() -> bool:
 def _engine_liveness(rd: Path) -> Optional[bool]:
     """True when held, False when definitively free/absent, None when the probe is inconclusive."""
     lock = rd / "engine.lock"
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-
-    def _is_reparse(entry) -> bool:
-        attributes = int(getattr(entry, "st_file_attributes", 0) or 0)
-        return bool(reparse_flag and attributes & reparse_flag)
-
     try:
         run_entry = rd.lstat()
     except FileNotFoundError:
         return False  # required for a not-yet-materialized, validated new-start path
     except OSError:
         return None
-    if (stat.S_ISLNK(run_entry.st_mode) or not stat.S_ISDIR(run_entry.st_mode)
-            or _is_reparse(run_entry)):
+    if is_reparse(run_entry) or not stat.S_ISDIR(run_entry.st_mode):
         return None
     try:
         canonical_run = rd.resolve(strict=True)
@@ -59,8 +54,7 @@ def _engine_liveness(rd: Path) -> Optional[bool]:
             current = rd.lstat()
             return bool(
                 stat.S_ISDIR(current.st_mode)
-                and not stat.S_ISLNK(current.st_mode)
-                and not _is_reparse(current)
+                and not is_reparse(current)
                 and (current.st_dev, current.st_ino, current.st_mode)
                 == (run_entry.st_dev, run_entry.st_ino, run_entry.st_mode)
                 and rd.resolve(strict=True) == canonical_run
@@ -81,8 +75,7 @@ def _engine_liveness(rd: Path) -> Optional[bool]:
     except OSError:
         return None
     try:
-        if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode)
-                or _is_reparse(entry)):
+        if is_reparse(entry) or not stat.S_ISREG(entry.st_mode):
             return None
         if lock.resolve(strict=True).parent != canonical_run:
             return None
@@ -119,8 +112,7 @@ def _engine_liveness(rd: Path) -> Optional[bool]:
             current = lock.lstat()
             return bool(
                 stat.S_ISREG(current.st_mode)
-                and not stat.S_ISLNK(current.st_mode)
-                and not _is_reparse(current)
+                and not is_reparse(current)
                 and (current.st_dev, current.st_ino, current.st_mode)
                 == (entry.st_dev, entry.st_ino, entry.st_mode)
                 == (opened.st_dev, opened.st_ino, opened.st_mode)

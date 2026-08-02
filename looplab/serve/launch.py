@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from looplab.adapters import tasks as task_adapters
+from looplab.core.pathsafe import WINDOWS_RESERVED
 from looplab.core.appconfig import load_document
 from looplab.core.comparison import canonical_comparison_contract
 from looplab.core.config import (Settings, canonicalize_parallelism_source,
@@ -32,11 +33,6 @@ from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 
 _START_FIELDS = {
     "run_id", "task", "task_file", "settings", "chat", "validation_token", "idempotency_key",
-}
-_WINDOWS_RESERVED = {
-    "CON", "PRN", "AUX", "NUL",
-    *(f"COM{i}" for i in range(1, 10)),
-    *(f"LPT{i}" for i in range(1, 10)),
 }
 
 
@@ -65,7 +61,7 @@ def safe_run_dir(root: Path, run_id: Any, *, check_conflict: bool = True) -> Pat
         _reject(400, "invalid_run_id", "run_id is required", "run_id")
     if (len(run_id) > 255 or run_id != run_id.strip() or run_id.endswith((".", " "))
             or ":" in run_id or any(ord(ch) < 32 for ch in run_id)
-            or run_id.split(".", 1)[0].upper() in _WINDOWS_RESERVED):
+            or run_id.split(".", 1)[0].upper() in WINDOWS_RESERVED):
         _reject(400, "invalid_run_id", "run_id is unsafe or filesystem-ambiguous", "run_id")
     requested = root / run_id
     try:

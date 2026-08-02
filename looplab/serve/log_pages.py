@@ -133,6 +133,10 @@ def _first_generation(handle: BinaryIO, size: int) -> Optional[str]:
 def _metadata_signature(stat: os.stat_result) -> tuple[int, int]:
     """Metadata used only to distinguish same-size in-place rewrites from an unchanged snapshot.
 
+    A deliberate SUBSET of `core/atomicio.file_identity` (timestamps only): dev/ino are checked
+    separately at the read sites as the file's identity, and size is the append signal, so folding
+    them in here would conflate "a different file" and "grew normally" with "rewritten in place".
+
     Size growth is handled as the normal append path and deliberately keeps the cursor epoch. A
     changed timestamp at the same size is ambiguous, so fail closed and rebuild the index.
     """

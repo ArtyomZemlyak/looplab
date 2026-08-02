@@ -225,7 +225,13 @@ def _log_path_key(path: Path) -> str:
 
 
 def _file_identity(stat_result) -> Optional[tuple[int, int]]:
-    """Return an OS file identity when the filesystem exposes one (Windows does via ``st_ino`` too)."""
+    """Return an OS file identity when the filesystem exposes one (Windows does via ``st_ino`` too).
+
+    Deliberately a SUBSET of `core/atomicio.file_identity`: this asks only "is this the same file?",
+    never "is it unchanged?" — the monitor tails a log that is expected to grow between reads, so
+    including size/mtime would report a rotation on every ordinary append. It also returns None when
+    the filesystem cannot prove identity (inode 0), which the canonical tuple has no way to express.
+    """
     try:
         device = int(stat_result.st_dev)
         inode = int(stat_result.st_ino)

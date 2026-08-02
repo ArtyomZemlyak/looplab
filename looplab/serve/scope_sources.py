@@ -20,6 +20,7 @@ from typing import Callable, TypeVar
 import orjson
 
 from looplab.core.models import Event
+from looplab.core.pathsafe import is_reparse
 from looplab.events.eventstore import (MAX_EVENT_BATCH_BYTES, decode_event_record,
                                        UnsupportedEventVersionError)
 from looplab.serve.run_commands import run_generation_token
@@ -127,10 +128,6 @@ def _attributes(status: os.stat_result) -> int:
     return int(getattr(status, "st_file_attributes", 0))
 
 
-def _is_reparse(status: os.stat_result) -> bool:
-    return bool(_attributes(status) & _REPARSE_POINT)
-
-
 def _file_identity(status: os.stat_result) -> tuple[int, ...]:
     """Identity shared by lstat/fstat without Windows' divergent ctime."""
     return (
@@ -232,7 +229,7 @@ def _lstat(path: Path, *, changed: bool = False) -> os.stat_result:
 
 def _require_real_directory(path: Path, *, label: str) -> os.stat_result:
     status = _lstat(path)
-    if stat.S_ISLNK(status.st_mode) or _is_reparse(status):
+    if is_reparse(status):
         raise ScopeSourceCorruptError(f"{label} must not be a symlink or reparse point")
     if not stat.S_ISDIR(status.st_mode):
         raise ScopeSourceCorruptError(f"{label} is not a directory")
@@ -263,7 +260,7 @@ def _run_path(root: Path, run_id: str) -> tuple[Path, os.stat_result]:
 
 
 def _require_regular(status: os.stat_result, *, label: str) -> None:
-    if stat.S_ISLNK(status.st_mode) or _is_reparse(status):
+    if is_reparse(status):
         raise ScopeSourceCorruptError(f"{label} must not be a symlink or reparse point")
     if not stat.S_ISREG(status.st_mode):
         raise ScopeSourceCorruptError(f"{label} is not a regular file")

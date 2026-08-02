@@ -43,7 +43,7 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 
 | Path | Contents |
 |---|---|
-| `looplab/core/` | foundation: domain models, `Settings` (config.py = schema, appconfig.py = loader), LLM client (`llm.py` + its `llm_streaming`/`llm_toolcall`/`llm_transient` siblings — every split name re-exported through `llm.py`), parsing, tracing, shared errors |
+| `looplab/core/` | foundation: domain models, `Settings` (config.py = schema, appconfig.py = loader), LLM client (`llm.py` + its `llm_streaming`/`llm_toolcall`/`llm_transient` siblings — every split name re-exported through `llm.py`), parsing, tracing, shared errors; `pathsafe.py` (the single spelling of `is_reparse` / `WINDOWS_RESERVED` / `filesystem_identity`) and `atomicio.file_identity` (the canonical same-file-unchanged stat tuple) — a site needing a SUBSET of either documents why against the shared definition rather than re-deriving it |
 | `looplab/events/` | event store, `types.py` (event-type registry), `replay.py::fold` (event log → `RunState`), digest, readmodel, exporters + the pure UI projections (`traceview.py`, `htmlview.py`, `comment_projection.py` = threaded-comment lifecycle projection), `span_index.py` (light span index → `spans.index.jsonl`) |
 | `looplab/runtime/` | sandboxes (subprocess/Docker tiers), command evaluation, dep install, background tasks |
 | `looplab/tools/` | agent-facing tools; `_base.py` documents the ToolProvider contract; `env_inspect.py` (repo Developer's read-only env inspector: pkg version/API/source), `vectorstore.py` + `memora.py` (embeddings + harmonic index) |

@@ -10,7 +10,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from looplab.core.atomicio import strict_atomic_write_text
+from looplab.core.atomicio import file_identity, strict_atomic_write_text
+from looplab.core.pathsafe import is_reparse
 from looplab.core.run_reset import (
     RUN_RESET_OPERATION_RE, RunResetStorageError, clear_run_reset_marker,
     load_run_reset_marker)
@@ -71,12 +72,6 @@ class ResetReceiptError(RuntimeError):
     """A reset receipt is unavailable, malformed, or changed while being read."""
 
 
-def _is_reparse(info: os.stat_result) -> bool:
-    attributes = int(getattr(info, "st_file_attributes", 0) or 0)
-    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-    return stat.S_ISLNK(info.st_mode) or bool(attributes & reparse_flag)
-
-
 def reset_receipt_path(srv, rd: Path, operation_id: str) -> Path:
     if RUN_RESET_OPERATION_RE.fullmatch(operation_id) is None:
         raise ValueError("invalid reset operation id")
@@ -117,7 +112,7 @@ def _regular_receipt(path: Path) -> Optional[os.stat_result]:
         return None
     except OSError as exc:
         raise ResetReceiptError(f"reset receipt cannot be inspected: {exc}") from exc
-    if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
+    if is_reparse(info) or not stat.S_ISREG(info.st_mode):
         raise ResetReceiptError("reset receipt is not a regular service-owned file")
     return info
 
@@ -196,11 +191,7 @@ def load_reset_receipt(path: Path) -> Optional[dict[str, Any]]:
         after = _regular_receipt(path)
     except OSError as exc:
         raise ResetReceiptError(f"reset receipt cannot be read: {exc}") from exc
-    identity = lambda info: (
-        info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
-        int(getattr(info, "st_file_attributes", 0) or 0),
-    )
-    if after is None or identity(before) != identity(after):
+    if after is None or file_identity(before) != file_identity(after):
         raise ResetReceiptError("reset receipt changed while it was being read")
     if len(raw) > RESET_RECEIPT_MAX_BYTES:
         raise ResetReceiptError("reset receipt exceeds its safety limit")

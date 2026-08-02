@@ -15,7 +15,8 @@ import stat
 from pathlib import Path
 from typing import Any, Optional
 
-from looplab.core.atomicio import strict_atomic_write_text
+from looplab.core.atomicio import file_identity, strict_atomic_write_text
+from looplab.core.pathsafe import is_reparse
 
 
 RUN_RESET_MARKER = ".looplab-resetting.json"
@@ -44,12 +45,6 @@ def reset_marker_path(run_dir: str | os.PathLike) -> Path:
     return Path(run_dir) / RUN_RESET_MARKER
 
 
-def _is_reparse(info: os.stat_result) -> bool:
-    attributes = int(getattr(info, "st_file_attributes", 0) or 0)
-    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-    return stat.S_ISLNK(info.st_mode) or bool(attributes & reparse_flag)
-
-
 def load_run_reset_marker(run_dir: str | os.PathLike) -> Optional[dict[str, Any]]:
     path = reset_marker_path(run_dir)
     try:
@@ -58,7 +53,7 @@ def load_run_reset_marker(run_dir: str | os.PathLike) -> Optional[dict[str, Any]
         return None
     except OSError as exc:
         raise RunResetStorageError(f"reset marker cannot be inspected: {exc}") from exc
-    if _is_reparse(before) or not stat.S_ISREG(before.st_mode):
+    if is_reparse(before) or not stat.S_ISREG(before.st_mode):
         raise RunResetStorageError("reset marker is not a regular service-owned file")
     if before.st_size > RUN_RESET_MARKER_MAX_BYTES:
         raise RunResetStorageError("reset marker exceeds its safety limit")
@@ -68,11 +63,7 @@ def load_run_reset_marker(run_dir: str | os.PathLike) -> Optional[dict[str, Any]
         after = path.lstat()
     except OSError as exc:
         raise RunResetStorageError(f"reset marker cannot be read: {exc}") from exc
-    identity = lambda info: (
-        info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
-        int(getattr(info, "st_file_attributes", 0) or 0),
-    )
-    if identity(before) != identity(after):
+    if file_identity(before) != file_identity(after):
         raise RunResetStorageError("reset marker changed while it was being read")
     if len(raw) > RUN_RESET_MARKER_MAX_BYTES:
         raise RunResetStorageError("reset marker exceeds its safety limit")
