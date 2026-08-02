@@ -142,7 +142,11 @@ test('dynamic API paths preserve fragment syntax and a literal encoded slash as 
   }
   const calls = []
   globalThis.location = { pathname: '/proxy/app/', hash: '' }
-  globalThis.sessionStorage = { getItem: () => '' }
+  // A real `Storage` answers `null` for a key nobody set. Returning one value for EVERY key made
+  // `loadRunStartOverIntent` read `''` as a CORRUPT start-over envelope for whichever run was
+  // under test, and `getRunAccess` fails that closed into a run-wide destructive lock — so every
+  // mutation below was refused with START_OVER_RECOVERY_LOCK instead of exercising its own path.
+  globalThis.sessionStorage = { getItem: () => null }
   globalThis.fetch = async url => {
     calls.push(String(url))
     return { ok: true, json: async () => ({ ok: true, generation: 'a'.repeat(64), seq: 1 }) }

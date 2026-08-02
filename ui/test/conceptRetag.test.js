@@ -19,7 +19,11 @@ const withHttpGlobals = async (fetchImpl, fn) => {
     location: globalThis.location, fetch: globalThis.fetch, sessionStorage: globalThis.sessionStorage,
   }
   globalThis.location = { pathname: '/proxy/app/', hash: '' }
-  globalThis.sessionStorage = { getItem: () => '' }
+  // A real `Storage` answers `null` for a key nobody set. Returning one value for EVERY key made
+  // `loadRunStartOverIntent` read `''` as a CORRUPT start-over envelope for whichever run was
+  // under test, and `getRunAccess` fails that closed into a run-wide destructive lock — so every
+  // mutation below was refused with START_OVER_RECOVERY_LOCK instead of exercising its own path.
+  globalThis.sessionStorage = { getItem: () => null }
   globalThis.fetch = (url, options = {}) => String(url).endsWith('/state') && options.method == null
     ? Promise.resolve(jsonResponse({ state: {}, seq: 0, generation: GEN_A }))
     : fetchImpl(url, options)
