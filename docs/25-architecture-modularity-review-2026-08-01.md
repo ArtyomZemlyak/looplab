@@ -1148,6 +1148,24 @@ would serve one task's paid overlay to another.
 
 *Recommendation:* Either wire CaseLibrary into a real consumer (if the Memora harmonic case path is still planned) or delete it and port its direction-comparability lesson into JsonlCaseLibrary docs; at minimum mark it clearly as test-fixture/unwired so its docstring stops claiming to be 'the top-system differentiator'.
 
+*Resolution (2026-08-02):* marked, not deleted — and the marking is now enforced. `CaseLibrary`'s
+docstring opens with UNWIRED, names `JsonlCaseLibrary` as the store a run actually reaches, and says
+what wiring it in would require (the durability contract it does not have: whole-file reload,
+quarantine-preserving rewrite, retain-on-improvement across runs). `JsonlCaseLibrary`'s docstring
+points back, and carries the direction-comparability lesson from `CaseLibrary._consolidate` — two
+cases are only comparable when their objective direction matches, which the JSONL store sidesteps by
+keying on `task_id`.
+
+Deleting it would have deleted the only coverage of Memora consolidation/expansion, which is still
+the intended direction for this path; the finding's own minimum ask was the marking.
+
+`tests/test_case_store_wiring.py` keeps both claims true in BOTH directions: it fails if anything
+under `looplab/` constructs `CaseLibrary` (with the message saying what to do about it), and it
+fails if nothing constructs `JsonlCaseLibrary` — because that would mean the engine has no case store
+and cross-run recall is silently off. A first attempt at the "someone wired it in" break was silent:
+assigning the class is not constructing it, and the scan looks for calls. The break was sharpened to
+a real construction.
+
 #### EM-12 · MEDIUM · excessive-logic · effort: medium
 
 **Ad-hoc hand-written receipt validators repeated ~8 times with no shared schema helper**

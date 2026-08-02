@@ -529,9 +529,18 @@ def valid_case_record(case) -> bool:
 
 
 class JsonlCaseLibrary:
-    """Persistent case store (I19, ADR-10): cases on disk as JSONL, keyed by task_id
-    with retain-on-improvement. Loads existing cases on init so it accumulates across
-    runs. `search` does a keyword/recency lookup (no embedding dependency)."""
+    """THE case store the engine actually uses (I19, ADR-10) — `lessons.py::store_case` builds it.
+
+    Cases on disk as JSONL, keyed by task_id with retain-on-improvement. Loads existing cases on init
+    so it accumulates across runs. `search` does a keyword/recency lookup (no embedding dependency).
+
+    The vector-backed `CaseLibrary` above claims the same I19/ADR-10 role in its own docstring but is
+    unwired; that ambiguity used to be resolvable only by grepping for constructors (doc 25 EM-11).
+
+    One lesson worth carrying if the harmonic path is ever wired in: `CaseLibrary._consolidate` had to
+    learn that two cases are only comparable when their objective DIRECTION matches, or merging picks
+    the wrong winner across a min/max boundary. This store sidesteps it by keying on task_id, which
+    carries the direction with it."""
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -1494,7 +1503,19 @@ def portfolio_digest(capsules: list[dict], *, aliases: Optional[dict] = None,
 
 
 class CaseLibrary:
-    """Episodic case store over a `VectorStore`. Optionally *harmonic* (Memora): pass an `abstract`
+    """UNWIRED (doc 25 EM-11): the vector-backed episodic case store, kept for the Memora path.
+
+    Nothing under `looplab/` constructs this — the engine's real case store is `JsonlCaseLibrary`
+    below, reached through `lessons.py::store_case`. Only tests exercise this class today, so read it
+    as a prototype of the harmonic path rather than as live behaviour; a reader tracing "where do
+    cases come from" wants `JsonlCaseLibrary`.
+
+    It is retained rather than deleted because its tests are the only coverage of Memora
+    consolidation/expansion, which is still the intended direction for the case path. Wiring it in
+    means giving it `JsonlCaseLibrary`'s durability contract (whole-file reload, quarantine-preserving
+    rewrite, retain-on-improvement across runs) — it has none of those today.
+
+    Episodic case store over a `VectorStore`. Optionally *harmonic* (Memora): pass an `abstract`
     callable (see `tools.memora.make_abstractor`) to index each case by a short abstraction + cue
     anchors instead of its raw task text, CONSOLIDATE a near-duplicate case into the existing entry on
     `add`, and EXPAND `retrieve` through the top hits' anchors. With `abstract=None` (the default) every
