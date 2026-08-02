@@ -290,6 +290,56 @@ is what makes the remainder worth treating as a real defect class:
 thread-stack dumps (the technique that found the 405), and fix the stall. Every guard added by this
 campaign is worth less while the suite is intermittently red for reasons no one has read.
 
+### T9 — The UI suite's source-regex idiom had silently retired 30 assertions (added 2026-08-02, RESOLVED)
+
+The `ui/test/*.test.js` files check many properties by matching a regex against the `.jsx`/`.css`
+source. It is a cheap idiom for things a jsdom render cannot see (dep lists, layer priorities,
+which branch calls the mutating API), and the repo uses it deliberately. It also has a failure mode
+that is the browser-side twin of the HTTP-contract drift in CLAUDE.md: **when the production code
+gets safer, the anchor stops matching, and the assertion is retired rather than reported.**
+
+Thirty tests were red this way. The distribution is the point — this is not sloppiness, it is the
+idiom working against itself:
+
+* **13 anchors broke on a HARDENING.** The node-mutation gate was renamed *and widened* to cover
+  lost run authority; the re-tag editor's remount key gained the run generation (so a draft opened
+  before a start-over cannot submit against the rebuilt node); the stale-detail latch moved from a
+  predicate flag into `finish`/`cancel`, which newly fences the FAILURE path too; `useDialogFocus`
+  calls gained explicit layer priorities; a recovery POST gained `acknowledged_live_share_ids`. In
+  every case the assertion stopped running at the exact moment the property it guarded got stronger.
+* **6 fixtures predated a required envelope field.** `useAttention`'s pages, `useAttentionDeadline`'s
+  pages, the settings resource's `credential`, the shared chat's `meta.live`/`expires_at`. A
+  protocol-invalid payload is dropped WHOLE by design, so the FIRST assertion threw and every
+  fail-closed case below it — disproportionately the security-relevant ones — never ran.
+* **5 pinned a behaviour that had been deliberately improved.** A composer that froze on an unknown
+  write outcome now offers a non-mutating "Check command"; a retry no longer blanks the error the
+  operator is reading; a standalone `attempt=` is now a valid node-lifecycle fence rather than a
+  dangling half-link.
+* **4 were pure cosmetics** — an attribute added, a line wrapped, a parameter renamed.
+* **2 were real defects**, found only because fixing the anchor let the test run: `role="status"` on
+  a `<ul>` erased its own `<li>` list semantics (serious axe violation, on the warning list the
+  operator reads when a source is stale), and RunList reflected server `message`/`remediation` into
+  an alert unbounded, uncoerced, and with an empty-string fallback — so a malformed body rendered
+  `[object Object]`, and an envelope carrying neither field rendered a blank alert.
+
+*Resolution:* 29 of 30 fixed, each by re-pointing the anchor at the property rather than the
+spelling, and by asserting the improvement that broke it. Where a count or an exact array was the
+anchor (`4` route-level mains, an exact effect dep list, a `z-index` literal), it was replaced by
+the relation that must hold — every route-main focusable and named; the deps that carry the meaning
+with additions permitted; backdrop < drawer < modal overlay — so the next legitimate change reports
+the values instead of a bare regex miss.
+
+*Remaining:* `inspectorDetailResource`. Its stale assertion is identified (a retry no longer blanks
+the surface; the alert stays and its button relabels to "Retrying…" and disables), but correcting it
+lets the test run on into a separate hang. Left failing FAST and deliberately rather than
+half-fixed, because a 30 s harness timeout in CI is worse than a fast red.
+
+*Recommendation:* the idiom is worth keeping, but a source-regex assertion should anchor on the
+smallest thing that carries the meaning, and any assertion that can pass vacuously — an `indexOf`
+that returns -1, a slice whose end anchor moved, a `[^>]*` that cannot cross a line — needs a
+companion check that the scan saw anything at all. Several tests in this file already do this
+(`'a source anchor moved; this test reads nothing'`); it should be the default.
+
 ### T7 — Acknowledged-but-unfixed in-code review markers
 
 `CLAUDE REVIEW:`/`CODEX AGENT:` comments shipping in production, each describing a diagnosed
