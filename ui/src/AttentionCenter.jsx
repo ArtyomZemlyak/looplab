@@ -20,6 +20,7 @@ const dispatchOpenAttention = () => {
 }
 
 const ATTENTION_PREFERENCE_FAILURE = 'This browser could not verify the saved attention preference.'
+const NO_COMPLETE_ATTENTION_SNAPSHOT = 'No complete verified snapshot is available yet.'
 
 function isPlainRunActivation(event) {
   if (!event || event.defaultPrevented || (event.button != null && event.button !== 0)
@@ -119,7 +120,7 @@ function AttentionItem({ item, unread, sourceStale, onOpenRun, onMarkRead, onDis
       <span className="attention-severity-dot" aria-hidden="true" />
       {SEVERITY_LABEL[item.severity] && <span className="sr-only">{SEVERITY_LABEL[item.severity]}: </span>}
       <h4>{item.title}</h4>
-      {stale && <span className="attention-stale-label">Last verified</span>}
+      {stale && <span className="attention-stale-label">Stale</span>}
       {unread && <span className="attention-new-label">{stale ? 'Unread' : 'New'}</span>}
     </div>
     {item.source === 'run' && <p className="attention-run-context">
@@ -149,7 +150,8 @@ export default function AttentionCenter() {
   const {
     items, currentItems, initialized, runStale, permissionsStale, partial, truncated,
     hasMore, loadingMore, loadMoreError, loadMore, refresh,
-    authoritative, verified, runVerifiedGeneratedAt, runActiveActionCount,
+    authoritative, verified, runVerified, permissionsVerified,
+    runVerifiedGeneratedAt, runActiveActionCount,
   } = useAttention()
   const [open, setOpen] = useState(false)
   const [preferences, setPreferences] = useState(() => loadAttentionState())
@@ -265,12 +267,8 @@ export default function AttentionCenter() {
   const actionPhrase = actionCountCopy(activeActionCount)
   const stillActionPhrase = actionCountCopy(activeActionCount, true)
   const uncertainActionPhrase = activeActionCount === 1
-    ? (verified
-        ? '1 item is shown or was last verified as needing action'
-        : '1 loaded item needs action')
-    : (verified
-        ? `${activeActionCount} items are shown or were last verified as needing action`
-        : `${activeActionCount} loaded items need action`)
+    ? '1 loaded or previously verified item may need action'
+    : `${activeActionCount} loaded or previously verified items may need action`
   const unreadComplete = feedAuthoritative && !truncated
   const unreadPaginationIncomplete = feedAuthoritative && truncated
 
@@ -479,17 +477,21 @@ export default function AttentionCenter() {
   }, [focusRevision, open, unreadCount, visibleItems.length])
 
   const feedVerified = feedAuthoritative
-  const verifiedAge = verified === true ? snapshotAge(runVerifiedGeneratedAt) : ''
+  const verifiedRunAge = runVerified === true ? snapshotAge(runVerifiedGeneratedAt) : ''
   const sourceMessages = []
   if (!initialized) sourceMessages.push('Updating attention items…')
   else {
-    if (runStale && permissionsStale) sourceMessages.push('Both attention sources are temporarily stale; showing the last safe snapshot.')
-    else if (runStale) sourceMessages.push('Run attention is temporarily stale; showing the last safe snapshot.')
-    else if (permissionsStale) sourceMessages.push('Assistant approvals are temporarily stale; showing the last safe snapshot.')
-    if (partial) sourceMessages.push('Some run logs could not be inspected, so this list may be incomplete.')
-    if (!feedVerified) sourceMessages.push(verifiedAge
-      ? `Last verified snapshot was updated ${verifiedAge}.`
-      : 'No complete verified snapshot is available yet.')
+    if (runStale) sourceMessages.push(runVerified
+      ? 'Run attention is temporarily stale. Loaded run items may be out of date; this source was verified previously.'
+      : 'Run attention is temporarily unavailable. Any loaded run items are unverified.')
+    if (permissionsStale) sourceMessages.push(permissionsVerified
+      ? 'Assistant approvals are temporarily stale. Loaded approval items may be out of date; this source was verified previously.'
+      : 'Assistant approvals are temporarily unavailable. Any loaded approval items are unverified.')
+    if (partial) sourceMessages.push('Some run logs could not be inspected, so loaded run-attention data may be incomplete.')
+    if (!feedVerified && verifiedRunAge) {
+      sourceMessages.push(`Run attention was last fully verified ${verifiedRunAge}.`)
+    }
+    if (!feedVerified && !verified) sourceMessages.push(NO_COMPLETE_ATTENTION_SNAPSHOT)
     if (hasMore && truncated) sourceMessages.push('More older attention items are available below.')
   }
   const notificationsEnabled = preferences.valid && preferences.state.enabled
@@ -502,9 +504,7 @@ export default function AttentionCenter() {
     ? (activeActionCount > 0 ? actionPhrase : 'no items need action')
     : activeActionCount > 0
       ? `${uncertainActionPhrase}; current action total is unavailable`
-      : verified
-        ? 'current action total is unavailable; no loaded or last verified items need action'
-        : 'current action total is unavailable; no loaded items need action'
+      : 'current action total is unavailable; no action cards are loaded'
   const unreadAria = unreadComplete
     ? (unreadCount > 0 ? unreadPhrase : 'no unread items')
     : unreadCount > 0
@@ -529,7 +529,7 @@ export default function AttentionCenter() {
   const headerStatus = !initialized
     ? 'Checking for updates'
     : !feedVerified
-      ? (verifiedAge ? `Last verified ${verifiedAge}` : 'Status unavailable')
+      ? 'Current status unavailable'
       : activeActionCount > 0
         ? unreadCount > 0
           ? `${actionPhrase} · ${unreadComplete ? unreadPhrase : loadedUnreadPhrase}`
@@ -544,13 +544,23 @@ export default function AttentionCenter() {
   const actionEmptyCopy = !initialized
     ? 'Checking for items that need action…'
     : feedVerified
-      ? 'Nothing needs your action right now.'
-      : 'Current action status is unavailable. Showing the last verified snapshot.'
+      ? activeActionCount > 0
+        ? `No action cards are shown yet, but ${actionPhrase} in total. Load older items to review them.`
+        : 'Nothing needs your action right now.'
+      : activeActionCount > 0
+        ? `No action cards are shown; ${uncertainActionPhrase}. Retry to verify the current list.`
+        : verified
+          ? 'No action cards are shown. Current action status is unavailable; both sources were verified previously.'
+          : `No action cards are shown. Current action status is unavailable. ${NO_COMPLETE_ATTENTION_SNAPSHOT}`
   const recentEmptyCopy = !initialized
     ? 'Checking recent run notices…'
     : feedVerified
-      ? 'No recent completion or budget notices.'
-      : 'Recent notice status is unavailable. Showing the last verified snapshot.'
+      ? truncated
+        ? 'No recent notices are shown yet. Load older items to continue.'
+        : 'No recent completion or budget notices are shown.'
+      : verified
+        ? 'No recent notices are shown. Current notice status is unavailable; both sources were verified previously.'
+        : `No recent notices are shown. Current notice status is unavailable. ${NO_COMPLETE_ATTENTION_SNAPSHOT}`
 
   return <>
     <button type="button" className={triggerClass}
@@ -622,7 +632,9 @@ export default function AttentionCenter() {
                   : activeActionCount > 99 ? '99+?' : `${activeActionCount}?`}</span>
                 <span className="sr-only">{actionCountExact
                   ? `${actionPhrase} in total`
-                  : `${uncertainActionPhrase}. Current total unavailable.`}</span>
+                  : activeActionCount > 0
+                    ? `${uncertainActionPhrase}. Current total unavailable.`
+                    : 'No action cards are loaded. Current total unavailable.'}</span>
               </span>
             </div>
             {actionItems.length
@@ -673,8 +685,12 @@ export default function AttentionCenter() {
 
           {initialized && items.length > 0 && visibleItems.length === 0
             && <p className="attention-all-dismissed">{feedVerified
-              ? 'All current items are dismissed. New IDs will appear here normally.'
-              : 'All items in the last verified snapshot are dismissed. Retry to check the current state.'}</p>}
+              ? truncated
+                ? 'All loaded items are dismissed. Load older items to continue.'
+                : 'All current items are dismissed. New IDs will appear here normally.'
+              : verified
+                ? 'All loaded items are dismissed. Current status is unavailable; retry to verify the current list.'
+                : `All loaded items are dismissed. ${NO_COMPLETE_ATTENTION_SNAPSHOT} Retry to check the current state.`}</p>}
         </div>
       </section>
     </div>}
