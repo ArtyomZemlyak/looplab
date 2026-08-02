@@ -1,8 +1,11 @@
 export function installNavigationLossGuard({
-  allowRef, guardedHash, message, win = window,
+  allowRef, guardedHash, message, onAllow = null, win = window,
 }) {
   if (!allowRef || typeof guardedHash !== 'string' || typeof message !== 'function') {
     throw new TypeError('Invalid navigation loss guard')
+  }
+  if (onAllow != null && typeof onAllow !== 'function') {
+    throw new TypeError('Invalid navigation loss callback')
   }
   const beforeUnload = event => {
     event.preventDefault()
@@ -12,6 +15,7 @@ export function installNavigationLossGuard({
     if (allowRef.current || win.location.hash === guardedHash) return
     if (win.confirm(message())) {
       allowRef.current = true
+      onAllow?.()
       return
     }
     win.history.pushState(win.history.state, '',

@@ -27,6 +27,7 @@ import {
 } from './mergeIntent.js'
 import { nodeIsActive } from './nodeProjection.js'
 import { createInspectorDraftStore } from './inspectorDraftStore.js'
+import { installNavigationLossGuard } from './navigationLossGuard.js'
 import {
   clearRunStartOverIntent, createRunStartOverIntent, loadRunStartOverIntent,
   saveRunStartOverIntent,
@@ -258,6 +259,32 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const selectedId = routeState.nodeId
   const inspectTab = routeState.inspectTab
   const panel = routeState.panel
+  const retainedConfigDraft = panel === 'config'
+    ? inspectorDraftStoreRef.current.readField(`panel:config:${String(runId)}`, 'draft', null)
+    : null
+  const retainedConfigDraftUnsafe = retainedConfigDraft?.schema === 'looplab.config-draft/v1'
+    && retainedConfigDraft?.unsafe === true
+  const retainedConfigNavigationAllowRef = useRef(false)
+  const retainedConfigScope = `panel:config:${String(runId)}`
+  useEffect(() => {
+    if ((!generationMismatch && !generationPending) || !retainedConfigDraftUnsafe) {
+      retainedConfigNavigationAllowRef.current = false
+      return undefined
+    }
+    return installNavigationLossGuard({
+      allowRef: retainedConfigNavigationAllowRef,
+      guardedHash: location.hash,
+      message: () => 'This tab is retaining an unsaved Run settings draft. Leave this run and discard it?',
+      onAllow: () => inspectorDraftStoreRef.current.clear(retainedConfigScope),
+    })
+  }, [generationMismatch, generationPending, retainedConfigDraftUnsafe, retainedConfigScope])
+  const leaveRetainedConfigRoute = () => {
+    if (!retainedConfigDraftUnsafe) { onBack?.(); return }
+    if (!window.confirm('Discard the retained Run settings draft and leave this run?')) return
+    retainedConfigNavigationAllowRef.current = true
+    inspectorDraftStoreRef.current.clear(retainedConfigScope)
+    onBack?.()
+  }
   const requestedRouteView = routeState.view
   // The obsolete Direction focus route is retired by runRouteState with a visible migration notice.
   // Keep this compatibility argument null until the old aggregate API is removed; Concepts owns the
@@ -1858,7 +1885,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   if (routeFenceBlocked) return <div className={'app' + (reviewMode ? ' review-mode' : '')}>
     <div className="topbar run-head">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
-      {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>
+      {onBack ? <button className="btn sm ghost" onClick={leaveRetainedConfigRoute}>← runs</button>
         : <span className="pill">read-only review</span>}
     </div>
     <main className="run-resource-state stale-route-state" data-route-main tabIndex={-1}
@@ -1867,12 +1894,29 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       <h1 id="run-state">{generationMismatch ? 'This diagnostic link targets an earlier run generation' : 'Verifying diagnostic link…'}</h1>
       {generationMismatch ? <>
         <p>The run was reset or replaced after this link was created. Node ids and sequence numbers may now mean something else, so LoopLab will not reinterpret the link.</p>
+        {retainedConfigDraftUnsafe && <p className="notice" role="status">
+          <b>Your unsaved Run settings draft is retained in this tab.</b> Nothing was sent automatically.
+          Open the current generation to load its authoritative settings and review the retained fields.
+        </p>}
         <div className="route-generation-detail">
           <code>link {routeState.generation?.slice(0, 12)}</code><span>≠</span><code>current {generation?.slice(0, 12)}</code>
         </div>
         <div className="resource-state-actions">
-          <button className="btn primary" onClick={() => { setRouteNotice(''); route.openCurrentGeneration() }}>Open current generation</button>
-          {onBack && <button className="btn" onClick={onBack}>Back to runs</button>}
+          <button className="btn primary" onClick={() => {
+            setRouteNotice('')
+            if (retainedConfigDraftUnsafe && generation) {
+              const scope = `panel:config:${String(runId)}`
+              inspectorDraftStoreRef.current.updateField(scope, 'draft', current => current
+                ? { ...current, reconcileGeneration: generation } : current, null)
+            }
+            const opened = route.openCurrentGeneration(retainedConfigDraftUnsafe
+              ? { mode: 'replace', panel: 'config' } : undefined)
+            if (opened && retainedConfigDraftUnsafe) {
+              retainedConfigNavigationAllowRef.current = true
+            }
+          }}>{retainedConfigDraftUnsafe
+              ? 'Open current generation with draft' : 'Open current generation'}</button>
+          {onBack && <button className="btn" onClick={leaveRetainedConfigRoute}>Back to runs</button>}
         </div>
       </> : <p>Confirming that this node and sequence still belong to the run generation named by the link.</p>}
     </main>
@@ -2423,7 +2467,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         draftStore={inspectorDraftStoreRef.current}
         expectedGeneration={generation} refreshKey={state?.comments_revision} />}
       {panel === 'config' && panelAllowed('config') && <ConfigPanel runId={runId}
-        expectedGeneration={generation} state={state} live={live} onToast={showToast} onClose={closePanel} />}
+        expectedGeneration={generation} state={state} live={live} onToast={showToast}
+        onClose={closePanel} draftStore={inspectorDraftStoreRef.current} />}
       {panel === 'authoring' && panelAllowed('authoring') && <AuthoringPanel onToast={showToast} onClose={closePanel} />}
       {panel === 'memory' && panelAllowed('memory') && <MemoryPanel onClose={closePanel} />}
       {panel === 'registry' && panelAllowed('registry') && <RegistryPanel state={state} onClose={closePanel} />}

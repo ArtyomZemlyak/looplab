@@ -55,8 +55,37 @@ const AUTHORING_OPERATION_KEYS = new Set([
   'expectedTargetRootId', 'desiredRevision', 'updatedAt',
 ])
 const authoringDigestQuarantine = new Map()
-const publicConfigForm = form => ({ ...(form || {}), llm_api_key: '' })
+const publicConfigForm = (form, settingsSchema = null) => {
+  const sanitized = { ...(form || {}), llm_api_key: '' }
+  for (const [key, field] of Object.entries(settingsSchema?.fieldByKey || {})) {
+    if (field?.type === 'secret') sanitized[key] = ''
+  }
+  return sanitized
+}
+const publicConfigMeta = meta => ({
+  configRevision: typeof meta?.configRevision === 'string' ? meta.configRevision : '',
+  pinnedFields: new Set(meta?.pinnedFields instanceof Set ? meta.pinnedFields : []),
+  readOnlyFields: new Set(meta?.readOnlyFields instanceof Set ? meta.readOnlyFields : []),
+  mismatchFields: Array.isArray(meta?.mismatchFields) ? [...meta.mismatchFields] : [],
+})
 const RUN_GENERATION_RE = /^[0-9a-f]{64}$/
+const CONFIG_DRAFT_SCHEMA = 'looplab.config-draft/v1'
+const configDraftScope = runId => `panel:config:${String(runId)}`
+
+function validConfigDraftEnvelope(value, runId) {
+  if (!isRecord(value) || value.schema !== CONFIG_DRAFT_SCHEMA || value.unsafe !== true
+      || value.runId !== String(runId) || !RUN_GENERATION_RE.test(value.expectedGeneration)
+      || !isRecord(value.settingsSchema) || !isRecord(value.form) || !isRecord(value.saved)
+      || !isRecord(value.agentControl) || !isRecord(value.savedAC) || !isRecord(value.configMeta)
+      || typeof value.saveInFlight !== 'boolean' || !Array.isArray(value.dirtyKeys)
+      || !Array.isArray(value.dirtyControlKeys)
+      || (value.reconcileGeneration != null
+        && !RUN_GENERATION_RE.test(value.reconcileGeneration))
+      || value.dirtyKeys.some(key => typeof key !== 'string')
+      || value.dirtyControlKeys.some(key => typeof key !== 'string')
+      || (value.configMutationUnknown != null && !isRecord(value.configMutationUnknown))) return null
+  return value
+}
 
 function authoringPayload(value) {
   if (!isRecord(value) || !nullableText(value.dir) || !Array.isArray(value.files)) invalidPanelPayload()
@@ -731,7 +760,9 @@ export function DataQualityPanel({ state, onClose }) {
 // defaults), so this is how you change a specific run's settings (e.g. raise `timeout`, enable timeout
 // repair). Works for live runs too: saving the snapshot is safe mid-run (the engine never re-reads it),
 // and a "Pause & resume" applies it now by restarting the engine (pause → wait for it to stop → resume).
-export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: closePanel, onToast }) {
+export function ConfigPanel({
+  runId, expectedGeneration, state, live, onClose: closePanel, onToast, draftStore = null,
+}) {
   const [cfg, setCfg] = useState(null)
   const [settingsSchema, setSettingsSchema] = useState(null)
   const [form, setForm] = useState(null)
@@ -753,12 +784,66 @@ export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: c
   const loadGenerationRef = useRef(0)
   const loadedIdentityRef = useRef({ runId: '', expectedGeneration: '' })
   const mutationRef = useRef(null)
+  const configSaveInFlightRef = useRef(false)
   const allowConfigNavigationRef = useRef(false)
+  const draftScope = configDraftScope(runId)
+  const retainedDraftRef = useRef({ scope: '', value: null })
+  if (retainedDraftRef.current.scope !== draftScope) {
+    retainedDraftRef.current = {
+      scope: draftScope,
+      value: validConfigDraftEnvelope(
+        draftStore?.readField(draftScope, 'draft', null), runId),
+    }
+  }
   useEffect(() => setSec(''), [runId, expectedGeneration])
   useEffect(() => {
     const requestedGeneration = typeof expectedGeneration === 'string' ? expectedGeneration : ''
     const previousIdentity = loadedIdentityRef.current
     const generation = ++loadGenerationRef.current
+    const retainedDraft = retainedDraftRef.current.scope === draftScope
+      ? retainedDraftRef.current.value : null
+    if (retainedDraft) {
+      retainedDraftRef.current = { scope: draftScope, value: null }
+      mutationRef.current = null
+      configSaveInFlightRef.current = false
+      loadedIdentityRef.current = {
+        runId, expectedGeneration: retainedDraft.expectedGeneration,
+      }
+      setBusy(false); setCfg(null); setLoadError('')
+      setSettingsSchema(retainedDraft.settingsSchema)
+      setForm(publicConfigForm(retainedDraft.form, retainedDraft.settingsSchema))
+      setSaved(publicConfigForm(retainedDraft.saved, retainedDraft.settingsSchema))
+      setAgentControl(retainedDraft.agentControl); setSavedAC(retainedDraft.savedAC)
+      setConfigMeta(publicConfigMeta(retainedDraft.configMeta)); setSec('')
+      const generationChanged = retainedDraft.expectedGeneration !== requestedGeneration
+      const requiresReconcile = generationChanged
+        || retainedDraft.reconcileGeneration === requestedGeneration
+      const retainedKeys = [...new Set([
+        ...retainedDraft.dirtyKeys,
+        ...(retainedDraft.configMutationUnknown?.uncertainKeys || []),
+      ])]
+      const retainedControlKeys = [...new Set([
+        ...retainedDraft.dirtyControlKeys,
+        ...(retainedDraft.configMutationUnknown?.uncertainControlKeys || []),
+      ])]
+      const retainedRecovery = requiresReconcile || retainedDraft.saveInFlight
+        ? {
+          stage: requiresReconcile ? 'conflict' : 'unknown', runId, generation,
+          expectedGeneration: requestedGeneration,
+            submittedForm: publicConfigForm(retainedDraft.form, retainedDraft.settingsSchema),
+            submittedControl: retainedDraft.agentControl,
+            uncertainKeys: retainedKeys,
+            uncertainControlKeys: retainedControlKeys,
+          }
+        : retainedDraft.configMutationUnknown
+      setConfigMutationUnknown(retainedRecovery)
+      if (requiresReconcile) {
+        onToast('The run changed. Your settings draft is retained in this tab; load the current version to review it.')
+      } else if (retainedDraft.saveInFlight && !retainedDraft.configMutationUnknown) {
+        onToast('A settings save was interrupted. Refresh server state before making another change.')
+      }
+      return undefined
+    }
     const generationChanged = previousIdentity.runId === runId
       && previousIdentity.expectedGeneration
       && previousIdentity.expectedGeneration !== requestedGeneration
@@ -782,7 +867,7 @@ export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: c
       setBusy(false); setLoadError('')
       setConfigMutationUnknown({
         stage: 'conflict', runId, generation, expectedGeneration: requestedGeneration,
-        submittedForm: publicConfigForm(form), submittedControl: agentControl,
+        submittedForm: publicConfigForm(form, settingsSchema), submittedControl: agentControl,
         uncertainKeys: retainedKeys, uncertainControlKeys: retainedControlKeys,
       })
       onToast('The run changed. Load its current settings and review your retained draft.')
@@ -791,6 +876,7 @@ export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: c
     loadedIdentityRef.current = { runId: '', expectedGeneration: '' }
     // A reused panel must never display or reconcile the previous run while the next config loads.
     mutationRef.current = null
+    configSaveInFlightRef.current = false
     setBusy(false); setCfg(null); setSettingsSchema(null); setForm(null); setSaved(null); setLoadError('')
     setConfigMutationUnknown(null)
     setAgentControl({}); setSavedAC({})
@@ -818,7 +904,7 @@ export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: c
       }
     })
     return () => configRequest.controller.abort()
-  }, [runId, expectedGeneration, loadNonce])
+  }, [runId, expectedGeneration, loadNonce, draftScope])
 
   // A live engine keeps its in-memory settings until it restarts; gate on `live` (not the possibly
   // historical `state`) so time-travel doesn't misreport liveness.
@@ -909,6 +995,56 @@ export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: c
   const hasChanges = dirty.size > 0 || acDirty
   const canSave = hasChanges && invalidCount === 0
   const configNavigationUnsafe = hasChanges || busy || !!configMutationUnknown
+  const writeConfigDraft = (overrides = {}) => {
+    if (!draftStore || allowConfigNavigationRef.current) return
+    const nextForm = Object.hasOwn(overrides, 'form') ? overrides.form : form
+    const nextSaved = Object.hasOwn(overrides, 'saved') ? overrides.saved : saved
+    const nextAgentControl = Object.hasOwn(overrides, 'agentControl')
+      ? overrides.agentControl : agentControl
+    const nextSavedAC = Object.hasOwn(overrides, 'savedAC') ? overrides.savedAC : savedAC
+    const nextRecovery = Object.hasOwn(overrides, 'configMutationUnknown')
+      ? overrides.configMutationUnknown : configMutationUnknown
+    const saveInFlight = Object.hasOwn(overrides, 'saveInFlight')
+      ? overrides.saveInFlight : configSaveInFlightRef.current
+    if (!nextForm || !nextSaved || !settingsSchema) return
+    const currentRecord = fromForm(nextForm, settingsSchema, { allowClear: false })
+    const savedRecord = fromForm(nextSaved, settingsSchema, { allowClear: false })
+    const dirtyKeys = Object.keys(settingsSchema.fieldByKey).filter(
+      key => JSON.stringify(currentRecord[key]) !== JSON.stringify(savedRecord[key]))
+    const nextAcDirty = JSON.stringify(nextAgentControl) !== JSON.stringify(nextSavedAC)
+    const dirtyControlKeys = nextAcDirty
+      ? [...new Set([...Object.keys(nextAgentControl), ...Object.keys(nextSavedAC)])] : []
+    if (!dirtyKeys.length && !nextAcDirty && !nextRecovery && !saveInFlight) {
+      if (configIdentityReady) draftStore.clear(draftScope)
+      return
+    }
+    const identityGeneration = loadedIdentityRef.current.expectedGeneration || expectedGeneration
+    if (!RUN_GENERATION_RE.test(identityGeneration || '')) return
+    const storedRecovery = nextRecovery ? {
+      ...nextRecovery,
+      submittedForm: publicConfigForm(nextRecovery.submittedForm, settingsSchema),
+    } : null
+    draftStore.updateField(draftScope, 'draft', {
+      schema: CONFIG_DRAFT_SCHEMA,
+      unsafe: true,
+      runId: String(runId),
+      expectedGeneration: identityGeneration,
+      settingsSchema,
+      form: publicConfigForm(nextForm, settingsSchema),
+      saved: publicConfigForm(nextSaved, settingsSchema),
+      agentControl: nextAgentControl,
+      savedAC: nextSavedAC,
+      configMeta: publicConfigMeta(configMeta),
+      saveInFlight,
+      dirtyKeys,
+      dirtyControlKeys,
+      configMutationUnknown: storedRecovery,
+    }, null)
+  }
+  useEffect(() => {
+    writeConfigDraft()
+  }, [agentControl, busy, configIdentityReady, configMeta, configMutationUnknown, form, saved,
+    savedAC, settingsSchema])
   useEffect(() => {
     if (!configNavigationUnsafe) {
       allowConfigNavigationRef.current = false
@@ -927,13 +1063,21 @@ export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: c
             : 'This run-settings panel has unsaved changes.'
         return `${warning} Leave this run anyway?`
       },
+      onAllow: () => draftStore?.clear(draftScope),
     })
-  }, [configNavigationUnsafe, busy, configMutationUnknown])
-  const onChange = (k, v) => setForm(f => ({ ...f, [k]: v }))
-  const onToggleAgent = (key, role) => setAgentControl(ac => {
-    const cur = new Set(ac[key] || []); cur.has(role) ? cur.delete(role) : cur.add(role)
-    return { ...ac, [key]: [...cur] }
-  })
+  }, [configNavigationUnsafe, busy, configMutationUnknown, draftScope, draftStore])
+  const onChange = (k, v) => {
+    const next = { ...form, [k]: v }
+    writeConfigDraft({ form: next })
+    setForm(next)
+  }
+  const onToggleAgent = (key, role) => {
+    const cur = new Set(agentControl[key] || [])
+    cur.has(role) ? cur.delete(role) : cur.add(role)
+    const next = { ...agentControl, [key]: [...cur] }
+    writeConfigDraft({ agentControl: next })
+    setAgentControl(next)
+  }
   const beginMutation = (kind = 'control', reconcileGeneration = '') => {
     if (mutationRef.current || (configMutationUnknown && kind !== 'reconciling')) return null
     const identity = loadedIdentityRef.current
@@ -963,19 +1107,22 @@ export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: c
   }
   const rememberUnknownSave = (stage, submittedForm, submittedControl, submittedRunId, mutation,
     uncertainKeys, uncertainControlKeys) => {
-    if (mutation.generation !== loadGenerationRef.current || submittedRunId !== runId
+    if (allowConfigNavigationRef.current || mutation.generation !== loadGenerationRef.current
+        || submittedRunId !== runId
         || mutation.expectedGeneration !== expectedGeneration) return
-    setConfigMutationUnknown({
+    const recovery = {
       stage,
       runId: submittedRunId,
       generation: mutation.generation,
       expectedGeneration: mutation.expectedGeneration,
       submittedForm: publicConfigForm(toForm(
-        fromForm(submittedForm, settingsSchema, { allowClear: false }), settingsSchema)),
+        fromForm(submittedForm, settingsSchema, { allowClear: false }), settingsSchema), settingsSchema),
       submittedControl,
       uncertainKeys,
       uncertainControlKeys,
-    })
+    }
+    setConfigMutationUnknown(recovery)
+    writeConfigDraft({ configMutationUnknown: recovery, saveInFlight: true })
     onToast(stage === 'conflict'
       ? 'Run settings changed elsewhere. Load the current server version and review your retained draft.'
       : 'Save outcome unknown. Refresh the server state before making another change.')
@@ -1017,6 +1164,10 @@ export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: c
     }
   }
   const onSave = async () => {
+    if (configMutationUnknown || !configIdentityReady) {
+      onToast('Load the current server settings before saving this retained draft.')
+      return
+    }
     if (invalidCount) {
       focusFirstInvalid()
       onToast('Fix invalid settings before saving')
@@ -1031,6 +1182,10 @@ export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: c
     if (!Object.keys(changed).length) return
     const mutation = beginMutation('save')
     if (!mutation) return
+    configSaveInFlightRef.current = true
+    writeConfigDraft({
+      form: submittedForm, agentControl: submittedControl, saveInFlight: true,
+    })
     const submittedRunId = mutation.runId
     try {
       const write = deadlineRequest(
@@ -1070,7 +1225,10 @@ export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: c
       } else if (mutation.generation === loadGenerationRef.current) {
         onToast('save failed: ' + e.message)
       }
-    } finally { finishMutation(mutation) }
+    } finally {
+      configSaveInFlightRef.current = false
+      finishMutation(mutation)
+    }
   }
   const onResume = async () => {           // stalled/finished: just spawn the engine (re-reads the snapshot)
     const mutation = beginMutation()
@@ -1123,8 +1281,19 @@ export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: c
     }
     finally { finishMutation(mutation) }
   }
+  const revertConfigDraft = () => {
+    setForm(saved)
+    setAgentControl(savedAC)
+    writeConfigDraft({
+      form: saved, agentControl: savedAC, configMutationUnknown: null, saveInFlight: false,
+    })
+  }
   const requestClose = () => {
-    if (!hasChanges && !busy && !configMutationUnknown) { closePanel(); return }
+    if (!hasChanges && !busy && !configMutationUnknown) {
+      draftStore?.clear(draftScope)
+      closePanel()
+      return
+    }
     const warning = configMutationUnknown?.stage === 'conflict'
       ? 'The server version changed while this draft was open.'
       : configMutationUnknown
@@ -1132,6 +1301,7 @@ export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: c
       : busy ? 'A settings operation is still in progress.' : 'This panel has unsaved changes.'
     if (window.confirm(`${warning} Close the run settings panel anyway?`)) {
       allowConfigNavigationRef.current = true
+      draftStore?.clear(draftScope)
       closePanel()
     }
   }
@@ -1197,13 +1367,16 @@ export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: c
         </div>}
         <div className="toolbar" style={{ marginBottom: 10 }}>
           <span className="spacer" style={{ flex: 1 }} />
-          <button className="btn sm ghost" onClick={() => setRaw(r => !r)}>{raw ? 'form' : 'raw'}</button>
+          <button className="btn sm ghost" disabled={!cfg}
+            title={!cfg ? 'Load the current server version before viewing raw settings' : undefined}
+            onClick={() => setRaw(r => !r)}>{raw ? 'form' : 'raw'}</button>
           {invalidCount > 0 && <button type="button"
             className="settings-summary-link settings-save-state is-invalid"
             onClick={focusFirstInvalid}>
             {invalidCount} invalid setting{invalidCount === 1 ? '' : 's'} — review
           </button>}
-          <button className="btn sm ghost" disabled={controlBusy || !hasChanges} onClick={() => { setForm(saved); setAgentControl(savedAC) }}>↺ revert</button>
+          <button className="btn sm ghost" disabled={controlBusy || !hasChanges}
+            onClick={revertConfigDraft}>↺ revert</button>
           <button className="btn sm primary" disabled={controlBusy || !canSave} onClick={onSave}>Save</button>
           {engineLive
             ? <button className="btn sm" disabled={controlBusy || hasChanges} onClick={onPauseResume} title="pause the run, then resume it with the saved settings">Pause &amp; resume ▸</button>

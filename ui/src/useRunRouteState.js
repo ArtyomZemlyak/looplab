@@ -21,7 +21,9 @@ export function useRunRouteState({ generation = null, reviewMode = false } = {})
   const hydratedHashRef = useRef(null)
   stateRef.current = resource.state
 
-  const write = useCallback((state, mode = 'push', { forceGeneration = false } = {}) => {
+  const write = useCallback((state, mode = 'push', {
+    forceGeneration = false, clearPanelHistory = false,
+  } = {}) => {
     if (typeof window === 'undefined') return false
     const previousHref = `${window.location.pathname}${window.location.search}${window.location.hash}`
     const nextHash = hashWithRunRouteState(window.location.hash, state, { reviewMode, forceGeneration })
@@ -30,7 +32,7 @@ export function useRunRouteState({ generation = null, reviewMode = false } = {})
     const currentHistoryState = window.history.state
     const nextHistoryState = currentHistoryState && typeof currentHistoryState === 'object'
       ? { ...currentHistoryState } : {}
-    if (!state.panel) delete nextHistoryState[RUN_PANEL_HISTORY_STATE_KEY]
+    if (clearPanelHistory || !state.panel) delete nextHistoryState[RUN_PANEL_HISTORY_STATE_KEY]
     else if (mode !== 'replace') {
       nextHistoryState[RUN_PANEL_HISTORY_STATE_KEY] = { version: 1, previousHref }
     }
@@ -94,13 +96,17 @@ export function useRunRouteState({ generation = null, reviewMode = false } = {})
     return candidate
   }, [generation, reviewMode, write])
 
-  const openCurrentGeneration = useCallback(({ mode = 'push' } = {}) => {
-    const state = emptyRunRouteState()
-    if (!write(state, mode)) return false
+  const openCurrentGeneration = useCallback(({ mode = 'push', panel = null } = {}) => {
+    const state = {
+      ...emptyRunRouteState(),
+      panel,
+      generation: panel && generation ? generation : null,
+    }
+    if (!write(state, mode, { clearPanelHistory: !!panel })) return false
     stateRef.current = state
     setResource(value => ({ ...value, state, issues: [] }))
     return true
-  }, [write])
+  }, [generation, write])
   const clearIssues = useCallback(() => {
     setResource(value => ({ ...value, issues: [] }))
   }, [])
