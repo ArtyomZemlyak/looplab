@@ -30,6 +30,7 @@ from looplab.core.llm_broker import LLM_LANES, in_llm_lane
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, RunState,
                                   node_concept_event_provenance)
+from looplab.engine.cadence import cadence_due, cadence_marks
 from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
 from looplab.events.replay import fold
@@ -319,35 +320,51 @@ class StrategyCadenceMixin:
             return {k: v for k, v in snap.items() if k not in {"at_node", "projection_token"}}
         return coverage_signal(state, resolution=self.archive_resolution)
 
-    def _should_consult(self, state: RunState) -> bool:
+    def _should_consult(self, state: RunState, *, marks=None) -> bool:
         """Bounded, deterministic cadence: only at a creation decision point (no pending evals),
-        at the seed boundary or every `strategist_every` created nodes."""
+        at the seed boundary, then every `strategist_every` created nodes SINCE this consumer last
+        fired.
+
+        Since-last, not `n % every == 0`. Under `llm_parallel > 1` the node count advances in
+        batch-width strides, so a modulo gate can step clean over the only multiple in a window and
+        skip the consult entirely — with width 4 and `strategist_every=5` it can miss every multiple
+        and starve the Strategist for the whole run. That is the same failure the deep-research
+        cadence was patched for; `_cadence_due` carries the canonical statement of it.
+
+        `marks` is the CONSUMER's own durable record of when it last fired (`at_node` on its folded
+        events), because the three consumers of this gate — the Strategist consult, the coverage
+        snapshot, the concept-coverage snapshot — advance independently. Passing none keeps the
+        window open from node 0, which is right for a consumer that has never fired.
+        """
         if state.pending_nodes():
             return False
         n = len(state.nodes)
         if n == 0:
             return False
+        if n == self.n_seeds:
+            return True
         # `strategist_every` is `ge=1` via Settings, but the Engine kwarg / EngineOptions accept 0, and
         # this cadence is reused for coverage snapshots even with NO strategist wired
-        # (`_maybe_snapshot_coverage`) — so guard the modulo like the deep-research cadence does, or
-        # `Engine(strategist_every=0, coverage_context=True)` raises ZeroDivisionError mid-loop.
-        return n == self.n_seeds or (self.strategist_every > 0 and n % self.strategist_every == 0)
+        # (`_maybe_snapshot_coverage`) — `_cadence_due` guards `every <= 0` for that case.
+        return cadence_due(n, cadence_marks(marks), self.strategist_every)
 
-    def _should_consult_concepts(self, state: RunState) -> bool:
+    def _should_consult_concepts(self, state: RunState, *, marks=None) -> bool:
         """PART V (F1): the concept CLASSIFIER re-tag / consolidation cadence — DECOUPLED from
         `strategist_every`. The LLM concept map is heavier and slower-moving than a strategy consult, so it
         refreshes on its OWN `concept_retag_every` interval (default 30) rather than every consult.
         Researcher-authored `idea.concepts` still fold into node_concepts at node_created (immediate UI
         freshness); this only paces the classifier-EVIDENCE + consolidation refresh and the concept-coverage
         pivot snapshot. Same shape/guards as `_should_consult` (creation decision point, seed boundary, then
-        every interval; modulo guarded for the `0` kwarg case)."""
+        every interval — since-last, for the same batch-stride reason `_should_consult` states)."""
         if state.pending_nodes():
             return False
         n = len(state.nodes)
         if n == 0:
             return False
+        if n == self.n_seeds:
+            return True
         every = getattr(self, "concept_retag_every", 0) or self.strategist_every
-        return n == self.n_seeds or (every > 0 and n % every == 0)
+        return cadence_due(n, cadence_marks(marks), every)
 
     def _record_strategy(self, strat: dict, state: RunState,
                          ctx: Optional[StrategyContext] = None) -> None:
@@ -641,7 +658,8 @@ class StrategyCadenceMixin:
         decision point is reached once). No-op when coverage_context is off, off-cadence, mid-eval,
         or already snapshotted at this node-count."""
         n = len(state.nodes)
-        if (not self._coverage_context or not self._should_consult(state)
+        if (not self._coverage_context
+                or not self._should_consult(state, marks=state.coverage_snapshots)
                 or self._already_covered_at(state, n)):
             return state
         self.store.append(EV_COVERAGE_SNAPSHOT, {
@@ -663,7 +681,9 @@ class StrategyCadenceMixin:
         # NOT ``strategist_every``. Every operator-facing description — this docstring, configuration.md,
         # the core config help, and the Settings-UI schema — is aligned to that cadence so operators tune
         # the control that actually governs snapshot freshness / paid-LLM cost.
-        if not getattr(self, "_concept_pivot", False) or not self._should_consult_concepts(state):
+        if (not getattr(self, "_concept_pivot", False)
+                or not self._should_consult_concepts(
+                    state, marks=state.concept_coverage_snapshots)):
             return state
         n = len(state.nodes)
         if any((c or {}).get("at_node") == n
@@ -1144,7 +1164,8 @@ class StrategyCadenceMixin:
             "llm_lane_limits", "card_scoring")
                    if pin.get(k) is not None}
         n = len(state.nodes)
-        consulting = (self.strategist is not None and self._should_consult(state)
+        consulting = (self.strategist is not None
+                      and self._should_consult(state, marks=state.strategy_history)
                       and not self._autonomous_strategy_already_recorded_at(state, n))
         active_core = self._strategy_core(state.active_strategy)
         # Cheap pre-check (no ctx/validate): a pin "drifts" if a raw pinned field differs from what's

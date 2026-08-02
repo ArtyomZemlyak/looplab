@@ -47,6 +47,7 @@ from looplab.events.types import (
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED,
     EV_ENV_CHANGED, EV_WORKSPACE_CHANGED)
 from looplab.engine.ablation import AblationMixin
+from looplab.engine.cadence import cadence_due
 from looplab.engine.audit import AuditMixin
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
 from looplab.engine.costs import bind_cost_accountants
@@ -3721,12 +3722,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _store_task_facets(self, final: RunState) -> str:
         return self.lessons.store_task_facets(final)
 
-    @staticmethod
-    def _cadence_due(n: int, last: int, every: int) -> bool:
-        """The shared since-last node-count gate (report/distill/refresh cadences). Since-last
-        (not `n % every == 0`): a failed/merge/ablate node-count jump must not step over the only
-        multiple and silently skip the whole window."""
-        return every > 0 and n > 0 and n - last >= every
+    # The shared since-last node-count gate (report/distill/refresh/strategist/coverage cadences).
+    # `engine/cadence.py` states why since-last and not `n % every == 0`; the name stays here because
+    # several mixins call it as `self._cadence_due`.
+    _cadence_due = staticmethod(cadence_due)
 
     # -------------------------------------------------- novelty gate (extracted to engine/novelty.py)
     # The E1/T5 novelty/dedup gate cluster (`_idea_text`, `_idea_vec`, `_semantic_duplicate`,

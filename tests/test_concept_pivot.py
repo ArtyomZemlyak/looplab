@@ -85,7 +85,7 @@ def _snap_engine(store, *, concept_pivot=True, consult=True):
     PART V (F1): the cadence gate is now the DECOUPLED `_should_consult_concepts`, not `_should_consult`."""
     return SimpleNamespace(
         _concept_pivot=concept_pivot,
-        _should_consult_concepts=lambda st: consult,
+        _should_consult_concepts=lambda st, **_: consult,
         _concept_coverage_snapshot=lambda st: Engine._concept_coverage_snapshot(None, st),
         store=store)
 
@@ -140,21 +140,50 @@ def test_concept_cadence_decoupled_from_strategist_every():
     # strategist_every=3 (would fire at 3,6,9…) but concept_retag_every=10, the concept snapshot fires only
     # at the seed boundary and every 10th node — independent of the strategy consult cadence.
     eng = SimpleNamespace(n_seeds=2, strategist_every=3, concept_retag_every=10)
-    def fire(k):
+    def fire(k, last=0):
         return Engine._should_consult_concepts(
-            eng, SimpleNamespace(nodes={i: None for i in range(k)}, pending_nodes=lambda: []))
-    assert fire(2) is True           # seed boundary
-    assert fire(3) is False          # a strategist consult point, but NOT a concept one (decoupled)
-    assert fire(6) is False
-    assert fire(10) is True          # every concept_retag_every
-    assert fire(20) is True
-    assert fire(12) is False
+            eng, SimpleNamespace(nodes={i: None for i in range(k)}, pending_nodes=lambda: []),
+            marks=[{"at_node": last}] if last else None)
+    assert fire(2) is True                   # seed boundary
+    assert fire(3, last=2) is False          # a strategist consult point, NOT a concept one
+    assert fire(6, last=2) is False
+    assert fire(12, last=2) is True          # concept_retag_every since the last snapshot
+    assert fire(13, last=12) is False        # ...and the window reopens from THERE, not from a multiple
+    assert fire(22, last=12) is True
     # falls back to strategist_every when the knob is unset/zero (back-compat)
     eng0 = SimpleNamespace(n_seeds=2, strategist_every=3, concept_retag_every=0)
-    def fire0(k):
+    def fire0(k, last=0):
         return Engine._should_consult_concepts(
-            eng0, SimpleNamespace(nodes={i: None for i in range(k)}, pending_nodes=lambda: []))
-    assert fire0(3) is True and fire0(6) is True and fire0(4) is False
+            eng0, SimpleNamespace(nodes={i: None for i in range(k)}, pending_nodes=lambda: []),
+            marks=[{"at_node": last}] if last else None)
+    # since-last: a full `strategist_every` window past the LAST snapshot, not the next multiple
+    assert fire0(5, last=2) is True and fire0(8, last=5) is True and fire0(4, last=2) is False
+
+
+def test_a_batch_stride_cannot_step_over_the_concept_cadence_window():
+    """The regression the modulo gate had (doc 25 EC-07).
+
+    Under `llm_parallel > 1` the node count advances in batch-width strides, so `n % every == 0` can
+    step clean over the only multiple in a window — with width 4 and `concept_retag_every=10` the
+    counts land on 4, 8, 12, 16, 20 and NEVER on a multiple of 10, starving the cadence for the whole
+    run. Since-last fires on the first count that is a full window past the last snapshot."""
+    eng = SimpleNamespace(n_seeds=2, strategist_every=5, concept_retag_every=10)
+
+    def fire(k, last):
+        return Engine._should_consult_concepts(
+            eng, SimpleNamespace(nodes={i: None for i in range(k)}, pending_nodes=lambda: []),
+            marks=[{"at_node": last}])
+
+    strides, last, fired = [4, 8, 12, 16, 24], 2, []
+    for count in strides:
+        if fire(count, last):
+            fired.append(count)
+            last = count
+    # A modulo gate fires on NONE of these counts; since-last fires on the first one a full window
+    # past the seed snapshot (12), then reopens from THERE — so 24 is due again at 12 + 10 = 22.
+    assert fired == [12, 24], fired
+    assert not [count for count in strides if count % 10 == 0], (
+        "the stride sequence must miss every multiple of the interval, or this pins nothing")
 
 
 def test_no_skeleton_task_emits_no_snapshot(tmp_path):

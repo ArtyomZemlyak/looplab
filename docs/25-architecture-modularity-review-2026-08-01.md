@@ -792,6 +792,33 @@ worker-seam case.
 
 *Recommendation:* Convert _should_consult/_should_consult_concepts to the same since-last _cadence_due pattern (last consult/snapshot at_node is already durable in strategy_history / coverage_snapshots), or document concretely why strategist starvation under batched builds is acceptable. Either way, one cadence idiom should be canonical.
 
+*Resolution (2026-08-02):* `engine/cadence.py` now owns `cadence_due(n, last, every)` and
+`cadence_marks(records)`; `_should_consult` and `_should_consult_concepts` use them, and
+`Engine._cadence_due` is kept as `staticmethod(cadence_due)` so its existing `self.`-callers are
+untouched. The module was extracted rather than the method reused because both gates are unit-tested
+against a stand-in `self`, which cannot resolve an Engine method.
+
+Each of the three consumers passes its OWN durable marks — `state.strategy_history`,
+`state.coverage_snapshots`, `state.concept_coverage_snapshots` — because they advance independently
+and must not be able to satisfy each other's window. That is also what makes the gate resume-safe:
+`last` comes from the folded log, not process memory, unlike the hypothesis-merge baseline this
+finding lists as its third idiom (still a documented KNOWN GAP).
+
+Three deliberate breaks were caught: reverting to modulo, taking the EARLIEST mark instead of the
+latest (which leaves the window permanently open — a paid LLM call per node for the concept
+snapshot), and accepting a negative `at_node` (which overshoots the interval and fires early).
+
+Two existing tests encoded the modulo semantics directly — `fire(12) is False`, `fire0(4) is False`.
+They were rewritten to assert the since-last property rather than edited until green, and a new
+`test_a_batch_stride_cannot_step_over_the_concept_cadence_window` pins the case the finding names:
+a width-4 stride over 4, 8, 12, 16, 24 hits no multiple of 10, so a modulo gate fires zero times and
+the since-last gate fires at 12 and again at 24.
+
+**Behaviour note:** a consult that fails without recording its event leaves the mark unadvanced, so
+the next decision point retries rather than waiting for the next multiple. That is the same
+treatment the deep-research cadence gives an unrecorded attempt, and for the concept path the
+paid-retry exposure is the KNOWN GAP already documented on `_maybe_snapshot_concept_coverage`.
+
 #### EC-08 · MEDIUM · flat-code · effort: medium
 
 **_set_complexity_hint is a 255-line linear cue assembler**

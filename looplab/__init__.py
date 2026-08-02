@@ -59,6 +59,7 @@ _LAYOUT = {
     "taxonomy_dedup": "search",   # PART IV D4 taxonomy-aware board dedup analysis (offline)
     "cross_run_context": "engine",  # shared skeleton of the live cross-run builders (doc 25 EC-01)
     "crash_repair": "engine",
+    "cadence": "engine",     # the shared since-last node-count gate (doc 25 EC-07)
     "claims": "engine",
     "claims_health": "engine",  # ...its source-row/read-health leaf (doc 25 EM-01 split)          # PART IV cross-run Step 4: evidence-grounded claim assessments (read-model)
     "claims_assessments": "engine",  # ...the lessons+research verdict projections (same split)

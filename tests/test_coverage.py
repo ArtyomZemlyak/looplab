@@ -207,7 +207,7 @@ def test_same_node_count_abort_refreshes_flat_coverage_snapshot(tmp_path):
     store = _store(tmp_path, [("old", {"x": 1.0}, 1.0), ("live", {"x": 2.0}, 2.0)])
     eng = SimpleNamespace(
         _coverage_context=True,
-        _should_consult=lambda state: True,
+        _should_consult=lambda state, **_: True,
         _already_covered_at=lambda state, n: Engine._already_covered_at(state, n),
         archive_resolution=1.0,
         store=store,
