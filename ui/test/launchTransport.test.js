@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  clearLaunchTransport, listLaunchTransports, loadLaunchTransport, saveLaunchTransport,
+  clearDamagedLaunchTransport, clearLaunchTransport, listLaunchTransports,
+  loadLaunchTransport, saveLaunchTransport,
 } from '../src/api.js'
 
 class MemoryStorage {
@@ -50,9 +51,19 @@ test('unavailable or malformed recovery storage fails closed', () => {
   const malformed = new MemoryStorage()
   malformed.setItem('ll.launch-transport.proposal', '{not-json')
   assert.deepEqual(loadLaunchTransport('proposal', malformed), { invalid: true })
-  assert.deepEqual(listLaunchTransports(malformed), [{
+  // A damaged entry now reports the exact storage key it lives under, so it can be cleared by that
+  // key instead of by one re-derived from a decode that already failed. The deepEqual read the new
+  // field as a defect; it is asserted here, and round-tripped through the clear it exists for.
+  const damaged = listLaunchTransports(malformed)
+  assert.deepEqual(damaged, [{
     identity: 'proposal', runId: '', updatedAt: 0, invalid: true,
+    storageKey: 'll.launch-transport.proposal',
   }])
+  assert.equal(clearDamagedLaunchTransport(damaged[0].storageKey, malformed), true)
+  assert.deepEqual(listLaunchTransports(malformed), [],
+    'a damaged record must be clearable by the key its own listing reports')
+  assert.equal(clearDamagedLaunchTransport('ll.something-else.proposal', malformed), false,
+    'the clear must refuse a key outside the launch-transport namespace')
 
   const sticky = new MemoryStorage()
   sticky.setItem('ll.launch-transport.proposal', JSON.stringify({

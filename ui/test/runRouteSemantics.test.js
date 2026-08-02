@@ -42,13 +42,28 @@ test('run workspace navigation announces deep links without stealing focus on lo
   const [runView, conceptView] = await Promise.all([source('RunView.jsx'), source('ConceptView.jsx')])
   assert.match(runView, /const routeMainRef = useRef\(null\)/)
   assert.match(runView, /routeMainRef\.current \|\| document\.querySelector\('\[data-route-main\]'\)/)
-  assert.match(runView, /\}, \[routeFocusPhase, route\.navigationRevision\]\)/,
+  // `overlayPanelOpen` joined the dep list so the announcement also re-runs when an overlay panel
+  // opens or closes over the workspace — otherwise the outer main is announced while a panel above
+  // it owns the screen. Pinning the exact two-element array failed on the addition rather than on
+  // anything missing, so require the two that carry the meaning and allow the effect to depend on
+  // more.
+  assert.match(runView, /\}, \[routeFocusPhase, route\.navigationRevision(?:, [^\]]+)?\]\)/,
     'Back/Forward navigation must re-announce the named outer main')
   assert.doesNotMatch(runView, /\[routeFocusPhase, route\.navigationRevision, view\]/,
     'ordinary workspace view clicks must keep focus on the invoking tab')
   assert.match(runView, /ref=\{routeMainRef\}[\s\S]*?aria-label=\{workspaceRouteLabel\}/)
-  const routeMains = runView.match(/<main\b[^>]*data-route-main[^>]*>/g) || []
-  assert.equal(routeMains.length, 4, 'every run resource phase has one route-level main')
+  // Three more resource phases (start-over recovery, stale-route, history) gained their own
+  // route-level main since this count was written. The count is a proxy; what has to hold is that
+  // EVERY one of them is focusable and carries an accessible name, so a phase added without either
+  // fails here rather than silently announcing an unnamed region.
+  const routeMains = runView.match(/<main\b[\s\S]*?data-route-main[\s\S]*?>/g) || []
+  assert.equal(routeMains.length, 7, 'every run resource phase has one route-level main')
+  for (const main of routeMains) {
+    assert.match(main, /tabIndex=\{-1\}/,
+      `a route-level main must be programmatically focusable: ${main.slice(0, 80)}`)
+    assert.match(main, /aria-label(?:ledby)?=/,
+      `a route-level main must be named for the announcement: ${main.slice(0, 80)}`)
+  }
   for (const main of routeMains) {
     assert.match(main, /aria-(?:label|labelledby)=/,
       'loading, failure, fence, history, and ready route mains all need an accessible name')
