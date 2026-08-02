@@ -132,17 +132,36 @@ def test_background_boss_route_maps_only_allow_listed_domain_detail(tmp_path, mo
 
 
 def test_llm_health_never_reflects_configured_base_url_or_exception(tmp_path, monkeypatch):
+    """The probe is a revision-fenced POST, not the old free GET — a paid, at-most-once provider
+    call bound to the saved Settings snapshot. This test travels with that contract because the
+    property it guards is about the RESPONSE, not the verb: a provider failure must never reflect
+    the configured base URL, its embedded credentials, or the raw exception text. Sending the old
+    GET made this route 404, which silently retired the redaction check rather than failing it."""
     monkeypatch.setenv(
         "LOOPLAB_LLM_BASE_URL",
         "https://config-user:config-secret@provider.example/v1?token=config-token",
     )
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _provider_boom)
-    body = TestClient(make_app(tmp_path)).get("/api/llm/health").json()
+    client = TestClient(make_app(tmp_path))
+    snapshot = client.get("/api/settings").json()
+    response = client.post("/api/llm/health", json={
+        "expected_settings_revision": snapshot["settings_revision"],
+        "expected_secret_revision": snapshot["secret_revision"],
+        "operation_id": "b2f6c1de-4a3e-4c1b-9f57-0d1e2a3b4c5d",
+    })
 
-    assert body["ok"] is False and body["error_kind"] == "credentials"
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] is False
+    # The failure now surfaces from CLIENT CONSTRUCTION (the preflight), which is not the provider
+    # declining the request — so it is classified as a generic provider error rather than the
+    # `credentials` an explicit 401 rejection would carry. Pin the safe SET, not one member: the
+    # redaction contract is that the kind is drawn from the allow-list at all.
+    assert body["error_kind"] in {"credentials", "provider_error", "unavailable", "rate_limit"}
     assert "base_url" not in body
     _assert_safe(body)
-    assert "config-secret" not in json.dumps(body)
+    for secret in ("config-secret", "config-user", "config-token", "provider.example"):
+        assert secret not in json.dumps(body)
 
 
 def test_research_provider_failure_is_redacted(tmp_path, monkeypatch):

@@ -3671,19 +3671,28 @@ def test_boss_command_without_a_key_keeps_the_historical_behaviour(tmp_path, mon
 
 
 def test_author_name_allowlist_rejects_a_trailing_newline(tmp_path):
-    """`$` also matches immediately BEFORE a trailing newline, so `x.md\\n` passed the allow-list.
+    """A trailing newline must not pass the authored-markdown allow-list.
 
+    The original bug: `$` also matches immediately BEFORE a trailing newline, so `x.md\\n` passed.
     The write then landed a file that `list_author`'s `*.md` glob can never match again — the
-    write-only-invisible outcome the allow-list exists to prevent. `\\Z` anchors at the true end.
+    write-only-invisible outcome the allow-list exists to prevent.
     """
-    from looplab.serve.routers.misc import _AUTHOR_NAME_RE
+    # The allow-list is now the `_valid_author_name` predicate rather than the `_AUTHOR_NAME_RE`
+    # pattern this test was written against: it was deliberately widened to accept spaces and
+    # Unicode basenames. Follow it, because what must not drift is the REJECTION set below — the
+    # regex was only ever the mechanism. Importing the retired constant made this test an
+    # ImportError, which retires the guard instead of checking it.
+    from looplab.serve.routers.misc import _valid_author_name
 
-    assert _AUTHOR_NAME_RE.match("note.md")
-    assert _AUTHOR_NAME_RE.match("a_b-c.1.md")
-    assert not _AUTHOR_NAME_RE.match("note.md\n"), (
+    assert _valid_author_name("note.md")
+    assert _valid_author_name("a_b-c.1.md")
+    assert _valid_author_name("a note.md")                 # widened: spaces are allowed now
+    assert not _valid_author_name("note.md\n"), (
         "a trailing newline still passes the authored-markdown allow-list")
-    assert not _AUTHOR_NAME_RE.match("note.txt")
-    assert not _AUTHOR_NAME_RE.match("../escape.md")
+    assert not _valid_author_name("note.txt")
+    assert not _valid_author_name("../escape.md")
+    assert not _valid_author_name("sub/note.md")           # separators stay rejected
+    assert not _valid_author_name(".env")
 
 
 def test_runs_list_started_date_is_the_runs_start_not_its_last_append(tmp_path):
