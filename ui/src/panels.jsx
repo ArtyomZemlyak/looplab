@@ -2075,7 +2075,7 @@ export function MemoryPanel({ onClose }) {
   const selectedResource = tab === 'knowledge' ? knowledge : memory
   return (
     <Panel title="Memory & knowledge — what the runs have learned" sub={memory.data ? (mem.dir || 'no memory dir') : ''} onClose={onClose} wide>
-      <div className="conv-toggle" style={{ marginBottom: 12 }}>
+      <div className="conv-toggle memory-tabs" style={{ marginBottom: 12 }}>
         {tabs.map(([k, label, n]) => <button key={k} aria-pressed={tab === k} className={'seg' + (tab === k ? ' on' : '')}
           onClick={() => setTab(k)}>{label} <span className="muted">{(k === 'knowledge' ? knowledge : memory).data ? n : '…'}</span></button>)}
       </div>
@@ -2090,7 +2090,7 @@ export function MemoryPanel({ onClose }) {
         The <b>Researcher</b> gets R&D / “what technique to try” lessons; the <b>Developer</b> gets only
         its own “what code change fixed a crash” lessons (untagged/legacy lessons are shared).
       </div>}
-      {tab === 'lessons' && <div className="conv-toggle" style={{ marginBottom: 8 }}>
+      {tab === 'lessons' && <div className="conv-toggle memory-role-tabs" style={{ marginBottom: 8 }}>
         {[['all', 'All'], ['researcher', 'Researcher'], ['developer', 'Developer']].map(([r, label]) =>
           <button key={r} aria-pressed={lessonRole === r} className={'seg' + (lessonRole === r ? ' on' : '')}
             onClick={() => setLessonRole(r)}>{label}</button>)}

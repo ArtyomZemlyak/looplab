@@ -1440,6 +1440,10 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .event-explorer-json { max-height: min(38dvh, 360px); margin: 8px 0 0; padding: 10px; overflow: auto;
   overscroll-behavior: contain; border-radius: 6px; background: var(--bg); color: var(--fg);
   white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+@media (max-width: 900px) {
+  .event-explorer-row { grid-template-columns: 44px 64px minmax(140px, 200px) minmax(0, 1fr); }
+  .event-explorer-toggle, .event-explorer-toggle-placeholder { width: 44px; height: 44px; }
+}
 @media (max-width: 600px) {
   .event-explorer-tools .text { flex: 1 0 100%; min-height: 44px; font-size: 16px; }
   .event-explorer-tools .btn { flex: 1 1 auto; min-height: 44px; justify-content: center; }
@@ -2224,6 +2228,17 @@ pre.code.event-json { max-height: 220px; }
 .asst-perm-state { margin-top: 7px; color: var(--fg-mut); font-size: 11.5px; }
 .asst-perm-state.warning { color: var(--fail); }
 .asst-perm-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-top: 10px; }
+@media (max-width: 900px) {
+  .overlay > .panel .btn.sm,
+  .overlay > .panel .conv-toggle .seg,
+  .overlay > .panel :is(.authoring-file, .art-filter, .art-root-h, .art-file, .memory-note-toggle) {
+    min-height: 44px;
+  }
+  .overlay > .panel .conv-toggle .seg {
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .overlay > .panel .panel-close { min-width: 44px; }
+}
 @media (max-width: 600px) {
   .overlay { padding: 0; align-items: stretch; }
   .overlay > .panel, .overlay > .modal { width: 100% !important; max-width: none; max-height: 100dvh;
@@ -2242,9 +2257,13 @@ pre.code.event-json { max-height: 220px; }
   .authoring-list { display: flex; width: 100%; max-height: 30dvh; overflow: auto; gap: 6px; }
   .authoring-file { min-width: max-content; }
   .authoring-editor textarea { min-height: 40dvh; }
+  .memory-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; overflow: visible; }
+  .memory-role-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; overflow: visible; }
+  .memory-tabs .seg, .memory-role-tabs .seg { min-width: 0; }
   .art-wrap { height: calc(100dvh - 96px); min-height: 0; flex-direction: column; }
   .art-list { flex: 0 0 auto; width: 100%; max-height: 34dvh; padding: 0 0 8px;
     border-right: 0; border-bottom: 1px solid var(--line); }
+  .art-filter { font-size: 16px; }
   .asst-view.asst-full { height: 100dvh; flex-direction: column; }
   .asst-full .asst-main-h, .asst-shared .asst-main-h { flex-wrap: wrap;
     padding-top: calc(10px + env(safe-area-inset-top, 0px)); }
@@ -2983,6 +3002,9 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .review-created>div:first-of-type{flex-wrap:wrap}.review-created>div:first-of-type>.btn{width:100%}
   .review-recovery-actions>.btn{flex:1 1 120px}
   .review-link-row{align-items:flex-start;flex-wrap:wrap}.review-link-row>.btn{width:100%}
+  .review-links-error{min-width:0;align-items:flex-start;flex-wrap:wrap}
+  .review-links-error>span{min-width:0;flex:1 1 180px;overflow-wrap:anywhere}
+  .review-links-error>.btn{min-height:44px;flex:1 1 140px;justify-content:center}
 }
 
 /* Theme-safe semantic foregrounds. Keep the saturated base tokens for borders, fills, graphs and

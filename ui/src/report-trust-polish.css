@@ -173,6 +173,9 @@
 }
 
 @media (max-width: 700px) {
+  .report-inline-state { min-width: 0; align-items: flex-start; flex-wrap: wrap; }
+  .report-inline-state > span { min-width: 0; flex: 1 1 180px; overflow-wrap: anywhere; }
+  .report-inline-state > .btn { min-height: 44px; flex: 1 1 140px; justify-content: center; }
   .report-view { padding-inline: 14px; }
   .report-view .report-toolbar { position: static; align-items: stretch; }
   .report-view .report-toolbar .btn { min-height: 44px; justify-content: center; flex: 1 1 130px; }
