@@ -193,7 +193,8 @@
   }
   .app > .topbar, .panel-bar, .concept-bar, .why-strip, .dock,
   .cmdbar-wrap, .asst-side-panel, .asst-view, .attention-trigger, .attention-layer,
-  .toast { display: none !important; }
+  .history-banner, .route-state-notice, .copy-link-fallback, .merge-destination-bar,
+  .review-banner, .toast { display: none !important; }
   .report-view .report-toolbar { display: none; }
   .report-view {
     --bg: #fff; --bg-1: #fff; --bg-2: #f3f4f6; --bg-3: #e5e7eb;
