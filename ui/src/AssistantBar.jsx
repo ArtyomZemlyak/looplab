@@ -2094,7 +2094,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       const command = goal ? `/new ${goal}` : '/new '
       const existing = input.trim()
       if (!existing || existing === command.trim()) setInput(command)
-      else flash('Draft preserved — clear it before starting a new run')
+      else flash('Draft preserved — choose Chat or clear the composer before drafting a new run')
       setView(current => current === 'bar' ? 'side' : current)
       setHasNew(false)
       requestAnimationFrame(() => inputRef.current?.focus())
@@ -2187,8 +2187,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     : null
 
   const slashMatch = /^\/(\w*)$/.exec(input)
+  const draftingNewRun = /^\/(?:new|genesis|run)\b/i.test(input.trim())
   const directNames = [
-    { name: 'new', desc: 'plan & start a run — in this chat' },
+    { name: 'new', desc: 'draft a launch card — review before start' },
     ...(runId ? Object.keys(DIRECT).map(n => ({ name: n, desc: 'run control · no LLM' })) : []),
   ]
   const suggestions = slashMatch
@@ -2421,7 +2422,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       {suggestionPop}
       {attachBtn('asst-attach')}
       <textarea className="text" ref={inputRef} value={input}
-        aria-label="Assistant message" {...comboAria}
+        aria-label="Assistant message" aria-describedby={draftingNewRun ? 'assistant-new-run-hint' : undefined}
+        {...comboAria}
         disabled={historical || commandBusy || sharePaused} onChange={changeInput} onKeyDown={onKey}
         placeholder={historical ? readOnlyShort : shareUnknown
           ? 'Public-link status unknown · messaging paused' : shareBusy
@@ -2432,6 +2434,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             disabled={historical || commandBusy || sharePaused || (!input.trim() && files.length === 0)}
             onClick={send}>{shareUnknown ? 'Paused' : commandBusy || shareBusy ? 'Waiting…' : 'Send'}</button>}
     </div>
+    {draftingNewRun && <div id="assistant-new-run-hint" className="asst-new-run-hint" role="note">
+      Describe the goal after /new, then Send. Send uses the configured model to draft a launch card.
+      Nothing starts until you review it and press Start run.
+    </div>}
     {modeRow}
   </div>
 
@@ -2601,7 +2607,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               ? 'LIVE · new replies public' : 'snapshot public'}
           </button>}
         <span className="spacer" style={{ flex: 1 }} />
-        <button className="btn sm ghost" title="new chat" onClick={newChat}>＋ New</button>
+        <button className="btn sm ghost" aria-label="Start a new Assistant chat"
+          title="new chat" onClick={newChat}>＋ Chat</button>
         <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
         <button className="btn sm ghost" title="collapse to the bar" onClick={collapseToBar}>▾ bar</button>
       </div>
@@ -2620,7 +2627,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         <div className="asst-side-h">
           <button className="btn sm" title="fold back to the bar" onClick={collapseToBar}>▾ bar</button>
           <span className="ttl" style={{ flex: 1 }}>Assistant</span>
-          <button className="btn sm primary" onClick={newChat}>+ New</button>
+          <button className="btn sm primary" aria-label="Start a new Assistant chat"
+            onClick={newChat}>+ Chat</button>
         </div>
         <div ref={sessionsRef} className="asst-sessions"
           aria-busy={sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}>

@@ -328,9 +328,12 @@ function Modal({ title, onClose, children, busy = false }) {
   </div>
 }
 
-function PromptModal({ title, label, placeholder, initial = '', confirm = 'Create', allowEmpty = false,
+function PromptModal({ title, label, description = '', placeholder, initial = '', confirm = 'Create', allowEmpty = false,
   maxLength, blocked = false, blockedMessage = '',
   onSubmit, onReconcile, onClose }) {
+  const reactId = React.useId().replace(/:/g, '')
+  const inputId = `prompt-${reactId}`
+  const descriptionId = description ? `${inputId}-description` : undefined
   const [v, setV] = useState(initial)
   const [busy, error, mutate] = useMutation()
   const ok = !blocked && (allowEmpty || !!v.trim())
@@ -338,8 +341,11 @@ function PromptModal({ title, label, placeholder, initial = '', confirm = 'Creat
     if (ok && await mutate(() => onSubmit(v.trim()), onReconcile)) onClose()
   }
   return <Modal title={title} onClose={onClose} busy={busy}>
-    {label && <div className="muted" style={{ marginBottom: 8 }}>{label}</div>}
-    <input className="text" autoFocus readOnly={busy || blocked} aria-label={label || title}
+    {label && <label htmlFor={inputId} className="muted"
+      style={{ display: 'block', marginBottom: description ? 4 : 8 }}>{label}</label>}
+    {description && <div id={descriptionId} className="muted" style={{ marginBottom: 8 }}>{description}</div>}
+    <input id={inputId} className="text" autoFocus readOnly={busy || blocked}
+           aria-label={label || title} aria-describedby={descriptionId}
            placeholder={placeholder} maxLength={maxLength} value={v} onChange={e => setV(e.target.value)}
            onKeyDown={e => { if (e.key === 'Enter') go(); if (e.key === 'Escape' && !busy) onClose() }} />
     {blocked && blockedMessage && <div className="flag" role="alert">{blockedMessage}</div>}
@@ -1624,7 +1630,9 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
 
       {projModal && <PromptModal
         title={projModal.parent_id ? 'New sub-project' : 'New project'}
-        label={projModal.parent_id ? `Inside “${projName[projModal.parent_id]}”` : 'Group runs into a project folder.'}
+        label={projModal.parent_id ? 'Sub-project name' : 'Project name'}
+        description={projModal.parent_id
+          ? `Inside “${projName[projModal.parent_id]}”.` : 'Group runs into a project folder.'}
         placeholder="e.g. baseline sweep" confirm="Create"
         onSubmit={submitProject} onReconcile={refresh} onClose={closeProjectModal} />}
 

@@ -2179,6 +2179,11 @@ pre.code.event-json { max-height: 220px; }
   .overlay > .modal > .modal-b {
     padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
   }
+  .overlay > .modal .modal-h .btn,
+  .overlay > .modal .modal-actions .btn,
+  .overlay > .modal input.text { min-height: 44px; }
+  .overlay > .modal .modal-h .btn { min-width: 44px; }
+  .overlay > .modal input.text { font-size: 16px; }
   .panel-b { padding: 10px; }
   .authoring-layout { flex-direction: column; }
   .authoring-list { display: flex; width: 100%; max-height: 30dvh; overflow: auto; gap: 6px; }
@@ -2355,6 +2360,7 @@ pre.code.event-json { max-height: 220px; }
 .asst-hint { background: var(--bg-2); border: 1px solid var(--line-2); color: var(--fg); cursor: pointer;
   border-radius: 14px; padding: 5px 12px; font-size: 12px; }
 .asst-hint:hover { border-color: var(--accent-dim); background: var(--bg-3); }
+.asst-new-run-hint { margin: 6px 2px 2px; color: var(--fg-dim); font-size: 11px; line-height: 1.4; }
 
 /* Full = a dedicated OPAQUE page above everything. */
 .asst-view.asst-full { position: fixed; inset: 0; z-index: 200; background: var(--bg); }
@@ -2609,6 +2615,9 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .home-head .seg button, .home-head .new-run-cta.btn.sm,
   .home-head .projects-toggle.btn.sm { min-height: 44px; }
   .home-head .projects-toggle .t-ic { display: none; }
+  .psidebar-h > .btn { min-height: 44px; }
+  .psidebar-h > .projects-close { min-width: 44px; }
+  .ptree-row.pseudo { min-height: 44px; }
   .settings-page button, .settings-page input, .settings-page select,
   .settings-actions button { min-height: 44px; }
 
