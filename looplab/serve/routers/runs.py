@@ -33,8 +33,8 @@ from looplab.core.run_reset import (
     load_run_reset_marker)
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import (
-    EventStore, EventStoreConcurrencyError, EventStoreLockError, _interprocess_lock,
-    iter_event_jsonl)
+    EventStore, EventStoreConcurrencyError, EventStoreLockError, JsonlRecordInvalid,
+    _interprocess_lock, decode_jsonl_line, iter_event_jsonl)
 from looplab.events.replay import FoldCursor, fold
 from looplab.events.traceview import (
     TRACE_PROJECTION_SCHEMA, trace_file_revision, unavailable_projection)
@@ -233,8 +233,9 @@ def _scan_span_tail(path: Path, sid: str, since: int) -> Optional[dict]:
     """Find one span row by id in the bytes AFTER `since`, bounded by `_SPAN_FALLBACK_MAX_LINES`.
 
     `since` must be a newline boundary — the span index's `covers` is exactly that (its scan reports
-    the last complete-record offset). Applies `iter_jsonl`'s torn-tail rules verbatim so the two
-    agree on where a damaged file stops; returns None when the id is not in the scanned window."""
+    the last complete-record offset). Uses the SHARED line rule (`decode_jsonl_line`) so the two
+    cannot disagree on where a damaged file stops; returns None when the id is not in the scanned
+    window. The line cap is this fallback's own bound, not part of that rule."""
     try:
         with open(path, "rb") as f:
             if since > 0:
@@ -242,15 +243,12 @@ def _scan_span_tail(path: Path, sid: str, since: int) -> Optional[dict]:
             for seen, raw in enumerate(f):
                 if seen >= _SPAN_FALLBACK_MAX_LINES or not raw.endswith(b"\n"):
                     break                       # cap reached, or a torn final write
-                line = raw.strip()
-                if not line:
-                    continue
                 try:
-                    obj = orjson.loads(line)
-                except orjson.JSONDecodeError:
+                    obj = decode_jsonl_line(raw)
+                except JsonlRecordInvalid:
                     break                       # corrupt tail — stop cleanly
-                if not isinstance(obj, dict):
-                    break
+                if obj is None:
+                    continue                    # blank line: part of the prefix, not a record
                 if obj.get("span_id") == sid:
                     return obj
     except OSError:

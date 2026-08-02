@@ -308,12 +308,88 @@ def _interprocess_lock(lock_path: Path, *, required: bool = False, blocking: boo
             f.close()
 
 
+class JsonlRecordInvalid(ValueError):
+    """This physical line ENDS the recoverable prefix of an append-only JSONL log.
+
+    Not "skip me": every append-only reader below stops here, because in a log that is only ever
+    appended to, a damaged line means the bytes after it were written behind damage the reader
+    cannot interpret — accepting them would silently reorder or resurrect records. Mutable stores
+    step over the same condition on purpose via `read_jsonl_lenient`; that policy split is the whole
+    reason both readers exist, and it is why this is a distinct exception rather than a bare False.
+    """
+
+
+def decode_jsonl_line(raw: bytes) -> Optional[dict]:
+    """Classify ONE newline-stripped physical JSONL line under the append-only prefix rule.
+
+    Three outcomes: the record for a valid line, ``None`` for a blank one (skip it — whitespace is
+    not damage, and stopping there would truncate a log at a stray newline), and
+    ``JsonlRecordInvalid`` for anything else.
+
+    Five readers used to re-derive these outcomes inline (doc 25 EV-05) — `iter_jsonl`,
+    `_parse_jsonl_region`, `log_divergence`, `span_index`'s two scans and the span-tail fallback in
+    `serve/routers/runs.py` — and their agreement was maintained by comments reading "matches
+    iter_jsonl" rather than by shared code. It is not a cosmetic agreement: each reader's accepted
+    byte count is a durable watermark, so a reader that accepts one line more than `read_all` claims
+    coverage of bytes the event log treats as damage.
+
+    Both rejections are load-bearing. `not isinstance(obj, dict)` is a STOP rather than a skip: a
+    valid-JSON non-object line in an append-only log is corruption, not an unknown record type. And
+    the parser must be the one the writer used — stdlib `json` accepts the NaN/Infinity literals
+    orjson rejects, so swapping it here would classify writer-valid lines as damage.
+    """
+    line = raw.strip()
+    if not line:
+        return None
+    try:
+        obj = orjson.loads(line)
+    except orjson.JSONDecodeError as exc:
+        raise JsonlRecordInvalid("line is not valid JSON") from exc
+    if not isinstance(obj, dict):
+        raise JsonlRecordInvalid("valid JSON, but not an object")
+    return obj
+
+
+def scan_jsonl_region(buf: bytes) -> tuple[list[tuple[dict, int, int]], int]:
+    """Parse complete records from a byte buffer under the same append-only prefix rule.
+
+    Returns ``(records, consumed)``. Each record is ``(obj, start, end)``: ``start`` is the offset of
+    the line's first byte within ``buf`` and ``end`` the offset of its terminating newline, so
+    ``buf[start:end]`` is the line verbatim and ``end + 1`` is the boundary after it.
+
+    ``consumed`` always lands ON a newline boundary and NEVER covers a rejected line — a torn final
+    line (no newline yet) and a corrupt line are both left unconsumed, so a caller that tops the
+    buffer up later re-examines exactly those bytes and a completed torn line is picked up then.
+    Blank lines ARE consumed: they are part of the valid prefix, they just produce no record.
+    """
+    records: list[tuple[dict, int, int]] = []
+    consumed = 0
+    i, n = 0, len(buf)
+    while i < n:
+        nl = buf.find(b"\n", i)
+        if nl == -1:
+            break                       # torn final write — leave it for a later top-up
+        try:
+            obj = decode_jsonl_line(buf[i:nl])
+        except JsonlRecordInvalid:
+            break                       # corrupt tail — stop cleanly, don't advance past it
+        if obj is not None:
+            records.append((obj, i, nl))
+        i = nl + 1
+        consumed = i
+    return records, consumed
+
+
 def iter_jsonl(path: str | os.PathLike) -> Iterator[dict]:
     """Yield dict records from an append-only JSONL file, tolerating a torn/partial final line
     (a crash mid-append): stop at the first line without a trailing newline or that fails to
     parse. This helper is deliberately FORMAT-AGNOSTIC: chat, assistant-message and span stores also use
     it, and a foreign row whose ordinary ``type`` happens to equal an internal event type must round-trip
-    unchanged. Event-log consumers use :func:`iter_event_jsonl` below."""
+    unchanged. Event-log consumers use :func:`iter_event_jsonl` below.
+
+    Streams line by line rather than going through `scan_jsonl_region`: this reader is used on
+    multi-hundred-MB span logs, and holding the whole file as one buffer to reuse the walk would
+    trade the duplication for the memory. The line RULE is shared, which is the part that drifted."""
     p = Path(path)
     if not p.exists():
         return
@@ -321,15 +397,12 @@ def iter_jsonl(path: str | os.PathLike) -> Iterator[dict]:
         for raw in f:
             if not raw.endswith(b"\n"):
                 break  # torn final write — ignore the partial record
-            line = raw.strip()
-            if not line:
-                continue
             try:
-                obj = orjson.loads(line)
-            except orjson.JSONDecodeError:
-                break  # corrupt tail — stop cleanly
-            if not isinstance(obj, dict):
-                break  # a valid-JSON but non-object line is corruption, not a record
+                obj = decode_jsonl_line(raw)
+            except JsonlRecordInvalid:
+                break  # corrupt tail (unparseable, or valid JSON that is not an object)
+            if obj is None:
+                continue  # blank line
             yield obj
 
 
@@ -546,25 +619,25 @@ def log_divergence(path: str | os.PathLike) -> Optional[dict]:
         s = line.strip()
         if not s:
             continue
-        # A line is "good" only if `read_all` would ACCEPT it — i.e. it is a valid JSON object AND a
-        # constructible `Event`. read_all stops not just at non-JSON/non-dict lines but ALSO at a
-        # dict-valid line that fails `Event(**o)` (a byte-flip that renames a required key like `type`,
-        # or makes `data` a non-dict). Checking only `isinstance(..., dict)` here was strictly weaker
-        # than read_all's stop condition, so such a corruption dropped the tail on read yet went
-        # UNDETECTED — defeating the fail-closed guard that gates on this (review of arch-review §3 P0-4).
+        # A line is "good" only if `read_all` would ACCEPT it — i.e. it passes the shared line rule
+        # AND is a constructible `Event`. read_all stops not just at non-JSON/non-dict lines but ALSO
+        # at a dict-valid line that fails `Event(**o)` (a byte-flip that renames a required key like
+        # `type`, or makes `data` a non-dict). Checking only `isinstance(..., dict)` here was strictly
+        # weaker than read_all's stop condition, so such a corruption dropped the tail on read yet
+        # went UNDETECTED — defeating the fail-closed guard that gates on this (review of arch-review
+        # §3 P0-4). This walk shares `decode_jsonl_line` with the readers but deliberately NOT their
+        # stop: it must continue PAST the bad line to count what they would drop.
         try:
-            obj = orjson.loads(s)
-        except orjson.JSONDecodeError:
+            obj = decode_jsonl_line(s)   # never None: blank lines were skipped above
+        except JsonlRecordInvalid:
             ok = False
         else:
-            ok = isinstance(obj, dict)
-            if ok:
-                try:
-                    events = _decode_event_record(obj)
-                except Exception:  # noqa: BLE001 — a dict that isn't a valid Event is where read_all stops
-                    ok = False
-                else:
-                    ok = event_sequence_continues(events, expected_seq)
+            try:
+                events = _decode_event_record(obj)
+            except Exception:  # noqa: BLE001 — a dict that isn't a valid Event is where read_all stops
+                ok = False
+            else:
+                ok = event_sequence_continues(events, expected_seq)
         if not ok:
             dropped = sum(1 for later in complete[i + 1:] if later.strip())
             return {"good_records": sum(1 for e in complete[:i] if e.strip()),
@@ -675,31 +748,10 @@ def _parse_jsonl_region(buf: bytes) -> tuple[list[tuple[dict, int]], int]:
     boundary before it. This is the incremental core shared by the read cache: the set of records
     it yields for a full-file buffer is identical to `iter_jsonl`, so caching can never change
     what `read_all` returns — it only avoids re-reading+re-parsing bytes already seen."""
-    out: list[tuple[dict, int]] = []
-    consumed = 0
-    n = len(buf)
-    i = 0
-    while i < n:
-        nl = buf.find(b"\n", i)
-        if nl == -1:
-            break  # torn final write (no trailing newline) — leave it for a later top-up
-        raw = buf[i:nl]
-        line = raw.strip()
-        if not line:
-            # blank line: iter_jsonl `continue`s over it (it is newline-terminated here)
-            i = nl + 1
-            consumed = i
-            continue
-        try:
-            obj = orjson.loads(line)
-        except orjson.JSONDecodeError:
-            break  # corrupt tail — stop cleanly (matches iter_jsonl), don't advance past it
-        if not isinstance(obj, dict):
-            break  # valid JSON but non-object => corruption, not a record
-        i = nl + 1
-        consumed = i
-        out.append((obj, consumed))
-    return out, consumed
+    records, consumed = scan_jsonl_region(buf)
+    # `scan_jsonl_region` reports the newline's OWN offset; this caller's contract is the boundary
+    # AFTER the line, which is what it rewinds to when it rejects a record.
+    return [(obj, end + 1) for obj, _start, end in records], consumed
 
 
 def retry_tail_cas(store, plan, *, attempts: int = 64, on_exhaust):

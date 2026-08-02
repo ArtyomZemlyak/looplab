@@ -181,7 +181,8 @@ The copies where drift is a correctness event, not a style problem:
 - **SR-01** durable paid-work idempotency protocol ×5+ across routers (byte-identical helper pairs prove the abstraction exists).
 - **SC-03** canonical run-path/run-id validation ×6, `_is_reparse` ×7, Windows reserved names ×4.
 - **EM-04** durable curation-key derivation duplicated between writer and validator (drift = ledger poisoning).
-- **EV-05** tolerant-JSONL-prefix scan ×4–5 (equivalence maintained by comments).
+- **EV-05** tolerant-JSONL-prefix scan ×4–5 (equivalence maintained by comments). *(resolved
+  2026-08-02 — `eventstore.decode_jsonl_line` / `scan_jsonl_region`.)*
 - **EV-06** `EventStore.append`/`append_many` duplicate the ~55-line critical section. *(resolved
   2026-08-02 — `EventStore._locked_append`.)*
 - **RA-03** Docker hardening argv mirrored by comment (already drifted once).
@@ -897,9 +898,25 @@ Scope: `looplab/events/`: eventstore.py, replay.py, types.py, projections, span_
 
 *Recommendation:* Add a tiny validators module (e.g. core: valid_hex_digest(value, prefix), bounded_int(value, lo, hi), bounded_str(value, max_len)) and use the existing table-driven style (_coverage_snapshot_row) as the canonical pattern for new handlers. Collapse the four _on_run_started digest blocks into one loop over field names first — that alone removes ~30 lines with zero semantic risk.
 
-#### EV-05 · MEDIUM · duplication · effort: medium
+#### EV-05 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-02)**
 
 **Four hand-synchronized implementations of the tolerant-JSONL-prefix scan (stop at first torn/corrupt line)**
+
+*Resolution:* Two shared primitives in `events/eventstore.py`. `decode_jsonl_line(raw)` owns the
+per-line rule as three explicit outcomes (record / blank-skip / `JsonlRecordInvalid`), and
+`scan_jsonl_region(buf)` owns the buffer walk, returning `(records, consumed)` with each record as
+`(obj, start, end)`. `_parse_jsonl_region` and `span_index._scan_light` are now thin projections
+over the walk; `iter_jsonl`, `log_divergence`, `span_index._load_persisted` and the span-tail
+fallback in `serve/routers/runs.py` share the line rule while keeping their own stop policies —
+`log_divergence` deliberately continues PAST the bad line to count what the readers drop.
+A fifth copy the review had not counted turned up in `serve/routers/runs.py::_scan_span_tail`,
+whose own docstring claimed it "applies `iter_jsonl`'s torn-tail rules verbatim".
+
+`tests/test_jsonl_prefix_scanner.py` is the shared equivalence test the extraction makes possible:
+one corpus of adversarial buffers (torn tail, corrupt line, valid-JSON non-object, blank runs,
+unicode) drives every reader and asserts they agree on the accepted records AND on the byte
+watermark, plus a narrow source guard for a re-inlined stop. Verified to have teeth: relaxing
+`decode_jsonl_line`'s non-object rejection fails 10 cases across all four readers at once.
 
 *Locations:* `looplab/events/eventstore.py:311-333`, `looplab/events/eventstore.py:669-701`, `looplab/events/eventstore.py:539-573`, `looplab/events/span_index.py:188-219`, `looplab/serve/log_pages.py:190`
 

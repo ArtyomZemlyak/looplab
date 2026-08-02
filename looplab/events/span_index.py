@@ -37,7 +37,8 @@ import orjson
 from looplab.core.atomicio import atomic_write_bytes
 from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion_fence
 from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
-from looplab.events.eventstore import _interprocess_lock
+from looplab.events.eventstore import (
+    JsonlRecordInvalid, _interprocess_lock, decode_jsonl_line, scan_jsonl_region)
 from looplab.events.traceview import _normalize_span, _strip_span_io
 
 # Bump when the persisted record shape changes so an old `spans.index.jsonl` is ignored (rebuilt),
@@ -193,27 +194,13 @@ def _scan_light(buf: bytes, base: int) -> tuple[list[tuple[dict, int, int]], int
     the FULL span line verbatim. Returns `(records, consumed)`; `consumed` lands on a newline boundary
     (the exact prefix `iter_jsonl` would have accepted), so it is the index's coverage watermark."""
     records: list[tuple[dict, int, int]] = []
-    n = len(buf)
-    i = 0
-    consumed = 0
-    while i < n:
-        nl = buf.find(b"\n", i)
-        if nl == -1:
-            break  # torn final line (no newline yet) — leave for a later top-up
-        raw = buf[i:nl]
-        line = raw.strip()
-        if line:
-            try:
-                obj = orjson.loads(line)
-            except orjson.JSONDecodeError:
-                break  # corrupt tail — stop cleanly (matches iter_jsonl)
-            if not isinstance(obj, dict):
-                break  # valid JSON but non-object => corruption, not a span
-            normalized = _normalize_span(obj)
-            if normalized is not None:
-                records.append((_strip_span_io(normalized), base + i, nl - i))
-        i = nl + 1
-        consumed = i
+    parsed, consumed = scan_jsonl_region(buf)
+    for obj, start, end in parsed:
+        # A span that does not normalize is DROPPED but still CONSUMED: it is a well-formed record
+        # this projection has no use for, not damage, so it must not stall the watermark.
+        normalized = _normalize_span(obj)
+        if normalized is not None:
+            records.append((_strip_span_io(normalized), base + start, end - start))
     # `consumed` is the offset of the last complete-newline boundary within buf (a torn/corrupt tail
     # is NOT consumed — it is left for a later top-up once completed). Absolute coverage = base+consumed.
     return records, base + consumed
@@ -532,15 +519,14 @@ def _load_persisted(spans_path: Path, identity: tuple, size: int) -> Optional[Sp
             for raw in f:
                 if not raw.endswith(b"\n"):
                     break  # torn index tail
-                line = raw.strip()
-                if not line:
-                    continue
                 try:
-                    rec = orjson.loads(line)
-                except orjson.JSONDecodeError:
+                    # The persisted index is itself an append-only JSONL file, so it gets the SAME
+                    # prefix rule as the log it accelerates — shared rather than re-derived.
+                    rec = decode_jsonl_line(raw)
+                except JsonlRecordInvalid:
                     break
-                if not isinstance(rec, dict):
-                    break
+                if rec is None:
+                    continue
                 off = rec.pop("_o", None)
                 length = rec.pop("_l", None)
                 if (not isinstance(off, int) or isinstance(off, bool)
