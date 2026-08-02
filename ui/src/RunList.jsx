@@ -579,7 +579,7 @@ function RunDeletionCard({ run, recovery, busy, onRetry, setRef }) {
 function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManageSupers, onRename,
   onDelete, onReconcile, onClose, onBusyChange, mutationLocked = false,
   mutationLockReason = 'Resolve the existing run operation before changing this run', anchor = null,
-  deleteLocked = mutationLocked, deleteLockReason = mutationLockReason }) {
+  positionKey = '', deleteLocked = mutationLocked, deleteLockReason = mutationLockReason }) {
   const menuRef = useRef(null)
   const [menuStyle, setMenuStyle] = useState(null)
   const [busy, error, mutate] = useMutation()
@@ -613,7 +613,7 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
       window.removeEventListener('resize', positionMenu)
       window.removeEventListener('scroll', positionMenu, true)
     }
-  }, [anchor, projects.length, supertasks.length, mutationLocked, deleteLocked, busy, error])
+  }, [anchor, positionKey, projects.length, supertasks.length, mutationLocked, deleteLocked, busy, error])
   useEffect(() => {
     menuRef.current?.querySelector('[role="menuitem"]:not(:disabled)')?.focus()
   }, [])
@@ -640,6 +640,10 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
       aria-busy={busy} aria-disabled={busy}
       onClick={e => e.stopPropagation()} onClickCapture={e => { if (busy) { e.preventDefault(); e.stopPropagation() } }} onKeyDown={onKeyDown}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) close(false) }}>
+      <div className="mi-label run-menu-context" title={r.label || r.run_id} aria-hidden="true">
+        Run · <b>{r.label || r.run_id}</b>
+      </div>
+      <div className="mi-sep" />
       <button type="button" role="menuitem" tabIndex={-1} className="mi" onClick={() => { close(false); onOpen(r.run_id) }}>↗ Open</button>
       {mutationLocked && <div className="mi-label" role="status">
         {mutationLockReason}
@@ -983,7 +987,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
     await loadRuns()
   }
 
-  const { byParent, subtree } = useMemo(() => indexProjects(proj.projects), [proj.projects])
+  const { byParent, byId: projectById, subtree } = useMemo(
+    () => indexProjects(proj.projects), [proj.projects])
   const projName = useMemo(() => Object.fromEntries(proj.projects.map(p => [p.id, p.name])), [proj.projects])
 
   const scoped = useMemo(() => scopeRuns(runs || [], sel, proj.projects),
@@ -1005,6 +1010,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   }), [runs, sel, proj.projects, query, taskFilter, stFilter, statusFilter])
   const visible = useMemo(() => sortRuns(filtered, sortKey, sortDir), [filtered, sortKey, sortDir])
   const displayedRuns = visible.slice(0, listLimit)
+  const displayedRunOrder = displayedRuns.map(run => run.run_id).join('\u001f')
   const renderedDeletionIds = new Set(view === 'list'
     ? displayedRuns.filter(run => deletionRecoveries.has(run.run_id)).map(run => run.run_id)
     : [])
@@ -1054,7 +1060,6 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
     previousListCriteriaKeyRef.current = listCriteriaKey
     setListLimit(LIST_PAGE_SIZE)
   }, [listCriteriaKey])
-
   const portfolioState = {
     project: sel, query, task: taskFilter, status: statusFilter, supertask: stFilter,
     sort: sortKey, direction: sortDir, view, compare: [...compareIds], columns: compareColumns,
@@ -1220,10 +1225,13 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
 
   const breadcrumb = useMemo(() => {
     if (sel === ALL || sel === UNASSIGNED) return []
-    const path = []; let cur = proj.projects.find(p => p.id === sel)
-    while (cur) { path.unshift(cur); cur = proj.projects.find(p => p.id === cur.parent_id) }
+    const path = []; const seen = new Set(); let cur = projectById[sel]
+    // Project files can be edited outside the UI. A malformed parent cycle must not freeze Runs.
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id); path.unshift(cur); cur = projectById[cur.parent_id]
+    }
     return path
-  }, [sel, proj.projects])
+  }, [sel, projectById])
 
   // The scope a cross-run report would cover, by the CURRENT view: an explicit super-task / task filter
   // is the user's intent to scope by it; otherwise the open folder. null = nothing reportable (All runs,
@@ -1838,10 +1846,13 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
                         onClick={e => {
                           e.stopPropagation()
                           if (openMenuRun) closeRunMenu(false)
-                          else { runMenuTriggerRef.current = e.currentTarget; setRunMenu({ ...r }) }
+                          else {
+                            runMenuTriggerRef.current = e.currentTarget
+                            setRunMenu({ ...r })
+                          }
                         }}>⋮</button>
                 {openMenuRun && <RunMenu r={openMenuRun} projects={proj.projects} supertasks={superdata.supertasks}
-                  anchor={runMenuTriggerRef.current}
+                  anchor={runMenuTriggerRef.current} positionKey={displayedRunOrder}
                   onOpen={openRun} onMove={moveRun} onSetSuper={assignToSuper} onManageSupers={() => openSuperTasks(runMenuTriggerRef.current)}
                   onRename={openRunRename} onDelete={openRunDeletion} onReconcile={reconcileAll}
                   onClose={closeRunMenu} onBusyChange={setMenuBusy}
