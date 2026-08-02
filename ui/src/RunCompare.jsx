@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { get, fmt, fmtAgo, fmtElapsedSeconds, normalizeRunGeneration } from './util.js'
 import { effectiveRunStatus, metricComparable } from './runIndex.js'
 import { bestComparableRun, COMPARE_COLUMNS, configDifferences } from './portfolioModel.js'
@@ -87,6 +87,13 @@ const openComparisonRoute = (onOpen, runId, href) => {
 export default function RunCompare({ runs, columns, names, onColumns, onRemove, onOpen = null }) {
   const [resource, setResource] = useState({ status: 'loading', details: [], loadedAt: 0 })
   const [retry, setRetry] = useState(0)
+  const columnsDetailsRef = useRef(null)
+  const closeColumns = () => {
+    const details = columnsDetailsRef.current
+    if (!details?.open) return
+    details.open = false
+    requestAnimationFrame(() => details.querySelector('summary')?.focus({ preventScroll: true }))
+  }
   const identity = runs.map(run => `${run.run_id}@${normalizeRunGeneration(run.generation) || '?'}`)
     .join('\n')
   useEffect(() => {
@@ -116,9 +123,17 @@ export default function RunCompare({ runs, columns, names, onColumns, onRemove, 
         <h2 id="run-compare-title">Run comparison</h2>
         <p>{runs.length} runs · The Run column stays pinned; choose the evidence columns you need.</p>
       </div>
-      <details className="compare-columns">
+      <details ref={columnsDetailsRef} className="compare-columns" onKeyDown={event => {
+        if (event.key !== 'Escape' || !event.currentTarget.open) return
+        event.preventDefault()
+        event.stopPropagation()
+        closeColumns()
+      }}>
         <summary>Columns · {columns.length}</summary>
         <fieldset><legend className="sr-only">Comparison columns</legend>
+          <button type="button" className="btn sm compare-columns-close" onClick={closeColumns}>
+            Done
+          </button>
           {COMPARE_COLUMNS.map(([id, label]) => <label key={id}>
             <input type="checkbox" checked={columns.includes(id)} onChange={() => toggleColumn(id)} /> {label}
           </label>)}

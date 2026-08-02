@@ -1056,6 +1056,7 @@ button.ptree-row { width: 100%; border: 0; background: transparent; color: inher
 .compare-columns fieldset { position: absolute; z-index: 25; right: 0; width: 230px; max-height: min(420px, 65vh);
   overflow: auto; display: grid; gap: 7px; margin: 5px 0 0; padding: 10px;
   border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg-2); box-shadow: var(--shadow); }
+.compare-columns-close { display: none; }
 .compare-columns label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
 .compare-receipt { min-height: 22px; color: var(--fg-mut); font-size: 12px; }
 .compare-table { min-width: 760px; }
@@ -2703,6 +2704,15 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .compare-columns label { min-height: 44px; }
   .compare-table .compare-link { display: inline-flex; min-height: 44px; align-items: center; }
   .compare-columns fieldset { position: fixed; inset: auto 10px 72px; width: auto; }
+  .compare-columns .compare-columns-close {
+    position: sticky; top: -10px; z-index: 1; display: inline-flex; width: calc(100% + 20px);
+    min-height: 44px; margin: -10px -10px 0; justify-content: center; border-radius: 8px 8px 0 0;
+    background: var(--bg-2); border-bottom-color: var(--line-2);
+  }
+
+  .timeline-pagebar .btn { min-height: 44px; }
+  .live-trace .lt-toggle { display: inline-flex; min-height: 44px; align-items: center; padding-inline: 4px; }
+  .dock-foot .transport .btn { min-width: 44px; }
 
   .side.compact-drawer { width: 100% !important; max-width: none; border-left: 0; }
   .workspace-scrim { display: none; }
@@ -2819,6 +2829,11 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .cmdbar-dock > .cmdbar-status.preview:not(.recovery) { display: none; }
   .cmdbar-dock > .cmdbar-field { order: 3; flex: 1 1 calc(100% - 50px); }
   .cmdbar-dock > .cmdbar-go { order: 3; }
+  /* The comparison column sheet must clear the two-row persistent Assistant dock. */
+  .compare-columns fieldset {
+    bottom: calc(126px + env(safe-area-inset-bottom, 0px));
+    max-height: min(420px, calc(100dvh - 146px));
+  }
 
   .asst-launch { width: 100%; gap: 8px; padding: 8px; }
   .feed-msg.chat.assistant.has-launch { width: 100%; max-width: 100%; }
