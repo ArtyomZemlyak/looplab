@@ -1006,7 +1006,9 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   const focusEvent = (e) => {
     const nid = eventNode(e)
     if (nid == null) { setViewSeq(e.seq); return }
-    onFocus?.(Number(nid), e.type === 'node_created' ? 'Trace' : 'Overview', e.seq)
+    const opensTrace = e.type === 'node_created'
+    // Trace is a live sidecar, so entering historical replay would immediately replace it with Overview.
+    onFocus?.(Number(nid), opensTrace ? 'Trace' : 'Overview', opensTrace ? null : e.seq)
   }
   const toggleKind = (g) => setKinds(s => { const n = new Set(s); n.has(g) ? n.delete(g) : n.add(g); return n })
   const searchableLog = useMemo(() => log.map(event => {
