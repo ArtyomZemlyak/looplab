@@ -255,6 +255,37 @@ synthetic task adapters (RA-06).
 
 ### T6 — Dead code (verified; see §3 inventory)
 
+### T8 — Non-deterministic full-suite failures (added 2026-08-02)
+
+Three concurrency tests each failed EXACTLY ONCE across ~8 full-suite runs on 2026-08-02, and each
+passes 6–8/8 when run alone:
+
+| test | observed failure |
+|---|---|
+| `test_run_command_service.py::test_reload_finalize_reattaches_existing_record_without_event_or_spawn_duplication` | worker still `executing` when `_terminal` gave up |
+| `test_cross_run_server.py::test_concept_global_cas_fences_alias_and_split_ledgers` | CAS fence |
+| `test_lessons_fingerprint.py::test_run_writes_lessons_with_fingerprint` | — |
+
+This is **not** a tight-budget problem, and raising ceilings again would only hide it. `_terminal`
+already allows **60 s** (raised from 15 s for exactly this symptom, per its own comment), and
+`_WORKER_START_TIMEOUT_S` is 60 s for the same reason. A background command worker that has not
+reached a terminal status in a full minute is stalling, not merely descheduled.
+
+Two of this family WERE diagnosed properly the same day and are fixed rather than deferred, which
+is what makes the remainder worth treating as a real defect class:
+
+* `test_concurrent_disjoint_settings_puts_do_not_lose_updates` — the rendezvous barrier timed out
+  because one `PUT /api/settings` came back **405**: FastAPI 0.13x's lazy `include_router` cache is
+  not thread-safe, and two concurrent first requests matched against a half-built candidate list.
+  Fixed in production (`_warm_route_matching`), not in the test.
+* `test_concurrent_same_key_returns_one_start_identity_and_one_popen` — the test pinned one member
+  of a fail-closed SET as if it were the contract. Fixed by asserting the set plus the invariants
+  that never vary (one Popen, one shared `start_id`).
+
+*Recommendation:* treat each remaining case the same way — reproduce under parallel load with
+thread-stack dumps (the technique that found the 405), and fix the stall. Every guard added by this
+campaign is worth less while the suite is intermittently red for reasons no one has read.
+
 ### T7 — Acknowledged-but-unfixed in-code review markers
 
 `CLAUDE REVIEW:`/`CODEX AGENT:` comments shipping in production, each describing a diagnosed
