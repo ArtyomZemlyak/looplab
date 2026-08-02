@@ -214,16 +214,31 @@ const completeSettingsRecord = ({ includeSecret = true } = {}) => Object.fromEnt
     .map(field => [field.key, validSettingValue(field)]),
 )
 
+// Every settings envelope now carries a credential state, and all three ack validators require it.
+// The fixture predated that field, so the FIRST assertion below threw and every fail-closed case
+// after it — the ones that matter — silently stopped running. `none/missing` is the minimal state
+// that satisfies the cross-field rules: nothing stored, so nothing effective, active or clearable.
+const CREDENTIAL_NONE = Object.freeze({
+  source: 'none', status: 'missing',
+  stored: false, effective: false, active: false, clearable: false,
+})
+const CREDENTIAL_STORED = Object.freeze({
+  source: 'stored', status: 'active',
+  stored: true, effective: true, active: true, clearable: true,
+})
+
 test('settings and run-config resources reject malformed HTTP-200 envelopes', () => {
   const settings = completeSettingsRecord()
   const defaults = completeSettingsRecord({ includeSecret: false })
-  const resource = { settings, defaults, overrides: {},
+  const resource = { settings, defaults, overrides: {}, credential: CREDENTIAL_NONE,
     settings_revision: 'settings-r1', secret_revision: 'secret-r1' }
   assert.equal(validateSettingsResource(resource, SETTINGS_SCHEMA), resource)
   assert.equal(validateSettingsSaveAck({ ok: true, settings, overrides: {},
-    settings_revision: 'settings-r2' }, SETTINGS_SCHEMA).ok, true)
+    credential: CREDENTIAL_NONE,
+    settings_revision: 'settings-r2', secret_revision: 'secret-r1' }, SETTINGS_SCHEMA).ok, true)
   assert.equal(validateSecretSaveAck({ ok: true, key: 'llm_api_key', set: true,
-    secret_revision: 'secret-r2' },
+    credential: CREDENTIAL_STORED,
+    settings_revision: 'settings-r1', secret_revision: 'secret-r2' },
     'llm_api_key').set, true)
 
   for (const malformed of [
@@ -231,12 +246,27 @@ test('settings and run-config resources reject malformed HTTP-200 envelopes', ()
     { ...resource, settings: { ...settings, max_nodes: 'many' } },
     { ...resource, settings: Object.fromEntries(
       Object.entries(settings).filter(([key]) => key !== 'max_nodes')) },
+    // The credential envelope fails closed on its own, and on every cross-field claim it makes: a
+    // key nobody stored cannot be the effective one, and `clearable` must track owner-stored
+    // material rather than the effective source, or the UI offers a delete that cannot work.
+    { ...resource, credential: undefined },
+    { ...resource, credential: { ...CREDENTIAL_NONE, source: 'guessed' } },
+    { ...resource, credential: { ...CREDENTIAL_NONE, status: 'fine' } },
+    { ...resource, credential: { ...CREDENTIAL_NONE, effective: true } },
+    { ...resource, credential: { ...CREDENTIAL_STORED, clearable: false } },
+    { ...resource, credential: { ...CREDENTIAL_STORED, active: true, effective: false } },
   ]) assert.throws(() => validateSettingsResource(malformed, SETTINGS_SCHEMA),
     /Invalid settings resource/)
   assert.throws(() => validateSettingsSaveAck({ ok: true, settings: {}, overrides: {} },
     SETTINGS_SCHEMA), /Invalid settings resource/)
   assert.throws(() => validateSecretSaveAck({ ok: true, key: 'llm_api_key', set: 'yes' },
     'llm_api_key'), /Invalid settings resource/)
+  // A secret ack that claims a write happened must agree with the credential state it ships, or the
+  // UI shows "saved" over a key the server did not store.
+  assert.throws(() => validateSecretSaveAck({ ok: true, key: 'llm_api_key', set: true,
+    credential: CREDENTIAL_NONE,
+    settings_revision: 'settings-r1', secret_revision: 'secret-r2' }, 'llm_api_key'),
+  /Invalid settings resource/)
 
   const config = { ...settings, _looplab_config_meta: {
     config_revision: 'b'.repeat(64), run_start_pinned_fields: [],

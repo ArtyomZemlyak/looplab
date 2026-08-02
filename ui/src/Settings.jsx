@@ -36,7 +36,10 @@ const SETTINGS_READ_TIMEOUT_MS = 15_000
 const SETTINGS_WRITE_TIMEOUT_MS = 15_000
 // The server permits a 60s provider wall limit plus bounded teardown. The browser must keep the
 // same operation alive long enough to receive that authoritative result instead of timing out first.
-const LLM_HEALTH_TIMEOUT_MS = 70_000
+// Exported so the browser-deadline test can drive the real value: it intercepts the timer by its
+// delay, and when this was raised from 15s the test's hardcoded match silently stopped finding it —
+// leaving the timeout half of "immediate, single-flight, and BOUNDED" unexercised.
+export const LLM_HEALTH_TIMEOUT_MS = 70_000
 const unknownTransport = error => !Number.isInteger(error?.status)
   || error.status >= 500 || [408, 425, 429].includes(error.status)
 const publicSubmittedForm = form => ({ ...(form || {}), llm_api_key: '' })
