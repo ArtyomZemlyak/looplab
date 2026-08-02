@@ -76,7 +76,7 @@ baseline.
 `master` has since advanced by further commits (mobile/UI hardening, settings, attention and
 assistant features, a test re-pointing sweep — and `a077d86`, the first structural commit acting
 on this document). A dedicated per-finding status pass over the new HEAD produced the
-remediation ledger in **§5** (running total as of `a077d86`: 7 fixed, 2 partial, 179 open — and
+remediation ledger in **§5** (running total as of `cea97c3`: 7 fixed, 4 partial, 177 open — and
 several flagged god-modules grew substantially in the same window, §5.3). **§6** adds the
 target-design proposals for resolving the finding clusters; §6 was itself adversarially
 validated against HEAD `a077d86` by nine design reviewers, whose corrections (naming collisions
@@ -2484,8 +2484,14 @@ maintained; each was checked against it. `70b6a5d` fixes a live/persisted digest
 source hash). Then `a077d86` became the **first structural commit to act on this document**: it
 executed §3's deletion list (the seven zero-reference helpers plus `METRIC_READERS`, ~97 lines
 of code removed, with the §3 rows flipped to DELETED in the same change — the §6.8 ledger-upkeep rule in
-action). That flips **XP-08, RA-04 and SE-13 to fixed and SR-13 to partial**, bringing the
-running total to **7 fixed, 2 partial, 179 open**.
+action). That flips **XP-08, RA-04 and SE-13 to fixed and SR-13 to partial**. Immediately after,
+`cea97c3` executed the first slice of §6.1's safety kernel — in its post-validation form
+(`core/pathsafe.py` with a stat-taking `is_reparse`, `WINDOWS_RESERVED`,
+`filesystem_identity`; `atomicio.file_identity`) — collapsing all **eight** `_is_reparse`
+copies (the review's seven plus `misc.py`'s identically-bodied sibling), the four
+reserved-name sets and the fs-identity rule, and porting a first tranche of stat-tuple sites.
+That flips **SC-03 and XP-02 to partial**, bringing the running total to **7 fixed, 4 partial,
+177 open**.
 
 ### 5.1 Fixed / partially fixed
 
@@ -2499,6 +2505,8 @@ running total to **7 fixed, 2 partial, 179 open**.
 | RA-04 | **fixed** | `a077d86` deleted the dead METRIC_READERS registry with the false "shared" docstring (the duplicated reader-kind enumerations in read_metric/_valid_metric_kind remain, tracked under RA-05). |
 | SE-13 | **fixed** | `a077d86` deleted the unreferenced _explored_concepts wrapper. |
 | SR-13 | **partial** | `a077d86` deleted _scope_action_lease_marker_exists; the /api/research and agents_md endpoints and the _portfolio_identity wrapper remain (pending the external-consumer check). |
+| SC-03 | **partial** | `cea97c3` (2026-08-02) unified the `_is_reparse`×8, reserved-name×4 and fs-identity×3 micro-helpers into `core/pathsafe.py`; the 6+ full canonical run-path validators (`validate_run_child` and the per-surface ladders) remain — §6.1's remaining slice. |
+| XP-02 | **partial** | `cea97c3` added the canonical `atomicio.file_identity` and ported a first tranche of sites (fences, train_monitor, log_pages, scope_sources, paid_work); inline identity tuples remain in appstate, _runcache, routers/runs, span_index/traceview. |
 | SR-15 | **partial** | Confirmed the doc's post-baseline note on HEAD: c92b89f extracted _boss_prologue (boss.py:619), now shared by chat (649), suggest (692) and command (740), removing the prologue duplication for those three. The four-copy error-shaping epilogue remains (_sanitized_domain_http_exception + _safe_boss_failure blocks at 589-594 chat_compact, 662-667 chat, 719-724 suggest, 814/853 command), and chat_compact still keeps its own prologue. |
 
 ### 5.2 Still open — everything else (183 findings)
@@ -2514,14 +2522,14 @@ recent commits touched). Per-section outcome of the status pass:
 | 4.3 | engine — cross-run memory & knowledge | `git log 756ad13..HEAD` over the whole 4.3 scope is EMPTY — line counts match the review byte-for-byte | all 15 open |
 | 4.4 | events | only `eventstore.py` changed (`c92b89f`, the EV-07 two-arm redesign); replay.py and the projections untouched | 12 open, EV-07 fixed |
 | 4.5 | core | `e3f3a56`/`9275736` ADDED ~400 lines to the flagged god-modules (`llm.py` grew to 1,865 lines) | all 13 open |
-| 4.6 | serve — non-router | behavior/feature commits only; `run_commands.py` grew to 4,164 lines and `_execute`/`_reset_blocking` both grew | 15 open, SC-08 fixed |
+| 4.6 | serve — non-router | behavior/feature commits; `run_commands.py` grew to 4,164 lines; `cea97c3` unified the path-safety micro-helpers | 14 open, SC-08 fixed, SC-03 partial |
 | 4.7 | serve — routers | `c92b89f`/`f3586c9` perf offloads; `a077d86` deleted one dead helper; router god-modules grew (`misc.py` +1.2k lines) | 12 open, SR-08 fixed, SR-13 + SR-15 partial |
 | 4.8 | search | untouched until `a077d86` deleted two dead helpers (`_explored_concepts`, `_normalized_rename_map`/`_canon_set`) | 14 open, SE-13 fixed |
 | 4.9 | agents | one commit (`e3f3a56`) touched cli_agent/tool_loop with credential plumbing unrelated to the findings | all 10 open |
 | 4.10 | tools | `927dfee` added +867 lines to `write_tools.py` (undo/destructive fencing); `e3f3a56` hardened transports — neither addressed a flagged structure | all 11 open |
 | 4.11 | runtime + adapters | `e3f3a56` (client binding, `git_subprocess_env`); `a077d86` deleted METRIC_READERS | 9 open, RA-04 fixed |
 | 4.12 | cli/trust/misc | one commit (`e3f3a56`) rerouted client construction through `make_llm_client_for`; the flagged duplications persist | all 15 open |
-| 4.13 | cross-package | perf/behavior fixes only, until `a077d86` executed the §3 deletion list | 11 open, XP-08 fixed |
+| 4.13 | cross-package | perf/behavior fixes until `a077d86` (§3 deletions) and `cea97c3` (`file_identity` + pathsafe) | 10 open, XP-08 fixed, XP-02 partial |
 | 4.14 | ui | 25 `fix(ui)` commits, all behavioral/mobile/security; none of the recommended extractions happened | all 14 open |
 
 ### 5.3 Size drift since the baseline (the accretion is live)
