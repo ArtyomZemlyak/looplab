@@ -146,7 +146,8 @@ class StrategyCadenceMixin:
         On only under `cross_run_advisory` + a memory dir; best-effort ("" on any hiccup or empty store), so
         it never blocks the cadence. Advisory prose; honors operator claim decisions.
         """
-        if not getattr(self, "_cross_run_advisory", False) or not getattr(self, "memory_dir", ""):
+        from looplab.engine import cross_run_context as ctx
+        if not ctx.advisory_enabled(self):
             self._cross_run_note_receipt = {}
             return ""
         current_direction = getattr(state, "direction", None) if state is not None else None
@@ -164,34 +165,17 @@ class StrategyCadenceMixin:
                 _filter_claim_source_rows,
                 _safe_claim_source_summary,
                 atlas_for_memory,
-                load_claim_lessons,
-                load_research_claims,
             )
-            from looplab.engine.memory import (ConceptCapsuleStore, _capsule_source_summary,
-                                               _filter_capsule_rows)
+            from looplab.engine.memory import _capsule_source_summary, _filter_capsule_rows
             base = Path(self.memory_dir)
             if _governance is None:
-                from looplab.engine.governance_health import project_governed_sources
-
-                return project_governed_sources(
+                return ctx.enter_governed(
                     base,
-                    lambda governance: self._cross_run_note_for_ctx(
-                        state, _governance=governance),
-                    include_concepts=True,
-                    source_names=(
-                        "concept_capsules.jsonl", "lessons.jsonl", "research_claims.jsonl"),
-                )
-            cp = base / "concept_capsules.jsonl"
-            lessons = load_claim_lessons(base)
-            from looplab.engine.governance_health import observed_path_missing
-            caps = ConceptCapsuleStore(cp).all() if not observed_path_missing(cp) else []
-            research = load_research_claims(base)
-            task_id = str(getattr(state, "task_id", "") or "") if state is not None else ""
-            run_id = str(getattr(state, "run_id", "") or "") if state is not None else ""
-            def _visible(row):
-                return (same_live_direction(current_direction, row.get("direction"))
-                        and bool(task_id) and str(row.get("task_id") or "") == task_id
-                        and (not run_id or str(row.get("run_id") or "") != run_id))
+                    lambda governance: self._cross_run_note_for_ctx(state, _governance=governance))
+            lessons, caps, research = ctx.load_governed_sources(base)
+            run_id, task_id = ctx.scoped_identity(state)
+            _visible = ctx.visible_row_predicate(
+                current_direction, task_id=task_id, excluded_run=run_id)
             lessons = _filter_claim_source_rows(lessons, _visible, research=False)
             caps = _filter_capsule_rows(caps, _visible)
             research = _filter_claim_source_rows(research, _visible, research=True)
@@ -207,10 +191,7 @@ class StrategyCadenceMixin:
                 _governance=_governance,
             )
             claim_source = _safe_claim_source_summary(a.get("claim_source"))
-            if (not lessons and not caps and not research
-                    and capsule_source.get("source_complete") is True
-                    and claim_source is not None
-                    and claim_source.get("source_complete") is True):
+            if ctx.empty_after_complete_read(lessons, caps, research, capsule_source, claim_source):
                 self._cross_run_note_receipt = {}
                 return ""
             raw_source = a.get("concept_source")
@@ -307,29 +288,17 @@ class StrategyCadenceMixin:
             note = cross_run_text(
                 "UNTRUSTED_MEMORY_SUMMARY=" + repr(" | ".join(parts)),
                 max_chars=8_000, single_line=False, entropy=True)
-            corpus_projection = sanitize_cross_run_projection(
-                {"parts": parts}, max_chars=16_000, max_items=64, max_total_items=256)
-            corpus = json.dumps(corpus_projection,
-                                ensure_ascii=False, sort_keys=True, default=str,
-                                separators=(",", ":")).encode("utf-8")
-            self._cross_run_note_receipt = {
-                "v": 2,
-                "scope_task": cross_run_text(
-                    task_id, max_chars=500, single_line=True, entropy=False),
-                "excluded_run": cross_run_text(
-                    run_id, max_chars=500, single_line=True, entropy=False),
-                "n_lessons": len(lessons), "n_capsules": len(caps), "n_research": len(research),
-                "concept_source": concept_source,
-                "claim_source": claim_receipt,
-                "corpus_digest": hashlib.sha256(corpus).hexdigest(),
-                "render_digest": hashlib.sha256(note.encode("utf-8")).hexdigest(),
-            }
+            self._cross_run_note_receipt = ctx.build_receipt(
+                scope_task=task_id, excluded_run=run_id,
+                lessons=lessons, capsules=caps, research=research,
+                scope_key="concept_source", scope_value=concept_source,
+                claim_source=claim_receipt,
+                corpus=ctx.corpus_digest({"parts": parts}, max_chars=16_000, max_items=64,
+                                         max_total_items=256),
+                rendered=note)
             return note
         except GovernanceLedgerUnavailable as exc:
-            self._cross_run_note_receipt = {
-                "v": 2, "status": "unavailable", "complete": False,
-                "governance": exc.public_receipt(),
-            }
+            self._cross_run_note_receipt = ctx.unavailable_receipt(exc)
             return ""
         except Exception:  # noqa: BLE001 — advisory context, never blocks the strategist cadence
             self._cross_run_note_receipt = {}

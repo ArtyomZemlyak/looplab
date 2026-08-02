@@ -635,7 +635,7 @@ Scope: `looplab/engine/`: strategy, research_cadence, novelty, speculation, abla
 - Known gaps are honestly annotated with bounds and a closing recipe (e.g. the in-memory _last_hyp_merge_n cadence gap in research_cadence.py:539-548, the concept-snapshot re-purchase gap in strategy.py:703-711), which makes review and future fixes far cheaper than silent debt.
 - Fail-closed engineering in resources.py (lease inode/symlink validation, count-only degradation when the memory inventory can't be joined losslessly) and costs.py (self-authenticating outbox records, never erasing conflicting evidence) is thorough and clearly reasoned inline.
 
-#### EC-01 · HIGH · duplication · effort: medium
+#### EC-01 · HIGH · duplication · effort: medium — **RESOLVED (2026-08-02)**
 
 **Two ~190-line near-duplicate cross-run context builders (Strategist note vs Researcher advisory)**
 
@@ -644,6 +644,35 @@ Scope: `looplab/engine/`: strategy, research_cadence, novelty, speculation, abla
 *Evidence:* _cross_run_note_for_ctx (strategy.py:139-335) and _cross_run_advisory_text (proposal_cues.py:332-528) implement the same pipeline in parallel: gate on _cross_run_advisory + memory_dir; valid_live_direction check; the identical governance re-entry idiom (`if _governance is None: return project_governed_sources(base, lambda governance: self.<method>(state, _governance=governance), include_concepts=True, source_names=('concept_capsules.jsonl','lessons.jsonl','research_claims.jsonl'))`); load_claim_lessons/ConceptCapsuleStore/load_research_claims with observed_path_missing guard; row filtering by direction/task_id/excluded run_id; a v2 receipt dict with identical keys (scope_task, excluded_run, n_lessons, n_capsules, n_research, corpus_digest, render_digest built via sanitize_cross_run_projection + sha256); identical GovernanceLedgerUnavailable handler emitting {'v':2,'status':'unavailable','complete':False,'governance':exc.public_receipt()}; identical bare-except -> empty receipt + "". Only the middle (atlas summary vs context pack rendering) differs.
 
 *Recommendation:* Extract a shared helper (e.g. engine/cross_run_context.py) that owns: the flag/direction gating, the governed source load + row scoping, and receipt construction (one build_receipt(scope_task, excluded_run, counts, corpus, rendered) function plus the unavailable/empty receipt shapes). Each caller keeps only its distinct projection/rendering middle section. This removes ~250 duplicated lines and, more importantly, prevents the two receipt schemas and scoping rules from drifting.
+
+*Resolution (2026-08-02):* `engine/cross_run_context.py` now owns what both builders duplicated —
+the flag/direction gate, the governance re-entry idiom, the governed source load, the row-scoping
+predicate, the bounded corpus digest, and the v2 receipt (including its unavailable shape). Each
+caller keeps only its distinct middle: an atlas summary for the Strategist, a rendered context pack
+for the Researcher.
+
+The receipt is why this mattered more than the line count. It is what an auditor reads to decide
+whether "no cross-run evidence opposed this" meant *nothing opposed it* or *the store could not be
+read* — and two hand-maintained copies of that schema drift silently until the two agents shaping
+the same run stop being comparable. One consequence fell out immediately: the two builders scoped
+RESEARCH rows through separately-written predicates that happened to agree; they now share
+`visible_row_predicate`.
+
+*Verified behaviour-preserving.* A 70-scenario harness (7 seedings × 5 run states × on/off) captured
+both builders' rendered text AND both receipts before and after: 42,672 bytes, byte-identical.
+
+*The teeth pass is the part worth recording.* Five deliberate breaks of the new shared module were
+run against the existing 64 cross-run tests, and TWO passed silently:
+
+* dropping `research_claims.jsonl` from `CROSS_RUN_SOURCE_NAMES` — the builder still returns text,
+  now governed by a ledger that never saw one of the stores it is projecting;
+* digesting the raw projection instead of the sanitized one — the module's own docstring calls a raw
+  hash "a credential oracle and an identity for bytes the model never received", and nothing checked
+  it.
+
+Neither is visible in rendered output, which is exactly why centralizing them needed new guards
+rather than inherited ones. `tests/test_cross_run_context.py` — 14 tests; all seven breaks (the five
+above plus receipt key-order and a digest leaking into the unavailable receipt) now fail loudly.
 
 #### EC-02 · HIGH · under-decomposition · effort: large
 

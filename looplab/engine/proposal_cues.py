@@ -336,7 +336,8 @@ class ProposalCuesMixin:
         observation line (Step 3), rendered as a short prose block. Folded into the prompt hint like the E4
         prior note; advisory only, NEVER touches node selection (§21.7). Off unless `cross_run_advisory`;
         returns "" on no memory dir / empty store / any hiccup, so the prompt is byte-identical when off."""
-        if not getattr(self, "_cross_run_advisory", False) or not getattr(self, "memory_dir", ""):
+        from looplab.engine import cross_run_context as ctx
+        if not ctx.advisory_enabled(self):
             self._cross_run_advisory_receipt = {}
             return ""
         current_direction = getattr(state, "direction", None)
@@ -354,13 +355,9 @@ class ProposalCuesMixin:
                 _filter_claim_source_rows,
                 build_context_pack,
                 claims_for_memory,
-                load_claim_lessons,
-                load_research_claims,
                 render_context_pack,
             )
-            from looplab.engine.governance_health import project_governed_sources
             from looplab.engine.memory import (
-                ConceptCapsuleStore,
                 _capsule_source_summary,
                 _capsule_completeness,
                 _capsule_fingerprint_scope_complete,
@@ -369,18 +366,11 @@ class ProposalCuesMixin:
             )
             base = Path(self.memory_dir)
             if _governance is None:
-                return project_governed_sources(
+                return ctx.enter_governed(
                     base,
                     lambda governance: self._cross_run_advisory_text(
-                        state, _governance=governance),
-                    include_concepts=True,
-                    source_names=(
-                        "concept_capsules.jsonl", "lessons.jsonl", "research_claims.jsonl"),
-                )
-            cp = base / "concept_capsules.jsonl"
-            lessons = load_claim_lessons(base)
-            from looplab.engine.governance_health import observed_path_missing
-            capsules = ConceptCapsuleStore(cp).all() if not observed_path_missing(cp) else []
+                        state, _governance=governance))
+            lessons, capsules, _unscoped_research = ctx.load_governed_sources(base)
             # Freeze one task-scoped view for this prompt. Exact task id is authoritative only after
             # direction provenance matches; related-task transfer uses the same fingerprint threshold as
             # lesson priors and never includes this run.
@@ -450,11 +440,12 @@ class ProposalCuesMixin:
 
             lessons = _filter_claim_source_rows(lessons, _scoped, research=False)
             capsules = _filter_capsule_rows(capsules, lambda r: _scoped(r, capsule=True))
+            # Research rows are scoped exactly like the Strategist note's: same live direction,
+            # exact task, never this run. `_unscoped_research` is the same read `load_research_claims`
+            # performed here before, now done once with the other two governed stores.
             research = _filter_claim_source_rows(
-                load_research_claims(base),
-                lambda r: ((not rid or str(r.get("run_id") or "") != rid)
-                           and bool(tid) and str(r.get("task_id") or "") == tid
-                           and same_live_direction(current_direction, r.get("direction"))),
+                _unscoped_research,
+                ctx.visible_row_predicate(current_direction, task_id=tid, excluded_run=rid),
                 research=True,
             )
             # Freeze all three operator-policy ledgers together. The live prompt must never combine
@@ -497,31 +488,17 @@ class ProposalCuesMixin:
             text = cross_run_text(text, max_chars=16_000, single_line=False, entropy=True)
             # Digest the exact bounded structured pack behind the rendered prompt, not raw legacy stores.
             # A raw hash is both a credential oracle and an identity for bytes the model never received.
-            corpus_projection = sanitize_cross_run_projection(
-                pack, max_chars=64_000, max_items=64, max_total_items=2_048)
-            corpus = json.dumps(corpus_projection,
-                                ensure_ascii=False, sort_keys=True, default=str,
-                                separators=(",", ":")).encode("utf-8")
-            self._cross_run_advisory_receipt = {
-                "v": 2,
-                "scope_task": cross_run_text(
-                    tid, max_chars=500, single_line=True, entropy=False),
-                "excluded_run": cross_run_text(
-                    rid, max_chars=500, single_line=True, entropy=False),
-                "n_lessons": len(lessons), "n_capsules": len(capsules), "n_research": len(research),
-                "concept_scope": concept_scope,
-                "claim_source": claim_source,
-                "corpus_digest": hashlib.sha256(corpus).hexdigest(),
-                "render_digest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            }
+            self._cross_run_advisory_receipt = ctx.build_receipt(
+                scope_task=tid, excluded_run=rid,
+                lessons=lessons, capsules=capsules, research=research,
+                scope_key="concept_scope", scope_value=concept_scope,
+                claim_source=claim_source,
+                corpus=ctx.corpus_digest(pack, max_chars=64_000, max_items=64,
+                                         max_total_items=2_048),
+                rendered=text)
             return ("\n" + text) if text else ""
         except GovernanceLedgerUnavailable as exc:
-            # suppressing untrusted policy is safe; erasing its health state is not.
-            # Keep a closed, content-free receipt so audit distinguishes disabled/empty from unavailable.
-            self._cross_run_advisory_receipt = {
-                "v": 2, "status": "unavailable", "complete": False,
-                "governance": exc.public_receipt(),
-            }
+            self._cross_run_advisory_receipt = ctx.unavailable_receipt(exc)
             return ""
         except Exception:  # noqa: BLE001 — advisory context is best-effort, never blocks proposing
             self._cross_run_advisory_receipt = {}

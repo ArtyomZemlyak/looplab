@@ -57,6 +57,7 @@ _LAYOUT = {
     "novelty_recall": "search",   # PART IV E3 novelty-gate recall / paraphrase-leak diagnostic (offline)
     "research_targeting": "search",   # PART IV D2 axis-structured research targeting (offline)
     "taxonomy_dedup": "search",   # PART IV D4 taxonomy-aware board dedup analysis (offline)
+    "cross_run_context": "engine",  # shared skeleton of the live cross-run builders (doc 25 EC-01)
     "crash_repair": "engine",
     "claims": "engine",
     "claims_health": "engine",  # ...its source-row/read-health leaf (doc 25 EM-01 split)          # PART IV cross-run Step 4: evidence-grounded claim assessments (read-model)
