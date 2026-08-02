@@ -1032,3 +1032,37 @@ def test_contested_filter(tmp_path):
     out = client.get("/api/cross-run/claims", params={"contested": True}).json()["claims"]
     stmts = {c["statement"] for c in out}
     assert "mixed one" in stmts and "solid" not in stmts
+
+
+def test_an_unhealthy_projection_refuses_the_steward_before_any_paid_call(tmp_path, monkeypatch):
+    """The health probe runs BEFORE client creation and before the durable paid-call claim.
+
+    Both stewards share one driver now (doc 25 SR-07), and this ordering is the reason the driver
+    exists rather than a wrapper around the invocation: a steward handed a guessed taxonomy returns
+    confident proposals about a portfolio that does not exist, and the operator has already paid for
+    them. Moving the probe after the claim leaves every other assertion in this file green, so it is
+    pinned here explicitly.
+    """
+    import looplab.engine.concept_registry as registry
+    import looplab.engine.steward_invocation as invocation
+
+    md = Path(os.environ["LOOPLAB_MEMORY_DIR"])
+    md.mkdir(parents=True, exist_ok=True)
+    claimed = []
+    monkeypatch.setattr(invocation, "run_steward_invocation",
+                        lambda *a, **k: claimed.append(a) or (None, False))
+
+    def _unhealthy(_memory_dir):
+        from looplab.engine.governance_health import GovernanceLedgerUnavailable
+        raise GovernanceLedgerUnavailable("concept_governance", "invalid_record")
+
+    monkeypatch.setattr(registry, "concept_governance_snapshot", _unhealthy)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client",
+                        lambda *a, **k: pytest.fail("a client was built for an unhealthy ledger"))
+
+    client = TestClient(make_app(tmp_path))
+    response = client.post("/api/cross-run/concept-steward",
+                           params={"action_id": "steward-unhealthy-ledger"})
+
+    assert response.status_code >= 400, response.text
+    assert not claimed, "an unhealthy projection must not reach the durable paid-call claim"

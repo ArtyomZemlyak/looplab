@@ -627,116 +627,91 @@ def build_router(srv) -> APIRouter:
                 "portfolio_id": portfolio_id,
                 "revision": rec["revision"]}
 
+    def _governed_mutation(body, record, result_key: str) -> dict:
+        """Run one governance mutation and shape its response — the five ways to say the same thing.
+
+        merge / purge / alias-clear / split / split-clear differ ONLY in which registry function
+        runs; everything around it — resolving the portfolio, funnelling every failure through
+        `_raise_governance_error`, and the five-key envelope carrying both revisions back — was
+        written out per endpoint. The envelope is what a client CASes on next, so a copy that drifted
+        (a missing `governance_revision`, a `revision` read off the wrong record) would break the
+        next fenced write rather than this one, at a call site with no visible connection to the bug.
+
+        `record` takes the resolved memory dir and returns the persisted row; `result_key` is the
+        one field name that legitimately differs (`alias` vs `split`).
+        """
+        memory_dir, portfolio_id = _portfolio(body.expected_portfolio_id)
+        try:
+            rec = record(memory_dir)
+        except Exception as exc:
+            _raise_governance_error(exc)
+        return {
+            "ok": True, result_key: _public_cross_run_row(rec), "revision": rec["revision"],
+            "governance_revision": rec["governance_revision"], "portfolio_id": portfolio_id,
+        }
+
     @router.post("/api/cross-run/concept-merge", response_model=ConceptAliasResponse)
     def concept_merge(body: _ConceptMerge):
         """Merge one non-empty concept into another; purge is a separate confirmed action."""
         from looplab.engine.concept_registry import record_concept_alias
-        memory_dir, portfolio_id = _portfolio(body.expected_portfolio_id)
-
-        try:
-            rec = record_concept_alias(
-                memory_dir, from_concept=body.from_concept, to_concept=body.to_concept,
-                by=_actor(), at=_timestamp(), expected_revision=body.expected_revision,
-                expected_governance_revision=body.expected_governance_revision,
-                action_id=body.action_id, require_existing=True,
-            )
-        except Exception as exc:
-            _raise_governance_error(exc)
-        return {
-            "ok": True, "alias": _public_cross_run_row(rec), "revision": rec["revision"],
-            "governance_revision": rec["governance_revision"], "portfolio_id": portfolio_id,
-        }
+        return _governed_mutation(body, lambda memory_dir: record_concept_alias(
+            memory_dir, from_concept=body.from_concept, to_concept=body.to_concept,
+            by=_actor(), at=_timestamp(), expected_revision=body.expected_revision,
+            expected_governance_revision=body.expected_governance_revision,
+            action_id=body.action_id, require_existing=True,
+        ), "alias")
 
     @router.post("/api/cross-run/concept-purge", response_model=ConceptAliasResponse)
     def concept_purge(body: _ConceptPurge):
         """Explicitly tombstone one concept after a typed confirmation."""
         from looplab.engine.concept_registry import record_concept_alias
-        memory_dir, portfolio_id = _portfolio(body.expected_portfolio_id)
-
-        try:
-            rec = record_concept_alias(
-                memory_dir, from_concept=body.from_concept, to_concept="",
-                by=_actor(), at=_timestamp(), expected_revision=body.expected_revision,
-                expected_governance_revision=body.expected_governance_revision,
-                action_id=body.action_id, require_existing=True,
-            )
-        except Exception as exc:
-            _raise_governance_error(exc)
-        return {
-            "ok": True, "alias": _public_cross_run_row(rec), "revision": rec["revision"],
-            "governance_revision": rec["governance_revision"], "portfolio_id": portfolio_id,
-        }
+        # An EMPTY `to_concept` is what makes this a tombstone rather than a redirect.
+        return _governed_mutation(body, lambda memory_dir: record_concept_alias(
+            memory_dir, from_concept=body.from_concept, to_concept="",
+            by=_actor(), at=_timestamp(), expected_revision=body.expected_revision,
+            expected_governance_revision=body.expected_governance_revision,
+            action_id=body.action_id, require_existing=True,
+        ), "alias")
 
     @router.post("/api/cross-run/concept-alias-clear", response_model=ConceptAliasResponse)
     def concept_alias_clear(body: _ConceptSource):
         """Undo the current alias/purge policy without deleting its audit history."""
         from looplab.engine.concept_registry import clear_concept_alias
-        memory_dir, portfolio_id = _portfolio(body.expected_portfolio_id)
-
-        try:
-            rec = clear_concept_alias(
-                memory_dir, from_concept=body.from_concept, by=_actor(), at=_timestamp(),
-                expected_revision=body.expected_revision,
-                expected_governance_revision=body.expected_governance_revision,
-                action_id=body.action_id, require_existing=True,
-            )
-        except Exception as exc:
-            _raise_governance_error(exc)
-        return {
-            "ok": True, "alias": _public_cross_run_row(rec), "revision": rec["revision"],
-            "governance_revision": rec["governance_revision"], "portfolio_id": portfolio_id,
-        }
+        return _governed_mutation(body, lambda memory_dir: clear_concept_alias(
+            memory_dir, from_concept=body.from_concept, by=_actor(), at=_timestamp(),
+            expected_revision=body.expected_revision,
+            expected_governance_revision=body.expected_governance_revision,
+            action_id=body.action_id, require_existing=True,
+        ), "alias")
 
     @router.post("/api/cross-run/concept-split", response_model=ConceptSplitResponse)
     def concept_split(body: _ConceptSplit):
         """Record one bounded deterministic split rule set."""
         from looplab.engine.concept_registry import record_concept_split
-        memory_dir, portfolio_id = _portfolio(body.expected_portfolio_id)
-
-        try:
-            rec = record_concept_split(
-                memory_dir, from_concept=body.from_concept,
-                rules=[rule.model_dump() for rule in body.rules], default=body.default,
-                by=_actor(), at=_timestamp(), expected_revision=body.expected_revision,
-                expected_governance_revision=body.expected_governance_revision,
-                action_id=body.action_id, require_existing=True,
-            )
-        except Exception as exc:
-            _raise_governance_error(exc)
-        return {
-            "ok": True, "split": _public_cross_run_row(rec), "revision": rec["revision"],
-            "governance_revision": rec["governance_revision"], "portfolio_id": portfolio_id,
-        }
+        return _governed_mutation(body, lambda memory_dir: record_concept_split(
+            memory_dir, from_concept=body.from_concept,
+            rules=[rule.model_dump() for rule in body.rules], default=body.default,
+            by=_actor(), at=_timestamp(), expected_revision=body.expected_revision,
+            expected_governance_revision=body.expected_governance_revision,
+            action_id=body.action_id, require_existing=True,
+        ), "split")
 
     @router.post("/api/cross-run/concept-split-clear", response_model=ConceptSplitResponse)
     def concept_split_clear(body: _ConceptSource):
         """Undo the active split while preserving the append-only history."""
         from looplab.engine.concept_registry import clear_concept_split
-        memory_dir, portfolio_id = _portfolio(body.expected_portfolio_id)
-
-        try:
-            rec = clear_concept_split(
-                memory_dir, from_concept=body.from_concept, by=_actor(), at=_timestamp(),
-                expected_revision=body.expected_revision,
-                expected_governance_revision=body.expected_governance_revision,
-                action_id=body.action_id, require_existing=True,
-            )
-        except Exception as exc:
-            _raise_governance_error(exc)
-        return {
-            "ok": True, "split": _public_cross_run_row(rec), "revision": rec["revision"],
-            "governance_revision": rec["governance_revision"], "portfolio_id": portfolio_id,
-        }
-
-    def _iter_log(path: Path):
-        """Yield a curation ledger only after its complete paid-call history validates."""
-        yield from _read_curation_rows(path)
+        return _governed_mutation(body, lambda memory_dir: clear_concept_split(
+            memory_dir, from_concept=body.from_concept, by=_actor(), at=_timestamp(),
+            expected_revision=body.expected_revision,
+            expected_governance_revision=body.expected_governance_revision,
+            action_id=body.action_id, require_existing=True,
+        ), "split")
 
     def _recent_log(name: str, limit: int, memory_dir: str, portfolio_id: str) -> dict:
         path = Path(memory_dir) / name
         latest: deque[dict] = deque(maxlen=limit)
         count = 0
-        for row in _iter_log(path):
+        for row in _read_curation_rows(path):
             latest.append(_public_cross_run_row(row))
             count += 1
         return {
@@ -815,27 +790,33 @@ def build_router(srv) -> APIRouter:
         from looplab.serve.assistant import safe_assistant_failure
         return f"{phase}:{safe_assistant_failure(exc)['error_kind']}"
 
-    @router.post("/api/cross-run/concept-steward", response_model=StewardProposalResponse)
-    def concept_steward(action_id: str = Query(..., min_length=1, max_length=160),
-                        expected_portfolio_id: str = Query(
-                            ..., pattern=_PORTFOLIO_ID_PATTERN),
-                        apply: bool = False):
-        """Run a proposal-only taxonomy review; typed operator actions apply selected proposals."""
+    def _run_steward(kind: str, action_id: str, expected_portfolio_id: str, apply: bool,
+                     *, probe, steward) -> dict:
+        """Drive one proposal-only steward invocation.
+
+        The concept and claim stewards differ in exactly two things — which revision they probe for
+        health and which steward function runs — and were otherwise identical, down to the paid-call
+        ordering that is the whole point of the sequence:
+
+        * `apply` is refused BEFORE anything else, because these endpoints only ever propose;
+        * the health probe runs BEFORE client creation and before the durable paid-call claim, so an
+          unhealthy projection cannot be paid to review — a steward given a guessed taxonomy returns
+          confident proposals about a portfolio that does not exist;
+        * every failure funnels through `_raise_governance_error`, and errors are recorded through
+          `_safe_steward_error`, so a provider exception cannot carry an endpoint or credential
+          fragment into a durable receipt.
+        """
+        from looplab.engine.steward_invocation import run_steward_invocation
+
         if apply:
             raise HTTPException(422, "steward endpoints are proposal-only; apply typed operator actions")
-        from looplab.engine.concept_registry import concept_governance_snapshot
-        from looplab.engine.steward_invocation import run_steward_invocation
         memory_dir, portfolio_id = _portfolio(expected_portfolio_id)
-
-        # Refuse before client creation / durable paid-call claim: an unhealthy taxonomy cannot
-        # produce a trustworthy prompt, and paying a steward to review a guessed projection is waste.
-        _read_governance(lambda: concept_governance_snapshot(memory_dir))
-        from looplab.engine.concept_steward import steward_concepts
+        _read_governance(lambda: probe(memory_dir))
         try:
             record, _replayed = run_steward_invocation(
-                memory_dir, "concept", action_id, actor=_actor(), at=_timestamp(),
+                memory_dir, kind, action_id, actor=_actor(), at=_timestamp(),
                 prepare=_steward_client,
-                invoke=lambda client: steward_concepts(
+                invoke=lambda client: steward(
                     memory_dir, client, apply=False, by=_actor(), raise_on_failure=True),
                 safe_error=lambda exc, phase: _safe_steward_error(exc, phase=phase),
                 request={"surface": "owner-http"},
@@ -843,6 +824,17 @@ def build_router(srv) -> APIRouter:
         except Exception as exc:
             _raise_governance_error(exc)
         return _steward_response(record, portfolio_id)
+
+    @router.post("/api/cross-run/concept-steward", response_model=StewardProposalResponse)
+    def concept_steward(action_id: str = Query(..., min_length=1, max_length=160),
+                        expected_portfolio_id: str = Query(
+                            ..., pattern=_PORTFOLIO_ID_PATTERN),
+                        apply: bool = False):
+        """Run a proposal-only taxonomy review; typed operator actions apply selected proposals."""
+        from looplab.engine.concept_registry import concept_governance_snapshot
+        from looplab.engine.concept_steward import steward_concepts
+        return _run_steward("concept", action_id, expected_portfolio_id, apply,
+                            probe=concept_governance_snapshot, steward=steward_concepts)
 
     @router.post("/api/cross-run/claim-steward", response_model=StewardProposalResponse)
     def claim_steward(action_id: str = Query(..., min_length=1, max_length=160),
@@ -850,25 +842,9 @@ def build_router(srv) -> APIRouter:
                           ..., pattern=_PORTFOLIO_ID_PATTERN),
                       apply: bool = False):
         """Run a proposal-only claim review; typed operator actions apply selected proposals."""
-        if apply:
-            raise HTTPException(422, "steward endpoints are proposal-only; apply typed operator actions")
         from looplab.engine.claims import claim_governance_revision
-        from looplab.engine.steward_invocation import run_steward_invocation
-        memory_dir, portfolio_id = _portfolio(expected_portfolio_id)
-
-        _read_governance(lambda: claim_governance_revision(memory_dir))
         from looplab.engine.claim_steward import steward_claims
-        try:
-            record, _replayed = run_steward_invocation(
-                memory_dir, "claim", action_id, actor=_actor(), at=_timestamp(),
-                prepare=_steward_client,
-                invoke=lambda client: steward_claims(
-                    memory_dir, client, apply=False, by=_actor(), raise_on_failure=True),
-                safe_error=lambda exc, phase: _safe_steward_error(exc, phase=phase),
-                request={"surface": "owner-http"},
-            )
-        except Exception as exc:
-            _raise_governance_error(exc)
-        return _steward_response(record, portfolio_id)
+        return _run_steward("claim", action_id, expected_portfolio_id, apply,
+                            probe=claim_governance_revision, steward=steward_claims)
 
     return router

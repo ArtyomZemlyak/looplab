@@ -1837,6 +1837,23 @@ path, the same reason `serve/engine_proc.py` imports it inside its functions.
 
 *Recommendation:* A `_governed_mutation(body, fn, result_key)` helper collapses the five endpoints to one-liners; parameterize the steward pair; delete `_iter_log`.
 
+*Resolution (2026-08-02):* all three. `_governed_mutation(body, record, result_key)` owns the
+portfolio resolve, the `_raise_governance_error` funnel and the five-key envelope; merge / purge /
+alias-clear / split / split-clear each shrink to the registry call that is genuinely theirs.
+`_run_steward(kind, ..., probe=, steward=)` parameterizes the pair. `_iter_log` — a wrapper whose
+body was `yield from _read_curation_rows(path)` — is deleted and its one caller reads directly.
+
+The envelope is the part worth sharing rather than the line count: `revision` and
+`governance_revision` are what a client CASes on next, so a copy that dropped one would break the
+NEXT fenced write, at a call site with no visible connection to the endpoint that dropped it.
+
+Five deliberate breaks were tried and four were caught by the existing suite. The fifth was not, and
+is the one the driver exists for: moving the health probe AFTER the durable paid-call claim left
+every assertion green. A steward handed a guessed taxonomy returns confident proposals about a
+portfolio that does not exist, and the operator has already paid for them — so
+`test_an_unhealthy_projection_refuses_the_steward_before_any_paid_call` now pins the ordering by
+asserting the invocation is never reached, not merely that the response is an error.
+
 #### SR-08 · MEDIUM · other · effort: medium
 
 **Twelve unresolved async-handler-blocks-event-loop defects, flagged in-code but unfixed**
