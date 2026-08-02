@@ -60,6 +60,7 @@ _LAYOUT = {
     "crash_repair": "engine",
     "claims": "engine",
     "claims_health": "engine",  # ...its source-row/read-health leaf (doc 25 EM-01 split)          # PART IV cross-run Step 4: evidence-grounded claim assessments (read-model)
+    "claims_retrieval": "engine",  # ...and its context-pack/retrieval top (same split)
     "claim_key": "engine",       # PART IV cross-run §21.20.13: structured scope+polarity-safe claim key
     "claim_steward": "engine",   # PART IV cross-run §22.4: agentic claim curator (LLM proposes ratify/reject/pin)
     "concept_registry": "engine",# PART IV cross-run CR1a: concept UID + alias resolver (merge/purge/split)

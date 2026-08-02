@@ -796,9 +796,29 @@ DEFERRED back-import is caught too — that one would not even raise), the barre
 SAME objects rather than copies (a copy silently defeats monkeypatching through either path), and
 the cross-package private names must still resolve. Verified to have teeth against all three.
 
-*Still open:* the remaining four modules (ledger, D8 store, assessments, retrieval). Their
-back-edges are call-level rather than constant-level, so each needs its forward calls turned into
-deferred imports deliberately — mechanical, but not the same change as lifting a leaf out.
+*Resolution (2026-08-02, second module):* `engine/claims_retrieval.py` — 852 lines — is extracted
+as the leaf's counterpart at the TOP of the subsystem: the context pack, the CR2a retrieval planner
+and the portfolio atlas, i.e. everything that decides what a proposing agent SEES. That separation
+is the point of doing this one next: retrieval quotas, the reserved caveat slot and the atlas are
+selection-shaping policy, and they previously sat in the same file as the durable store that decides
+what is TRUE. `claims.py` drops to 1,236 lines (from 2,846 before the split began).
+
+The direction is inverted from `claims_health`'s: `claims.py` imports THIS module to re-export it,
+so the one legal form for the five functions that need the ledger/store half (`build_context_pack`,
+`_classify_intent`, `_retrieval_tokens`, `cross_run_retrieve`, `portfolio_atlas`) is a
+function-local import. A module-level one is an import cycle at startup, and is guarded.
+
+One trap is worth recording because it cost a debugging pass and is invisible to every ordinary
+check: the module first took its leaf dependencies via `from claims_health import *`. Every name it
+needs from the leaf is PRIVATE, and `import *` skips underscore names — so the module imported
+cleanly, collected cleanly, and raised `NameError: _MAX_CONTEXT_CLAIMS` the first time a context
+pack was actually built. A wildcard is now banned here by test, and a second guard walks the
+module's compiled code objects (excluding `co_varnames`/`co_cellvars`/`co_freevars`, so a deferred
+import still reads as bound) to catch any private global that resolves nowhere.
+
+*Still open:* the remaining three modules (ledger, D8 store, assessments). Their back-edges are
+call-level rather than constant-level, so each needs its forward calls turned into deferred imports
+deliberately — mechanical, but not the same change as lifting a leaf out.
 
 #### EM-02 · HIGH · duplication · effort: medium
 

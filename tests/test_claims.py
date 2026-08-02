@@ -1611,3 +1611,122 @@ def test_the_private_names_other_packages_import_still_resolve_through_claims():
                  "_safe_research_source_summary", "_filter_claim_assessments",
                  "_load_claim_source_path"):
         assert hasattr(claims, name), f"engine.claims.{name} disappeared in the split"
+
+
+# --- the claims_retrieval split (doc 25 EM-01) -------------------------------------------------
+
+def _claims_module_source(name: str) -> str:
+    from pathlib import Path
+
+    return (Path(__file__).resolve().parents[1]
+            / "looplab" / "engine" / f"{name}.py").read_text(encoding="utf-8-sig")
+
+
+def _module_level_imports(source: str, prefix: str) -> list[str]:
+    import ast
+
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        module = getattr(node, "module", None) if isinstance(node, ast.ImportFrom) else None
+        names = ([module] if module else
+                 [a.name for a in node.names] if isinstance(node, ast.Import) else [])
+        for candidate in names:
+            if candidate and candidate.startswith(prefix) and node.col_offset == 0:
+                found.append(f"line {node.lineno}: {candidate}")
+    return found
+
+
+def test_claims_retrieval_is_the_top_of_the_claims_subsystem():
+    """The counterpart direction to `claims_health`'s leaf rule.
+
+    `claims_retrieval` decides what a proposing agent SEES — retrieval quotas, the reserved caveat
+    slot, the portfolio atlas. That is selection-shaping policy, and the reason it was pulled out of
+    the same file as the durable store is precisely that nothing which decides what is TRUE should
+    sit under something that decides what is SURFACED. So it may read the leaf, but it must reach
+    the store/ledger half only through deferred imports — `claims.py` imports THIS module to
+    re-export it, so a module-level import back is an immediate cycle.
+    """
+    source = _claims_module_source("claims_retrieval")
+    upward = _module_level_imports(source, "looplab.engine.claims")
+    upward = [entry for entry in upward if "claims_health" not in entry]
+    assert not upward, (
+        "claims_retrieval imports the claims store/ledger at MODULE level, but `claims.py` imports "
+        "claims_retrieval to re-export it — this is an import cycle at startup, not a style "
+        f"preference:\n  " + "\n  ".join(upward))
+
+
+def test_claims_retrieval_names_the_leaf_privates_it_needs_explicitly():
+    """A wildcard here fails at CALL time, not import time.
+
+    Every name `claims_retrieval` takes from `claims_health` is PRIVATE, and `from ... import *`
+    skips underscore names — so a star import resolves cleanly, passes collection, and then raises
+    `NameError: _MAX_CONTEXT_CLAIMS` the first time a context pack is actually built. That is a
+    latent crash on the agent-facing path, reachable only by running the feature.
+    """
+    import ast
+
+    source = _claims_module_source("claims_retrieval")
+    stars = [f"line {node.lineno}: {node.module}"
+             for node in ast.walk(ast.parse(source))
+             if isinstance(node, ast.ImportFrom)
+             and any(alias.name == "*" for alias in node.names)]
+    assert not stars, (
+        "claims_retrieval star-imports another module; every name it needs from claims_health is "
+        f"private, and `import *` silently skips those:\n  " + "\n  ".join(stars))
+
+
+def test_every_leaf_private_claims_retrieval_reads_is_actually_imported():
+    """The direct check the star import defeated: exercise the module's own free variables.
+
+    Compiling is not enough — Python resolves a module-level global lazily, so an unimported private
+    is invisible until the line runs. This walks the module's code objects instead.
+    """
+    import builtins
+
+    from looplab.engine import claims_retrieval
+
+    import types
+
+    unresolved = []
+
+    def _walk(code, qualname, bound):
+        # A deferred `from ... import X` binds X as a LOCAL while still naming it in co_names, so
+        # the bound sets are what distinguish "imported inside the function" (the legal form for the
+        # store/ledger half) from "expected as a module global and never bound anywhere". cellvars /
+        # freevars cover the case where the deferred import is read by a nested comprehension or
+        # helper closure rather than by the importing frame itself.
+        bound = bound | set(code.co_varnames) | set(code.co_cellvars) | set(code.co_freevars)
+        for name in code.co_names:
+            if not name.startswith("_") or name.startswith("__"):
+                continue
+            if name in bound or hasattr(claims_retrieval, name) or hasattr(builtins, name):
+                continue
+            unresolved.append(f"{qualname}: {name}")
+        for const in code.co_consts:
+            if isinstance(const, types.CodeType):
+                _walk(const, f"{qualname}.{const.co_name}", bound)
+
+    for obj in vars(claims_retrieval).values():
+        code = getattr(obj, "__code__", None)
+        if code is None or getattr(obj, "__module__", None) != claims_retrieval.__name__:
+            continue
+        _walk(code, obj.__name__, set())
+    assert not unresolved, (
+        "these private globals are referenced by claims_retrieval but resolve nowhere in it — the "
+        f"call raises NameError the first time it runs:\n  " + "\n  ".join(sorted(set(unresolved))))
+
+
+def test_the_retrieval_barrel_re_exports_the_same_objects():
+    """Same seam hazard as the health barrel: one object, two spellings, or monkeypatching lies."""
+    from looplab.engine import claims, claims_retrieval
+
+    shared = [name for name in dir(claims_retrieval)
+              if not name.startswith("__") and getattr(
+                  getattr(claims_retrieval, name), "__module__", claims_retrieval.__name__)
+              == claims_retrieval.__name__]
+    assert len(shared) >= 15, f"only {len(shared)} names own to claims_retrieval — the split moved little"
+    missing = [name for name in shared if not hasattr(claims, name)]
+    assert not missing, f"claims no longer re-exports {missing}; existing imports would break"
+    for name in shared:
+        assert getattr(claims, name) is getattr(claims_retrieval, name), (
+            f"claims.{name} is a COPY of claims_retrieval.{name}, not a re-export")
