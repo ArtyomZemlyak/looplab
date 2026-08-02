@@ -30,15 +30,16 @@ test('Markdown links share the bounded URL policy and reject active or credentia
     assert.equal(safeMarkdownHref(href), null, href)
   }
   const markdown = await source('markdown.jsx')
-  assert.match(markdown, /import \{ safeMarkdownHref \} from '\.\/urlSafety\.js'/)
+  assert.match(markdown, /import \{ safeExternalHref, safeMarkdownHref \} from '\.\/urlSafety\.js'/)
   assert.match(markdown, /export const safeHref = safeMarkdownHref/)
-  assert.match(markdown, /const href = safeMarkdownHref\(mm\[2\]\)/)
+  assert.match(markdown, /const href = externalOnly \? safePublicMarkdownHref\(mm\[2\]\) : safeMarkdownHref\(mm\[2\]\)/,
+    'both the owner and the public link policies must go through a bounded sanitizer, never a raw href')
 })
 
 test('large graph starts bounded and preserves exact deep links', async () => {
   const [runView, dag] = await Promise.all([source('RunView.jsx'), source('Dag.jsx')])
   assert.match(runView, /initialDagOverviewDecision\(\{/)
-  assert.match(runView, /explicitContext: selectedId != null \|\| selectedGroup != null \|\| historyActive/)
+  assert.match(runView, /explicitContext: historyActive \|\| \(selectedId != null && !selectedLiveGroupValid\)/)
   assert.match(runView, /largeOverviewAppliedRef\.current = true[\s\S]*?computeGroups\(live\.nodes, 'operator', live\)/)
   assert.match(runView, /setCollapsed\(new Set\(groups\.keys\(\)\)\)/)
   assert.match(dag, /fitView=\{autoFit\}[\s\S]*?defaultViewport=\{DAG_READABLE_VIEWPORT\}/)
@@ -99,12 +100,17 @@ test('stale async resources are cancelled and run ids are encoded at every trans
   ])
   assert.match(deadline, /const controller = new AbortController\(\)/)
   assert.match(deadline, /setTimeout\([\s\S]*controller\.abort/)
-  assert.match(shared, /deadlineGet\([\s\S]*SHARED_REQUEST_TIMEOUT_MS/)
+  assert.match(shared, /deadlineSharedAssistant\(sid, SHARED_REQUEST_TIMEOUT_MS\)/,
+    'the shared transcript read stays bounded, and by the share id rather than an owner path')
   assert.match(shared, /requestRef\.current !== timed/)
   assert.match(shared, /requestRef\.current\?\.controller\.abort\(\)/)
   assert.doesNotMatch(shared, /sharedLoadError = error =>[\s\S]{0,400}error\?*\.message/)
-  assert.match(shared, /'\/api\/assistant\/shared'/)
-  assert.match(shared, /'X-LoopLab-Share': String\(sid \|\| ''\)/)
+  const apiShared = api.slice(api.indexOf("const path = '/api/assistant/shared'"))
+  assert.match(apiShared, /'\/api\/assistant\/shared'/)
+  assert.match(apiShared, /'X-LoopLab-Share': String\(shareToken \|\| ''\)/,
+    'the share bearer travels in a header, never in the URL that reaches history or access logs')
+  assert.match(apiShared, /credentials: 'omit'/,
+    'a public share must not carry the owner cookie to an intentionally unauthenticated route')
   assert.match(hooks, /fetchEventStream\(runApiPath\(runId, '\/events'\), \{/)
   assert.match(hooks, /const controller = new AbortController\(\)/)
   assert.match(hooks, /lastEventId: lastStreamEventId/)
