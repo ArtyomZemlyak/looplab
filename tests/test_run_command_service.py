@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from looplab.events.eventstore import EventStore  # noqa: E402
 from looplab.events.replay import fold  # noqa: E402
 from looplab.serve import run_commands as run_commands_module  # noqa: E402
+from looplab.serve.engine_proc import EngineSpawnOutcomeUnknown  # noqa: E402
 from looplab.serve.protocol import CONTROL_EVENTS, PHASE_FINALIZING  # noqa: E402
 from looplab.serve.run_commands import (  # noqa: E402
     CONTROL_DATA_FIELDS, CONTROL_SPECS, TERMINAL_STATUSES, EnginePolicy, RunCommandService,
@@ -99,6 +100,54 @@ def _generation(client, run_id="demo"):
     generation = client.get(f"/api/runs/{run_id}/state").json()["generation"]
     assert isinstance(generation, str) and len(generation) == 64
     return generation
+
+
+def _replacement_spawn(rd, *, pid=9001, task_id="replacement", capture=None):
+    """A `_spawn_engine` stand-in that behaves like a real Replay child.
+
+    Replay withholds its 200 until a REPLACEMENT generation is durably visible, and while the reset
+    marker exists `EventStore` refuses every writer whose `RUN_RESET_OPERATION_ENV` does not match
+    the marker's operation id (`core/run_reset.py::assert_run_reset_write_allowed`, read from the
+    process environment). A fake that appends without adopting the env the route froze for the child
+    is fenced out, the spawn raises, and the route answers 503 — so the test never reaches the
+    behaviour after the reset."""
+    import os
+
+    from looplab.core.run_reset import RUN_RESET_OPERATION_ENV
+
+    def spawn(*args, env=None, **kwargs):
+        if capture is not None:
+            capture.append((args[0] if args else None, {"env": env, **kwargs}))
+        previous = os.environ.get(RUN_RESET_OPERATION_ENV)
+        os.environ[RUN_RESET_OPERATION_ENV] = (env or {}).get(RUN_RESET_OPERATION_ENV, "")
+        try:
+            EventStore(rd / "events.jsonl").append("run_started", {
+                "run_id": rd.name, "task_id": task_id, "goal": "g", "direction": "min"})
+        finally:
+            if previous is None:
+                os.environ.pop(RUN_RESET_OPERATION_ENV, None)
+            else:
+                os.environ[RUN_RESET_OPERATION_ENV] = previous
+        return pid
+
+    return spawn
+
+
+def _delete(client, run_id="demo", *, rd, op="1" * 8):
+    """Delete through the operation-bound transaction that replaced bodyless DELETE.
+
+    `DELETE /api/runs/{id}` is now a 409 stub ("deletion_identity_required") so a bodyless request
+    cannot destroy a REPLACEMENT generation nobody inspected. Its 409 is free and unconditional, so
+    a test still calling it collects the right STATUS for the wrong reason and never reaches the
+    active-command guard, the spawn-in-flight guard, or the delete itself."""
+    from looplab.serve.run_commands import run_generation_token
+
+    events = EventStore(rd / "events.jsonl").read_all()
+    return client.post(f"/api/runs/{run_id}/deletions", json={
+        "operation_id": f"{op}-1111-4111-8111-{'1' * 12}",
+        "expected_generation": run_generation_token(events),
+        "expected_seq": events[-1].seq if events else -1,
+    })
 
 
 def _post(client, event_type, data=None, key="key-1", *, generation=None):
@@ -789,14 +838,41 @@ def test_restart_waits_for_old_owner_then_requires_exact_replacement_serve(tmp_p
 
 
 def test_spawn_exception_and_no_progress_startup_are_structured_failures(tmp_path):
+    """A spawner that RAISED is uncertain; a refusal reached before Popen is a retryable failure.
+
+    `_spawn` arms its `popen_boundary_entered` flag BEFORE calling the injected spawner, because an
+    opaque callable can fail on either side of the OS accepting the process. Every exception out of
+    it is therefore `engine_start_uncertain`: the spawn claim is RETAINED and the intent is NOT
+    marked retryable, since retrying could start a second engine into the same run. Only a refusal
+    raised before that boundary — here, a run with no reproducible task — is still `spawn_failed`,
+    retryable, with the claim released and the spawner never called.
+    """
     rd = _seed(tmp_path)
     driver = _Driver(error=OSError("permission denied"))
-    client, _srv = _client(tmp_path, driver)
-    failed = _terminal(client, _post(client, "budget_extend", {"add_nodes": 2}).json())
-    assert failed["status"] == "failed" and failed["error"]["code"] == "spawn_failed"
-    assert set(failed["error"]) == {"code", "message", "retryable", "remediation"}
-    assert failed["error"]["retryable"] is True
+    client, srv = _client(tmp_path, driver)
+    uncertain = _terminal(client, _post(client, "budget_extend", {"add_nodes": 2}).json())
+    assert uncertain["status"] == "failed"
+    assert uncertain["error"]["code"] == "engine_start_uncertain"
+    assert set(uncertain["error"]) == {"code", "message", "retryable", "remediation"}
+    assert uncertain["error"]["retryable"] is False, (
+        "an uncertain process boundary must not invite a retry that could double-start the engine")
+    assert "spawn claim" in uncertain["error"]["remediation"]
+    assert srv.commands.spawn_inflight(rd), "the claim is retained as the duplicate-start hazard"
+    assert len(driver.calls) == 1
     assert _types(rd).count("budget_extend") == 1
+
+    pre_popen = _seed(tmp_path, "no-task")
+    (pre_popen / "task.snapshot.json").unlink()
+    never_called = _Driver(error=OSError("must not be reached"))
+    client_pre, _srv_pre = _client(tmp_path, never_called)
+    refused = _terminal(client_pre, client_pre.post(
+        "/api/runs/no-task/commands", headers={"Idempotency-Key": "pre-popen"},
+        json={"type": "budget_extend", "data": {"add_nodes": 2},
+              "expected_generation": _generation(client_pre, "no-task")}).json(),
+        run_id="no-task")
+    assert refused["status"] == "failed" and refused["error"]["code"] == "spawn_failed"
+    assert refused["error"]["retryable"] is True
+    assert never_called.calls == [], "a pre-Popen refusal never reaches the spawner"
 
     rd2 = _seed(tmp_path, "other")
     app = make_app(tmp_path)
@@ -1323,16 +1399,26 @@ def test_malformed_control_payload_is_rejected_before_durable_intent(tmp_path, e
 
 
 def test_same_key_is_observational_new_key_conflicts_and_explicit_retry_reuses_intent(tmp_path):
+    """The first start must fail RETRYABLY, which means failing before the Popen boundary.
+
+    A spawner exception is `engine_start_uncertain` now: the claim is retained, so every follow-up
+    here is refused with "an earlier engine start has not exposed its lock" and neither the
+    new-key conflict nor the explicit retry this test exists for is ever reached. Refuse before the
+    spawner instead (no task snapshot), then restore it so the retry can genuinely succeed.
+    """
     rd = _seed(tmp_path)
-    driver = _Driver(error=OSError("first start failed"))
+    snapshot = rd / "task.snapshot.json"
+    reproducible = snapshot.read_bytes()
+    snapshot.unlink()
+    driver = _Driver()
     client, _srv = _client(tmp_path, driver)
     body = {"add_nodes": 2}
     failed = _terminal(client, _post(client, "budget_extend", body, key="durable-budget").json())
-    assert failed["status"] == "failed" and len(driver.calls) == 1
+    assert failed["status"] == "failed" and driver.calls == []
 
     same = _post(client, "budget_extend", body, key="durable-budget")
     assert same.status_code == 200 and same.json()["status"] == "failed"
-    assert len(driver.calls) == 1 and _types(rd).count("budget_extend") == 1
+    assert driver.calls == [] and _types(rd).count("budget_extend") == 1
     duplicate = _post(client, "budget_extend", body, key="different-key")
     assert duplicate.status_code == 409
     assert duplicate.json()["detail"] == {
@@ -1343,7 +1429,7 @@ def test_same_key_is_observational_new_key_conflicts_and_explicit_retry_reuses_i
     }
     assert failed["id"] in duplicate.json()["detail"]["remediation"]
 
-    driver.error = None
+    snapshot.write_bytes(reproducible)          # the cause is fixed; the SAME intent may retry
 
     def start_and_ack():
         driver.alive = True
@@ -1355,7 +1441,7 @@ def test_same_key_is_observational_new_key_conflicts_and_explicit_retry_reuses_i
     done = _terminal(client, retried.json())
     assert done["status"] == "succeeded" and done["id"] == failed["id"]
     assert done.get("retry_count") == 1
-    assert len(driver.calls) == 2 and _types(rd).count("budget_extend") == 1
+    assert len(driver.calls) == 1 and _types(rd).count("budget_extend") == 1
 
 
 def test_semantically_equivalent_additive_payload_cannot_bypass_unresolved_guard(tmp_path):
@@ -1420,8 +1506,17 @@ def test_legacy_mutation_cannot_overtake_retryable_terminal_additive_intent(
 
 
 def test_legacy_mutations_cannot_overtake_failed_retryable_additive_intent(tmp_path):
+    """Produce the retryable failure BEFORE the Popen boundary.
+
+    A spawner that raises is now `engine_start_uncertain` and NOT retryable (see
+    `test_spawn_exception_and_no_progress_startup_are_structured_failures`), so injecting an error
+    into the driver no longer sets up the state this test needs — it would silently become a
+    non-retryable-intent test wearing a retryable name. Removing the task snapshot makes `_spawn`
+    refuse before it reaches the spawner, which is still `spawn_failed` + retryable.
+    """
     rd = _seed(tmp_path)
-    client, _srv = _client(tmp_path, _Driver(error=OSError("spawn failed")))
+    (rd / "task.snapshot.json").unlink()
+    client, _srv = _client(tmp_path, _Driver())
     command = _terminal(client, _post(
         client, "budget_extend", {"add_nodes": 2}, key="legacy-failed-guard").json())
     assert command["status"] == "failed"
@@ -1646,8 +1741,12 @@ def test_card_drop_bypasses_active_driver_gate_and_cancels_live_work(tmp_path):
 
 
 def test_explicit_retry_is_blocked_while_a_different_command_is_active(tmp_path):
+    # Fail before the Popen boundary (no task snapshot). A spawner exception would instead retain an
+    # uncertain start claim, and the SECOND command would be refused by that claim rather than
+    # accepted — so the retry could never reach the active-command guard this test pins.
     rd = _seed(tmp_path)
-    driver = _Driver(error=OSError("start failed"))
+    (rd / "task.snapshot.json").unlink()
+    driver = _Driver()
     client, srv = _client(tmp_path, driver)
     failed = _terminal(
         client, _post(client, "budget_extend", {"add_nodes": 1}, key="failed-a").json())
@@ -2174,9 +2273,10 @@ def test_slow_spawn_keeps_lease_past_startup_window_and_late_ack_succeeds(tmp_pa
     current = client.get(f"/api/runs/demo/commands/{command['id']}").json()
     assert current["status"] == "executing" and current.get("startup_slow") is True
     assert len(driver.calls) == 1 and srv.commands.spawn_inflight(rd)
-    blocked = client.delete("/api/runs/demo")
+    blocked = _delete(client, rd=rd)
     assert blocked.status_code == 409
-    assert any(reason in blocked.json()["detail"] for reason in ("active command", "engine start"))
+    assert any(reason in str(blocked.json()["detail"])
+               for reason in ("active command", "engine start"))
     retry = client.post(f"/api/runs/demo/commands/{command['id']}/retry")
     assert retry.status_code == 409 and len(driver.calls) == 1
 
@@ -2282,12 +2382,12 @@ def test_delete_is_excluded_by_active_command_then_permitted_after_terminal(tmp_
     pause = _post(client, "pause", key="delete-guard").json()
     _wait_for_intent(rd, pause["id"])
 
-    blocked = client.delete("/api/runs/demo")
-    assert blocked.status_code == 409 and pause["id"] in blocked.json()["detail"]
+    blocked = _delete(client, rd=rd)
+    assert blocked.status_code == 409 and pause["id"] in str(blocked.json()["detail"])
     assert rd.exists()
     driver.alive = False
     assert _terminal(client, pause)["status"] == "succeeded"
-    deleted = client.delete("/api/runs/demo")
+    deleted = _delete(client, rd=rd, op="2" * 8)
     assert deleted.status_code == 200 and not rd.exists()
     time.sleep(0.05)
     assert driver.calls == []
@@ -2314,19 +2414,15 @@ def test_reset_active_guard_and_external_spawn_lease_prevent_second_popen(monkey
 
     reset_spawns = []
 
-    def reset_spawn(args, **kwargs):
-        reset_spawns.append((args, kwargs))
-        EventStore(rd / "events.jsonl").append(
-            "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
-        return 9001
-
-    monkeypatch.setattr(control_router, "_spawn_engine", reset_spawn)
+    monkeypatch.setattr(control_router, "_spawn_engine", _replacement_spawn(
+        rd, pid=9001, task_id="task", capture=reset_spawns))
     reset = client.post("/api/runs/demo/reset")
     assert reset.status_code == 200 and len(reset_spawns) == 1
     assert srv.commands.spawn_inflight(rd)
-    delete_during_start = client.delete("/api/runs/demo")
+    delete_during_start = _delete(client, rd=rd)
     assert delete_during_start.status_code == 409
-    assert "engine start is still in progress" in delete_during_start.json()["detail"]
+    detail = delete_during_start.json()["detail"]
+    assert detail["code"] == "engine_launching" and detail["retryable"] is True
 
     before_lock = _post(client, "budget_extend", {"add_nodes": 2}, key="after-reset")
     assert before_lock.status_code == 409
@@ -2362,13 +2458,8 @@ def test_reset_rejects_delayed_first_post_but_same_key_replays_old_terminal_reco
 
     from looplab.serve.routers import control as control_router
 
-    def reset_spawn(_args, **_kwargs):
-        EventStore(rd / "events.jsonl").append(
-            "run_started", {"run_id": "demo", "task_id": "task-b", "goal": "b",
-                            "direction": "min"})
-        return 9002
-
-    monkeypatch.setattr(control_router, "_spawn_engine", reset_spawn)
+    monkeypatch.setattr(control_router, "_spawn_engine", _replacement_spawn(
+        rd, pid=9002, task_id="task-b"))
     reset = client.post("/api/runs/demo/reset")
     assert reset.status_code == 200
     generation_b = _generation(client)
@@ -2444,7 +2535,19 @@ def test_get_quarantines_stale_or_unbound_nonterminal_records_without_starting_w
     assert driver.calls == [] and _types(rd) == ["run_started"]
 
 
-def test_reset_archive_failure_rolls_back_and_never_spawns(monkeypatch, tmp_path):
+def test_reset_archive_failure_leaves_the_run_readable_and_never_spawns(monkeypatch, tmp_path):
+    """An artifact that cannot be archived stops Replay before any engine is launched.
+
+    Inject at `_durable_archive_move` — the archive is a native no-replace `renameat2`/`MoveFileExW`
+    call now, so patching `Path.rename` intercepts nothing and the reset under test quietly SUCCEEDS
+    (spawn included) while the assertions below wait for a failure that never comes.
+
+    The transaction reports 425 `reset_pending` and keeps the operation open rather than unwinding:
+    a retry resumes from the recorded `archiving` phase. `spans.jsonl` is the first artifact in the
+    manifest, so failing on it leaves both it and the event log exactly where they were.
+    """
+    import looplab.serve.reset_route as reset_route
+
     rd = _seed(tmp_path, finished=True)
     (rd / "spans.jsonl").write_text('{"name":"keep"}\n', encoding="utf-8")
     before_events = (rd / "events.jsonl").read_bytes()
@@ -2454,28 +2557,39 @@ def test_reset_archive_failure_rolls_back_and_never_spawns(monkeypatch, tmp_path
 
     spawns = []
     monkeypatch.setattr(control_router, "_spawn_engine", lambda *a, **k: spawns.append((a, k)))
-    original_rename = type(rd).rename
+    real_move = reset_route._durable_archive_move
 
-    def fail_spans_rename(self, target):
-        if self.name == "spans.jsonl":
+    def fail_spans_archive(source, destination):
+        if source.name == "spans.jsonl":
             raise OSError("simulated archive failure")
-        return original_rename(self, target)
+        return real_move(source, destination)
 
-    monkeypatch.setattr(type(rd), "rename", fail_spans_rename)
+    monkeypatch.setattr(reset_route, "_durable_archive_move", fail_spans_archive)
     response = client.post("/api/runs/demo/reset")
-    assert response.status_code == 500 and "no engine was started" in response.json()["detail"]
-    assert spawns == []
+    assert response.status_code == 425
+    detail = response.json()["detail"]
+    assert detail["code"] == "reset_pending" and "spans.jsonl" in detail["message"]
+    assert spawns == [], "no engine may be launched against a half-archived run"
     assert (rd / "events.jsonl").read_bytes() == before_events
     assert (rd / "spans.jsonl").read_bytes() == before_spans
     assert not list(rd.glob("events.jsonl.reset-*"))
 
 
-def test_reset_spawn_lease_failure_restores_archived_run(monkeypatch, tmp_path):
+def test_reset_spawn_lease_failure_keeps_the_archive_intact_and_never_spawns(monkeypatch, tmp_path):
+    """A lease that cannot be written stops Replay before Popen, without discarding the archive.
+
+    The lease is taken AFTER the artifacts move, so the archived copies exist by the time it fails.
+    They are deliberately left in place: the receipt records the reached phase and a retry of the
+    same operation resumes from it, whereas un-archiving would throw away the only copy of the run
+    if this process died mid-rollback. What must hold is that every archived byte still matches the
+    original and that no engine was started against the half-finished transaction.
+    """
     rd = _seed(tmp_path, finished=True)
     (rd / "spans.jsonl").write_text('{"name":"keep"}\n', encoding="utf-8")
     before_events = (rd / "events.jsonl").read_bytes()
     before_spans = (rd / "spans.jsonl").read_bytes()
     client, srv = _client(tmp_path, _Driver())
+    from looplab.core.run_reset import load_run_reset_marker
     from looplab.serve.routers import control as control_router
 
     spawns = []
@@ -2489,9 +2603,9 @@ def test_reset_spawn_lease_failure_restores_archived_run(monkeypatch, tmp_path):
     with pytest.raises(OSError, match="lease write failed"):
         client.post("/api/runs/demo/reset")
     assert spawns == []
-    assert (rd / "events.jsonl").read_bytes() == before_events
-    assert (rd / "spans.jsonl").read_bytes() == before_spans
-    assert not list(rd.glob("*.reset-*"))
+    assert next(rd.glob("events.jsonl.reset-*")).read_bytes() == before_events
+    assert next(rd.glob("spans.jsonl.reset-*")).read_bytes() == before_spans
+    assert load_run_reset_marker(rd) is not None, "the operation stays owned, and so resumable"
 
 
 def test_external_spawn_record_failure_keeps_lease_and_reset_archives(monkeypatch, tmp_path):
@@ -2514,9 +2628,13 @@ def test_external_spawn_record_failure_keeps_lease_and_reset_archives(monkeypatc
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("claim update failed")))
 
     # Popen returned, so a persistence error must leave the preclaim in place. A second legacy
-    # resume observes already_starting and cannot call Popen again.
-    with pytest.raises(OSError, match="claim update failed"):
+    # resume observes already_starting and cannot call Popen again. The error surfaces WRAPPED as
+    # `EngineSpawnOutcomeUnknown`: past the spawn boundary a bare OSError would read as "nothing
+    # started", which is exactly the wrong conclusion to hand a caller deciding whether to retry.
+    with pytest.raises(EngineSpawnOutcomeUnknown) as spawn_error:
         client.post("/api/runs/resume-me/resume")
+    assert isinstance(spawn_error.value.__cause__, OSError)
+    assert "claim update failed" in str(spawn_error.value.__cause__)
     assert srv.commands._spawn_claim_path(resume_rd).exists()
     resumed_again = client.post("/api/runs/resume-me/resume")
     assert resumed_again.status_code == 409
@@ -2524,9 +2642,12 @@ def test_external_spawn_record_failure_keeps_lease_and_reset_archives(monkeypatc
     assert len(spawns) == 1
 
     # Reset must not roll archived files back underneath a child that may already be using the new
-    # run directory; its preclaim likewise remains the duplicate-spawn quarantine.
-    with pytest.raises(OSError, match="claim update failed"):
-        client.post("/api/runs/reset-me/reset")
+    # run directory; its preclaim likewise remains the duplicate-spawn quarantine. Unlike the legacy
+    # resume above, the durable transaction CATCHES the uncertain spawn and answers with a resumable
+    # receipt instead of letting the exception escape as a 500.
+    reset = client.post("/api/runs/reset-me/reset")
+    assert reset.status_code == 503
+    assert reset.json()["detail"]["code"] == "reset_launch_uncertain"
     assert srv.commands._spawn_claim_path(reset_rd).exists()
     assert not (reset_rd / "events.jsonl").exists()
     assert list(reset_rd.glob("events.jsonl.reset-*"))
@@ -2816,14 +2937,21 @@ def test_command_and_lock_sidecar_symlinks_are_rejected(monkeypatch, tmp_path):
 
     (rd / ".commands").unlink()
     events = rd / "events.jsonl"
+    # Capture the fence while the log is still readable: once it is a symlink out of the run, /state
+    # refuses to serve a generation at all, and `_post` would die reading it instead of proving that
+    # the COMMAND path rejects the sidecar.
+    inside_generation = _generation(client)
     backup = rd / "events.real.jsonl"
     events.rename(backup)
     outside_events = outside / "events.jsonl"
     outside_events.write_bytes(backup.read_bytes())
     before = outside_events.read_bytes()
     os.symlink(outside_events, events)
-    response = _post(client, "hint", {"text": "events must stay in run"}, key="events-link")
-    assert response.status_code == 409 and outside_events.read_bytes() == before
+    response = _post(client, "hint", {"text": "events must stay in run"}, key="events-link",
+                     generation=inside_generation)
+    # 404, not 409: the events-symlink check moved down into `AppState.run_dir`, so a run whose log
+    # points outside the run directory is not a run to ANY route, not just to the command service.
+    assert response.status_code == 404 and outside_events.read_bytes() == before
     events.unlink()
     backup.rename(events)
 
