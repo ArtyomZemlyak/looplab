@@ -75,7 +75,7 @@ file's `settings:` **>** env/`.env` **>** defaults.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **158 of the 192 direct `Settings` fields in 10 groups**. The default
+server-owned curated catalogue with **158 of the 193 direct `Settings` fields in 10 groups**. The default
 **Essential** disclosure mode contains 18 high-frequency keys; search spans all 158 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes.
@@ -181,6 +181,7 @@ These are no-ops unless `backend=llm`.
 | `llm_model` | `LOOPLAB_LLM_MODEL` | `qwen3:8b` | Model id |
 | `llm_base_url` | `LOOPLAB_LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint (Ollama default) |
 | `llm_api_key` | `LOOPLAB_LLM_API_KEY` | — | Secret; never serialized as a value. Local servers ignore it |
+| `llm_api_key_base_url` | `LOOPLAB_LLM_API_KEY_BASE_URL` | — | Endpoint the secret above is bound to. A key travels only while the request still goes to this host, so a role/stage endpoint override drops the credential instead of sending it elsewhere. Dropped from config snapshots entirely (not masked) |
 | `llm_temperature` | `LOOPLAB_LLM_TEMPERATURE` | `0.6` | Sampling temperature |
 | `llm_parser` | `LOOPLAB_LLM_PARSER` | `tool_call` | Structured-output strategy (`tool_call`, with text fallback) |
 | `llm_guided_json` | `LOOPLAB_LLM_GUIDED_JSON` | `false` | Use the endpoint's constrained decoding (vLLM/SGLang `guided_json`) |

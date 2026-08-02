@@ -241,6 +241,10 @@ def test_the_stage_client_cache_does_not_merge_two_credentials(monkeypatch):
     the other's account."""
     monkeypatch.setenv("TEAM_A_API_KEY", "sk-a")
     monkeypatch.setenv("TEAM_B_API_KEY", "sk-b")
+    # Each credential names the endpoint it is bound to; both profiles here deliberately share the
+    # endpoint, which is exactly what makes the cache-merge hazard this test pins possible.
+    monkeypatch.setenv("TEAM_A_API_KEY_BASE_URL", "https://p/v1")
+    monkeypatch.setenv("TEAM_B_API_KEY_BASE_URL", "https://p/v1")
     agent = _unified(llm_model="m", llm_base_url="https://p/v1",
                      llm_profiles={"a": {"api_key_env": "TEAM_A_API_KEY"},
                                    "b": {"api_key_env": "TEAM_B_API_KEY"}},

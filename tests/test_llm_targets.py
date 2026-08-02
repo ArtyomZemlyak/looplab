@@ -110,9 +110,14 @@ def test_a_bound_profile_supplies_its_own_key(monkeypatch):
     monkeypatch.setattr(llm_mod, "make_llm_client",
                         lambda settings, **kw: seen.append(kw) or object())
     monkeypatch.setenv("LOOPLAB_LLM_API_KEY_CODER", "sk-coder")
+    # A profile credential must declare the endpoint it is bound to, from the SAME source, so the
+    # key can never travel to a host it was not issued for. Setting only the key is now a loud
+    # LLMError before any client is built.
+    monkeypatch.setenv("LOOPLAB_LLM_API_KEY_CODER_BASE_URL", "https://provider.tld/v1")
     s = Settings(llm_profiles=_PROFILES, role_profiles={"implement": "coder"})
     make_llm_client_for(s, role="implement")
     assert seen[0]["api_key"] == "sk-coder"
+    assert seen[0]["api_key_base_url"] == "https://provider.tld/v1"
 
 
 def test_a_missing_credential_fails_loudly_and_never_echoes_a_value(monkeypatch):
