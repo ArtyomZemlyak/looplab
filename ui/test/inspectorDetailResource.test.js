@@ -17,7 +17,15 @@ test('missing Inspector summary exposes detail failure, safe retry, and focus re
     location: dom.window.location, sessionStorage: dom.window.sessionStorage,
     requestAnimationFrame: callback => setTimeout(callback, 0),
     cancelAnimationFrame: handle => clearTimeout(handle), IS_REACT_ACT_ENVIRONMENT: true,
-    fetch: url => new Promise(resolve => requests.push({ url: String(url), resolve })),
+    // Abort-aware on purpose. A real `fetch` REJECTS when its signal aborts; a stub that ignores the
+    // signal leaves every unanswered request pending forever, and unmount — which aborts the
+    // in-flight detail read — then never completes. That turned any assertion failure in this file
+    // into a harness timeout instead of a fast red, which is how the stale assertion below hid.
+    fetch: (url, options = {}) => new Promise((resolve, reject) => {
+      requests.push({ url: String(url), resolve })
+      options.signal?.addEventListener('abort',
+        () => reject(new DOMException('The operation was aborted.', 'AbortError')))
+    }),
   }
   const previous = Object.fromEntries(Object.keys(installed)
     .map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
@@ -54,11 +62,25 @@ test('missing Inspector summary exposes detail failure, safe retry, and focus re
 
     retry.focus()
     await act(async () => retry.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
-    assert.match(document.querySelector('[role="status"]')?.textContent || '',
-      /Loading experiment #99 details/)
+    // A retry no longer blanks the surface back to "Loading…" — the alert stays, its button relabels
+    // to "Retrying…" and disables. That is better on every count: the operator keeps the message
+    // they were reading, the control is single-flight, and focus has a live element to stay on.
+    assert.equal(document.querySelector('[role="status"]'), null,
+      'an in-flight retry must not discard the error the operator is reading')
+    const pending = document.querySelector('[role="alert"] button')
+    assert.match(pending.textContent, /Retrying…/)
+    assert.equal(pending.disabled, true, 'the retry control must be single-flight while in flight')
+
     await reply(requests[1], { detail: 'token=must-not-render' }, 503)
     await act(async () => new Promise(resolve => setTimeout(resolve, 5)))
-    assert.equal(document.activeElement, document.querySelector('[role="alert"]'))
+    // Focus recovery means the operator does not lose their place — it stays on the Retry control
+    // they just used, INSIDE the re-rendered alert. Requiring focus on the alert container would
+    // yank it off the button and out of the keyboard flow.
+    const refocused = document.querySelector('[role="alert"] button')
+    assert.equal(document.activeElement, refocused,
+      'a failed retry must leave focus on the control that can retry again')
+    assert.notEqual(document.activeElement, document.body,
+      'focus must never fall back to the document body across a failed retry')
     assert.doesNotMatch(document.body.textContent, /token/)
 
     const secondRetry = document.querySelector('[role="alert"] button')
