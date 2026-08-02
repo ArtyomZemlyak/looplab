@@ -2063,7 +2063,7 @@ divergence is a decision rather than a surprise.
 
 *Recommendation:* Add a registry-style guard consistent with the repo convention: e.g. a STRATEGY_FIELDS tuple plus a test asserting _StrategyOut's model_fields, _assemble_strategy's copied keys, and validate_strategy's accepted keys all cover it (a source-scan test like tests/test_role_output_contract.py). Collapse CARD_SCORING_STANCES into NOVELTY_STANCES or document why they may diverge.
 
-#### AG-04 · LOW · duplication · effort: small
+#### AG-04 · LOW · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **UnifiedAgent.choose_action and triage_crash duplicate ~40 lines of identical loop scaffolding**
 
@@ -2072,6 +2072,27 @@ divergence is a decision rather than a surprise.
 *Evidence:* Both methods repeat the same sequence with only content differing: pilot-client None guard, render(system prompt), messages build, inline emit_spec dict, _finalize/_fallback closures that coerce-or-default, conditional bind_state on _pilot_tools, the call-time 'from looplab.agents.agent import drive_tool_loop' seam import (choose_action with the full six-line seam comment, triage_crash with a one-line pointer to it), drive_tool_loop(max_turns=self._agent_max_turns, time_budget_s=self._agent_time_budget_s, **self._loop_opts), and the identical except BudgetExceeded raise / except Exception -> _fallback tail. Only the schema, finalize coercion and default result differ.
 
 *Recommendation:* Extract a private _pilot_emit(self, messages, emit_spec, finalize, fallback, state=None) helper owning bind_state, the seam import, the loop kwargs and the exception tail; both methods keep their prompts/schemas/coercions (prompt strings untouched).
+
+*Resolution (2026-08-02):* `UnifiedAgent._pilot_emit(messages, emit_spec, finalize, fallback, *,
+state=None, bind_state=True)` owns what the two methods shared — the optional `bind_state`, the
+call-time seam import with its six-line comment, the loop kwargs, and the containment boundary.
+Each caller keeps its prompt, schema and coercion, and each keeps a one-line note saying what ITS
+fallback means (the policy recommendation; the safe "attempt repair" action), so the why stays at
+the site that knows.
+
+It is also AG-06's first adopter: the containment tail is now `tool_loop.resilient`, which is
+exactly the "adopt opportunistically at new call sites" that finding recommends.
+
+`bind_state` is a FLAG rather than an inference from `state is not None`, because the two callers
+genuinely differ — the pilot binds unconditionally, triage only when handed a run state — and
+collapsing it would silently change which tools are reachable.
+
+*The teeth pass needed two rounds and that is the point.* Three deliberate breaks were tried; two
+initially passed. Collapsing the flag into `state is not None` was invisible because both existing
+cases agreed with it, and a caller that simply stops passing `bind_state` still reads as one
+`_pilot_emit(` call to a structural count. The guards now include the distinguishing case (`state`
+is None but binding is still requested) and drive `triage_crash` itself. All three breaks fail
+loudly.
 
 #### AG-05 · LOW · mergeable-entities · effort: medium
 

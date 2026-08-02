@@ -95,3 +95,111 @@ def test_the_rule_is_documented_where_a_new_caller_will_read_it():
     doc = resilient.__doc__ or ""
     assert "BudgetExceeded" in doc
     assert "propagat" in doc.lower() and "degrade" in doc.lower()
+
+
+# --- the pilot emit helper (doc 25 AG-04) ------------------------------------------------------
+
+def _pilot(bind_calls, *, tools=True):
+    """A UnifiedAgent stripped to what `_pilot_emit` reads."""
+    from looplab.agents.unified_agent import UnifiedAgent
+
+    class _Tools:
+        def bind_state(self, state, parent=None):
+            bind_calls.append((state, parent))
+
+    agent = UnifiedAgent.__new__(UnifiedAgent)
+    agent._pilot_client = object()
+    agent._pilot_tools = _Tools() if tools else None
+    agent._agent_max_turns = 3
+    agent._agent_time_budget_s = 1.0
+    agent._loop_opts = {}
+    return agent
+
+
+def test_the_pilot_emit_binds_state_only_when_its_caller_says_so(monkeypatch):
+    """`choose_action` binds unconditionally; `triage_crash` binds only when handed a run state.
+    Inferring the flag from `state is not None` would silently change which tools are reachable, so
+    it stays explicit and this pins both directions."""
+    import looplab.agents.agent as agent_module
+
+    monkeypatch.setattr(agent_module, "drive_tool_loop", lambda *a, **k: {"ok": True})
+
+    bound = []
+    assert _pilot(bound)._pilot_emit([], {}, None, lambda _m: None,
+                                     state="S", bind_state=True) == {"ok": True}
+    assert bound == [("S", None)]
+
+    bound = []
+    _pilot(bound)._pilot_emit([], {}, None, lambda _m: None, state=None, bind_state=False)
+    assert bound == [], "triage without a run state must not bind tools to it"
+
+    # The case that distinguishes the FLAG from an inference: the pilot binds even when the state
+    # it was handed is None. Collapsing `bind_state` into `state is not None` passes both cases
+    # above and silently changes which tools the pilot can reach.
+    bound = []
+    _pilot(bound)._pilot_emit([], {}, None, lambda _m: None, state=None, bind_state=True)
+    assert bound == [(None, None)], (
+        "an explicit bind must happen regardless of the state's value — that is why it is a flag")
+
+
+def test_the_pilot_emit_propagates_a_budget_stop_and_degrades_everything_else(monkeypatch):
+    """The containment rule reaching the site it was extracted for."""
+    import looplab.agents.agent as agent_module
+
+    def budget(*_a, **_k):
+        raise BudgetExceeded("ceiling reached")
+
+    monkeypatch.setattr(agent_module, "drive_tool_loop", budget)
+    with pytest.raises(BudgetExceeded):
+        _pilot([])._pilot_emit([], {}, None, lambda _m: "fallback", state=None)
+
+    def transport(*_a, **_k):
+        raise RuntimeError("endpoint 503 after retries")
+
+    monkeypatch.setattr(agent_module, "drive_tool_loop", transport)
+    assert _pilot([])._pilot_emit([], {}, None, lambda _m: "fallback",
+                                  state=None) == "fallback"
+
+
+def test_the_seam_is_resolved_at_call_time(monkeypatch):
+    """The six-line comment this helper inherited exists because a module-level import early-binds
+    the function object, so a monkeypatch on the documented seam never reaches the call — and an
+    offline test then silently drives the REAL loop against the real client."""
+    import looplab.agents.agent as agent_module
+
+    monkeypatch.setattr(agent_module, "drive_tool_loop", lambda *a, **k: "patched")
+    assert _pilot([])._pilot_emit([], {}, None, lambda _m: "fb", state=None) == "patched"
+
+
+def test_triage_without_a_run_state_reaches_the_helper_with_binding_off(monkeypatch):
+    """Driving the real entry point, because the wiring is what the structural count cannot see: a
+    caller that simply stops passing `bind_state` still shows up as one `_pilot_emit(` call."""
+    from looplab.agents.unified_agent import UnifiedAgent
+
+    seen = {}
+
+    def spy(_self, messages, emit_spec, finalize, fallback, *, state=None, bind_state=True):
+        seen.update(state=state, bind_state=bind_state)
+        return {"action": "repair", "rationale": ""}
+
+    monkeypatch.setattr(UnifiedAgent, "_pilot_emit", spy)
+    agent = UnifiedAgent.__new__(UnifiedAgent)
+    agent._pilot_client = object()
+    agent._pilot_tools = None
+    agent.prompts = {}
+    node = type("N", (), {"id": 1, "code": ""})()
+    agent.triage_crash(node, "boom", 1)
+    assert seen == {"state": None, "bind_state": False}, (
+        "triage with no run state must not ask the helper to bind tools to it")
+
+
+def test_both_public_entry_points_go_through_the_helper():
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "looplab" / "agents"
+              / "unified_agent.py").read_text(encoding="utf-8-sig")
+    ast.parse(source)
+    assert source.count("self._pilot_emit(") == 2, "choose_action and triage_crash, no more no less"
+    assert "except BudgetExceeded:" not in source, (
+        "the containment idiom is inlined again; `_pilot_emit` routes through tool_loop.resilient")

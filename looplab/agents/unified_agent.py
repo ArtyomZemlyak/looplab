@@ -20,7 +20,10 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.agents.roles import WrapsDeveloper, forward_hints
-from looplab.core.llm import BudgetExceeded
+# `BudgetExceeded` is no longer named here — the propagate-vs-degrade rule moved into
+# `tool_loop.resilient`, which owns it (doc 25 AG-06). Re-exported for any importer that
+# reached it through this module.
+from looplab.core.llm import BudgetExceeded  # noqa: F401
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.prompts import render
 
@@ -164,6 +167,40 @@ class UnifiedAgent(WrapsDeveloper):
         "from the legal list and a one-sentence `rationale`."
     )
 
+    def _pilot_emit(self, messages: list, emit_spec: dict, finalize, fallback, *,
+                    state=None, bind_state: bool = True):
+        """Drive the pilot tool loop for one emit, containing everything but a budget stop.
+
+        `choose_action` and `triage_crash` differ only in prompt, schema and coercion; this owns what
+        they shared — the optional `bind_state`, the call-time seam import, the loop kwargs, and the
+        containment boundary. Each caller's `fallback` still carries its own meaning (the policy
+        recommendation; the safe "attempt repair" action), so what degrades and why stays at the site
+        that knows.
+
+        `bind_state` is a flag rather than an inference from `state is not None` because the two
+        callers genuinely differ: the pilot binds unconditionally, while triage binds only when it
+        was handed a run state — collapsing that would silently change which tools are reachable.
+        """
+        if bind_state and self._pilot_tools is not None and hasattr(self._pilot_tools, "bind_state"):
+            self._pilot_tools.bind_state(state, None)
+        # Resolve through `agent.py`'s module global at CALL time, not at import time: a
+        # module-level `from ... import drive_tool_loop` early-binds the function object, so a
+        # monkeypatch on the documented seam `looplab.agents.agent.drive_tool_loop` (CLAUDE.md;
+        # `agent.py` states the contract) never reached this call and an offline test silently
+        # drove the REAL loop against the real client. `strategist.py` already imports it here.
+        from looplab.agents.agent import drive_tool_loop
+        from looplab.agents.tool_loop import resilient
+
+        # A hard budget stop propagates and ends the run; a transport failure degrades to the
+        # caller's fallback rather than crashing it. `resilient` is that rule written down once
+        # (doc 25 AG-06), and this is the new call site it was meant to be adopted at.
+        return resilient(
+            lambda: drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
+                                    max_turns=self._agent_max_turns,
+                                    time_budget_s=self._agent_time_budget_s,
+                                    finalize=finalize, fallback=fallback, **self._loop_opts),
+            lambda: fallback(messages))
+
     def choose_action(self, state: RunState, legal: list[dict], recommended: Optional[dict] = None,
                       *, brief: str = "") -> dict:
         """Pick the next macro action from `legal` (the pure legal-action gate). Returns a dict
@@ -233,23 +270,9 @@ class UnifiedAgent(WrapsDeveloper):
         def _fallback(_messages) -> dict:
             return {"index": default_idx, "rationale": "fallback: policy recommendation"}
 
-        if self._pilot_tools is not None and hasattr(self._pilot_tools, "bind_state"):
-            self._pilot_tools.bind_state(state, None)
-        # Resolve through `agent.py`'s module global at CALL time, not at import time: a
-        # module-level `from ... import drive_tool_loop` early-binds the function object, so a
-        # monkeypatch on the documented seam `looplab.agents.agent.drive_tool_loop` (CLAUDE.md;
-        # `agent.py` states the contract) never reached this call and an offline test silently
-        # drove the REAL loop against the real client. `strategist.py` already imports it here.
-        from looplab.agents.agent import drive_tool_loop
-        try:
-            return drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
-                                   max_turns=self._agent_max_turns,
-                                   time_budget_s=self._agent_time_budget_s,
-                                   finalize=_finalize, fallback=_fallback, **self._loop_opts)
-        except BudgetExceeded:      # hard budget stop -> propagate and end the run
-            raise
-        except Exception:  # noqa: BLE001 - a transport failure must not crash the run; the pilot
-            return _fallback(messages)   # degrades to the policy recommendation (still within `legal`)
+        # On any transport failure the pilot degrades to the policy recommendation, still within
+        # `legal` — see `_pilot_emit` for the budget-vs-transport rule it applies.
+        return self._pilot_emit(messages, emit_spec, _finalize, _fallback, state=state)
 
     # --------------------------------------------------- Crash triage (in-node repair)
     _TRIAGE_SYSTEM = (
@@ -311,15 +334,7 @@ class UnifiedAgent(WrapsDeveloper):
         def _fallback(_messages) -> dict:
             return {"action": "repair", "rationale": "fallback: attempt repair"}
 
-        if state is not None and self._pilot_tools is not None and hasattr(self._pilot_tools, "bind_state"):
-            self._pilot_tools.bind_state(state, None)   # enable read_code / find_analogous on the run
-        from looplab.agents.agent import drive_tool_loop   # call-time seam, see above
-        try:
-            return drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
-                                   max_turns=self._agent_max_turns,
-                                   time_budget_s=self._agent_time_budget_s,
-                                   finalize=_finalize, fallback=_fallback, **self._loop_opts)
-        except BudgetExceeded:      # hard budget stop -> propagate and end the run
-            raise
-        except Exception:  # noqa: BLE001 - a transport failure must not crash the run; triage
-            return _fallback(messages)   # degrades to the safe "attempt repair" action
+        # Binding only with a run state is what enables read_code / find_analogous on it; on any
+        # transport failure triage degrades to the safe "attempt repair" action.
+        return self._pilot_emit(messages, emit_spec, _finalize, _fallback,
+                                state=state, bind_state=state is not None)
