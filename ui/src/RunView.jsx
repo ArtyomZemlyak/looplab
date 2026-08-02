@@ -857,7 +857,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           ? `${panel} is unavailable while Start over is being resolved.`
           : `${panel} is not included in this review link.`
       setRouteNotice(current => [current, reason].filter(Boolean).join(' '))
-      setPanel(null, { mode: 'replace', preserveIssues: true })
+      setPanel(null, { mode: 'replace', preserveIssues: true, forceGeneration: true })
     }
   }, [panel, reviewMode, reviewEvidence, historyActive, startOverMutationBlocked])
   const panelReturnFocusRef = useRef(null)
@@ -875,7 +875,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       window.history.back()
       return true
     }
-    route.update(current => ({ ...current, panel: null }), { mode: 'replace' })
+    route.update(current => ({ ...current, panel: null }), {
+      mode: 'replace', forceGeneration: true,
+    })
     return true
   }
   const [openHub, setOpenHub] = useState(null)               // which panel-hub dropdown is open
