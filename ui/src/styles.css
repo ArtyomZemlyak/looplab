@@ -825,7 +825,9 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 
 /* ---------- panels / overlays ---------- */
 .overlay { position: fixed; inset: 0; background: rgba(6,8,12,.55); display: flex;
-  justify-content: center; align-items: flex-start; padding: 36px; z-index: 190; }
+  /* Modal panels must cover the docked/full Assistant (191/200); explicit lifecycle and delete
+     confirmations remain above this shared layer at 210+. */
+  justify-content: center; align-items: flex-start; padding: 36px; z-index: 205; }
 .panel { background: var(--bg-1); border: 1px solid var(--line-2); border-radius: 12px;
   box-shadow: var(--shadow); width: min(880px, 92%); max-height: 86%; overflow: auto; }
 .panel-h { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 10px 14px; border-bottom: 1px solid var(--line);
