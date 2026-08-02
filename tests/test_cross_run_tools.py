@@ -1377,3 +1377,76 @@ def test_a_bound_run_scoped_provider_reads_normally(tmp_path):
     out = bound.execute("cross_run_search", {"query": "hard negatives"})
     assert "not bound" not in out
     assert "hard-negative mining" in out
+
+
+# --- the shared fuzzy slug scorer (doc 25 TO-01) -----------------------------------------------
+
+def test_the_slug_scorer_is_shared_by_both_callers():
+    """`find_concept_slugs` and `concept_card` used to carry byte-identical copies of this scoring,
+    with a comment in the second saying "Scoring mirrors find_concept_slugs exactly" — the
+    correspondence was maintained by hand. That is the failure worth removing, because the two
+    callers decide DIFFERENT things from the same number: which slugs to offer an agent, and which
+    existing card an agent's spelling resolves to. Drift makes a slug findable by a query that
+    cannot then open its card."""
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "looplab" / "tools"
+              / "cross_run_tools.py").read_text(encoding="utf-8-sig")
+    ast.parse(source)
+    # Count the CALL form, not the word — the helper's own docstring names it too, and a guard that
+    # trips on prose would be re-tuned rather than believed.
+    assert source.count("difflib.SequenceMatcher(") == 2, (
+        "the SequenceMatcher scoring is written more than once again; both callers must go through "
+        "`_slug_score` (2 = the two ratios inside the one helper)")
+    assert source.count("_slug_score(") >= 3, "both callers plus the definition"
+    assert source.count("_SLUG_MATCH_FLOOR") >= 3, (
+        "the 0.55 surface floor is inlined again; it decides what an agent is shown AND what an "
+        "agent's spelling resolves to, so it has to be one constant")
+
+
+def test_slug_scoring_matches_the_spelling_it_replaced():
+    """A differential against the exact expression both branches used, over the shapes that matter:
+    separator/case variants, leaf-vs-path matches, unicode, and empty input."""
+    import difflib
+    import itertools
+
+    from looplab.tools.cross_run_tools import _slug_norm, _slug_score
+
+    def previous(normalized_query, slug):
+        full, leaf = _slug_norm(slug), _slug_norm(slug.split("/")[-1])
+        if normalized_query and (normalized_query == full or normalized_query == leaf):
+            return 1.0
+        if normalized_query and (normalized_query in full or full in normalized_query):
+            return 0.9
+        return max(difflib.SequenceMatcher(None, normalized_query, full).ratio(),
+                   difflib.SequenceMatcher(None, normalized_query, leaf).ratio())
+
+    slugs = ["regularization/r-drop", "r-drop", "R_Drop", "data/augment", "augment",
+             "retrieval/rerank", "a/b/c", "", "  ", "ünïcode/tëst", "x",
+             "very/long/nested/path/leaf"]
+    queries = ["rdrop", "r-drop", "R_DROP", "augment", "rerank", "", "zzz", "leaf", "ünïcode", "a"]
+    for query, slug in itertools.product(queries, slugs):
+        normalized = _slug_norm(query)
+        assert _slug_score(normalized, slug) == previous(normalized, slug), (query, slug)
+
+
+def test_the_leaf_is_matched_separately_from_the_path():
+    """The property the two-ratio max exists for: concept keys are PATHS, so an agent writing the
+    bare technique name shares no prefix with the full slug and would otherwise score far below the
+    surface floor."""
+    from looplab.tools.cross_run_tools import _SLUG_MATCH_FLOOR, _slug_norm, _slug_score
+
+    assert _slug_score(_slug_norm("rdrop"), "regularization/r-drop") == 1.0
+    assert _slug_score(_slug_norm("R_DROP"), "regularization/r-drop") == 1.0, (
+        "separator/case normalization is what makes the fuzzy search usable at all")
+    assert _slug_score(_slug_norm("zzzz"), "regularization/r-drop") < _SLUG_MATCH_FLOOR
+
+
+def test_an_empty_query_never_claims_an_exact_or_substring_match():
+    """`qn and ...` guards both fast paths. Without them the empty string is a substring of every
+    slug, so a blank query would resolve to an arbitrary existing card at score 0.9."""
+    from looplab.tools.cross_run_tools import _slug_score
+
+    for slug in ("regularization/r-drop", "a/b/c", "x"):
+        assert _slug_score("", slug) < 0.9

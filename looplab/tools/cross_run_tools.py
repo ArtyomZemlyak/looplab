@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+import difflib
 import unicodedata
 from pathlib import Path
 
@@ -51,6 +52,31 @@ def _slug_norm(s: str) -> str:
     r-drop`). Unicode concept vocabularies remain searchable instead of collapsing to an empty key."""
     normalized = unicodedata.normalize("NFKC", str(s or "")).casefold()
     return "".join(char for char in normalized if char.isalnum())
+# The fuzzy slug match, in ONE place. `find_concept_slugs` and `concept_card` both need it, and the
+# second copy carried a comment saying "Scoring mirrors find_concept_slugs exactly" — i.e. the
+# duplication was known and the correspondence maintained by hand. That is the failure mode worth
+# removing: the two callers decide DIFFERENT things from the same number (which slugs to offer an
+# agent, and which existing card an agent's spelling resolves to), so a drift between them would
+# make a slug findable by a query that cannot then open its card.
+_SLUG_MATCH_FLOOR = 0.55
+
+
+def _slug_score(normalized_query: str, slug: str) -> float:
+    """Similarity of an already-normalized query to `slug`, matching either the full path or its
+    leaf: exact = 1.0, substring either way = 0.9, otherwise the better SequenceMatcher ratio.
+
+    The leaf is matched separately because concept keys are paths — an agent writing `r-drop` must
+    reach `regularization/r-drop`, which shares no prefix with the query at all.
+    """
+    full, leaf = _slug_norm(slug), _slug_norm(slug.split("/")[-1])
+    if normalized_query and (normalized_query == full or normalized_query == leaf):
+        return 1.0
+    if normalized_query and (normalized_query in full or full in normalized_query):
+        return 0.9
+    return max(difflib.SequenceMatcher(None, normalized_query, full).ratio(),
+               difflib.SequenceMatcher(None, normalized_query, leaf).ratio())
+
+
 _TOOL_UNAVAILABLE = "(cross-run tool unavailable)"
 # DERIVED from the loop's cap, per the ToolProvider contract in _base.py. A flat 16k was 4x
 # RESULT_CAP, and `drive_tool_loop` head-cuts anything longer — dropping the TAIL, which is exactly
@@ -897,7 +923,6 @@ class CrossRunTools:
             return "\n".join(lines)
 
         if name == "find_concept_slugs":
-            import difflib
             from collections import Counter
             raw_limit = args.get("limit")
             if raw_limit is None:
@@ -1048,15 +1073,8 @@ class CrossRunTools:
             _rank = {"own": 0, "cross": 1, "global": 2, "unknown": 2}
             scored = []
             for slug, meta in vocab.items():
-                sn, ln = _slug_norm(slug), _slug_norm(slug.split("/")[-1])
-                if qn and (qn == sn or qn == ln):
-                    score = 1.0
-                elif qn and (qn in sn or sn in qn):
-                    score = 0.9
-                else:
-                    score = max(difflib.SequenceMatcher(None, qn, sn).ratio(),
-                                difflib.SequenceMatcher(None, qn, ln).ratio())
-                if score >= 0.55:
+                score = _slug_score(qn, slug)
+                if score >= _SLUG_MATCH_FLOOR:
                     scored.append((_rank[_scope(meta)], -score, slug, meta))
             if (not scored and partial_note
                     and self._concept_projection_status == "partial"):
@@ -1111,7 +1129,6 @@ class CrossRunTools:
             return "\n".join(lines)
 
         if name == "concept_card":
-            import difflib
             raw_slug = args.get("slug")
             if not isinstance(raw_slug, str) or not raw_slug.strip():
                 return "(cross-run tool error: slug must be a non-empty string)"
@@ -1166,18 +1183,12 @@ class CrossRunTools:
                 qn = _slug_norm(slug_in)
                 scored = []
                 # Stable lexical traversal (set order is process-randomized) so equal-score spellings
-                # resolve to ONE card on every worker. Scoring mirrors find_concept_slugs exactly:
-                # exact-normalized = 1.0, substring = 0.9, else the SequenceMatcher ratio (surface >= 0.55).
+                # resolve to ONE card on every worker. Scoring is `_slug_score`, shared verbatim with
+                # find_concept_slugs — the two must agree or a slug becomes findable by a query that
+                # cannot then open its card.
                 for s in sorted(global_vocab):
-                    sn, ln = _slug_norm(s), _slug_norm(s.split("/")[-1])
-                    if qn and (qn == sn or qn == ln):
-                        score = 1.0
-                    elif qn and (qn in sn or sn in qn):
-                        score = 0.9
-                    else:
-                        score = max(difflib.SequenceMatcher(None, qn, sn).ratio(),
-                                    difflib.SequenceMatcher(None, qn, ln).ratio())
-                    if score >= 0.55:
+                    score = _slug_score(qn, s)
+                    if score >= _SLUG_MATCH_FLOOR:
                         scored.append((score, s))
                 scored.sort(key=lambda t: (-t[0], t[1]))
                 if scored and scored[0][0] >= 0.97:

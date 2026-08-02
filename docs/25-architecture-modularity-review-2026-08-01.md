@@ -2161,7 +2161,7 @@ Scope: `looplab/tools/`: ~25 ToolProviders.
 - patch.SurfacePolicy is a good example of merging three previously independent write gates into one value object while explicitly documenting (not erasing) the per-site semantic differences as constructor parameters — the opposite of a lossy 'simplification'.
 - Truncation honesty as a design principle: nearly every tool distinguishes 'absent' from 'not searched/cut' ('this is NOT evidence of absence', resume markers with exact continuation lines, capped-at receipts), which directly targets the model-facing failure mode of treating a partial read as a completed negative search.
 
-#### TO-01 · HIGH · under-decomposition · effort: medium
+#### TO-01 · HIGH · under-decomposition · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
 **cross_run_tools._execute is a single ~856-line dispatch function containing eight tool implementations**
 
@@ -2170,6 +2170,33 @@ Scope: `looplab/tools/`: ~25 ToolProviders.
 *Evidence:* `CrossRunTools._execute` runs from line 473 to line 1329 (~856 lines) as one flat `if name == ...` chain implementing all eight tools (cross_run_prior_attempts, cross_run_claims, cross_run_atlas, cross_run_concept_map, cross_run_search, similar_runs, find_concept_slugs, concept_card) inline, each 60-220 lines, with per-branch local imports, nested helper closures (`_receipt` defined twice, lines 829 and 988), and the partial-source/scope/claim warning boilerplate (`_partial_source_warning` + `_partial_scope_warning` + `partial_note` append sequences) repeated ~10 times across branches. The fuzzy slug-scoring block (exact-normalized=1.0, substring=0.9, SequenceMatcher, >=0.55 floor) is copy-pasted between find_concept_slugs (lines 1050-1060) and concept_card (lines 1171-1181) — the comment at 1167-1170 even says 'Scoring mirrors find_concept_slugs exactly', i.e. the duplication is known but not extracted. Contrast: RunControlTools in machine_runs_tools dispatches the same way but to one private method per verb.
 
 *Recommendation:* Split each `if name == ...` branch into a private method (as RunControlTools already does), extract the fuzzy-score function (`_slug_score(query, slug) -> float`) shared by find_concept_slugs and concept_card, and extract a small receipt-builder helper that appends the source/scope/claim partial warnings so the ~10 hand-rolled sequences collapse to one call.
+
+*Resolution (2026-08-02, the known duplication):* the fuzzy slug scoring is now one module-level
+`_slug_score(normalized_query, slug)` plus a `_SLUG_MATCH_FLOOR` constant, shared by
+`find_concept_slugs` and `concept_card`.
+
+This was the piece the code itself admitted — the second copy carried the comment "Scoring mirrors
+find_concept_slugs exactly", i.e. the correspondence was maintained by hand. It is worth fixing
+ahead of the larger split because the two callers decide DIFFERENT things from the same number:
+which slugs to offer an agent, and which existing card an agent's spelling resolves to. Drift
+between them makes a slug findable by a query that cannot then open its card — an agent chasing a
+concept it was just told exists.
+
+Extracting it surfaced a second reason the copies existed: `difflib` was imported PER BRANCH, so a
+module-level helper could not see it. It is hoisted, and the two now-shadowed local imports removed.
+That also explains why the duplication survived — the natural place to put a shared helper did not
+have the import it needed, and the failure mode was the generic `(cross-run tool unavailable)`
+swallow rather than an ImportError.
+
+Verified against the exact expression both branches used, over 120 query/slug pairs spanning
+separator and case variants, leaf-vs-path matches, unicode and empty input: zero mismatches. Four
+guards in `tests/test_cross_run_tools.py` pin one definition, the two-ratio max (concept keys are
+PATHS, so a bare technique name shares no prefix with its full slug), and the empty-query guard —
+without which the empty string is a substring of every slug and a blank query resolves to an
+arbitrary card at 0.9. All three deliberate breaks fail loudly.
+
+*Still open:* the 856-line `if name == ...` chain itself, and the ~10 hand-rolled partial-source /
+partial-scope warning sequences.
 
 #### TO-02 · HIGH · over-engineering · effort: medium
 
