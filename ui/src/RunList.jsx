@@ -1413,7 +1413,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           {viewMessage && <div className="notice resource-warning portfolio-message" role="alert">
             {viewMessage} <button className="btn xs" onClick={() => setViewMessage('')}>Dismiss</button>
           </div>}
-          {runs && !!scoped.length && <div className="runbar">
+          {runs && !!scoped.length && view !== 'compare' && <div className="runbar">
             <OpIcon name="search" className="t-ic" />
             <input className="text runbar-q" aria-label="Filter runs" placeholder="filter runs…" value={query}
                    onChange={e => setQuery(e.target.value)} />
