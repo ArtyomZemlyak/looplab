@@ -120,3 +120,40 @@ def test_the_fanout_site_still_queues_its_pause_instead_of_appending_it():
     assert "self.store.append(EV_PAUSE" not in body and "(EV_PAUSE," not in body, (
         "the fan-out appends EV_PAUSE directly from a worker thread; it must queue it for the "
         "main task via _request_create_pause")
+
+
+# --- the build-telemetry consume/discard pairing (doc 25 ES-02, partial) ----------------------
+
+def test_every_creation_path_consumes_its_build_telemetry_through_one_helper():
+    """Three separate emits with no shared name is how a path keeps two and loses the third.
+
+    Role telemetry set during a build (last_report / last_hyp_priority / last_foresight) belongs to
+    the node that build produced. A path that does not consume it leaves it for the NEXT created
+    node — a "propose" reset re-runs the researcher, so the stale pick set is silently attributed to
+    a different experiment. `_emit_role_telemetry` exists to prevent exactly that, and it cannot if
+    the consuming half is spelled three times.
+    """
+    source = (_PKG / "engine/orchestrator.py").read_text(encoding="utf-8-sig")
+    tree = ast.parse(source)
+    bodies = {node.name: ast.unparse(node) for node in ast.walk(tree)
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for name in ("_create_node_scoped", "_rerun_node", "_create_injected_node"):
+        assert name in bodies, f"{name} was renamed; this guard no longer covers its path"
+        assert "_consume_node_build_telemetry" in bodies[name], (
+            f"{name} no longer consumes its build telemetry through the shared helper")
+        for emit in ("_emit_hypothesis_ranked", "_emit_foresight_selected"):
+            assert emit not in bodies[name], (
+                f"{name} calls {emit} itself again — the three emits must move together")
+
+
+def test_the_consume_helper_pairs_with_the_discard_used_on_failure_paths():
+    """Consume and discard are the two halves of one rule: telemetry never outlives its build."""
+    source = (_PKG / "engine/orchestrator.py").read_text(encoding="utf-8-sig")
+    helper = ast.unparse(next(
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_consume_node_build_telemetry"))
+    for emit in ("_emit_agent_report", "_emit_hypothesis_ranked", "_emit_foresight_selected"):
+        assert emit in helper, f"the shared consume step dropped {emit}"
+    assert "_discard_node_build_telemetry" in source, (
+        "the failure-path half of the pairing vanished; a failed build would keep its telemetry")

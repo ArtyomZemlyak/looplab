@@ -371,9 +371,27 @@ Scope: `looplab/engine/`: orchestrator.py, node_build.py, eval_dispatch.py, eval
 
 *Recommendation:* Extract (1) the calibration profile + envelope validation into looplab/search/speculation_calibration.py (where SPECULATION_CALIBRATION_SEEDS etc. already live) or a new engine/speculation_gate.py, and (2) the Card ledger into an engine/card_ledger.py mixin, following the established pattern. For the Card cluster's internal fold() calls, either import fold from the canonical home (as evaluate.py does, with the same docstring note that the orchestrator seam gates creation only) or route through a small engine hook, and verify the two fold-monkeypatching tests still intercept the paths they target.
 
-#### ES-02 · HIGH · duplication · effort: medium
+#### ES-02 · HIGH · duplication · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
 **Three node-creation paths triplicate a ~70-line commit epilogue that has already forced the same fix to be applied three times**
+
+*Resolution so far:* two of the epilogue's five stages are single-sourced. The developer-error
+sentinel handling went through `node_build.developer_crash_records` (EC-03), and the telemetry
+consumption is now `_consume_node_build_telemetry(node_id, generation, *, researcher, developer)`,
+called by all three paths. The latter mattered more than its size suggests: it is three separate
+emits with no shared name, so a path could quietly keep two and lose the third, and the telemetry
+left behind is then attributed to the NEXT created node — which is exactly what
+`_emit_role_telemetry` exists to prevent.
+
+*Still open:* the parent-refetch guard, `_emit_node_created` and the landed-check. Those carry the
+real per-path divergence (`materialize_abort`'s first-terminal branch, generation payloads,
+`developer_called`) and the review's own §6 requires the extraction to read as parameterized
+unification with the two fold-monkeypatch test files re-verified — a change that wants its own
+pass rather than being appended to this one.
+
+`tests/test_developer_crash_transaction.py` guards the resolved half: every creation path consumes
+through the shared helper and none re-spells an individual emit, and the consume/discard pairing is
+pinned. Verified to have teeth by making the inject path keep two emits and drop the third.
 
 *Locations:* `looplab/engine/orchestrator.py:5173-5260`, `looplab/engine/orchestrator.py:5418-5463`, `looplab/engine/orchestrator.py:5604-5675`
 

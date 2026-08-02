@@ -5249,12 +5249,32 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     node_id,
                     "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
                     "unresolved within the node) — resume once it's fixed")
-        # Variant-1: pass THIS build's pooled roles so concurrent draft builds don't cross-wire
-        # each other's telemetry (last_report / last_hyp_priority / last_foresight). For serial
-        # paths `researcher`/`developer` ARE `self.researcher`/`self.developer`, so byte-identical.
-        self._emit_agent_report(node_id, developer=developer)
-        self._emit_hypothesis_ranked(node_id, 0, researcher=researcher)
-        self._emit_foresight_selected(node_id, 0, researcher=researcher, developer=developer)
+        self._consume_node_build_telemetry(
+            node_id, 0, researcher=researcher, developer=developer)
+
+    def _consume_node_build_telemetry(self, node_id: int, generation: int,
+                                      *, researcher=None, developer=None) -> None:
+        """Attribute this build's role telemetry to the node it belongs to, then clear it.
+
+        All three creation paths end with this triple, and it is the CONSUMING half of the pairing
+        `_discard_node_build_telemetry` performs on every failure path. Skipping it is not inert: a
+        "propose" reset re-runs the researcher (setting last_hyp_priority/last_foresight), and the
+        pick set left behind then leaks onto the NEXT created node's id — the exact mis-attribution
+        `_emit_role_telemetry` exists to prevent. Because it is three separate emits with no shared
+        name, a path could quietly keep two of them and lose the third; here they move together.
+
+        Variant-1: pass THIS build's pooled roles so concurrent draft builds cannot cross-wire each
+        other's telemetry (last_report / last_hyp_priority / last_foresight). For the serial paths
+        `researcher`/`developer` ARE `self.researcher`/`self.developer`, so omitting them is
+        byte-identical to passing them.
+        """
+        self._emit_agent_report(node_id, **({"developer": developer} if developer is not None else {}))
+        self._emit_hypothesis_ranked(
+            node_id, generation, **({"researcher": researcher} if researcher is not None else {}))
+        self._emit_foresight_selected(
+            node_id, generation,
+            **({"researcher": researcher} if researcher is not None else {}),
+            **({"developer": developer} if developer is not None else {}))
 
     def _create_node_guarded(self, action: dict, roles=None, reserved=None, preproposed=None,
                              pretelemetry=None) -> None:
@@ -5450,12 +5470,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         "auto-paused: a Developer session crashed (LLM unreachable or a hard "
                         "error, unresolved within the node) — resume once it's fixed"):
                     self.store.append(crash_type, crash_data)
-        self._emit_agent_report(node.id, generation)
-        # Consume the predictive telemetry for THIS node too: a "propose" reset re-runs the researcher
-        # (setting last_hyp_priority/last_foresight), so without consuming it here the pick set would
-        # leak onto the NEXT _create_node's id — the exact mis-attribution _emit_role_telemetry prevents.
-        self._emit_hypothesis_ranked(node.id, generation)
-        self._emit_foresight_selected(node.id, generation)
+        self._consume_node_build_telemetry(node.id, generation)
 
     def _prepare_injected_node(
         self,
@@ -5662,10 +5677,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         "once it's fixed"):
                     self.store.append(crash_type, crash_data)
         if developer_called:
-            self._emit_agent_report(node_id)
-            # consume predictive telemetry for this node so it can't leak onto the next created node
-            self._emit_hypothesis_ranked(node_id, 0)
-            self._emit_foresight_selected(node_id, 0)
+            self._consume_node_build_telemetry(node_id, 0)
 
     def _activate_spec(self, proposal: dict) -> None:
         """Make the ratified onboarding proposal the trusted eval (Phase 3): the eval_spec
