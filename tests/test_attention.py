@@ -338,7 +338,34 @@ def test_attention_endpoint_is_owner_only_no_store_bounded_and_observation_only(
     assert client.get("/api/attention", headers={**owner, **review}).status_code == 403
 
 
-def test_attention_endpoint_marks_complete_log_corruption_partial_and_fails_closed(tmp_path):
+
+def _attention_after_change(client, monkeypatch, previous_generated_at):
+    """Read `/api/attention` once the feed has actually re-scanned the run root.
+
+    The endpoint no longer rescans inside the request: it serves a cached snapshot and refreshes it
+    on a BACKGROUND thread once the snapshot is older than `_SNAPSHOT_SOFT_REFRESH_SECONDS` (6s).
+    A test that mutates the logs and reads once therefore sees the pre-mutation snapshot and
+    concludes the feed lost a property it merely had not observed yet. Drop the soft-refresh window
+    to zero so the very next request schedules the rescan, then poll until the snapshot is REBUILT
+    rather than sleeping a guessed interval — bounded, so a feed that genuinely stops refreshing
+    still fails instead of hanging.
+
+    Keyed on `generated_at`, which advances on every rebuild — NOT on `snapshot_id`, which is a
+    content hash. An unchanged id cannot tell "never refreshed" apart from "refreshed and saw the
+    same thing", so keying on it reports a genuine property loss as a refresh failure and points
+    the next reader at the wrong subsystem."""
+    from looplab.serve.routers import attention as attention_router
+
+    monkeypatch.setattr(attention_router, "_SNAPSHOT_SOFT_REFRESH_SECONDS", 0.0)
+    for _ in range(400):
+        payload = client.get("/api/attention").json()
+        if payload["generated_at"] != previous_generated_at:
+            return payload
+    raise AssertionError("the attention feed never refreshed after the run root changed")
+
+
+def test_attention_endpoint_marks_complete_log_corruption_partial_and_fails_closed(
+        tmp_path, monkeypatch):
     good = _store(tmp_path, "good")
     _node(good, 0, metric=1.0)
     good.append(EV_APPROVAL_REQUESTED, {"node_id": 0, "generation": 0})
@@ -357,9 +384,7 @@ def test_attention_endpoint_marks_complete_log_corruption_partial_and_fails_clos
     with (tmp_path / "terminal" / "events.jsonl").open("ab") as handle:
         handle.write(b"not-a-json-event\n")
 
-    response = client.get("/api/attention")
-    assert response.status_code == 200
-    payload = response.json()
+    payload = _attention_after_change(client, monkeypatch, warm["generated_at"])
     assert payload["partial"] is True
     assert {item["run_id"] for item in payload["items"]} == {"good", "damaged", "terminal"}
     stale = next(item for item in payload["items"] if item["run_id"] == "damaged")
@@ -379,15 +404,16 @@ def test_attention_endpoint_preserves_snapshot_when_run_root_disappears(tmp_path
     assert response.headers["cache-control"] == "no-store"
 
 
-def test_attention_endpoint_keeps_last_safe_snapshot_during_log_replacement(tmp_path):
+def test_attention_endpoint_keeps_last_safe_snapshot_during_log_replacement(tmp_path, monkeypatch):
     store = _store(tmp_path)
     _node(store, 0, metric=1.0)
     store.append(EV_APPROVAL_REQUESTED, {"node_id": 0, "generation": 0})
     client = TestClient(make_app(tmp_path))
-    prior = client.get("/api/attention").json()["items"][0]
+    warm = client.get("/api/attention").json()
+    prior = warm["items"][0]
 
     (tmp_path / "demo" / "events.jsonl").replace(tmp_path / "demo" / "events.replacing")
-    payload = client.get("/api/attention").json()
+    payload = _attention_after_change(client, monkeypatch, warm["generated_at"])
     assert payload["partial"] is True
     assert len(payload["items"]) == 1
     assert payload["items"][0]["id"] == prior["id"]
