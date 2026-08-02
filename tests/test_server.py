@@ -2747,8 +2747,18 @@ def test_chat_suggest_health_softfail(tmp_path):
     assert c.status_code == 200 and "ok" in c.json()
     s = client.post("/api/runs/demo/suggest", json={"instruction": "try a higher degree"})
     assert s.status_code == 200 and "ok" in s.json()
-    h = client.get("/api/llm/health").json()
-    assert "ok" in h and "model" in h
+    # The health probe is a revision-fenced POST now (the old GET is retired), and it is a PAID
+    # provider call, so it is bound to the exact saved snapshot the caller displayed. The property
+    # here is unchanged: whether or not a model is reachable, it answers a well-formed envelope
+    # rather than raising.
+    snapshot = client.get("/api/settings").json()
+    h = client.post("/api/llm/health", json={
+        "expected_settings_revision": snapshot["settings_revision"],
+        "expected_secret_revision": snapshot["secret_revision"],
+        "operation_id": "7c1f1a2e-9b0d-4e6a-8f31-5c2d7e4a9b60",
+    })
+    assert h.status_code == 200, h.text
+    assert "ok" in h.json()
 
 
 def test_chat_returns_trace_with_user_and_completion(tmp_path, monkeypatch):
@@ -3202,8 +3212,13 @@ def test_supertask_endpoints_round_trip(tmp_path):
     st = client.post("/api/supertasks", json={"name": "nomad2018"}).json()
     assert st["id"].startswith("st_") and st["name"] == "nomad2018"
 
-    r = client.post("/api/runs/demo/supertask", json={"supertask_id": st["id"]})
-    assert r.status_code == 200
+    # Run-organization writes are fenced to the run generation the Runs list showed, so a stale tab
+    # cannot re-file a run that was reset out from under it.
+    generation = {x["run_id"]: x for x in client.get("/api/runs").json()}["demo"]["generation"]
+    r = client.post("/api/runs/demo/supertask", json={
+        "supertask_id": st["id"], "expected_generation": generation,
+        "expected_supertask_id": None})            # CAS on the CURRENT value too, null included
+    assert r.status_code == 200, r.text
     summary = {x["run_id"]: x for x in client.get("/api/runs").json()}
     assert summary["demo"]["supertask_id"] == st["id"]          # surfaced in the run summary
     assert len(summary["demo"]["generation"]) == 64
@@ -3212,10 +3227,20 @@ def test_supertask_endpoints_round_trip(tmp_path):
     assert client.get("/api/supertasks").json()["supertasks"][0]["name"] == "MLE-bench"
 
     # assigning an unknown super-task -> 400; assigning a real run to an unknown run -> 404
-    assert client.post("/api/runs/demo/supertask", json={"supertask_id": "st_x"}).status_code == 400
-    assert client.post("/api/runs/ghost/supertask", json={"supertask_id": st["id"]}).status_code == 404
+    assert client.post("/api/runs/demo/supertask", json={
+        "supertask_id": "st_x", "expected_generation": generation,
+        "expected_supertask_id": st["id"]}).status_code == 400
+    assert client.post("/api/runs/ghost/supertask", json={
+        "supertask_id": st["id"], "expected_generation": generation,
+        "expected_supertask_id": None}).status_code == 404
+    # …and a stale generation is refused even when the super-task itself is valid.
+    assert client.post("/api/runs/demo/supertask", json={
+        "supertask_id": st["id"], "expected_generation": "0" * 64,
+        "expected_supertask_id": st["id"]}).status_code == 409
 
-    client.post("/api/runs/demo/supertask", json={"supertask_id": None})  # clear
+    client.post("/api/runs/demo/supertask", json={          # clear
+        "supertask_id": None, "expected_generation": generation,
+        "expected_supertask_id": st["id"]})
     assert {x["run_id"]: x for x in client.get("/api/runs").json()}["demo"]["supertask_id"] is None
 
     client.delete(f"/api/supertasks/{st['id']}")
