@@ -3,7 +3,7 @@ import React, {
 } from 'react'
 import { useMediaQuery, useRunState } from './hooks.js'
 import { useTimeline } from './useTimeline.js'
-import { RUN_PANEL_HISTORY_STATE_KEY, useRunRouteState } from './useRunRouteState.js'
+import { takeRunPanelHistoryEntry, useRunRouteState } from './useRunRouteState.js'
 import { reviewInspectorTabs, reviewPanelAllowed, runRouteStateHasTarget } from './runRouteState.js'
 import { deadlineGet, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback, createIdempotencyKey, resetRun,
   storageGet, storageSet } from './util.js'
@@ -869,7 +869,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     if (!confirmRetainedPanelClose()) return false
     // App-opened panels own one marked history entry, so dismissing them should consume that entry.
     // A panel reached from a copied/deep link has no marker and is safely dismissed in place instead.
-    const panelEntry = window.history.state?.[RUN_PANEL_HISTORY_STATE_KEY]
+    const panelEntry = takeRunPanelHistoryEntry()
     if (panelEntry?.version === 1 && window.history.length > 1) {
       panelBackCloseRef.current = true
       window.history.back()

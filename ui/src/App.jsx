@@ -200,8 +200,14 @@ export default function App() {
   }, [])
   useEffect(() => {
     if (!route.canonicalHash || location.hash === route.canonicalHash) return
-    history.replaceState(history.state, '', route.canonicalHash)
-    setRoute(parseHash())
+    try {
+      history.replaceState(history.state, '', route.canonicalHash)
+    } catch {
+      // The legacy alias already renders its correct destination. If History is throttled, use a
+      // same-document replacement when available and never let canonicalization crash the route.
+      try { location.replace(route.canonicalHash) } catch { /* keep the working legacy URL */ }
+    }
+    if (location.hash === route.canonicalHash) setRoute(parseHash())
   }, [route.canonicalHash])
   const routeLabel = route.view === 'run' ? `Run ${route.id}`
     : route.view === 'settings' ? 'Settings'
