@@ -73,12 +73,15 @@ baseline.
 
 ### 0.2 Second reconciliation (2026-08-02, HEAD `41813bd`)
 
-`master` has since advanced by ~42 further commits (mobile/UI hardening, settings, attention and
-assistant features, and a test re-pointing sweep). A dedicated per-finding status pass over the
-new HEAD produced the remediation ledger in **§5**: 4 findings fixed and 1 partial (all by
-`c92b89f`), 183 open — and several flagged god-modules grew substantially in the same window
-(§5.3). **§6** adds the target-design proposals for resolving the finding clusters. Line numbers
-below still reference the baseline.
+`master` has since advanced by further commits (mobile/UI hardening, settings, attention and
+assistant features, a test re-pointing sweep — and `a077d86`, the first structural commit acting
+on this document). A dedicated per-finding status pass over the new HEAD produced the
+remediation ledger in **§5** (running total as of `a077d86`: 7 fixed, 2 partial, 179 open — and
+several flagged god-modules grew substantially in the same window, §5.3). **§6** adds the
+target-design proposals for resolving the finding clusters; §6 was itself adversarially
+validated against HEAD `a077d86` by nine design reviewers, whose corrections (naming collisions
+with existing modules, seam-preservation blockers, split-mechanics fixes) are folded in. Line
+numbers below still reference the baseline.
 
 ### Severity model
 
@@ -324,6 +327,9 @@ Adjacent stale-comment fixes (the repo treats stale load-bearing comments as bug
 (CO-12); `SearchFitness.selection_key`'s "no callers" framing is stale (CO-11); `parse.py`'s
 "one spelling of scalar coercion" claim is no longer true (CO-09); `mlebench_real._competition`'s
 "single place" claim is contradicted by two copies (RA-10).
+
+**Update (2026-08-02):** the seven zero-reference helpers and `METRIC_READERS` were deleted by
+`a077d86` (the rows above are flipped to DELETED in that same change, per the §6.8 upkeep rule).
 
 **Explicitly not dead** (checked and cleared): `adapters/kaggle_dl.check_auth` is a documented
 operator command (docs/MLEBENCH.md); all 200 `_LAYOUT` shim entries resolve; `timings` is a
@@ -2470,10 +2476,16 @@ commit — `c92b89f` («perf: stop blocking the ASGI event loop, and make two ho
 sub-quadratic»), which closed the whole `[PERF]`-marker backlog. The other ~42 commits are
 behavioral work (mobile/UI hardening, settings/attention/assistant features, test re-pointing)
 that performed **no structural extractions** — and §5.3 shows several flagged god-modules grew
-meaningfully in the same window. (Seven further commits landed while this ledger was being
-assembled, up to `c748da2`; each was checked and none changes a status — notably `70b6a5d`
-fixes a live/persisted digest-source mismatch *inside* the speculation gate without touching
-SE-01's structural claim, the whole-repo raw-byte source hash.)
+meaningfully in the same window.
+
+**Updates through `a077d86` (2026-08-02).** Commits kept landing while this ledger was
+maintained; each was checked against it. `70b6a5d` fixes a live/persisted digest-source mismatch
+*inside* the speculation gate without touching SE-01's structural claim (the whole-repo raw-byte
+source hash). Then `a077d86` became the **first structural commit to act on this document**: it
+executed §3's deletion list (the seven zero-reference helpers plus `METRIC_READERS`, ~97 lines
+of code removed, with the §3 rows flipped to DELETED in the same change — the §6.8 ledger-upkeep rule in
+action). That flips **XP-08, RA-04 and SE-13 to fixed and SR-13 to partial**, bringing the
+running total to **7 fixed, 2 partial, 179 open**.
 
 ### 5.1 Fixed / partially fixed
 
@@ -2483,6 +2495,10 @@ SE-01's structural claim, the whole-repo raw-byte source hash.)
 | EV-07 | **fixed** | Re-confirmed on HEAD: fixed by c92b89f. read_all now uses the two-arm design — bounded head/tail windows (_read_prefix_windows) on every poll, full-prefix sha256 proof only on first external observation and each prefix doubling (_full_verified_bytes gate) — amortized O(1) per appended byte; the [PERF] marker is gone (replaced by a why-comment) and tests/test_eventstore_cache.py gained the pinning tests. |
 | SC-08 | **fixed** | Confirmed fixed on HEAD by c92b89f (per the doc's post-baseline note): no 'CLAUDE REVIEW' marker remains anywhere in serve/, both decision baselines now read self._observe(rd).latest_seq (run_commands.py 3764 and 3824) and the full-log self._events(rd) read is gone. |
 | SR-08 | **fixed** | Re-confirmed the post-baseline note: fixed by c92b89f ('perf: stop blocking the ASGI event loop...', with f3586c9 for the settings/secret/project lock sites). Zero 'CLAUDE REVIEW' markers remain anywhere in looplab/, anyio.to_thread offloads are present in every flagged router (org 5, misc 4, boss 12, genesis 2, control 8, runs 6, reports 1, assistant 3), and the runs.py span read path is bounded via events/span_index. No regression observed. |
+| XP-08 | **fixed** | `a077d86` (2026-08-02) deleted all seven zero-reference helpers (locked_claim_evidence_snapshot, claim_governance_snapshot, build_digest, _scope_action_lease_marker_exists, _normalized_rename_map/_canon_set, _explored_concepts). |
+| RA-04 | **fixed** | `a077d86` deleted the dead METRIC_READERS registry with the false "shared" docstring (the duplicated reader-kind enumerations in read_metric/_valid_metric_kind remain, tracked under RA-05). |
+| SE-13 | **fixed** | `a077d86` deleted the unreferenced _explored_concepts wrapper. |
+| SR-13 | **partial** | `a077d86` deleted _scope_action_lease_marker_exists; the /api/research and agents_md endpoints and the _portfolio_identity wrapper remain (pending the external-consumer check). |
 | SR-15 | **partial** | Confirmed the doc's post-baseline note on HEAD: c92b89f extracted _boss_prologue (boss.py:619), now shared by chat (649), suggest (692) and command (740), removing the prologue duplication for those three. The four-copy error-shaping epilogue remains (_sanitized_domain_http_exception + _safe_boss_failure blocks at 589-594 chat_compact, 662-667 chat, 719-724 suggest, 814/853 command), and chat_compact still keeps its own prologue. |
 
 ### 5.2 Still open — everything else (183 findings)
@@ -2499,13 +2515,13 @@ recent commits touched). Per-section outcome of the status pass:
 | 4.4 | events | only `eventstore.py` changed (`c92b89f`, the EV-07 two-arm redesign); replay.py and the projections untouched | 12 open, EV-07 fixed |
 | 4.5 | core | `e3f3a56`/`9275736` ADDED ~400 lines to the flagged god-modules (`llm.py` grew to 1,865 lines) | all 13 open |
 | 4.6 | serve — non-router | behavior/feature commits only; `run_commands.py` grew to 4,164 lines and `_execute`/`_reset_blocking` both grew | 15 open, SC-08 fixed |
-| 4.7 | serve — routers | `c92b89f`/`f3586c9` perf offloads only; router god-modules grew (`misc.py` +1.3k lines) | 13 open, SR-08 fixed, SR-15 partial |
-| 4.8 | search | `git log 756ad13..HEAD -- looplab/search/` is EMPTY; all line counts match exactly | all 15 open |
+| 4.7 | serve — routers | `c92b89f`/`f3586c9` perf offloads; `a077d86` deleted one dead helper; router god-modules grew (`misc.py` +1.2k lines) | 12 open, SR-08 fixed, SR-13 + SR-15 partial |
+| 4.8 | search | untouched until `a077d86` deleted two dead helpers (`_explored_concepts`, `_normalized_rename_map`/`_canon_set`) | 14 open, SE-13 fixed |
 | 4.9 | agents | one commit (`e3f3a56`) touched cli_agent/tool_loop with credential plumbing unrelated to the findings | all 10 open |
 | 4.10 | tools | `927dfee` added +867 lines to `write_tools.py` (undo/destructive fencing); `e3f3a56` hardened transports — neither addressed a flagged structure | all 11 open |
-| 4.11 | runtime + adapters | one commit (`e3f3a56`) — client binding + `sandbox.py::git_subprocess_env`; no RA finding addressed | all 10 open |
+| 4.11 | runtime + adapters | `e3f3a56` (client binding, `git_subprocess_env`); `a077d86` deleted METRIC_READERS | 9 open, RA-04 fixed |
 | 4.12 | cli/trust/misc | one commit (`e3f3a56`) rerouted client construction through `make_llm_client_for`; the flagged duplications persist | all 15 open |
-| 4.13 | cross-package | flagged files were touched only with perf/behavior fixes; every cross-package structure persists | all 12 open |
+| 4.13 | cross-package | perf/behavior fixes only, until `a077d86` executed the §3 deletion list | 11 open, XP-08 fixed |
 | 4.14 | ui | 25 `fix(ui)` commits, all behavioral/mobile/security; none of the recommended extractions happened | all 14 open |
 
 ### 5.3 Size drift since the baseline (the accretion is live)
@@ -2535,47 +2551,96 @@ feature by default.
 §4's per-finding recommendations are local fixes. This section proposes the **target designs**
 that resolve the finding *clusters* — what the tree should look like so the same debt does not
 re-accrete. Each proposal names its driving findings, the concrete module layout, the migration
-path, and the invariant it must preserve. Ordering follows the P1–P5 plan in §2; every proposal
-is behavior-preserving unless marked as a decision item.
+path, and the invariant it must preserve. §6 absorbs the cluster-level P1 items of §2 (the five
+P1 singles — EV-03/EV-05/EV-06 in §6.2, RA-03/RA-06 in §6.1 — are folded into the kernels so
+nothing from P1 is orphaned); every proposal is behavior-preserving unless explicitly marked as
+a **decision item**.
+
+> *Validation note (2026-08-02).* This section was itself adversarially validated against
+> `master` HEAD `a077d86` by nine independent design reviewers (one per subsection plus a
+> cross-cutting pass) checking facts, naming collisions, layering, seam preservation and
+> feasibility; their three blockers and ~60 corrections are folded into the text below. The
+> recurring lessons: name-check the tree before coining a module (`core/_pathsafe.py`,
+> `core/validate.py`, `serve/paid_work.py` and `events/readmodel.py` all already exist), splits
+> are preserved by **re-export barrels** (the `llm.py`/`agent.py` pattern — the `_LAYOUT` shim
+> only aliases flat pre-split names), and every extraction must carry its monkeypatch seams and
+> its CLAUDE.md/docs/diagram updates in the same change.
 
 ### 6.1 A shared safety kernel in `core/` (resolves most of T1)
 
-The highest-risk duplication class is small hand-copied *safety* helpers. Introduce four tiny,
-dependency-free core modules and port callers mechanically:
+The highest-risk duplication class is small hand-copied *safety* helpers. Consolidate them into
+core, reusing the homes that already exist rather than coining near-collisions:
 
-| New home | Contents | Replaces (findings) |
+| Home | Contents | Replaces (findings) |
 |---|---|---|
-| `core/pathsafe.py` | `is_reparse(path)`, `WINDOWS_RESERVED`, `filesystem_identity(name)` (NFD-casefold/normcase), `validate_run_child(root, run_id, *, require_events, error_style)` | 7× `_is_reparse`, 4× reserved-name set, 3× fs-identity rule, 6+ run-path validators (SC-03); the fence-module twins consume it (CO-01) |
-| `core/atomicio.py` (extend) | `file_identity(stat) -> 5-tuple` with the canonical why-comment; `durable_no_replace_rename(src, dst, *, label)` (the ctypes renameat2/renamex_np/Windows write-through mover) | 10+ inline stat tuples (XP-02); the reset/deletion mover pair (SC-05) |
-| `core/validators.py` | `valid_hex_digest(v, prefix)`, `bounded_int(v, lo, hi)`, `bounded_str(v, max_len)`, `canonical_json_digest(payload, *, prefix)`, `tokenize(text)`/`WORD_RE` (NFKC+casefold) | ~20 hex-digest blocks and dozens of scalar guards (EV-04), six digest minters' scaffolding (CO-08), five word-token regex copies (EM-15) |
-| `core/redact.py` (extend) | `bounded_redacted_tree(value, *, max_chars, max_items, max_depth, max_total_items, secret_policy)` | the tracing/advisory walker pair (CO-06) and the five router-side bounded-JSON projectors (SR-06) |
+| `core/pathsafe.py` — the existing `core/_pathsafe.py` promoted to a public name (`_pathsafe` kept as an import alias for its six current importers; comments move verbatim) | its current tool-provider guards (`looks_secret`/`resolve_within`/…) **plus** the run-path family: `is_reparse(info: os.stat_result)` (stat-taking, matching all seven copies — callers lstat once and reuse the result inside a TOCTOU bracket), `WINDOWS_RESERVED`, `filesystem_identity(name)` (NFD-casefold/normcase), and `validate_run_child(root, run_id, *, require_events, check_conflict, reserved_prefixes)` returning a typed verdict / raising one core exception with a reason enum — **each serve caller maps reasons onto its own pinned HTTP status/code set at the edge** (core must not shape HTTP errors; fastapi is an optional extra and the refusal-code sets are security-test-pinned) | 7× `_is_reparse`, 4× reserved-name set (content-identical, so that merge is behavior-preserving), 3× fs-identity rule, the shared core of the 6+ run-path validators (SC-03); the fence-module twins consume it (CO-01). Surface-specific checks (launch's name-conflict + deletion-fence probe, deletion's uniform-404 policy) stay at the edges |
+| `core/atomicio.py` (extend) | `file_identity(stat) -> 5-tuple` with the canonical why-comment; `durable_no_replace_rename(src, dst, *, label)` (the ctypes renameat2/renamex_np/Windows write-through mover — both current copies already import `_windows_move_write_through` from here) | the ~6 exact-shape stat tuples port mechanically; deliberate-subset sites (train_monitor's 2-tuple, scope_sources' st_mode-for-ctime, log_pages' metadata pair, runs.py's 4-field key) keep their shapes but document the subset against the canonical definition; the four fence/receipt identity tuples (run_reset/run_deletion/reset_transaction/deletion_transaction) port **only under an equality test pinning tuple contents and order** — they are durable-identity brackets (XP-02); the mover pair (SC-05) |
+| `core/parse.py` (extend — it already claims the scalar-coercion charter) + a new `core/digests.py` | `bounded_int(v, lo, hi)` / `bounded_str(v, max_len)` beside the existing coercers; `valid_hex_digest(v, prefix)` and `canonical_json_digest(payload, *, prefix)` in `digests.py`. (Deliberately **not** `core/validators.py` — `core/validate.py` already exists as the unrelated ADR-7 CLI-agent output validator, and a one-letter sibling name is exactly the silent-typo trap this codebase documents) | ~20 hex-digest blocks and dozens of scalar guards (EV-04); the **four canonical-JSON minters'** dump+hash scaffolding (CO-08 — `idea_proposal_digest`, `_card_action_digest`, `stable_advisory_ref`, `verifier_evidence_digest`, whose dump kwargs are byte-identical). **Excluded:** `hypothesis_statement_digest` (sha256 over a normalized string) and `run_setup_key` (md5 over a joined argv string) are frozen non-JSON durable identities that must not be rerouted; five word-token regex copies (EM-15) also consolidate here or in a tiny `core/_text.py` |
+| `core/redact.py` (extend) | `bounded_redacted_tree(value, *, max_chars, max_items, max_depth, max_total_items, per_string_cap, strict_int_typing, guard_exceptions, drop_empty_keys, secret_policy)` — the divergent axes of the two existing walkers become explicit policy parameters | the tracing/advisory walker pair (CO-06) — noting advisory's sanitized projections feed `stable_advisory_ref` digest preimages, so the advisory-side port lands behind a golden-digest test; of the router projectors (SR-06) only the two near-identical walkers (genesis/misc) port now — `_scrub_json` may later adopt the core with its key-redaction policy parameterized, and the assistant **allow-list** projectors stay bespoke (an allow-list is not a bounded walk) |
 
-Frozen digest preimages (v1/v2 identities) keep their byte-exact builders and only route the
-final dump+hash through the shared tail — identity stability is the invariant.
+Two further P1 single-spelling extractions land alongside the kernel: the shared Docker
+hardening argv builder + `require_docker_cli` in `runtime/sandbox.py`, composed by both
+untrusted tiers (RA-03); and one shared `direction` validator (an `Annotated Literal["min",
+"max"]` type in core) applied to **all nine** registered task models (RA-06). Frozen digest
+preimages keep their byte-exact builders and only route the final dump+hash through the shared
+tail — identity stability is the invariant. The CLAUDE.md `core/` package-map row (and any
+docs/guide page describing these helpers) is updated in the same change that lands the kernel.
 
-### 6.2 One spelling for the engine's append protocols (ES-02, EC-03, ES-07, ES-06, ES-11)
+### 6.2 One spelling for the engine's append protocols (ES-02, EC-03, ES-07, ES-06, ES-11 + EV-03/EV-05/EV-06)
 
 The engine's replay-safety discipline is uniform in *intent* but hand-spelled per site. Add a
 small protocol layer used by every append path:
 
 - `events/eventstore.py::retry_tail_cas(store, plan, *, attempts=64, on_exhaust)` — the one
-  read→check→append(expected_last_seq)→retry loop; the eight hand-rolled copies become calls,
-  and exhaustion behavior becomes an explicit argument instead of accidental divergence.
-- `engine/node_build.py::_commit_built_node(reservation, code, files, *, pause_via_queue)` —
-  the shared post-build epilogue (parent-refetch guard → `_emit_node_created` → landed-check →
-  developer-error sentinel → telemetry consumption). `_create_node_scoped`, `_rerun_node` and
-  `_create_injected_node` keep only how they obtained idea/code. The worker-seam rule (only the
-  main task appends run-global `pause`) becomes a parameter, not a per-copy convention.
-- `engine/node_build.py::append_developer_crash(...)` — the one builder for the
-  `node_failed(reason='developer_crash')` + pause transaction, parameterized by reason text and
-  pause routing; the five call sites (three orchestrator, two speculation) collapse.
+  read→check→append(`expected_last_seq`)→retry loop. The `plan` callback returns either an
+  abort result or a **zero-arg append closure** the helper invokes — this covers the site that
+  must route its CAS append through the single `_emit_node_created` emitter and lets each site
+  keep its own lock wrapping. Lock scope is load-bearing and stays per-site:
+  `_reserve_node_build` calls the helper *inside* its existing `with self._id_lock:` (serial id
+  reservation), while the three narrow-lock sites keep the scan/fold/plan outside the lock as
+  their comments prescribe. Exhaustion behavior (`RuntimeError` vs `return False`) becomes the
+  explicit `on_exhaust` argument instead of accidental divergence.
+- `_commit_built_node(reservation, code, files, ...)` — the shared post-build epilogue
+  (parent-refetch guard → `_emit_node_created` → landed-check → developer-error sentinel →
+  telemetry consumption), **homed in `orchestrator.py` beside its three callers**. It cannot
+  move to `node_build.py`: the epilogue's re-folds are module-global `fold` calls that tests
+  monkeypatch through the orchestrator namespace, `node_build.py`'s own docstring documents the
+  three creation paths as "DELIBERATELY NOT MOVED" for that reason, and a reverse top-level
+  import would cycle. The per-path divergences become explicit parameters/hooks (landed-check
+  predicate, `materialize_abort` first-terminal branch, files/deleted source, generation
+  payload, telemetry gating and pooled-roles) so the extraction reviews as parameterized
+  unification, not textual dedupe. The two fold-monkeypatch test files are re-verified to still
+  intercept in the same change.
+- `append_developer_crash(...)` — one records-builder/appender for the
+  `node_failed(reason='developer_crash')` + pause transaction, parameterized by reason text,
+  pause routing (queued vs direct), CAS discipline (tail-CAS `append_many` at the speculation
+  sites vs today's plain sequential appends at the orchestrator sites — unifying the latter
+  onto CAS would be an improvement, not preservation: a marked decision item), and the
+  speculation sites' `_create_paused = True` side effect. The pause-only recovery branch of
+  `_close_developer_sentinel_once` (which restores a lost pause with *no* terminal) either
+  stays hand-rolled or uses an omit-terminal mode. The worker-seam rule is not a trusted
+  boolean: the orchestrator's why-comment block (why a worker-written `EV_PAUSE` races
+  `EV_RESUME` for byte position) moves verbatim into the helper, which **asserts** queued
+  routing whenever invoked off the main task, mirroring the existing membership-assert pattern.
 - `core/models.py::DEVELOPER_ERROR_PREFIX` + `is_developer_error(code)` — producer and all six
-  consumers import it; a two-way source-scan test (the repo's established pattern) pins it.
+  consumers import it; a two-way source-scan test pins it (ES-11).
 - `_eval_admission_current(state, node, generation, max_es)` shared by the serial and parallel
   dispatch branches (ES-06).
-- A tail-seq-keyed `fold_cached(events)` memo on Engine (identity + last-seq keyed, invalidated
-  by any append) to retire the per-iteration re-fold apologies (ES-12) without weakening
-  invariant #4 — any append still forces a re-fold.
+- The events-layer P1 singles land here too: `_invalidate_completion_certificates(st, ctx)`
+  called from all five fold handlers (EV-03); one tolerant-JSONL-prefix scanner under the four
+  hand-synchronized copies (EV-05); and `_locked_append` extracted under
+  `EventStore.append`/`append_many` (EV-06).
+- A tail-keyed `fold_cached` memo to retire the per-iteration re-fold apologies (ES-12) —
+  specified precisely, because appends reach the log from outside the Engine (serve
+  cross-process, eval worker threads, the background research task), so invalidation **cannot**
+  hook append sites. Contract: on every call compare (first-event object identity, tail seq,
+  snapshot length, **fold-callable identity**) against the freshly read snapshot (the
+  `_ack_commands` cursor technique); store key+state as one atomically swapped tuple; each
+  converted call site passes its own module-global `fold` so per-module patch seams keep
+  resolving. The enabling precondition is `RunState`'s documented "never mutated except by
+  replay.fold" contract (a cache hit returns a shared instance). Adopting it **amends CLAUDE.md
+  invariant #4's wording in the same change** (the memo preserves the invariant's purpose —
+  any log movement invalidates — but the current text forbids caching derived state outright).
 
 ### 6.3 Finish the Card subsystem's move out of the two god-modules (ES-01, EV-01, CO-02)
 
@@ -2584,129 +2649,267 @@ write-side ledger in `orchestrator.py` (~1,000 lines), the read-side derivation 
 (~2,200 lines), and identity/digest machinery in `core/models.py` (~800 lines). Target layout:
 
 - `core/cards.py` — Card identity: the digest/receipt family and the provenance models,
-  re-exported through `models.py` exactly as `concepts.py` already is.
-- `engine/card_ledger.py` — an eighteenth mixin holding the reservation/receipt write side
-  (`_plan_native_card` … `_mirror_hypothesis_card_merges`), following the documented mixin
-  pattern; the module-global `fold` monkeypatch seam stays in `orchestrator.py` because it only
-  gates `_create_node`/`_rerun_node`/`_create_injected_node` (per the comment at the seam).
+  re-exported through `models.py` via the existing compatibility-seam pattern. Unlike
+  `concepts.py` (a true leaf), the card family has dependencies pointing back into `models.py`
+  — so `cards.py` also absorbs the leaf helpers it needs (`durable_idea_payload`,
+  `hypothesis_id` and its statement normalizers), with `models.py` re-exporting all of them;
+  otherwise the re-export import cycles at load.
+- `engine/card_ledger.py` — a **seventeenth mixin** (making the Engine span eighteen files)
+  holding the reservation/receipt write side — ES-01's nineteen-helper cluster,
+  `_canonical_card_id` … `_mirror_hypothesis_card_merges`. The cluster contains six
+  module-global `fold` call sites (one, `_reserve_node_build`, on the default creation path),
+  so the mixin binds its own `fold` from `looplab.events.replay` like every other extracted
+  mixin, and the fold-monkeypatching tests (`test_creation_runaway_guard`,
+  `test_gpu_resources`, `test_hypothesis_merge`) are extended to patch
+  `looplab.engine.card_ledger.fold` **in the same change** and re-verified to intercept — the
+  repo already shipped exactly this breakage once during the research_cadence extraction. The
+  orchestrator's fold-seam comment stays true for the three creation functions that remain.
 - `events/cards.py` — the bounded-receipt fold helpers plus `derive_cards(state)` decomposed
-  into its numbered phases as pure top-level functions; `_finalize_fold` keeps calling one entry
-  point. A normalization adapter converts the legacy hypothesis-board events into card-shaped
-  rows **once at the top** so the derivation reasons over one input family (EV-13).
+  into its numbered phases as pure top-level functions; `_finalize_fold` keeps calling one
+  entry point. `replay.py` keeps `_derive_cards` (plus the `_FoldCtx`/handler names that four
+  test files import) as compatibility re-exports — the `_LAYOUT` shim cannot help with
+  intra-package symbol moves. A normalization adapter converts the legacy hypothesis-board
+  events into card-shaped rows **once at the top** so the derivation reasons over one input
+  family — the behavior-preserving half of EV-13 (the shadow-family *retirement* stays a P5
+  decision item).
 
 Invariants: the fold stays deterministic and order-tolerant (the pass is already pure over
-`RunState`); old logs must replay byte-identically — the existing replay tests are the pin.
+`RunState`); old logs must replay byte-identically — the existing golden-replay tests are the
+pin. Each extraction commit also updates the CLAUDE.md package map (the mixin count/list —
+"SEVENTEEN files … sixteen mixins" goes stale — plus the `events/` and `core/` rows), the
+affected docs/guide pages, and `docs/infographic/agent-architecture.html` (which references the
+Card subsystem ~14 times), per the repo's same-change rule.
 
 ### 6.4 A durable paid-work service for `serve/` (SR-01, SR-02, SR-03, SC-06)
 
 Five-plus hand-rolled implementations of "claim → do paid/destructive work → terminal receipt →
 generation fence → crash reconciliation" is the layer's biggest bug surface. Target:
 
-- `serve/paid_action.py` — the **event-ledger** protocol (claim event, terminal event,
-  fsync-confirm, generation fence, ambiguous-outcome reconciliation), parameterized by event
-  types; port boss `report_refresh` and the runs concept-lens onto it first (their helper pairs
-  are already byte-near-identical).
+- `serve/paid_ledger.py` — the **operation-idempotency (claim/terminal) ledger** half,
+  explicitly **composing the existing `serve/paid_work.py`** (whose docstring already owns the
+  other half of this boundary: the generation-bound metering lease and cost reconciliation).
+  Both docstrings state the split: *paid_work = generation-bound metering/attribution lease;
+  paid_ledger = per-operation claim→terminal receipt ledger that wraps it*. Port boss
+  `report_refresh` and the runs concept-lens first: their fsync-confirm helpers are identical
+  and their ledger folds share a shape — but the protocol is parameterized by identity field
+  names, digest binding and **conflict policy** (report_refresh is first-terminal-wins; the
+  lens binds `request_digest` into identity and drops conflicted identities fail-closed, and
+  keeps its strict recovery fold as its own strategy). The lens port includes de-closuring the
+  `build_router` helpers by threading `srv` explicitly (the boss/reset_route pattern). The
+  module **asserts its parameterized claim/terminal event types against an explicit
+  allow-list** (DIAGNOSTIC_EVENTS plus the documented serve-appendable folded exceptions) at
+  the append site, mirroring the BACKGROUND_APPENDABLE pattern — otherwise a generic serve-side
+  append helper becomes the unguarded path around engine invariant #1.
 - `serve/durable_op.py` — the **file-ledger** kit shared by reset and deletion (generic receipt
   store with immutable-field/phase tables, fence-binding validator, one
-  `preflight_quiescence(srv, rd, *, operation)`); reset/deletion keep their own phase enums.
-- Extract `serve/trace_clear.py` (mirroring `reset_route.py`'s shape) and
-  `serve/scope_actions.py` (the ~1,400 lines of lease/fence machinery out of
-  `routers/reports.py`), leaving both routers as endpoint wiring.
-- `run_commands.py`: split into `process_identity.py` / `control_validation.py` /
-  `spawn_leases.py` + the `RunCommandService` orchestrator, and grow `ControlSpec` into a real
-  per-event strategy record `{event_type, engine_policy, postcondition, data_fields, normalize,
-  precondition, decide}` — the existing set-equality assertions then *prove* every control event
-  has all handlers, and the three giant if/elif chains (SC-02) disappear structurally rather
-  than cosmetically.
+  `preflight_quiescence(srv, rd, *, operation)`); reset/deletion keep their own phase enums
+  (reset's unordered frozenset vs deletion's ordered monotonic tuple).
+- Extract `serve/trace_clear.py` (mirroring `reset_route.py`'s shape — feasible: the seventeen
+  closures capture only `srv`, module constants and each other) and `serve/scope_actions.py`
+  (the ~1,400 lines of module-level lease/fence machinery out of `routers/reports.py` **plus**
+  the five request-scoped closures of the ~530-line `generate_scope_report_ep`, decomposed into
+  functions taking `(reports_dir, scope_type, scope_id, action_id, …)`). This shrinks both
+  routers substantially rather than to pure wiring; `control.py`'s start-record reconciliation
+  (SR-01's fifth variant) is its own follow-up port.
+- `run_commands.py`: split into `spawn_leases.py` / `control_validation.py` + the
+  `RunCommandService` orchestrator, with the PID identity probes folded into the existing
+  `serve/engine_proc.py` (already the serve-layer process-plumbing module) rather than a third
+  process module. `run_commands.py` stays as the re-export barrel for the moved names
+  (`normalize_control`, `CONTROL_SPECS`, a derived `CONTROL_DATA_FIELDS` compat mapping —
+  tests import them directly). Grow `ControlSpec` into a real per-event strategy record
+  `{event_type, engine_policy, postcondition, data_fields, normalize, precondition, decide}` —
+  the existing set-equality assertions then *prove* every control event has all handlers; the
+  per-event `decide` hooks compose with the existing shared cross-event epilogue rather than
+  replacing it. Each extraction updates the CLAUDE.md serve/ package-map row and the
+  docs/guide/concepts.md module table in the same change (the process diagram has no
+  serve-internal nodes and is unaffected).
 
 ### 6.5 Re-modularize the cross-run knowledge subsystem (EM-01, EM-03, EM-05, EM-10, EM-06)
 
-- Split `claims.py` along its comment-delimited seams: `claims_health.py` (row validation +
-  receipts), `claims_ledger.py` (decision governance), `research_claims_store.py` (D8
-  persistence), `claims_assessments.py` (projections), `claims_retrieval.py` (context pack +
-  retrieve + atlas). Split `memory.py` into `concept_capsules.py` + `lesson_hygiene.py` + the
-  case libraries. Wire both through the `_LAYOUT` shim.
-- Move the paid-curation transaction out of `lessons.py` into `curation_protocol.py` beside
-  `steward_invocation.py`, and converge new writes on the v2 semantic-key shape so the
-  four-generation row validator becomes legacy-read-only (EM-03).
-- Relocate `_append_governance` to `governance_health.py`, make per-ledger readers a mandatory
-  parameter instead of filename special-cases, and port `record_claim_decision` onto it (EM-05).
+- Split `claims.py` along the section boundaries EM-01 identifies (three of which are
+  banner-commented): `claims_health.py` (row validation + receipts — the shared base module the
+  other four import), `claims_ledger.py` (decision governance), `research_claims_store.py` (D8
+  persistence), `claims_assessments.py` (projections, absorbing `claims_for_memory`),
+  `claims_retrieval.py` (context pack + retrieve + atlas, absorbing `atlas_for_memory`). Split
+  `memory.py` into `concept_capsules.py` + `lesson_rows.py` (named outside the `lessons_*`
+  mixin namespace — it is a pure-function module, not another LessonMemory mixin); fingerprints,
+  the M6/M4 helpers and the case libraries stay in `memory.py`. **Compatibility is the
+  re-export barrel, not the `_LAYOUT` shim**: `claims.py`/`memory.py` keep re-exporting every
+  moved name (the documented `llm.py`/`agent.py` split pattern) so importers and monkeypatch
+  seams keep resolving — internal call sites that tests patch keep routing through the barrel
+  or late imports; the new modules are additionally registered in `_LAYOUT` because the
+  two-way package-layout audit requires it.
+- Move the paid-curation transaction out of `lessons.py` as a **`CurationProtocolMixin`** in
+  `curation_protocol.py` (verbatim method moves, following the documented
+  `lessons_priors`/`distill`/`reconcile` mixin convention) — the protocol members are
+  LessonMemory methods that durability tests monkeypatch as *instance attributes*, so a
+  free-function extraction would silently detach those seams. **Decision item (EM-03):**
+  converging new writes onto the v2 semantic-key shape is a durable-protocol migration of a
+  live paid at-most-once path (the v1 begun/terminal generation is written today by the
+  HTTP/CLI steward invocations, whose begun-row crash fence and request-digest binding the v2
+  finalize shape does not provide for operator retries) — it needs its own at-most-once design
+  and an owner; only after it lands can the v1 branch of the row validator become
+  legacy-read-only.
+- Relocate `_append_governance` to `governance_health.py`, parameterizing the per-ledger
+  readers **and** the global-revision hook (or lazy-importing
+  `concept_governance_global_revision` — never top-level: `concept_registry` imports
+  `governance_health` at module top, so a top-level back-import cycles), and deciding whether
+  the `ConceptGovernance*` exception types move with it. Port `record_claim_decision` onto it
+  with the semantics parameterized, not assumed: the idempotency-payload extractor (claim rows
+  share none of the concept fields the current extractor reads), the revision derivation
+  (logical deduped claim count vs physical row count), a persist-continuation hook so the
+  `validate_evidence` path keeps its `project_governed_sources(claim_locked=True)` lock nesting
+  around the append, and the `Claim*` exception types the HTTP layer maps (an HTTP contract —
+  its tests move in the same change). Alternatively scope the port to sharing only the
+  lock/append/fsync/durability core.
 - One generic receipted-snapshot type (rows + typed receipt + explicit attachments) replacing
-  the three list subclasses (EM-09), and one declarative receipt-spec helper replacing the ~8
-  hand-rolled validators (EM-12) — builder and validator consume the same spec, so drift becomes
-  structurally impossible.
-- **Decision item:** make the structured claim key the default assessment projection and mark
-  lean/fuzzy as legacy read paths with a deprecation note (EM-06).
+  the three list subclasses (EM-09), and one declarative receipt-spec helper for the ~8
+  hand-rolled validators (EM-12) — with §6.1's caveat applied: specs must reproduce today's
+  exact per-version field sets, bounds and legacy-absent defaults (golden fixtures pin them);
+  digest field-lists and consumer projections remain separate contracts the spec does not
+  unify.
+- **Decision item (EM-06), rescoped:** the *product* default is already the structured claim
+  key (`Settings.cross_run_structured_claims=True`); what remains is (a) whether to flip the
+  deliberately-frozen bare-library defaults (EngineOptions and the function signatures), which
+  requires revising the pinned options-divergence test and the configuration.md row while
+  keeping the resume-compat map entry, and (b) deprecating the lean/fuzzy read paths
+  (`_fuzzy_merge_claims`, the `_global_key`/`_scoped_key` shadow namespaces, the CLI fuzzy
+  flag).
+- Each split/relocation commit updates docs/guide/concepts.md's module map (pinned by
+  `test_package_layout`), the relevant docs/guide pages and the CLAUDE.md engine package-map
+  row in the same change.
 
 ### 6.6 Guard the cross-package seams like the in-package ones (T4)
 
-- Export a public read-model facade from the engine for tools/serve consumers — e.g.
-  `engine/read_models.py` re-exporting the capsule/claim views under public names — and add a
-  two-way source-scan test pinning the list (XP-01, TO-09). Underscore-names stop crossing
-  package boundaries.
-- Move the developer-backend key registry into core (`core/task_kinds.py` pattern) and have
-  `agents/cli_agent.PRESETS` assert against it, restoring "core imports nothing above itself"
-  (CO-07/XP-04).
+- Export a public read-model facade from the engine for tools/serve consumers — e.g. one
+  `engine/knowledge_views.py` (**not** `read_models.py`: `events/readmodel.py` already owns
+  that term for the per-run SQLite artifact) re-exporting the capsule/claim views under public
+  names, plus a public home for `concept_registry._TOMBSTONE` — with a two-way source-scan test
+  pinning the list (XP-01, TO-09). Additionally promote `events.eventstore._interprocess_lock`
+  to a public `interprocess_lock` (back-compat alias kept): it is the single most-imported
+  cross-package underscore name (serve, cli, engine, tools). With those, engine-internal
+  underscore names stop crossing into tools/serve.
+- Move the developer-backend key registry into core (the `core/task_kinds.py` pattern) and have
+  `agents/cli_agent.PRESETS` assert against it; also derive `cli/__init__.py`'s hardcoded
+  `_DEV_BACKENDS` tuple from it and cover `appconfig.py`'s template string in the source-scan
+  test, so all four spellings pin to one source (CO-07/XP-04).
 - Inject the serve dependencies `machine_runs_tools` needs (config-write lock, liveness/spawn
-  probes) as constructor callables from `serve/assistant.py` — or move the mutation half of the
-  module into `serve/` (TO-03/XP-03).
-- Move the two speculation-calibration constants into `search/speculation_calibration.py` (its
-  stated purpose) and export `incomplete_finalize_scope` through events/core, deleting the lazy
-  search↔engine cycle (SE-07/XP-07).
+  probes) as constructor callables — with **fail-closed semantics**: the lifecycle-fence
+  callables are required arguments (or, when absent, the mutation verbs refuse with an explicit
+  "(run control unavailable: no lifecycle fence bound)"), never no-op; only the read-side
+  `alive_fn` keeps its degrade-to-False display behavior. The existing `alive_fn` precedent
+  degrades open, which is fine for liveness display and unsafe for the destructive-rewrite
+  fences (TO-03/XP-03).
+- Move the speculation-calibration **profile-builder block** (not just two constants: the
+  settings-defaults walker, the ~105-line overrides literal, the coverage guards and the
+  schema-string digest — ~170 lines of import-time machinery) into
+  `search/speculation_calibration.py`, accepting that the module gains `core.config`/orjson
+  imports and rewriting its two "spelled literally to avoid importing core.config" comments in
+  the same change; `orchestrator.py` keeps back-compat re-exports (the existing
+  `SPECULATION_CALIBRATION_VARIANT_FIELDS` precedent) for the cli and five test importers. The
+  digest value is location-independent, so the move cannot invalidate receipts. Export
+  `incomplete_finalize_scope`'s pure helper cluster through `events/` (it keys on
+  `events/types.py` constants, so core is not a viable home; `engine/finalize.py` keeps a
+  re-export), deleting the lazy search↔engine cycle (SE-07/XP-07).
 - Add the missing `STRATEGY_FIELDS` registry + source-scan test (AG-03); document the
   agents↔search import direction in CLAUDE.md (AG-07); extract the shared scan skeleton into
-  `tests/_source_scan.py` so the six guard tests stop copy-pasting it (XP-10).
+  `tests/_source_scan.py` so the **seven-plus** guard tests (including
+  `test_task_adapter_contract`) and the three this section adds stop copy-pasting it (XP-10).
+  Each new registry/module lands together with its CLAUDE.md updates (registry enumeration,
+  package-map rows) in the same change.
 - **Decision item (SE-01):** replace the whole-repo raw-byte speculation-gate hash with a
   versioned semantic manifest (explicit protocol version + hashes of execution-affecting files
-  only), and import the expected finalize/setup event shapes from the engine writer modules so
-  writer and validator share one spelling.
+  only), and extract the expected finalize/setup event-shape constants into a
+  **downward-importable home** — `events/` beside the event-type registry, or
+  `speculation_calibration.py` — with the *engine writer* importing them. (Never the reverse:
+  having the search-side validator import engine writer modules would re-create the exact
+  search→engine edge the previous bullet deletes.)
 
-### 6.7 UI: one command machine, one resource hook, smaller files (UI-01…UI-08)
+### 6.7 UI: one command machine, one resource hook, smaller files (UI-01…UI-08, UI-13)
 
 - `useDurableRunCommand(source, runId, {labels, onToast})` — one hook (or pure state-machine
-  module) over the already-shared `api.js` envelope layer; Dock and AssistantBar keep only their
-  action tables and labels (UI-01).
+  module) over the already-shared `api.js` envelope layer; Dock and AssistantBar keep only
+  their action tables and labels (UI-01 — a T1 member; it ships in §6.9 step 1, not
+  opportunistically).
 - Split `api.js` along its visible seams (`commandStorage.js`, `eventStream.js`,
-  `commandProtocol.js`, `scopeReportActions.js`) with the `util.js` barrel preserving importers —
-  the codebase's own P5.2 precedent (UI-02).
-- Promote one `useResource` family (lock, last-good, stale, retry, supersede/mapLastGood —
-  Inspector's machine is the superset to design for) and migrate the seven variants
-  incrementally (UI-06); one `useToast` (UI-13); `submitCommand(promise, labels, onToast)` for
-  the ~15 CONTROL blocks (UI-07).
-- Move the narration tables into a unit-tested pure module (`narration.js` or `timelineModel.js`)
-  with one `{validate?, render}` table (UI-08); extract `useStartOverRecovery` + a `RunShell`
-  wrapper from RunView (UI-03); split ConfigPanel and the Card kanban out of `panels.jsx`
-  keeping it as the lazy-chunk barrel (UI-04).
+  `commandProtocol.js`, `scopeReportActions.js`) — with **`api.js` itself remaining the compat
+  barrel** re-exporting the extracted modules: 14 src files and 12 test files import
+  `./api.js`/`../src/api.js` directly (only ~20 go through `util.js`), so a util-only barrel
+  strands them — the same stranded-test failure mode the repo's contract-change rule warns
+  about. Extract the fetch client beneath the four modules first to avoid an
+  api↔commandProtocol import cycle (UI-02).
+- Promote one shared resource-hook family — by **growing `usePanelResource`** (which already
+  has the right shape) toward Inspector's superset (supersede/mapLastGood/onSettled), or by
+  migrating `RunList.jsx` first so its exported hook vacates the `useResource` name — and
+  migrate the seven variants incrementally (UI-06). One `useToast` (UI-13). A
+  `withCommandToast(promise, labels, onToast)` helper for the ~15 CONTROL blocks (UI-07) —
+  named to avoid the near-collision with the existing `submitRunCommand` (a different protocol
+  layer).
+- Move the narration tables into **`narration.js`** with one `{validate?, render}` table
+  (UI-08), imported only by Dock — *not* into `timelineModel.js`: that module sits inside the
+  review-route bundle closures whose budgets `ui/scripts/check-bundle.mjs` deliberately keeps
+  owner-only Dock bytes out of (budgets are "calibrated downward — do not raise them").
+  `dockNarration.test.js` is re-pointed (or Dock keeps an `eventNarration` re-export) in the
+  same change.
+- Extract `useStartOverRecovery` + a `RunShell` wrapper for the six early-return screens from
+  RunView (UI-03); split **three** residents out of `panels.jsx`, keeping it as the lazy-chunk
+  barrel: ConfigPanel, the Card board complex, and `AuthoringPanel` with its
+  authoring-operation recovery helpers — AuthoringPanel grew ~32→~830 lines in the §5.3 drift
+  window, so a two-way split no longer leaves a barrel (UI-04).
 
 ### 6.8 Guardrails against re-accretion (the meta-problem)
 
 Every god-module in §4 regrew *after* a documented split, so structural fixes need enforcement:
 
-1. **A size-regression source-scan test** in the spirit of the existing registry guards: a test
-   that walks `looplab/` and fails when a named hotspot file grows past its recorded line
-   budget, or a new function exceeds ~200 lines outside an allow-list. The allow-list starts as
-   today's §4 inventory, values only ratchet DOWN, and the failure message points at doc 25 —
-   turning "the split eroded" from a review observation into a red test. The ratchet is not
-   hypothetical: in the single day after this review's baseline, `panels.jsx` grew
-   2,351→4,042 lines and `routers/misc.py` 737→1,927 (§5.3).
-2. **Marker hygiene rule in CLAUDE.md**: an in-code `CODEX AGENT:`/review marker must be either
-   fixed or converted into a tracked issue in the same change that touches its function; markers
-   are TODOs with an owner, not permanent annotations (T7). The precedent: the entire
-   `[PERF]` marker backlog was closed by `c92b89f` within a day of being catalogued here.
+1. **A size-regression source-scan test** in the spirit of the existing registry guards,
+   covering **both trees**: file-level line budgets for `looplab/**/*.py` *and*
+   `ui/src/**/*.{js,jsx}` (plain line counting — the headline offenders are UI files, which the
+   existing looplab-only scan pattern would miss), plus a Python-only ast rule for new
+   functions over ~200 lines outside an allow-list. §4 supplies the hotspot *list*; budgets
+   seed from the actual line counts at the commit that lands the test and only ratchet DOWN
+   from there (seeding from §4's baseline numbers would arrive red by up to +1,691 lines). The
+   failure message points at doc 25. The ratchet is not hypothetical: in the single day after
+   this review's baseline, `panels.jsx` grew 2,351→4,042 lines and `routers/misc.py` 737→1,927
+   (§5.3).
+2. **Marker hygiene rule in CLAUDE.md**: a diagnosed-defect marker (`CODEX AGENT:` and
+   successors) in `looplab/` must be resolved when a change **alters the behavior** of its
+   function — by fixing it, filing a tracked issue, or rewriting it as a marker-free
+   why-comment where the content is accepted-limitation documentation (the `c92b89f`
+   precedent). Verbatim code moves stay exempt (the repo's comments-move-verbatim convention),
+   and test-rationale comments are out of scope. The precedent: all 15 baseline `[PERF]`
+   markers were closed within hours of being catalogued here — 13 by `c92b89f`, the two
+   settings-lock markers by `f3586c9`.
 3. **Ledger upkeep**: when a change fixes a doc-25 finding, flip its entry in §5 in the SAME
-   change (the repo already applies this rule to `docs/guide/` and the process diagram).
-4. **Test-side factories**: add `tests/factories.py` (`make_engine(run_dir, **overrides)` + the
-   common scripted-role stubs) and migrate opportunistically (XP-11) — this is what makes the
-   frozen `Engine(...)` keyword API evolvable at all, and it de-risks every §6.2/§6.3 extraction.
+   change — `a077d86` already demonstrated the workflow by flipping §3's rows to DELETED in the
+   deletion commit itself.
+4. **Test-side factories**: add `tests/factories.py` (`make_engine(run_dir, **overrides)` plus
+   the common scripted-role stubs) and migrate opportunistically (XP-11; 153 direct `Engine(`
+   constructions across 78 test files — CLAUDE.md's own "~100 call sites" is a stale
+   undercount) — this is what makes the frozen `Engine(...)` keyword API evolvable at all, and
+   it de-risks every §6.2/§6.3 extraction.
 
 ### 6.9 Suggested sequencing
 
-1. §6.1 + §6.2 first (small, mechanical, each removes a live drift risk; no API changes).
-2. §6.6 seam guards next — cheap, and they make the §6.3–§6.5 moves safe to review.
+0. Land the two §6.8 enablers **first**: `tests/factories.py` (it de-risks every §6.2/§6.3
+   extraction, so it cannot come after them) and the §6.8.1 size ratchet (the accretion it
+   guards against is measurably live *now*, §5.3). Marker hygiene and ledger upkeep (§6.8.2/3)
+   land with the first flagship split.
+1. §6.1 + §6.2 next (small, mechanical, each removes a live drift risk; no API changes), plus
+   the UI `useDurableRunCommand` hook — the last unshipped T1 member.
+2. §6.6 seam guards — cheap, and they make the §6.4–§6.5 moves safe to review (§6.3's safety
+   pin is the golden-replay tests, as stated there).
 3. §6.3 (Cards) and §6.4 (serve paid-work) as the two flagship splits; each is a bounded series
    of behavior-preserving commits with existing tests as pins.
-4. §6.5 and §6.7 opportunistically, module by module, behind the `_LAYOUT` shim and the
-   `util.js` barrel respectively.
-5. §6.8 guardrails land together with the first flagship split, so the ratchet exists before
-   the next accretion cycle starts. Decision items (EM-06, SE-01, plus §2's P5 list) get owners
-   rather than patches.
+4. §6.5 and §6.7 opportunistically, module by module — behind the `claims.py`/`memory.py` and
+   `api.js` **re-export barrels** respectively (the `llm.py`/P5.2 precedent; the `_LAYOUT` shim
+   and `util.js` keep resolving *through* the barrels, they are not the split mechanism).
+5. Decision items get owners rather than patches: EM-06 (bare-library structured-key defaults +
+   lean/fuzzy deprecation), EM-03 (v2 write-shape convergence), SE-01 (versioned manifest +
+   event-shape constants), the developer-crash CAS unification (§6.2), EV-13's shadow-family
+   retirement, plus §2's remaining P5 list.
+
+Every extraction/split commit updates the CLAUDE.md package map (including the mixin count/list
+and the registry enumeration), the relevant docs/guide page, and — where subsystems the diagram
+shows are affected — `docs/infographic/agent-architecture.html`, in the same change; and every
+commit that fixes a finding flips its §5 row. That rule is what keeps this document, CLAUDE.md
+and the tree telling the same story.
