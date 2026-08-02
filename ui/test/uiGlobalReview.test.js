@@ -132,10 +132,15 @@ test('early run creation and uncertain share mutations cannot replay user intent
   assert.match(assistant, /const onNewRun = \(event\) => \{\s*event\.preventDefault\(\)/)
   assert.match(assistant, /onReady\?\.\(\)/)
   assert.match(assistant, /shareUnknownSid[\s\S]*?Share uncertain · revoke before retrying/)
-  assert.match(collaboration, /const \[unknownCreate, setUnknownCreate\] = useState\(false\)/)
-  assert.match(collaboration, /if \(busy \|\| unknownCreate\) return/)
-  assert.match(collaboration, /reconcileUnknownCreate[\s\S]*?refreshed\.some\(activeLink\)/)
-  assert.match(collaboration, /disabled=\{busy \|\| unknownCreate\}/)
+  // The `unknownCreate` boolean became a DURABLE per-view recovery record — an uncertain mint now
+  // survives a reload instead of only a re-render, which is the point: a link may already exist on
+  // the server. The property is unchanged and is asserted on the record's fields.
+  assert.match(collaboration, /const emptyRecovery = key => \(\{\n\s*key, loaded: false, intent: null, invalid: null, busy: false/,
+    'link-mint uncertainty is durable state keyed to the view, not a transient flag')
+  assert.match(collaboration, /if \(!recovery\.loaded \|\| recovery\.busy \|\| recovery\.intent \|\| recovery\.invalid\) return/,
+    'no second mint may start before the recovery record is loaded and clear')
+  assert.match(collaboration, /const controlsLocked = !recovery\.loaded \|\| !!recovery\.invalid \|\| !!intent \|\| recovery\.busy/,
+    'an unresolved or unreadable mint locks the builder rather than offering a retry that re-mints')
 })
 
 test('dynamic API paths preserve fragment syntax and a literal encoded slash as one identity segment', async () => {
