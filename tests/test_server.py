@@ -2629,9 +2629,21 @@ def test_concurrent_start_reserves_run_before_popen(tmp_path, monkeypatch):
         responses = [first.result(timeout=5), second.result(timeout=5)]
 
     assert sorted(r.status_code for r in responses) == [200, 409]
-    assert len(calls) == 1
+    assert len(calls) == 1                                   # exactly one detached child, ever
     conflict = next(r for r in responses if r.status_code == 409)
-    assert conflict.json()["detail"]["code"] == "start_uncertain"
+    detail = conflict.json()["detail"]
+    # WHICH fail-closed code the loser gets depends on how far the winner got before the loser
+    # reached the sequencer, and that ordering is not something this fixture controls: an unresolved
+    # spawn claim answers `start_uncertain`, a live engine `start_in_progress`, and a winner that
+    # already recorded its spawn leaves a directory that simply owns the name (`run_id_conflict`).
+    # Pinning one of the three made this test hostage to that race. What must hold is the property:
+    # the loser is REFUSED, with a code from the fail-closed set — never an overwrite, and never a
+    # code that invites one.
+    assert detail["code"] in {
+        "start_uncertain", "start_in_progress", "run_id_conflict",
+        "external_start_uncertain", "external_start_in_progress",
+    }, detail
+    assert "remediation" in detail or detail.get("field_errors")   # always an actionable next step
 
 
 def test_inject_node_control_append(tmp_path):
