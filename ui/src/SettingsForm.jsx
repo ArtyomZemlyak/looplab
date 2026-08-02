@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useState } from 'react'
+import React, { useEffect, useId, useRef, useState } from 'react'
 import { filterSettingsGroups, normalizeSettingsQuery } from './settingsModel.js'
 import './settings-polish.css'
 
@@ -145,28 +145,48 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
                                        focusKey = '', focusRequest = 0, interactionDisabled = false }) {
   const groups = filterSettingsGroups(schema.groups, { mode, query, only, hideSecret })
   const rolePills = schema.agentRolePills
-  const [active, setActive] = useState(0)
+  // Keep the selected section by stable identity. The Essential catalogue is a sparse subset of
+  // All, so retaining a numeric index silently selected a different section when modes changed.
+  const [activeGroup, setActiveGroup] = useState('')
   const reactId = useId()
   const idPrefix = `sf-${safeId(reactId)}`
   const searching = !!normalizeSettingsQuery(query)
-  const idx = groups.length ? Math.min(active, groups.length - 1) : 0
+  const selectedIndex = groups.findIndex(item => item.title === activeGroup)
+  const idx = selectedIndex >= 0 ? selectedIndex : 0
   const group = groups[idx]
+  const handledFocusRef = useRef('')
+  const tablistRef = useRef(null)
   const groupUnsaved = gr => gr.fields.some(f => unsaved?.has(f.key))
   const groupChanged = gr => gr.fields.some(f => dirty?.has(f.key))
 
   useEffect(() => {
     if (!focusKey || !Object.hasOwn(schema.fieldByKey, focusKey)) return undefined
+    const focusCommand = `${focusRequest}:${focusKey}`
+    if (handledFocusRef.current === focusCommand) return undefined
     const groupIndex = groups.findIndex(item => item.fields.some(field => field.key === focusKey))
     if (groupIndex < 0) return undefined
-    if (!searching && active !== groupIndex) {
-      setActive(groupIndex)
+    if (!searching && idx !== groupIndex) {
+      setActiveGroup(groups[groupIndex].title)
       return undefined
     }
     const timer = setTimeout(() => {
-      document.querySelector(`[data-settings-form="${idPrefix}"] [name="${focusKey}"]`)?.focus()
+      const target = document.querySelector(
+        `[data-settings-form="${idPrefix}"] [name="${focusKey}"]`,
+      )
+      if (!target) return
+      target.focus()
+      // A review request is a one-shot focus command. Remember it only after the target exists so
+      // the tab-switch render above can finish first, but never replay it on ordinary navigation.
+      handledFocusRef.current = focusCommand
     }, 0)
     return () => clearTimeout(timer)
-  }, [focusKey, focusRequest, mode, query, only, hideSecret, schema, searching, active])
+  }, [focusKey, focusRequest, mode, query, only, hideSecret, schema, searching, idx])
+
+  useEffect(() => {
+    if (searching) return
+    tablistRef.current?.querySelector('[aria-selected="true"]')
+      ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [idx, searching])
 
   if (!groups.length) return <div className="settings-empty" role="status">
     <strong>No settings match “{query.trim()}”</strong>
@@ -192,7 +212,7 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
     else if (event.key === 'End') next = groups.length - 1
     else return
     event.preventDefault()
-    setActive(next)
+    setActiveGroup(groups[next].title)
     event.currentTarget.parentElement?.querySelectorAll('[role="tab"]')[next]?.focus()
   }
 
@@ -200,13 +220,13 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
   const panelId = `${idPrefix}-panel-${idx}`
   return <div className="settings-form tabbed" role="form" aria-label="Settings fields"
               data-settings-form={idPrefix}>
-    <div className="tabs sf-tabs" role="tablist" aria-label="Settings sections">
+    <div ref={tablistRef} className="tabs sf-tabs" role="tablist" aria-label="Settings sections">
       {groups.map((gr, index) => <button key={gr.title} type="button" role="tab"
         id={`${idPrefix}-tab-${index}`}
         aria-controls={index === idx ? `${idPrefix}-panel-${index}` : undefined}
         aria-selected={index === idx} tabIndex={index === idx ? 0 : -1}
         className={'tab' + (index === idx ? ' active' : '')}
-        onClick={() => setActive(index)} onKeyDown={event => onTabKeyDown(event, index)}
+        onClick={() => setActiveGroup(gr.title)} onKeyDown={event => onTabKeyDown(event, index)}
         title={gr.sub || ''}>
         {gr.title}{changeDot(groupUnsaved(gr), groupChanged(gr))}
       </button>)}

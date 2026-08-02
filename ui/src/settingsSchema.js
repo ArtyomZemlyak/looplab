@@ -13,6 +13,14 @@ const boundedText = (value, maximum, allowEmpty = false) => {
 }
 const ownKeys = value => Object.keys(value)
 
+export function canonicalAgentRoles(value) {
+  return Array.isArray(value) ? [...new Set(value)].sort() : null
+}
+
+export function sameAgentRoles(left, right) {
+  return JSON.stringify(canonicalAgentRoles(left)) === JSON.stringify(canonicalAgentRoles(right))
+}
+
 export function validateSettingsSchema(value) {
   if (!record(value) || value.schema !== SETTINGS_SCHEMA_VERSION
       || typeof value.revision !== 'string' || !/^[0-9a-f]{64}$/.test(value.revision)
@@ -158,6 +166,13 @@ const numericRangeError = (field, value) => {
 
 export function parseSettingValue(field, raw, { allowClear = true } = {}) {
   if (field.type === 'bool') return { valid: true, value: !!raw, error: '' }
+  // Some providers distinguish an explicit empty enum value from inheritance. For example,
+  // llm_reasoning="" means “send no reasoning parameter”, while null removes the override and
+  // falls back to the engine default. Preserve a schema-declared empty option before generic blank
+  // handling turns it into a clear operation.
+  if (field.type === 'enum' && raw === '' && field.options?.includes('')) {
+    return { valid: true, value: '', error: '' }
+  }
   if (raw == null || (typeof raw === 'string' && raw.trim() === '')) {
     return allowClear || field.nullable
       ? { valid: true, value: null, error: '' }
@@ -282,8 +297,10 @@ export function settingsSavePayload(form, agentControl, baselineForm, baselineAg
     const patch = {}
     const keys = new Set([...Object.keys(control), ...Object.keys(baselineAgentControl)])
     for (const key of keys) {
-      const value = Object.hasOwn(control, key) ? control[key] : null
-      if (JSON.stringify(value) !== JSON.stringify(baselineAgentControl[key] ?? null)) patch[key] = value
+      const value = Object.hasOwn(control, key) ? canonicalAgentRoles(control[key]) : null
+      const baselineValue = Object.hasOwn(baselineAgentControl, key)
+        ? canonicalAgentRoles(baselineAgentControl[key]) : null
+      if (!sameAgentRoles(value, baselineValue)) patch[key] = value
     }
     if (Object.keys(patch).length) out.agent_control = patch
   } else if (baselineForm == null) {

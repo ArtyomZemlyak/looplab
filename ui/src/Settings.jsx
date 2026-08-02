@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createIdempotencyKey, deadlineGet, saveSettings, saveSecret, llmHealth } from './util.js'
 import {
-  toForm, fromForm, settingsSavePayload, settingsValidationErrors, loadSettingsSchema,
+  toForm, fromForm, settingsSavePayload, settingsValidationErrors, loadSettingsSchema, sameAgentRoles,
 } from './settingsSchema.js'
 import {
   filterSettingsGroups, reconcileAcceptedRecord, reconcileUnknownRecord, settingsViewStats,
@@ -522,6 +522,7 @@ export default function Settings({ onBack }) {
   const loadControllerRef = useRef(null)
   const allowNavigationRef = useRef(false)
   const settingsHashRef = useRef(typeof location === 'undefined' ? '#/settings' : location.hash)
+  const searchInputRef = useRef(null)
 
   const load = (reloadSchema = false, preserveExisting = false) => {
     const owner = ++loadRef.current
@@ -577,8 +578,13 @@ export default function Settings({ onBack }) {
       const defaultValue = defaults[key] ?? (schema.fieldByKey[key].type === 'list' ? [] : null)
       if (JSON.stringify(current[key]) !== JSON.stringify(defaultValue ?? null)) changed.add(key)
     }
+    const defaultControl = defaults.agent_control || {}
+    const controlKeys = new Set([...Object.keys(agentControl || {}), ...Object.keys(defaultControl)])
+    for (const key of controlKeys) {
+      if (!sameAgentRoles((agentControl || {})[key] || [], defaultControl[key] || [])) changed.add(key)
+    }
     return changed
-  }, [form, defaults, schema])
+  }, [form, defaults, schema, agentControl])
 
   const validationErrors = useMemo(() => form && schema
     ? settingsValidationErrors(form, schema) : {}, [form, schema])
@@ -602,7 +608,7 @@ export default function Settings({ onBack }) {
     }
     const controlKeys = new Set([...Object.keys(agentControl || {}), ...Object.keys(savedAC || {})])
     for (const key of controlKeys) {
-      if (JSON.stringify((agentControl || {})[key] || []) !== JSON.stringify((savedAC || {})[key] || [])) changed.add(key)
+      if (!sameAgentRoles((agentControl || {})[key] || [], (savedAC || {})[key] || [])) changed.add(key)
     }
     return changed
   }, [form, saved, schema, validationErrors, agentControl, savedAC])
@@ -652,7 +658,8 @@ export default function Settings({ onBack }) {
   const visibleGroups = useMemo(() => schema
     ? filterSettingsGroups(schema.groups, { mode, query }) : [], [mode, query, schema])
   const visibleStats = useMemo(() => settingsViewStats(visibleGroups), [visibleGroups])
-  const hiddenUnsaved = [...unsavedKeys].filter(key => !visibleStats.keys.has(key)).length
+  const hiddenUnsavedKeys = [...unsavedKeys].filter(key => !visibleStats.keys.has(key))
+  const hiddenUnsaved = hiddenUnsavedKeys.length
   const searching = !!query.trim()
   const catalogueSummary = searching
     ? `${countLabel(visibleStats.fields, 'match', 'matches')} across all settings`
@@ -883,8 +890,14 @@ export default function Settings({ onBack }) {
     }
   }
   const revealChanges = () => {
+    const first = hiddenUnsavedKeys[0]
     setQuery('')
     setMode('all')
+    if (first) setInvalidFocus(previous => ({ key: first, request: previous.request + 1 }))
+  }
+  const clearSearch = () => {
+    setQuery('')
+    requestAnimationFrame(() => searchInputRef.current?.focus())
   }
   const requestBack = () => {
     if (navigationUnsafe && !window.confirm(navigationWarning(
@@ -914,7 +927,7 @@ export default function Settings({ onBack }) {
             </div>
             <details className="settings-help">
               <summary>How changes work</summary>
-              <p><span className="sf-dot unsaved">●</span> Unsaved edits clear after Save.
+              <p><span className="sf-dot unsaved">●</span> Amber dots mark edits not yet saved; they disappear after a successful Save.
                 <span className="sf-dot fromdefault">●</span> Customized values differ from the engine default.</p>
               <p>R, S, and B control whether the Researcher, Strategist, or Boss may change a setting at runtime.</p>
             </details>
@@ -936,12 +949,12 @@ export default function Settings({ onBack }) {
               <label className="settings-control-label" htmlFor="settings-search">Find a setting</label>
               <div className="settings-search-control">
                 <OpIcon name="search" className="t-ic" />
-                <input id="settings-search" type="search" value={query}
+                <input ref={searchInputRef} id="settings-search" type="search" value={query}
                        aria-describedby={searching ? 'settings-search-scope' : undefined}
                        placeholder="Name, key, option, or purpose…"
                        onChange={event => setQuery(event.target.value)} />
                 {query && <button type="button" className="settings-search-clear"
-                                  aria-label="Clear settings search" onClick={() => setQuery('')}>×</button>}
+                                  aria-label="Clear settings search" onClick={clearSearch}>×</button>}
               </div>
               {searching && <span id="settings-search-scope" className="settings-search-scope">Search includes advanced settings.</span>}
             </div>

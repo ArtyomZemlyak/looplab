@@ -257,8 +257,13 @@
   white-space: nowrap;
 }
 
-.sf-tabs { scrollbar-width: none; -ms-overflow-style: none; }
-.sf-tabs::-webkit-scrollbar { display: none; }
+.sf-tabs {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+}
+.sf-tabs::-webkit-scrollbar { height: 6px; }
+.sf-tabs::-webkit-scrollbar-track { background: transparent; }
+.sf-tabs::-webkit-scrollbar-thumb { border-radius: 999px; background: var(--line-2); }
 .llm-health { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
 .llm-health-note { color: var(--working-text); font-size: 11px; line-height: 1.3; white-space: nowrap; }
 .llm-health-result { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
