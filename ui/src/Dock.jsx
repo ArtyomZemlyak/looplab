@@ -16,7 +16,7 @@ import { DataTable } from './accessibility.jsx'
 import { tracePartial, traceUnavailable } from './traceProjection.js'
 import { crossRunPriorNarration } from './crossRunPrior.js'
 import { buildingGenerations, buildingMarkers } from './buildingModel.js'
-import { useDialogFocus } from './useDialogFocus.js'
+import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 
 
 // The run's EVENTS window (round-9): one scrubbable, filterable feed that renders every run event
@@ -864,7 +864,8 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
     const target = collapseButtonRef.current || document.querySelector('[data-route-main]')
     target?.focus?.({ preventScroll: true })
   })
-  useDialogFocus(startOverDialogRef, closeStartOverDialog, !!startOverDialogIntent)
+  useDialogFocus(startOverDialogRef, closeStartOverDialog, !!startOverDialogIntent,
+    { priority: DIALOG_PRIORITY.START_OVER })
   const setCollapseButtonRef = element => {
     collapseButtonRef.current = element
     if (typeof collapseControlRef === 'function') collapseControlRef(element)

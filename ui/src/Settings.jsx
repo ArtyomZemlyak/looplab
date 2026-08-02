@@ -12,7 +12,7 @@ import { OpIcon } from './icons.jsx'
 import { deadlineRequest } from './requestDeadline.js'
 import { installNavigationLossGuard } from './navigationLossGuard.js'
 import { publish as publishSettingsLaunchGuard } from './settingsLaunchGuard.js'
-import { useDialogFocus } from './useDialogFocus.js'
+import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 
 const countLabel = (count, singular, plural = `${singular}s`) => `${count} ${count === 1 ? singular : plural}`
 const CREDENTIAL_SOURCE_LABELS = {
@@ -625,7 +625,7 @@ export function LlmHealth({
 
 function ResetDefaultsDialog({ hasSecretDraft, onCancel, onConfirm }) {
   const dialogRef = useRef(null)
-  useDialogFocus(dialogRef, onCancel)
+  useDialogFocus(dialogRef, onCancel, true, { priority: DIALOG_PRIORITY.DESTRUCTIVE })
   return <div className="overlay settings-reset-overlay"
     onMouseDown={event => { if (event.target === event.currentTarget) onCancel() }}>
     <section ref={dialogRef} className="modal settings-reset-dialog" role="alertdialog"

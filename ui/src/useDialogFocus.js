@@ -2,19 +2,70 @@ import { useEffect, useRef } from 'react'
 
 const dialogStack = []
 
-export function useDialogFocus(ref, onClose, active = true, { modal = true } = {}) {
+const highestPriorityLayer = layers => layers.reduce((top, candidate) => (
+  !top || candidate.priority >= top.priority ? candidate : top
+), null)
+
+const setLayerBlocked = (layer, blocked) => {
+  const root = layer.ref.current
+  if (layer.blockedRoot && layer.blockedRoot !== root) {
+    layer.blockedRoot.inert = layer.restoreInert
+    if (layer.restoreAriaHidden == null) layer.blockedRoot.removeAttribute('aria-hidden')
+    else layer.blockedRoot.setAttribute('aria-hidden', layer.restoreAriaHidden)
+    layer.blockedRoot = null
+  }
+  if (!root) return
+  if (blocked && layer.blockedRoot !== root) {
+    layer.restoreInert = root.inert
+    layer.restoreAriaHidden = root.getAttribute('aria-hidden')
+    root.inert = true
+    root.setAttribute('aria-hidden', 'true')
+    layer.blockedRoot = root
+  } else if (!blocked && layer.blockedRoot === root) {
+    root.inert = layer.restoreInert
+    if (layer.restoreAriaHidden == null) root.removeAttribute('aria-hidden')
+    else root.setAttribute('aria-hidden', layer.restoreAriaHidden)
+    layer.blockedRoot = null
+  }
+}
+
+const syncDialogIsolation = () => {
+  const topModal = highestPriorityLayer(dialogStack.filter(candidate => candidate.modal))
+  for (const layer of dialogStack) setLayerBlocked(layer, !!topModal && layer !== topModal)
+}
+
+// Keep keyboard ownership aligned with the effective visual layer order. Equal priorities retain
+// the usual "last mounted wins" behaviour, while a late lower surface cannot steal focus from a
+// modal that is visibly above it.
+export const DIALOG_PRIORITY = Object.freeze({
+  NONMODAL: 0,
+  NAVIGATION: 10,
+  ASSISTANT_SIDE: 20,
+  ASSISTANT_FULL: 30,
+  OVERLAY: 40,
+  START_OVER: 50,
+  DESTRUCTIVE: 60,
+  ATTENTION: 70,
+  ASSISTANT_DELETE: 80,
+})
+
+export function useDialogFocus(
+  ref, onClose, active = true, { modal = true, priority = DIALOG_PRIORITY.OVERLAY } = {},
+) {
   const closeRef = useRef(onClose)
   closeRef.current = onClose
   useEffect(() => {
     if (!active) return
     const previous = document.activeElement
-    const layer = { ref, modal }
+    const layer = { ref, modal, priority, blockedRoot: null }
     dialogStack.push(layer)
+    syncDialogIsolation()
     // True modals always outrank coexisting nonmodal surfaces, even when a route update mounts the
-    // latter after the modal. Among peers, the most recently mounted layer still wins.
+    // latter after the modal. Visual priority wins among peers; equal layers use mount order.
     const topmost = () => {
       const modalLayers = dialogStack.filter(candidate => candidate.modal)
-      const topLayer = modalLayers.length ? modalLayers[modalLayers.length - 1] : dialogStack[dialogStack.length - 1]
+      const candidates = modalLayers.length ? modalLayers : dialogStack
+      const topLayer = highestPriorityLayer(candidates)
       return topLayer === layer
     }
     const root = ref.current
@@ -24,7 +75,7 @@ export function useDialogFocus(ref, onClose, active = true, { modal = true } = {
     // back to the dialog container only when the dialog genuinely has no controls.
     const blockingModal = !modal && [...document.querySelectorAll('[aria-modal="true"]')]
       .some(surface => surface !== root && !root?.contains(surface))
-    if (root && !blockingModal && !root.contains(document.activeElement)) {
+    if (root && topmost() && !blockingModal && !root.contains(document.activeElement)) {
       const initial = root.querySelector('[autofocus], [data-dialog-initial-focus]') || root.querySelector(selector)
       ;(initial || root).focus()
       // The tracking listener is attached below, so record our own programmatic initial focus now.
@@ -68,9 +119,11 @@ export function useDialogFocus(ref, onClose, active = true, { modal = true } = {
       const wasTopmost = topmost()
       const index = dialogStack.indexOf(layer)
       if (index >= 0) dialogStack.splice(index, 1)
+      setLayerBlocked(layer, false)
+      syncDialogIsolation()
       if (wasTopmost && previous && document.contains(previous) && (modal || focusWasInside)) {
         previous.focus({ preventScroll: true })
       }
     }
-  }, [active, modal])
+  }, [active, modal, priority])
 }

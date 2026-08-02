@@ -3,7 +3,7 @@ import { Turn, PermCard } from './AssistantChat.jsx'
 import { OpIcon } from './icons.jsx'
 import { useMediaQuery, usePoll } from './hooks.js'
 import { getRunAccess } from './runMode.js'
-import { useDialogFocus } from './useDialogFocus.js'
+import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 import { pendingApprovalTarget } from './runIndex.js'
 import { assistantErrorInfo, assistantPreview } from './assistantErrors.js'
 import { reconcilePendingPermissions } from './assistantPermission.js'
@@ -716,10 +716,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     requestAnimationFrame(() => document.querySelector(returnSelector)?.focus())
   }
   const toggleSide = () => (view === 'side' ? collapseToBar() : openSide())
-  useDialogFocus(fullDialogRef, collapseToBar, view === 'full' && !hidden)
-  useDialogFocus(sideDialogRef, collapseToBar, view === 'side' && compactAssistant && !hidden)
+  useDialogFocus(fullDialogRef, collapseToBar, view === 'full' && !hidden,
+    { priority: DIALOG_PRIORITY.ASSISTANT_FULL })
+  useDialogFocus(sideDialogRef, collapseToBar, view === 'side' && compactAssistant && !hidden,
+    { priority: DIALOG_PRIORITY.ASSISTANT_SIDE })
   useDialogFocus(deleteDialogRef, deleteConfirmBusy ? null : closeDeleteConfirm,
-    !!deleteConfirm && !hidden)
+    !!deleteConfirm && !hidden, { priority: DIALOG_PRIORITY.ASSISTANT_DELETE })
   useEffect(() => {
     if (deleteConfirmError) deleteErrorRef.current?.focus({ preventScroll: true })
   }, [deleteConfirmError])

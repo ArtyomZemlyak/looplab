@@ -14,7 +14,7 @@ import {
   effectiveRunStatus, metricComparable, projectRunCounts, scopeRuns, sortRuns,
 } from './runIndex.js'
 import { defaultCollapsedClusters } from './runMapModel.js'
-import { useDialogFocus } from './useDialogFocus.js'
+import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 import { followClientRoute, nextRovingIndex } from './accessibility.jsx'
 import {
   decodePortfolioViews, normalizeCompareColumns, portfolioViewSignature, upsertPortfolioView,
@@ -510,7 +510,8 @@ const runDeletionProgress = recovery => {
 function RunDeleteDialog({ target, currentRun, busy, error, onClose, onConfirm }) {
   const dialogRef = useRef(null)
   const errorRef = useRef(null)
-  useDialogFocus(dialogRef, busy ? null : onClose)
+  useDialogFocus(dialogRef, busy ? null : onClose, true,
+    { priority: DIALOG_PRIORITY.DESTRUCTIVE })
   useEffect(() => {
     if (error) errorRef.current?.focus({ preventScroll: true })
   }, [error])
@@ -935,7 +936,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
     })
   }
   // Keep the compact drawer active while any list or menu mutation is pending.
-  useDialogFocus(projectsDialogRef, navigationBusy ? null : () => setProjectsOpen(false), compactNav && projectsOpen)
+  useDialogFocus(projectsDialogRef, navigationBusy ? null : () => setProjectsOpen(false),
+    compactNav && projectsOpen, { priority: DIALOG_PRIORITY.NAVIGATION })
   useEffect(() => {
     const rememberProjectsFocus = event => {
       const target = event.target

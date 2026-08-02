@@ -10,7 +10,7 @@ import {
 } from './attentionStorage.js'
 import { OpIcon } from './icons.jsx'
 import { useAttention } from './useAttention.js'
-import { useDialogFocus } from './useDialogFocus.js'
+import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 import './attention.css'
 
 const dispatchOpenAttention = () => {
@@ -167,7 +167,7 @@ export default function AttentionCenter() {
     focusRequestRef.current = null
     setOpen(false)
   }, [])
-  useDialogFocus(dialogRef, close, open)
+  useDialogFocus(dialogRef, close, open, { priority: DIALOG_PRIORITY.ATTENTION })
 
   const jumpToSection = useCallback(section => {
     const heading = section === 'action' ? actionHeadingRef.current : recentHeadingRef.current

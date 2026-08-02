@@ -12,7 +12,7 @@ import EnergyToggle from './EnergyToggle.jsx'
 import { OpIcon } from './icons.jsx'
 import LazyBoundary from './LazyBoundary.jsx'
 import WhyStrip from './WhyStrip.jsx'
-import { useDialogFocus } from './useDialogFocus.js'
+import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 import { nextRovingIndex } from './accessibility.jsx'
 import {
   clearRunAccess, historyMatches, liveHistory, reconcileHistoricalSelection, rejectHistory,
@@ -574,7 +574,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // This drawer intentionally coexists with the header and timeline. Give it dialog navigation
   // (initial focus, Escape, focus restoration) without claiming or enforcing modal containment.
   useDialogFocus(compactInspectorRef, closeCompactInspector,
-    compactWorkspace && compactInspectorOpen && !overlayPanelOpen, { modal: false })
+    compactWorkspace && compactInspectorOpen && !overlayPanelOpen,
+    { modal: false, priority: DIALOG_PRIORITY.NONMODAL })
   useLayoutEffect(() => {
     if (!groupSurfaceReady || !compactWorkspace || !compactInspectorOpen || overlayPanelOpen) return
     // Route hydration can schedule main-focus before the drawer commit. Reassert the explicit
