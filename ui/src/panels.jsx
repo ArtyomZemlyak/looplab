@@ -120,11 +120,12 @@ function authoringPayload(value) {
   if ((value.dir == null && (targetRootId !== null || value.files.length > 0 || truncatedFiles > 0))
       || (value.dir != null && !validAuthoringTargetRootId(targetRootId))) invalidPanelPayload()
   const files = value.files.map(file => {
-    if (!isRecord(file) || !validAuthoringName(file.name) || typeof file.text !== 'string') invalidPanelPayload()
-    const truncated = file.truncated === true
+    if (!isRecord(file) || !validAuthoringName(file.name) || typeof file.text !== 'string'
+        || typeof file.truncated !== 'boolean') invalidPanelPayload()
+    const truncated = file.truncated
     const revision = typeof file.revision === 'string' && AUTHORING_REVISION_RE.test(file.revision)
       ? file.revision : null
-    if (!truncated && revision == null) invalidPanelPayload()
+    if ((truncated && file.revision !== null) || (!truncated && revision == null)) invalidPanelPayload()
     return { name: file.name, text: file.text, revision, truncated }
   })
   return { dir: value.dir, targetRootId, files, truncatedFiles }
@@ -280,10 +281,12 @@ async function authoringTextRevision(text) {
 function memoryPayload(value) {
   if (!isRecord(value) || !nullableText(value.dir)
       || !['cases', 'lessons', 'notes'].every(key => Array.isArray(value[key]))) invalidPanelPayload()
-  for (const row of value.cases) {
+  const cases = value.cases.map(row => {
     if (!isRecord(row) || !row.task_id || typeof row.task_id !== 'string' || typeof row.goal !== 'string'
-        || !nullableNumber(row.metric) || !Object.hasOwn(row, 'params')) invalidPanelPayload()
-  }
+        || !nullableNumber(row.metric) || !Object.hasOwn(row, 'params')
+        || (row.params_truncated != null && typeof row.params_truncated !== 'boolean')) invalidPanelPayload()
+    return { ...row, params_truncated: row.params_truncated === true }
+  })
   const lessonText = ['role', 'kind', 'outcome', 'task_id']
   for (const row of value.lessons) {
     if (!isRecord(row) || !row.statement || typeof row.statement !== 'string'
@@ -296,8 +299,51 @@ function memoryPayload(value) {
     if (typeof note !== 'string' || !note || (row.task_id != null && typeof row.task_id !== 'string')) invalidPanelPayload()
     return { ...row, note }
   })
-  return { dir: value.dir, cases: value.cases, lessons: value.lessons, notes }
+  if (value.dir == null) {
+    if (cases.length || value.lessons.length || notes.length || value.projection != null || value.page != null) {
+      invalidPanelPayload()
+    }
+    return { dir: null, cases, lessons: value.lessons, notes, projection: null, page: null }
+  }
+  if (value.projection !== 'bounded_recent_tail' || !isRecord(value.page)
+      || !isRecord(value.page.tiers)) invalidPanelPayload()
+  const tiers = {}
+  for (const key of ['cases', 'lessons', 'notes']) {
+    const receipt = value.page.tiers[key]
+    if (!isRecord(receipt)
+        || !Number.isSafeInteger(receipt.limit) || receipt.limit <= 0
+        || !Number.isSafeInteger(receipt.returned) || receipt.returned < 0 || receipt.returned > receipt.limit
+        || receipt.returned !== value[key].length
+        || !Number.isSafeInteger(receipt.skipped) || receipt.skipped < 0
+        || typeof receipt.source_window_truncated !== 'boolean'
+        || typeof receipt.unavailable !== 'boolean'
+        || (receipt.unavailable && receipt.returned !== 0)) invalidPanelPayload()
+    tiers[key] = {
+      limit: receipt.limit,
+      returned: receipt.returned,
+      skipped: receipt.skipped,
+      sourceWindowTruncated: receipt.source_window_truncated,
+      unavailable: receipt.unavailable,
+    }
+  }
+  const truncated = Object.values(tiers).some(receipt => receipt.sourceWindowTruncated)
+  const unavailable = Object.values(tiers).some(receipt => receipt.unavailable)
+  const partial = Object.values(tiers).some(receipt => receipt.sourceWindowTruncated
+    || receipt.skipped > 0 || receipt.unavailable)
+  if (value.page.truncated !== truncated || value.page.unavailable !== unavailable
+      || value.page.partial !== partial) invalidPanelPayload()
+  return {
+    dir: value.dir,
+    cases,
+    lessons: value.lessons,
+    notes,
+    projection: value.projection,
+    page: { tiers, truncated, unavailable, partial },
+  }
 }
+
+const memoryTierIncomplete = receipt => !!receipt && (receipt.sourceWindowTruncated
+  || receipt.skipped > 0 || receipt.unavailable)
 
 function runsPayload(value) {
   if (!Array.isArray(value)) invalidPanelPayload()
@@ -340,7 +386,8 @@ function usePanelResource(loader, normalize = value => value, key = '', pollMs =
       flight.current = request
       setValue(previous => previous.key !== key
         ? { key, state: 'loading', data: null, pending: null }
-        : ['error', 'stale'].includes(previous.state) ? { ...previous, pending: intent } : previous)
+        : (intent === 'retry' || ['error', 'stale'].includes(previous.state))
+          ? { ...previous, pending: intent } : previous)
       const finish = (ok, data = null) => {
         if (flight.current !== request) return
         flight.current = null
@@ -2330,13 +2377,29 @@ export function AuthoringPanel({ onClose, onToast, draftStore: sharedDraftStore 
   )
 }
 
+function MemoryCompletenessNotice({ resource, onRetry, error = false, children }) {
+  const action = error ? 'Retry' : 'Refresh'
+  return <div className={'report-inline-state' + (error ? ' error' : '')} role={error ? 'alert' : 'status'}>
+    <OpIcon name="alert" size={14} />
+    <span>{children}</span>
+    <button type="button" className="btn sm" disabled={!!resource.pending} onClick={onRetry}>
+      {resource.pending ? `${action}ing…` : action}</button>
+  </div>
+}
+
 function KbNote({ note }) {
   const [open, setOpen] = useState(false)
   return <div className="mem-card">
     <button type="button" className="memory-note-toggle disclosure-button" aria-expanded={open}
       onClick={() => setOpen(o => !o)}>
-      <span style={{ opacity: 0.6, fontSize: 10, marginRight: 4 }}>{open ? '▾' : '▸'}</span>{note.name}</button>
-    {open && <div style={{ marginTop: 6 }}><Markdown text={note.text || note.content || ''} /></div>}
+      <span style={{ opacity: 0.6, fontSize: 10, marginRight: 4 }}>{open ? '▾' : '▸'}</span>{note.name}
+      {note.truncated && <span className="muted" style={{ marginLeft: 6, fontSize: 10 }}>· prefix only</span>}</button>
+    {open && <div style={{ marginTop: 6 }}>
+      {note.truncated && <div className="report-inline-state" role="status" style={{ margin: '0 0 8px' }}>
+        <OpIcon name="alert" size={14} /><span>Only the first {AUTHORING_MAX_BYTES / 1024} KiB of this note was returned; the rest is not shown.</span>
+      </div>}
+      <Markdown text={note.text || note.content || ''} />
+    </div>}
   </div>
 }
 
@@ -2345,22 +2408,58 @@ export function MemoryPanel({ onClose }) {
   // the agentic knowledge-base markdown notes (best configs / recipes the agents save + later retrieve).
   const [memory, retryMemory] = usePanelResource(signal => get('/api/memory', { signal }), memoryPayload)
   const [knowledge, retryKnowledge] = usePanelResource(signal => get('/api/knowledge', { signal }), authoringPayload)
-  const mem = memory.data || { dir: null, cases: [], lessons: [], notes: [] }
-  const kb = knowledge.data || { dir: null, files: [] }   // /api/knowledge → {dir, files:[{name,text}]}
+  const mem = memory.data || { dir: null, cases: [], lessons: [], notes: [], projection: null, page: null }
+  const kb = knowledge.data || { dir: null, files: [], truncatedFiles: 0 }   // /api/knowledge → {dir, files:[{name,text}]}
   const [tab, setTab] = useState('lessons')
   const [lessonRole, setLessonRole] = useState('all')      // §role-split: Researcher vs Developer lessons
   const kbFiles = kb.files || []
-  const tabs = [['lessons', 'Lessons', mem.lessons?.length], ['cases', 'Cases', mem.cases?.length],
-    ['notes', 'Notes', mem.notes?.length], ['knowledge', 'Knowledge', kbFiles.length]]
+  const truncatedKnowledgePreviews = kbFiles.filter(file => file.truncated).length
+  const knowledgeIncomplete = kb.truncatedFiles > 0 || truncatedKnowledgePreviews > 0
+  const tabs = [
+    ['lessons', 'Lessons', mem.lessons?.length, memoryTierIncomplete(mem.page?.tiers?.lessons)],
+    ['cases', 'Cases', mem.cases?.length, memoryTierIncomplete(mem.page?.tiers?.cases)],
+    ['notes', 'Notes', mem.notes?.length, memoryTierIncomplete(mem.page?.tiers?.notes)],
+    ['knowledge', 'Knowledge', kbFiles.length, knowledgeIncomplete],
+  ]
   const selectedResource = tab === 'knowledge' ? knowledge : memory
+  const selectedReceipt = tab === 'knowledge' ? null : mem.page?.tiers?.[tab]
+  const selectedReceiptIncomplete = memoryTierIncomplete(selectedReceipt)
+  const selectedTierLabel = tab === 'lessons' ? 'Lessons' : tab === 'cases' ? 'Cases' : 'Meta-notes'
+  const selectedReceiptIssues = []
+  if (selectedReceipt?.unavailable) selectedReceiptIssues.push('This tier could not be read.')
+  if (selectedReceipt?.sourceWindowTruncated) {
+    selectedReceiptIssues.push(selectedReceipt.returned > 0
+      ? `Showing the newest ${selectedReceipt.returned} ${selectedReceipt.returned === 1 ? 'item' : 'items'} from a bounded window; older entries were omitted.`
+      : 'Only a bounded recent source window was checked; older entries were omitted.')
+  }
+  if (selectedReceipt?.skipped > 0) {
+    selectedReceiptIssues.push(`${selectedReceipt.skipped} source ${selectedReceipt.skipped === 1 ? 'row was' : 'rows were'} not shown.`)
+  }
+  const memoryEmptyCopy = (receipt, noun, completeCopy) => {
+    if (mem.dir == null) return 'No cross-run memory directory is configured.'
+    if (receipt?.unavailable) return `No ${noun} can be shown because this memory tier is unavailable.`
+    if (memoryTierIncomplete(receipt)) return `No ${noun} are visible in the loaded recent subset.`
+    return completeCopy
+  }
   return (
     <Panel title="Memory & knowledge — what the runs have learned" sub={memory.data ? (mem.dir || 'no memory dir') : ''} onClose={onClose} wide>
       <div className="conv-toggle memory-tabs" style={{ marginBottom: 12 }}>
-        {tabs.map(([k, label, n]) => <button key={k} aria-pressed={tab === k} className={'seg' + (tab === k ? ' on' : '')}
-          onClick={() => setTab(k)}>{label} <span className="muted">{(k === 'knowledge' ? knowledge : memory).data ? n : '…'}</span></button>)}
+        {tabs.map(([k, label, n, incomplete]) => <button key={k} aria-pressed={tab === k} className={'seg' + (tab === k ? ' on' : '')}
+          onClick={() => setTab(k)}>{label} <span className="muted">{(k === 'knowledge' ? knowledge : memory).data
+            ? `${n}${incomplete ? ' shown' : ''}` : '…'}</span></button>)}
       </div>
       <PanelResourceNotice resource={selectedResource} label={tab === 'knowledge' ? 'Knowledge notes' : 'Cross-run memory'}
         onRetry={tab === 'knowledge' ? retryKnowledge : retryMemory} />
+      {tab !== 'knowledge' && memory.state === 'ready' && selectedReceiptIncomplete
+        && <MemoryCompletenessNotice resource={memory} onRetry={retryMemory} error={selectedReceipt.unavailable}>
+          <b>{selectedTierLabel} data is incomplete.</b>{' '}{selectedReceiptIssues.join(' ')}
+        </MemoryCompletenessNotice>}
+      {tab === 'knowledge' && knowledge.state === 'ready' && knowledgeIncomplete
+        && <MemoryCompletenessNotice resource={knowledge} onRetry={retryKnowledge}>
+          <b>Knowledge notes are incomplete.</b>{' '}
+          {kb.truncatedFiles > 0 && `${kb.truncatedFiles} Markdown ${kb.truncatedFiles === 1 ? 'entry was' : 'entries were'} not returned. `}
+          {truncatedKnowledgePreviews > 0 && `${truncatedKnowledgePreviews} loaded ${truncatedKnowledgePreviews === 1 ? 'preview contains' : 'previews contain'} only a prefix.`}
+        </MemoryCompletenessNotice>}
       {/* General orientation shown on every tab; the role-split detail (§role-split) is lessons-only. */}
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
         Cross-run memory reused to guide future runs. Cases, notes and the knowledge base are shared;
@@ -2392,21 +2491,32 @@ export function MemoryPanel({ onClose }) {
                 {l.task_id && <span className="muted" style={{ fontSize: 11 }}>· {l.task_id}</span>}
               </div>
             </div>)
-          : memory.state === 'ready' && <div className="muted">No {lessonRole === 'all' ? '' : lessonRole + ' '}lessons yet — they accrue as runs finish (reflection distils them into memory).</div>
+          : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.lessons,
+            `${lessonRole === 'all' ? '' : lessonRole + ' '}lessons`,
+            lessonRole !== 'all' && mem.lessons.length > 0
+              ? `No ${lessonRole} lessons match the loaded lessons.`
+              : `No ${lessonRole === 'all' ? '' : lessonRole + ' '}lessons yet — they accrue as runs finish (reflection distils them into memory).`)}</div>
       })()}
       {tab === 'cases' && ((mem.cases || []).length
         ? <DataTable caption="Stored memory cases" card={false}><table className="tbl"><thead><tr><th>task</th><th>goal</th><th>metric</th><th>params</th></tr></thead><tbody>
-          {mem.cases.map((c, i) => <tr key={i}><td>{c.task_id}</td><td className="muted">{c.goal}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}</td></tr>)}</tbody></table></DataTable>
-        : memory.state === 'ready' && <div className="muted">No cases stored.</div>)}
+          {mem.cases.map((c, i) => <tr key={i}><td>{c.task_id}</td><td className="muted">{c.goal}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}
+            {c.params_truncated && <span title="Only a bounded parameter projection was returned"
+              aria-label="parameters truncated"> · partial</span>}</td></tr>)}</tbody></table></DataTable>
+        : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.cases,
+          'cases', 'No cases stored.')}</div>)}
       {tab === 'notes' && ((mem.notes || []).length
         ? mem.notes.map((n, i) => <div key={i} className="mem-card">
             {n.task_id && <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>{n.task_id}</div>}
             <Markdown text={n.note || n.statement || JSON.stringify(n)} /></div>)
-        : memory.state === 'ready' && <div className="muted">No meta-notes yet.</div>)}
+        : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.notes,
+          'meta-notes', 'No meta-notes yet.')}</div>)}
       {tab === 'knowledge' && (kbFiles.length
         ? <><div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>{kb.dir} — agents save + retrieve these via kb_search</div>
           {kbFiles.map((n, i) => <KbNote key={i} note={n} />)}</>
-        : knowledge.state === 'ready' && <div className="muted">No knowledge notes ({kb.dir || 'no knowledge dir'}).</div>)}
+        : knowledge.state === 'ready' && <div className="muted">{kb.dir == null
+          ? 'No knowledge directory is configured.'
+          : knowledgeIncomplete ? 'No knowledge notes are visible in the loaded subset.'
+            : `No knowledge notes yet (${kb.dir}).`}</div>)}
     </Panel>
   )
 }
