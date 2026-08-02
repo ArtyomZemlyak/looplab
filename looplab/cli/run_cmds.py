@@ -387,7 +387,9 @@ def run(
         settings = appconfig.build_settings(file_settings, typed, sets)
     except ValidationError as e:
         raise typer.BadParameter(f"invalid settings: {e}")
-    set_profile_replaced = bool({"llm_profile", "llm_profiles"} & sets)
+    # `parse_sets` returns a DICT, so intersect its keys — `set & dict` is a TypeError, and this line
+    # runs on every `looplab run`, before any of the work the command exists to do.
+    set_profile_replaced = bool({"llm_profile", "llm_profiles"} & sets.keys())
     effective_model_override = (sets["llm_model"] if "llm_model" in sets else
                                 model if not set_profile_replaced else None)
     if effective_model_override is not None:

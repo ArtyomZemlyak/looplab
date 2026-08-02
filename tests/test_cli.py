@@ -368,8 +368,15 @@ def test_receipt_backed_run_forces_narrow_profile_before_engine_construction(
     assert seen["max_nodes"] == 5
     assert seen["speculation_depth"] == 1
     assert seen["speculation_gate_receipt"] == str(receipt)
+    # `masked_snapshot` deliberately DROPS the credential-binding field rather than masking it, so
+    # the calibration profile (which covers every non-variant Settings field) has one entry the
+    # snapshot cannot have. Assert that absence explicitly — it is a redaction guarantee, and
+    # skipping the key silently would also hide a snapshot that started leaking it.
+    assert "llm_api_key_base_url" not in seen
     for field, expected in SPECULATION_CALIBRATION_PROFILE_SETTINGS.items():
-        assert seen[field] == expected
+        if field == "llm_api_key_base_url":
+            continue
+        assert seen[field] == expected, field
 
 
 def test_ordinary_cli_engine_keeps_large_budget_outside_rollout_scope(
