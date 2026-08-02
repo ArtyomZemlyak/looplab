@@ -353,7 +353,7 @@ def test_chat_treats_unknown_engine_ownership_as_observation_only(tmp_path, monk
     monkeypatch.setattr(
         "looplab.serve.llm_context._engine_alive",
         lambda _rd: (_ for _ in ()).throw(AssertionError("unknown must not use bool fallback")))
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda settings: _Cap(settings))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda settings, **_kw: _Cap(settings))
     response = TestClient(make_app(tmp_path)).post(
         "/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "status?"}]})
     assert response.json()["ok"]

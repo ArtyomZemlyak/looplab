@@ -190,7 +190,7 @@ def test_genesis_provider_creation_failure_is_redacted(tmp_path, monkeypatch):
 
 
 def test_genesis_planning_failure_is_redacted(tmp_path, monkeypatch):
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr("looplab.core.parse.parse_structured", _provider_boom)
     response = TestClient(make_app(tmp_path)).post(
         "/api/genesis", json={"instruction": "plan a small run"})
@@ -225,7 +225,7 @@ def test_boss_provider_failures_are_redacted(tmp_path, monkeypatch, path, body):
 
 
 def test_assistant_background_sse_failure_is_redacted(tmp_path, monkeypatch):
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr("looplab.serve.routers.assistant._assistant_run_turn", _provider_boom)
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
@@ -279,7 +279,7 @@ def test_report_action_chat_log_canonicalizes_legacy_transport_error(tmp_path):
 def test_report_timeout_terminal_replays_sanitized_kind_without_a_second_call(
         tmp_path, monkeypatch):
     _minimal_run(tmp_path)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     calls = []
 
     def timeout(*_args, **_kwargs):
@@ -307,7 +307,7 @@ def test_report_timeout_terminal_replays_sanitized_kind_without_a_second_call(
     ]
     assert len(terminals) == 1 and terminals[0].data["error_kind"] == "unavailable"
 
-    def forbidden(_settings):
+    def forbidden(_settings, **_kw):
         raise AssertionError("a durable terminal receipt must not start a second provider call")
 
     monkeypatch.setattr("looplab.serve.server.make_llm_client", forbidden)

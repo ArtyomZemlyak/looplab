@@ -155,7 +155,7 @@ def test_scope_brief_maps_contract_phase_to_authoritative_evidence(
         return {"headline": "captured"}
 
     monkeypatch.setattr("looplab.serve.scope_report.generate_scope_report", capture)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     response = TestClient(make_app(tmp_path)).post(
         "/api/scope-report/task/comparison-task/generate",
         headers={"Idempotency-Key": "12345678-1234-4234-9234-123456789abc"})

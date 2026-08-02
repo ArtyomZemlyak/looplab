@@ -231,6 +231,67 @@ def _seed_finished_run(root: Path, name: str = "demo") -> Path:
     return rd
 
 
+def _replacement_spawn(rd: Path, *, pid: int = 9101, task_id: str = "replacement", before=None):
+    """A `_spawn_engine` stand-in that behaves like a real Replay child: it writes the
+    generation-defining first event.
+
+    Replay only reports success once a REPLACEMENT generation is durably visible
+    (`complete_reset_if_observed`); a fake that just returns a pid leaves the transaction at
+    `phase="popen_returned"` and the route answers 425 "retry this exact operation". So a test
+    using the pid-only fake can never observe a 200 again — and a test that lowers its bar to
+    "not 409" stops distinguishing "the lease released the run" from "the reset never landed".
+
+    Writing that event needs the operation fence: while the reset marker exists, `EventStore`
+    refuses every writer whose `RUN_RESET_OPERATION_ENV` does not match the marker's operation id
+    (`core/run_reset.py::assert_run_reset_write_allowed`, read from the process environment). The
+    real child gets that variable in the env the route froze for it, so adopt the same env here
+    for the length of the append rather than inventing an id the marker would reject."""
+    import os
+
+    from looplab.core.run_reset import RUN_RESET_OPERATION_ENV
+    from looplab.events.eventstore import EventStore
+
+    def spawn(*_args, env=None, **_kwargs):
+        if before is not None:
+            before()                    # inspect the archived generation before writing the new one
+        previous = os.environ.get(RUN_RESET_OPERATION_ENV)
+        os.environ[RUN_RESET_OPERATION_ENV] = (env or {}).get(RUN_RESET_OPERATION_ENV, "")
+        try:
+            EventStore(rd / "events.jsonl").append("run_started", {
+                "run_id": rd.name, "task_id": task_id, "goal": "new", "direction": "min"})
+        finally:
+            if previous is None:
+                os.environ.pop(RUN_RESET_OPERATION_ENV, None)
+            else:
+                os.environ[RUN_RESET_OPERATION_ENV] = previous
+        return pid
+
+    return spawn
+
+
+def _delete_run(client, run_id: str, *, rd: Path, op: str = "1" * 8):
+    """Delete a run through the operation-bound transaction that replaced bodyless DELETE.
+
+    `DELETE /api/runs/{id}` is now a 409 stub ("deletion_identity_required"): a bodyless request
+    could otherwise destroy a REPLACEMENT generation the caller never inspected. The real route is
+    `POST /api/runs/{id}/deletions` carrying the exact generation + log tail the caller saw, plus a
+    client-minted operation id so a retried request replays one receipt instead of deleting twice.
+
+    A test that keeps calling the stub gets its 409 for free and stops exercising the destructive
+    boundary at all — every guard downstream (the run-cost evidence gate, the in-flight launch
+    fence) becomes unreachable, so the test passes while proving nothing. Read the identity from
+    DISK so this helper works on runs no HTTP view has listed yet."""
+    from looplab.serve.run_commands import run_generation_token
+    from looplab.events.eventstore import EventStore
+
+    events = EventStore(rd / "events.jsonl").read_all()
+    return client.post(f"/api/runs/{run_id}/deletions", json={
+        "operation_id": f"{op}-1111-4111-8111-{'1' * 12}",
+        "expected_generation": run_generation_token(events),
+        "expected_seq": events[-1].seq if events else -1,
+    })
+
+
 def test_engine_writes_report_on_cadence_and_finish(tmp_path):
     writer = _FakeWriter()
     st = _build_run(tmp_path, "demo", writer=writer, report_every=1)
@@ -461,7 +522,7 @@ def test_report_refresh_endpoint(tmp_path, monkeypatch):
 def test_fast_report_refreshes_do_not_exhaust_shared_job_capacity(tmp_path, monkeypatch):
     """Every paid result is reachable and consumed, independent of runner scheduling latency."""
     _build_run(tmp_path, "demo", writer=None)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr("looplab.serve.report.generate_report", lambda state, _client, **_kwargs: {
         "headline": "durable", "at_node": len(state.nodes),
     })
@@ -490,7 +551,7 @@ def test_slow_report_terminal_polls_release_shared_job_capacity(tmp_path, monkey
     monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")
     _build_run(tmp_path, "demo", writer=None)
     calls = []
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr(
         "looplab.serve.report.generate_report",
         lambda state, _client, **_kwargs: (
@@ -530,7 +591,7 @@ def test_report_refresh_ignores_non_sha_ledger_identity(tmp_path, monkeypatch):
     EventStore(tmp_path / "demo" / "events.jsonl").append("report_refresh_started", {
         "refresh_id": "z" * 64, "generation": generation,
     })
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr("looplab.serve.report.generate_report", lambda state, _client, **_kwargs: {
         "headline": "not blocked", "at_node": len(state.nodes),
     })
@@ -555,7 +616,7 @@ def test_report_refresh_rejects_generation_replaced_after_click(tmp_path, monkey
     created = []
     monkeypatch.setattr(
         "looplab.serve.server.make_llm_client",
-        lambda _settings: created.append(True) or object())
+        lambda _settings, **_kw: created.append(True) or object())
 
     response = _refresh_report(client, generation=generation_a, key="delayed-a")
 
@@ -584,7 +645,7 @@ def test_report_refresh_idempotency_rejoins_one_paid_job(tmp_path, monkeypatch):
 
     import looplab.serve.report as report_mod
     monkeypatch.setattr(report_mod, "generate_report", blocked_report)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     client = TestClient(make_app(tmp_path))
     generation = client.get("/api/runs/demo/state").json()["generation"]
 
@@ -613,7 +674,7 @@ def test_report_refresh_retry_starts_workerless_durable_reservation(tmp_path, mo
     generation = client.get("/api/runs/demo/state").json()["generation"]
     calls = []
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr("looplab.serve.report.generate_report", lambda state, _client, **_kwargs: (
         calls.append(state.run_id) or {"headline": "recovered", "at_node": len(state.nodes)}))
     registry = app.state.looplab.jobs
@@ -653,7 +714,7 @@ def test_report_refresh_restart_is_fail_closed_then_recovers_terminal_receipt(
 
     import looplab.serve.report as report_mod
     monkeypatch.setattr(report_mod, "generate_report", blocked_report)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     first_client = TestClient(make_app(tmp_path))
     generation = first_client.get("/api/runs/demo/state").json()["generation"]
 
@@ -739,7 +800,7 @@ def test_report_refresh_terminal_append_failure_stays_uncertain(
     monkeypatch.setattr(EventStore, "append", fail_failure_receipt)
     monkeypatch.setattr(
         "looplab.serve.server.make_llm_client",
-        lambda _settings: (_ for _ in ()).throw(RuntimeError("provider failed")),
+        lambda _settings, **_kw: (_ for _ in ()).throw(RuntimeError("provider failed")),
     )
     client = TestClient(make_app(tmp_path))
     generation = client.get("/api/runs/demo/state").json()["generation"]
@@ -769,7 +830,7 @@ def test_report_refresh_never_starts_provider_without_durable_claim(
     providers = []
     monkeypatch.setattr(
         "looplab.serve.server.make_llm_client",
-        lambda _settings: providers.append("started") or object(),
+        lambda _settings, **_kw: providers.append("started") or object(),
     )
     monkeypatch.setattr(
         "looplab.events.eventstore.strict_fsync",
@@ -798,7 +859,7 @@ def test_report_refresh_success_requires_durable_terminal_before_success(
 
     monkeypatch.setattr(eventstore_module, "strict_fsync", fail_terminal_sync)
     monkeypatch.setattr("looplab.serve.routers.boss.strict_fsync", fail_terminal_sync)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr("looplab.serve.report.generate_report", lambda state, _client, **_kwargs: (
         calls.append(state.run_id) or {"headline": "paid terminal", "at_node": len(state.nodes)}))
     client = TestClient(make_app(tmp_path))
@@ -836,7 +897,7 @@ def test_report_refresh_failure_terminal_uses_strict_durability(tmp_path, monkey
         return real_append(self, event_type, data, **kwargs)
 
     monkeypatch.setattr(EventStore, "append", watched_append)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr(
         "looplab.serve.report.generate_report",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("provider failed")),
@@ -856,7 +917,7 @@ def test_report_refresh_terminal_replay_does_not_require_current_llm_settings(
     monkeypatch.setattr(report_mod, "generate_report", lambda st, _client, **_kwargs: {
         "headline": "durable replay", "at_node": len(st.nodes), "trigger": "manual",
     })
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     client = TestClient(make_app(tmp_path))
     generation = client.get("/api/runs/demo/state").json()["generation"]
     first = _settled(client, _refresh_report(
@@ -921,7 +982,7 @@ def test_manual_report_failure_preserves_last_good_report(tmp_path, monkeypatch)
         raise RuntimeError("https://user:secret@provider.invalid/v1?token=hidden")
 
     monkeypatch.setattr("looplab.agents.agent.agentic_struct", explode)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     client = TestClient(make_app(tmp_path))
 
     response = _refresh_report(client, key="failed-manual-report")
@@ -940,7 +1001,7 @@ def test_report_refresh_soft_fails_offline(tmp_path, monkeypatch):
     _build_run(tmp_path, "demo", writer=None)
     client = TestClient(make_app(tmp_path))
 
-    def _boom(_s):
+    def _boom(_s, **_kw):
         raise RuntimeError("no model")
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom)
     r = _refresh_report(client)
@@ -1012,8 +1073,8 @@ def test_report_refresh_lease_blocks_reset_through_durable_append(tmp_path, monk
 
     monkeypatch.setattr(report_mod, "generate_report", blocked_report)
     monkeypatch.setattr(EventStore, "append", watched_append)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: object())
-    monkeypatch.setattr(control_router, "_spawn_engine", lambda *_a, **_k: 9101)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s, **_kw: object())
+    monkeypatch.setattr(control_router, "_spawn_engine", _replacement_spawn(rd))
     client = TestClient(make_app(tmp_path))
 
     queued = _refresh_report(client).json()
@@ -1059,8 +1120,8 @@ def test_metered_boss_call_lease_blocks_reset_until_provider_returns(tmp_path, m
                 "prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10})
             return "done"
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: BlockingBoss())
-    monkeypatch.setattr(control_router, "_spawn_engine", lambda *_a, **_k: 9102)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s, **_kw: BlockingBoss())
+    monkeypatch.setattr(control_router, "_spawn_engine", _replacement_spawn(rd, pid=9102))
     client = TestClient(make_app(tmp_path))
 
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -1125,7 +1186,7 @@ def test_metered_boss_pending_cost_survives_context_and_flushes_same_id(tmp_path
                 raise OSError("simulated transient event-log outage")
         return original_append(self, event_type, data, **kwargs)
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: MeteredBoss())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s, **_kw: MeteredBoss())
     monkeypatch.setattr(EventStore, "append", fail_first_three_usage_appends)
     client = TestClient(app)
 
@@ -1186,7 +1247,7 @@ def test_destructive_guard_nonpaid_flushes_pending_boss_cost(tmp_path, monkeypat
                 raise OSError("simulated transient event-log outage")
         return original_append(self, event_type, data, **kwargs)
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: MeteredBoss())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s, **_kw: MeteredBoss())
     monkeypatch.setattr(EventStore, "append", fail_first_two_usage_appends)
     client = TestClient(app)
 
@@ -1244,16 +1305,14 @@ def test_reset_drains_crashed_process_outbox_into_old_generation(tmp_path, monke
     srv = app.state.looplab
     assert not getattr(srv, "_pending_run_costs", {})
 
-    def spawn_replacement(*_args, **_kwargs):
+    def assert_cost_landed_in_the_old_generation():
         archived_log = next(rd.glob("events.jsonl.reset-*"))
         old_usage = [event for event in EventStore(archived_log).read_all()
                      if event.type == EV_LLM_USAGE]
         assert len(old_usage) == 1 and old_usage[0].data["usage_id"] == usage_id
-        EventStore(rd / "events.jsonl").append("run_started", {
-            "run_id": "demo", "task_id": "replacement", "goal": "new", "direction": "min"})
-        return 4242
 
-    monkeypatch.setattr(control_router, "_spawn_engine", spawn_replacement)
+    monkeypatch.setattr(control_router, "_spawn_engine", _replacement_spawn(
+        rd, pid=4242, before=assert_cost_landed_in_the_old_generation))
     response = TestClient(app).post("/api/runs/demo/reset")
 
     assert response.status_code == 200
@@ -1319,10 +1378,17 @@ def test_late_unsafe_usage_outbox_blocks_destructive_boundary(
         control_router, "_spawn_engine", lambda *args, **kwargs: spawns.append((args, kwargs)))
     client = TestClient(app)
     response = (client.post("/api/runs/demo/reset") if route == "reset"
-                else client.delete("/api/runs/demo"))
+                else _delete_run(client, "demo", rd=rd))
 
     assert response.status_code == 409
-    assert "run-cost evidence" in response.json()["detail"]
+    detail = response.json()["detail"]
+    # Both routes refuse for the SAME reason but say it in their own shape: reset raises a bare
+    # string, the deletion transaction a structured retryable code. Assert each one's reason —
+    # a shared `status_code == 409` would also pass on an unrelated refusal.
+    if route == "reset":
+        assert detail == "run-cost evidence is pending or conflicting"
+    else:
+        assert detail["code"] == "delete_cost_pending" and detail["retryable"] is True
     assert rd.exists() and (rd / "events.jsonl").exists()
     assert (rd / ".llm-usage-outbox" / f"{usage_id}.json").exists()
     assert not list(rd.glob("*.reset-*"))
@@ -1361,8 +1427,9 @@ def test_broken_outbox_directory_symlink_blocks_destructive_boundary(
     spawns = []
     monkeypatch.setattr(
         control_router, "_spawn_engine", lambda *args, **kwargs: spawns.append((args, kwargs)))
-    response = (TestClient(app).post("/api/runs/demo/reset") if route == "reset"
-                else TestClient(app).delete("/api/runs/demo"))
+    destructive = TestClient(app)
+    response = (destructive.post("/api/runs/demo/reset") if route == "reset"
+                else _delete_run(destructive, "demo", rd=rd))
 
     assert response.status_code == 409
     assert rd.exists() and (rd / "events.jsonl").exists()
@@ -1400,7 +1467,10 @@ def test_reset_archive_defense_rejects_reparse_even_if_recovery_hook_regresses(
     response = TestClient(app).post("/api/runs/demo/reset")
 
     assert response.status_code == 409
-    assert "symlink or reparse" in response.json()["detail"]
+    # The guard classifies the outbox from its own `lstat` — a symlink, a junction, or (as here)
+    # anything that is simply not a directory. That is what makes it immune to the two recovery
+    # hooks lying above: it never asks them, it looks.
+    assert response.json()["detail"] == "run-cost outbox is not a regular directory"
     assert outbox.read_text(encoding="utf-8") == "simulated reparse evidence"
     assert (rd / "events.jsonl").exists() and not list(rd.glob("*.reset-*"))
     assert spawns == []
@@ -1438,6 +1508,7 @@ def test_pending_cost_flush_serializes_same_run_before_new_provider(tmp_path, mo
     from contextlib import contextmanager
     from types import SimpleNamespace
 
+    from looplab.core.config import Settings
     from looplab.core.llm import CostAccountant
     from looplab.events.types import EV_LLM_USAGE
     import looplab.serve.routers.boss as boss_router
@@ -1487,7 +1558,7 @@ def test_pending_cost_flush_serializes_same_run_before_new_provider(tmp_path, mo
     clients = []
     second_client_created = threading.Event()
 
-    def make_client(_settings):
+    def make_client(_settings, **_kw):
         client = SimpleNamespace(accountant=CostAccountant())
         clients.append(client)
         if len(clients) > 1:
@@ -1496,10 +1567,14 @@ def test_pending_cost_flush_serializes_same_run_before_new_provider(tmp_path, mo
 
     srv = SimpleNamespace(commands=commands, make_llm_client=make_client)
     monkeypatch.setattr(paid_work, "EventStore", lambda _path: store)
+    # `_metered_run_client` resolves the role target before it reaches the factory, so the settings
+    # argument must be real Settings — a bare `object()` now dies in `resolve_llm_target` and the
+    # test would never reach the pop/flush serialization it exists to pin.
+    settings = Settings()
 
     # The original provider result is known, but both its synchronous sink append and context-exit
     # reconciliation fail. Its ledger + activity context must therefore remain retained.
-    with boss_router._metered_run_client(srv, object(), run_dir, generation) as client:
+    with boss_router._metered_run_client(srv, settings, run_dir, generation) as client:
         client.accountant.add(0.5, {
             "prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7})
     assert len(clients) == 1 and commands.active == 1 and store.usage_attempts == 2
@@ -1516,7 +1591,7 @@ def test_pending_cost_flush_serializes_same_run_before_new_provider(tmp_path, mo
     monkeypatch.setattr(paid_work, "reconcile_cost_accountants", blocked_reconcile)
 
     def start_second_metered_call():
-        with boss_router._metered_run_client(srv, object(), run_dir, generation):
+        with boss_router._metered_run_client(srv, settings, run_dir, generation):
             return True
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -1545,7 +1620,7 @@ def test_report_worker_rejects_replaced_generation_before_client_creation(tmp_pa
     app = make_app(tmp_path)
     created = []
 
-    def forbidden_client(_settings):
+    def forbidden_client(_settings, **_kw):
         created.append(True)
         raise AssertionError("a stale generation must be rejected before client construction")
 
@@ -1808,7 +1883,7 @@ def test_chat_compact_empty_is_noop(tmp_path, monkeypatch):
     _build_run(tmp_path, "demo", writer=None)
     client = TestClient(make_app(tmp_path))
 
-    def _boom(_s):
+    def _boom(_s, **_kw):
         raise AssertionError("must not call the model when there's nothing to compact")
 
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom)
@@ -1869,7 +1944,7 @@ def test_command_endpoint_soft_fails_offline(tmp_path, monkeypatch):
     _build_run(tmp_path, "demo", writer=None)
     client = TestClient(make_app(tmp_path))
 
-    def _boom(_s):
+    def _boom(_s, **_kw):
         raise RuntimeError("no model")
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom)
     r = client.post("/api/runs/demo/command", json={"instruction": "confirm 1"})
@@ -2020,7 +2095,7 @@ def test_genesis_dedup_ignores_empty_leftover_dir(tmp_path, monkeypatch):
 def test_genesis_soft_fails_offline(tmp_path, monkeypatch):
     client = TestClient(make_app(tmp_path))
 
-    def _boom(_s):
+    def _boom(_s, **_kw):
         raise RuntimeError("no model")
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom)
     r = client.post("/api/genesis", json={"instruction": "anything"})
@@ -2299,7 +2374,7 @@ def test_scope_report_forces_structured_synthesis_when_loop_doesnt_emit(monkeypa
     assert c["headline"] == "SYNTH" and "No portfolio-wide winner" in c["verdict"]
 
 
-def _boom_client(_s):
+def _boom_client(_s, **_kw):
     raise RuntimeError("no model")
 
 
@@ -2376,7 +2451,7 @@ def test_scope_report_paid_action_requires_uuidv4_before_provider(tmp_path, monk
     _seed_scope_run(tmp_path, "required-action-run", task_id)
     provider_calls = 0
 
-    def provider(_settings):
+    def provider(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         return object()
@@ -2406,7 +2481,7 @@ def test_scope_report_action_replays_inline_terminal_and_new_uuid_regenerates(
     action_b = "22222222-2222-4222-8222-222222222222"
     client_calls = 0
 
-    def offline_client(_settings):
+    def offline_client(_settings, **_kw):
         nonlocal client_calls
         client_calls += 1
         raise RuntimeError("test-only offline")
@@ -2467,7 +2542,7 @@ def test_scope_report_action_survives_consumed_terminal_job_poll(tmp_path, monke
         return real_generate(scope, briefs, None)
 
     monkeypatch.setattr(scope_report, "generate_scope_report", blocked_generate)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
 
@@ -2517,7 +2592,7 @@ def test_scope_report_action_durably_replays_failure_without_reentering_provider
 
     monkeypatch.setattr(
         "looplab.serve.scope_report.generate_scope_report", mutate_during_synthesis)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
 
@@ -2542,7 +2617,7 @@ def test_scope_report_action_uuid_is_scope_bound_and_slash_route_is_unambiguous(
     _seed_scope_run(tmp_path, "other-action-run", "other-task")
     provider_calls = 0
 
-    def offline_client(_settings):
+    def offline_client(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         raise RuntimeError("test-only offline")
@@ -2610,7 +2685,7 @@ def test_scope_report_action_terminal_never_persists_raw_provider_prose(
         raise RuntimeError(secret)
 
     monkeypatch.setattr("looplab.serve.scope_report.generate_scope_report", explode)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
 
@@ -2689,7 +2764,7 @@ def test_scope_report_action_ledger_records_what_the_paid_call_actually_spent(
     class _Client:
         accountant = _Accountant()
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: _Client())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: _Client())
     result = _generate_scope_report(
         TestClient(make_app(tmp_path)),
         f"/api/scope-report/task/{task_id}", action_id=action_id).json()
@@ -2716,7 +2791,7 @@ def test_scope_report_refuses_to_pay_when_its_attempt_row_cannot_be_written(
     provider_calls = 0
     real_write = reports.strict_atomic_write_text
 
-    def provider(_settings):
+    def provider(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         return object()
@@ -2746,7 +2821,7 @@ def test_scope_report_action_claim_sync_failure_never_starts_provider(
     _seed_scope_run(tmp_path, "claim-sync-run", task_id)
     provider_calls = 0
 
-    def provider(_settings):
+    def provider(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         return object()
@@ -2784,7 +2859,7 @@ def test_scope_report_action_preworker_fence_failure_recovers_through_abandon(
             raise OSError("scope fence sync unavailable")
         return real_write(path, text)
 
-    def offline(_settings):
+    def offline(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         raise RuntimeError("test-only offline")
@@ -2925,7 +3000,7 @@ def test_scope_report_mismatched_done_tombstone_failure_stays_quarantined(
         return real_generate(scope, briefs, None)
 
     monkeypatch.setattr(scope_report, "generate_scope_report", blocked)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     app = make_app(tmp_path)
     client = TestClient(app)
     url = f"/api/scope-report/task/{task_id}"
@@ -3135,7 +3210,7 @@ def test_scope_report_action_baseexception_orphan_is_retired_after_durable_recon
 
     monkeypatch.setattr(
         "looplab.serve.scope_report.generate_scope_report", raise_baseexception)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     app = make_app(tmp_path)
     monkeypatch.setattr(
         jobs_module, "threading", SimpleNamespace(Thread=BackgroundCatchingThread))
@@ -3161,7 +3236,7 @@ def test_scope_report_action_canonical_report_sync_failure_is_durable_failure(
     real_write = reports.strict_atomic_write_text
     provider_calls = 0
 
-    def provider(_settings):
+    def provider(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         raise RuntimeError("test-only offline")
@@ -3206,7 +3281,7 @@ def test_scope_report_visible_canonical_without_success_terminal_is_quarantined_
             raise OSError("canonical parent sync confirmation was lost")
         return result
 
-    def offline(_settings):
+    def offline(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         raise RuntimeError("test-only offline")
@@ -3241,7 +3316,7 @@ def test_scope_report_done_receipt_remains_authoritative_after_action_marker_los
     _seed_scope_run(tmp_path, "terminal-marker-loss-run", task_id)
     calls = 0
 
-    def offline(_settings):
+    def offline(_settings, **_kw):
         nonlocal calls
         calls += 1
         raise RuntimeError("test-only offline")
@@ -3317,7 +3392,7 @@ def test_scope_report_action_thread_spawn_failure_is_durable_and_never_calls_pro
     _seed_scope_run(tmp_path, "worker-spawn-run", task_id)
     provider_calls = 0
 
-    def provider(_settings):
+    def provider(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         return object()
@@ -3356,7 +3431,7 @@ def test_scope_report_action_started_then_start_raises_cancels_and_releases_scop
     _seed_scope_run(tmp_path, "worker-started-then-failed-run", task_id)
     provider_calls = 0
 
-    def offline(_settings):
+    def offline(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         raise RuntimeError("test-only offline")
@@ -3412,7 +3487,7 @@ def test_scope_report_action_fences_scope_until_explicit_safe_abandon(
     _seed_scope_run(tmp_path, "scope-paid-fence-run", task_id)
     provider_calls = 0
 
-    def provider(_settings):
+    def provider(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         raise RuntimeError("test-only offline")
@@ -3540,7 +3615,7 @@ def test_scope_report_action_cross_process_lease_fences_live_worker(
         return real_generate(scope, briefs, None)
 
     monkeypatch.setattr(scope_report, "generate_scope_report", blocked_generate)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     app_a = make_app(tmp_path)
     app_b = make_app(tmp_path)
     client_a = TestClient(app_a)
@@ -3644,7 +3719,7 @@ def test_scope_report_live_scope_lease_blocks_after_fence_deletion(
         return real_generate(scope, briefs, None)
 
     monkeypatch.setattr(scope_report, "generate_scope_report", blocked)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
     try:
@@ -3688,7 +3763,7 @@ def test_scope_report_live_action_survives_regular_reports_directory_replacement
         return real_generate(scope, briefs, None)
 
     monkeypatch.setattr(scope_report, "generate_scope_report", blocked)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
     try:
@@ -3713,7 +3788,7 @@ def test_scope_report_action_indexed_missing_receipt_never_becomes_unknown(
     _seed_scope_run(tmp_path, "deleted-paid-run", task_id)
     provider_calls = 0
 
-    def provider(_settings):
+    def provider(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         raise RuntimeError("test-only offline")
@@ -3743,7 +3818,7 @@ def test_scope_report_clear_fence_prevents_rebill_after_receipt_and_marker_loss(
     _seed_scope_run(tmp_path, "clear-fence-run", task_id)
     provider_calls = 0
 
-    def offline(_settings):
+    def offline(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         raise RuntimeError("test-only offline")
@@ -3827,7 +3902,7 @@ def test_scope_report_clear_fence_reconstructs_missing_scope_marker(
     _seed_scope_run(tmp_path, "scope-marker-loss-run", task_id)
     calls = 0
 
-    def offline(_settings):
+    def offline(_settings, **_kw):
         nonlocal calls
         calls += 1
         raise RuntimeError("test-only offline")
@@ -3874,7 +3949,7 @@ def test_scope_report_action_unknown_abandon_is_noop_without_inode_growth(
     _seed_scope_run(tmp_path, "unknown-paid-run", task_id)
     provider_calls = 0
 
-    def provider(_settings):
+    def provider(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         return object()
@@ -3909,7 +3984,7 @@ def test_scope_report_action_unknown_noop_and_status_are_cache_safe(
     _seed_scope_run(tmp_path, "bounded-paid-run", task_id)
     provider_calls = 0
 
-    def provider(_settings):
+    def provider(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         raise RuntimeError("test-only offline")
@@ -4224,7 +4299,7 @@ def test_scope_report_run_change_during_synthesis_preserves_last_good(
                 })
         return {"headline": "MUST NOT REPLACE LAST GOOD"}
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr(
         "looplab.serve.scope_report.generate_scope_report", mutate_during_synthesis)
     changed = _generate_scope_report(client, url).json()
@@ -4257,7 +4332,7 @@ def test_scope_report_drill_refuses_replaced_frozen_generation(tmp_path, monkeyp
             "inspect_experiment", {"run_id": "drilled-run", "node_id": 1}))
         return {"headline": "must not publish", "verdict": observed[-1]}
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr("looplab.agents.agent.drive_tool_loop", replace_then_drill)
     response = _generate_scope_report(
         TestClient(make_app(tmp_path)), f"/api/scope-report/task/{task_id}").json()
@@ -4316,7 +4391,7 @@ def test_scope_report_revalidates_frozen_sources_before_provider(tmp_path, monke
             EventStore(event_path).append("annotation", {"text": "changed after freeze"})
         return source
 
-    def provider(_settings):
+    def provider(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         return object()
@@ -4346,7 +4421,7 @@ def test_scope_report_rejects_task_snapshot_changed_after_job_reservation(
     app = make_app(tmp_path)
     provider_calls = 0
 
-    def provider(_settings):
+    def provider(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         return object()
@@ -4390,7 +4465,7 @@ def test_scope_report_terminal_receipt_is_shared_by_concurrent_observers(
         release.wait(timeout=5)
         return {"headline": "shared terminal result"}
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr(
         "looplab.serve.scope_report.generate_scope_report", slow_synthesis)
     client = TestClient(app)
@@ -4653,7 +4728,7 @@ def test_scope_report_rejects_oversized_record_before_provider(
     report_path.write_bytes(hostile)
     provider_calls = 0
 
-    def provider(_settings):
+    def provider(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         return object()
@@ -4678,7 +4753,7 @@ def test_scope_report_rejects_oversized_source_before_provider(tmp_path, monkeyp
     event_size = (tmp_path / "owner-run" / "events.jsonl").stat().st_size
     provider_calls = 0
 
-    def provider(_settings):
+    def provider(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         return object()
@@ -4712,7 +4787,7 @@ def test_scope_report_bounded_json_parse_failures_are_storage_conflicts(
     report_path.write_bytes(raw)
     provider_calls = 0
 
-    def provider(_settings):
+    def provider(_settings, **_kw):
         nonlocal provider_calls
         provider_calls += 1
         return object()
@@ -4741,7 +4816,7 @@ def test_scope_report_oversized_publication_preserves_last_good(
     report_path = next((tmp_path / "reports").glob("*.json"))
     last_good = report_path.read_bytes()
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr(
         "looplab.serve.scope_report.generate_scope_report",
         lambda *_args, **_kwargs: {
@@ -4776,7 +4851,7 @@ def test_scope_report_revalidates_store_after_slow_generation(tmp_path, monkeypa
         (root / "reports").symlink_to(outside, target_is_directory=True)
         return {"headline": "must not publish"}
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr("looplab.serve.scope_report.generate_scope_report", swap_store)
     result = _generate_scope_report(
         TestClient(make_app(root)), f"/api/scope-report/task/{task_id}").json()
@@ -4850,7 +4925,7 @@ def test_scope_report_brief_marks_both_incomplete_finalization_protocols(
 
     monkeypatch.setattr(
         "looplab.serve.scope_report.generate_scope_report", capture_briefs)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     response = _generate_scope_report(
         TestClient(make_app(tmp_path)), "/api/scope-report/task/t")
 
@@ -4871,6 +4946,21 @@ def test_scope_report_absent_then_stale_on_new_run(tmp_path, monkeypatch):
     assert got["exists"] is True and got["stale"] is True and "r2" in got["added"]
 
 
+def _assign_project(client, run_id: str, project_id: str):
+    """File a run under a project through the fenced organization write.
+
+    `/api/runs/{id}/project` CASes on both the run generation and the current `project_id`, so a
+    stale tab cannot re-file a run that was reset out from under it. Omitting either precondition
+    is a 400 the scope endpoints then report as "no runs in this scope" — which reads as a broken
+    report rather than an unfenced write."""
+    generation = {x["run_id"]: x for x in client.get("/api/runs").json()}[run_id]["generation"]
+    r = client.post(f"/api/runs/{run_id}/project", json={
+        "project_id": project_id, "expected_generation": generation,
+        "expected_project_id": None})
+    assert r.status_code == 200, r.text
+    return r
+
+
 def test_scope_report_project_scope_includes_descendants(tmp_path, monkeypatch):
     """A folder report covers the project AND everything nested under it."""
     _build_run(tmp_path, "r1", writer=None)
@@ -4878,8 +4968,8 @@ def test_scope_report_project_scope_includes_descendants(tmp_path, monkeypatch):
     client = TestClient(make_app(tmp_path))
     parent = client.post("/api/projects", json={"name": "P"}).json()
     child = client.post("/api/projects", json={"name": "C", "parent_id": parent["id"]}).json()
-    client.post("/api/runs/r1/project", json={"project_id": parent["id"]})
-    client.post("/api/runs/r2/project", json={"project_id": child["id"]})
+    _assign_project(client, "r1", parent["id"])
+    _assign_project(client, "r2", child["id"])
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     g = _generate_scope_report(
         client, f"/api/scope-report/project/{parent['id']}").json()
@@ -5027,7 +5117,7 @@ def test_genesis_prior_reports_are_redacted_untrusted_user_json(tmp_path, monkey
         captured["agentic"] = messages
         raise RuntimeError("force the plain structured fallback")
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr("looplab.agents.agent.drive_tool_loop", _cap_drive)
     monkeypatch.setattr("looplab.core.parse.parse_structured", _cap_parse)
     response = client.post("/api/genesis", json={

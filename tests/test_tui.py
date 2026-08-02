@@ -1617,7 +1617,7 @@ def test_genesis_offline_soft_fails(tmp_path, monkeypatch):
     """With no LLM reachable the genesis boss soft-fails (ok:false) instead of throwing, so the TUI can
     keep the user's draft and show the reason (mirrors GenesisChat's offline handling). Force that
     precondition explicitly: a developer machine may have a healthy local Ollama endpoint."""
-    def _offline(_settings):
+    def _offline(_settings, **_kw):
         raise RuntimeError("model endpoint unavailable")
 
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _offline)

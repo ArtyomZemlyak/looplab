@@ -73,7 +73,7 @@ def test_message_stream_persists_raw_and_share_strips_it(tmp_path, monkeypatch):
         def complete_text_stream(self, messages):
             yield "done"
     monkeypatch.setattr("looplab.serve.server.make_llm_client",
-                        lambda s: _C([_call("final_answer", {"reply": "done"})]))
+                        lambda s, **_kw: _C([_call("final_answer", {"reply": "done"})]))
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
     with client.stream("POST", f"/api/assistant/sessions/{sid}/message_stream",

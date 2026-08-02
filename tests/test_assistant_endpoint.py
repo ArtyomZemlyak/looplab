@@ -425,7 +425,7 @@ def test_recovered_turn_without_journal_identity_has_no_run_control(tmp_path):
 # --------------------------------------------------------------------------- HTTP routes
 def test_assistant_endpoints_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr("looplab.serve.server.make_llm_client",
-                        lambda s: _FakeChatClient([_call("list_runs", {}), _final("done — no runs.")]))
+                        lambda s, **_kw: _FakeChatClient([_call("list_runs", {}), _final("done — no runs.")]))
     client = TestClient(make_app(tmp_path))
 
     # create + list
@@ -451,7 +451,7 @@ def test_assistant_endpoints_roundtrip(tmp_path, monkeypatch):
 
 def test_assistant_router_passes_the_app_command_service(tmp_path, monkeypatch):
     """Both HTTP turn layers share the app-owned command service with ``run_turn``."""
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient([]))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s, **_kw: _FakeChatClient([]))
     seen = []
     namespaces = []
 
@@ -476,7 +476,7 @@ def test_assistant_router_passes_the_app_command_service(tmp_path, monkeypatch):
 
 
 def test_dangling_user_turn_reuses_command_namespace_without_duplicate_append(tmp_path, monkeypatch):
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient([]))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s, **_kw: _FakeChatClient([]))
     observed = []
 
     def fake_run_turn(_client, _root, history, instruction, mode, **kwargs):
@@ -504,7 +504,7 @@ def test_dangling_user_turn_reuses_command_namespace_without_duplicate_append(tm
 
 
 def test_dangling_turn_pins_persisted_raw_instruction_and_mode(tmp_path, monkeypatch):
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient([]))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s, **_kw: _FakeChatClient([]))
     observed = []
 
     def fake_run_turn(_client, _root, history, instruction, mode, **kwargs):
@@ -531,7 +531,7 @@ def test_dangling_turn_pins_persisted_raw_instruction_and_mode(tmp_path, monkeyp
 
 
 def test_dangling_turn_rejects_raw_or_mode_mismatch(tmp_path, monkeypatch):
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient([]))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s, **_kw: _FakeChatClient([]))
     called = []
 
     def fake_run_turn(*_args, **_kwargs):
@@ -573,7 +573,7 @@ def test_dangling_turn_rejects_raw_or_mode_mismatch(tmp_path, monkeypatch):
 
 def test_dangling_user_turn_blocks_different_next_message(tmp_path, monkeypatch):
     """U2 cannot turn an unanswered, possibly-mutating U1 into ordinary model history."""
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient([]))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s, **_kw: _FakeChatClient([]))
     called = []
 
     def fake_run_turn(*_args, **_kwargs):
@@ -604,7 +604,7 @@ def test_cancel_keeps_turn_slot_until_worker_releases(tmp_path, monkeypatch):
     import time
 
     monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0.01")
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient([]))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s, **_kw: _FakeChatClient([]))
     entered = threading.Event()
     release = threading.Event()
     calls = []
@@ -652,7 +652,7 @@ def test_assistant_permission_pause_resume(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0.3")     # return {running} fast; the turn blocks on approval
     target = tmp_path / "made.txt"
     monkeypatch.setattr("looplab.serve.server.make_llm_client",
-                        lambda s: _FakeChatClient([_call("write_file", {"path": str(target), "content": "yo"}),
+                        lambda s, **_kw: _FakeChatClient([_call("write_file", {"path": str(target), "content": "yo"}),
                                                    _final("wrote it")]))
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"mode": "default"}).json()["id"]
@@ -691,7 +691,7 @@ def test_stale_permission_resolve_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0.3")
     target = tmp_path / "made2.txt"
     monkeypatch.setattr("looplab.serve.server.make_llm_client",
-                        lambda s: _FakeChatClient([_call("write_file", {"path": str(target), "content": "z"}),
+                        lambda s, **_kw: _FakeChatClient([_call("write_file", {"path": str(target), "content": "z"}),
                                                    _final("done")]))
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"mode": "default"}).json()["id"]
@@ -729,7 +729,7 @@ def test_allow_always_is_exact_scope_mode_and_current_turn_only(tmp_path, monkey
         _final("done"),
     ]
     monkeypatch.setattr(
-        "looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient(scripted))
+        "looplab.serve.server.make_llm_client", lambda _s, **_kw: _FakeChatClient(scripted))
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"mode": "default"}).json()["id"]
     submitted = client.post(
@@ -784,7 +784,7 @@ def test_high_action_asks_in_auto_and_cannot_be_remembered(tmp_path, monkeypatch
     target.write_text("x", encoding="utf-8")
     monkeypatch.setattr(
         "looplab.serve.server.make_llm_client",
-        lambda _s: _FakeChatClient([
+        lambda _s, **_kw: _FakeChatClient([
             _call("delete_file", {"path": str(target)}), _final("deleted")]))
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"mode": "auto"}).json()["id"]
@@ -823,7 +823,7 @@ def test_unknown_action_cannot_be_remembered_and_malformed_resolve_is_400(tmp_pa
     import time
 
     monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0.01")
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient([]))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s, **_kw: _FakeChatClient([]))
 
     def fake_run_turn(_client, _root, _history, _instruction, mode, **kwargs):
         verdict = kwargs["approver"]({
@@ -865,7 +865,7 @@ def test_unknown_action_cannot_be_remembered_and_malformed_resolve_is_400(tmp_pa
 
 
 def test_assistant_message_soft_fails_offline(tmp_path, monkeypatch):
-    def _boom(s):
+    def _boom(s, **_kw):
         raise RuntimeError("connection refused")
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom)
     client = TestClient(make_app(tmp_path))
@@ -971,7 +971,7 @@ def test_cancel_skips_the_paid_session_titling_call(tmp_path, monkeypatch):
         def chat(self, *a, **k):
             return {"content": "", "tool_calls": []}
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _Client())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s, **_kw: _Client())
     entered, release = threading.Event(), threading.Event()
 
     def fake_run_turn(_client, _root, _history, instruction, mode, **_kwargs):

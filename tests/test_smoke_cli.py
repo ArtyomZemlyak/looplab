@@ -13,7 +13,7 @@ def _run_smoke(monkeypatch, structured):
     import looplab.cli.export_cmds as export_cmds
     import looplab.core.parse as parse_module
 
-    monkeypatch.setattr(export_cmds, "make_llm_client", lambda _settings: _TextReadyClient())
+    monkeypatch.setattr(export_cmds, "make_llm_client", lambda _settings, **_kw: _TextReadyClient())
     if isinstance(structured, Exception):
         def parse_failure(*_args, **_kwargs):
             raise structured
