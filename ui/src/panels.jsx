@@ -39,6 +39,22 @@ export { default as Panel } from './PanelShell.jsx'
 
 const Stat = ({ n, l }) => <div className="stat"><div className="n">{n}</div><div className="l">{l}</div></div>
 
+const MetricGauge = ({ value, max = 100, hot = false, label, valueText }) => {
+  const numericValue = typeof value === 'number' && Number.isFinite(value) ? value : null
+  const numericMax = typeof max === 'number' && Number.isFinite(max) && max > 0 ? max : null
+  if (numericValue == null || numericMax == null) {
+    return <span className="muted" aria-label={`${label} unavailable`}>unavailable</span>
+  }
+  const safeValue = Math.max(0, Math.min(numericMax, numericValue))
+  return <div className="gauge">
+    <div className="bar" role="progressbar" aria-label={label} aria-valuemin={0}
+      aria-valuemax={numericMax} aria-valuenow={safeValue} aria-valuetext={valueText}>
+      <div className={'fill' + (hot ? ' hot' : '')}
+        style={{ width: `${safeValue / numericMax * 100}%` }} />
+    </div>
+  </div>
+}
+
 const invalidPanelPayload = () => { throw new Error('Invalid panel payload') }
 const isRecord = value => !!value && typeof value === 'object' && !Array.isArray(value)
 const nullableText = value => value === null || typeof value === 'string'
@@ -2443,8 +2459,6 @@ export function RegistryPanel({ state, onClose }) {
 export function GpuPanel({ onClose }) {
   const [resource, retry] = usePanelResource(signal => get('/api/gpu', { signal }), gpuPayload, '', 2000)
   const data = resource.data
-  const bar = (v, max, hot) => <div className="bar" style={{ height: 8 }}>
-    <div className={'fill' + (hot ? ' hot' : '')} style={{ width: Math.min(100, max ? v / max * 100 : 0) + '%' }} /></div>
   return (
     <Panel title="GPU monitor" sub="nvidia-smi · live" onClose={onClose} wide>
       <PanelResourceNotice resource={resource} label="GPU telemetry" onRetry={retry} />
@@ -2452,20 +2466,32 @@ export function GpuPanel({ onClose }) {
         ? <div className="notice">No GPU / nvidia-smi not available on the server host.</div>
         : data && !data.gpus.length
           ? <div className="notice">No GPU devices reported.</div>
-        : data?.available && (data.gpus || []).map((g, i) => (
-            <div key={i} style={{ marginBottom: 16 }}>
-              <div className="section-h">{g.name}</div>
+        : data?.available && (data.gpus || []).map((g, i, gpus) => {
+            const gpuLabel = gpus.length > 1
+              ? `GPU ${i + 1} of ${gpus.length} · ${g.name}` : g.name
+            const utilizationText = g.util == null ? '—' : `${fmt(g.util)}%`
+            const memoryText = g.mem_used == null || g.mem_total == null || g.mem_total <= 0
+              ? '—' : `${fmt(g.mem_used)} / ${fmt(g.mem_total)} MiB`
+            const temperatureText = g.temp == null ? '—' : `${fmt(g.temp)}°C`
+            const powerText = g.power == null ? '—' : `${fmt(g.power)} W`
+            return <div key={i} style={{ marginBottom: 16 }}>
+              <div className="section-h">{gpuLabel}</div>
               <div className="cardgrid" style={{ marginBottom: 10 }}>
-                <Stat n={`${fmt(g.util)}%`} l="utilization" />
-                <Stat n={`${fmt(g.mem_used)} / ${fmt(g.mem_total)} MiB`} l="memory" />
-                <Stat n={`${fmt(g.temp)}°C`} l="temperature" />
-                <Stat n={`${fmt(g.power)} W`} l="power draw" />
+                <Stat n={utilizationText} l="utilization" />
+                <Stat n={memoryText} l="memory" />
+                <Stat n={temperatureText} l="temperature" />
+                <Stat n={powerText} l="power draw" />
               </div>
               <div className="kv">
-                <div className="k">GPU util</div><div className="v">{bar(g.util, 100, true)}</div>
-                <div className="k">VRAM</div><div className="v">{bar(g.mem_used, g.mem_total)}</div>
+                <div className="k">GPU util</div><div className="v"><MetricGauge
+                  value={g.util} hot label={`${gpuLabel} utilization`}
+                  valueText={utilizationText} /></div>
+                <div className="k">VRAM</div><div className="v"><MetricGauge
+                  value={g.mem_used} max={g.mem_total} label={`${gpuLabel} VRAM usage`}
+                  valueText={`${fmt(g.mem_used)} of ${fmt(g.mem_total)} MiB`} /></div>
               </div>
-            </div>))}
+            </div>
+          })}
     </Panel>
   )
 }
@@ -2486,8 +2512,9 @@ export function HyperImportancePanel({ state, onClose }) {
               {rows.map(row => <tr key={row.k}>
                 <td>{row.k}</td><td>{fmt(row.imp, 3)}</td>
                 <td className="muted">{row.r >= 0 ? '+' : ''}{fmt(row.r, 3)}</td><td className="muted">{row.n}</td>
-                <td style={{ width: 160 }}><div className="bar" style={{ height: 8 }}>
-                  <div className="fill" style={{ width: Math.min(100, row.imp / top * 100) + '%' }} /></div></td></tr>)}
+                <td style={{ width: 160 }}><MetricGauge value={row.imp} max={top}
+                  label={`${row.k} relative importance`}
+                  valueText={`${fmt(row.imp / top * 100, 1)}%`} /></td></tr>)}
             </tbody></table></DataTable>
             <div className="muted" style={{ marginTop: 8 }}>Sign of r shows direction: with a {state.direction === 'min' ? 'minimize' : 'maximize'} objective,
               a {state.direction === 'min' ? 'negative' : 'positive'} r means a larger value tends to help. Needs ≥3 evaluated nodes per param.</div></>
