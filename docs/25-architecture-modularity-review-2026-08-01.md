@@ -771,9 +771,9 @@ Scope: `looplab/engine/`: memory.py, lessons.py, claims.py, concept_registry.py,
 - cross_run_index.py is a model module: pure deterministic projection, byte-identical rebuild guarantee, receipted incremental cache with explicit skip reasons, TOCTOU fences on digest/read, and honest degraded-provenance notes.
 - Load-bearing why-comments throughout (replay-safety notes, mega-review/CR references, named past bugs with their observed symptoms) make otherwise-subtle invariants auditable, and the mixin decomposition of LessonMemory (priors/distill/reconcile) preserved test monkeypatch seams with zero call-site churn.
 
-#### EM-01 · HIGH · under-decomposition · effort: large — **PARTIALLY RESOLVED (2026-08-02)**
+#### EM-01 · HIGH · under-decomposition · effort: large — **RESOLVED (2026-08-02)**
 
-**claims.py is a 2896-line god-module spanning six distinct subsystems**
+**claims.py is a 2896-line god-module spanning six distinct subsystems** — now 843 lines across four
 
 *Locations:* `looplab/engine/claims.py:81`, `looplab/engine/claims.py:965`, `looplab/engine/claims.py:1401`, `looplab/engine/claims.py:1726`, `looplab/engine/claims.py:2115`, `looplab/engine/claims.py:2436`, `looplab/engine/claims.py:2719`
 
@@ -816,9 +816,28 @@ pack was actually built. A wildcard is now banned here by test, and a second gua
 module's compiled code objects (excluding `co_varnames`/`co_cellvars`/`co_freevars`, so a deferred
 import still reads as bound) to catch any private global that resolves nowhere.
 
-*Still open:* the remaining three modules (ledger, D8 store, assessments). Their back-edges are
-call-level rather than constant-level, so each needs its forward calls turned into deferred imports
-deliberately — mechanical, but not the same change as lifting a leaf out.
+*Resolution (2026-08-02, third module):* `engine/claims_assessments.py` — 439 lines — carries the
+three projections that fold the two independent durable stores (lesson outcomes, D8 research claims)
+into one epistemic view: `supported` / `refuted` / `mixed` / `inconclusive` with the run and node
+ids behind each. `contested` is only reachable *because* a research claim can oppose a lesson
+verdict, which is the reason the two stores are read together here rather than separately. It sits
+between the leaf and the planner — reads `claims_health`, is read by `claims_retrieval` through the
+barrel — and takes the ledger's two legacy overlay-key helpers by deferred import.
+
+Three helpers moved DOWN into the leaf as part of this, on the same rule that moved
+`_MAX_DECISION_METRIC`: `_CLAIM_WORD`, `_string_list` and `_MAX_DECISION_SCOPE` are each read by
+three of the four modules, so leaving them where they were first declared cost every consumer a
+deferred import back into `claims.py`. `_CLAIM_WORD` is the load-bearing one — it defines what
+counts as a claim word for BOTH the fuzzy-merge projection and the retrieval planner's intent
+classifier, so a per-module copy could drift into making a claim retrievable by a query the merge
+step considers a different statement. A test pins one definition each and identity across all four
+modules.
+
+`claims.py` is now 843 lines, down from 2,846 — the four modules total 3,124, the growth being
+module docstrings that state each layer's direction.
+
+*Still open:* the ledger and the D8 store. Both remain in `claims.py`, which at 843 lines is no
+longer a god-module; splitting them further is optional rather than the finding.
 
 #### EM-02 · HIGH · duplication · effort: medium
 

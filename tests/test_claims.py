@@ -1730,3 +1730,94 @@ def test_the_retrieval_barrel_re_exports_the_same_objects():
     for name in shared:
         assert getattr(claims, name) is getattr(claims_retrieval, name), (
             f"claims.{name} is a COPY of claims_retrieval.{name}, not a re-export")
+
+
+# --- the claims_assessments split (doc 25 EM-01) -----------------------------------------------
+
+def test_claims_assessments_sits_between_the_leaf_and_the_planner():
+    """It reads `claims_health` and is read BY `claims_retrieval` (through the barrel), so the only
+    thing it may not do at module scope is import the store/ledger half — `claims.py` imports this
+    module to re-export it, and a module-level import back is a startup cycle."""
+    source = _claims_module_source("claims_assessments")
+    upward = [entry for entry in _module_level_imports(source, "looplab.engine.claims")
+              if "claims_health" not in entry]
+    assert not upward, (
+        "claims_assessments imports the claims store/ledger at MODULE level, which cycles with the "
+        f"barrel that re-exports it:\n  " + "\n  ".join(upward))
+    assert not _module_level_imports(source, "looplab.engine.claims_retrieval"), (
+        "claims_assessments imports the retrieval planner, inverting the split: retrieval consumes "
+        "assessments, not the other way round")
+
+
+def test_the_assessments_barrel_re_exports_the_same_objects():
+    from looplab.engine import claims, claims_assessments
+
+    shared = [name for name in dir(claims_assessments)
+              if not name.startswith("__") and getattr(
+                  getattr(claims_assessments, name), "__module__", claims_assessments.__name__)
+              == claims_assessments.__name__]
+    assert shared, "no names own to claims_assessments — the split moved nothing"
+    for name in shared:
+        assert getattr(claims, name) is getattr(claims_assessments, name), (
+            f"claims.{name} is a COPY of claims_assessments.{name}, not a re-export")
+
+
+def test_every_private_global_claims_assessments_reads_resolves():
+    """Same walk as the retrieval guard: an unimported private is invisible until the line runs, and
+    the two ledger key helpers this module needs come in through per-call deferred imports."""
+    import builtins
+    import types
+
+    from looplab.engine import claims_assessments
+
+    unresolved = []
+
+    def _walk(code, qualname, bound):
+        bound = bound | set(code.co_varnames) | set(code.co_cellvars) | set(code.co_freevars)
+        for name in code.co_names:
+            if not name.startswith("_") or name.startswith("__"):
+                continue
+            if name in bound or hasattr(claims_assessments, name) or hasattr(builtins, name):
+                continue
+            unresolved.append(f"{qualname}: {name}")
+        for const in code.co_consts:
+            if isinstance(const, types.CodeType):
+                _walk(const, f"{qualname}.{const.co_name}", bound)
+
+    for obj in vars(claims_assessments).values():
+        code = getattr(obj, "__code__", None)
+        if code is None or getattr(obj, "__module__", None) != claims_assessments.__name__:
+            continue
+        _walk(code, obj.__name__, set())
+    assert not unresolved, (
+        "these private globals resolve nowhere in claims_assessments — the call raises NameError "
+        f"the first time it runs:\n  " + "\n  ".join(sorted(set(unresolved))))
+
+
+def test_the_three_shared_helpers_live_in_the_leaf_with_one_definition_each():
+    """`_CLAIM_WORD`, `_string_list` and `_MAX_DECISION_SCOPE` are each read by three of the four
+    modules. Left in whichever section declared them first, every consumer needed a deferred import
+    back into `claims.py`; the alternative — a copy per module — is worse, because `_CLAIM_WORD`
+    defines what counts as a claim word for BOTH the fuzzy merge and the retrieval planner's intent
+    classifier, and a divergence would make a claim retrievable by a query the merge step considers
+    a different statement. They live in the leaf for the same reason `_MAX_DECISION_METRIC` does."""
+    import ast
+
+    from looplab.engine import claims, claims_assessments, claims_health, claims_retrieval
+
+    for name in ("_CLAIM_WORD", "_string_list", "_MAX_DECISION_SCOPE"):
+        assert hasattr(claims_health, name), f"{name} left the leaf"
+        for module in (claims, claims_assessments, claims_retrieval):
+            assert getattr(module, name) is getattr(claims_health, name), (
+                f"{module.__name__}.{name} is not the leaf's object — a second definition means the "
+                "two can drift apart silently")
+
+    for module_name in ("claims", "claims_assessments", "claims_retrieval"):
+        tree = ast.parse(_claims_module_source(module_name))
+        redefined = [node.lineno for node in tree.body
+                     if isinstance(node, ast.Assign)
+                     and any(getattr(target, "id", None) in
+                             {"_CLAIM_WORD", "_string_list", "_MAX_DECISION_SCOPE"}
+                             for target in node.targets)]
+        assert not redefined, (
+            f"{module_name}.py redefines one of the shared leaf helpers at line(s) {redefined}")

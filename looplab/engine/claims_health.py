@@ -47,6 +47,9 @@ _MAX_SOURCE_STATEMENT = 4000
 # token that identifies a decision, kept with the other bounds rather than in whichever
 # section declared it first.
 _MAX_DECISION_METRIC = 200
+# Same reasoning: the ledger declares a decision's scope, but the context pack and the
+# assessment projections both bound it too, so the bound lives with the other bounds.
+_MAX_DECISION_SCOPE = 500
 _MAX_SOURCE_ID = 500
 _MAX_SOURCE_EVIDENCE = 256
 _MAX_SOURCE_FINGERPRINT = 256
@@ -463,6 +466,25 @@ def _valid_claim_source_row(row, *, research: bool) -> bool:
 
 def _valid_claim_source_rows(rows, *, research: bool) -> list[dict]:
     return _claim_source_rows(rows, research=research)
+
+
+# Token regex shared by the fuzzy-merge projection and the retrieval planner's intent
+# classifier. Both spell "a claim word" the same way on purpose: a divergence here would make
+# a claim retrievable by a query that the merge step considers a different statement.
+_CLAIM_WORD = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _string_list(raw, *, maximum: int, item_maximum: int) -> list[str]:
+    """Bounded JSON-list normalization; strings are scalar values, never character iterables."""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out = []
+    for value in raw[:maximum]:
+        if isinstance(value, str):
+            clean = _claim_text(value, item_maximum)
+            if clean:
+                out.append(clean)
+    return out
 
 
 def _claim_text(value, maximum: int = 4000) -> str:

@@ -27,8 +27,10 @@ from typing import Optional
 # module needs from it is PRIVATE, and `import *` skips underscore names — so a wildcard here would
 # resolve at import time and then NameError on the first call.
 from looplab.engine.claims_health import (
+    _CLAIM_WORD,
     _MAX_CONTEXT_CLAIMS,
     _MAX_RETRIEVAL_CORPUS,
+    _MAX_DECISION_SCOPE,
     _MAX_RETRIEVAL_HITS,
     _bounded_claim_projection,
     _claim_source_rows,
@@ -43,6 +45,7 @@ from looplab.engine.claims_health import (
     _safe_claim_read_health,
     _safe_claim_source_summary,
     _safe_research_source_summary,
+    _string_list,
     _unknown_claim_source_summary,
     _valid_claim_source_rows,
 )
@@ -121,9 +124,6 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     Pure/deterministic and
     'silent' by construction — it just returns structured data; promoting it to advisory prompt-grounding
     is a separate, gated step (never wired here). No LLM, no I/O."""
-    # DEFERRED: `claims.py` imports THIS module to re-export it, so importing back at module
-    # scope would cycle. These names live in the ledger/store half of the split (EM-01).
-    from looplab.engine.claims import _MAX_DECISION_SCOPE, _string_list
     # NOTE: this bounds by CLAIM COUNT + per-claim field caps (below), not a serialized token/byte
     # budget — a true token envelope is the CR2b TODO. `max_claims<1` is normalized to 1.
     max_claims = max(1, min(int(max_claims), _MAX_CONTEXT_CLAIMS))
@@ -285,7 +285,6 @@ def _classify_intent(query: str) -> str:
     Deterministic, no LLM. `explore` (neutral) when no cue fires — the safe default that reorders nothing."""
     # DEFERRED: `claims.py` imports THIS module to re-export it, so importing back at module
     # scope would cycle. These names live in the ledger/store half of the split (EM-01).
-    from looplab.engine.claims import _CLAIM_WORD
     toks = set(_CLAIM_WORD.findall(str(query or "").casefold()))
     scored = [(sum(1 for w in cues if w in toks), name) for name, cues in _INTENT_CUES.items()]
     # An equal cue count is broken CAVEAT-FIRST, not alphabetically. The tie-break used to be the intent
@@ -327,7 +326,6 @@ _CAVEAT_QUERY_COVERAGE = 0.10
 def _retrieval_tokens(text: str) -> frozenset[str]:
     # DEFERRED: `claims.py` imports THIS module to re-export it, so importing back at module
     # scope would cycle. These names live in the ledger/store half of the split (EM-01).
-    from looplab.engine.claims import _CLAIM_WORD
     normalized = unicodedata.normalize("NFKC", str(text or "")).casefold()
     return frozenset(_CLAIM_WORD.findall(normalized))
 
@@ -406,7 +404,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     Operator-rejected claims never enter the corpus. Advisory; pure w.r.t. the passed/loaded stores."""
     # DEFERRED: `claims.py` imports THIS module to re-export it, so importing back at module
     # scope would cycle. These names live in the ledger/store half of the split (EM-01).
-    from looplab.engine.claims import _string_list, claim_assessments, load_claim_lessons, load_research_claims
+    from looplab.engine.claims import claim_assessments, load_claim_lessons, load_research_claims
     from pathlib import Path
 
     from looplab.engine.governance_health import observed_path_missing, project_governed_sources
