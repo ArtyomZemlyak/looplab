@@ -1198,14 +1198,17 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     route.update(current => {
       const nextTab = tab || current.inspectTab
       const preserveComment = id === current.nodeId && nextTab === 'Comments'
-      return { ...current, nodeId: id,
+      return { ...current, view: 'dag', nodeId: id,
         nodeGeneration: preserveComment ? current.nodeGeneration : null,
         inspectTab: nextTab,
         commentId: preserveComment ? current.commentId : null,
         sequence: reviewMode ? null : targetSeq }
     })
     setSelectedGroup(null)
-    if (compactWorkspace) setCompactInspectorOpen(true)
+    if (compactWorkspace) {
+      setCompactTimelineOpen(false)
+      setCompactInspectorOpen(true)
+    }
     else setSideC(false)     // drill-down means "show me the inspector" — un-fold a collapsed panel
   }
   // --- semantic-zoom grouping controls ---
