@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { deadlineGet, get, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL,
   saveRunConfig, operatorMeta, commandFeedback, runApiPath, runNodeApiPath,
   createIdempotencyKey, getRunCommand, isTransientCommandReadError, retryRunCommand, runCommand,
@@ -833,6 +833,7 @@ export function DataQualityPanel({ state, onClose }) {
 // and a "Pause & resume" applies it now by restarting the engine (pause → wait for it to stop → resume).
 export function ConfigPanel({
   runId, expectedGeneration, state, live, onClose: closePanel, onToast, draftStore = null,
+  navigationGuardOwner = 'panel', publishNavigationGuard = null,
 }) {
   const [cfg, setCfg] = useState(null)
   const [settingsSchema, setSettingsSchema] = useState(null)
@@ -857,6 +858,10 @@ export function ConfigPanel({
   const mutationRef = useRef(null)
   const configSaveInFlightRef = useRef(false)
   const allowConfigNavigationRef = useRef(false)
+  useLayoutEffect(() => {
+    allowConfigNavigationRef.current = false
+    return () => { allowConfigNavigationRef.current = true }
+  }, [])
   const draftScope = configDraftScope(runId)
   const retainedDraftRef = useRef({ scope: '', value: null })
   if (retainedDraftRef.current.scope !== draftScope) {
@@ -1066,6 +1071,16 @@ export function ConfigPanel({
   const hasChanges = dirty.size > 0 || acDirty
   const canSave = hasChanges && invalidCount === 0
   const configNavigationUnsafe = hasChanges || busy || !!configMutationUnknown
+  const configNavigationSummary = [
+    hasChanges ? 'This Run settings panel has unsaved changes.' : '',
+    configMutationUnknown?.stage === 'conflict'
+      ? 'The server version changed while this draft was open.'
+      : configMutationUnknown
+        ? 'The last Run settings save may or may not have reached the server.' : '',
+    busy ? 'A Run settings operation is still in progress; its server-side outcome may arrive after this view closes.' : '',
+  ].filter(Boolean).join(' ')
+  const configCloseMessage = `${configNavigationSummary} Closing it discards this panel's client-only state. Close the Run settings panel anyway?`
+  const configLeaveSummary = `${configNavigationSummary} Leaving this run discards this panel's client-only state.`
   const writeConfigDraft = (overrides = {}) => {
     if (!draftStore || allowConfigNavigationRef.current) return
     const nextForm = Object.hasOwn(overrides, 'form') ? overrides.form : form
@@ -1116,9 +1131,22 @@ export function ConfigPanel({
     writeConfigDraft()
   }, [agentControl, busy, configIdentityReady, configMeta, configMutationUnknown, form, saved,
     savedAC, settingsSchema])
+  useLayoutEffect(() => {
+    if (navigationGuardOwner !== 'run' || typeof publishNavigationGuard !== 'function') {
+      return undefined
+    }
+    return publishNavigationGuard({
+      route: 'config', unsafe: configNavigationUnsafe,
+      closeMessage: configCloseMessage, leaveSummary: configLeaveSummary,
+      dispose: () => {
+        allowConfigNavigationRef.current = true
+        draftStore?.clear(draftScope)
+      },
+    })
+  }, [navigationGuardOwner, publishNavigationGuard, configNavigationUnsafe,
+    configCloseMessage, configLeaveSummary, draftStore, draftScope])
   useEffect(() => {
-    if (!configNavigationUnsafe) {
-      allowConfigNavigationRef.current = false
+    if (navigationGuardOwner === 'run' || !configNavigationUnsafe) {
       return undefined
     }
     const guardedHash = location.hash
@@ -1136,7 +1164,8 @@ export function ConfigPanel({
       },
       onAllow: () => draftStore?.clear(draftScope),
     })
-  }, [configNavigationUnsafe, busy, configMutationUnknown, draftScope, draftStore])
+  }, [navigationGuardOwner, configNavigationUnsafe, busy, configMutationUnknown, draftScope,
+    draftStore])
   const onChange = (k, v) => {
     const next = { ...form, [k]: v }
     writeConfigDraft({ form: next })
@@ -1360,6 +1389,10 @@ export function ConfigPanel({
     })
   }
   const requestClose = () => {
+    if (navigationGuardOwner === 'run') {
+      if (closePanel?.() !== false) allowConfigNavigationRef.current = true
+      return
+    }
     if (!hasChanges && !busy && !configMutationUnknown) {
       draftStore?.clear(draftScope)
       closePanel()
@@ -1463,7 +1496,10 @@ export function ConfigPanel({
   )
 }
 
-export function AuthoringPanel({ onClose, onToast, draftStore: sharedDraftStore = null }) {
+export function AuthoringPanel({
+  onClose, onToast, draftStore: sharedDraftStore = null, navigationGuardOwner = 'panel',
+  publishNavigationGuard = null,
+}) {
   const [kind, setKind] = useState('prompts')
   const [selectedScope, setSelectedScope] = useState(null)
   const fallbackDraftStoreRef = useRef(null)
@@ -1524,9 +1560,13 @@ export function AuthoringPanel({ onClose, onToast, draftStore: sharedDraftStore 
     setStoredUncertainSaves(current => current)
     setStoredDamagedRecoveries(current => current)
   }, [setStoredDamagedRecoveries, setStoredUncertainSaves])
-  useEffect(() => {
+  useLayoutEffect(() => {
     activeRef.current = true
-    return () => { activeRef.current = false }
+    allowNavigationRef.current = false
+    return () => {
+      activeRef.current = false
+      allowNavigationRef.current = true
+    }
   }, [])
   useEffect(() => {
     if (source.state !== 'ready') {
@@ -1662,11 +1702,35 @@ export function AuthoringPanel({ onClose, onToast, draftStore: sharedDraftStore 
   const mutationBusy = !!saveState
   const navigationUnsafe = dirtyCount > 0 || mutationBusy
     || uncertainSaveCount > 0 || damagedRecoveryCount > 0
+  const authoringNavigationSummary = [
+    dirtyCount > 0
+      ? `${dirtyCount} unsaved Authoring draft${dirtyCount === 1 ? '' : 's'} will be discarded.` : '',
+    mutationBusy ? 'A file save is still in progress; its immediate outcome may no longer be visible here.' : '',
+    uncertainSaveCount > 0
+      ? `${uncertainSaveCount} file save outcome${uncertainSaveCount === 1 ? '' : 's'} may still be unknown; retained recovery must be reviewed before any retry.` : '',
+    damagedRecoveryCount > 0
+      ? `${damagedRecoveryCount} damaged Authoring recovery record${damagedRecoveryCount === 1 ? ' remains' : 's remain'} quarantined in this browser tab.` : '',
+  ].filter(Boolean).join(' ')
+  const authoringCloseMessage = `${authoringNavigationSummary} Close Authoring anyway?`
   const navigationUnsafeRef = useRef(navigationUnsafe)
   navigationUnsafeRef.current = navigationUnsafe
+  useLayoutEffect(() => {
+    if (navigationGuardOwner !== 'run' || typeof publishNavigationGuard !== 'function') {
+      return undefined
+    }
+    return publishNavigationGuard({
+      route: 'authoring', unsafe: navigationUnsafe,
+      closeMessage: authoringCloseMessage, leaveSummary: authoringNavigationSummary,
+      dispose: () => {
+        allowNavigationRef.current = true
+        activeRef.current = false
+        draftStore.clear(AUTHORING_PANEL_DRAFT_SCOPE)
+      },
+    })
+  }, [navigationGuardOwner, publishNavigationGuard, navigationUnsafe,
+    authoringCloseMessage, authoringNavigationSummary, draftStore])
   useEffect(() => {
-    if (!navigationUnsafe) {
-      allowNavigationRef.current = false
+    if (navigationGuardOwner === 'run' || !navigationUnsafe) {
       return undefined
     }
     return installNavigationLossGuard({
@@ -1681,7 +1745,7 @@ export function AuthoringPanel({ onClose, onToast, draftStore: sharedDraftStore 
           : `${dirtyCount} unsaved Authoring draft${dirtyCount === 1 ? '' : 's'} will be lost. Leave anyway?`,
       onAllow: () => draftStore.clear(AUTHORING_PANEL_DRAFT_SCOPE),
     })
-  }, [draftStore, navigationUnsafe, mutationBusy, uncertainSaveCount,
+  }, [navigationGuardOwner, draftStore, navigationUnsafe, mutationBusy, uncertainSaveCount,
     damagedRecoveryCount, dirtyCount])
   useEffect(() => () => {
     const retained = draftStore.readField(AUTHORING_PANEL_DRAFT_SCOPE, 'documents', {})
@@ -2238,6 +2302,10 @@ export function AuthoringPanel({ onClose, onToast, draftStore: sharedDraftStore 
       : 'The retained snapshot of the missing recovery record was released. No stored record was changed.')
   }
   const requestClose = () => {
+    if (navigationGuardOwner === 'run') {
+      if (onClose?.() !== false) allowNavigationRef.current = true
+      return
+    }
     if (!navigationUnsafe) {
       draftStore.clear(AUTHORING_PANEL_DRAFT_SCOPE)
       onClose?.()

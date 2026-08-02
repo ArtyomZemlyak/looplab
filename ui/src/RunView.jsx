@@ -1,5 +1,5 @@
 import React, {
-  lazy, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
+  lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
 } from 'react'
 import { useMediaQuery, useRunState } from './hooks.js'
 import { useTimeline } from './useTimeline.js'
@@ -31,6 +31,11 @@ import { installNavigationLossGuard } from './navigationLossGuard.js'
 import {
   authoringRecoveryStorageKey, inspectAuthoringRecoveryStorage,
 } from './authoringRecoveryStorage.js'
+import {
+  clearCommentOperationIntent, clearDamagedCommentOperation,
+  listCommentOperationRecoveries, readCommentOperationRecoveryRevision,
+  refreshCommentOperationRecoveries, subscribeCommentOperationRecoveries,
+} from './commentRecoveryStorage.js'
 import {
   clearRunStartOverIntent, createRunStartOverIntent, loadRunStartOverIntent,
   saveRunStartOverIntent,
@@ -73,6 +78,26 @@ const publishTraceClearRecovery = (scope, kind) => {
   while (signals.size > 64) signals.delete(signals.keys().next().value)
   traceClearRecoverySnapshot = { revision: signal.revision, signals }
   for (const listener of traceClearRecoveryListeners) listener()
+}
+
+const commentDraftEntryUnsafe = ([scope, fields], runId) => {
+  if ((!scope.startsWith(`comment-composer:${runId}@`)
+      && !scope.startsWith(`comment-card:${runId}@`))
+      || !fields || typeof fields !== 'object' || Array.isArray(fields)) return false
+  const busy = fields.busy === true || (typeof fields.busy === 'string' && !!fields.busy)
+  const draft = (typeof fields.text === 'string' && fields.text.length > 0)
+    || (fields.dirty === true && typeof fields.draftText === 'string')
+  const recovery = !!fields.retryIntent || !!fields.uncertainIntent
+    || !!fields.editRetryIntent || !!fields.uncertainEdit
+    || !!fields.resolutionRetryIntent || !!fields.uncertainResolution
+    || !!fields.damagedRecovery
+  return busy || draft || recovery
+}
+
+const commentDraftText = ([, fields]) => {
+  if (typeof fields?.text === 'string' && fields.text.length > 0) return fields.text
+  if (fields?.dirty === true && typeof fields.draftText === 'string') return fields.draftText
+  return ''
 }
 
 // All optional panels intentionally share one deferred module request. The first opened panel pays
@@ -254,19 +279,109 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const traceClearRecoveryStore = useRef(traceClearRecoveryRegistry)
   const inspectorDraftStoreRef = useRef(null)
   if (!inspectorDraftStoreRef.current) inspectorDraftStoreRef.current = createInspectorDraftStore()
+  const panelNavigationGuardRef = useRef(null)
+  const [panelNavigationGuard, setPanelNavigationGuard] = useState(null)
+  const publishPanelNavigationGuard = useCallback(controller => {
+    if (!controller || !['config', 'authoring'].includes(controller.route)
+        || typeof controller.dispose !== 'function') return undefined
+    const registration = { ...controller }
+    panelNavigationGuardRef.current = registration
+    setPanelNavigationGuard(registration)
+    return () => {
+      if (panelNavigationGuardRef.current !== registration) return
+      // An unsafe child can disappear behind a generation/history fence before the user chooses
+      // what to do. Keep its controller reachable until an explicit discard or a replacement panel
+      // registers; the child's unmount fence separately prevents late async writes.
+      if (registration.unsafe) return
+      panelNavigationGuardRef.current = null
+      setPanelNavigationGuard(null)
+    }
+  }, [])
+  const commentRecoveryRevision = useSyncExternalStore(
+    subscribeCommentOperationRecoveries,
+    readCommentOperationRecoveryRevision,
+    readCommentOperationRecoveryRevision,
+  )
   // useSyncExternalStore closes the render→effect subscription gap: a clear POST may settle while
   // RunView is being remounted, and that outcome must never be missed by the replacement Inspector.
   const traceClearRecoverySnapshot = useSyncExternalStore(
     subscribeTraceClearRecovery, readTraceClearRecoverySnapshot, readTraceClearRecoverySnapshot)
+  const inspectorDraftRevision = useSyncExternalStore(
+    inspectorDraftStoreRef.current.subscribeAll,
+    inspectorDraftStoreRef.current.revision,
+    inspectorDraftStoreRef.current.revision,
+  )
+  const retainedCommentEntries = useMemo(() => reviewMode ? []
+    : inspectorDraftStoreRef.current.entries()
+      .filter(entry => commentDraftEntryUnsafe(entry, String(runId))),
+  [reviewMode, runId, inspectorDraftRevision])
+  const retainedCommentScopes = useMemo(
+    () => [...new Set(retainedCommentEntries.map(([scope]) => scope))],
+    [retainedCommentEntries],
+  )
+  const retainedCommentDrafts = useMemo(() => retainedCommentEntries
+    .map(commentDraftText).filter(Boolean), [retainedCommentEntries])
+  const retainedCommentRecovery = useMemo(
+    () => reviewMode
+      ? { available: true, valid: [], damaged: [] }
+      : listCommentOperationRecoveries(String(runId)),
+    [reviewMode, runId, commentRecoveryRevision],
+  )
+  const retainedCommentDurableCount = retainedCommentRecovery.valid.length
+    + retainedCommentRecovery.damaged.length
+  const retainedCommentRecoveryUnavailable = !reviewMode && !retainedCommentRecovery.available
+  const retainedCommentProtectedCreateCandidates = [
+    ...retainedCommentRecovery.valid.filter(intent => intent.kind === 'create'
+      && (!generation || intent.expectedGeneration === generation)),
+    ...retainedCommentRecovery.damaged.filter(recovery => recovery.identity?.kind === 'create'
+      && (!generation || recovery.identity.expectedGeneration === generation))
+      .map(recovery => recovery.identity),
+    ...retainedCommentEntries.flatMap(([, fields]) => {
+      const candidates = [fields?.uncertainIntent?.recovery, fields?.damagedRecovery?.identity]
+      return candidates.filter(identity => identity?.kind === 'create'
+        && (!generation || identity.expectedGeneration === generation))
+    }),
+  ]
+  const retainedCommentProtectedCreates = [...new Map(
+    retainedCommentProtectedCreateCandidates.map(identity => [[
+      identity.expectedGeneration, identity.nodeId, identity.nodeGeneration,
+    ].join('\u0000'), identity]),
+  ).values()]
+  const retainedCommentDamagedProtectedCreateCount = retainedCommentProtectedCreates
+    .filter(identity => !identity.operationId).length
+  const retainedCommentValidProtectedCreateCount = retainedCommentProtectedCreates.length
+    - retainedCommentDamagedProtectedCreateCount
+  const retainedCommentScopeHasProtectedCreate = scope => retainedCommentProtectedCreates.some(
+    identity => {
+      const base = `comment-composer:${String(runId)}@${identity.expectedGeneration}:${identity.nodeId}:${identity.nodeGeneration}`
+      return scope === base || scope.startsWith(`${base}:`)
+    },
+  )
+  const retainedCommentReleasableEntries = retainedCommentRecoveryUnavailable ? []
+    : retainedCommentEntries.filter(([scope]) => !retainedCommentScopeHasProtectedCreate(scope))
+  const retainedCommentReleasableIntents = retainedCommentRecovery.valid.filter(
+    intent => intent.kind !== 'create' || (generation && intent.expectedGeneration !== generation))
+  const retainedCommentReleasableDamaged = retainedCommentRecovery.damaged.filter(
+    recovery => recovery.identity?.kind !== 'create'
+      || (generation && recovery.identity.expectedGeneration !== generation))
+  const retainedCommentReleasableCount = retainedCommentReleasableEntries.length
+    + retainedCommentReleasableIntents.length + retainedCommentReleasableDamaged.length
+  const retainedCommentWorkUnsafe = retainedCommentEntries.length > 0
+    || retainedCommentDurableCount > 0 || retainedCommentRecoveryUnavailable
   const viewSeq = routeState.sequence
   const selectedId = routeState.nodeId
   const inspectTab = routeState.inspectTab
   const panel = routeState.panel
+  const activePanelNavigationGuard = panelNavigationGuard?.route === panel
+    ? panelNavigationGuard : null
   const retainedConfigDraft = panel === 'config'
     ? inspectorDraftStoreRef.current.readField(`panel:config:${String(runId)}`, 'draft', null)
     : null
-  const retainedConfigDraftUnsafe = retainedConfigDraft?.schema === 'looplab.config-draft/v1'
+  const retainedConfigStoredDraftUnsafe = retainedConfigDraft?.schema === 'looplab.config-draft/v1'
     && retainedConfigDraft?.unsafe === true
+  const retainedConfigDraftUnsafe = retainedConfigStoredDraftUnsafe
+    || (activePanelNavigationGuard?.route === 'config'
+      && activePanelNavigationGuard.unsafe === true)
   const retainedConfigScope = `panel:config:${String(runId)}`
   const retainedAuthoringScope = 'panel:authoring'
   const retainedAuthoringDocuments = panel === 'authoring'
@@ -363,6 +478,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     + retainedAuthoringMemoryOnlyRecoveryCount
   const retainedAuthoringDraftUnsafe = retainedAuthoringDraftCount > 0
     || retainedAuthoringRecoveryCount > 0
+    || (activePanelNavigationGuard?.route === 'authoring'
+      && activePanelNavigationGuard.unsafe === true)
   const retainedPanelDraftUnsafe = retainedConfigDraftUnsafe || retainedAuthoringDraftUnsafe
   const retainedPanelScope = retainedConfigDraftUnsafe
     ? retainedConfigScope : retainedAuthoringDraftUnsafe ? retainedAuthoringScope : ''
@@ -377,30 +494,124 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const retainedAuthoringDiscardStatement = retainedAuthoringDiscardItems.length > 0
     ? `Leaving this run will discard ${retainedAuthoringDiscardItems.join(' and ')}.`
     : 'No in-memory Authoring draft will be discarded.'
-  const retainedPanelLeaveMessage = retainedConfigDraftUnsafe
-    ? 'This tab is retaining an unsaved Run settings draft. Leave this run and discard it?'
-    : `${retainedAuthoringDiscardStatement}${retainedAuthoringDurableRecoveryCount > 0
-      ? ` ${retainedAuthoringDurableRecoveryCount} durable recovery record${retainedAuthoringDurableRecoveryCount === 1 ? '' : 's'} will remain protected in browser storage.`
-      : ''} Leave this run?`
-  const retainedPanelNavigationAllowRef = useRef(false)
-  useEffect(() => {
-    if ((!generationMismatch && !generationPending) || !retainedPanelDraftUnsafe) {
-      retainedPanelNavigationAllowRef.current = false
-      return undefined
+  const retainedPanelLeaveSummary = activePanelNavigationGuard?.unsafe
+      && activePanelNavigationGuard.route === retainedPanelRoute
+      && activePanelNavigationGuard.leaveSummary
+    ? activePanelNavigationGuard.leaveSummary
+    : retainedConfigDraftUnsafe
+      ? 'Leaving this run will discard an unsaved Run settings draft.'
+      : `${retainedAuthoringDiscardStatement}${retainedAuthoringDurableRecoveryCount > 0
+        ? ` ${retainedAuthoringDurableRecoveryCount} durable recovery record${retainedAuthoringDurableRecoveryCount === 1 ? '' : 's'} will remain protected in browser storage.`
+        : ''}`
+  const retainedPanelLeaveMessage = `${retainedPanelLeaveSummary} Leave this run?`
+  const retainedPanelCloseMessage = activePanelNavigationGuard?.unsafe
+      && activePanelNavigationGuard.route === retainedPanelRoute
+      && activePanelNavigationGuard.closeMessage
+    ? activePanelNavigationGuard.closeMessage
+    : retainedConfigDraftUnsafe
+      ? 'This tab is retaining an unsaved Run settings draft. Close the panel and discard it?'
+      : `${retainedAuthoringDiscardItems.length > 0
+        ? `Closing Authoring will discard ${retainedAuthoringDiscardItems.join(' and ')}.`
+        : 'No in-memory Authoring draft will be discarded.'}${retainedAuthoringDurableRecoveryCount > 0
+        ? ` ${retainedAuthoringDurableRecoveryCount} durable recovery record${retainedAuthoringDurableRecoveryCount === 1 ? '' : 's'} will remain protected in browser storage.`
+        : ''} Close Authoring?`
+  const retainedCommentLeaveMessage = [
+    retainedCommentDrafts.length > 0
+      ? `${retainedCommentDrafts.length} unsaved comment draft${retainedCommentDrafts.length === 1 ? '' : 's'} will leave this in-memory workspace`
+      : '',
+    retainedCommentDurableCount > 0
+      ? `${retainedCommentDurableCount} exact comment recovery record${retainedCommentDurableCount === 1 ? '' : 's'} will remain protected in this browser tab`
+      : '',
+    retainedCommentEntries.length > retainedCommentDrafts.length
+      ? `${retainedCommentEntries.length - retainedCommentDrafts.length} other active Comments state${retainedCommentEntries.length - retainedCommentDrafts.length === 1 ? '' : 's'} will leave the in-memory workspace`
+      : '',
+    retainedCommentRecoveryUnavailable
+      ? 'Comments recovery storage cannot be inspected, so an exact saved command may still be protected in this tab'
+      : '',
+  ].filter(Boolean).join('; ')
+  const retainedRunLeaveMessage = [
+    retainedPanelDraftUnsafe ? retainedPanelLeaveSummary : '',
+    retainedCommentWorkUnsafe ? retainedCommentLeaveMessage : '',
+  ].filter(Boolean).join(' ') + ' Leave this run?'
+  const retainedNavigationAllowRef = useRef(false)
+  const clearRetainedCommentMemory = () => {
+    for (const scope of retainedCommentScopes) inspectorDraftStoreRef.current.clear(scope)
+  }
+  const clearRetainedPanelMemory = () => {
+    const controller = panelNavigationGuardRef.current
+    if (controller?.route === retainedPanelRoute) {
+      controller.dispose()
+      if (panelNavigationGuardRef.current === controller) {
+        panelNavigationGuardRef.current = null
+        setPanelNavigationGuard(current => current === controller ? null : current)
+      }
     }
+    if (retainedPanelDraftUnsafe && retainedPanelScope) {
+      inspectorDraftStoreRef.current.clear(retainedPanelScope)
+    }
+  }
+  const retainedNavigationTarget = targetHash => {
+    const runHash = `#/run/${encodeURIComponent(String(runId))}`
+    const sameRun = targetHash === runHash || targetHash.startsWith(`${runHash}?`)
+    if (!sameRun) return { sameRun: false, panel: null, keepsMutablePanel: false }
+    const queryIndex = targetHash.indexOf('?')
+    const params = queryIndex < 0
+      ? new URLSearchParams() : new URLSearchParams(targetHash.slice(queryIndex + 1))
+    const targetPanels = params.getAll('panel')
+    const targetGenerations = params.getAll('gen')
+    const targetPanel = targetPanels.length === 1 ? targetPanels[0] : null
+    const targetGeneration = targetGenerations.length === 1 ? targetGenerations[0] : null
+    const keepsMutablePanel = targetPanels.length === 1 && targetGenerations.length === 1
+      && targetPanel === retainedPanelRoute && !params.has('seq')
+      && targetGeneration === generation
+    return { sameRun: true, panel: targetPanel, keepsMutablePanel }
+  }
+  const retainedNavigationShouldBlock = targetHash => {
+    const target = retainedNavigationTarget(targetHash)
+    if (!target.sameRun) return retainedPanelDraftUnsafe || retainedCommentWorkUnsafe
+    return retainedPanelDraftUnsafe && !target.keepsMutablePanel
+  }
+  const retainedGuardedHash = location.hash
+  const retainedGuardedHistoryState = window.history.state
+  useEffect(() => {
+    retainedNavigationAllowRef.current = false
+    if (!retainedPanelDraftUnsafe && !retainedCommentWorkUnsafe) return undefined
     return installNavigationLossGuard({
-      allowRef: retainedPanelNavigationAllowRef,
-      guardedHash: location.hash,
-      message: () => retainedPanelLeaveMessage,
-      onAllow: () => inspectorDraftStoreRef.current.clear(retainedPanelScope),
+      allowRef: retainedNavigationAllowRef,
+      guardedHash: retainedGuardedHash,
+      guardedState: retainedGuardedHistoryState,
+      message: targetHash => retainedNavigationTarget(targetHash).sameRun
+        ? retainedPanelCloseMessage : retainedRunLeaveMessage,
+      shouldBlock: retainedNavigationShouldBlock,
+      onAllow: targetHash => {
+        const target = retainedNavigationTarget(targetHash)
+        if (retainedPanelDraftUnsafe && !target.keepsMutablePanel) {
+          clearRetainedPanelMemory()
+        }
+        if (!target.sameRun && retainedCommentWorkUnsafe) clearRetainedCommentMemory()
+      },
     })
-  }, [generationMismatch, generationPending, retainedPanelDraftUnsafe,
-    retainedPanelLeaveMessage, retainedPanelScope])
+  }, [runId, generation, retainedCommentWorkUnsafe, retainedRunLeaveMessage, retainedPanelCloseMessage,
+    retainedCommentScopes.join('\u0000'), retainedPanelDraftUnsafe, retainedPanelRoute,
+    retainedPanelScope, retainedGuardedHash, retainedGuardedHistoryState])
+  const confirmRetainedPanelClose = () => {
+    if (!retainedPanelDraftUnsafe) return true
+    if (!window.confirm(retainedPanelCloseMessage)) return false
+    retainedNavigationAllowRef.current = true
+    clearRetainedPanelMemory()
+    return true
+  }
   const leaveRetainedPanelRoute = () => {
-    if (!retainedPanelDraftUnsafe) { onBack?.(); return }
-    if (!window.confirm(retainedPanelLeaveMessage)) return
-    retainedPanelNavigationAllowRef.current = true
-    inspectorDraftStoreRef.current.clear(retainedPanelScope)
+    if (!retainedPanelDraftUnsafe && !retainedCommentWorkUnsafe) { onBack?.(); return }
+    if (!window.confirm(retainedRunLeaveMessage)) return
+    if (retainedPanelDraftUnsafe) {
+      retainedNavigationAllowRef.current = true
+      clearRetainedPanelMemory()
+    }
+    if (retainedCommentWorkUnsafe) {
+      retainedNavigationAllowRef.current = true
+      clearRetainedCommentMemory()
+    }
     onBack?.()
   }
   const requestedRouteView = routeState.view
@@ -502,9 +713,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       nodeGeneration: current.nodeGeneration,
       commentId: next === 'Comments' ? current.commentId : null }
   }, options)
-  const setPanel = (value, options = {}) => route.update(current => ({
-    ...current, panel: typeof value === 'function' ? value(current.panel) : value,
-  }), options)
+  const setPanel = (value, options = {}) => {
+    const nextPanel = typeof value === 'function' ? value(routeState.panel) : value
+    if (retainedPanelDraftUnsafe && routeState.panel === retainedPanelRoute
+        && nextPanel !== retainedPanelRoute && !confirmRetainedPanelClose()) return routeState
+    return route.update(current => ({ ...current, panel: nextPanel }), options)
+  }
   const setView = (value, options = {}) => route.update(current => ({
     ...current, view: typeof value === 'function' ? value(current.view) : value,
   }), options)
@@ -637,27 +851,32 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     groupMode, historyActive])
   useEffect(() => {
     if (panel && !panelAllowed(panel)) {
-      setRouteNotice(current => [current, historyActive
+      const reason = historyActive
         ? `${panel} is not snapshot-safe and was not opened with historical data.`
-        : `${panel} is not included in this review link.`].filter(Boolean).join(' '))
+        : startOverMutationBlocked
+          ? `${panel} is unavailable while Start over is being resolved.`
+          : `${panel} is not included in this review link.`
+      setRouteNotice(current => [current, reason].filter(Boolean).join(' '))
       setPanel(null, { mode: 'replace', preserveIssues: true })
     }
-  }, [panel, reviewMode, reviewEvidence, historyActive])
+  }, [panel, reviewMode, reviewEvidence, historyActive, startOverMutationBlocked])
   const panelReturnFocusRef = useRef(null)
   const panelBackCloseRef = useRef(false)
   const hubTriggerRef = useRef(null)
   const hubMenuRef = useRef(null)
   const closePanel = () => {
-    if (panelBackCloseRef.current) return
+    if (panelBackCloseRef.current) return false
+    if (!confirmRetainedPanelClose()) return false
     // App-opened panels own one marked history entry, so dismissing them should consume that entry.
     // A panel reached from a copied/deep link has no marker and is safely dismissed in place instead.
     const panelEntry = window.history.state?.[RUN_PANEL_HISTORY_STATE_KEY]
     if (panelEntry?.version === 1 && window.history.length > 1) {
       panelBackCloseRef.current = true
       window.history.back()
-      return
+      return true
     }
-    setPanel(null, { mode: 'replace' })
+    route.update(current => ({ ...current, panel: null }), { mode: 'replace' })
+    return true
   }
   const [openHub, setOpenHub] = useState(null)               // which panel-hub dropdown is open
   const closeHub = (restoreFocus = false) => {
@@ -1091,6 +1310,72 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     setToast(m)
     toastTimer.current = setTimeout(() => setToast(null), 5000)
   }
+  const copyRetainedCommentWork = async () => {
+    const lines = [
+      ...retainedCommentDrafts.map((text, index) => `Unsaved comment draft ${index + 1}:\n${text}`),
+      ...retainedCommentRecovery.valid.map((intent, index) => {
+        const subject = `experiment #${intent.nodeId}, attempt ${intent.nodeGeneration}`
+        if (intent.kind === 'resolution') {
+          return `Saved resolution command ${index + 1}: ${intent.resolved ? 'resolve' : 'reopen'} comment ${intent.commentId} on ${subject}`
+        }
+        return `Saved ${intent.kind === 'create' ? 'new comment' : `edit for ${intent.commentId}`} ${index + 1} on ${subject}:\n${intent.text}`
+      }),
+    ]
+    if (!lines.length) { showToast('There is no readable comment text to copy.'); return }
+    try {
+      await navigator.clipboard.writeText(lines.join('\n\n'))
+      showToast('Retained Comments work copied.')
+    } catch {
+      showToast('Clipboard is unavailable. Open the recovery details and copy the text manually.')
+    }
+  }
+  const discardRetainedCommentWork = () => {
+    if (retainedCommentRecoveryUnavailable) {
+      showToast('Comments recovery storage is unavailable. Retry it before discarding any retained work.')
+      return
+    }
+    const total = retainedCommentReleasableCount
+    if (!total) {
+      showToast(retainedCommentProtectedCreates.length > 0
+        ? 'Current-generation new-comment recovery cannot be discarded without a terminal server outcome or intact exact recovery data.'
+        : 'There is no releasable Comments work in this tab.')
+      return
+    }
+    if (!window.confirm(
+      `Discard ${total} releasable Comments work item${total === 1 ? '' : 's'} from this browser tab? Current-generation append-only recovery stays protected because it is not safe to release.`,
+    )) return
+    let cleared = true
+    for (const intent of retainedCommentReleasableIntents) {
+      if (!clearCommentOperationIntent(intent)) cleared = false
+    }
+    for (const recovery of retainedCommentReleasableDamaged) {
+      if (!clearDamagedCommentOperation(recovery)) cleared = false
+    }
+    if (cleared) {
+      for (const [scope] of retainedCommentReleasableEntries) {
+        inspectorDraftStoreRef.current.clear(scope)
+      }
+    }
+    showToast(cleared
+      ? retainedCommentProtectedCreates.length > 0
+        ? 'Releasable Comments work discarded. Exact new-comment recovery remains protected.'
+        : 'Retained Comments work discarded. Review the thread before creating another command.'
+      : 'Some Comments recovery changed and was not discarded. Refresh this run before continuing.')
+  }
+  const currentCommentRecovery = retainedCommentRecovery.valid.find(
+    intent => intent.expectedGeneration === generation)
+  const openCurrentCommentRecovery = () => {
+    if (!currentCommentRecovery) return
+    if (!confirmRetainedPanelClose()) return
+    route.update(current => ({
+      ...current,
+      view: 'dag', sequence: null, panel: null,
+      nodeId: currentCommentRecovery.nodeId,
+      nodeGeneration: currentCommentRecovery.nodeGeneration,
+      inspectTab: 'Comments',
+      commentId: currentCommentRecovery.commentId,
+    }))
+  }
   const startOverIntent = startOverRecovery.kind === 'active'
     ? startOverRecovery.intent : null
   const startOverRequestPending = !!startOverRequestRef.current
@@ -1215,6 +1500,44 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     }
   }
   const submitStartOver = (confirmedGeneration) => {
+    // The confirmation dialog can outlive the render that opened it. Re-read both memory and
+    // durable recovery synchronously so a just-created comment command can never race Start over.
+    const currentCommentMemoryUnsafe = inspectorDraftStoreRef.current.entries()
+      .some(entry => commentDraftEntryUnsafe(entry, String(runId)))
+    const currentCommentRecovery = listCommentOperationRecoveries(String(runId))
+    const currentCommentWorkUnsafe = currentCommentMemoryUnsafe
+      || !currentCommentRecovery.available
+      || currentCommentRecovery.valid.length > 0
+      || currentCommentRecovery.damaged.length > 0
+    if (currentCommentWorkUnsafe) {
+      refreshCommentOperationRecoveries()
+      showToast('Start over is blocked while Comments has retained work or recovery storage cannot be verified. Review the Comments notice and resolve, restore, or retry it first.')
+      return
+    }
+    const currentPanelController = panelNavigationGuardRef.current
+    const currentConfigDraft = inspectorDraftStoreRef.current.readField(
+      `panel:config:${String(runId)}`, 'draft', null)
+    const currentAuthoringDocuments = inspectorDraftStoreRef.current.readField(
+      'panel:authoring', 'documents', {})
+    const currentAuthoringRecoveryUnsafe = ['uncertainSaves', 'damagedRecoveries'].some(field => {
+      const records = inspectorDraftStoreRef.current.readField('panel:authoring', field, {})
+      return records && typeof records === 'object' && !Array.isArray(records)
+        && Object.keys(records).length > 0
+    })
+    const currentPanelWorkUnsafe = currentPanelController?.unsafe === true
+      || (currentConfigDraft?.schema === 'looplab.config-draft/v1'
+        && currentConfigDraft.unsafe === true)
+      || (currentAuthoringDocuments && typeof currentAuthoringDocuments === 'object'
+        && !Array.isArray(currentAuthoringDocuments)
+        && Object.values(currentAuthoringDocuments).some(document => document
+          && typeof document === 'object' && !Array.isArray(document)
+          && (document.draftText !== document.savedText
+            || document.recoveryOperationId || document.recoveryStorageRaw)))
+      || currentAuthoringRecoveryUnsafe
+    if (currentPanelWorkUnsafe) {
+      showToast('Start over is blocked while Run settings or Authoring has retained work. Finish it or explicitly discard it first.')
+      return
+    }
     if (reviewMode || startOverRecovery.kind !== 'none'
         || confirmedGeneration !== generation
         || !/^[0-9a-f]{64}$/.test(confirmedGeneration || '')) {
@@ -1400,6 +1723,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // the panel's current route entry so Back returns to the pre-panel workspace. The trailing child
   // onClose becomes a harmless no-op because the route already has no panel.
   const selectNodeFromPanel = id => {
+    if (!confirmRetainedPanelClose()) return
     panelReturnFocusRef.current = null
     route.update(current => ({
       ...routeWithSelectedNode(current, id), view: 'dag', panel: null,
@@ -1825,6 +2149,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     }
     // This is a deliberate drill-down destination, not a panel dismissal. Let route focus move into
     // the workspace instead of restoring the hub button that originally opened Comments.
+    if (!confirmRetainedPanelClose()) return
     panelReturnFocusRef.current = null
     route.update(current => ({
       ...current,
@@ -1881,7 +2206,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   if (!live && startOverRecovery.kind !== 'none' && !startOverIntent) return <div className="app">
     <div className="topbar run-head">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
-      {onBack && <button className="btn sm ghost" onClick={onBack}>← runs</button>}
+      {onBack && <button className="btn sm ghost" onClick={leaveRetainedPanelRoute}>← runs</button>}
     </div>
     <main ref={startOverNoticeRef} className="run-resource-state" data-route-main tabIndex={-1}
       aria-labelledby="run-state" role="alert">
@@ -1895,7 +2220,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       <div className="resource-state-actions">
         {startOverRecovery.kind === 'unavailable' && <button type="button"
           className="btn primary" onClick={retryStartOverStorage}>Try storage again</button>}
-        {onBack && <button type="button" className="btn" onClick={onBack}>Back to runs</button>}
+        {onBack && <button type="button" className="btn" onClick={leaveRetainedPanelRoute}>Back to runs</button>}
       </div>
     </main>
     {toast && <div className="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>}
@@ -1903,7 +2228,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   if (!live && startOverIntent) return <div className="app">
     <div className="topbar run-head">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
-      {onBack && <button className="btn sm ghost" onClick={onBack}>← runs</button>}
+      {onBack && <button className="btn sm ghost" onClick={leaveRetainedPanelRoute}>← runs</button>}
     </div>
     <main ref={startOverNoticeRef} className="run-resource-state" data-route-main tabIndex={-1}
       aria-labelledby="run-state" role={runStatus === 'error' ? 'alert' : 'status'}>
@@ -1943,7 +2268,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   if (!live) return <div className={'app' + (reviewMode ? ' review-mode' : '')}>
     <div className="topbar run-head">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
-      {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>
+      {onBack ? <button className="btn sm ghost" onClick={leaveRetainedPanelRoute}>← runs</button>
         : <span className="pill">read-only review</span>}
     </div>
     <main className="run-resource-state" data-route-main tabIndex={-1} aria-live="polite"
@@ -1952,7 +2277,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <div className="resource-state-icon" aria-hidden="true">404</div>
         <h1 id="run-state">Run not found</h1>
         <p><code>{runId}</code> does not exist or may have been removed.</p>
-        <div className="resource-state-actions">{onBack && <button className="btn primary" onClick={onBack}>Back to runs</button>}<button className="btn" onClick={retryRun}>Retry</button></div>
+        <div className="resource-state-actions">{onBack && <button className="btn primary" onClick={leaveRetainedPanelRoute}>Back to runs</button>}<button className="btn" onClick={retryRun}>Retry</button></div>
       </> : runStatus === 'gone' ? <>
         <div className="resource-state-icon" aria-hidden="true">×</div>
         <h1 id="run-state">Review access ended</h1>
@@ -1961,7 +2286,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <div className="resource-state-icon" aria-hidden="true">!</div>
         <h1 id="run-state">Could not load run</h1>
         <p>{runError || 'Check that the LoopLab server is reachable.'}</p>
-        <div className="resource-state-actions"><button className="btn primary" onClick={retryRun}>Retry</button>{onBack && <button className="btn" onClick={onBack}>Back to runs</button>}</div>
+        <div className="resource-state-actions"><button className="btn primary" onClick={retryRun}>Retry</button>{onBack && <button className="btn" onClick={leaveRetainedPanelRoute}>Back to runs</button>}</div>
       </> : <>
         <div className="history-spinner" aria-hidden="true" />
         <h1 id="run-state">Opening run…</h1><p>Loading the latest search state.</p>
@@ -1971,7 +2296,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   if (routeFenceBlocked && startOverIntent) return <div className="app">
     <div className="topbar run-head">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
-      {onBack && <button className="btn sm ghost" onClick={onBack}>← runs</button>}
+      {onBack && <button className="btn sm ghost" onClick={leaveRetainedPanelRoute}>← runs</button>}
     </div>
     <main ref={startOverNoticeRef} className="run-resource-state stale-route-state"
       data-route-main tabIndex={-1} aria-labelledby="run-state" role="alert">
@@ -1995,7 +2320,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             : startOverReplacementSuperseded ? 'Open current run'
               : startOverHandoff ? 'Retry opening new run' : 'Retry exact request'}
         </button>
-        {onBack && <button type="button" className="btn" onClick={onBack}>Back to runs</button>}
+        {onBack && <button type="button" className="btn" onClick={leaveRetainedPanelRoute}>Back to runs</button>}
       </div>
     </main>
     {toast && <div className="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>}
@@ -2013,8 +2338,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {generationMismatch ? <>
         <p>The run was reset or replaced after this link was created. Node ids and sequence numbers may now mean something else, so LoopLab will not reinterpret the link.</p>
         {retainedConfigDraftUnsafe && <p className="notice" role="status">
-          <b>Your unsaved Run settings draft is retained in this tab.</b> Nothing was sent automatically.
-          Open the current generation to load its authoritative settings and review the retained fields.
+          {retainedConfigStoredDraftUnsafe ? <>
+            <b>Your unsaved Run settings draft is retained in this tab.</b> Nothing was sent automatically.
+            Open the current generation to load its authoritative settings and review the retained fields.
+          </> : <>
+            <b>A Run settings operation was interrupted by this generation change.</b>{' '}
+            Its server-side outcome may need verification; nothing will be replayed automatically.
+            Open the current generation to inspect the authoritative state.
+          </>}
         </p>}
         {retainedAuthoringDraftUnsafe && <p className="notice" role="status">
           {retainedAuthoringDraftCount > 0 && <>
@@ -2031,6 +2362,46 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           </>}
           Open the current generation to refresh the Authoring source and review the retained text.
         </p>}
+        {retainedCommentWorkUnsafe && <div className="notice"
+          role={retainedCommentRecoveryUnavailable || retainedCommentRecovery.damaged.length > 0
+            ? 'alert' : 'status'}>
+          <b>Comments work is retained in this tab.</b>{' '}
+          {retainedCommentDrafts.length > 0
+            ? `${retainedCommentDrafts.length} unsaved draft${retainedCommentDrafts.length === 1 ? '' : 's'} remain in memory. `
+            : ''}
+          {retainedCommentRecovery.valid.length > 0
+            ? `${retainedCommentRecovery.valid.length} exact command recover${retainedCommentRecovery.valid.length === 1 ? 'y is' : 'ies are'} protected in browser storage. `
+            : ''}
+          {retainedCommentRecovery.damaged.length > 0
+            ? `${retainedCommentRecovery.damaged.length} damaged recovery record${retainedCommentRecovery.damaged.length === 1 ? ' needs' : 's need'} review. `
+            : ''}
+          {retainedCommentRecoveryUnavailable
+            ? 'Recovery storage cannot be inspected, so Start over remains blocked until it is available again. '
+            : ''}
+          Nothing will be replayed automatically or rebound to the replacement generation.
+          {(retainedCommentDrafts.length > 0 || retainedCommentRecovery.valid.length > 0) && <details>
+            <summary>View retained Comments work</summary>
+            {retainedCommentDrafts.map((text, index) => <pre key={`draft:${index}`}
+              className="comment-recovery-payload">{text}</pre>)}
+            {retainedCommentRecovery.valid.map(intent => <div key={intent.storageKey}
+              className="comment-recovery-payload">
+              <b>{intent.kind === 'create' ? 'New comment' : intent.kind === 'edit'
+                ? 'Comment edit' : intent.resolved ? 'Resolve comment' : 'Reopen comment'}</b>
+              {' '}· experiment #{intent.nodeId} · attempt {intent.nodeGeneration}
+              {intent.text != null && <pre>{intent.text}</pre>}
+            </div>)}
+          </details>}
+          <div className="resource-state-actions">
+            {(retainedCommentDrafts.length > 0 || retainedCommentRecovery.valid.length > 0)
+              && <button type="button" className="btn"
+                onClick={copyRetainedCommentWork}>Copy Comments work</button>}
+            {retainedCommentRecoveryUnavailable && <button type="button" className="btn"
+              onClick={refreshCommentOperationRecoveries}>Retry recovery storage</button>}
+            {retainedCommentReleasableCount > 0 && <button type="button" className="btn danger"
+              onClick={discardRetainedCommentWork}>{retainedCommentProtectedCreates.length > 0
+                ? 'Discard other work' : 'Discard Comments work'}</button>}
+          </div>
+        </div>}
         <div className="route-generation-detail">
           <code>link {routeState.generation?.slice(0, 12)}</code><span>≠</span><code>current {generation?.slice(0, 12)}</code>
         </div>
@@ -2042,15 +2413,16 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               inspectorDraftStoreRef.current.updateField(scope, 'draft', current => current
                 ? { ...current, reconcileGeneration: generation } : current, null)
             }
-            const opened = route.openCurrentGeneration(retainedPanelRoute
+            route.openCurrentGeneration(retainedPanelRoute
               ? { mode: 'replace', panel: retainedPanelRoute } : undefined)
-            if (opened && retainedPanelDraftUnsafe) {
-              retainedPanelNavigationAllowRef.current = true
-            }
           }}>{retainedConfigDraftUnsafe
-              ? 'Open current generation with settings draft'
+              ? retainedConfigStoredDraftUnsafe
+                ? 'Open current generation with settings draft'
+                : 'Open current generation after settings operation'
               : retainedAuthoringDraftUnsafe
                 ? 'Open current generation with Authoring work'
+                : retainedCommentWorkUnsafe
+                  ? 'Open current generation with Comments recovery'
                 : 'Open current generation'}</button>
           {onBack && <button className="btn" onClick={leaveRetainedPanelRoute}>Back to runs</button>}
         </div>
@@ -2082,7 +2454,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   if (historyActive && !hist) return <div className="app">
     <div className="topbar run-head">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
-      {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>
+      {onBack ? <button className="btn sm ghost" onClick={leaveRetainedPanelRoute}>← runs</button>
         : <span className="pill">read-only review</span>}
       <span className="spacer" />
       <span className={'live ' + liveStatus}><span className="led" />current run: {liveLabel}</span>
@@ -2156,7 +2528,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       <h1 className="sr-only">{workspaceRouteLabel}</h1>
       <div className="topbar run-head">
         <span className="brand"><span className="dot">◉</span> LoopLab</span>
-        {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>
+        {onBack ? <button className="btn sm ghost" onClick={leaveRetainedPanelRoute}>← runs</button>
           : <span className="pill">read-only review</span>}
         <button type="button" className="btn sm ghost copy-view-btn" onClick={copyViewLink}
           aria-label={reviewMode ? 'Copy read-only review context' : 'Copy shareable run context'}
@@ -2251,6 +2623,57 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           onClick={() => setConfigRetry(value => value + 1)}>
           {configNoticeStatus === 'retrying' ? 'Retrying…' : 'Retry'}
         </button>
+      </div>}
+      {!reviewMode && retainedCommentWorkUnsafe && <div
+        className="route-state-notice run-comments-recovery-notice"
+        role={retainedCommentRecoveryUnavailable || retainedCommentRecovery.damaged.length > 0
+          ? 'alert' : 'status'}>
+        <OpIcon name="chat" size={13} />
+        <span>{retainedCommentEntries.length > 0
+          ? `${retainedCommentEntries.length} in-memory Comments work item${retainedCommentEntries.length === 1 ? ' is' : 's are'} retained in this tab. `
+          : ''}
+          {retainedCommentRecovery.valid.length > 0
+            ? `${retainedCommentRecovery.valid.length} exact Comments command recover${retainedCommentRecovery.valid.length === 1 ? 'y is' : 'ies are'} saved in this tab.`
+            : ''}
+          {retainedCommentRecovery.damaged.length > 0
+            ? ` ${retainedCommentRecovery.damaged.length} damaged recovery record${retainedCommentRecovery.damaged.length === 1 ? ' needs' : 's need'} review.`
+            : ''}
+          {retainedCommentRecoveryUnavailable
+            ? ' Comments recovery storage cannot be inspected. Start over remains blocked; retry storage before continuing.'
+            : ''}
+          {retainedCommentValidProtectedCreateCount > 0
+            ? ` ${retainedCommentValidProtectedCreateCount} current-generation new-comment recover${retainedCommentValidProtectedCreateCount === 1 ? 'y stays' : 'ies stay'} protected until the exact command reaches a terminal outcome.`
+            : ''}
+          {retainedCommentDamagedProtectedCreateCount > 0
+            ? ` ${retainedCommentDamagedProtectedCreateCount} damaged new-comment recover${retainedCommentDamagedProtectedCreateCount === 1 ? 'y cannot' : 'ies cannot'} be safely released; restore the exact recovery data before continuing.`
+            : ''}
+          {currentCommentRecovery
+            ? ' Open its experiment to check the same command; nothing replays automatically.'
+            : retainedCommentDurableCount > 0
+              ? ' The saved commands belong to an earlier generation and will not be rebound.'
+              : ' Review the retained work before leaving this run or starting over.'}
+        </span>
+        {(retainedCommentDrafts.length > 0 || retainedCommentRecovery.valid.length > 0) && <details>
+          <summary>View</summary>
+          {retainedCommentDrafts.map((text, index) => <pre key={`draft:${index}`}
+            className="comment-recovery-payload">{text}</pre>)}
+          {retainedCommentRecovery.valid.map(intent => <div key={intent.storageKey}
+            className="comment-recovery-payload">
+            <b>{intent.kind === 'create' ? 'New comment' : intent.kind === 'edit'
+              ? 'Comment edit' : intent.resolved ? 'Resolve comment' : 'Reopen comment'}</b>
+            {' '}— experiment #{intent.nodeId} — attempt {intent.nodeGeneration}
+            {intent.text != null && <pre>{intent.text}</pre>}
+          </div>)}
+        </details>}
+        {currentCommentRecovery && <button type="button" className="btn xs"
+          onClick={openCurrentCommentRecovery}>Open recovery</button>}
+        {(retainedCommentDrafts.length > 0 || retainedCommentRecovery.valid.length > 0)
+          && <button type="button" className="btn xs" onClick={copyRetainedCommentWork}>Copy</button>}
+        {retainedCommentRecoveryUnavailable && <button type="button" className="btn xs"
+          onClick={refreshCommentOperationRecoveries}>Retry storage</button>}
+        {retainedCommentReleasableCount > 0 && <button type="button" className="btn xs ghost"
+          onClick={discardRetainedCommentWork}>{retainedCommentProtectedCreates.length > 0
+            ? 'Discard other work…' : 'Discard…'}</button>}
       </div>}
       {!reviewMode && startOverRecovery.kind !== 'none' && <div
         ref={startOverNoticeRef} tabIndex={-1}
@@ -2549,11 +2972,16 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           onKindFiltersChange={value => route.update(current => ({ ...current, timelineKinds: value }))}
           onToast={showToast}
           startOverState={{
-            blocked: startOverRecovery.kind !== 'none'
+            blocked: retainedPanelDraftUnsafe || retainedCommentWorkUnsafe
+              || startOverRecovery.kind !== 'none'
               || !/^[0-9a-f]{64}$/.test(generation || ''),
             lifecycleBlocked: startOverRecovery.kind === 'active'
               || startOverRecovery.kind === 'corrupt',
-            disabledReason: startOverRecovery.kind === 'active'
+            disabledReason: retainedPanelDraftUnsafe
+              ? 'Finish or explicitly discard retained Run settings or Authoring work first'
+              : retainedCommentWorkUnsafe
+              ? 'Review retained Comments work or retry unavailable recovery storage first'
+              : startOverRecovery.kind === 'active'
               ? 'Resolve the existing Start over outcome first'
               : startOverRecovery.kind === 'unavailable'
                 ? 'Start over needs working recovery storage in this tab'
@@ -2604,9 +3032,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         expectedGeneration={generation} refreshKey={state?.comments_revision} />}
       {panel === 'config' && panelAllowed('config') && <ConfigPanel runId={runId}
         expectedGeneration={generation} state={state} live={live} onToast={showToast}
-        onClose={closePanel} draftStore={inspectorDraftStoreRef.current} />}
+        onClose={closePanel} draftStore={inspectorDraftStoreRef.current}
+        navigationGuardOwner="run" publishNavigationGuard={publishPanelNavigationGuard} />}
       {panel === 'authoring' && panelAllowed('authoring') && <AuthoringPanel onToast={showToast}
-        onClose={closePanel} draftStore={inspectorDraftStoreRef.current} />}
+        onClose={closePanel} draftStore={inspectorDraftStoreRef.current}
+        navigationGuardOwner="run" publishNavigationGuard={publishPanelNavigationGuard} />}
       {panel === 'memory' && panelAllowed('memory') && <MemoryPanel onClose={closePanel} />}
       {panel === 'registry' && panelAllowed('registry') && <RegistryPanel state={state} onClose={closePanel} />}
       {panel === 'gpu' && panelAllowed('gpu') && <GpuPanel onClose={closePanel} />}

@@ -12,6 +12,11 @@ import { fmtAgo, fmtDate } from './format.js'
 import { OpIcon } from './icons.jsx'
 import { useComments } from './useComments.js'
 import { createInspectorDraftStore, useInspectorDraftField } from './inspectorDraftStore.js'
+import {
+  clearCommentOperationIntent, clearDamagedCommentOperation,
+  commentOperationIntentStored, createCommentOperationIntent, inspectCommentOperation,
+  refreshCommentOperationRecoveries, saveCommentOperationIntent,
+} from './commentRecoveryStorage.js'
 
 const terminalCommentRecord = record => {
   if (record && COMMAND_SUCCEEDED.has(record.status)) return record
@@ -82,6 +87,88 @@ const mutationOptions = (expectedGeneration, idempotencyKey) => ({
 })
 const domId = (id, surface = 'inspector') => `run-comment-${surface}-${id}`
 
+const submissionFromRecovery = recovery => recovery ? {
+  text: recovery.text,
+  version: recovery.expectedVersion,
+  resolved: recovery.resolved,
+  idempotencyKey: recovery.operationId,
+  record: null,
+  unknown: true,
+  recovery,
+} : null
+
+function useStoredCommentOperation(draftStore, scope, identity, enabled = true) {
+  const initialRef = useRef(null)
+  const initialScope = `${scope}:${enabled ? 'enabled' : 'disabled'}`
+  if (!initialRef.current || initialRef.current.scope !== initialScope) {
+    const inspected = enabled ? inspectCommentOperation(identity) : { kind: 'none', key: null }
+    initialRef.current = {
+      scope: initialScope,
+      inspected,
+      restored: inspected.kind === 'valid' ? submissionFromRecovery(inspected.intent) : null,
+    }
+  }
+  const initial = initialRef.current.inspected
+  const [damaged, setDamaged] = useInspectorDraftField(
+    draftStore, scope, 'damagedRecovery', null)
+  const [storageUnavailable, setStorageUnavailable] = useInspectorDraftField(
+    draftStore, scope, 'storageUnavailable', false)
+  const hydrationToken = initial.kind === 'damaged'
+    ? `${initialScope}:${initial.key || ''}:${initial.raw || ''}`
+    : `${initialScope}:${initial.kind}`
+  const hydratedInitialRef = useRef(null)
+  const initialHydrationPending = hydratedInitialRef.current !== hydrationToken
+  useEffect(() => {
+    if (hydratedInitialRef.current === hydrationToken) return
+    hydratedInitialRef.current = hydrationToken
+    if (!enabled) return
+    if (initial.kind === 'damaged') {
+      const current = inspectCommentOperation(identity)
+      setDamaged(current.kind === 'damaged' && current.raw === initial.raw ? current : null)
+      setStorageUnavailable(current.kind === 'unavailable')
+      return
+    }
+    if (initial.kind === 'unavailable') setStorageUnavailable(true)
+  }, [enabled, hydrationToken, setDamaged, setStorageUnavailable])
+  const visibleDamaged = damaged || (initialHydrationPending && initial.kind === 'damaged'
+    ? initial : null)
+  const visibleStorageUnavailable = storageUnavailable
+    || (initialHydrationPending && initial.kind === 'unavailable')
+  const inspect = () => {
+    if (!enabled) return { kind: 'none', key: null }
+    const next = inspectCommentOperation(identity)
+    setStorageUnavailable(next.kind === 'unavailable')
+    setDamaged(next.kind === 'damaged' ? next : null)
+    refreshCommentOperationRecoveries()
+    return next
+  }
+  const discardDamaged = () => {
+    if (!enabled || !visibleDamaged || !clearDamagedCommentOperation(visibleDamaged)) return false
+    setDamaged(null)
+    setStorageUnavailable(false)
+    return true
+  }
+  return {
+    restored: initialRef.current.restored,
+    damaged: visibleDamaged,
+    storageUnavailable: visibleStorageUnavailable,
+    inspect,
+    discardDamaged,
+    setStorageUnavailable,
+  }
+}
+
+const createStoredCommentSubmission = fields => {
+  const intent = createCommentOperationIntent({
+    ...fields, operationId: createIdempotencyKey(),
+  })
+  const recovery = intent && saveCommentOperationIntent(intent)
+  return recovery ? submissionFromRecovery(recovery) : null
+}
+
+const recoveryStorageMessage = 'Recovery storage is unavailable. Nothing was sent. Free browser storage or enable it, then retry.'
+const recoveryChangedMessage = 'The saved recovery identity changed. Nothing was sent; refresh this Comments view before retrying.'
+
 function DraftCounter({ draft }) {
   const invalid = draft.tooLarge || draft.invalidUnicode
   return <span className={'comment-byte-count' + (invalid ? ' over' : '')}
@@ -97,7 +184,13 @@ function CommentComposer({
   draftStore, draftScope,
 }) {
   const fieldId = useId()
-  const [text, setText] = useInspectorDraftField(draftStore, draftScope, 'text', '')
+  const recoveryIdentity = {
+    kind: 'create', runId, expectedGeneration, nodeId, nodeGeneration, commentId: null,
+  }
+  const recovery = useStoredCommentOperation(
+    draftStore, `${draftScope}:recovery`, recoveryIdentity)
+  const [text, setText] = useInspectorDraftField(
+    draftStore, draftScope, 'text', '')
   const [busy, setBusy] = useInspectorDraftField(draftStore, draftScope, 'busy', false)
   const [error, setError] = useInspectorDraftField(draftStore, draftScope, 'error', '')
   const [retryIntent, setRetryIntent] = useInspectorDraftField(
@@ -106,17 +199,36 @@ function CommentComposer({
     draftStore, draftScope, 'uncertainIntent', null)
   const [messageKind, setMessageKind] = useInspectorDraftField(
     draftStore, draftScope, 'messageKind', 'error')
+  const restoredIntent = recovery.restored
+  const hydratedIntentRef = useRef(null)
+  useEffect(() => {
+    if (!restoredIntent || hydratedIntentRef.current === restoredIntent.recovery.storageRaw) return
+    hydratedIntentRef.current = restoredIntent.recovery.storageRaw
+    const current = recovery.inspect()
+    if (current.kind !== 'valid' || current.raw !== restoredIntent.recovery.storageRaw) {
+      if (current.kind === 'valid') recovery.setStorageUnavailable(true)
+      return
+    }
+    // Hydrate into real store fields exactly once. A recovered value must never be a hook fallback:
+    // clearing a completed scope would otherwise reveal that fallback again after its CAS record is gone.
+    setText(current => current || restoredIntent.text)
+    setUncertainIntent(current => current || restoredIntent)
+  }, [restoredIntent, setText, setUncertainIntent])
   const draft = useMemo(() => commentDraftState(text), [text])
   const normalizedText = text.trim()
   // The owner below keys this composer by run + node + node attempt + run generation, so retry and
   // unknown-outcome state cannot survive any mutation-scope change.
   const exactRetry = retryIntent?.text === normalizedText
+  const retryIntentMismatch = !!retryIntent && !exactRetry
   // Creating a comment is append-only. Once one submission has an unknown outcome, changing or
   // clearing the textarea must not silently permit a second POST that could create a duplicate.
-  const outcomeUnknown = uncertainIntent != null
+  const recoveryNeedsHydration = !!restoredIntent
+    && hydratedIntentRef.current !== restoredIntent.recovery.storageRaw
+  const pendingIntent = uncertainIntent || (recoveryNeedsHydration ? restoredIntent : null)
+  const outcomeUnknown = pendingIntent != null
   const copyPendingSubmission = async () => {
     try {
-      await navigator.clipboard.writeText(uncertainIntent?.text || '')
+      await navigator.clipboard.writeText(pendingIntent?.text || '')
       onAnnounce?.('Pending comment submission copied.')
     } catch {
       onAnnounce?.('Clipboard is unavailable. The pending submission remains visible below.')
@@ -125,19 +237,39 @@ function CommentComposer({
 
   const submit = async event => {
     event?.preventDefault?.()
-    if (busy || (!outcomeUnknown && !draft.valid)) return
+    if (busy || recovery.damaged || recovery.storageUnavailable || retryIntentMismatch
+        || (!outcomeUnknown && !draft.valid)) return
     const checking = outcomeUnknown
     const retrying = !checking && exactRetry
     const submission = outcomeUnknown
-      ? uncertainIntent
+      ? pendingIntent
       : retrying
         ? retryIntent
-        : {
-            text: normalizedText,
-            idempotencyKey: createIdempotencyKey(),
-            record: null,
-            unknown: false,
-          }
+        : createStoredCommentSubmission({
+            ...recoveryIdentity, expectedVersion: null,
+            text: normalizedText, resolved: null,
+          })
+    if (!submission) {
+      const inspected = recovery.inspect()
+      if (inspected.kind === 'valid') {
+        const restored = submissionFromRecovery(inspected.intent)
+        setText(current => current || restored.text)
+        setUncertainIntent(restored)
+        setError('Another saved operation already owns this comment subject. Check that exact command before posting again.')
+        setMessageKind('status')
+      } else {
+        setError(inspected.kind === 'damaged'
+          ? 'A damaged recovery record blocks this comment subject. Nothing was sent.'
+          : recoveryStorageMessage)
+        setMessageKind('error')
+      }
+      return
+    }
+    if (!commentOperationIntentStored(submission.recovery)) {
+      setError(recoveryChangedMessage)
+      setMessageKind('error')
+      return
+    }
     const observing = outcomeUnknown && submission.record?.id
       && commentCommandPending(submission.record)
     let completed = false
@@ -146,30 +278,41 @@ function CommentComposer({
     setError('')
     setMessageKind('error')
     try {
+      let terminalRecord
       if (observing) {
-        terminalCommentRecord(await getRunCommand(runId, submission.record.id))
+        terminalRecord = terminalCommentRecord(await getRunCommand(runId, submission.record.id))
       } else if (retrying) {
-        await retryCommentCommand(runId, submission.record)
+        terminalRecord = await retryCommentCommand(runId, submission.record)
       } else {
-        terminalCommentRecord(await CONTROL.createComment(runId, {
+        terminalRecord = terminalCommentRecord(await CONTROL.createComment(runId, {
           nodeId, nodeGeneration, text: submission.text,
         }, mutationOptions(expectedGeneration, submission.idempotencyKey)))
       }
-      completed = true
       retainNewerDraft = normalizedText !== submission.text
       onAnnounce?.(`Comment added to experiment #${nodeId}.`)
       onRefresh?.()
+      if (!clearCommentOperationIntent(submission.recovery)) {
+        setUncertainIntent({ ...submission, record: terminalRecord, unknown: false })
+        setError('The comment was posted, but its saved recovery record could not be cleared. Check the same command to clean it up safely.')
+        setMessageKind('status')
+        return
+      }
+      completed = true
     } catch (caught) {
       const record = retryableCommentRecord(caught, submission.record?.id)
       const unknown = !record && (commentCommandOutcomeUnknown(caught)
         || (checking && commandRecoveryOutcomeUnresolved(caught)))
-      const sameDraft = normalizedText === submission.text
-      setRetryIntent(record && sameDraft ? { ...submission, record, unknown: false } : null)
-      setUncertainIntent(unknown
+      const releaseFailed = !record && !unknown
+        && !clearCommentOperationIntent(submission.recovery)
+      setRetryIntent(record ? { ...submission, record, unknown: false } : null)
+      setUncertainIntent(unknown || releaseFailed
         ? { ...submission, record: recoveryCommentRecord(caught, submission.record),
             unknown: caught?.commandUnknown === true }
         : null)
-      setError(commentMutationError(caught, 'Comment could not be added. Your draft is preserved.'))
+      const message = commentMutationError(caught, 'Comment could not be added. Your draft is preserved.')
+      setError(releaseFailed
+        ? `${message} Its saved recovery record could not be cleared; check the same command before posting again.`
+        : message)
       setMessageKind('error')
     } finally {
       // Do not recreate an empty store entry by writing `busy=false` after a successful clear.
@@ -195,11 +338,15 @@ function CommentComposer({
       onChange={event => {
         const next = event.target.value
         if (next === '' && !outcomeUnknown) {
+          if (retryIntent && !clearCommentOperationIntent(retryIntent.recovery)) {
+            setText(next)
+            setError('The failed command is still saved. Restore its text or discard that exact recovery before posting again.')
+            return
+          }
           draftStore.clear(draftScope)
           return
         }
         setText(next)
-        if (retryIntent && next.trim() !== retryIntent.text) setRetryIntent(null)
       }}
       onKeyDown={event => {
         if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') submit(event)
@@ -208,6 +355,27 @@ function CommentComposer({
       <span id={`${fieldId}-hint`} className="muted">Plain text · Ctrl/⌘+Enter posts · visible in read-only review links after redaction</span>
       <span id={`${fieldId}-count`}><DraftCounter draft={draft} /></span>
     </div>
+    {recovery.storageUnavailable && <div className="notice resource-error comment-inline-error" role="alert">
+      <span>{recoveryStorageMessage}</span>
+      <button type="button" className="btn xs" onClick={() => {
+        const inspected = recovery.inspect()
+        if (inspected.kind === 'none') {
+          setError('Recovery storage is available again. You can post this draft.')
+          setMessageKind('status')
+        } else if (inspected.kind === 'valid') {
+          const restored = submissionFromRecovery(inspected.intent)
+          setText(current => current || restored.text)
+          setUncertainIntent(restored)
+          setError('A saved comment operation was restored. Check that exact command before posting again.')
+          setMessageKind('status')
+        }
+      }}>Retry storage</button>
+    </div>}
+    {recovery.damaged && <div className="notice resource-error comment-inline-error" role="alert">
+      <span>A saved new-comment recovery record is invalid. Posting stays blocked because discarding an
+        unverified append-only command could create a duplicate. Restore this tab's recovery data or
+        reload Comments; nothing will be sent automatically.</span>
+    </div>}
     {error && <div id={`${fieldId}-error`}
       className={`notice comment-inline-error ${messageKind === 'status' ? 'warn' : 'resource-error'}`}
       role={messageKind === 'status' ? 'status' : 'alert'}><span>{error}</span></div>}
@@ -215,30 +383,42 @@ function CommentComposer({
       aria-label="Uncertain comment submission recovery">
       <details>
         <summary>View submission to check</summary>
-        <div className="comment-recovery-payload">{uncertainIntent.text}</div>
+        <div className="comment-recovery-payload">{pendingIntent.text}</div>
       </details>
       <div className="comment-recovery-actions">
         <button type="button" className="btn sm" onClick={onRefresh}>Refresh comments</button>
         <button type="button" className="btn sm" onClick={copyPendingSubmission}>
           Copy pending submission
         </button>
-        <button type="button" className="btn sm ghost" disabled={busy}
-          title="Only discard this after confirming that the comment was not posted"
-          onClick={() => {
-            if (busy) return
-            onAnnounce?.('The uncertain comment submission was discarded. Review the thread before posting again.')
-            if (!text.trim() && !retryIntent) draftStore.clear(draftScope)
-            else {
-              setUncertainIntent(null)
-              setError('')
-            }
-          }}>Discard pending submission</button>
+      </div>
+      <div className="muted">Check command safely resubmits the exact saved idempotency key. This
+        append-only recovery cannot be discarded until the server returns a terminal outcome.</div>
+    </div>}
+    {retryIntentMismatch && <div className="comment-recovery-panel" role="status">
+      <span>The saved failed command belongs to different text. Restore it to retry, or discard that terminal failure before posting a new intent.</span>
+      <div className="comment-recovery-actions">
+        <button type="button" className="btn sm" onClick={() => setText(retryIntent.text)}>
+          Restore failed submission
+        </button>
+        <button type="button" className="btn sm ghost" onClick={() => {
+          if (!clearCommentOperationIntent(retryIntent.recovery)) {
+            setError('The saved failed-command record changed and was not discarded. Refresh Comments.')
+            return
+          }
+          setRetryIntent(null)
+          setError('Failed command discarded. Review this draft before posting a new comment.')
+          setMessageKind('status')
+        }}>Discard failed command</button>
       </div>
     </div>}
     <div className="comment-composer-actions">
       <button type="submit" className="btn sm primary"
-        disabled={busy || (!outcomeUnknown && !draft.valid)}
-        title={exactRetry ? 'Retry this exact durable command; no new comment intent is created' : undefined}>
+        disabled={busy || recovery.damaged || recovery.storageUnavailable || retryIntentMismatch
+          || (!outcomeUnknown && !draft.valid)}
+        title={exactRetry ? 'Retry this exact durable command; no new comment intent is created'
+          : retryIntentMismatch ? 'Resolve the saved failed command before posting new text'
+            : recovery.damaged || recovery.storageUnavailable
+              ? 'Working recovery storage is required before posting' : undefined}>
         <OpIcon name="chat" size={12} /> {busy
           ? outcomeUnknown ? 'Checking…' : exactRetry ? 'Retrying…' : 'Posting…'
           : outcomeUnknown ? 'Check command' : exactRetry ? 'Retry same command' : 'Post comment'}
@@ -322,6 +502,18 @@ function CommentCard({
   const editScope = `${draftScope}:edit`
   const resolutionScope = `${draftScope}:resolution`
   const observationScope = `${draftScope}:observation`
+  const editRecoveryIdentity = {
+    kind: 'edit', runId, expectedGeneration, nodeId: comment.nodeId,
+    nodeGeneration: comment.nodeGeneration, commentId: comment.id,
+  }
+  const resolutionRecoveryIdentity = { ...editRecoveryIdentity, kind: 'resolution' }
+  const mutableCommentSubject = !readOnly && comment.editable && !comment.legacy
+    && /^[0-9a-f]{64}$/.test(expectedGeneration || '')
+    && Number.isSafeInteger(comment.nodeId) && Number.isSafeInteger(comment.nodeGeneration)
+  const editRecovery = useStoredCommentOperation(
+    draftStore, `${editScope}:recovery`, editRecoveryIdentity, mutableCommentSubject)
+  const resolutionRecovery = useStoredCommentOperation(
+    draftStore, `${resolutionScope}:recovery`, resolutionRecoveryIdentity, mutableCommentSubject)
   const commentDomId = domId(comment.id, draftSurface)
   const [inspectorEditing, setInspectorEditing] = useInspectorDraftField(
     draftStore, editScope, 'editing:inspector', false)
@@ -335,7 +527,8 @@ function CommentCard({
     draftStore, editScope, 'editBaseText', comment.text)
   const [editBaseVersion, setEditBaseVersion] = useInspectorDraftField(
     draftStore, editScope, 'editBaseVersion', null)
-  const [dirty, setDirty] = useInspectorDraftField(draftStore, editScope, 'dirty', false)
+  const [dirty, setDirty] = useInspectorDraftField(
+    draftStore, editScope, 'dirty', false)
   const [editBusy, setEditBusy] = useInspectorDraftField(draftStore, editScope, 'busy', '')
   const [editError, setEditError] = useInspectorDraftField(draftStore, editScope, 'error', '')
   const [editMessageKind, setEditMessageKind] = useInspectorDraftField(
@@ -370,6 +563,7 @@ function CommentCard({
   const canViewHistory = !readOnly && !comment.legacy
   const exactEditRetry = editRetryIntent?.text === normalizedDraft
     && editRetryIntent?.version === comment.version
+  const editRetryMismatch = !!editRetryIntent && !exactEditRetry
   const editOutcomeUnknown = uncertainEdit?.version === comment.version
   const editIntentMismatch = (!!uncertainEdit && !editOutcomeUnknown)
     || (!!editRetryIntent && editRetryIntent.version !== comment.version)
@@ -380,15 +574,87 @@ function CommentCard({
     && uncertainResolution?.version === comment.version
   const resolutionIntentMismatch = (!!uncertainResolution && !resolutionOutcomeUnknown)
     || (!!resolutionRetryIntent && !exactResolutionRetry)
+  const restoredEdit = editRecovery.restored
+  const restoredResolution = resolutionRecovery.restored
+  const hydratedEditRef = useRef(null)
+  const hydratedResolutionRef = useRef(null)
+  const editRecoveryNeedsHydration = !!restoredEdit
+    && hydratedEditRef.current !== restoredEdit.recovery.storageRaw
+  const resolutionRecoveryNeedsHydration = !!restoredResolution
+    && hydratedResolutionRef.current !== restoredResolution.recovery.storageRaw
   // A clean editor in the other surface is still active work. Block resolution globally so it cannot
   // disable an unseen Inspector/Collab editor with a command the operator cannot recover there.
   const hasEditDraft = inspectorEditing || collabEditing
-    || dirty || !!editRetryIntent || !!uncertainEdit
+    || dirty || !!editRetryIntent || !!uncertainEdit || editRecoveryNeedsHydration
+    || !!editRecovery.damaged || editRecovery.storageUnavailable
   const resolutionFence = resolutionConflictVersion != null
-    || !!resolutionRetryIntent || !!uncertainResolution
+    || !!resolutionRetryIntent || !!uncertainResolution || resolutionRecoveryNeedsHydration
+    || !!resolutionRecovery.damaged || resolutionRecovery.storageUnavailable
+  const editRecoveryBlocked = !!editRecovery.damaged || editRecovery.storageUnavailable
   const busy = !!editBusy || !!resolutionBusy
   const editorVisible = editing && canMutate
   const restoreEditFocus = () => requestAnimationFrame(() => editButtonRef.current?.focus())
+
+  const retainInspectedEdit = inspected => {
+    if (inspected.kind !== 'valid') return null
+    const restored = submissionFromRecovery(inspected.intent)
+    setDraftText(current => current === comment.text ? restored.text : current)
+    setEditBaseVersion(current => current ?? restored.version)
+    setDirty(true)
+    setUncertainEdit(current => current || restored)
+    return restored
+  }
+  const retainInspectedResolution = inspected => {
+    if (inspected.kind !== 'valid') return null
+    const restored = submissionFromRecovery(inspected.intent)
+    setUncertainResolution(current => current || restored)
+    return restored
+  }
+  const retryEditRecoveryStorage = () => {
+    const inspected = editRecovery.inspect()
+    if (retainInspectedEdit(inspected)) {
+      setEditError('A saved edit operation was found. Check that exact command; any newer draft remains retained.')
+      setEditMessageKind('status')
+    } else if (inspected.kind === 'none') {
+      setEditError('Recovery storage is available again. You can edit this comment.')
+      setEditMessageKind('status')
+    }
+  }
+  const retryResolutionRecoveryStorage = () => {
+    const inspected = resolutionRecovery.inspect()
+    if (retainInspectedResolution(inspected)) {
+      setResolutionError('A saved resolution operation was found. Check that exact command before acting again.')
+    } else if (inspected.kind === 'none') {
+      setResolutionError('Recovery storage is available again. Review the current state before acting.')
+    }
+  }
+
+  useEffect(() => {
+    if (!mutableCommentSubject || !restoredEdit
+        || hydratedEditRef.current === restoredEdit.recovery.storageRaw) return
+    hydratedEditRef.current = restoredEdit.recovery.storageRaw
+    const current = editRecovery.inspect()
+    if (current.kind !== 'valid' || current.raw !== restoredEdit.recovery.storageRaw) {
+      if (current.kind === 'valid') editRecovery.setStorageUnavailable(true)
+      return
+    }
+    setDraftText(current => current === comment.text ? restoredEdit.text : current)
+    setEditBaseVersion(current => current ?? restoredEdit.version)
+    setDirty(true)
+    setUncertainEdit(current => current || restoredEdit)
+  }, [comment.text, mutableCommentSubject, restoredEdit, setDraftText,
+    setEditBaseVersion, setDirty, setUncertainEdit])
+  useEffect(() => {
+    if (!mutableCommentSubject || !restoredResolution
+        || hydratedResolutionRef.current === restoredResolution.recovery.storageRaw) return
+    hydratedResolutionRef.current = restoredResolution.recovery.storageRaw
+    const current = resolutionRecovery.inspect()
+    if (current.kind !== 'valid' || current.raw !== restoredResolution.recovery.storageRaw) {
+      if (current.kind === 'valid') resolutionRecovery.setStorageUnavailable(true)
+      return
+    }
+    setUncertainResolution(current => current || restoredResolution)
+  }, [mutableCommentSubject, restoredResolution, setUncertainResolution])
 
   useEffect(() => {
     if (comment.version > latestSeenVersion) {
@@ -410,22 +676,28 @@ function CommentCard({
   }, [comment.version, editConflictVersion, resolutionConflictVersion, surfaceStale])
 
   useEffect(() => {
-    if (surfaceStale) return
-    if (editRetryIntent && comment.version > editRetryIntent.version) setEditRetryIntent(null)
-    if (uncertainEdit && comment.version > uncertainEdit.version) setUncertainEdit(null)
+    if (!mutableCommentSubject || surfaceStale) return
+    if (editRetryIntent && comment.version > editRetryIntent.version
+        && clearCommentOperationIntent(editRetryIntent.recovery)) setEditRetryIntent(null)
+    if (uncertainEdit && comment.version > uncertainEdit.version
+        && clearCommentOperationIntent(uncertainEdit.recovery)) setUncertainEdit(null)
     if (resolutionRetryIntent && comment.version > resolutionRetryIntent.version) {
-      setResolutionRetryIntent(null)
-      setResolutionError('')
+      if (clearCommentOperationIntent(resolutionRetryIntent.recovery)) {
+        setResolutionRetryIntent(null)
+        setResolutionError('')
+      }
     }
     if (uncertainResolution && comment.version > uncertainResolution.version) {
-      setUncertainResolution(null)
-      setResolutionError('')
+      if (clearCommentOperationIntent(uncertainResolution.recovery)) {
+        setUncertainResolution(null)
+        setResolutionError('')
+      }
     }
-  }, [comment.version, comment.resolved, editRetryIntent, uncertainEdit,
+  }, [comment.version, comment.resolved, editRetryIntent, mutableCommentSubject, uncertainEdit,
     resolutionRetryIntent, uncertainResolution, surfaceStale])
 
   useEffect(() => {
-    if (surfaceStale || !versionChanged) return
+    if (!mutableCommentSubject || surfaceStale || !versionChanged) return
     if (!dirty && !editRetryIntent && !uncertainEdit) {
       setDraftText(comment.text)
       setEditBaseText(comment.text)
@@ -433,15 +705,19 @@ function CommentCard({
       setEditError('')
       return
     }
-    setEditRetryIntent(null)
-    setUncertainEdit(null)
+    if (editRetryIntent && clearCommentOperationIntent(editRetryIntent.recovery)) {
+      setEditRetryIntent(null)
+    }
+    if (uncertainEdit && clearCommentOperationIntent(uncertainEdit.recovery)) {
+      setUncertainEdit(null)
+    }
     setEditError('This comment changed after your draft started. Review the latest version before saving.')
-  }, [comment.text, comment.version, dirty, editRetryIntent, uncertainEdit,
+  }, [comment.text, comment.version, dirty, editRetryIntent, mutableCommentSubject, uncertainEdit,
     surfaceStale, versionChanged])
 
   const save = async () => {
     const checking = editOutcomeUnknown
-    if (busy || resolutionFence || editIntentMismatch
+    if (busy || resolutionFence || editRecoveryBlocked || editRetryMismatch || editIntentMismatch
         || (!checking && (!canMutate || editConflictVersion != null
         || !draft.valid || !draftChanged || versionChanged))) return
     const retrying = !checking && exactEditRetry
@@ -449,48 +725,73 @@ function CommentCard({
       ? uncertainEdit
       : retrying
         ? editRetryIntent
-        : {
-            text: normalizedDraft,
-            version: comment.version,
-            idempotencyKey: createIdempotencyKey(),
-            record: null,
-            unknown: false,
-          }
+        : createStoredCommentSubmission({
+            ...editRecoveryIdentity, expectedVersion: comment.version,
+            text: normalizedDraft, resolved: null,
+          })
+    if (!submitted) {
+      const inspected = editRecovery.inspect()
+      if (inspected.kind === 'valid') {
+        retainInspectedEdit(inspected)
+        setEditError('Another saved operation already owns this edit. Check that exact command; any newer draft remains retained.')
+        setEditMessageKind('status')
+      } else {
+        setEditError(inspected.kind === 'damaged'
+          ? 'A damaged recovery record blocks this edit. Nothing was sent.'
+          : recoveryStorageMessage)
+        setEditMessageKind('error')
+      }
+      return
+    }
+    if (!commentOperationIntentStored(submitted.recovery)) {
+      setEditError(recoveryChangedMessage)
+      setEditMessageKind('error')
+      return
+    }
     const observing = checking && submitted.record?.id
       && commentCommandPending(submitted.record)
     let completed = false
     let retainNewerDraft = false
     setEditBusy('edit'); setEditError(''); setEditMessageKind('error')
     try {
+      let terminalRecord
       if (observing) {
-        terminalCommentRecord(await getRunCommand(runId, submitted.record.id))
+        terminalRecord = terminalCommentRecord(await getRunCommand(runId, submitted.record.id))
       } else if (retrying) {
-        await retryCommentCommand(runId, submitted.record)
+        terminalRecord = await retryCommentCommand(runId, submitted.record)
       } else {
-        terminalCommentRecord(await CONTROL.editComment(runId, {
+        terminalRecord = terminalCommentRecord(await CONTROL.editComment(runId, {
           commentId: comment.id, nodeId: comment.nodeId, nodeGeneration: comment.nodeGeneration,
           expectedVersion: submitted.version, text: submitted.text,
         }, mutationOptions(expectedGeneration, submitted.idempotencyKey)))
       }
-      completed = true
       retainNewerDraft = normalizedDraft !== submitted.text
       restoreEditFocus()
       onAnnounce?.(`Comment on experiment #${comment.nodeId} updated.`)
       onRefresh?.()
+      if (!clearCommentOperationIntent(submitted.recovery)) {
+        setUncertainEdit({ ...submitted, record: terminalRecord, unknown: false })
+        setEditError('The edit completed, but its saved recovery record could not be cleared. Check the same command to clean it up safely.')
+        setEditMessageKind('status')
+        return
+      }
+      completed = true
     } catch (caught) {
       const record = retryableCommentRecord(caught, submitted.record?.id)
       const unknown = !record && (commentCommandOutcomeUnknown(caught)
         || (checking && commandRecoveryOutcomeUnresolved(caught)))
-      const sameDraft = normalizedDraft === submitted.text
-      setEditRetryIntent(record && sameDraft
-        ? { ...submitted, record, unknown: false }
-        : null)
-      setUncertainEdit(unknown
+      const releaseFailed = !record && !unknown
+        && !clearCommentOperationIntent(submitted.recovery)
+      setEditRetryIntent(record ? { ...submitted, record, unknown: false } : null)
+      setUncertainEdit(unknown || releaseFailed
         ? { ...submitted, record: recoveryCommentRecord(caught, submitted.record),
             unknown: caught?.commandUnknown === true }
         : null)
       if (commentConflict(caught)) setEditConflictVersion(comment.version)
-      setEditError(commentMutationError(caught, 'Comment could not be updated. Your draft is preserved.'))
+      const message = commentMutationError(caught, 'Comment could not be updated. Your draft is preserved.')
+      setEditError(releaseFailed
+        ? `${message} Its saved recovery record could not be cleared; check the same command before saving again.`
+        : message)
       setEditMessageKind('error')
     } finally {
       if (completed && !retainNewerDraft) {
@@ -514,51 +815,74 @@ function CommentCard({
     const retrying = !checking && resolutionRetryIntent?.resolved === resolved
       && resolutionRetryIntent?.version === comment.version
     if (busy || hasEditDraft || resolutionConflictVersion != null || resolutionIntentMismatch
+        || resolutionRecovery.damaged || resolutionRecovery.storageUnavailable
         || (!checking && !retrying && !canMutate)) return
     const submitted = checking
       ? uncertainResolution
       : retrying
         ? resolutionRetryIntent
-        : {
-            resolved,
-            version: comment.version,
-            idempotencyKey: createIdempotencyKey(),
-            record: null,
-            unknown: false,
-          }
+        : createStoredCommentSubmission({
+            ...resolutionRecoveryIdentity, expectedVersion: comment.version,
+            text: null, resolved,
+          })
+    if (!submitted) {
+      const inspected = resolutionRecovery.inspect()
+      if (inspected.kind === 'valid') {
+        retainInspectedResolution(inspected)
+        setResolutionError('Another saved operation already owns this resolution change. Check that exact command before acting again.')
+      } else setResolutionError(inspected.kind === 'damaged'
+        ? 'A damaged recovery record blocks this resolution change. Nothing was sent.'
+        : recoveryStorageMessage)
+      return
+    }
+    if (!commentOperationIntentStored(submitted.recovery)) {
+      setResolutionError(recoveryChangedMessage)
+      return
+    }
     const observing = checking && submitted.record?.id
       && commentCommandPending(submitted.record)
     let completed = false
     setResolutionBusy('resolution'); setResolutionError('')
     try {
+      let terminalRecord
       if (observing) {
-        terminalCommentRecord(await getRunCommand(runId, submitted.record.id))
+        terminalRecord = terminalCommentRecord(await getRunCommand(runId, submitted.record.id))
       } else if (retrying) {
-        await retryCommentCommand(runId, submitted.record)
+        terminalRecord = await retryCommentCommand(runId, submitted.record)
       } else {
-        terminalCommentRecord(await CONTROL.setCommentResolved(runId, {
+        terminalRecord = terminalCommentRecord(await CONTROL.setCommentResolved(runId, {
           commentId: comment.id, nodeId: comment.nodeId, nodeGeneration: comment.nodeGeneration,
           expectedVersion: submitted.version, resolved: submitted.resolved,
         }, mutationOptions(expectedGeneration, submitted.idempotencyKey)))
       }
-      completed = true
       onAnnounce?.(`${submitted.resolved ? 'Resolved' : 'Reopened'} comment on experiment #${comment.nodeId}.`)
       onRefresh?.()
+      if (!clearCommentOperationIntent(submitted.recovery)) {
+        setUncertainResolution({ ...submitted, record: terminalRecord, unknown: false })
+        setResolutionError('The resolution change completed, but its saved recovery record could not be cleared. Check the same command to clean it up safely.')
+        return
+      }
+      completed = true
     } catch (caught) {
       const record = retryableCommentRecord(caught, submitted.record?.id)
       const unknown = !record && (commentCommandOutcomeUnknown(caught)
         || (checking && commandRecoveryOutcomeUnresolved(caught)))
+      const releaseFailed = !record && !unknown
+        && !clearCommentOperationIntent(submitted.recovery)
       setResolutionRetryIntent(record
         ? { ...submitted, record, unknown: false }
         : null)
-      setUncertainResolution(unknown
+      setUncertainResolution(unknown || releaseFailed
         ? { ...submitted, record: recoveryCommentRecord(caught, submitted.record),
             unknown: caught?.commandUnknown === true }
         : null)
       if (commentConflict(caught)) setResolutionConflictVersion(comment.version)
-      setResolutionError(commentMutationError(caught,
+      const message = commentMutationError(caught,
         submitted.resolved ? 'Comment could not be resolved. The requested state is preserved.'
-          : 'Comment could not be reopened. The requested state is preserved.'))
+          : 'Comment could not be reopened. The requested state is preserved.')
+      setResolutionError(releaseFailed
+        ? `${message} Its saved recovery record could not be cleared; check the same command before changing resolution again.`
+        : message)
     } finally {
       if (completed) draftStore.clear(resolutionScope)
       else setResolutionBusy('')
@@ -618,16 +942,15 @@ function CommentCard({
           const next = event.target.value
           setDraftText(next)
           setDirty(next.trim() !== editBaseText)
-          if (editRetryIntent && next.trim() !== editRetryIntent.text) setEditRetryIntent(null)
         }}
         onKeyDown={event => {
           if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); save() }
           if (event.key === 'Escape') {
             event.preventDefault()
-            if (editBusy || editOutcomeUnknown) {
+            if (editBusy || editOutcomeUnknown || editRetryIntent) {
               onAnnounce?.(editBusy
                 ? 'Wait for the current edit request to finish before closing this draft.'
-                : 'Check the pending edit before closing this draft.')
+                : 'Resolve the saved edit command before closing this draft.')
             } else {
               draftStore.clear(editScope)
               restoreEditFocus()
@@ -638,6 +961,29 @@ function CommentCard({
         Saving creates a new audit version. Prior text remains in the run log and backups.
       </div>
       <div className="comment-editor-meta"><span className="muted">Plain text · Esc cancels</span><DraftCounter draft={draft} /></div>
+      {editRecovery.storageUnavailable && <div className="notice resource-error comment-inline-error" role="alert">
+        <span>{recoveryStorageMessage}</span>
+        <button type="button" className="btn xs" onClick={() => {
+          const inspected = editRecovery.inspect()
+          if (inspected.kind === 'none') {
+            setEditError('Recovery storage is available again. You can save this draft.')
+            setEditMessageKind('status')
+          } else if (inspected.kind === 'valid') {
+            retainInspectedEdit(inspected)
+            setEditError('A saved edit operation was restored. Check that exact command; any newer draft remains retained.')
+            setEditMessageKind('status')
+          }
+        }}>Retry storage</button>
+      </div>}
+      {editRecovery.damaged && <div className="notice resource-error comment-inline-error" role="alert">
+        <span>A saved edit recovery record is invalid. Editing is blocked until that browser-only record is discarded.</span>
+        <button type="button" className="btn xs" onClick={() => {
+          if (editRecovery.discardDamaged()) {
+            setEditError('Damaged edit recovery discarded. Review this draft against the current comment.')
+            setEditMessageKind('status')
+          } else setEditError('The damaged edit recovery changed and was not discarded. Refresh Comments.')
+        }}>Discard damaged recovery</button>
+      </div>}
       {editError && <div
         className={`notice comment-inline-error ${editMessageKind === 'status' ? 'warn' : 'resource-error'}`}
         role={editMessageKind === 'status' ? 'status' : 'alert'}><span>{editError}</span></div>}
@@ -680,21 +1026,53 @@ function CommentCard({
         <div className="comment-recovery-actions">
           <button type="button" className="btn xs" onClick={onRefresh}>Refresh comments</button>
           <button type="button" className="btn xs" onClick={copyPendingEdit}>Copy pending edit</button>
+          <button type="button" className="btn xs ghost" disabled={!!editBusy}
+            title="Only discard this after confirming that the edit was not applied"
+            onClick={() => {
+              if (!clearCommentOperationIntent(uncertainEdit.recovery)) {
+                setEditError('The saved edit recovery changed and was not discarded. Refresh Comments.')
+                return
+              }
+              setUncertainEdit(null)
+              setEditError('Pending edit discarded. Review your draft against the current comment.')
+              setEditMessageKind('status')
+            }}>Discard pending edit</button>
+        </div>
+      </div>}
+      {editRetryMismatch && <div className="comment-recovery-panel" role="status">
+        <span>The saved failed edit belongs to different text or an older version. Restore its text to retry when valid, or discard that terminal failure.</span>
+        <div className="comment-recovery-actions">
+          <button type="button" className="btn xs" onClick={() => setDraftText(editRetryIntent.text)}>
+            Restore failed edit
+          </button>
+          <button type="button" className="btn xs ghost" onClick={() => {
+            if (!clearCommentOperationIntent(editRetryIntent.recovery)) {
+              setEditError('The saved failed-edit record changed and was not discarded. Refresh Comments.')
+              return
+            }
+            setEditRetryIntent(null)
+            setEditError('Failed edit command discarded. Review this draft before saving a new edit.')
+            setEditMessageKind('status')
+          }}>Discard failed edit</button>
         </div>
       </div>}
       <div className="comment-editor-actions">
-        <button type="button" className="btn sm ghost" disabled={!!editBusy || editOutcomeUnknown}
-          title={editOutcomeUnknown ? 'Check the pending edit before closing this draft' : undefined}
+        <button type="button" className="btn sm ghost"
+          disabled={!!editBusy || editOutcomeUnknown || !!editRetryIntent}
+          title={editOutcomeUnknown || editRetryIntent
+            ? 'Resolve the saved edit command before closing this draft' : undefined}
           onClick={() => {
-            if (editBusy || editOutcomeUnknown) return
+            if (editBusy || editOutcomeUnknown || editRetryIntent) return
             draftStore.clear(editScope)
             restoreEditFocus()
           }}>Cancel</button>
         <button type="button" className="btn sm primary"
-          disabled={busy || resolutionFence || (!editOutcomeUnknown
-            && (editConflictVersion != null || editIntentMismatch
+          disabled={busy || resolutionFence || editRecoveryBlocked || editRetryMismatch
+            || (!editOutcomeUnknown && (editConflictVersion != null || editIntentMismatch
               || !draft.valid || !draftChanged || versionChanged))}
-          title={exactEditRetry ? 'Retry this exact durable command; no new edit intent is created' : undefined}
+          title={exactEditRetry ? 'Retry this exact durable command; no new edit intent is created'
+            : editRetryMismatch ? 'Resolve the saved failed edit before saving new text'
+              : editRecoveryBlocked ? 'Working recovery storage is required before saving' : undefined}
           onClick={save}>{editBusy === 'edit'
             ? editOutcomeUnknown ? 'Checking…' : exactEditRetry ? 'Retrying…' : 'Saving…'
             : editOutcomeUnknown ? 'Check command'
@@ -702,19 +1080,57 @@ function CommentCard({
       </div>
     </div> : <div className="comment-text">{comment.text}</div>}
 
+    {!editorVisible && editRecovery.storageUnavailable && <div className="notice resource-error comment-inline-error" role="alert">
+      <span>Edit recovery storage is unavailable. Editing is blocked.</span>
+      <button type="button" className="btn xs" onClick={retryEditRecoveryStorage}>Retry storage</button>
+    </div>}
+    {!editorVisible && editRecovery.damaged && <div className="notice resource-error comment-inline-error" role="alert">
+      <span>A saved edit recovery record is invalid. Editing is blocked.</span>
+      <button type="button" className="btn xs" onClick={() => {
+        if (!editRecovery.discardDamaged()) {
+          setEditError('The damaged edit recovery changed and was not discarded. Refresh Comments.')
+        }
+      }}>Discard damaged recovery</button>
+    </div>}
+    {resolutionRecovery.storageUnavailable && <div className="notice resource-error comment-inline-error" role="alert">
+      <span>Resolution recovery storage is unavailable. Resolve/reopen is blocked.</span>
+      <button type="button" className="btn xs" onClick={retryResolutionRecoveryStorage}>Retry storage</button>
+    </div>}
+    {resolutionRecovery.damaged && <div className="notice resource-error comment-inline-error" role="alert">
+      <span>A saved resolution recovery record is invalid. Resolve/reopen is blocked.</span>
+      <button type="button" className="btn xs" onClick={() => {
+        if (!resolutionRecovery.discardDamaged()) {
+          setResolutionError('The damaged resolution recovery changed and was not discarded. Refresh Comments.')
+        }
+      }}>Discard damaged recovery</button>
+    </div>}
+
     {resolutionError && <div id={`${commentDomId}-resolution-error`}
       className="notice resource-error comment-inline-error"
       role="alert"><span>{resolutionError}</span></div>}
-    {(resolutionConflictVersion != null || resolutionOutcomeUnknown) &&
+    {(resolutionConflictVersion != null || resolutionOutcomeUnknown || resolutionIntentMismatch) &&
       <div className="comment-recovery-panel">
         <div className="comment-recovery-actions">
         <button type="button" className="btn xs" onClick={onRefresh}>Refresh comments</button>
+        {(uncertainResolution || resolutionRetryIntent) && <button type="button" className="btn xs ghost"
+          title="Discard only after reviewing the current comment state"
+          onClick={() => {
+            const intent = uncertainResolution || resolutionRetryIntent
+            if (!clearCommentOperationIntent(intent.recovery)) {
+              setResolutionError('The saved resolution recovery changed and was not discarded. Refresh Comments.')
+              return
+            }
+            setUncertainResolution(null)
+            setResolutionRetryIntent(null)
+            setResolutionConflictVersion(null)
+            setResolutionError('Saved resolution command discarded. Review the current state before acting again.')
+          }}>Discard saved resolution command</button>}
         </div>
     </div>}
     <footer className="comment-card-actions">
       {canMutate && !editorVisible && <>
         <button ref={editButtonRef} type="button" className="btn xs ghost"
-          disabled={busy || resolutionFence}
+          disabled={busy || resolutionFence || editRecoveryBlocked}
           onClick={() => {
             if (!dirty && !editRetryIntent && !uncertainEdit) {
               setDraftText(comment.text); setEditBaseText(comment.text)
@@ -727,7 +1143,9 @@ function CommentCard({
           <OpIcon name="pencil" size={11} /> {dirty || editRetryIntent || uncertainEdit ? 'Resume edit' : 'Edit'}
         </button>
         <button type="button" className="btn xs ghost"
-          disabled={busy || hasEditDraft || resolutionConflictVersion != null || resolutionIntentMismatch}
+          disabled={busy || hasEditDraft || resolutionConflictVersion != null
+            || resolutionIntentMismatch || resolutionRecovery.damaged
+            || resolutionRecovery.storageUnavailable}
           title={exactResolutionRetry ? 'Retry this exact durable command; no new resolution intent is created' : undefined}
           onClick={() => changeResolution(resolutionTarget)}>
           <OpIcon name={comment.resolved ? 'replay' : 'check'} size={11} />
@@ -769,7 +1187,11 @@ export default function CommentsThread({
   const immutable = readOnly || reviewMode
   const fallbackDraftStoreRef = useRef(null)
   if (!fallbackDraftStoreRef.current) fallbackDraftStoreRef.current = createInspectorDraftStore()
-  const draftStore = sharedDraftStore || fallbackDraftStoreRef.current
+  // Public reviews must not inspect, render, or mutate owner-only in-memory recovery even if a caller
+  // accidentally reuses the owner's RunView store while switching authority modes in the same tab.
+  const draftStore = immutable
+    ? fallbackDraftStoreRef.current
+    : sharedDraftStore || fallbackDraftStoreRef.current
   const threadDraftScope = `comments-thread:${draftSurface}:${runId}@${expectedGeneration || '?'}:${global
     ? 'global' : `${nodeId}:${nodeGeneration ?? '?'}`}`
   const [filter, setFilter] = useInspectorDraftField(

@@ -7,11 +7,15 @@ import { useCallback, useRef, useSyncExternalStore } from 'react'
 export function createInspectorDraftStore() {
   const entries = new Map()
   const listeners = new Map()
+  const aggregateListeners = new Set()
   const protectedScopes = new Set()
   const maxDetachedDisposableScopes = 512
+  let revision = 0
 
   const notify = scope => {
     for (const listener of listeners.get(scope) || []) listener()
+    revision += 1
+    for (const listener of aggregateListeners) listener()
   }
   const prune = () => {
     let detachedDisposable = 0
@@ -66,6 +70,16 @@ export function createInspectorDraftStore() {
           prune()
         }
       }
+    },
+    subscribeAll(listener) {
+      aggregateListeners.add(listener)
+      return () => aggregateListeners.delete(listener)
+    },
+    revision() {
+      return revision
+    },
+    entries() {
+      return [...entries.entries()]
     },
   }
 }
