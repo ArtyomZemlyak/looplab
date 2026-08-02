@@ -692,12 +692,15 @@ export default function Settings({ onBack }) {
     loadControllerRef.current?.abort()
     const timed = deadlineGet('/api/settings', SETTINGS_READ_TIMEOUT_MS)
     loadControllerRef.current = timed.controller
-    setLoadError('')
+    // Keep a stale-data warning visible while an authoritative refresh is in flight. Clearing it
+    // early briefly made launch look safe and removed the only progress affordance on this page.
+    if (!preserveExisting) setLoadError('')
     return Promise.all([timed.promise, loadSettingsSchema({ reload: reloadSchema })]).then(([data, nextSchema]) => {
       if (loadRef.current !== owner) return false
       validateSettingsResource(data, nextSchema)
       const settings = data.settings || {}
       const nextForm = toForm(settings, nextSchema)
+      setLoadError('')
       setDefaults(data.defaults)
       setSchema(nextSchema)
       setForm(nextForm)
@@ -906,6 +909,9 @@ export default function Settings({ onBack }) {
       const settings = data.settings || {}
       const acceptedForm = toForm(settings, schema)
       const acceptedControl = settings.agent_control || {}
+      // This authoritative read also resolves any older stale-load warning; leaving that warning
+      // behind would keep the launch guard blocked after reconciliation had already succeeded.
+      setLoadError('')
       setDefaults(data.defaults)
       setSaved(acceptedForm); setSavedAC(acceptedControl)
       setForm(current => {
@@ -1159,18 +1165,23 @@ export default function Settings({ onBack }) {
     setQuery('')
     requestAnimationFrame(() => searchInputRef.current?.focus())
   }
-  const reloadSavedSettings = async () => {
+  const reloadSavedSettings = async (options = {}) => {
+    // CredentialState passes its click event through this callback; read only the explicit option
+    // fields so that ordinary provider refreshes retain their existing defaults.
+    const reloadSchema = options?.reloadSchema === true
+    const successMessage = typeof options?.successMessage === 'string'
+      ? options.successMessage : 'Server state refreshed; saved credential status is up to date'
     if (unsaved && !window.confirm('Reload saved settings and discard the current draft changes?')) {
       return false
     }
     const mutation = beginMutation('reloading settings')
     if (!mutation) return false
     try {
-      const reloaded = await load(false, true)
+      const reloaded = await load(reloadSchema, true)
       if (!reloaded) {
         show('Saved settings could not be reloaded; current values and warnings were kept')
       } else {
-        show('Server state refreshed; saved credential status is up to date')
+        show(successMessage)
         focusProviderHeading()
       }
       return reloaded
@@ -1274,8 +1285,11 @@ export default function Settings({ onBack }) {
         {loadError && <div className="notice resource-error settings-stale-warning" role="alert">
           <b>Could not refresh settings.</b>
           <span>The last loaded values remain visible, but new runs stay blocked until the current server state is loaded.</span>
-          <button className="btn sm primary" disabled={mutationBusy === 'reloading settings'}
-            onClick={() => load(true, true)}>Retry</button>
+          <button className="btn sm primary" disabled={!!mutationBusy || !!mutationUnknown}
+            onClick={() => reloadSavedSettings({
+              reloadSchema: true,
+              successMessage: 'Settings and editor schema refreshed from the server',
+            })}>{mutationBusy === 'reloading settings' ? 'Retrying...' : 'Retry'}</button>
         </div>}
 
         {mutationUnknown && <div className="notice resource-error" role="alert">
