@@ -244,6 +244,47 @@ class _TurnMutationFence:
         )
 
 
+def _node_subtree(state: RunState, root_id: int) -> set[int]:
+    """``root_id`` plus every descendant reachable through ``parent_ids``.
+
+    Deleting a node alone would orphan its children's parent links, so every delete path resolves
+    the whole subtree first — and all three of them (the plan, the commit, and the purge's
+    re-verification) were carrying their own verbatim copy of this walk. They are not free to
+    disagree: the purge compares its own answer against the approved one and refuses on a
+    mismatch, so a copy that drifted would turn a correct approval into a permanent refusal.
+
+    The graph is a DAG, not a tree — a merge node has several parents — so this is a fixpoint
+    sweep rather than a recursive descent, and a node joins as soon as ANY parent is inside.
+    """
+    found = {root_id}
+    changed = True
+    while changed:
+        changed = False
+        for node in state.nodes.values():
+            if node.id not in found and any(parent in found for parent in node.parent_ids):
+                found.add(node.id)
+                changed = True
+    return found
+
+
+def _node_lifecycle_unchanged(store, *, node_id: int, expected_tail: int,
+                              generation: int) -> bool:
+    """Whether the exact node lifecycle a permission card was formed against is still current.
+
+    A confirm card can stay open indefinitely while another control resets, re-tags or tombstones
+    the node underneath it, so approval is re-checked against the log immediately BEFORE the
+    mutation is submitted. The fence is the whole log TAIL, not just the node: the operator
+    approved an action against a run they were shown, and a sibling append changed that run.
+    """
+    from looplab.events.replay import fold
+
+    events = store.read_all()
+    tail = events[-1].seq if events else -1
+    node = fold(events).nodes.get(node_id)
+    return (tail == expected_tail and node is not None and not node.tombstoned
+            and node.attempt == generation)
+
+
 def _command_record(value) -> dict:
     """Coerce the command service's record/model to the small mapping this tool consumes."""
     if isinstance(value, dict):
@@ -1192,8 +1233,10 @@ class RunControlTools:
                 return self._retag_node(rid, rd, args)
             if name == "set_run_concepts":
                 return self._set_run_concepts(rid, rd, args)
+            # One method per verb: the outer dispatch used to hand three unrelated settings verbs to
+            # a single `_settings`, which then re-dispatched on the same name it was just given.
             if name in ("extend_budget", "set_directive", "set_trust_gate"):
-                return self._settings(name, rid, rd, args)
+                return getattr(self, f"_tool_{name}")(name, rid, rd, args)
             if name == "delete_node":
                 return self._delete_node(rid, rd, args)
             if name == "delete_run":
@@ -1241,106 +1284,117 @@ class RunControlTools:
                 rd, etype, data, idempotency_key=key, expected_generation=generation)
         return _render_command_result(record, name=name, run_id=rid, completed=verb)
 
-    def _settings(self, name: str, rid: str, rd: Path, args: dict) -> str:
-        """Change an allow-listed LIVE run setting by appending the matching control/config event the UI
-        writes (budget extension, a standing directive, or the trust gate). Gated exactly like the other
-        mutations. Command-backed settings use the server's engine policy and postcondition; the legacy
-        trust-gate path remains a direct event + snapshot update until it joins that control registry."""
+    def _tool_extend_budget(self, name: str, rid: str, rd: Path, args: dict) -> str:
+        """Raise a LIVE run's node/time budget by appending the same EV_BUDGET_EXTEND the UI writes."""
         import math
+
+        from looplab.events.types import EV_BUDGET_EXTEND
+
+        data: dict = {}
+        for k in ("add_nodes", "max_seconds", "max_eval_seconds"):
+            v = args.get(k)
+            if v is None:
+                continue
+            try:
+                data[k] = int(v) if k == "add_nodes" else float(v)
+            except (TypeError, ValueError):
+                return f"({k} must be a number)"
+            if k != "add_nodes" and not math.isfinite(data[k]):
+                return f"({k} must be a finite number — nan/inf would disable the budget)"
+        if not data:
+            return "(extend_budget needs at least one of add_nodes / max_seconds / max_eval_seconds)"
+        if data.get("add_nodes", 1) <= 0:      # a negative/zero delta SHRINKS the budget, not extends
+            return "(add_nodes must be a positive count of MORE experiment nodes)"
+        blocked, formed_generation = self._gate(
+            name, rid, rd, f"extend budget of {rid}: {data}",
+            scope={"run_id": rid, **data})
+        if blocked:
+            return blocked
+        with self._mutation_intent(
+                name, rid, rd, {"event_type": EV_BUDGET_EXTEND, "data": data},
+                command_backed=True,
+                expected_generation=formed_generation) as (key, generation):
+            record = self._commands.submit(
+                rd, EV_BUDGET_EXTEND, data, idempotency_key=key,
+                expected_generation=generation)
+        return _render_command_result(
+            record, name=name, run_id=rid, completed=f"budget extended for {rid}: {data}")
+
+    def _tool_set_directive(self, name: str, rid: str, rd: Path, args: dict) -> str:
+        """Record a standing directive for a LIVE run (EV_HINT), gated like every other mutation."""
+        from looplab.events.types import EV_HINT
+
+        text = " ".join(str(args.get("text") or "").split())
+        if not text:
+            return "(set_directive needs a non-empty text)"
+        blocked, formed_generation = self._gate(
+            name, rid, rd, f"directive for {rid}: {text[:60]}",
+            scope={"run_id": rid,
+                   "text_digest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                   "replace": bool(args.get("replace"))})
+        if blocked:
+            return blocked
+        data = {"text": text, "replace": bool(args.get("replace"))}
+        with self._mutation_intent(
+                name, rid, rd, {"event_type": EV_HINT, "data": data},
+                command_backed=True,
+                expected_generation=formed_generation) as (key, generation):
+            record = self._commands.submit(
+                rd, EV_HINT, data, idempotency_key=key,
+                expected_generation=generation)
+        return _render_command_result(
+            record, name=name, run_id=rid, completed=f"directive recorded for {rid}: {text[:80]!r}")
+
+    def _tool_set_trust_gate(self, name: str, rid: str, rd: Path, args: dict) -> str:
+        """Set the trust gate.
+
+        The only settings verb that is NOT command-backed: it writes the event and mirrors
+        `config.snapshot.json` directly, so a later RESUME re-enters with the new gate and the
+        settings panel does not show a stale value. It stays this way until the trust gate joins the
+        server's control registry, at which point it becomes a submit like the other two.
+        """
         from looplab.events.eventstore import EventStore
-        from looplab.events.types import EV_BUDGET_EXTEND, EV_HINT, EV_TRUST_GATE_CHANGED
-        if name == "extend_budget":
-            data: dict = {}
-            for k in ("add_nodes", "max_seconds", "max_eval_seconds"):
-                v = args.get(k)
-                if v is None:
-                    continue
-                try:
-                    data[k] = int(v) if k == "add_nodes" else float(v)
-                except (TypeError, ValueError):
-                    return f"({k} must be a number)"
-                if k != "add_nodes" and not math.isfinite(data[k]):
-                    return f"({k} must be a finite number — nan/inf would disable the budget)"
-            if not data:
-                return "(extend_budget needs at least one of add_nodes / max_seconds / max_eval_seconds)"
-            if data.get("add_nodes", 1) <= 0:      # a negative/zero delta SHRINKS the budget, not extends
-                return "(add_nodes must be a positive count of MORE experiment nodes)"
-            blocked, formed_generation = self._gate(
-                name, rid, rd, f"extend budget of {rid}: {data}",
-                scope={"run_id": rid, **data})
-            if blocked:
-                return blocked
-            with self._mutation_intent(
-                    name, rid, rd, {"event_type": EV_BUDGET_EXTEND, "data": data},
-                    command_backed=True,
-                    expected_generation=formed_generation) as (key, generation):
-                record = self._commands.submit(
-                    rd, EV_BUDGET_EXTEND, data, idempotency_key=key,
-                    expected_generation=generation)
-            return _render_command_result(
-                record, name=name, run_id=rid, completed=f"budget extended for {rid}: {data}")
-        if name == "set_directive":
-            text = " ".join(str(args.get("text") or "").split())
-            if not text:
-                return "(set_directive needs a non-empty text)"
-            blocked, formed_generation = self._gate(
-                name, rid, rd, f"directive for {rid}: {text[:60]}",
-                scope={"run_id": rid,
-                       "text_digest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                       "replace": bool(args.get("replace"))})
-            if blocked:
-                return blocked
-            data = {"text": text, "replace": bool(args.get("replace"))}
-            with self._mutation_intent(
-                    name, rid, rd, {"event_type": EV_HINT, "data": data},
-                    command_backed=True,
-                    expected_generation=formed_generation) as (key, generation):
-                record = self._commands.submit(
-                    rd, EV_HINT, data, idempotency_key=key,
-                    expected_generation=generation)
-            return _render_command_result(
-                record, name=name, run_id=rid, completed=f"directive recorded for {rid}: {text[:80]!r}")
-        if name == "set_trust_gate":
-            tg = str(args.get("trust_gate") or "").strip().lower()
-            if tg not in ("audit", "gate", "block"):
-                return "(trust_gate must be audit | gate | block)"
-            blocked, formed_generation = self._gate(
-                name, rid, rd, f"set trust_gate={tg} for {rid}",
-                scope={"run_id": rid, "trust_gate": tg})
-            if blocked:
-                return blocked
-            with self._mutation_intent(
-                    name, rid, rd, {"trust_gate": tg}, command_backed=False,
-                    expected_generation=formed_generation) as (_key, generation):
-                with self._commands.mutation_guard(
-                        rd, "set the trust gate", expected_generation=generation) as rd:
-                    store = EventStore(rd / "events.jsonl")
-                    # Mirror the UI PUT /config path: the fold already applies the event, but also update
-                    # config.snapshot.json so a later RESUME re-enters with the new gate and the settings panel
-                    # doesn't show a stale value (the two mutation paths must not drift). Best-effort.
-                    snap = rd / "config.snapshot.json"
-                    if snap.exists():
-                        # Global order is config -> events. Reset takes the same pair in that order,
-                        # preventing an event->config/config->event deadlock while also closing the
-                        # reset-marker race for this dual write.
-                        with self.lifecycle().run_config_write_lock(snap):
-                            store.append(
-                                EV_TRUST_GATE_CHANGED,
-                                {"trust_gate": tg, "source": "assistant"})
-                            try:
-                                import json as _json
-                                from looplab.core.atomicio import atomic_write_text
-                                cfg = _json.loads(snap.read_text(encoding="utf-8"))
-                                cfg["trust_gate"] = tg
-                                atomic_write_text(snap, _json.dumps(cfg, indent=2))
-                            except (OSError, ValueError):
-                                pass
-                    else:
+        from looplab.events.types import EV_TRUST_GATE_CHANGED
+
+        tg = str(args.get("trust_gate") or "").strip().lower()
+        if tg not in ("audit", "gate", "block"):
+            return "(trust_gate must be audit | gate | block)"
+        blocked, formed_generation = self._gate(
+            name, rid, rd, f"set trust_gate={tg} for {rid}",
+            scope={"run_id": rid, "trust_gate": tg})
+        if blocked:
+            return blocked
+        with self._mutation_intent(
+                name, rid, rd, {"trust_gate": tg}, command_backed=False,
+                expected_generation=formed_generation) as (_key, generation):
+            with self._commands.mutation_guard(
+                    rd, "set the trust gate", expected_generation=generation) as rd:
+                store = EventStore(rd / "events.jsonl")
+                # Mirror the UI PUT /config path: the fold already applies the event, but also update
+                # config.snapshot.json so a later RESUME re-enters with the new gate and the settings panel
+                # doesn't show a stale value (the two mutation paths must not drift). Best-effort.
+                snap = rd / "config.snapshot.json"
+                if snap.exists():
+                    # Global order is config -> events. Reset takes the same pair in that order,
+                    # preventing an event->config/config->event deadlock while also closing the
+                    # reset-marker race for this dual write.
+                    with self.lifecycle().run_config_write_lock(snap):
                         store.append(
                             EV_TRUST_GATE_CHANGED,
                             {"trust_gate": tg, "source": "assistant"})
-                    return f"(trust_gate set to {tg} for {rid})"
-        return f"(unknown settings tool: {name})"
+                        try:
+                            import json as _json
+                            from looplab.core.atomicio import atomic_write_text
+                            cfg = _json.loads(snap.read_text(encoding="utf-8"))
+                            cfg["trust_gate"] = tg
+                            atomic_write_text(snap, _json.dumps(cfg, indent=2))
+                        except (OSError, ValueError):
+                            pass
+                else:
+                    store.append(
+                        EV_TRUST_GATE_CHANGED,
+                        {"trust_gate": tg, "source": "assistant"})
+                return f"(trust_gate set to {tg} for {rid})"
 
     def _reset_node(self, rid: str, rd: Path, args: dict) -> str:
         from looplab.events.eventstore import EventStore
@@ -1370,11 +1424,8 @@ class RunControlTools:
             return blocked
         # Permission can stay open while another control changes the node. Reject that stale scope
         # before handing the exact lifecycle generation to the command sequencer.
-        latest_events = store.read_all()
-        latest_tail = latest_events[-1].seq if latest_events else -1
-        latest = fold(latest_events).nodes.get(nid)
-        if (latest_tail != expected_tail or latest is None or latest.tombstoned
-                or latest.attempt != generation):
+        if not _node_lifecycle_unchanged(
+                store, node_id=nid, expected_tail=expected_tail, generation=generation):
             return f"(node #{nid} or run intent changed while awaiting permission — refresh and retry)"
         data = {"node_id": nid, "generation": generation, "from_stage": stage}
         with self._mutation_intent(
@@ -1420,11 +1471,8 @@ class RunControlTools:
         if blocked:
             return blocked
         # Reject a stale subject that changed while the confirm card was open (same fence as reset_node).
-        latest = store.read_all()
-        latest_tail = latest[-1].seq if latest else -1
-        fresh = fold(latest).nodes.get(nid)
-        if (latest_tail != expected_tail or fresh is None or fresh.tombstoned
-                or fresh.attempt != node_gen):
+        if not _node_lifecycle_unchanged(
+                store, node_id=nid, expected_tail=expected_tail, generation=node_gen):
             return f"(node #{nid} or run intent changed while awaiting permission — refresh and retry)"
         data = {"node_id": nid, "node_generation": node_gen, "concepts": concepts}
         with self._mutation_intent(
@@ -1484,19 +1532,7 @@ class RunControlTools:
         st = fold(events)
         if nid not in st.nodes:
             return f"(no node #{nid} in {rid})"
-        # The node AND every descendant (deleting a node alone would orphan its children's parent links).
-        def _subtree(state):
-            found = {nid}
-            changed = True
-            while changed:
-                changed = False
-                for node in state.nodes.values():
-                    if node.id not in found and any(p in found for p in node.parent_ids):
-                        found.add(node.id)
-                        changed = True
-            return found
-
-        subtree = _subtree(st)
+        subtree = _node_subtree(st, nid)
         expected_tail = events[-1].seq if events else -1
         verb = "PURGE (physical, irreversible)" if purge else "tombstone"
         blocked, formed_generation = self._gate(
@@ -1526,17 +1562,6 @@ class RunControlTools:
 
         evp = rd / "events.jsonl"
 
-        def _subtree(state):
-            found = {nid}
-            changed = True
-            while changed:
-                changed = False
-                for node in state.nodes.values():
-                    if node.id not in found and any(parent in found for parent in node.parent_ids):
-                        found.add(node.id)
-                        changed = True
-            return found
-
         # The launch claim/Popen/child-lock gap is fenced only by the lifecycle lock. Acquire it after
         # approval, reject a fresh pending launch, then take engine.lock before the event-log CAS.
         with lifecycle.run_lifecycle_lock(rd):
@@ -1552,7 +1577,7 @@ class RunControlTools:
                 events = store.read_all()
                 tail = events[-1].seq if events else -1
                 state = fold(events)
-                current_subtree = _subtree(state) if nid in state.nodes else set()
+                current_subtree = _node_subtree(state, nid) if nid in state.nodes else set()
                 if current_subtree != subtree:
                     return (f"(delete scope changed while awaiting permission: approved "
                             f"{sorted(subtree)}, now {sorted(current_subtree)}; review and approve "
@@ -1612,15 +1637,7 @@ class RunControlTools:
             if actual_tail != expected_tail or nid not in state.nodes:
                 return f"(run {rid} changed while awaiting permission — refresh and retry)"
 
-            current_subtree = {nid}
-            changed = True
-            while changed:
-                changed = False
-                for node in state.nodes.values():
-                    if (node.id not in current_subtree
-                            and any(parent in current_subtree for parent in node.parent_ids)):
-                        current_subtree.add(node.id)
-                        changed = True
+            current_subtree = _node_subtree(state, nid)
             if current_subtree != subtree:
                 return (f"(delete scope changed while awaiting permission: approved "
                         f"{sorted(subtree)}, now {sorted(current_subtree)}; review and approve again)")

@@ -2337,6 +2337,38 @@ partial-scope warning sequences.
 
 *Recommendation:* Split the module: `_turn_fence.py` (_TurnMutationFence), `_run_command_adapter.py`, `run_launcher_tools.py`, `run_control_tools.py`. Extract `_subtree(state, root_id)` as one module-level function used by all three delete paths, extract the stale-node fence into a helper shared by _reset_node/_retag_node, and break _settings into three methods dispatched directly from execute().
 
+*Resolution (2026-08-02, the three named duplications):* all three are done; the file split is still
+open (see below).
+
+`_node_subtree(state, root_id)` replaces the three verbatim copies of the descendant walk. Those
+copies were not free to disagree: the purge re-runs the walk and compares its answer against the
+approved scope, refusing on a mismatch — so a copy that drifted would not have produced a wrong
+deletion, it would have produced a permanent refusal of a correct approval, which reads like data
+corruption. The extraction also gave the walk a place to say WHY it is a fixpoint sweep and not a
+recursive descent: the node graph is a DAG, a merge node has several parents, and a child joins the
+subtree as soon as ANY parent is inside it.
+
+`_node_lifecycle_unchanged(store, node_id=, expected_tail=, generation=)` replaces the fence
+`_reset_node` and `_retag_node` each spelled out. The property it defends is that a confirm card can
+stay open indefinitely while another control resets or tombstones its subject, and the fence is the
+whole log TAIL rather than just the node — the operator approved an action against a run they were
+shown, and a sibling append changed that run.
+
+`_settings` — a flat 100-line chain re-dispatching on the same `name` the outer dispatch had just
+matched — is now `_tool_extend_budget` / `_tool_set_directive` / `_tool_set_trust_gate`, reached
+directly. Splitting them made the odd one out visible in its own docstring: the trust gate is the
+only settings verb that is NOT command-backed, because it also mirrors `config.snapshot.json` so a
+later resume re-enters with the new gate.
+
+`tests/test_node_subtree_and_fence.py` adds 13 tests. Five deliberate breaks — require ALL parents
+instead of any, drop the fixpoint sweep for a single pass, drop the tail fence, allow a tombstoned
+subject, ignore the generation — were each caught. The single-pass break is the one worth naming:
+iteration order over `state.nodes` is not topological, so a one-pass version is right on most
+inputs and wrong when a descendant is visited before its parent joins.
+
+**Still open:** the module is 1,721 lines and still holds `_TurnMutationFence`, `_RunCommandAdapter`
+and three unrelated providers. That split is a separate change with its own verification.
+
 #### TO-03 · MEDIUM · layering · effort: medium
 
 **tools -> serve layering violation in machine_runs_tools, contradicting the rule other tools modules explicitly state**
