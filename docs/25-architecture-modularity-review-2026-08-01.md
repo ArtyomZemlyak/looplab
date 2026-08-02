@@ -1954,7 +1954,7 @@ Scope: `looplab/tools/`: ~25 ToolProviders.
 
 *Recommendation:* Add two shared helpers next to RESULT_CAP in core/context_budget or _base.py — `fit_rows(header, rows, receipt, cap)` (already exists as reposcout._fit_rows; promote it) and `clip(text, cap, *, keep='head'|'tail', note)` — and migrate the row-dropping and single-string sites onto them, keeping per-site marker wording as a parameter.
 
-#### TO-09 · MEDIUM · layering · effort: medium
+#### TO-09 · MEDIUM · layering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
 **cross_run_tools/concept_tools depend on ~10 underscore-private engine helpers via lazy imports, so an engine rename fails silently at runtime**
 
@@ -1963,6 +1963,24 @@ Scope: `looplab/tools/`: ~25 ToolProviders.
 *Evidence:* CrossRunTools lazily imports private names from engine modules throughout: `_filter_claim_source_rows`, `_claim_source_rows`, `_safe_claim_source_summary`, `_safe_research_source_summary` (engine.claims), `_capsule_rows`, `_capsule_completeness`, `_capsule_fingerprint_scope_complete`, `_dedup_valid_capsules`, `_filter_capsule_rows`, `_capsule_source_summary`, `_portfolio_concept_overview_data` (engine.memory), plus `_TOMBSTONE` in concept_tools.py:224. Because the imports are lazy (intentional, to keep the import graph acyclic per concept_tools' docstring) AND `execute` swallows every exception into the generic '(cross-run tool unavailable)' string (cross_run_tools.py:453-471, deliberately hiding exception text), renaming any of these engine privates produces no import-time error — every affected cross-run tool starts answering 'unavailable'; tests/test_cross_run_tools.py does then fail on missing content, but the failure is opaque (the generic unavailable string, not a NameError) and no registry-style source-scan pins the private-name list. This is exactly the silent-rename failure class CLAUDE.md's registry-guarded seams exist to prevent, but these seams are not registry-guarded, and an underscore prefix normally licenses engine maintainers to rename freely.
 
 *Recommendation:* Export a small public facade from engine (e.g. `engine.memory.capsule_views` / `engine.claims.claim_views` re-exporting the needed helpers under public names), or add a two-way source-scan test (like the existing registries) pinning the private names cross_run_tools/concept_tools import.
+
+*Resolution (2026-08-02, guard arm):* `tests/test_cross_package_private_seams.py` declares the
+whole surface — **26 edges**, more than either finding counted — as
+`CROSS_PACKAGE_PRIVATE_IMPORTS` (consumer package -> provider module -> names) and checks it BOTH
+ways: every declared name must still resolve (so renaming an engine private another package
+imports is a red test naming both ends, instead of a tool that quietly answers "(cross-run tool
+unavailable)"), and every edge in the tree must be declared (so a NEW private cross-package
+dependency is a decision someone writes down rather than one autocomplete makes). A third check
+fails on stale entries, so the debt can only shrink visibly.
+
+Two entries are pinned by size to keep the promotion work prioritized by pressure rather than by
+whoever trips over it first: `serve/` leans on nine `events.traceview` privates, and `tools/` +
+`cli/` on seven `engine.memory` capsule read-model privates — XP-01's primary promotion candidate.
+
+The **facade arm remains open**: this makes the breakage loud, it does not make the boundary
+public. Promoting the capsule/claim read-model to public names is still the recommended fix, and
+`_interprocess_lock` — imported by four packages outside `events` — is still a private name doing
+a public job.
 
 #### TO-10 · LOW · dead-code · effort: small
 
@@ -2309,7 +2327,7 @@ Scope: import graph, cross-package duplication, dead top-level code, registries,
 - Low-level helpers are genuinely reused across packages rather than reimplemented: read_jsonl_lenient/iter_jsonl, core/atomicio, core/redact, events/digest's node_metric/top-k — cli/inspect_cmds even documents WHY it picks read_jsonl_lenient over iter_jsonl for corrupt-span tolerance.
 - Load-bearing why-comments at append sites, cache keys and lock acquisitions make the replay/idempotency invariants auditable in place — most files explain the failure mode a guard exists for, not just what the code does.
 
-#### XP-01 · HIGH · layering · effort: medium
+#### XP-01 · HIGH · layering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
 **tools/cross_run_tools.py consumes 12 private (_-prefixed) engine functions (~20 import sites) across the package boundary**
 
