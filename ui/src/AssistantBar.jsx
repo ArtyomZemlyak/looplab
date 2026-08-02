@@ -4,6 +4,7 @@ import { OpIcon } from './icons.jsx'
 import { useMediaQuery, usePoll } from './hooks.js'
 import { getRunAccess } from './runMode.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
+import { AttentionLauncher, openAttentionCenter, useAttentionIndicator } from './attentionIndicator.jsx'
 import { pendingApprovalTarget } from './runIndex.js'
 import { assistantErrorInfo, assistantPreview } from './assistantErrors.js'
 import { reconcilePendingPermissions } from './assistantPermission.js'
@@ -307,6 +308,7 @@ const readFileText = (file) => new Promise((resolve) => {
 
 export default function AssistantBar({ runId, hidden = false, onReady }) {
   const compactAssistant = useMediaQuery(`(max-width: ${ASSISTANT_OVERLAY_MAX_PX}px)`)
+  const attentionIndicator = useAttentionIndicator()
   const runAccessKey = runId == null ? null : String(runId)
   const pendingRouteAccess = { readOnly: true, seq: null, mode: 'loading' }
   const [runAccessState, setRunAccessState] = useState(() => ({
@@ -445,6 +447,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const fileRef = useRef(null)
   const commandStatusRef = useRef(null)
   const commandFocusRequestedRef = useRef(false)
+  const collapseForNavigationRef = useRef(null)
   const openSessionRef = useRef(null)
   const toastRunIdRef = useRef(runId)
   const shareActionSessionRef = useRef(null)
@@ -790,6 +793,21 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     setView('bar')
     requestAnimationFrame(() => document.querySelector(returnSelector)?.focus())
   }
+  collapseForNavigationRef.current = () => {
+    const la = lastAssistant()
+    if (la && la.content) setPreview(previewText(la.content))
+    // Route navigation owns the next focus target. Do not let the ordinary fold-to-bar RAF steal it
+    // or present a known Assistant reply as newly arrived merely because the route was revealed.
+    commandFocusRequestedRef.current = false
+    setHasNew(false)
+    setView('bar')
+  }
+  useEffect(() => {
+    if (hidden) return undefined
+    const onCollapseForNavigation = () => collapseForNavigationRef.current?.()
+    window.addEventListener('ll:collapse-assistant-for-navigation', onCollapseForNavigation)
+    return () => window.removeEventListener('ll:collapse-assistant-for-navigation', onCollapseForNavigation)
+  }, [hidden])
   const toggleSide = () => (view === 'side' ? collapseToBar() : openSide())
   useDialogFocus(fullDialogRef, collapseToBar, view === 'full' && !hidden,
     { priority: DIALOG_PRIORITY.ASSISTANT_FULL })
@@ -3049,6 +3067,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               ? 'LIVE · new replies public' : 'snapshot public'}
           </button>}
         <span className="spacer" style={{ flex: 1 }} />
+        {compactAssistant && attentionIndicator.active && <AttentionLauncher
+          indicator={attentionIndicator} embedded onClick={openAttentionCenter} />}
         <button className="btn sm ghost" aria-label="Start a new Assistant chat"
           title="new chat" onClick={newChat}>＋ Chat</button>
         <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
@@ -3120,6 +3140,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       <div className="asst-main">
         <div className="asst-main-h">
           <span className="ttl" style={{ flex: 1 }}>{currentSession?.title || 'New chat'}</span>
+          {attentionIndicator.active && <AttentionLauncher
+            indicator={attentionIndicator} embedded onClick={openAttentionCenter} />}
           {ctxChip}
           {launchRecoveryButton}
           {sid && <button className="btn sm ghost" type="button"

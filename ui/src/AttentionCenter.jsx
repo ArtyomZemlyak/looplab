@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import { attentionHref } from './attentionModel.js'
 import {
@@ -11,13 +11,11 @@ import {
 import { OpIcon } from './icons.jsx'
 import { useAttention } from './useAttention.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
+import {
+  AttentionLauncher, claimAttentionIndicatorPublisher, openAttentionCenter,
+  publishAttentionIndicator, releaseAttentionIndicatorPublisher,
+} from './attentionIndicator.jsx'
 import './attention.css'
-
-const dispatchOpenAttention = () => {
-  if (typeof window !== 'undefined' && typeof window.Event === 'function') {
-    window.dispatchEvent(new window.Event('ll:open-attention'))
-  }
-}
 
 const ATTENTION_PREFERENCE_FAILURE = 'This browser could not verify the saved attention preference.'
 const NO_COMPLETE_ATTENTION_SNAPSHOT = 'No complete verified snapshot is available yet.'
@@ -27,6 +25,16 @@ function isPlainRunActivation(event) {
       || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return false
   const target = String(event.currentTarget?.target || '').toLowerCase()
   return (!target || target === '_self') && !event.currentTarget?.hasAttribute?.('download')
+}
+
+function collapseModalAssistantForRouteHandoff() {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return
+  const modalAssistant = document.querySelector(
+    '.asst-full[aria-modal="true"], .asst-side-panel[aria-modal="true"]',
+  )
+  if (modalAssistant && typeof window.Event === 'function') {
+    window.dispatchEvent(new window.Event('ll:collapse-assistant-for-navigation'))
+  }
 }
 
 function itemTime(seconds) {
@@ -168,6 +176,7 @@ export default function AttentionCenter() {
   const recentHeadingRef = useRef(null)
   const focusRequestRef = useRef(null)
   const pendingHandoffRef = useRef(null)
+  const indicatorPublisherRef = useRef(Symbol('attention-indicator'))
   const channelRef = useRef(null)
   const seenItemIdsRef = useRef(new Set())
   const baselinedSourcesRef = useRef({ run: false, permission: false })
@@ -218,14 +227,14 @@ export default function AttentionCenter() {
 
   useEffect(() => {
     const onFocus = () => reloadPreferences()
-    const onOpen = () => setOpen(true)
     window.addEventListener('focus', onFocus)
-    window.addEventListener('ll:open-attention', onOpen)
-    return () => {
-      window.removeEventListener('focus', onFocus)
-      window.removeEventListener('ll:open-attention', onOpen)
-    }
+    return () => window.removeEventListener('focus', onFocus)
   }, [reloadPreferences])
+  useLayoutEffect(() => {
+    const onOpen = () => setOpen(true)
+    window.addEventListener('ll:open-attention', onOpen)
+    return () => window.removeEventListener('ll:open-attention', onOpen)
+  }, [])
 
   const acknowledgedIds = useMemo(
     () => attentionIds(preferences.state, 'acknowledged'), [preferences.state.acknowledged],
@@ -332,7 +341,12 @@ export default function AttentionCenter() {
     if (!isPlainRunActivation(event) || typeof href !== 'string' || !href.startsWith('#/run/')) return
     event.preventDefault()
     closeForHandoff(() => {
-      if (location.hash === href) document.querySelector('[data-route-main]')?.focus({ preventScroll: true })
+      // A run destination would otherwise change underneath a still-opaque full/compact Assistant.
+      // Preserve nonmodal desktop side chat, but fold a modal Assistant before revealing the route.
+      collapseModalAssistantForRouteHandoff()
+      if (location.hash === href) requestAnimationFrame(() => {
+        document.querySelector('[data-route-main]')?.focus({ preventScroll: true })
+      })
       else location.hash = href
       acknowledgeInBackground(id)
     })
@@ -439,7 +453,7 @@ export default function AttentionCenter() {
       // A Notification can outlive this React instance (for example after owner navigation). Route
       // the click through the payload-free global event so only the currently mounted owner center
       // handles it; a review route has no listener and remains isolated.
-      onOpenCenter: dispatchOpenAttention,
+      onOpenCenter: openAttentionCenter,
     }).then(result => {
       if (!active) return
       if (result.status === 'storage-unavailable') reloadPreferences()
@@ -525,7 +539,14 @@ export default function AttentionCenter() {
     : unreadCount > 0
       ? visualCount(unreadCount, unreadPaginationIncomplete)
       : '?'
-  const triggerClass = `attention-trigger${badgeShowsActions ? ' has-action' : showBadge ? ' has-unread' : ''}${feedVerified ? '' : ' is-unverified'}`
+  const indicator = {
+    active: true,
+    ariaLabel: triggerLabel,
+    badge,
+    showBadge,
+    tone: badgeShowsActions ? 'action' : showBadge ? 'unread' : 'neutral',
+    verified: feedVerified,
+  }
   const headerStatus = !initialized
     ? 'Checking for updates'
     : !feedVerified
@@ -562,14 +583,18 @@ export default function AttentionCenter() {
         ? 'No recent notices are shown. Current notice status is unavailable; both sources were verified previously.'
         : `No recent notices are shown. Current notice status is unavailable. ${NO_COMPLETE_ATTENTION_SNAPSHOT}`
 
+  useLayoutEffect(() => {
+    const owner = indicatorPublisherRef.current
+    claimAttentionIndicatorPublisher(owner)
+    return () => releaseAttentionIndicatorPublisher(owner)
+  }, [])
+  useLayoutEffect(() => {
+    publishAttentionIndicator(indicatorPublisherRef.current, indicator)
+  }, [badge, badgeShowsActions, feedVerified, showBadge, triggerLabel])
+
   return <>
-    <button type="button" className={triggerClass}
-      aria-label={triggerLabel} aria-haspopup="dialog" aria-expanded={open}
-      aria-controls={drawerId} onClick={() => setOpen(value => !value)}>
-      <OpIcon name="bell" size={22} className="attention-bell-icon" />
-      {showBadge && <span className={`attention-badge ${badgeShowsActions ? 'is-action' : 'is-unread'}`}
-        aria-hidden="true">{badge}</span>}
-    </button>
+    <AttentionLauncher indicator={indicator} expanded={open} controls={drawerId}
+      onClick={() => setOpen(value => !value)} />
     <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
       {liveMessage.text && <span key={liveMessage.revision}>{liveMessage.text}</span>}
     </div>

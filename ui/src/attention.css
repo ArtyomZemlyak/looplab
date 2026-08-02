@@ -44,6 +44,19 @@
   background: color-mix(in srgb, var(--working) 6%, var(--bg-1));
   border-color: color-mix(in srgb, var(--working) 48%, var(--line-2));
 }
+.attention-trigger.in-assistant {
+  position: relative;
+  top: auto;
+  right: auto;
+  z-index: auto;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  background: transparent;
+  box-shadow: none;
+}
+.attention-trigger.in-assistant:hover { transform: none; }
+.attention-trigger.in-assistant .attention-badge { border-color: var(--bg-1); }
 .attention-bell-icon {
   width: 21px;
   height: 21px;
@@ -430,7 +443,7 @@
 }
 
 @media (min-width: 901px) {
-  body.asst-side-open .attention-trigger {
+  body.asst-side-open .attention-trigger:not(.in-assistant) {
     right: calc(var(--asst-side-w, 440px) + 16px);
   }
 }
@@ -442,6 +455,13 @@
     top: calc(6px + env(safe-area-inset-top, 0px));
     right: calc(12px + env(safe-area-inset-right, 0px));
   }
+  .attention-trigger.in-assistant { flex-basis: 44px; width: 44px; height: 44px; }
+}
+
+@media (max-width: 1439px) {
+  /* Compact side Assistant is modal and owns an embedded launcher. Do not leave a second, inert
+     badge visibly glowing through its scrim; desktop nonmodal side keeps the shifted global button. */
+  body.asst-side-open .attention-trigger:not(.in-assistant) { visibility: hidden; }
 }
 
 @media (max-width: 600px) {
