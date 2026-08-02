@@ -174,8 +174,9 @@
 
 @media (max-width: 700px) {
   .report-view { padding-inline: 14px; }
-  .report-view .report-toolbar { align-items: stretch; }
-  .report-view .report-toolbar .btn { justify-content: center; flex: 1 1 130px; }
+  .report-view .report-toolbar { position: static; align-items: stretch; }
+  .report-view .report-toolbar .btn { min-height: 44px; justify-content: center; flex: 1 1 130px; }
+  .report-view .caveat-chip { min-height: 44px; }
   .report-view .tbl { display: block; overflow-x: auto; }
   .trust-panel-body .tbl,
   .inspector-trust .tbl { display: block; overflow-x: auto; }
