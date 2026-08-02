@@ -12,7 +12,11 @@ test('session selection commits only a current, bounded read and preserves the p
   const commit = open.indexOf('sidRef.current = id; setSid(id); setMsgs([])')
 
   assert.ok(read >= 0 && commit > read, 'the target must be read before replacing the visible session')
-  assert.match(open, /const seq = \+\+openSessionSeqRef\.current/)
+  // A purely OBSERVATIONAL read of the live session must not burn a sequence number — doing so
+  // would supersede the session the user is actually watching. Every other path still claims a new
+  // one. Anchoring on the unconditional `++` stopped matching when that distinction was introduced.
+  assert.match(open, /const seq = observingLiveSession \? openSessionSeqRef\.current : \+\+openSessionSeqRef\.current/)
+  assert.match(open, /const observingLiveSession = observeOnly && id === sidRef\.current && runningRef\.current/)
   assert.match(open, /seq !== openSessionSeqRef\.current/)
   assert.match(source, /const newChat = \(\) => \{\s*\+\+openSessionSeqRef\.current/)
 })

@@ -83,7 +83,12 @@ test('exact recovery POST always carries instruction, clean display, and mode on
   assert.equal(calls.length, 1)
   assert.equal(calls[0].url, '/proxy/app/api/assistant/sessions/session%20one/message_stream')
   assert.equal(calls[0].options.method, 'POST')
-  assert.deepEqual(JSON.parse(calls[0].options.body), payload)
+  // The body gained `acknowledged_live_share_ids`: a recovery POST now states which live public-link
+  // states the operator has seen, so the server can refuse a retry into a share that changed under
+  // them. A whole-body deepEqual made that addition look like a failure; the three fields this test
+  // is actually about are checked exactly, and the new one is checked for its fail-closed default.
+  assert.deepEqual(JSON.parse(calls[0].options.body),
+    { ...payload, acknowledged_live_share_ids: [] })
 })
 
 test('an equal display is still explicit in the exact recovery body', async () => {
@@ -92,7 +97,8 @@ test('an equal display is still explicit in the exact recovery body', async () =
     body = JSON.parse(options.body)
     return completedStream()
   }, async () => assistantMessageStream('same', 'same text', 'auto', {}, undefined, 'same text'))
-  assert.deepEqual(body, { instruction: 'same text', display: 'same text', mode: 'auto' })
+  assert.deepEqual(body, { instruction: 'same text', display: 'same text', mode: 'auto',
+    acknowledged_live_share_ids: [] })
 })
 
 test('identity mismatch is blocked while ambiguous transport and an already-running worker keep polling', () => {
@@ -140,7 +146,9 @@ test('Assistant reload/retry path reuses the dangling turn and never appends a s
   assert.match(openSession, /const latestTurn = danglingAssistantTurn\(latest\.messages \|\| \[\]\)/)
   assert.match(openSession, /latestTurn\.turn_id !== dangling\.turn_id/)
   assert.match(openSession, /const recovery = assistantRecoveryPayload\(latestTurn\)/)
-  assert.match(openSession, /assistantMessageStream\(id, recovery\.instruction, recovery\.mode, \{\},[\s\S]*?recovery\.display\)/)
+  assert.match(openSession, /assistantMessageStream\(id, recovery\.instruction, recovery\.mode, \{\},[\s\S]*?recovery\.display, acknowledgedLiveShareIds\)/,
+    'the recovery retry must carry the acknowledged live-share ids, or the server cannot refuse a '
+    + 'retry into a public link whose state changed under the operator')
   assert.doesNotMatch(openSession, /role: 'user'/)
   assert.match(source, /failedTurn\?\.recoveryNeeded[\s\S]*?danglingAssistantTurn\(durableMessages\)[\s\S]*?openSession\(id, \{ recover: true \}\)/)
   assert.match(source, /assistantReplyCompletesTurn\(durableMessages, prior\)/)

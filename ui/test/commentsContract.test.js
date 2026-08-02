@@ -368,7 +368,16 @@ test('a nonterminal command with a failed status read remains an unknown outcome
       /outcome is not known.*draft is preserved/i)
     assert.ok(buttonByText('Refresh comments'))
     assert.equal(buttonByText('Retry same command'), undefined)
-    assert.equal(buttonWithExactText('Post comment').disabled, true)
+    // The composer no longer freezes on an unknown outcome — it relabels to an OBSERVATION. That is
+    // the better answer to "we do not know whether the write landed": the operator can find out
+    // without creating a second intent, instead of being stuck behind a disabled button. Asserting
+    // a disabled "Post comment" pinned the old behaviour and crashed once the label changed, which
+    // took the no-duplicate-POST check below it out of the run.
+    assert.equal(buttonWithExactText('Post comment'), undefined,
+      'an unknown outcome must not still offer the plain submit label')
+    const observe = buttonWithExactText('Check command')
+    assert.ok(observe, 'an unknown outcome must offer a non-mutating way to resolve itself')
+    assert.equal(observe.disabled, false)
     assert.equal(calls.filter(call => call.method === 'POST').length, 1,
       'an unobserved accepted command must not be submitted again')
   } finally { await harness.close() }
@@ -672,9 +681,16 @@ test('RunView refreshes comment feeds only from comments_revision, never global 
   assert.match(inspector, /detailResource\.scope === detailScope/)
   assert.match(inspector, /const detail = detailCurrent \? detailResource\.data : null/,
     'a node, attempt, or generation switch must hide stale full detail before passive effects')
+  // The `on` latch that used to gate this predicate moved into `finish`/`cancel` as a
+  // `detailFlightRef.current !== request` check, which is strictly stronger: the old flag guarded
+  // only the SUCCESS branch, so a stale FAILURE could still write an error over a newer request's
+  // state. Pin the fence where it lives now, and pin that it covers both outcomes.
   assert.match(inspector,
-    /if \(on && valid && detailMatchesGeneration\(d\) && detailMatchesAttempt\(d\)\)/,
+    /if \(valid && detailMatchesGeneration\(value\) && detailMatchesAttempt\(value\)\)/,
     'a reset racing the full-detail response must not relabel another attempt as current')
+  assert.equal((inspector.match(/if \(detailFlightRef\.current !== request\) return/g) || []).length, 2,
+    'both the success and the failure path must drop a settlement the current request no longer owns')
+  assert.match(inspector, /const finish = \(ok, data = null, error = ''\) => \{\s*if \(detailFlightRef\.current !== request\) return/)
   assert.match(runView, /const preserveComment = id === current\.nodeId && nextTab === 'Comments'/)
   assert.match(runView, /nodeGeneration: preserveComment \? current\.nodeGeneration : null/,
     'dock/report node transitions must not retarget an old comment to a different node')
