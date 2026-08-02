@@ -1,37 +1,53 @@
 import { useEffect, useRef } from 'react'
 
 const dialogStack = []
+const isolatedBackground = new Map()
 
 const highestPriorityLayer = layers => layers.reduce((top, candidate) => (
   !top || candidate.priority >= top.priority ? candidate : top
 ), null)
 
-const setLayerBlocked = (layer, blocked) => {
-  const root = layer.ref.current
-  if (layer.blockedRoot && layer.blockedRoot !== root) {
-    layer.blockedRoot.inert = layer.restoreInert
-    if (layer.restoreAriaHidden == null) layer.blockedRoot.removeAttribute('aria-hidden')
-    else layer.blockedRoot.setAttribute('aria-hidden', layer.restoreAriaHidden)
-    layer.blockedRoot = null
+const restoreBackgroundIsolation = () => {
+  for (const [node, saved] of isolatedBackground) {
+    // React may deliberately change either attribute while the modal is open (for example when a
+    // destructive child dialog closes). Do not overwrite that newer state if it already differs
+    // from the values this helper applied.
+    if (node.inert === true) node.inert = saved.inert
+    if (node.getAttribute('aria-hidden') === 'true') {
+      if (saved.ariaHidden == null) node.removeAttribute('aria-hidden')
+      else node.setAttribute('aria-hidden', saved.ariaHidden)
+    }
   }
-  if (!root) return
-  if (blocked && layer.blockedRoot !== root) {
-    layer.restoreInert = root.inert
-    layer.restoreAriaHidden = root.getAttribute('aria-hidden')
-    root.inert = true
-    root.setAttribute('aria-hidden', 'true')
-    layer.blockedRoot = root
-  } else if (!blocked && layer.blockedRoot === root) {
-    root.inert = layer.restoreInert
-    if (layer.restoreAriaHidden == null) root.removeAttribute('aria-hidden')
-    else root.setAttribute('aria-hidden', layer.restoreAriaHidden)
-    layer.blockedRoot = null
+  isolatedBackground.clear()
+}
+
+const isolateBackgroundFor = root => {
+  if (!root?.isConnected) return
+  // Walk from the active dialog to <body>, disabling every sibling branch along that path. Unlike
+  // making a lower dialog root inert, this also works for a child dialog rendered inside its parent:
+  // the child remains interactive while the parent's other controls disappear from both keyboard
+  // and virtual-cursor navigation.
+  let branch = root
+  while (branch && branch !== document.body) {
+    const parent = branch.parentElement
+    if (!parent) break
+    for (const sibling of parent.children) {
+      if (sibling === branch || isolatedBackground.has(sibling)) continue
+      isolatedBackground.set(sibling, {
+        inert: sibling.inert,
+        ariaHidden: sibling.getAttribute('aria-hidden'),
+      })
+      sibling.inert = true
+      sibling.setAttribute('aria-hidden', 'true')
+    }
+    branch = parent
   }
 }
 
 const syncDialogIsolation = () => {
   const topModal = highestPriorityLayer(dialogStack.filter(candidate => candidate.modal))
-  for (const layer of dialogStack) setLayerBlocked(layer, !!topModal && layer !== topModal)
+  restoreBackgroundIsolation()
+  isolateBackgroundFor(topModal?.ref.current)
 }
 
 // Keep keyboard ownership aligned with the effective visual layer order. Equal priorities retain
@@ -57,9 +73,8 @@ export function useDialogFocus(
   useEffect(() => {
     if (!active) return
     const previous = document.activeElement
-    const layer = { ref, modal, priority, blockedRoot: null }
+    const layer = { ref, modal, priority }
     dialogStack.push(layer)
-    syncDialogIsolation()
     // True modals always outrank coexisting nonmodal surfaces, even when a route update mounts the
     // latter after the modal. Visual priority wins among peers; equal layers use mount order.
     const topmost = () => {
@@ -81,6 +96,9 @@ export function useDialogFocus(
       // The tracking listener is attached below, so record our own programmatic initial focus now.
       focusWasInside = root.contains(document.activeElement)
     }
+    // Move focus before applying aria-hidden so browsers never have to reject hiding the element
+    // that still owns focus. The modal now exclusively owns both keyboard and accessibility trees.
+    syncDialogIsolation()
     const onKey = (event) => {
       if (!topmost()) return
       if (event.defaultPrevented) return
@@ -119,7 +137,6 @@ export function useDialogFocus(
       const wasTopmost = topmost()
       const index = dialogStack.indexOf(layer)
       if (index >= 0) dialogStack.splice(index, 1)
-      setLayerBlocked(layer, false)
       syncDialogIsolation()
       if (wasTopmost && previous && document.contains(previous) && (modal || focusWasInside)) {
         previous.focus({ preventScroll: true })
