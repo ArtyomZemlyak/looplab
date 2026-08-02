@@ -54,7 +54,7 @@ from looplab.engine.crash_repair import CrashRepairMixin
 from looplab.engine.eval_dispatch import EvalDispatchMixin
 from looplab.engine.eval_stages import EvalStagesMixin
 from looplab.engine.evaluate import EvaluateMixin
-from looplab.engine.node_build import NodeBuildMixin
+from looplab.engine.node_build import NodeBuildMixin, developer_crash_records
 from looplab.engine.proposal_cues import ProposalCuesMixin, normalize_steering_context
 from looplab.engine.resources import (ResourceSchedulingMixin, cuda_visible_device_tokens,
                                       default_gpu_host_lease_path, detect_gpu_inventory)
@@ -5223,10 +5223,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # metric — a false success that pollutes the search (the 401-window nodes 50-54 each faked
             # the parent's 0.81 this way). node_created → node_failed keeps the one-terminal invariant.
             elif is_developer_error(code):
-                self.store.append(EV_NODE_FAILED, {
-                    "node_id": node_id, "generation": 0,
-                    "error": code, "reason": "developer_crash",
-                    "eval_seconds": 0.0})
+                # Terminal only — see `_request_create_pause` below for why the pause is queued.
+                crash_terminal, _crash_pause = developer_crash_records(
+                    node_id, 0, code,
+                    "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
+                    "unresolved within the node) — resume once it's fixed")
+                self.store.append(crash_terminal[0], crash_terminal[1])
                 # Circuit-breaker — PAUSE on the FIRST developer_crash. A developer_crash means the
                 # Developer couldn't finish THIS node even after the LLM client's own within-call retries
                 # (429 / 5xx / throttle-403 all back off + retry): a problem that a NEW node can't fix
@@ -5443,13 +5445,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
                 return
             if is_developer_error(code):
-                self.store.append(EV_NODE_FAILED, {
-                    "node_id": node.id, "generation": generation,
-                    "error": code, "reason": "developer_crash", "eval_seconds": 0.0})
-                self.store.append(EV_PAUSE, {
-                    "node_id": node.id, "generation": generation,
-                    "reason": "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
-                              "unresolved within the node) — resume once it's fixed"})
+                for crash_type, crash_data in developer_crash_records(
+                        node.id, generation, code,
+                        "auto-paused: a Developer session crashed (LLM unreachable or a hard "
+                        "error, unresolved within the node) — resume once it's fixed"):
+                    self.store.append(crash_type, crash_data)
         self._emit_agent_report(node.id, generation)
         # Consume the predictive telemetry for THIS node too: a "propose" reset re-runs the researcher
         # (setting last_hyp_priority/last_foresight), so without consuming it here the pick set would
@@ -5655,14 +5655,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # one-terminal invariant) and trip the SAME developer-crash circuit-breaker, so an operator
             # inject during an LLM outage can't silently slip a garbage-code node past it.
             if is_developer_error(code):
-                self.store.append(EV_NODE_FAILED, {
-                    "node_id": node_id, "generation": 0,
-                    "error": code, "reason": "developer_crash", "eval_seconds": 0.0})
-                self.store.append(EV_PAUSE, {
-                    "node_id": node_id, "generation": 0,
-                    "reason": "auto-paused: a Developer session crashed while building an injected node "
-                              "(LLM unreachable or a hard error, unresolved within the node) — resume "
-                              "once it's fixed"})
+                for crash_type, crash_data in developer_crash_records(
+                        node_id, 0, code,
+                        "auto-paused: a Developer session crashed while building an injected node "
+                        "(LLM unreachable or a hard error, unresolved within the node) — resume "
+                        "once it's fixed"):
+                    self.store.append(crash_type, crash_data)
         if developer_called:
             self._emit_agent_report(node_id)
             # consume predictive telemetry for this node so it can't leak onto the next created node

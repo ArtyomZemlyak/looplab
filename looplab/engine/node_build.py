@@ -17,8 +17,61 @@ from typing import Optional
 
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import Idea, RunState, normalize_researcher_footprint, is_developer_error
-from looplab.events.types import EV_AGENT_DECISION, EV_NODE_CREATED
+from looplab.events.types import EV_AGENT_DECISION, EV_NODE_CREATED, EV_NODE_FAILED, EV_PAUSE
 from looplab.search.operators import merge_idea
+
+# --- the Developer-crash transaction (doc 25 EC-03) -------------------------------------------
+#
+# A Developer that cannot finish returns its error IN BAND as the node's code. Left pending, the
+# eval then runs the PARENT's carried-over entrypoint and inherits the PARENT's metric — a false
+# success that pollutes the search (the 401-window nodes 50-54 each faked the parent's 0.81 this
+# way). So the node is FAILED now, and the run is PAUSED: a Developer that could not finish even
+# after the LLM client's own within-call retries (429 / 5xx / throttle-403 all back off and retry)
+# has hit a problem a NEW node cannot fix, so rapid-firing more dead nodes is the wrong response —
+# the 403 blowout spun 67 of them.
+#
+# The pair was spelled out at five sites, and the reason strings had already drifted apart. What is
+# shared is the RECORDS: the two event types, their order (terminal first — a pause naming a node
+# that has no terminal reads as an operator freeze), and every field name and default. What is NOT
+# shared, deliberately, is how each site APPENDS them, because those genuinely differ and the
+# difference is load-bearing:
+#
+#   * the speculation sites append both under one tail CAS, so a concurrent operator control lands
+#     wholly before or wholly after the pair;
+#   * `_create_node`'s fan-out runs in a WORKER thread, where EV_PAUSE is a run-GLOBAL folded event
+#     outside invariant #1's worker seam — it queues the pause via `_request_create_pause` and the
+#     MAIN task appends it after the join, because a worker's byte position relative to a
+#     concurrent EV_RESUME is nondeterministic;
+#   * the two serial orchestrator sites append sequentially on the main task.
+#
+# Unifying those onto one CAS discipline would be an improvement rather than preservation, and doc
+# 25 marks it as a separate decision item.
+
+
+def developer_crash_records(node_id: int, generation: int, code: str, pause_reason: str,
+                            *, terminal: bool = True) -> list:
+    """The `(node_failed, pause)` pair for a Developer that returned the crash sentinel.
+
+    `pause_reason` is the caller's — the sites describe genuinely different situations (a fresh
+    build, a rebuild before GPU dispatch, an operator inject, a recovery sweep) and an operator
+    reading the pause needs to know which. Everything else is fixed here.
+
+    `terminal=False` omits the `node_failed` and returns the pause alone. That is the recovery
+    branch in `_close_developer_sentinel_once`: a legacy writer (or a crash in the old two-append
+    path) can leave the sentinel already terminal with only its pause lost, and re-appending a
+    second terminal would violate the one-terminal-per-node invariant.
+    """
+    records = []
+    if terminal:
+        records.append((EV_NODE_FAILED, {
+            "node_id": node_id, "generation": generation,
+            "error": code, "reason": "developer_crash", "eval_seconds": 0.0,
+        }))
+    records.append((EV_PAUSE, {
+        "node_id": node_id, "generation": generation, "reason": pause_reason,
+    }))
+    return records
+
 
 # Sentinel for `_emit_node_created`'s optional payload keys (moved with its only user):
 # distinguishes "key not passed" (the key is OMITTED from the event, matching each call site's

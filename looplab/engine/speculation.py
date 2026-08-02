@@ -24,6 +24,7 @@ from looplab.core.models import (
 from looplab.core.llm_broker import in_llm_lane
 from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.replay import fold
+from looplab.engine.node_build import developer_crash_records
 from looplab.events.types import (
     EV_CARD_ADDED,
     EV_CARD_BUILD_ATTEMPTED,
@@ -638,22 +639,11 @@ class SpeculationMixin:
                         or terminal_node.status is not NodeStatus.pending
                     ):
                         return None
-                    self.store.append_many([
-                        (EV_NODE_FAILED, {
-                            "node_id": node_id,
-                            "generation": terminal_node.attempt,
-                            "error": result.code,
-                            "reason": "developer_crash",
-                            "eval_seconds": 0.0,
-                        }),
-                        (EV_PAUSE, {
-                            "node_id": node_id,
-                            "generation": terminal_node.attempt,
-                            "reason": "auto-paused: a Developer session crashed (LLM unreachable "
-                                      "or a hard error, unresolved within the node) — resume once "
-                                      "it's fixed",
-                        }),
-                    ], expected_last_seq=tail)
+                    self.store.append_many(developer_crash_records(
+                        node_id, terminal_node.attempt, result.code,
+                        "auto-paused: a Developer session crashed (LLM unreachable or a hard "
+                        "error, unresolved within the node) — resume once it's fixed",
+                    ), expected_last_seq=tail)
                     self._create_paused = True
                     return None
 
@@ -1342,20 +1332,9 @@ class SpeculationMixin:
         records: list[tuple[str, dict[str, Any]]]
         if pending is not None:
             node = pending
-            records = [
-                (EV_NODE_FAILED, {
-                    "node_id": node.id,
-                    "generation": node.attempt,
-                    "error": node.code,
-                    "reason": "developer_crash",
-                    "eval_seconds": 0.0,
-                }),
-                (EV_PAUSE, {
-                    "node_id": node.id,
-                    "generation": node.attempt,
-                    "reason": "auto-paused: recovered a Developer crash before GPU dispatch",
-                }),
-            ]
+            records = developer_crash_records(
+                node.id, node.attempt, node.code,
+                "auto-paused: recovered a Developer crash before GPU dispatch")
         else:
             # A legacy writer (or a crash in the old two-append path) may already have made the
             # sentinel terminal while losing only its pause. Folded ``paused`` cannot distinguish
@@ -1381,13 +1360,11 @@ class SpeculationMixin:
             )
             if node is None:
                 return False
-            records = [
-                (EV_PAUSE, {
-                    "node_id": node.id,
-                    "generation": node.attempt,
-                    "reason": "auto-paused: recovered a terminal Developer crash",
-                }),
-            ]
+            # Pause ONLY: this node is already terminal, and a second terminal would break the
+            # one-terminal-per-node invariant.
+            records = developer_crash_records(
+                node.id, node.attempt, node.code,
+                "auto-paused: recovered a terminal Developer crash", terminal=False)
         tail = events[-1].seq if events else -1
         try:
             async with self._write_lock:

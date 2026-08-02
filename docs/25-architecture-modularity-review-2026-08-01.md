@@ -175,6 +175,7 @@ The copies where drift is a correctness event, not a style problem:
 
 - **ES-02** node-creation commit epilogue ×3 (`orchestrator.py` — the same bug already fixed 3×).
 - **EC-03** developer-crash `node_failed`+`pause` pair ×5 (reason strings already drift).
+  *(resolved 2026-08-02 — `node_build.developer_crash_records`.)*
 - **EV-03** completion-certificate invalidation ×5 in the fold (one drifted copy already shipped a
   selection bug). *(resolved 2026-08-02 — `replay._invalidate_completion_certificates`.)*
 - **ES-07** tail-CAS append retry loop ×8 (inconsistent exhaustion behavior by accident).
@@ -548,9 +549,31 @@ Scope: `looplab/engine/`: strategy, research_cadence, novelty, speculation, abla
 
 *Recommendation:* Decompose the loop body into named phase methods (recover_sentinels, serve_raw_stage, drop_stale, serve_head, admit_evals, decide_exit) that each take and return one folded snapshot, so the state is folded once per turn and the exit-gate predicate exists in exactly one place. The two admitted-vs-terminal gate tuples should be one small dataclass computed once per fold. Then address the acknowledged fold-caching TODO.
 
-#### EC-03 · HIGH · duplication · effort: small
+#### EC-03 · HIGH · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **Developer-crash terminal+pause event pair duplicated five times**
+
+*Resolution:* `engine/node_build.py::developer_crash_records(node_id, generation, code,
+pause_reason, *, terminal=True)` is the one spelling of the RECORDS — event types, order (terminal
+first: a pause naming a node with no terminal reads as an operator freeze), field names and
+defaults. All five sites build from it. `terminal=False` serves the recovery branch of
+`_close_developer_sentinel_once`, where the node is already terminal and a second one would break
+the one-terminal-per-node invariant.
+
+The per-site APPEND discipline is deliberately NOT unified, because the differences are
+load-bearing: the speculation sites append under one tail CAS, the fan-out queues its pause via
+`_request_create_pause` for the main task (a worker-written EV_PAUSE races EV_RESUME for byte
+position — CLAUDE.md invariant #1), and the two serial sites append sequentially. Doc 25 itself
+marks unifying them onto CAS as a separate decision item, not preservation.
+
+Pause wording stays each caller's — the sites describe genuinely different situations and an
+operator reading the pause needs to know which — while everything a replay reads is fixed.
+
+`tests/test_developer_crash_transaction.py` pins the record shape, the terminal-first order, the
+pause/terminal identity match, the pause-only recovery mode, a source guard against a re-spelled
+terminal (itself pinned against false negatives), and the worker-seam rule. Verified to have teeth:
+reordering the pair fails two cases, and making the fan-out append its own EV_PAUSE fails the
+worker-seam case.
 
 *Locations:* `looplab/engine/speculation.py:644`, `looplab/engine/speculation.py:1351`, `looplab/engine/orchestrator.py:5233`, `looplab/engine/orchestrator.py:5453`, `looplab/engine/orchestrator.py:5665`
 
