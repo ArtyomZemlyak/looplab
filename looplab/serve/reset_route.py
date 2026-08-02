@@ -993,7 +993,23 @@ async def durable_reset_run(
         # mean the CAS could no longer reject a generation change at all; resolving the CURRENT
         # generation instead narrows the window to "changed between this read and the locked
         # re-check", which is precisely what the fence is for.
-        expected_generation = srv.commands.run_generation(rd)
+        # An IN-FLIGHT Replay is the authority on the generation its operation was bound to. Past the
+        # archive step there is no live event log left to derive from, and `run_generation` answers
+        # 404 "no such run" — which would 404 the exact bodyless retry this route's own remediation
+        # demands ("Retry this exact operation; never submit a new Replay"), leaving a scripted
+        # caller (CLI, operator tooling — the callers this opt-out exists for) unable to finish the
+        # operation at all. The marker's generation re-derives the SAME uuid5 operation id below, so
+        # the retry rejoins the existing receipt rather than opening a second Replay. With no marker
+        # nothing is in flight and the live log stays the source, 404 included.
+        try:
+            in_flight = load_run_reset_marker(rd)
+        except RunResetStorageError as exc:
+            raise HTTPException(503, {
+                "code": "reset_fence_unavailable",
+                "message": "Replay ownership cannot be inspected safely.",
+            }) from exc
+        expected_generation = ((in_flight or {}).get("expected_generation")
+                               or srv.commands.run_generation(rd))
         if not expected_generation:
             # No durable generation identity yet (an empty or torn first line). Accepting a mutation
             # here would re-open the very reset race the token exists to close — see

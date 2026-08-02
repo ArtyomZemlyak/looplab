@@ -64,6 +64,77 @@ def test_state_exposes_deprecated_hypotheses_compat_projection(tmp_path):
                         "rationale", "created_at_node", "best_delta", "priority"}
 
 
+def _delete_run(client, run_id: str, *, rd: Path, op: str = "1" * 8):
+    """Delete a run through the operation-bound transaction that replaced bodyless DELETE.
+
+    `DELETE /api/runs/{id}` is now a 409 stub ("deletion_identity_required"): a bodyless request
+    could otherwise destroy a REPLACEMENT generation the caller never inspected. The real route is
+    `POST /api/runs/{id}/deletions` carrying the exact generation + log tail the caller saw, plus a
+    client-minted operation id so a retried request replays one receipt instead of deleting twice.
+
+    A test that keeps calling the stub collects its 409 for free and stops exercising the
+    destructive boundary at all — every guard downstream becomes unreachable, so the test passes
+    while proving nothing. Read the identity from DISK so this works on runs no view has listed."""
+    from looplab.serve.run_commands import run_generation_token
+    from looplab.events.eventstore import EventStore
+
+    events = EventStore(rd / "events.jsonl").read_all()
+    return client.post(f"/api/runs/{run_id}/deletions", json={
+        "operation_id": f"{op}-1111-4111-8111-{'1' * 12}",
+        "expected_generation": run_generation_token(events),
+        "expected_seq": events[-1].seq if events else -1,
+    })
+
+
+def _replacement_spawn(rd: Path, *, pid: int = 9101, task_id: str = "replacement"):
+    """A `_spawn_engine` stand-in that behaves like a real Replay child: it writes the
+    generation-defining first event.
+
+    Replay reports success only once a REPLACEMENT generation is durably visible
+    (`complete_reset_if_observed`), so a fake that merely returns a pid leaves the transaction at
+    `phase="popen_returned"` and the route answers 425 forever. Writing that event needs the
+    operation fence: while the reset marker exists, `EventStore` refuses every writer whose
+    `RUN_RESET_OPERATION_ENV` does not match the marker's operation id
+    (`core/run_reset.py::assert_run_reset_write_allowed`, read from the process environment). Adopt
+    the value the route froze into the child env rather than inventing an id the marker rejects."""
+    import os
+
+    from looplab.core.run_reset import RUN_RESET_OPERATION_ENV
+    from looplab.events.eventstore import EventStore
+
+    def spawn(*_args, env=None, **_kwargs):
+        previous = os.environ.get(RUN_RESET_OPERATION_ENV)
+        os.environ[RUN_RESET_OPERATION_ENV] = (env or {}).get(RUN_RESET_OPERATION_ENV, "")
+        try:
+            EventStore(rd / "events.jsonl").append("run_started", {
+                "run_id": rd.name, "task_id": task_id, "goal": "new", "direction": "min"})
+        finally:
+            if previous is None:
+                os.environ.pop(RUN_RESET_OPERATION_ENV, None)
+            else:
+                os.environ[RUN_RESET_OPERATION_ENV] = previous
+        return pid
+
+    return spawn
+
+
+def _run_config_put(client, run_id: str, body: dict, *, generation: str | None = None):
+    """PUT a run's settings carrying the run-generation fence the route now REQUIRES.
+
+    `expected_generation` is validated inside the config lock, because a reset can land between the
+    request arriving and the write — without it a stale tab silently re-configures the REPLACEMENT
+    run. It is mandatory on both body variants (`RunConfigUpdateRequest` and the legacy flat one),
+    so a PUT that omits it is rejected before the route reaches the revision CAS at all: a test that
+    omits it stops exercising the CAS, the pinned-field rules, and the lock behaviour it was written
+    for, and only proves that the request was malformed."""
+    payload = dict(body)
+    payload.setdefault(
+        "expected_generation",
+        generation if generation is not None
+        else client.get(f"/api/runs/{run_id}/state").json()["generation"])
+    return client.put(f"/api/runs/{run_id}/config", json=payload)
+
+
 def _artifact_generation(client, run_id: str = "demo") -> str:
     """The run generation the artifact views are fenced to.
 
@@ -1001,8 +1072,11 @@ def test_resume_claim_popen_gap_fences_reset_and_delete(
     with ThreadPoolExecutor(max_workers=2) as pool:
         resume = pool.submit(client.post, "/api/runs/demo/resume")
         assert entered.wait(2.0), "resume did not reach the claim -> Popen barrier"
+        # The delete arm goes through the deletion TRANSACTION: bodyless DELETE is a 409 stub that
+        # returns instantly without taking the sequencer, so it would sail past the fence and the
+        # arm would then "pass" on a 409 that means "wrong request shape", not "blocked".
         mutate = (pool.submit(client.post, "/api/runs/demo/reset") if mutation == "reset"
-                  else pool.submit(client.delete, "/api/runs/demo"))
+                  else pool.submit(_delete_run, client, "demo", rd=tmp_path / "demo"))
         _time.sleep(0.1)
         assert not mutate.done(), "lifecycle mutation crossed the in-flight launch fence"
         release.set()
@@ -1010,7 +1084,21 @@ def test_resume_claim_popen_gap_fences_reset_and_delete(
         assert mutate.result(timeout=2.0).status_code == 409
 
 
-def test_reset_rename_failure_rolls_back_everything_and_never_spawns(tmp_path, monkeypatch):
+def test_reset_archive_failure_keeps_the_source_of_truth_and_never_spawns(tmp_path, monkeypatch):
+    """A failed archive step leaves the event log where it was and starts no replacement engine.
+
+    Inject at `_durable_archive_move`, the primitive the archive actually calls. This test used to
+    patch `Path.rename`; the move became a native no-replace `renameat2`/`MoveFileExW` call, so that
+    patch stopped intercepting anything and the test was asserting a failure code against a Replay
+    that had quietly SUCCEEDED — including its spawn.
+
+    The transaction no longer unwinds the artifacts it already archived: the receipt records
+    `archiving`, so the retry continues from there rather than re-doing a move it cannot prove it
+    made. What must still hold is that nothing is LOST (the event log is untouched and byte-exact,
+    a pre-existing approved archive is not overwritten) and that no engine is launched against a
+    half-archived run.
+    """
+    import looplab.serve.reset_route as reset_route
     from looplab.serve.routers import control as control_router
 
     _build_run(tmp_path)
@@ -1019,40 +1107,42 @@ def test_reset_rename_failure_rolls_back_everything_and_never_spawns(tmp_path, m
     (rd / "spans.jsonl").write_text('{"span":1}\n', encoding="utf-8")
     approved_archive = rd / "spans.jsonl.reset-1"
     approved_archive.write_text('{"approved":true}\n', encoding="utf-8")
-    real_rename = Path.rename
-    real_replace = Path.replace
+    before = (rd / "events.jsonl").read_bytes()
+    real_move = reset_route._durable_archive_move
 
-    def _fail_source_of_truth(self, target):
-        if self.name == "events.jsonl":
-            raise OSError("injected event-log rename failure")
-        if self.name.startswith("spans.jsonl.reset-"):
-            raise AssertionError("rollback must not re-enter Path.rename")
-        return real_rename(self, target)
-
-    def _replace_with_windows_shadow(self, target):
-        result = real_replace(self, target)
-        if self.name.startswith("spans.jsonl.reset-"):
-            self.with_name(f"{self.name.upper()}.tmp").write_text(
-                "transaction shadow\n", encoding="utf-8")
-        return result
+    def _fail_source_of_truth(source, destination):
+        if source.name == "events.jsonl":
+            raise OSError("injected event-log archive failure")
+        return real_move(source, destination)
 
     spawns = []
     with monkeypatch.context() as patch:
-        patch.setattr(Path, "rename", _fail_source_of_truth)
-        patch.setattr(Path, "replace", _replace_with_windows_shadow)
+        patch.setattr(reset_route, "_durable_archive_move", _fail_source_of_truth)
         patch.setattr(
             control_router, "_spawn_engine", lambda *a, **kw: spawns.append((a, kw)))
         with TestClient(make_app(tmp_path)) as client:
             response = client.post("/api/runs/demo/reset")
 
-    assert response.status_code == 500
-    assert (rd / "events.jsonl").exists() and (rd / "spans.jsonl").exists()
+    assert response.status_code == 425
+    detail = response.json()["detail"]
+    assert detail["code"] == "reset_pending"
+    assert "events.jsonl" in detail["message"], "the operator must be told WHICH artifact blocked"
+    assert detail["remediation"] == "Retry this exact operation; do not submit a new Replay."
+    assert (rd / "events.jsonl").read_bytes() == before        # source of truth never moved
     assert approved_archive.read_text(encoding="utf-8") == '{"approved":true}\n'
-    assert [path for path in rd.glob("*.reset-*") if path != approved_archive] == []
-    assert not spawns
+    assert not spawns, "no engine may be launched against a half-archived run"
 
 
-def test_reset_spawn_failure_restores_archived_run(tmp_path, monkeypatch):
+def test_reset_spawn_failure_stays_resumable_without_losing_the_archived_run(tmp_path, monkeypatch):
+    """A Popen that raised is UNCERTAIN, so Replay keeps the operation open instead of rolling back.
+
+    This used to assert a 500 and a full restore. Rolling back is no longer safe: the process may
+    have started before the exception surfaced, and un-archiving underneath a live child would hand
+    it a log the server also considers current. The transaction instead reports
+    `reset_launch_uncertain` and stays resumable — so what has to be proven is that nothing is lost
+    (the archived log is byte-identical to the original) and that the retry the remediation demands
+    REJOINS the same operation rather than opening a second Replay.
+    """
     from looplab.serve.routers import control as control_router
 
     _build_run(tmp_path)
@@ -1067,10 +1157,30 @@ def test_reset_spawn_failure_restores_archived_run(tmp_path, monkeypatch):
             lambda *_a, **_kw: (_ for _ in ()).throw(OSError("injected Popen failure")))
         with TestClient(make_app(tmp_path)) as client:
             response = client.post("/api/runs/demo/reset")
-    assert response.status_code == 500
-    assert (rd / "events.jsonl").read_bytes() == before
-    assert (rd / "spans.jsonl").read_text(encoding="utf-8") == '{"span":1}\n'
-    assert not list(rd.glob("*.reset-*"))
+
+            assert response.status_code == 503
+            failed = response.json()["detail"]
+            assert failed["code"] == "reset_launch_uncertain"
+            assert failed["remediation"] == "Retry this exact operation; never submit a new Replay."
+            archived = next(rd.glob("events.jsonl.reset-*"))
+            assert archived.read_bytes() == before      # recoverable, byte for byte
+
+            # The retry carries no body, exactly as the failed request did. It must resolve to the
+            # SAME operation: the live event log is gone at this point, so deriving the generation
+            # from disk answers 404 "no such run" and the operation can never be finished by the
+            # scripted callers the bodyless form exists for.
+            patch.setattr(control_router, "_spawn_engine", _replacement_spawn(rd))
+            rejoined = client.post("/api/runs/demo/reset")
+
+    assert rejoined.status_code != 404, "the run must not read as deleted while Replay is in flight"
+    rejoin = rejoined.json()["detail"]
+    assert rejoin["operation_id"] == failed["operation_id"], (
+        "a bodyless retry must rejoin the operation, not open a second Replay")
+    assert rejoin["expected_generation"] == failed["expected_generation"]
+    # Still uncertain, and deliberately so: the first child's launch claim is neither confirmed dead
+    # nor cleared, so re-spawning could double-launch. The retry is a rejoin, not a relaunch.
+    assert rejoined.status_code == 425 and rejoin["phase"] == "launch_uncertain"
+    assert next(rd.glob("events.jsonl.reset-*")).read_bytes() == before
 
 
 def test_reset_replays_legacy_snapshot_with_off_defaults_and_explicit_null_aliases(
@@ -1085,10 +1195,14 @@ def test_reset_replays_legacy_snapshot_with_off_defaults_and_explicit_null_alias
     snapshot.write_text(json.dumps(raw), encoding="utf-8")
     before = snapshot.read_bytes()
     spawns = []
+    # Capture the frozen launch AND write the replacement generation: without that first event the
+    # transaction never leaves `popen_returned`, so the route answers 425 and the `--set` argv this
+    # test exists to inspect is never reached through a successful Replay.
+    replacement = _replacement_spawn(rd, pid=4242)
 
     def capture_spawn(args, **kwargs):
         spawns.append((args, kwargs))
-        return 4242
+        return replacement(args, **kwargs)
 
     monkeypatch.setattr(control_router, "_spawn_engine", capture_spawn)
     with TestClient(make_app(tmp_path)) as client:
@@ -1097,8 +1211,12 @@ def test_reset_replays_legacy_snapshot_with_off_defaults_and_explicit_null_alias
     assert response.status_code == 200
     assert len(spawns) == 1
     args, kwargs = spawns[0]
-    assert args.count("--set") == 2
+    # The launch is frozen field by field: every optional setting the replacement must NOT re-inherit
+    # from ambient config is passed as an explicit `--set <field>=null`. Pin the two legacy aliases
+    # by name — a bare count would break on every field added to the freeze without saying anything
+    # about the aliases this test exists for.
     assert "eval_parallel=null" in args and "llm_parallel=null" in args
+    assert args.count("--set") == len([a for a in args if a.endswith("=null")])
     env = kwargs["env"]
     for key in (
             "LOOPLAB_TRAIN_MONITOR", "LOOPLAB_ASHA_LIVE",
@@ -1609,29 +1727,40 @@ def test_delete_finished_and_stalled_runs(tmp_path):
     engine) — the old guard keyed on `finished` and wrongly 409'd a stalled run."""
     _build_run(tmp_path, "done")
     client = TestClient(make_app(tmp_path))
-    assert client.delete("/api/runs/done").status_code == 200
+    assert _delete_run(client, "done", rd=tmp_path / "done").status_code == 200
     assert not (tmp_path / "done").exists()
 
     sr = tmp_path / "stalled"
     sr.mkdir()                       # engine died without run_finished
     (sr / "events.jsonl").write_text('{"seq":0,"type":"run_started","data":{}}\n', encoding="utf-8")
-    r = client.delete("/api/runs/stalled")
+    r = _delete_run(client, "stalled", rd=sr, op="2" * 8)
     assert r.status_code == 200 and not sr.exists()             # was a spurious 409 before the fix
 
 
 def test_delete_and_reset_fail_closed_when_engine_liveness_is_unknown(tmp_path, monkeypatch):
-    from looplab.serve.routers import control as control_router
-    from looplab.serve.routers import org as org_router
+    """Neither destructive route may run while it cannot tell whether an engine still owns the run."""
+    import looplab.serve.reset_route as reset_route
+    from looplab.serve import deletion_service
 
     _build_run(tmp_path, "delete-unknown")
     _build_run(tmp_path, "reset-unknown")
+    # Replay validates the task snapshot BEFORE it reads liveness, so without one the reset arm
+    # 400s on "no reproducible task snapshot" and never reaches the gate under test.
+    _make_resumable(tmp_path / "reset-unknown")
     client = TestClient(make_app(tmp_path))
-    monkeypatch.setattr(org_router, "_engine_liveness", lambda _rd: None)
-    monkeypatch.setattr(control_router, "_engine_liveness", lambda _rd: None)
+    # Each route's liveness read moved to the module that owns its transaction. Patching the old
+    # `routers.org` / `routers.control` names injected nothing (org no longer even defines it), so
+    # both arms were running against REAL liveness and proving nothing about failing closed.
+    monkeypatch.setattr(deletion_service, "_engine_liveness", lambda _rd: None)
+    monkeypatch.setattr(reset_route, "_engine_liveness", lambda _rd: None)
 
-    deleted = client.delete("/api/runs/delete-unknown")
-    assert deleted.status_code == 409
+    # Both fail closed; they classify the same unknown differently, and correctly: deletion is a
+    # durable retryable transaction, so unverifiable ownership is a transient 503 the caller should
+    # re-attempt, while Replay reports it as a 409 conflict on the run's current state.
+    deleted = _delete_run(client, "delete-unknown", rd=tmp_path / "delete-unknown")
+    assert deleted.status_code == 503
     assert deleted.json()["detail"]["code"] == "engine_liveness_unknown"
+    assert deleted.json()["detail"]["retryable"] is True
     assert (tmp_path / "delete-unknown" / "events.jsonl").is_file()
 
     reset = client.post("/api/runs/reset-unknown/reset")
@@ -2104,12 +2233,18 @@ def test_settings_and_run_config_openapi_contracts_preserve_legacy_runtime(tmp_p
         "application/json"]["schema"]
     run_variants = {variant["title"]: variant for variant in run_body["anyOf"]}
     canonical_run = run_variants["RunConfigUpdateRequest"]
-    assert canonical_run["required"] == ["settings"]
+    # The run generation is REQUIRED on both variants and the revision stays optional: the revision
+    # is a lost-update guard, the generation says WHICH run this body was composed against. A
+    # generated client that omitted it would silently re-configure a replacement run, so it must be
+    # visible in the published schema, not only enforced at runtime.
+    assert canonical_run["required"] == ["settings", "expected_generation"]
     assert canonical_run["additionalProperties"] is False
     assert rev_string_variant(canonical_run["properties"]["expected_revision"])["pattern"] == r"^[0-9a-f]{64}$"
+    assert canonical_run["properties"]["expected_generation"]["pattern"] == r"^[0-9a-f]{64}$"
     legacy_run = run_variants["LegacyRunConfigUpdateRequest"]
     assert legacy_run["additionalProperties"] is True
     assert legacy_run["not"] == {"required": ["settings"]}
+    assert legacy_run["required"] == ["expected_generation"]
     assert rev_string_variant(legacy_run["properties"]["expected_revision"])["pattern"] == r"^[0-9a-f]{64}$"
     assert components["RunConfigResponse"]["additionalProperties"] is True
     assert "_looplab_config_meta" in components["RunConfigResponse"]["required"]
@@ -2133,7 +2268,7 @@ def test_settings_and_run_config_openapi_contracts_preserve_legacy_runtime(tmp_p
     assert cleared_secret.status_code == 200 and cleared_secret.json()["set"] is False
 
     run_config = client.get("/api/runs/demo/config").json()
-    updated = client.put("/api/runs/demo/config", json={
+    updated = _run_config_put(client, "demo", {
         "timeout": 47.0,
         "expected_revision": run_config["_looplab_config_meta"]["config_revision"],
     })
@@ -2141,7 +2276,7 @@ def test_settings_and_run_config_openapi_contracts_preserve_legacy_runtime(tmp_p
     assert updated.json()["config"]["timeout"] == 47.0
     assert updated.json()["config"]["_looplab_config_meta"]["config_revision"]
     assert client.put("/api/settings", json={"settings": []}).status_code == 400
-    assert client.put("/api/runs/demo/config", json={"settings": []}).status_code == 400
+    assert _run_config_put(client, "demo", {"settings": []}).status_code == 400
 
 
 def test_put_run_config_edits_snapshot_for_resume(tmp_path):
@@ -2153,13 +2288,13 @@ def test_put_run_config_edits_snapshot_for_resume(tmp_path):
     _write_snapshot(rd, timeout=30.0, inline_repair_reasons=["crash"])
     client = TestClient(make_app(tmp_path))
 
-    r = client.put("/api/runs/demo/config",
-                   json={"settings": {"timeout": 120.0, "inline_repair_reasons": ["crash", "timeout"]}})
+    r = _run_config_put(client, "demo", {
+        "settings": {"timeout": 120.0, "inline_repair_reasons": ["crash", "timeout"]}})
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] and set(body["changed"]) == {"timeout", "inline_repair_reasons"}
     # sending an UNCHANGED value is a no-op (only real diffs are written)
-    r2 = client.put("/api/runs/demo/config", json={"settings": {"timeout": 120.0}})
+    r2 = _run_config_put(client, "demo", {"settings": {"timeout": 120.0}})
     assert r2.json()["changed"] == []
     # persisted to the snapshot that resume re-reads through the compatibility loader
     snap = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
@@ -2196,7 +2331,7 @@ def test_legacy_sparse_run_config_is_effective_but_never_backfilled_by_get_or_un
     assert body["_looplab_config_meta"]["config_revision"] == expected_revision
     assert snapshot.read_bytes() == before
 
-    saved = client.put("/api/runs/demo/config", json={"settings": {"timeout": 45.0}})
+    saved = _run_config_put(client, "demo", {"settings": {"timeout": 45.0}})
     assert saved.status_code == 200
     persisted = json.loads(snapshot.read_text(encoding="utf-8"))
     assert persisted["timeout"] == 45.0
@@ -2218,14 +2353,14 @@ def test_run_config_cas_rejects_an_old_delayed_put(tmp_path):
     old_revision = loaded["_looplab_config_meta"]["config_revision"]
     assert len(old_revision) == 64 and int(old_revision, 16) >= 0
 
-    newer = client.put("/api/runs/demo/config", json={
+    newer = _run_config_put(client, "demo", {
         "settings": {"timeout": 91.0}, "expected_revision": old_revision,
     })
     assert newer.status_code == 200
     new_revision = newer.json()["config"]["_looplab_config_meta"]["config_revision"]
     assert new_revision != old_revision
 
-    delayed = client.put("/api/runs/demo/config", json={
+    delayed = _run_config_put(client, "demo", {
         "settings": {"timeout": 17.0}, "expected_revision": old_revision,
     })
     assert delayed.status_code == 409
@@ -2249,7 +2384,7 @@ def test_put_run_config_rejects_invalid_expected_revision(tmp_path, bad_revision
     _write_snapshot(rd, timeout=30.0)
     client = TestClient(make_app(tmp_path))
 
-    response = client.put("/api/runs/demo/config", json={
+    response = _run_config_put(client, "demo", {
         "settings": {"timeout": 44.0}, "expected_revision": bad_revision,
     })
     assert response.status_code == 400
@@ -2264,7 +2399,7 @@ def test_put_run_config_null_expected_revision_is_no_cas(tmp_path):
     _write_snapshot(rd, timeout=30.0)
     client = TestClient(make_app(tmp_path))
 
-    response = client.put("/api/runs/demo/config", json={
+    response = _run_config_put(client, "demo", {
         "settings": {"timeout": 44.0}, "expected_revision": None,
     })
     assert response.status_code == 200
@@ -2321,7 +2456,7 @@ def test_concurrent_run_config_puts_serialize_the_complete_cas_transaction(
     monkeypatch.setattr(runs_router, "atomic_write_text", delayed_first_write)
 
     def save(client, timeout):
-        return client.put("/api/runs/demo/config", json={
+        return _run_config_put(client, "demo", {
             "settings": {"timeout": timeout}, "expected_revision": revision,
         })
 
@@ -2348,16 +2483,16 @@ def test_put_run_config_null_clears_optional_but_not_required_or_read_only_field
     metadata = client.get("/api/runs/demo/config").json()["_looplab_config_meta"]
     assert metadata["run_read_only_fields"] == ["profile"]
 
-    cleared = client.put("/api/runs/demo/config", json={"settings": {"max_seconds": None}})
+    cleared = _run_config_put(client, "demo", {"settings": {"max_seconds": None}})
     assert cleared.status_code == 200
     assert cleared.json()["changed"] == ["max_seconds"]
     assert json.loads((rd / "config.snapshot.json").read_text(
         encoding="utf-8"))["max_seconds"] is None
 
-    required = client.put("/api/runs/demo/config", json={"settings": {"timeout": None}})
+    required = _run_config_put(client, "demo", {"settings": {"timeout": None}})
     assert required.status_code == 422
     assert "timeout" in required.json()["detail"]
-    profile = client.put("/api/runs/demo/config", json={"settings": {"profile": None}})
+    profile = _run_config_put(client, "demo", {"settings": {"profile": None}})
     assert profile.status_code == 422
     assert "profile can't be changed per-run" in profile.json()["detail"]
     persisted = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
@@ -2380,9 +2515,13 @@ def test_put_run_config_fails_closed_when_interprocess_lock_is_unavailable(
         raise EventStoreLockError(path, OSError("injected unsupported lock"))
         yield  # pragma: no cover - makes this a context manager; acquisition must fail
 
+    client = TestClient(make_app(tmp_path))
+    # Read the fence BEFORE the lock is broken: the PUT must fail on the lock, not on a body the
+    # route rejects before it ever tries to acquire one.
+    generation = client.get("/api/runs/demo/state").json()["generation"]
     monkeypatch.setattr(runs_router, "_interprocess_lock", unavailable)
-    response = TestClient(make_app(tmp_path)).put(
-        "/api/runs/demo/config", json={"settings": {"timeout": 44.0}})
+    response = _run_config_put(
+        client, "demo", {"settings": {"timeout": 44.0}}, generation=generation)
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "run_config_lock_unavailable"
     assert json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))["timeout"] == 30.0
@@ -2394,7 +2533,7 @@ def test_put_run_config_rejects_invalid_value_naming_the_field(tmp_path):
     _write_snapshot(tmp_path / "demo", timeout=30.0)
     client = TestClient(make_app(tmp_path))
     # the exact bug the user hit: Seeds = -1 (n_seeds has ge=1)
-    r = client.put("/api/runs/demo/config", json={"settings": {"n_seeds": -1}})
+    r = _run_config_put(client, "demo", {"settings": {"n_seeds": -1}})
     assert r.status_code == 422
     assert "n_seeds" in r.json()["detail"]          # the offending field is surfaced, not an opaque 422
     # the bad value never reached disk
@@ -2412,7 +2551,7 @@ def test_put_run_config_allowed_while_engine_live(tmp_path):
     _write_snapshot(rd, timeout=30.0)
     client = TestClient(make_app(tmp_path))
     with _engine_singleton(rd):          # a live engine holds the lock
-        r = client.put("/api/runs/demo/config", json={"settings": {"timeout": 99.0}})
+        r = _run_config_put(client, "demo", {"settings": {"timeout": 99.0}})
         assert r.status_code == 200
         assert r.json()["engine_running"] is True
     assert json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))["timeout"] == 99.0
@@ -2429,8 +2568,7 @@ def test_put_run_config_preserves_secret_and_unknown_keys(tmp_path):
     (rd / "config.snapshot.json").write_text(json.dumps(snap), encoding="utf-8")
     client = TestClient(make_app(tmp_path))
 
-    r = client.put("/api/runs/demo/config",
-                   json={"settings": {"timeout": 77.0, "llm_api_key": "leak"}})
+    r = _run_config_put(client, "demo", {"settings": {"timeout": 77.0, "llm_api_key": "leak"}})
     assert r.status_code == 200
     out = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
     assert out["timeout"] == 77.0
@@ -2473,7 +2611,7 @@ def test_run_config_uses_folded_launch_pins_and_repairs_legacy_snapshot_drift(tm
     assert set(meta["run_start_pinned_fields"]) == RUN_START_PINNED_FIELDS
     assert set(meta["snapshot_mismatch_fields"]) == RUN_START_PINNED_FIELDS
 
-    saved = client.put("/api/runs/pinned/config", json={"settings": {"timeout": 45.0}})
+    saved = _run_config_put(client, "pinned", {"settings": {"timeout": 45.0}})
     assert saved.status_code == 200
     assert set(saved.json()["normalized_pinned"]) == RUN_START_PINNED_FIELDS
     healed = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
@@ -2508,8 +2646,7 @@ def test_put_run_config_rejects_every_run_start_pinned_field(tmp_path):
 
     assert set(attempted) == RUN_START_PINNED_FIELDS
     for field, value in attempted.items():
-        response = client.put(
-            "/api/runs/pinned/config", json={"settings": {field: value}})
+        response = _run_config_put(client, "pinned", {"settings": {field: value}})
         assert response.status_code == 422, field
         assert field in response.json()["detail"]
 
@@ -2523,7 +2660,7 @@ def test_put_run_config_rejects_malformed_json_and_non_object_shapes(tmp_path):
         "/api/runs/demo/config", content="{", headers={"Content-Type": "application/json"},
     ).status_code == 400
     assert client.put("/api/runs/demo/config", json=[]).status_code == 400
-    assert client.put("/api/runs/demo/config", json={"settings": []}).status_code == 400
+    assert _run_config_put(client, "demo", {"settings": []}).status_code == 400
     persisted = json.loads(
         (tmp_path / "demo" / "config.snapshot.json").read_text(encoding="utf-8"))
     assert persisted["timeout"] == 30.0
@@ -2546,16 +2683,16 @@ def test_put_run_config_repairs_trust_gate_after_append_failure_without_duplicat
         return original_append(self, event_type, data, *args, **kwargs)
 
     monkeypatch.setattr(EventStore, "append", fail_first_gate_append)
-    first = client.put("/api/runs/demo/config", json={"settings": {"trust_gate": "gate"}})
+    first = _run_config_put(client, "demo", {"settings": {"trust_gate": "gate"}})
     assert first.status_code == 500
     assert json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))["trust_gate"] == "gate"
     assert fold(EventStore(rd / "events.jsonl").read_all()).trust_gate == "audit"
 
-    retry = client.put("/api/runs/demo/config", json={"settings": {"trust_gate": "gate"}})
+    retry = _run_config_put(client, "demo", {"settings": {"trust_gate": "gate"}})
     assert retry.status_code == 200
     assert retry.json()["changed"] == []
     assert retry.json()["trust_gate_event_appended"] is True
-    again = client.put("/api/runs/demo/config", json={"settings": {"trust_gate": "gate"}})
+    again = _run_config_put(client, "demo", {"settings": {"trust_gate": "gate"}})
     assert again.status_code == 200 and again.json()["trust_gate_event_appended"] is False
     gate_events = [
         event for event in EventStore(rd / "events.jsonl").read_all()
@@ -2592,7 +2729,7 @@ def test_boss_command_flags_stalled_run(tmp_path, monkeypatch):
 def test_put_run_config_404_without_snapshot(tmp_path):
     _build_run(tmp_path)                  # _build_run does NOT write config.snapshot.json
     client = TestClient(make_app(tmp_path))
-    r = client.put("/api/runs/demo/config", json={"settings": {"timeout": 50.0}})
+    r = _run_config_put(client, "demo", {"settings": {"timeout": 50.0}})
     assert r.status_code == 404
 
 
@@ -3357,11 +3494,13 @@ def test_start_seeds_genesis_chat(tmp_path, monkeypatch):
 def test_reset_archives_chat_log(tmp_path, monkeypatch):
     """Replay (reset) starts a clean conversation: the prior chat.jsonl is archived (renamed), not
     carried into the fresh run."""
-    import looplab.serve.server as server
+    from looplab.serve.routers import control as control_router
     _build_run(tmp_path)                                          # a finished run (reset only runs on those)
-    # patch AFTER the build — Popen is the shared module symbol the sandbox uses to run solution.py too
-    monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: type("P", (), {})())
     rd = tmp_path / "demo"
+    # Stub the SPAWN, not `Popen`: Replay withholds its 200 until a replacement generation is
+    # durably visible, and a Popen stub that starts nothing leaves the transaction at 425 forever —
+    # the archive assertions below would then never run against a completed Replay.
+    monkeypatch.setattr(control_router, "_spawn_engine", _replacement_spawn(rd))
     (rd / "ui_meta.json").write_text('{"task_file": "%s"}' % str(TASK).replace("\\", "/"), encoding="utf-8")
 
     client = TestClient(make_app(tmp_path))
@@ -3658,8 +3797,8 @@ def test_put_run_config_honors_the_run_generation_fence(tmp_path):
     byte-identical — which means a revision observed against generation A STILL matches after the run
     is reset into generation B, letting a delayed PUT silently rewrite the replacement run's settings.
     The generation fence is checked inside the config lock, since a reset can land between the request
-    arriving and the write. Optional for now (the UI does not send it yet); when absent, behavior is
-    unchanged.
+    arriving and the write. It is now REQUIRED on both body variants — while it was optional, a
+    caller that simply never sent it kept the exact hole this test describes.
     """
     _build_run(tmp_path)
     _write_snapshot(tmp_path / "demo", timeout=30.0)
@@ -3667,12 +3806,12 @@ def test_put_run_config_honors_the_run_generation_fence(tmp_path):
     meta = client.get("/api/runs/demo/config").json()["_looplab_config_meta"]
     generation = client.get("/api/runs/demo/state").json()["generation"]
 
-    ok = client.put("/api/runs/demo/config", json={
+    ok = _run_config_put(client, "demo", {
         "timeout": 51.0, "expected_revision": meta["config_revision"],
         "expected_generation": generation})
     assert ok.status_code == 200 and ok.json()["config"]["timeout"] == 51.0
 
-    stale = client.put("/api/runs/demo/config", json={
+    stale = _run_config_put(client, "demo", {
         "timeout": 99.0,
         "expected_revision": ok.json()["config"]["_looplab_config_meta"]["config_revision"],
         "expected_generation": "0" * 64})
