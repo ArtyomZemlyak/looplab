@@ -113,8 +113,14 @@ test('the list mutation guard bounds hung writes and reconciliation without late
     root = createRoot(document.getElementById('root'))
 
     const write = () => new Promise((resolve, reject) => writes.push({ resolve, reject }))
+    // A settled write ALWAYS runs the bounded list check now — after a success it refreshes, after a
+    // failure it checks before offering retry — so the stub must hang the specific read under test
+    // rather than "every read after the first". Hanging an unrelated refresh holds the mutation lock
+    // and makes the next legitimate click look like a refusal, which is the opposite of the property
+    // below.
+    let hangReconcile = false
     const reconcile = () => {
-      if (!reads.length) { reads.push(null); return Promise.resolve() }
+      if (!hangReconcile) { reads.push(null); return Promise.resolve() }
       return new Promise(resolve => reads.push(resolve))
     }
     function Harness() {
@@ -155,8 +161,10 @@ test('the list mutation guard bounds hung writes and reconciliation without late
       await Promise.resolve()
     })
     assert.equal(writes.length, 3)
+    hangReconcile = true          // from here the follow-up check is the thing being bounded
     await act(async () => { writes[2].reject({ status: 500, message: 'private provider detail' }); await Promise.resolve() })
-    assert.equal(reads.length, 2)
+    // 3, not 2: the successful write above also spent one read on its refresh.
+    assert.equal(reads.length, 3)
     assert.match(document.querySelector('[role="status"]')?.textContent || '', /Checking the current list/)
     await act(async () => {
       button.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
@@ -174,7 +182,9 @@ test('the list mutation guard bounds hung writes and reconciliation without late
     })
     assert.equal(writes.length, 4, 'a hung read cannot hold the mutation lock forever')
     await act(async () => { writes[3].resolve(); await Promise.resolve() })
-    await act(async () => { reads[1](); await Promise.resolve() })
+    // Settle the refresh the last write is still waiting on. Indexed from the end because the count
+    // of reads depends on how many writes settled, not on which one is being bounded.
+    await act(async () => { reads[reads.length - 1](); await Promise.resolve() })
     assert.equal(document.querySelector('[role="status"]'), null)
     assert.equal(document.querySelector('[role="alert"]'), null)
   } finally {
