@@ -1974,7 +1974,16 @@ def test_settings_and_secret_puts_never_take_their_blocking_locks_on_the_event_l
     client = TestClient(app)
 
     saved = client.put("/api/settings", json={"settings": {"max_nodes": 11}})
-    stored = client.put("/api/settings/secret", json={"key": "llm_api_key", "value": "sk-x"})
+    # Saving a credential now requires BOTH revisions from the latest snapshot: 428 without them,
+    # 409 with stale ones. Re-read AFTER the settings save, which moved the settings revision.
+    # A request turned away at either precondition never reaches the lock this test is about, so
+    # `on_loop` would stay empty for a reason that has nothing to do with the offload.
+    snapshot = client.get("/api/settings").json()
+    stored = client.put("/api/settings/secret", json={
+        "key": "llm_api_key", "value": "sk-x",
+        "expected_settings_revision": snapshot["settings_revision"],
+        "expected_secret_revision": snapshot["secret_revision"],
+    })
 
     assert saved.status_code == 200 and stored.status_code == 200
     assert on_loop == [], on_loop
