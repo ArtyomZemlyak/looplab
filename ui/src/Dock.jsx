@@ -1006,9 +1006,10 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   const focusEvent = (e) => {
     const nid = eventNode(e)
     if (nid == null) { setViewSeq(e.seq); return }
-    const opensTrace = e.type === 'node_created'
-    // Trace is a live sidecar, so entering historical replay would immediately replace it with Overview.
-    onFocus?.(Number(nid), opensTrace ? 'Trace' : 'Overview', opensTrace ? null : e.seq)
+    const opensLiveTrace = e.type === 'node_created' && atLiveView
+    // Trace is a live sidecar. A node-created row clicked during replay must keep the exact historical
+    // sequence and use snapshot-safe Overview instead of silently jumping the whole workspace to live.
+    onFocus?.(Number(nid), opensLiveTrace ? 'Trace' : 'Overview', opensLiveTrace ? null : e.seq)
   }
   const toggleKind = (g) => setKinds(s => { const n = new Set(s); n.has(g) ? n.delete(g) : n.add(g); return n })
   const searchableLog = useMemo(() => log.map(event => {

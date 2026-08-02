@@ -107,6 +107,13 @@ function parseDirect(t) {
   if (!spec) return null
   const arg = m[2] ? Number(m[2]) : null
   if (spec.arg && arg == null) return null
+  // A node token changes the meaning of a run-wide lifecycle command. Treat that input as
+  // invalid instead of silently discarding the node and stopping the whole run (or asking an LLM
+  // to reinterpret a control-shaped typo). Preserve the draft so the user can correct it in place.
+  if (!spec.arg && arg != null) return {
+    invalid: true,
+    message: `/${name} controls the whole run and does not accept #${arg}. Remove the node id to continue.`,
+  }
   return { name, spec, arg }
 }
 
@@ -2078,6 +2085,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       return
     }
     const direct = parseDirect(t)
+    if (direct?.invalid) { flash(direct.message); return }
     if (direct) { setInput(''); runDirect(direct); return }
     const pr = runId ? preRoute(t) : null
     if (pr) { setInput(''); runDirect(pr); return }
