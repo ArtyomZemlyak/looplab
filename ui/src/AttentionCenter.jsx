@@ -101,7 +101,11 @@ function AttentionItem({ item, unread, sourceStale, onAcknowledge, onMarkRead, o
   // Reconstruct the destination from the normalized, generation-fenced fields. Never trust a URL
   // supplied by the feed (and permission cards never receive a link at all).
   const runHref = item.source === 'run' ? attentionHref(item) : null
-  return <li className={`attention-item severity-${item.severity}${unread ? ' unread' : ''}`}>
+  const permissionActionLabel = item.source === 'permission'
+    ? `${actionLabel} for approval request ${item.requestId.slice(0, 6)}`
+    : undefined
+  return <li className={`attention-item severity-${item.severity}${unread ? ' unread' : ''}`}
+    data-attention-item-id={item.id} tabIndex={-1}>
     <div className="attention-item-heading">
       <span className="attention-severity-dot" aria-hidden="true" />
       {SEVERITY_LABEL[item.severity] && <span className="sr-only">{SEVERITY_LABEL[item.severity]}: </span>}
@@ -120,6 +124,7 @@ function AttentionItem({ item, unread, sourceStale, onAcknowledge, onMarkRead, o
         aria-label={`${actionLabel} for ${item.contextLabel || item.runId}`}
         onClick={() => onAcknowledge(item.id)}>{actionLabel}</a>}
       {item.source === 'permission' && <button type="button" className="attention-button primary"
+        aria-label={permissionActionLabel}
         onClick={() => onOpenPermission(item)}>{actionLabel}</button>}
       {activeAction && unread && <button type="button" className="attention-button subtle"
         aria-label={`Mark ${item.title}${item.source === 'run' ? ` for ${item.contextLabel || item.runId}` : ''} as read`}
@@ -142,11 +147,15 @@ export default function AttentionCenter() {
   const [capability, setCapability] = useState(() => notificationCapability())
   const [notificationBusy, setNotificationBusy] = useState(false)
   const [notificationFeedback, setNotificationFeedback] = useState('')
+  const [focusRevision, setFocusRevision] = useState(0)
   const [liveMessage, setLiveMessageState] = useState({ text: '', revision: 0 })
   const setLiveMessage = useCallback(text => {
     setLiveMessageState(previous => ({ text, revision: previous.revision + 1 }))
   }, [])
   const dialogRef = useRef(null)
+  const actionHeadingRef = useRef(null)
+  const recentHeadingRef = useRef(null)
+  const focusRequestRef = useRef(null)
   const channelRef = useRef(null)
   const seenItemIdsRef = useRef(new Set())
   const baselinedSourcesRef = useRef({ run: false, permission: false })
@@ -154,8 +163,18 @@ export default function AttentionCenter() {
   const descriptionId = useId()
   const drawerId = useId()
 
-  const close = useCallback(() => setOpen(false), [])
+  const close = useCallback(() => {
+    focusRequestRef.current = null
+    setOpen(false)
+  }, [])
   useDialogFocus(dialogRef, close, open)
+
+  const jumpToSection = useCallback(section => {
+    const heading = section === 'action' ? actionHeadingRef.current : recentHeadingRef.current
+    if (!heading) return
+    heading.focus({ preventScroll: true })
+    heading.closest('.attention-section')?.scrollIntoView({ block: 'start' })
+  }, [])
 
   const reloadPreferences = useCallback(() => {
     setPreferences(loadAttentionState())
@@ -281,16 +300,26 @@ export default function AttentionCenter() {
 
   const acknowledge = useCallback(async id => {
     await persistIds('acknowledged', [id], '')
-    setOpen(false)
-  }, [persistIds])
+    close()
+  }, [close, persistIds])
 
   const markRead = useCallback(async id => {
-    await persistIds('acknowledged', [id], 'Attention item marked as read.')
+    focusRequestRef.current = { ids: [id], section: 'action' }
+    const saved = await persistIds('acknowledged', [id], 'Attention item marked as read.')
+    if (saved) setFocusRevision(value => value + 1)
+    else focusRequestRef.current = null
   }, [persistIds])
 
   const dismiss = useCallback(async id => {
-    await persistIds('dismissed', [id], 'Attention item dismissed.', true)
-  }, [persistIds])
+    const index = recentItems.findIndex(item => item.id === id)
+    focusRequestRef.current = {
+      ids: index < 0 ? [] : [recentItems[index + 1]?.id, recentItems[index - 1]?.id].filter(Boolean),
+      section: 'recent',
+    }
+    const saved = await persistIds('dismissed', [id], 'Attention item dismissed.', true)
+    if (saved) setFocusRevision(value => value + 1)
+    else focusRequestRef.current = null
+  }, [persistIds, recentItems])
 
   const markAllRead = useCallback(async () => {
     if (!unreadCount) return
@@ -308,11 +337,11 @@ export default function AttentionCenter() {
   const openPermission = useCallback(async item => {
     if (item?.source !== 'permission' || !/^[0-9a-f]{16}$/.test(item.session || '')) return
     await persistIds('acknowledged', [item.id], '')
-    setOpen(false)
+    close()
     window.dispatchEvent(new CustomEvent('ll:open-assistant-session', {
       detail: { session: item.session },
     }))
-  }, [persistIds])
+  }, [close, persistIds])
 
   const enableNotifications = useCallback(async () => {
     if (notificationBusy) return
@@ -390,12 +419,26 @@ export default function AttentionCenter() {
     if (!open) return
     const frame = requestAnimationFrame(() => {
       const root = dialogRef.current
+      const request = focusRequestRef.current
+      if (root && request) {
+        const cards = [...root.querySelectorAll('[data-attention-item-id]')]
+        const target = request.ids
+          .map(id => cards.find(card => card.dataset.attentionItemId === id))
+          .find(Boolean)
+          || (request.section === 'action' ? actionHeadingRef.current : recentHeadingRef.current)
+        focusRequestRef.current = null
+        if (target) {
+          target.focus({ preventScroll: true })
+          target.scrollIntoView({ block: 'nearest' })
+          return
+        }
+      }
       if (root && !root.contains(document.activeElement)) {
         root.querySelector('[data-dialog-initial-focus]')?.focus({ preventScroll: true })
       }
     })
     return () => cancelAnimationFrame(frame)
-  }, [open, unreadCount, visibleItems.length])
+  }, [focusRevision, open, unreadCount, visibleItems.length])
 
   const feedVerified = feedAuthoritative
   const verifiedAge = verified === true ? snapshotAge(runVerifiedGeneratedAt) : ''
@@ -500,6 +543,24 @@ export default function AttentionCenter() {
         </header>
 
         <div className="attention-scroll">
+          <nav className="attention-jump-nav" aria-label="Attention sections">
+            <button type="button" className="attention-jump"
+              aria-label={`Jump to Needs action, ${actionAria}`}
+              onClick={() => jumpToSection('action')}>
+              <span>Needs action</span>
+              <span className="attention-jump-count" aria-hidden="true">{actionCountExact
+                ? visualCount(activeActionCount)
+                : activeActionCount > 99 ? '99+?' : `${activeActionCount}?`}</span>
+            </button>
+            <button type="button" className="attention-jump"
+              aria-label={`Jump to Recent, ${recentItems.length} loaded`}
+              onClick={() => jumpToSection('recent')}>
+              <span>Recent</span>
+              <span className="attention-jump-count" aria-hidden="true">
+                {visualCount(recentItems.length)}
+              </span>
+            </button>
+          </nav>
           {sourceMessages.length > 0 && <div className="attention-source-status">
             <ul role="status" aria-live="polite">
               {sourceMessages.map(message => <li key={message}>{message}</li>)}
@@ -510,7 +571,7 @@ export default function AttentionCenter() {
 
           <section className="attention-section" aria-labelledby={`${titleId}-action`}>
             <div className="attention-section-heading">
-              <h3 id={`${titleId}-action`}>Needs action</h3>
+              <h3 ref={actionHeadingRef} id={`${titleId}-action`} tabIndex={-1}>Needs action</h3>
               <span className={`attention-section-count${activeActionCount > 0 ? ' has-action' : ''}`}>
                 <span aria-hidden="true">{actionCountExact
                   ? activeActionCount
@@ -544,8 +605,12 @@ export default function AttentionCenter() {
 
           <section className="attention-section" aria-labelledby={`${titleId}-recent`}>
             <div className="attention-section-heading">
-              <h3 id={`${titleId}-recent`}>Recent</h3>
-              <span className="attention-section-count">{recentItems.length}</span>
+              <h3 ref={recentHeadingRef} id={`${titleId}-recent`} tabIndex={-1}>Recent</h3>
+              <span className="attention-section-count">
+                <span aria-hidden="true">{recentItems.length} loaded</span>
+                <span className="sr-only">{recentItems.length} recent {itemWord(recentItems.length)} loaded
+                </span>
+              </span>
             </div>
             {recentItems.length
               ? <ul className="attention-list">{recentItems.map(item => <AttentionItem key={item.id}
