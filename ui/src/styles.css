@@ -2637,14 +2637,16 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .runbar-super-control .sel, .runbar-sort-control .sel { min-width: 0; max-width: none; flex: 1; }
   .runbar-super-control .btn, .runbar-sort-control .btn { min-width: 44px; justify-content: center; }
   .runbar-spacer { display: none; }
-  .run-card { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: start;
+  .run-card { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-items: start;
     gap: 8px 10px; padding: 11px; }
   .compare-toggle { grid-column: 1; grid-row: 1; align-self: start; margin: -7px 0 0 -7px; }
-  .run-card > .phase { grid-column: 2; grid-row: 1; }
-  .run-card-main { min-width: 0; grid-column: 3; }
-  .run-card-metrics { grid-column: 3; text-align: left !important; }
+  .run-card > .phase { grid-column: 2 / -1; grid-row: 1; align-self: center; justify-self: start; }
+  .run-card-main { min-width: 0; min-height: 44px; grid-column: 1 / -1; grid-row: 2;
+    overflow-wrap: anywhere; }
+  .run-card-metrics { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 12px;
+    min-width: 0; grid-column: 1 / 3; grid-row: 3; text-align: left !important; overflow-wrap: anywhere; }
   .run-card .goal { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .run-actions { grid-column: 4; grid-row: 1; }
+  .run-actions { grid-column: 3; grid-row: 3; align-self: start; justify-self: end; }
   .run-deletion-card { display: flex; flex-direction: column; align-items: stretch; gap: 9px; }
   .run-deletion-card > .btn { width: 100%; min-height: 44px; justify-content: center; }
   .run-delete-overlay { padding: max(12px, env(safe-area-inset-top, 0px))
