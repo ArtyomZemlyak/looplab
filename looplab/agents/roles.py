@@ -1,4 +1,4 @@
-﻿"""Role backends (I5, ADR-7). `Researcher` proposes an Idea (params to try);
+"""Role backends (I5, ADR-7). `Researcher` proposes an Idea (params to try);
 `Developer` turns an Idea into runnable code. Both are Protocols so an LLM-backed
 or external-coding-agent backend drops in with zero orchestrator change.
 
@@ -568,6 +568,10 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # Replay uses the union of all actual parents for a merge; the proposal role sees the primary parent
     # before policy finalizes that edge set, so the prompt names this limitation instead of claiming exactness.
     # recorded taxonomy is data, never an instruction; the shared projector quotes/bounds it.
+    # DEFERRED ON PURPOSE — this is the cycle-breaking import (doc 25 AG-07). `search` imports
+    # `agents` at MODULE level in five places (forward_hints, WrapsDeveloper, the speculation
+    # constants), so the only direction left for `agents -> search` is a function-local import.
+    # Hoisting this to module scope closes the loop into an ImportError at startup.
     from looplab.search.concept_projection import (bounded_untrusted_concept_json,
                                                     concept_inheritance_context)
     concept_context = concept_inheritance_context(state, parent.id if parent is not None else None)

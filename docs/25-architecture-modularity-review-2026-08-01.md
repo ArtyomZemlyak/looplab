@@ -235,6 +235,7 @@ synthetic task adapters (RA-06).
 - **SE-07 / XP-07** the lazy search↔engine cycle around speculation calibration constants —
   contradicting `speculation_calibration.py`'s own stated purpose.
 - **AG-07** agents↔search cycle held apart only by import placement, direction undocumented.
+  *(resolved 2026-08-02 — stated in CLAUDE.md, enforced by `tests/test_agents_search_direction.py`.)*
 - **SR-12** router-to-router private imports and late-bound `srv.*_fn` attribute wiring (also XP-05).
 - **AG-03** the Strategy field set synchronized across five encodings with no registry test —
   *(resolved 2026-08-02 — `tests/test_strategy_field_registry.py`.)*
@@ -1869,7 +1870,7 @@ divergence is a decision rather than a surprise.
 
 *Recommendation:* Provide a tiny shared wrapper (e.g. tool_loop.resilient(fn, fallback) or a context manager) documented once with the budget-propagation rule; adopt opportunistically at new call sites rather than churning every existing comment-bearing site at once.
 
-#### AG-07 · LOW · layering · effort: medium
+#### AG-07 · LOW · layering · effort: medium — **RESOLVED (2026-08-02)**
 
 **Hidden agents<->search circular dependency: search imports agents at module level while roles._state_brief imports search inside the function body**
 
@@ -1878,6 +1879,19 @@ divergence is a decision rather than a surprise.
 *Evidence:* Five search modules import looplab.agents at module level (forward_hints, WrapsDeveloper, the speculation constants), while agents/roles.py::_state_brief reaches back into looplab.search.concept_projection (line 571) via a deferred function-level import — the cycle is held apart only by import placement, with no comment marking the deferral as cycle-breaking (unlike the seam imports, which are explained). CLAUDE.md's layering rules cover core/events/serve/engine but leave agents-vs-search undefined, so nothing stops the next module-level import from closing the loop into an ImportError.
 
 *Recommendation:* Document the intended direction (search may depend on agents; agents may only reach search via deferred imports) in CLAUDE.md or a comment at roles.py:571, or move concept_projection's prompt-facing projector down to events/ (it projects folded state, like the digests roles.py already pulls from events.digest).
+
+*Resolution:* the direction is stated in CLAUDE.md's Layering bullet AND enforced, because "nothing
+states it" was the finding — a comment alone reproduces the same failure the next time. The
+deferred import in `roles._state_brief` now says why it is deferred.
+`tests/test_agents_search_direction.py` fails on any module-level `agents -> search` import, and
+also pins the two facts the rule DEPENDS on: that a deferred import still exists (a rule guarding
+nothing goes unnoticed when it breaks) and that `search -> agents` is still module-level in at
+least three places (if that stops being true, the constraint should be revisited rather than worked
+around). Verified to have teeth by hoisting the `concept_projection` import to module scope.
+
+The alternative — moving `concept_projection` down to `events/` — is not taken here: it projects
+folded state, so the move is defensible, but it is a relocation of a prompt-facing projector and
+belongs with the events-layer read-model work rather than with a layering guard.
 
 #### AG-08 · LOW · inconsistency · effort: small
 

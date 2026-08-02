@@ -105,7 +105,11 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   resolve to the SAME module object, so monkeypatching either path works. Many tests use old flat
   paths — keep the `_LAYOUT` map in sync when moving modules.
 - **Layering**: `core` imports nothing above itself; `events` only `core`; `serve` may import
-  anything; the engine must not grow new dependencies on `serve`.
+  anything; the engine must not grow new dependencies on `serve`. **`search` may import `agents` at
+  module level; `agents` may reach `search` ONLY through a deferred (function-local) import.** That
+  asymmetry is what keeps the cycle open — five search modules import `agents` at module scope, so a
+  module-level `looplab.search` import in `agents/` closes the loop into an ImportError at startup.
+  Guarded by `tests/test_agents_search_direction.py`.
 - **Comments are load-bearing.** The codebase documents *why* (ADR references, review provenance,
   replay-safety notes) inline. Preserve comments verbatim when moving code; write the same style.
 - **Prompt strings are contracts.** Changes to prompt text alter agent behavior — never "clean up"
