@@ -562,9 +562,15 @@ export default function AttentionCenter() {
             </button>
           </nav>
           {sourceMessages.length > 0 && <div className="attention-source-status">
-            <ul role="status" aria-live="polite">
-              {sourceMessages.map(message => <li key={message}>{message}</li>)}
-            </ul>
+            {/* The live region is the WRAPPER, not the list. `role="status"` on the <ul> replaces
+                its implicit `list` role, which strips every <li> of its list semantics — a screen
+                reader then reads the source warnings as loose text with no count and no boundaries.
+                Same rule the Atlas concept list is already annotated with. */}
+            <div role="status" aria-live="polite">
+              <ul>
+                {sourceMessages.map(message => <li key={message}>{message}</li>)}
+              </ul>
+            </div>
             {!feedVerified && <button type="button" className="attention-button subtle"
               onClick={() => refresh?.()}>Retry now</button>}
           </div>}

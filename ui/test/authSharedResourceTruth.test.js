@@ -8,6 +8,13 @@ import { JSDOM } from 'jsdom'
 
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
+// A shared-chat envelope must now declare whether the link is still LIVE and when it expires. The
+// fixture predated both fields, so every reply in the scenario below was rejected as malformed and
+// the assertions stopped describing anything real. `live: false, expires_at: <future>` is the plain
+// case for this scenario: a LIVE share that has not yet expired, which is the one whose refresh
+// actually fetches new messages.
+const SHARED_META = { shared: true, live: true, expires_at: 4_000_000_000 }
+
 test('owner auth and public shared chat expose fenced, retryable resource truth without raw errors', async () => {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
     url: 'https://looplab.test/', pretendToBeVisual: true,
@@ -130,14 +137,20 @@ test('owner auth and public shared chat expose fenced, retryable resource truth 
     assert.equal(requests[4].options.headers['X-LoopLab-Share'], 'shared/one')
     assert.ok(requests[4].options.signal instanceof AbortSignal)
     const firstSession = {
-      meta: { shared: true, title: 'First shared chat' },
+      meta: { ...SHARED_META, title: 'First shared chat' },
       messages: [{ role: 'assistant', content: 'Last good transcript' }],
     }
     await reply(requests[4], firstSession)
     assert.match(document.body.textContent, /First shared chat.*Last good transcript/)
     assert.equal(document.querySelector('[role="log"]').getAttribute('aria-live'), 'off')
 
-    const refresh = [...document.querySelectorAll('button')].find(node => node.textContent === 'Refresh')
+    // The refresh control now says what it will actually do: a live share can pull newly shared
+    // messages, a frozen snapshot can only re-check whether its link still resolves. A lookup for
+    // the old generic 'Refresh' finds neither, and the whole scenario below it stopped running.
+    assert.equal(document.querySelector('.asst-shared-terms .pill').textContent, 'live · read-only')
+    const refresh = [...document.querySelectorAll('button')]
+      .find(node => node.textContent === 'Refresh messages')
+    assert.ok(refresh, 'a live shared chat must offer to load newly shared messages')
     await act(async () => {
       refresh.click(); refresh.click(); await settle()
     })
@@ -148,7 +161,7 @@ test('owner auth and public shared chat expose fenced, retryable resource truth 
     assert.match(document.body.textContent, /Last good transcript/)
     assert.equal(document.activeElement, staleAlert)
     await reply(requests[5], {
-      meta: { shared: true, title: 'Late wrong chat' }, messages: [],
+      meta: { ...SHARED_META, title: 'Late wrong chat' }, messages: [],
     })
     assert.doesNotMatch(document.body.textContent, /Late wrong chat/)
 
@@ -156,7 +169,7 @@ test('owner auth and public shared chat expose fenced, retryable resource truth 
     await act(async () => { retry.click(); retry.click(); await settle() })
     assert.equal(requests.length, 7, 'double retry stays single-flight')
     await reply(requests[6], {
-      meta: { shared: true, title: 'Malformed' },
+      meta: { ...SHARED_META, title: 'Malformed' },
       messages: [{ role: 'assistant', content: 'bad', activity: [{ type: 'tools' }] }],
     })
     assert.match(document.querySelector('[role="alert"]').textContent,
@@ -167,9 +180,12 @@ test('owner auth and public shared chat expose fenced, retryable resource truth 
     await click([...document.querySelectorAll('button')].find(node => node.textContent === 'Retry'))
     assert.equal(requests.length, 8)
     await reply(requests[7], {
-      meta: { shared: true, title: 'Updated shared chat' }, messages: [],
+      meta: { ...SHARED_META, title: 'Updated shared chat' }, messages: [],
     })
-    assert.match(document.body.textContent, /Updated shared chat.*has no messages/)
+    // "no messages" became "no COMPLETE turns": a public snapshot can legitimately hold turns that
+    // were dropped by the redaction/bounding pass, and calling that "no messages" told the reader
+    // the chat was empty when it was not.
+    assert.match(document.body.textContent, /Updated shared chat.*has no complete turns/)
 
     await act(async () => { root.render(React.createElement(SharedAssistant, {
       sid: 'second', onBack() {},
@@ -180,11 +196,11 @@ test('owner auth and public shared chat expose fenced, retryable resource truth 
     })); await settle() })
     assert.equal(secondRequest.options.signal.aborted, true)
     await reply(secondRequest, {
-      meta: { shared: true, title: 'Superseded chat' }, messages: [],
+      meta: { ...SHARED_META, title: 'Superseded chat' }, messages: [],
     })
     assert.doesNotMatch(document.body.textContent, /Superseded chat/)
     await reply(requests[9], {
-      meta: { shared: true, title: 'Current chat' }, messages: [],
+      meta: { ...SHARED_META, title: 'Current chat' }, messages: [],
     })
     assert.match(document.body.textContent, /Current chat/)
   } finally {

@@ -138,7 +138,25 @@ test('Attention Center trigger and open dialog satisfy the accessibility/passive
       assert.equal(trigger.type, 'button')
       assert.equal(trigger.getAttribute('aria-haspopup'), 'dialog')
       assert.equal(trigger.getAttribute('aria-expanded'), 'false')
-      assert.equal(trigger.getAttribute('aria-label'), 'Open attention center')
+      // The label now carries the state a sighted user reads off the badge — action total, unread
+      // count, and explicitly whether either is UNKNOWN rather than zero. That distinction is the
+      // whole point of the attention feed's stale handling, and an equality check against the bare
+      // verb could not express it, so it just failed once the label started telling the truth.
+      const label = trigger.getAttribute('aria-label')
+      assert.match(label, /^Open attention center\b/)
+      assert.match(label, /unavailable|incomplete/,
+        'an unverified snapshot must be announced as unknown, never silently as zero')
+
+      // A live region must never be the list itself: `role="status"` REPLACES the <ul>'s implicit
+      // `list` role, so every <li> loses its list semantics and a screen reader reads the source
+      // warnings as loose text with no count and no boundaries. axe catches it as a serious
+      // `listitem` violation; this names the fix so a future edit does not re-collapse them.
+      for (const list of document.querySelectorAll('ul, ol')) {
+        const role = list.getAttribute('role')
+        assert.ok(role == null || role === 'list',
+          `a list carries role="${role}", which erases its own items' semantics — put the role on a `
+          + 'wrapper element instead')
+      }
       const controlledId = trigger.getAttribute('aria-controls')
       assert.ok(controlledId)
       assert.equal(document.getElementById(controlledId), null,
