@@ -168,6 +168,30 @@
 
 .settings-summary-link:hover { text-decoration: underline; }
 
+.settings-provider-check {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-1);
+}
+
+.settings-provider-check-copy {
+  display: flex;
+  flex: 0 1 340px;
+  min-width: 180px;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-provider-check-copy strong { color: var(--fg); font-size: 12px; }
+.settings-provider-check-copy span { color: var(--fg-mut); font-size: 11px; line-height: 1.4; }
+.settings-provider-check .llm-health { justify-content: flex-end; }
+.settings-stale-warning { margin-bottom: 14px; }
+
 .settings-form .sf-label-row {
   display: flex;
   align-items: center;
@@ -277,6 +301,9 @@
   .settings-actions .sa-inner { flex-wrap: wrap; }
   .settings-actions .sa-inner .spacer { display: none; }
   .settings-save-state { margin-left: auto; }
+  .settings-provider-check { align-items: flex-start; flex-direction: column; }
+  .settings-provider-check-copy { flex: none; min-width: 0; }
+  .settings-provider-check .llm-health { justify-content: flex-start; }
 }
 
 @media (max-width: 480px) {
@@ -291,6 +318,27 @@
   .settings-summary-link { margin-left: 0; }
   .settings-mode { display: flex; width: 100%; }
   .settings-mode button { flex: 1; }
-  .settings-save-state { width: 100%; margin-left: 0; }
-  .llm-health { flex: 1 1 100%; }
+  .settings-actions .sa-inner { flex-wrap: nowrap; }
+  .settings-save-state {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+    margin-left: 0;
+    white-space: normal;
+  }
+  .settings-actions .btn { flex: none; }
+  .settings-provider-check .llm-health { flex: 1 1 100%; }
+  .settings-search-clear,
+  .settings-help summary,
+  .settings-form .agpill { min-width: 44px; min-height: 44px; }
+  .settings-help summary { display: flex; align-items: center; width: fit-content; }
+  .settings-search-control input,
+  .settings-form :is(input.text, select.text) { font-size: 16px; }
+  .settings-form .switch {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
 }

@@ -972,6 +972,37 @@ export default function Settings({ onBack }) {
           </div>
         </section>
 
+        <section className="settings-provider-check" aria-labelledby="settings-provider-check-heading">
+          <div className="settings-provider-check-copy">
+            <strong id="settings-provider-check-heading">Saved LLM connection</strong>
+            <span>Optional connectivity check for the provider configuration used by new runs.</span>
+          </div>
+          <LlmHealth savedSettingsRevision={revisions.settings} savedSecretRevision={revisions.secret}
+            unsavedCount={unsavedKeys.size}
+            actionBlocked={!!mutationBusy || !!mutationUnknown}
+            actionKind={mutationBusy}
+            beginAction={beginMutation} finishAction={finishMutation}
+            onRecoveryChange={setHealthRecoveryActive}
+            reloadSavedSettings={async () => {
+              if (unsaved && !window.confirm('Reload saved settings and discard the current draft changes?')) return false
+              const mutation = beginMutation('reloading settings')
+              if (!mutation) return false
+              try {
+                const reloaded = await load(false, true)
+                if (!reloaded) show('Saved settings could not be reloaded; current values and the provider warning were kept')
+                return reloaded
+              }
+              finally { finishMutation(mutation) }
+            }} />
+        </section>
+
+        {loadError && <div className="notice resource-error settings-stale-warning" role="alert">
+          <b>Could not refresh settings.</b>
+          <span>The last loaded values remain visible, but new runs stay blocked until the current server state is loaded.</span>
+          <button className="btn sm primary" disabled={mutationBusy === 'reloading settings'}
+            onClick={() => load(true, true)}>Retry</button>
+        </div>}
+
         {mutationUnknown && <div className="notice resource-error" role="alert">
           <b>{mutationUnknown.stage.endsWith('-conflict')
             ? 'Server state changed in another client.' : 'Update outcome unknown.'}</b>
@@ -1003,23 +1034,6 @@ export default function Settings({ onBack }) {
     </main>
 
     {form && schema && <div className="settings-actions"><div className="sa-inner">
-      <LlmHealth savedSettingsRevision={revisions.settings} savedSecretRevision={revisions.secret}
-        unsavedCount={unsavedKeys.size}
-        actionBlocked={!!mutationBusy || !!mutationUnknown}
-        actionKind={mutationBusy}
-        beginAction={beginMutation} finishAction={finishMutation}
-        onRecoveryChange={setHealthRecoveryActive}
-        reloadSavedSettings={async () => {
-          if (unsaved && !window.confirm('Reload saved settings and discard the current draft changes?')) return false
-          const mutation = beginMutation('reloading settings')
-          if (!mutation) return false
-          try {
-            const reloaded = await load(false, true)
-            if (!reloaded) show('Saved settings could not be reloaded; current values and the provider warning were kept')
-            return reloaded
-          }
-          finally { finishMutation(mutation) }
-        }} />
       <span className="spacer" style={{ flex: 1 }} />
       {invalidCount
         ? <button type="button" className="settings-summary-link settings-save-state is-invalid"

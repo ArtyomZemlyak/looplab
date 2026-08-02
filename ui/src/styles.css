@@ -2720,6 +2720,10 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .cmdbar-dock > .cmdbar-attach { margin-left: auto; }
   .cmdbar-dock > .cmdbar-status { order: 2; flex: 1 0 100%; max-width: 100%;
     flex-wrap: wrap; white-space: normal; }
+  /* A closed Assistant already has an explicit 44px open control and a polite "response ready"
+     announcement. Do not let the optional transcript preview consume a third persistent row on the
+     narrowest workspaces; recovery/thinking/error states remain visible. */
+  .cmdbar-dock > .cmdbar-status.preview:not(.recovery) { display: none; }
   .cmdbar-dock > .cmdbar-field { order: 3; flex: 1 1 calc(100% - 50px); }
   .cmdbar-dock > .cmdbar-go { order: 3; }
 
