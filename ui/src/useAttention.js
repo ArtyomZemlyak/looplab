@@ -323,12 +323,10 @@ export function useAttention({ intervalMs = RUN_POLL_MS } = {}) {
         mismatch.status = 409
         throw mismatch
       }
-      let movedUnderUs = false
       setState(previous => {
         if (previous.runStale || previous.partial || previous.runSnapshotId !== snapshotId
             || previous.runActiveActionCount !== activeActionCount
             || previous.nextCursor !== cursor) {
-          movedUnderUs = true
           return staleCursorState(previous)
         }
         const runPages = [...previous.runPages, page.items]
@@ -343,24 +341,30 @@ export function useAttention({ intervalMs = RUN_POLL_MS } = {}) {
           loadMoreError: '',
         }
       })
-      // Recovery is scheduled for the client-side detection too, not only the server's 409: while
-      // the feed reads stale `loadMore` is a no-op and `hasMore` hides the button, so without this
-      // the operator waits a whole poll interval with no way to act.
-      if (movedUnderUs) setRefreshToken(value => value + 1)
     } catch (error) {
       if (loadMoreRequestRef.current !== request) return
-      const cursorStale = error?.status === 409
-      setState(previous => cursorStale ? staleCursorState(previous) : ({
+      setState(previous => error?.status === 409 ? staleCursorState(previous) : ({
         ...previous,
         loadingMore: false,
         loadMoreError: 'Older attention items could not be loaded. Try again.',
       }))
-      if (cursorStale) setRefreshToken(value => value + 1)
     } finally {
       if (loadMoreRequestRef.current === request) loadMoreRequestRef.current = null
     }
   }, [state.nextCursor, state.partial, state.runActiveActionCount,
     state.runSnapshotId, state.runStale])
+
+  // Stale-cursor recovery is armed HERE, not at the two detection sites, for a correctness reason
+  // rather than a tidiness one: a `setState` updater must be pure, and React runs it during a later
+  // render phase — so a flag written inside the updater and read on the line after `setState` is not
+  // reliably set, and the refresh could simply never be armed. Both detections converge on the same
+  // OBSERVABLE state, so one effect covers them and cannot double-fire. It also cannot storm: if the
+  // refresh itself fails the state does not change, the dep stays true, and recovery falls back to
+  // the normal poll cadence.
+  const staleCursorArmed = state.runStale && state.loadMoreError === STALE_CURSOR_MESSAGE
+  useEffect(() => {
+    if (staleCursorArmed) setRefreshToken(value => value + 1)
+  }, [staleCursorArmed])
 
   const refresh = useCallback(() => {
     cancelLoadMore()

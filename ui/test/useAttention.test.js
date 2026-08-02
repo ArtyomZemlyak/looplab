@@ -340,17 +340,35 @@ test('useAttention invalidates archival pages across partial-source transitions'
 test('both stale-cursor detections produce one state and both schedule recovery', async () => {
   const { readFile } = await import('node:fs/promises')
   const source = await readFile(new URL('../src/useAttention.js', import.meta.url), 'utf8')
+  // Ends at the recovery effect, not at `const refresh` — the effect now sits between them, and a
+  // slice that swallowed it would count its `setRefreshToken` as an imperative arming in loadMore.
   const loadMore = source.slice(source.indexOf('const loadMore = useCallback'),
-    source.indexOf('const refresh = useCallback'))
+    source.indexOf('// Stale-cursor recovery is armed HERE'))
   assert.ok(loadMore.length > 500, 'the loadMore slice anchors moved; this guard is reading nothing')
 
   assert.equal((loadMore.match(/staleCursorState\(previous\)/g) || []).length, 2,
     'both stale-cursor detections must build the state through the shared helper — two inline '
     + 'copies is how they drifted apart in the first place')
-  assert.equal((loadMore.match(/setRefreshToken\(value => value \+ 1\)/g) || []).length, 2,
-    'each stale-cursor detection must arm the refresh that recovers from it; while the feed reads '
-    + 'stale `loadMore` no-ops and `hasMore` hides the button, so a detection that does not '
-    + 'refresh strands the operator until the next poll tick')
+  // Recovery is armed by ONE effect on the observable state, not by either detection site. That is
+  // a correctness rule, not a style one: a `setState` updater must be pure and React runs it during
+  // a later render phase, so a flag written inside an updater and read on the next line is not
+  // reliably set — the refresh could simply never be armed, and no behavioural test can catch it
+  // because the client-side detection is unreachable from the hook's public surface.
+  assert.equal((loadMore.match(/setRefreshToken/g) || []).length, 0,
+    'loadMore must not arm recovery imperatively; the effect below keys on the resulting state')
+  assert.match(source, /const staleCursorArmed = state\.runStale && state\.loadMoreError === STALE_CURSOR_MESSAGE/)
+  assert.match(source, /useEffect\(\(\) => \{\s*if \(staleCursorArmed\) setRefreshToken\(value => value \+ 1\)\s*\}, \[staleCursorArmed\]\)/,
+    'one effect, keyed on the state both detections converge on, so it cannot double-fire')
+
+  // The exact shape of the bug that motivated the above — a flag declared immediately before an
+  // updater, so it can only be there to be written from inside it and read after. Deliberately
+  // narrow: updaters legitimately declare and assign their OWN locals (`let runPages` in the poll
+  // reducer), and no regex can tell those apart from an outer binding, so this pins the one
+  // spelling that is always wrong instead of guessing at scope.
+  assert.doesNotMatch(source, /\blet\s+\w+\s*=[^\n]*\n\s*setState\(/,
+    'a flag is declared immediately before a setState updater — if it is written inside the updater '
+    + 'and read after it, React may run the updater during a later render phase and the read sees '
+    + 'the initial value. Key an effect on the resulting state instead.')
   assert.doesNotMatch(loadMore, /loadMoreError: ''\s*,?\s*\}\)\s*:\s*\(\{/,
     'a stale-cursor branch is blanking the message again — the operator needs to be told why the '
     + '"Load more" control disappeared under their click')
