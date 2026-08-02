@@ -2122,10 +2122,12 @@ pre.code.event-json { max-height: 220px; }
 .art-wrap { display: flex; gap: 12px; min-height: 380px; height: min(64vh, 560px); }
 .art-list { flex: 0 0 320px; overflow: auto; border-right: 1px solid var(--line); padding-right: 8px; }
 .art-filter { width: 100%; margin-bottom: 8px; }
+.art-filter-status { margin: -3px 2px 8px; font-size: 11px; line-height: 1.35; }
 .art-root-h { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 4px 2px; font-size: 13px; }
+.art-root-h b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .art-root-h:hover { color: var(--fg); }
 .art-chev { width: 12px; color: var(--fg-mut); display: inline-block; }
-.art-root-n { margin-left: 4px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.art-root-n { margin-left: auto; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .art-files { margin: 2px 0 10px 14px; }
 .art-file { display: flex; align-items: center; gap: 8px; padding: 2px 6px; border-radius: 5px; cursor: pointer; }
 .art-file:hover { background: var(--bg-2); }

@@ -4415,6 +4415,15 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
   }
 
   const ql = filter.trim().toLowerCase()
+  // Search every server-bounded root, including collapsed ones. Keeping disclosure state separate
+  // avoids rendering thousands of hidden-root rows while still making each root's match count honest.
+  const matchesByRoot = ql && roots
+    ? new Map(roots.map(r => [r.id, r.files.filter(f => f.path.toLowerCase().includes(ql))]))
+    : null
+  const totalMatches = matchesByRoot
+    ? [...matchesByRoot.values()].reduce((total, files) => total + files.length, 0)
+    : 0
+  const cappedSearch = !!(ql && roots?.some(r => r.truncated))
   const binary = content && content.is_text === false   // the server's verdict, not the extension guess
   return (
     <Panel title="Files" sub={runId} wide onClose={onClose}>
@@ -4425,14 +4434,19 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
         : !roots ? <div className="muted">Loading…</div> :
         <div className="art-wrap">
           <div className="art-list">
-            <input className="text art-filter" aria-label="Filter files" placeholder="filter files…" value={filter}
+            <input className="text art-filter" aria-label="Filter loaded files" placeholder="filter loaded files…" value={filter}
                    onChange={e => setFilter(e.target.value)} />
+            {ql && <div className="muted art-filter-status" role="status" aria-live="polite" aria-atomic="true">
+              {totalMatches === 0
+                ? 'No matches in the loaded file inventory.'
+                : `${totalMatches} ${totalMatches === 1 ? 'match' : 'matches'} in the loaded file inventory.`}
+              {cappedSearch && ' Some roots reached the listing limit, so other matches may exist.'}
+            </div>}
             {roots.length === 0 && <div className="muted">No files found.</div>}
             {roots.map(r => {
               const isOpen = !!open[r.id]
-              // Filter only the EXPANDED root — collapsed roots aren't rendered, so don't rescan their
-              // (possibly large) file lists on every keystroke.
-              const files = isOpen ? (ql ? r.files.filter(f => f.path.toLowerCase().includes(ql)) : r.files) : null
+              const matches = matchesByRoot?.get(r.id) || r.files
+              const files = isOpen ? matches : null
               return (
                 <div className="art-root" key={r.id}>
                   <button type="button" className="art-root-h disclosure-button" title={r.path}
@@ -4440,10 +4454,13 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
                     <span className="art-chev">{isOpen ? '▾' : '▸'}</span>
                     <b>{r.label}</b>
                     <span className="muted art-root-n">
-                      {isOpen && ql ? `${files.length}/${r.n_files}` : `${r.n_files}${r.truncated ? '+' : ''}`}</span>
+                      {ql ? `${matches.length} ${matches.length === 1 ? 'match' : 'matches'} · ${r.n_files} loaded`
+                        : `${r.n_files}${r.truncated ? ' loaded · cap reached' : ''}`}</span>
                   </button>
                   {isOpen && <div className="art-files">
-                    {files.length === 0 ? <div className="muted art-empty">{ql ? 'no match' : 'empty'}</div>
+                    {files.length === 0 ? <div className="muted art-empty">{ql
+                      ? (r.truncated ? 'no match in loaded subset' : 'no match in this root')
+                      : 'empty'}</div>
                       : files.map(f => (
                         <button type="button" key={f.path} title={f.path + (f.is_text ? '' : ' · looks binary')}
                              aria-pressed={!!(sel && sel.root === r.id && sel.path === f.path)}
@@ -4453,7 +4470,9 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
                           <span className="art-name">{f.path}</span>
                           <span className="art-size">{fmtBytes(f.size)}</span>
                         </button>))}
-                    {r.truncated && !ql && <div className="muted art-empty">… listing capped at {r.n_files} files</div>}
+                    {r.truncated && <div className="muted art-empty">{ql
+                      ? `Filter checked ${r.n_files} loaded files; this root may contain more matches.`
+                      : `Listing stopped at ${r.n_files} files; this root may contain more.`}</div>}
                   </div>}
                 </div>
               )
