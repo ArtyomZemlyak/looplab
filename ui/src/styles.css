@@ -2984,6 +2984,10 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   background:color-mix(in srgb,var(--accent) 8%,var(--bg-1));color:var(--fg);font-size:12px}
 .review-banner>span:not(.spacer){color:var(--fg-mut)}
 .review-banner .review-refresh-warn{color:var(--fg);font-weight:700;text-decoration:underline;text-decoration-color:var(--fail)}
+/* On wide owner layouts the global Attention launcher sits just below the topbar. Reserve its fixed
+   slot in the history banner so the rightmost action remains visible and clickable. */
+@media(min-width:901px){.history-banner{
+  padding-right:calc(72px + env(safe-area-inset-right,0px))}}
 @media(max-width:700px){.review-banner{align-items:flex-start;flex-wrap:wrap;overflow-wrap:anywhere}.review-banner .spacer{display:none}
   .review-banner>span:last-child{flex-basis:100%}}
 .review-link-builder{display:grid;gap:10px;padding:14px;border:1px solid var(--border);border-radius:10px;background:var(--bg)}
