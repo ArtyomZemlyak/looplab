@@ -168,3 +168,66 @@ def test_the_widest_debts_are_the_ones_the_review_named():
         "serve/ leans on nine traceview privates — doc 25 SR-* proposes a public projection API")
     assert per_provider["looplab.engine.memory"] >= 7, (
         "tools/ + cli/ lean on the capsule read-model — doc 25 XP-01's primary promotion candidate")
+
+
+# --- the tools -> serve inversion (doc 25 XP-03 / TO-03) --------------------------------------
+
+def test_the_run_mutating_tool_takes_its_serve_primitives_by_injection():
+    """`tools/` sits BELOW `serve/` in the package map, and `serve/assistant.py` constructs
+    `RunControlTools` — so reaching up into `serve` from the tool closes a cycle that only
+    function-local imports were keeping open.
+
+    The primitives are now an explicit `RunLifecycleFns` argument. The default still lazily imports
+    the serve implementations, so this is a boundary made VISIBLE rather than one already moved:
+    the remaining upward import lives in exactly one named place a caller can replace.
+    """
+    from looplab.tools.machine_runs_tools import RunControlTools, RunLifecycleFns
+
+    calls = []
+
+    class _Lock:
+        def __enter__(self):
+            calls.append("lock")
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    injected = RunLifecycleFns(
+        engine_alive=lambda _rd: calls.append("alive") or False,
+        fresh_resume_launch_pending=lambda _rd: calls.append("resume") or False,
+        fresh_run_launch_pending=lambda _rd: calls.append("run") or False,
+        run_lifecycle_lock=lambda _rd: _Lock(),
+        run_config_write_lock=lambda _p: _Lock(),
+    )
+    tools = RunControlTools("runs", lifecycle=injected)
+    assert tools.lifecycle() is injected, "an injected provider must be used verbatim"
+
+    # ...and with nothing injected the default still resolves the serve implementations, so the
+    # historical behaviour of every existing caller is unchanged.
+    default = RunControlTools("runs").lifecycle()
+    assert isinstance(default, RunLifecycleFns)
+    assert all(callable(getattr(default, field)) for field in
+               ("engine_alive", "fresh_resume_launch_pending", "fresh_run_launch_pending",
+                "run_lifecycle_lock", "run_config_write_lock"))
+
+
+def test_the_upward_import_is_confined_to_that_one_default():
+    """The point of the inversion: `serve` may be named in the default provider and nowhere else in
+    `tools/`, so the boundary is one reviewable site instead of scattered lazy imports."""
+    offenders = []
+    for path in sorted((_PKG / "tools").rglob("*.py")):
+        source = path.read_text(encoding="utf-8-sig")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            module = getattr(node, "module", None) if isinstance(node, ast.ImportFrom) else None
+            if not module or not module.startswith("looplab.serve"):
+                continue
+            enclosing = [n.name for n in ast.walk(tree)
+                         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                         and n.lineno <= node.lineno <= (n.end_lineno or n.lineno)]
+            if "lifecycle" not in enclosing:
+                offenders.append(f"{path.relative_to(_PKG.parent)}:{node.lineno}: {module}")
+    assert not offenders, (
+        "tools/ imports serve/ outside the one injectable default provider — pass the dependency "
+        f"in instead of reaching up for it:\n  " + "\n  ".join(offenders))

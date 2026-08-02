@@ -18,6 +18,7 @@ import re
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 from looplab.events import digest
@@ -591,6 +592,23 @@ def _render_conversation(convo: dict, run_id, nid, stage: Optional[str], max_cha
     return text[:budget].rstrip() + f"\n…[+{len(text) - budget} chars truncated — narrow with `stage`]"
 
 
+@dataclass(frozen=True)
+class RunLifecycleFns:
+    """The `serve`-owned primitives a run-MUTATING tool needs, as an explicit contract.
+
+    Every field is a fence, not a convenience: the lifecycle lock is the only thing standing between
+    a delete and a resume that has been claimed but has not yet taken `engine.lock`, and the two
+    launch-pending predicates are what make that window observable. Naming them here means a
+    caller can substitute them (a test, a different host) without `tools/` reaching upward into
+    `serve/` — see doc 25 XP-03.
+    """
+    engine_alive: Callable
+    fresh_resume_launch_pending: Callable
+    fresh_run_launch_pending: Callable
+    run_lifecycle_lock: Callable
+    run_config_write_lock: Callable
+
+
 class MachineRunsTools:
     """Read-only view over ALL runs under the run-root (for the assistant)."""
 
@@ -943,16 +961,45 @@ class RunControlTools:
     def __init__(self, run_root, alive_fn: Optional[Callable[[Path], bool]] = None,
                  mode: str = "plan", approver: Optional[Callable] = None, *,
                  command_service=None, command_key_namespace: str = "",
-                 mutation_journal_path=None, mutation_recovery: bool = False):
+                 mutation_journal_path=None, mutation_recovery: bool = False,
+                 lifecycle: "Optional[RunLifecycleFns]" = None):
         self.run_root = Path(run_root)
         self.alive_fn = alive_fn
         self.mode = mode
         self.approver = approver
+        # The serve-side run-lifecycle primitives, INJECTED (doc 25 XP-03). `tools/` sits below
+        # `serve/` in the package map, and `serve/assistant.py` constructs this class — so reaching
+        # up into `serve` from here closes a tools<->serve cycle that only function-local imports
+        # were keeping open. Passing them in makes the dependency an explicit argument of the one
+        # component that needs it. `None` keeps the historical lazy import, so every existing
+        # caller — and every test constructing this directly — is unchanged.
+        self._lifecycle = lifecycle
         self._commands = _RunCommandAdapter(
             command_service, key_namespace=command_key_namespace)
         self._mutation_fence = (_TurnMutationFence(
             Path(mutation_journal_path), command_key_namespace, recovering=mutation_recovery)
             if mutation_journal_path is not None and command_key_namespace else None)
+
+    def lifecycle(self) -> "RunLifecycleFns":
+        """The injected run-lifecycle primitives, or the lazily-imported serve defaults.
+
+        Resolved per call rather than in `__init__` so the default path keeps its historical import
+        timing — these are only needed by the mutating tools, and importing `serve` at construction
+        would make every read-only assistant session pay for (and depend on) the server package.
+        """
+        if self._lifecycle is not None:
+            return self._lifecycle
+        from looplab.serve.engine_proc import (
+            _engine_alive, _fresh_resume_launch_pending, _fresh_run_launch_pending,
+            _run_lifecycle_lock)
+        from looplab.serve.run_files import run_config_write_lock
+        return RunLifecycleFns(
+            engine_alive=_engine_alive,
+            fresh_resume_launch_pending=_fresh_resume_launch_pending,
+            fresh_run_launch_pending=_fresh_run_launch_pending,
+            run_lifecycle_lock=_run_lifecycle_lock,
+            run_config_write_lock=run_config_write_lock,
+        )
 
     def bind_state(self, state=None, parent=None) -> None:
         return None
@@ -1273,11 +1320,10 @@ class RunControlTools:
                     # doesn't show a stale value (the two mutation paths must not drift). Best-effort.
                     snap = rd / "config.snapshot.json"
                     if snap.exists():
-                        from looplab.serve.run_files import run_config_write_lock
                         # Global order is config -> events. Reset takes the same pair in that order,
                         # preventing an event->config/config->event deadlock while also closing the
                         # reset-marker race for this dual write.
-                        with run_config_write_lock(snap):
+                        with self.lifecycle().run_config_write_lock(snap):
                             store.append(
                                 EV_TRUST_GATE_CHANGED,
                                 {"trust_gate": tg, "source": "assistant"})
@@ -1476,9 +1522,7 @@ class RunControlTools:
         from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, _interprocess_lock
         from looplab.events.replay import fold
         from looplab.events.types import EV_NODE_TOMBSTONED
-        from looplab.serve.engine_proc import (
-            _engine_alive, _fresh_resume_launch_pending, _fresh_run_launch_pending,
-            _run_lifecycle_lock)
+        lifecycle = self.lifecycle()
 
         evp = rd / "events.jsonl"
 
@@ -1495,10 +1539,11 @@ class RunControlTools:
 
         # The launch claim/Popen/child-lock gap is fenced only by the lifecycle lock. Acquire it after
         # approval, reject a fresh pending launch, then take engine.lock before the event-log CAS.
-        with _run_lifecycle_lock(rd):
-            if _fresh_resume_launch_pending(rd) or _fresh_run_launch_pending(rd):
+        with lifecycle.run_lifecycle_lock(rd):
+            if (lifecycle.fresh_resume_launch_pending(rd)
+                    or lifecycle.fresh_run_launch_pending(rd)):
                 return f"(run {rid} is launching — retry delete after the engine settles)"
-            if _engine_alive(rd):
+            if lifecycle.engine_alive(rd):
                 return f"(run {rid} became LIVE while awaiting permission — stop it and retry)"
             if purge:
                 return self._purge_node_snapshot(rid, rd, nid, subtree, expected_tail)

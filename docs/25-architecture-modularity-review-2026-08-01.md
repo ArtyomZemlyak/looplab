@@ -2417,7 +2417,7 @@ Scope: import graph, cross-package duplication, dead top-level code, registries,
 call it; the deliberate subsets (`train_monitor`, `log_pages`, `artifacts`) each state which
 fields they omit and why, against that definition.
 
-#### XP-03 · MEDIUM · layering · effort: medium
+#### XP-03 · MEDIUM · layering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
 **tools/machine_runs_tools.py is a serve-side component living in tools/, forming a tools<->serve cycle**
 
@@ -2426,6 +2426,24 @@ fields they omit and why, against that definition.
 *Evidence:* machine_runs_tools.py (1659 lines) lazily imports serve.run_files.run_config_write_lock and serve.engine_proc (spawn/liveness) — the only two upward tools→serve imports in the tree — while serve/assistant.py imports MachineRunsTools/RunLauncherTools/RunControlTools back. Its only non-test consumers are serve/assistant.py; the cycle is avoided purely by function-local imports. The package map defines tools/ as 'agent-facing tools' and serve/ as the top layer, so a run-mutating assistant backend that needs serve's config-lock and engine-spawn machinery sits one layer below its own dependencies.
 
 *Recommendation:* Move machine_runs_tools (or at least its mutation/spawn paths) into serve/, or extract run_config_write_lock and the liveness/spawn contract into a serve-independent module both can import downward.
+
+*Resolution (2026-08-02, inversion arm):* `RunControlTools` — the class that owns the mutating
+delete path — now takes its serve-side primitives as an explicit `RunLifecycleFns` dataclass
+argument, and `tools/` names `serve` in exactly ONE place: that argument's lazy default. The
+dependency is an argument of the component that needs it rather than an upward reach, and a caller
+(a test, a different host) can substitute it. Behaviour is unchanged for every existing caller,
+because the default resolves the same implementations.
+
+`tests/test_cross_package_private_seams.py` pins both halves: an injected provider is used verbatim,
+the default still resolves all five callables, and NO `looplab.serve` import may appear in `tools/`
+outside that one provider. Verified to have teeth by scattering a second lazy import back in.
+
+*Still open (the downward-extraction arm):* the five primitives cannot simply move to a lower layer
+as-is — `_run_lifecycle_lock`, `_fresh_resume_launch_pending` and `_fresh_run_launch_pending`
+transitively need `_run_lifecycle_key`, `_run_lifecycle_locks(_guard)`, `_run_lifecycle_lock_path`,
+`_engine_liveness`, `_launch_claim_is_fresh` and `_run_launch_marker_path`. That is the whole
+run-lifecycle/launch-liveness subsystem, not four helpers; moving half of it would split the grace
+constants across two modules, which is worse than the cycle. It wants its own change.
 
 #### XP-04 · LOW · layering · effort: small — **RESOLVED (2026-08-02)**
 
