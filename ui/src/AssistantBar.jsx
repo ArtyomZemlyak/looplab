@@ -376,6 +376,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const sidRef = useRef(null)   // session the stream callbacks belong to (guards cross-session bleed)
   const inputRef = useRef(null)
   const feedRef = useRef(null)
+  const sessionsRef = useRef(null)
   const fullDialogRef = useRef(null)
   const sideDialogRef = useRef(null)
   const deleteDialogRef = useRef(null)
@@ -639,6 +640,23 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
   const openSide = () => openCommandView('side')   // openable any time (even empty)
   const openFull = () => openCommandView('full')
+  useEffect(() => {
+    if (view !== 'full' || !sid) return
+    let frame = null
+    const revealActiveSession = () => {
+      if (frame != null) cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        sessionsRef.current?.querySelector('.asst-sess.active')
+          ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+      })
+    }
+    revealActiveSession()
+    window.addEventListener('resize', revealActiveSession)
+    return () => {
+      window.removeEventListener('resize', revealActiveSession)
+      if (frame != null) cancelAnimationFrame(frame)
+    }
+  }, [sessions.length, sid, view])
   const closeDeleteConfirm = React.useCallback(() => {
     if (deleteConfirmBusyRef.current) return
     const trigger = deleteTriggerRef.current
@@ -2604,7 +2622,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           <span className="ttl" style={{ flex: 1 }}>Assistant</span>
           <button className="btn sm primary" onClick={newChat}>+ New</button>
         </div>
-        <div className="asst-sessions"
+        <div ref={sessionsRef} className="asst-sessions"
           aria-busy={sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}>
           {sessionsStatus === 'loading' && <div className="asst-session-resource" role="status">
             <span>Loading chats…</span>

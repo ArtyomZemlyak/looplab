@@ -2709,7 +2709,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .run-metric-chip, .reset-stage-option, .ctx-chip, .data-table .btn.xs, .chip .chip-x,
   .grp-pill, .grp-tab, .run-card .ic, .cmdbar-attach, .asst-attach, .cmdbar-go,
   .cmdbar-drawer-btn, .asst-mode, .asst-side-panel .btn.sm, .asst-full .asst-main-h .btn,
-  .asst-shared .asst-main-h .btn, .asst-sess-open, .asst-sess-x,
+  .asst-full .asst-side-h .btn, .asst-shared .asst-main-h .btn, .asst-sess-open, .asst-sess-x,
   .asst-session-resource .btn { min-height: 44px; }
   .grp-pill { height: 44px; }
   .route-state-notice .btn, .copy-link-fallback .btn,
@@ -2721,7 +2721,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   }
   .asst-launch-global { padding-inline: 8px; }
   .asst-launch-global-label { display: none; }
-  .cmdbar-in, .asst-inrow textarea.text { font-size: 16px; }
+  .cmdbar-in, .asst-inrow textarea.text { min-height: 44px; font-size: 16px; }
   .asst-in { padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); background: var(--bg-1); }
   .asst-full .asst-feed, .asst-shared .asst-feed, .asst-side-panel .asst-drawer-feed {
     padding-bottom: max(18px, env(safe-area-inset-bottom, 0px));
@@ -2732,6 +2732,8 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 }
 
 @media (max-width: 480px) {
+  .asst-side-panel .asst-drawer-h { gap: 4px; }
+  .asst-side-panel .asst-ctxtok { margin-left: 0; }
   /* Keep all four workspace destinations legible after Back, Copy and Energy claim the first row. */
   .run-head .view-toggle { flex: 1 0 100%; width: 100%; max-width: 100%; }
   /* The compact command dock needs two deliberate rows. A recovery action plus four touch targets
