@@ -889,6 +889,18 @@ modules.
 `claims.py` is now 843 lines, down from 2,846 — the four modules total 3,124, the growth being
 module docstrings that state each layer's direction.
 
+*Verified behaviour-preserving, not merely asserted.* A digest harness over a fixed corpus
+(`tests/test_claims.py::test_the_claim_projections_are_unchanged_by_the_split`) exercises all four
+flag combinations of `claim_assessments`, five cap values of `build_context_pack`, the render path
+and the atlas — and produces the SAME digest when run against the pre-split tree
+(`bfd1659b~1`). 181,897 bytes of output, byte-identical. That is what justifies calling a
+2,846 -> 843 line redistribution behaviour-preserving; the module's own docstrings claim
+"pure/deterministic", which is what makes a digest a legitimate tripwire rather than a flake
+generator. Two companion guards keep it honest: one pins determinism within a process, the other
+proves the corpus actually reaches `mixed`/`supported`/`refuted`/`inconclusive`, exercises the
+governance overlay, and demonstrates that an operator-rejected claim is projected (auditable) but
+never reaches a context pack.
+
 *Still open:* the ledger and the D8 store. Both remain in `claims.py`, which at 843 lines is no
 longer a god-module; splitting them further is optional rather than the finding.
 

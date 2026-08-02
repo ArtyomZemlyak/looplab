@@ -1821,3 +1821,108 @@ def test_the_three_shared_helpers_live_in_the_leaf_with_one_definition_each():
                              for target in node.targets)]
         assert not redefined, (
             f"{module_name}.py redefines one of the shared leaf helpers at line(s) {redefined}")
+
+
+# --- the split is behaviour-preserving (doc 25 EM-01) -------------------------------------------
+
+# These projections document themselves as "Pure/deterministic". That makes a digest over a fixed
+# corpus a legitimate tripwire, and the EM-01 split is exactly what it was built for: the same
+# harness run against the pre-split tree produced BYTE-IDENTICAL output for every case below, which
+# is what justifies calling a 2,846 -> 843 line redistribution behaviour-preserving.
+#
+# A change to this digest is not a failure, it is a QUESTION: which projection moved, and was that
+# intended? Re-run the case list, read the diff, then update the constant in the same change that
+# causes it — never separately, or the tripwire silently stops covering the thing that moved.
+_CLAIMS_PROJECTION_DIGEST = "5e5ad06efacc3debdc9fec1fe69e62b47b8bbcaaf3dbbad26f4a45d46f6b258b"
+
+
+def _projection_corpus():
+    from looplab.engine.memory import normalize_statement
+
+    lessons = [
+        _lesson("wider layers help", "supported", [1, 2, 3]),
+        _lesson("wider layers help", "tested", [4], run_id="rB"),          # -> mixed
+        _lesson("dropout hurts", "refuted", [5], run_id="rB", task_id="task-x"),
+        _lesson("lr warmup is neutral", "tested", [6]),
+        _lesson("bigger batch helps", "supported", [7, 8], task_id="task-x"),
+        _lesson("augment helps", "supported", [9]),
+        _lesson("augment helps", "supported", [10], run_id="rC"),
+    ]
+    research = [
+        {"statement": "dropout hurts", "verdict": "refuted", "run_id": "rD",
+         "evidence": ["memo-1"], "task_id": "task-x"},
+        {"statement": "wider layers help", "verdict": "supported", "run_id": "rD",
+         "evidence": ["memo-2"]},
+    ]
+    decisions = {
+        normalize_statement("augment helps"): {"decision": "ratified"},
+        normalize_statement("lr warmup is neutral"): {"decision": "rejected"},
+    }
+    return lessons, research, decisions
+
+
+def _projection_outputs():
+    import json
+
+    from looplab.engine.claims import (
+        build_context_pack, claim_assessments, portfolio_atlas, render_context_pack,
+    )
+
+    lessons, research, decisions = _projection_corpus()
+    out = {}
+    for structured in (False, True):
+        for fuzzy in (False, True):
+            for bounded in (True, False):
+                key = f"assess:s={structured}:f={fuzzy}:b={bounded}"
+                rows = claim_assessments(lessons, research_claims=research, decisions=decisions,
+                                         fuzzy=fuzzy, structured=structured, bounded=bounded)
+                out[key] = list(rows)
+                for cap in (1, 3, 5, 64, 500):
+                    out[f"pack:{key}:{cap}"] = build_context_pack(rows, max_claims=cap)
+                out[f"render:{key}"] = render_context_pack(build_context_pack(rows, max_claims=5))
+                out[f"atlas:{key}"] = portfolio_atlas(rows, [])
+    return json.dumps(out, sort_keys=True, default=str)
+
+
+def test_the_claim_projections_are_unchanged_by_the_split():
+    import hashlib
+
+    payload = _projection_outputs()
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    assert digest == _CLAIMS_PROJECTION_DIGEST, (
+        "a claim projection changed. That may be correct — but these functions decide what evidence "
+        "a proposing agent sees and what the portfolio atlas reports, so it must be a decision. "
+        "Diff the outputs, then update _CLAIMS_PROJECTION_DIGEST in the SAME change.\n"
+        f"  payload bytes: {len(payload)}")
+
+
+def test_the_projections_are_deterministic_within_a_process():
+    """A digest over a non-deterministic payload is a flake generator, not a tripwire."""
+    assert _projection_outputs() == _projection_outputs()
+
+
+def test_the_digest_corpus_actually_exercises_the_interesting_states():
+    """A tripwire over a corpus that only produces `supported` rows would pass through any change to
+    the precedence rules it exists to protect."""
+    import json
+
+    payload = json.loads(_projection_outputs())
+    states = {row["epistemic"] for key, rows in payload.items()
+              if key.startswith("assess:") for row in rows}
+    assert {"mixed", "supported", "refuted", "inconclusive"} <= states, (
+        f"the corpus only reaches {sorted(states)}; the caveat precedence is untested by the digest")
+    maturities = {row.get("maturity") for key, rows in payload.items()
+                  if key.startswith("assess:") for row in rows}
+    assert "operator-ratified" in maturities, "no governance overlay is exercised by the digest"
+    # The governance filter lives in the PACK, not in the assessment: a rejected claim is still
+    # projected (carrying its `operator-rejected` maturity, so the ledger stays auditable) and is
+    # dropped only when assembling what an agent reads. The corpus proves both halves.
+    rejected_rows = [row for key, rows in payload.items() if key.startswith("assess:")
+                     for row in rows if row["statement"] == "lr warmup is neutral"]
+    assert rejected_rows, "the corpus no longer contains an operator-rejected claim at all"
+    assert {row["maturity"] for row in rejected_rows} == {"operator-rejected"}
+    packed = [row["statement"] for key, pack in payload.items() if key.startswith("pack:")
+              for row in pack["claims"]]
+    assert "lr warmup is neutral" not in packed, (
+        "an operator-rejected claim reached a context pack — the one thing the governance overlay "
+        "exists to prevent")
