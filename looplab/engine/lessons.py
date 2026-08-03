@@ -301,13 +301,10 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
     def reflect_client(self):
         """The LLM client to use for run-end distillation — the Researcher's (unwrapping any
         surrogate/fallback), else the Developer's. None when no LLM client is wired (toy backends)."""
-        r = getattr(self._e, "researcher", None)
-        for obj in (r, getattr(r, "inner", None), getattr(r, "fallback", None),
-                    getattr(self._e, "developer", None)):
-            c = getattr(obj, "client", None)
-            if c is not None and hasattr(c, "complete_text"):
-                return c
-        return None
+        from looplab.agents.roles import resolve_role_client
+
+        return resolve_role_client(getattr(self._e, "researcher", None),
+                                   getattr(self._e, "developer", None))
 
     @staticmethod
     def lessons_file_token(path: Path):

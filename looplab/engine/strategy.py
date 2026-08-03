@@ -1107,10 +1107,10 @@ class StrategyCadenceMixin:
         sound", and abstains rather than over-claiming when the judgment is unstable."""
         try:
             from looplab.trust.verifier import selection_criteria, verify
-            r = getattr(self, "researcher", None)
-            parser = next((p for o in (r, getattr(r, "inner", None), getattr(r, "fallback", None),
-                                       getattr(self, "developer", None)) if (p := getattr(o, "parser", None))),
-                          "tool_call")
+            from looplab.agents.roles import resolve_role_parser
+
+            parser = resolve_role_parser(getattr(self, "researcher", None),
+                                         getattr(self, "developer", None))
             snapshot = verifier_evidence_snapshot(state.direction, node)
             subject = (f"Experiment #{node.id} reported metric={snapshot['metric']} on the task (optimize "
                        f"direction: {state.direction}); its result is genuinely sound and will hold up.")

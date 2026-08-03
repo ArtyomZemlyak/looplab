@@ -329,12 +329,11 @@ class LessonDistillMixin:
         `settings.llm_parser`) — so unwrap the same researcher→inner→fallback→developer chain
         `reflect_client` walks. (None, "tool_call") when nothing is wired (toy backends) — exactly
         the defaults `agent_merge` assumed before these were threaded."""
+        from looplab.agents.roles import resolve_role_parser, resolve_role_prompts
+
         r = getattr(self._e, "researcher", None)
-        chain = (r, getattr(r, "inner", None), getattr(r, "fallback", None),
-                 getattr(self._e, "developer", None))
-        prompts = next((p for o in chain if (p := getattr(o, "prompts", None)) is not None), None)
-        parser = next((p for o in chain if (p := getattr(o, "parser", None))), "tool_call")
-        return prompts, parser
+        d = getattr(self._e, "developer", None)
+        return resolve_role_prompts(r, d), resolve_role_parser(r, d)
 
     def causal_meta_note(self, final: RunState, best) -> Optional[str]:
         """LLM-distilled 'WHY the winner won' — a reusable causal note (the meta-note's real purpose,

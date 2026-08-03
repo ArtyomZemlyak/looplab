@@ -799,13 +799,10 @@ class NoveltyGateMixin:
         try:
             from looplab.search.graded_novelty import reexamine_failed_direction
 
-            researcher = getattr(self, "researcher", None)
-            parser = next((value for owner in (
-                researcher,
-                getattr(researcher, "inner", None),
-                getattr(researcher, "fallback", None),
-                getattr(self, "developer", None),
-            ) if (value := getattr(owner, "parser", None))), "tool_call")
+            from looplab.agents.roles import resolve_role_parser
+
+            parser = resolve_role_parser(getattr(self, "researcher", None),
+                                         getattr(self, "developer", None))
             verdict = reexamine_failed_direction(
                 state,
                 node_id,

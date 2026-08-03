@@ -435,17 +435,6 @@ class ResourceSchedulingMixin:
             self._gpu_epoch += 1
             self._gpu_condition.notify_all()
 
-    # Back-compat for integrations/tests that exercised the old single-GPU primitive directly.  The
-    # dispatcher itself uses the multi-GPU API and never relies on this non-blocking wrapper.
-    def _acquire_gpu(self) -> Optional[int]:
-        if max(1, int(self._eval_parallel or 1)) <= 1:
-            return None
-        got = self._acquire_gpus(1)
-        return got[0] if got else None
-
-    def _release_gpu(self, gpu_id: Optional[int]) -> None:
-        self._release_gpus([] if gpu_id is None else [gpu_id])
-
     def _gpu_pool_epoch(self) -> int:
         self._ensure_resource_state()
         with self._gpu_condition:

@@ -1222,21 +1222,29 @@ def test_reserve_node_build_hands_distinct_ids_to_parallel_threads(tmp_path):
 
 
 def test_gpu_pool_auto_max_parallel_and_distinct_pinning(tmp_path, monkeypatch):
-    # max_parallel=0 -> AUTO = one experiment per DETECTED GPU; and _acquire_gpu hands out DISTINCT GPUs
+    # max_parallel=0 -> AUTO = one experiment per DETECTED GPU; and admission hands out DISTINCT GPUs
     # to concurrent evals (so parallel nodes don't collide on cuda:0), returning them to the pool. This is
     # what makes the Strategist's parallelism knob actually use a multi-GPU box instead of 1/N.
+    #
+    # Driven through the multi-GPU API the dispatcher actually uses (doc 25 EC-14). The old
+    # `_acquire_gpu`/`_release_gpu` wrappers this test used to call were production-dead, and their
+    # "serial mode never pins" branch was a SECOND copy of the rule that really lives in admission —
+    # so the assertion below could have held while the real path disagreed.
     monkeypatch.setattr("looplab.engine.orchestrator._detect_gpu_ids", lambda: [0, 1])
     eng = _engine(tmp_path / "gpu-auto", max_parallel=0)
     assert eng.max_parallel == 2                   # AUTO resolved to the 2 detected GPUs
-    a = eng._acquire_gpu()
-    b = eng._acquire_gpu()
+    (a,) = eng._acquire_gpus(1)
+    (b,) = eng._acquire_gpus(1)
     assert {a, b} == {0, 1} and a != b             # two concurrent evals -> two DISTINCT GPUs
-    assert eng._acquire_gpu() is None              # pool drained -> unpinned (shares), never blocks
-    eng._release_gpu(a)
-    assert eng._acquire_gpu() == a                 # a released GPU is reusable
-    # single-experiment mode never pins (uses the box as-is, backward-compatible)
+    assert eng._acquire_gpus(1) is None            # pool drained -> the caller waits, never a collision
+    eng._release_gpus([a])
+    assert eng._acquire_gpus(1) == [a]             # a released GPU is reusable
+    # single-experiment mode never pins (uses the box as-is, backward-compatible). The rule is a
+    # property of ADMISSION, not of the acquire primitive: an UNSPECIFIED footprint asks for a
+    # device only when the run is actually evaluating in parallel.
     eng1 = _engine(tmp_path / "gpu-single", max_parallel=1)
-    assert eng1._acquire_gpu() is None
+    assert eng1._resource_request_for_node(object())["count"] == 0
+    assert eng._resource_request_for_node(object())["count"] == 1
 
 
 def test_experiment_time_budget_cue_surfaces_limit_and_calibration(tmp_path):

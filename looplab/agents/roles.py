@@ -290,6 +290,55 @@ def forward_hints(src, dst) -> None:
             setattr(dst, attr, getattr(src, attr))
 
 
+def role_wrapper_chain(researcher, developer) -> tuple:
+    """The `researcher → researcher.inner → researcher.fallback → developer` lookup order, once.
+
+    The active Researcher is frequently a WRAPPER (surrogate, panel, foresight proxy, unified
+    facade), and the things the engine needs off a role — the configured structured-output parser,
+    the PromptStore, the LLM client — live on whichever link actually carries them. Four call sites
+    had hand-rolled this walk (doc 25 EC-13), and a hand-rolled copy is precisely where a wrapper
+    link gets missed: the resolution then silently falls back to a DEFAULT rather than failing, so
+    a run quietly uses `tool_call` parsing against a provider configured for JSON, or distils
+    lessons with no PromptStore override.
+
+    Returned as a plain tuple including `None` holes, so callers keep using `getattr(obj, ...)`
+    with its own None-tolerance rather than needing a second filtering rule."""
+    return (researcher, getattr(researcher, "inner", None),
+            getattr(researcher, "fallback", None), developer)
+
+
+def resolve_role_parser(researcher, developer, *, default: str = "tool_call") -> str:
+    """First truthy `.parser` along the wrapper chain, else `default`.
+
+    Truthy rather than `is not None`: an empty parser name is not a configured parser, and treating
+    it as one would pass "" to the structured-output layer instead of the default."""
+    return next((p for o in role_wrapper_chain(researcher, developer)
+                 if (p := getattr(o, "parser", None))), default)
+
+
+def resolve_role_prompts(researcher, developer):
+    """First non-None `.prompts` (a PromptStore) along the wrapper chain, else None.
+
+    `is not None` rather than truthy here, and deliberately: an EMPTY PromptStore is a wired store
+    that happens to override nothing, and skipping past it would keep walking into a wrapper that
+    was never configured."""
+    return next((p for o in role_wrapper_chain(researcher, developer)
+                 if (p := getattr(o, "prompts", None)) is not None), None)
+
+
+def resolve_role_client(researcher, developer):
+    """First usable LLM client along the wrapper chain, else None.
+
+    `hasattr(c, "complete_text")` is the load-bearing half: toy backends carry a `client` attribute
+    that is not an LLM client at all, and returning one would turn a "no LLM wired, skip the
+    advisory step" path into an AttributeError inside distillation."""
+    for obj in role_wrapper_chain(researcher, developer):
+        c = getattr(obj, "client", None)
+        if c is not None and hasattr(c, "complete_text"):
+            return c
+    return None
+
+
 def collect_hint_cues(obj, attrs) -> str:
     """Concatenate the given engine-set hint attributes (a subset of
     `RESEARCHER_HINT_ATTRS`) off `obj` in order, each defaulting to "" when unset — the

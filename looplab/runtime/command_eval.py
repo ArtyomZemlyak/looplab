@@ -816,7 +816,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     is_docker = bool(getattr(wrap, "_docker", False))
 
     # GPU-pin reconciliation gate: the engine pins a PARALLEL eval to exactly ONE GPU by setting a
-    # single-index CUDA_VISIBLE_DEVICES in `env` (evaluate.py::_acquire_gpu). When it did, cap any
+    # single-index CUDA_VISIBLE_DEVICES in `env` (engine/resources.py::_acquire_gpus). When it did, cap any
     # explicit multi-device request in the command down to one device (below) — the subprocess sees
     # only 1 GPU, so `--gpus 2`/`--devices 2`/`--gpus 0,1` would otherwise crash (pytorch-lightning
     # pick_multiple_gpus), including the PROTECTED score command the agent cannot edit. No-op when
