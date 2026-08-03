@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { deadlineSharedAssistant, fmtDate } from './util.js'
 import { Turn } from './AssistantChat.jsx'
 
@@ -104,7 +104,10 @@ export default function SharedAssistant({ sid }) {
   const dataRef = useRef(null)
   const mountedRef = useRef(false)
   const requestRef = useRef(null)
-  const errorRef = useRef(null)
+  const focusOriginRef = useRef(null)
+  const mainRef = useRef(null)
+  const titleId = useId()
+  const statusId = useId()
 
   const load = useCallback(async ({ preserve = false } = {}) => {
     if (requestRef.current) return
@@ -147,23 +150,43 @@ export default function SharedAssistant({ sid }) {
     }
   }, [load])
   useEffect(() => {
-    if (resource.status === 'error' || resource.status === 'stale' || resource.status === 'gone') {
-      errorRef.current?.focus({ preventScroll: true })
+    const origin = focusOriginRef.current
+    if (!origin) return
+    const pending = resource.status === 'loading' || resource.status === 'refreshing'
+    const active = document.activeElement
+    const focusWasLost = !active || active === document.body
+    if (!origin.isConnected) {
+      focusOriginRef.current = null
+      if (focusWasLost) mainRef.current?.focus({ preventScroll: true })
+    } else if (!pending) {
+      focusOriginRef.current = null
+      if (focusWasLost && !origin.disabled) origin.focus({ preventScroll: true })
     }
   }, [resource.status])
-
   const sess = resource.data
   const refreshing = resource.status === 'refreshing'
-  const retry = () => load({ preserve: !!dataRef.current })
+  const loadFromControl = (event, preserve) => {
+    if (document.activeElement === event.currentTarget) focusOriginRef.current = event.currentTarget
+    load({ preserve })
+  }
+  const retry = event => loadFromControl(event, !!dataRef.current)
   const messageCount = sess?.messages.length || 0
   const liveShare = sess?.meta.live === true
   const truncated = sess?.meta.truncated === true
   const expiry = sess?.meta.expires_at
-  return <main className="asst-view asst-shared" data-route-main tabIndex={-1}
-    aria-busy={resource.status === 'loading' || refreshing ? 'true' : undefined}>
+  const statusMessage = resource.status === 'loading'
+    ? 'Loading shared chat.'
+    : refreshing
+      ? 'Refreshing shared chat. Showing the last loaded transcript.'
+      : resource.status === 'ready'
+        ? `Shared chat loaded. ${messageCount} ${messageCount === 1 ? 'message' : 'messages'}.${truncated
+          ? ' Some messages or details are not included because this transcript reached its safety limit.' : ''}`
+        : ''
+  return <main ref={mainRef} className="asst-view asst-shared" data-route-main tabIndex={-1}
+    aria-labelledby={titleId} aria-describedby={statusId}>
     <div className="asst-main">
       <div className="asst-main-h">
-        <h1 className="ttl" style={{ flex: 1 }}>{sess?.meta.title || 'Shared chat'}</h1>
+        <h1 id={titleId} className="ttl" style={{ flex: 1 }}>{sess?.meta.title || 'Shared chat'}</h1>
         <div className="asst-shared-terms" role="note">
           <span className="pill">{sess ? (liveShare ? 'live · read-only' : 'frozen snapshot · read-only') : 'public · read-only'}</span>
           {expiry && <span className="muted">Expires <time dateTime={new Date(expiry * 1000).toISOString()}>
@@ -171,22 +194,21 @@ export default function SharedAssistant({ sid }) {
         </div>
         {sess && <button className="btn sm" type="button" disabled={refreshing}
           title={liveShare ? 'Load newly shared messages' : 'Recheck whether this frozen link is still available'}
-          onClick={() => load({ preserve: true })}>{refreshing ? 'Refreshing…'
+          onClick={event => loadFromControl(event, true)}>{refreshing ? 'Refreshing…'
             : liveShare ? 'Refresh messages' : 'Recheck link'}</button>}
       </div>
-      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {resource.status === 'ready' ? `Shared chat loaded. ${messageCount} messages.`
-          : refreshing ? 'Refreshing shared chat.' : ''}
+      <div id={statusId} className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {statusMessage}
       </div>
       <div className="asst-feed" role="log" aria-live="off" aria-label="Shared Assistant transcript"
         aria-busy={resource.status === 'loading' || refreshing ? 'true' : undefined} tabIndex={0}>
-        {truncated && <div className="notice" role="status">
+        {truncated && <div className="notice" role="note">
           This public transcript reached its safety limit. Some messages or details are not included.
         </div>}
-        {resource.status === 'loading' && <div className="notice" role="status">Loading shared chat…</div>}
-        {refreshing && <div className="notice" role="status">Refreshing shared chat…</div>}
-        {(resource.status === 'error' || resource.status === 'stale' || resource.status === 'gone') && <div ref={errorRef}
-          className="notice" role="alert" tabIndex={-1}
+        {resource.status === 'loading' && <div className="notice">Loading shared chat…</div>}
+        {refreshing && <div className="notice">Refreshing shared chat…</div>}
+        {(resource.status === 'error' || resource.status === 'stale' || resource.status === 'gone') && <div
+          className="notice" role="alert"
           style={{ borderColor: 'var(--fail)', color: 'var(--fg)' }}>
           <p>{resource.status === 'stale'
             ? `${resource.error} Showing the last loaded transcript.` : resource.error}</p>

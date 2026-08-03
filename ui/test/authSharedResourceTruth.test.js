@@ -136,6 +136,13 @@ test('owner auth and public shared chat expose fenced, retryable resource truth 
     assert.match(requests[4].url, /\/api\/assistant\/shared$/)
     assert.equal(requests[4].options.headers['X-LoopLab-Share'], 'shared/one')
     assert.ok(requests[4].options.signal instanceof AbortSignal)
+    const sharedMain = document.querySelector('[data-route-main]')
+    const sharedStatus = document.getElementById(sharedMain.getAttribute('aria-describedby'))
+    assert.ok(sharedStatus, 'shared resource status is permanently described by the route main')
+    assert.equal(sharedStatus.getAttribute('role'), 'status')
+    assert.equal(sharedStatus.getAttribute('aria-live'), 'polite')
+    assert.equal(sharedStatus.textContent.trim(), 'Loading shared chat.')
+    assert.equal(document.querySelectorAll('[role="status"]').length, 1)
     const firstSession = {
       meta: { ...SHARED_META, title: 'First shared chat' },
       messages: [{ role: 'assistant', content: 'Last good transcript' }],
@@ -143,6 +150,8 @@ test('owner auth and public shared chat expose fenced, retryable resource truth 
     await reply(requests[4], firstSession)
     assert.match(document.body.textContent, /First shared chat.*Last good transcript/)
     assert.equal(document.querySelector('[role="log"]').getAttribute('aria-live'), 'off')
+    assert.equal(sharedStatus.textContent.trim(), 'Shared chat loaded. 1 message.')
+    assert.equal(document.querySelectorAll('[role="status"]').length, 1)
 
     // The refresh control now says what it will actually do: a live share can pull newly shared
     // messages, a frozen snapshot can only re-check whether its link still resolves. A lookup for
@@ -152,22 +161,27 @@ test('owner auth and public shared chat expose fenced, retryable resource truth 
       .find(node => node.textContent === 'Refresh messages')
     assert.ok(refresh, 'a live shared chat must offer to load newly shared messages')
     await act(async () => {
-      refresh.click(); refresh.click(); await settle()
+      refresh.focus(); refresh.click(); refresh.click(); await settle()
     })
     assert.equal(requests.length, 6, 'double refresh stays single-flight')
+    assert.equal(sharedStatus.textContent.trim(),
+      'Refreshing shared chat. Showing the last loaded transcript.')
+    assert.equal(document.querySelectorAll('[role="status"]').length, 1)
     await fireDeadline(15_000)
     const staleAlert = document.querySelector('[role="alert"]')
     assert.match(staleAlert.textContent, /loading timed out.*last loaded transcript.*Retry/i)
     assert.match(document.body.textContent, /Last good transcript/)
-    assert.equal(document.activeElement, staleAlert)
+    assert.equal(document.activeElement, refresh, 'a background refresh error must not steal focus')
     await reply(requests[5], {
       meta: { ...SHARED_META, title: 'Late wrong chat' }, messages: [],
     })
     assert.doesNotMatch(document.body.textContent, /Late wrong chat/)
 
     const retry = [...document.querySelectorAll('button')].find(node => node.textContent === 'Retry')
-    await act(async () => { retry.click(); retry.click(); await settle() })
+    await act(async () => { retry.focus(); retry.click(); retry.click(); await settle() })
     assert.equal(requests.length, 7, 'double retry stays single-flight')
+    assert.equal(document.activeElement, sharedMain,
+      'Retry hands focus to the stable route main before its control is removed')
     await reply(requests[6], {
       meta: { ...SHARED_META, title: 'Malformed' },
       messages: [{ role: 'assistant', content: 'bad', activity: [{ type: 'tools' }] }],
@@ -187,10 +201,23 @@ test('owner auth and public shared chat expose fenced, retryable resource truth 
     // the chat was empty when it was not.
     assert.match(document.body.textContent, /Updated shared chat.*has no complete turns/)
 
+    const terminalRefresh = [...document.querySelectorAll('button')]
+      .find(node => node.textContent === 'Refresh messages')
+    terminalRefresh.focus()
+    await click(terminalRefresh)
+    assert.equal(requests.length, 9)
+    await reply(requests[8], { detail: 'revoked internal share metadata' }, 410)
+    assert.equal(document.activeElement, sharedMain,
+      'terminal removal recovers focus only after its refresh control disappears')
+    assert.match(document.querySelector('[role="alert"]').textContent, /shared chat is unavailable/i)
+    assert.equal([...document.querySelectorAll('button')]
+      .find(node => node.textContent === 'Retry'), undefined)
+    assert.doesNotMatch(document.body.textContent, /revoked internal share metadata|Updated shared chat/i)
+
     await act(async () => { root.render(React.createElement(SharedAssistant, {
       sid: 'second', onBack() {},
     })); await settle() })
-    const secondRequest = requests[8]
+    const secondRequest = requests[9]
     await act(async () => { root.render(React.createElement(SharedAssistant, {
       sid: 'third', onBack() {},
     })); await settle() })
@@ -199,7 +226,7 @@ test('owner auth and public shared chat expose fenced, retryable resource truth 
       meta: { ...SHARED_META, title: 'Superseded chat' }, messages: [],
     })
     assert.doesNotMatch(document.body.textContent, /Superseded chat/)
-    await reply(requests[9], {
+    await reply(requests[10], {
       meta: { ...SHARED_META, title: 'Current chat' }, messages: [],
     })
     assert.match(document.body.textContent, /Current chat/)
