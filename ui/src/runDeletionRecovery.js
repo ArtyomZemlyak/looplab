@@ -4,7 +4,7 @@ const LOCAL_PHASES = new Set(['submitting', 'pending', 'unknown'])
 const GENERATION_RE = /^[0-9a-f]{64}$/
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const SERVER_PHASES = new Set([
-  'prepared', 'fenced', 'quarantining', 'quarantined', 'metadata_committed',
+  'prepared', 'fenced', 'quarantining', 'quarantine_ambiguous', 'quarantined', 'metadata_committed',
   'purging', 'retiring_fence', 'succeeded',
 ])
 const INTENT_KEYS = new Set([

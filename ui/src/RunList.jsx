@@ -578,7 +578,9 @@ function RunDeleteDialog({ target, currentRun, busy, error, onClose, onConfirm }
 
 function RunDeletionCard({ run, recovery, busy, onRetry, setRef }) {
   const active = recovery.kind === 'active'
-  const urgent = !active || recovery.intent.phase === 'unknown' || recovery.storageUnavailable
+  const repairRequired = active && recovery.intent.serverPhase === 'quarantine_ambiguous'
+  const urgent = !active || recovery.intent.phase === 'unknown' || repairRequired
+    || recovery.storageUnavailable
   return <div ref={setRef} className={`run-card run-deletion-card${urgent ? ' attention' : ''}`}
     data-run-id={recovery.runId} tabIndex={-1}
     role={urgent ? 'alert' : 'status'} aria-live={urgent ? 'assertive' : 'polite'}
@@ -592,7 +594,8 @@ function RunDeletionCard({ run, recovery, busy, onRetry, setRef }) {
     </div>
     {active && <button type="button" className="btn sm" disabled={busy}
       onClick={() => onRetry(recovery)}>{busy ? 'Checking…'
-        : recovery.intent.phase === 'unknown' ? 'Retry exact deletion' : 'Check exact deletion'}</button>}
+        : recovery.intent.phase === 'unknown' ? 'Retry exact deletion'
+          : repairRequired ? 'Check after repair' : 'Check exact deletion'}</button>}
   </div>
 }
 
@@ -927,14 +930,22 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
       : { runId: intent.runId, kind: 'active', intent, storageUnavailable: true })
     return false
   }
-  const focusDeletionRecovery = runId => requestAnimationFrame(() => {
+  const deletionFocusOwned = (runId, allowLost = false) => {
+    if (typeof document === 'undefined') return false
+    const active = document.activeElement
+    if (!active || active === document.body || !active.isConnected) return allowLost
+    const surface = deletionRecoveryRefs.current.get(runId)
+    return !!surface && (surface === active || surface.contains(active))
+  }
+  const focusDeletionRecovery = (runId, shouldFocus = () => true) => requestAnimationFrame(() => {
+    if (!shouldFocus()) return
     ;(deletionRecoveryRefs.current.get(runId) || runsMainRef.current)
       ?.focus?.({ preventScroll: true })
   })
-  const focusAfterDeletion = (intent) => requestAnimationFrame(() => {
-    if (!deletionMountedRef.current) return
+  const focusAfterDeletion = (intent, shouldFocus = () => true) => requestAnimationFrame(() => {
     const fallback = deletionFallbacksRef.current.get(intent.operationId)
     deletionFallbacksRef.current.delete(intent.operationId)
+    if (!deletionMountedRef.current || !shouldFocus()) return
     const currentCard = [...(runsMainRef.current?.querySelectorAll('.run-card') || [])]
       .find(card => card.dataset.runId === intent.runId && !card.classList.contains('run-deletion-card'))
     const target = currentCard?.querySelector('.run-card-main')
@@ -1364,7 +1375,9 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
     deleteDialogFocusRef.current = null
     focusDeletionRecovery(intent.runId)
   }
-  const finishRunDeletionReceipt = async (intent, receipt, { fromDialog = false } = {}) => {
+  const finishRunDeletionReceipt = async (intent, receipt, {
+    fromDialog = false, shouldRestoreFocus = () => false,
+  } = {}) => {
     if (receipt.status === 'pending') {
       persistDeletionPhase(intent, 'pending', receipt.phase)
       if (fromDialog) leaveDeleteDialogForRecovery(intent)
@@ -1396,6 +1409,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
         const next = new Set(current); next.delete(intent.runId); return next
       })
     }
+    const restoreFocus = fromDialog || shouldRestoreFocus()
     const cleared = clearDeletionRecovery(intent)
     setDeletionNotice(cleared
       ? { kind: 'status', text: `Run “${intent.runId}” was permanently deleted.` }
@@ -1405,13 +1419,21 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
       setDeleteDialog(null); setDeleteDialogBusy(false); setDeleteDialogError('')
       deleteDialogFocusRef.current = null
     }
-    if (cleared) focusAfterDeletion(intent)
-    else focusDeletionRecovery(intent.runId)
+    if (cleared) {
+      if (restoreFocus) focusAfterDeletion(intent, fromDialog ? undefined : shouldRestoreFocus)
+      else deletionFallbacksRef.current.delete(intent.operationId)
+    } else if (restoreFocus) {
+      focusDeletionRecovery(intent.runId, fromDialog ? undefined : shouldRestoreFocus)
+    }
   }
   const runDeletionRequest = async (intent, {
     initialRequest = false, fromDialog = false,
   } = {}) => {
     if (!intent || deletionRequestRef.current.has(intent.operationId)) return
+    const focusContext = fromDialog ? 'dialog'
+      : deletionFocusOwned(intent.runId) ? 'recovery' : ''
+    const shouldRestoreFocus = () => focusContext === 'dialog'
+      || (focusContext === 'recovery' && deletionFocusOwned(intent.runId, true))
     // GET observes a receipt but cannot roll a pending transaction forward. Every continuation uses
     // the exact persisted POST identity, which is idempotent and resumes the server state machine.
     const timed = deadlineRequest(signal => submitRunDeletion(
@@ -1421,6 +1443,9 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
     deletionRequestRef.current.set(intent.operationId, request)
     setDeletionBusyFor(intent.runId, true)
     if (fromDialog) setDeleteDialogBusy(true)
+    else if (focusContext === 'recovery') {
+      focusDeletionRecovery(intent.runId, shouldRestoreFocus)
+    }
     try {
       const rawReceipt = await timed.promise
       if (deletionRequestRef.current.get(intent.operationId) !== request) return
@@ -1430,7 +1455,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
         protocol.code = 'delete_protocol_error'
         throw protocol
       }
-      await finishRunDeletionReceipt(intent, receipt, { fromDialog })
+      await finishRunDeletionReceipt(intent, receipt, { fromDialog, shouldRestoreFocus })
     } catch (error) {
       if (deletionRequestRef.current.get(intent.operationId) !== request
           || error?.name === 'AbortError') return
@@ -1441,6 +1466,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
       const authoritativeRejection = Number.isFinite(status)
         && status >= 400 && status < 500 && ![408, 425, 429].includes(status)
         && (initialRequest || ![401, 403].includes(status))
+      const restoreFocus = shouldRestoreFocus()
       if (authoritativeRejection && clearDeletionRecovery(intent)) {
         const rejectionMessage = runDeletionErrorMessage(error)
         if (fromDialog) {
@@ -1452,12 +1478,15 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
           setDeleteDialogBusy(false)
         } else {
           setDeletionNotice({ kind: 'error', text: rejectionMessage })
-          requestAnimationFrame(() => runsMainRef.current?.focus?.({ preventScroll: true }))
           const listRead = await loadRuns()
-          if (![404, 410].includes(status) && listRead?.ok) {
-            focusAfterDeletion(intent)
+          const followFocus = restoreFocus && shouldRestoreFocus()
+          if (followFocus && ![404, 410].includes(status) && listRead?.ok) {
+            focusAfterDeletion(intent, shouldRestoreFocus)
           } else {
             deletionFallbacksRef.current.delete(intent.operationId)
+            if (followFocus) requestAnimationFrame(() => {
+              if (shouldRestoreFocus()) runsMainRef.current?.focus?.({ preventScroll: true })
+            })
           }
         }
       } else {
@@ -1512,6 +1541,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   }
   const pendingDeletionRecoveries = [...deletionRecoveries.values()]
     .filter(recovery => recovery.kind === 'active' && recovery.intent.phase !== 'unknown'
+      && recovery.intent.serverPhase !== 'quarantine_ambiguous'
       && !recovery.storageUnavailable)
   const pendingDeletionKey = pendingDeletionRecoveries
     .map(recovery => `${recovery.intent.operationId}:${recovery.intent.phase}`).sort().join('|')
@@ -1600,7 +1630,9 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
       </div>}
       {missingDeletionRecoveries.map(recovery => {
         const active = recovery.kind === 'active'
-        const urgent = !active || recovery.intent.phase === 'unknown' || recovery.storageUnavailable
+        const repairRequired = active && recovery.intent.serverPhase === 'quarantine_ambiguous'
+        const urgent = !active || recovery.intent.phase === 'unknown' || repairRequired
+          || recovery.storageUnavailable
         const busy = deletionBusy.has(recovery.runId)
         return <div key={recovery.runId}
           ref={node => node
@@ -1612,7 +1644,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
           {active && <button type="button" className="btn sm"
             disabled={busy} onClick={() => retryRunDeletion(recovery)}>
             {busy ? 'Checking…'
-              : recovery.intent.phase === 'unknown' ? 'Retry exact deletion' : 'Check exact deletion'}
+              : recovery.intent.phase === 'unknown' ? 'Retry exact deletion'
+                : repairRequired ? 'Check after repair' : 'Check exact deletion'}
           </button>}
         </div>
       })}
