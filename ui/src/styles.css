@@ -2215,6 +2215,7 @@ pre.code.event-json { max-height: 220px; }
 .asst-perm-region { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .asst-perm { border: 1px solid var(--accent-dim); border-radius: 10px; background: var(--bg-1); padding: 10px 12px;
   align-self: flex-start; width: min(100%, 760px); max-width: 100%; }
+.asst-perm:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
 .asst-perm.risk-high, .asst-perm.risk-unknown { border-color: color-mix(in srgb, var(--fail) 70%, var(--line)); }
 .asst-perm-h { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13px; }
 .asst-perm-badge { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--accent-solid-ink);

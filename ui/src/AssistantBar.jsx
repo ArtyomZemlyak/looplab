@@ -393,13 +393,30 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
   const [runs, setRuns] = useState([])
   const [pending, setPending] = useState([])      // live HITL confirm requests
+  const [attentionPermissionFocus, setAttentionPermissionFocusState] = useState({
+    session: '', id: '', token: 0, phase: 'idle',
+  })
+  const attentionPermissionFocusRef = useRef(attentionPermissionFocus)
+  const setAttentionPermissionFocus = React.useCallback(update => {
+    if (typeof update !== 'function') {
+      attentionPermissionFocusRef.current = update
+      setAttentionPermissionFocusState(update)
+      return
+    }
+    setAttentionPermissionFocusState(current => {
+      const next = update(current)
+      attentionPermissionFocusRef.current = next
+      return next
+    })
+  }, [])
+  attentionPermissionFocusRef.current = attentionPermissionFocus
   const [resolvingPerms, setResolvingPerms] = useState(() => new Set())
   const resolvingPermsRef = useRef(new Set())
   // Ids of permission requests resolved LOCALLY this session. A permissions poll in flight when the user
   // clicks Approve/Reject can return its pre-resolution snapshot AFTER the card was optimistically removed,
   // re-adding a resolved card with its buttons re-enabled (a contradictory second decision). We filter
-  // poll-sourced pending against this set; it self-heals as the server drops each resolved id.
-  const resolvedPermsRef = useRef(new Set())
+  // poll-sourced pending against per-session sets; each self-heals as the server drops its ids.
+  const resolvedPermsRef = useRef(new Map())
   const [sessions, setSessions] = useState([])    // full-view session list
   const [sessionsStatus, setSessionsStatus] = useState('idle')
   const [deleteConfirm, setDeleteConfirm] = useState(null)
@@ -477,6 +494,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const mountedRef = useRef(true)
   const historicalRef = useRef(historical)
   historicalRef.current = historical
+  const readOnlyActionRef = useRef(readOnlyAction)
+  readOnlyActionRef.current = readOnlyAction
   const currentRunIdRef = useRef(runId)
   currentRunIdRef.current = runId
   const abortRef = useRef(null)
@@ -512,11 +531,60 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const collapseForNavigationRef = useRef(null)
   const pendingRunHandoffRef = useRef(null)
   const openSessionRef = useRef(null)
+  const attentionPermissionHandoffRef = useRef(0)
+  const attentionPermissionReceiptRef = useRef(0)
+  const permissionReadEpochRef = useRef(new Map())
+  const permissionReadPendingRef = useRef(new Map())
   const toastRunIdRef = useRef(runId)
   const shareActionSessionRef = useRef(null)
   const forkActionSessionRef = useRef(null)
   const forkRecoveryRef = useRef(new Map())
   const deletingSessionsRef = useRef(new Set())
+  const cancelAttentionPermissionHandoff = React.useCallback(() => {
+    if (attentionPermissionFocusRef.current.phase === 'idle') return false
+    const token = attentionPermissionHandoffRef.current + 1
+    attentionPermissionHandoffRef.current = token
+    setAttentionPermissionFocus({ session: '', id: '', token, phase: 'idle' })
+    return true
+  }, [setAttentionPermissionFocus])
+  // Permissions are complete snapshots. Coalesce ordinary reads for one session and fence every
+  // response against a newer read, so a late poll can never replace a fresher approval registry.
+  // Attention requests `fresh` after selecting the owning chat because its global feed can be newer
+  // than a session poll that was already in flight.
+  const readPermissionSnapshot = React.useCallback((session, { fresh = false } = {}) => {
+    const id = String(session || '')
+    const current = permissionReadPendingRef.current.get(id)
+    if (!fresh && current) return current.promise
+    const seq = (permissionReadEpochRef.current.get(id) || 0) + 1
+    permissionReadEpochRef.current.set(id, seq)
+    const record = { session: id, seq, promise: null }
+    record.promise = Promise.resolve()
+      .then(() => boundedRequest(signal => assistantPermissions(id, { signal }), 8000))
+      .then(payload => {
+        if (permissionReadEpochRef.current.get(id) !== seq) {
+          return { ok: false, reason: 'superseded', session: id, seq }
+        }
+        if (!Array.isArray(payload?.pending)) {
+          return { ok: false, reason: 'invalid', session: id, seq }
+        }
+        const resolvedForSession = resolvedPermsRef.current.get(id)
+        const pending = reconcilePendingPermissions(payload.pending,
+          resolvedForSession || new Set())
+        if (resolvedForSession && resolvedForSession.size === 0) {
+          resolvedPermsRef.current.delete(id)
+        }
+        return { ok: true, session: id, seq, pending }
+      }, error => permissionReadEpochRef.current.get(id) !== seq
+        ? { ok: false, reason: 'superseded', session: id, seq }
+        : { ok: false, reason: 'error', error, session: id, seq })
+      .finally(() => {
+        if (permissionReadPendingRef.current.get(id) === record) {
+          permissionReadPendingRef.current.delete(id)
+        }
+      })
+    permissionReadPendingRef.current.set(id, record)
+    return record.promise
+  }, [])
   const replyAttemptOwned = (attempt, id) => !!attempt
     && activeReplyAttemptRef.current === attempt
     && mountedRef.current && sidRef.current === id
@@ -905,6 +973,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     })
   }, [])
   const collapseToBar = () => {
+    cancelAttentionPermissionHandoff()
     const returnSelector = view === 'side' ? '.cmdbar-drawer-btn' : '.cmdbar-ic'
     const la = lastAssistant()
     if (la && la.content) setPreview(previewText(la.content))
@@ -915,6 +984,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     requestAnimationFrame(() => document.querySelector(returnSelector)?.focus())
   }
   collapseForNavigationRef.current = () => {
+    cancelAttentionPermissionHandoff()
     const la = lastAssistant()
     if (la && la.content) setPreview(previewText(la.content))
     // Route navigation owns the next focus target. Do not let the ordinary fold-to-bar RAF steal it
@@ -997,11 +1067,20 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   // ── sessions (full view) ──
   const openSession = (id, options = {}) => {
+    if (options.attentionHandoff !== true) cancelAttentionPermissionHandoff()
     if (turnCaptureRef.current && !sidRef.current) {
       if (!options.observeOnly) flash('Wait for the new Assistant chat to finish starting')
       return Promise.resolve({ ok: false, sessionId: id, reason: 'turn-starting' })
     }
     const matchingRead = openSessionPendingRef.current
+    if (matchingRead && String(matchingRead.id) !== String(id)
+        && String(sidRef.current) === String(id)) {
+      // Re-selecting current A (including an observational Attention handoff) owns the choice over
+      // an older A -> B read. Without this, B can replace A after the user already chose to stay.
+      ++openSessionSeqRef.current
+      openSessionPendingRef.current = null
+      setOpeningSid(null)
+    }
     const requestedAllowsRecovery = options.observeOnly !== true
     if (matchingRead && String(matchingRead.id) === String(id)
         && (matchingRead.allowsRecovery || !requestedAllowsRecovery)) return matchingRead.promise
@@ -1180,9 +1259,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                       activity: (pp.steps || []).length ? [{ type: 'tools', labels: pp.steps }] : prev.activity } : prev)
               // A reattached turn may be PARKED on a HITL confirm — surface its card too (the send
               // path polls permissions; without this a reload hides the card until the 900s deny).
-              const perms = await assistantPermissions(id)
-              if (replyAttemptCurrent(reattachAttempt, id)) {
-                setPending(reconcilePendingPermissions(perms.pending, resolvedPermsRef.current))
+              const permissionSnapshot = await readPermissionSnapshot(id)
+              if (permissionSnapshot.ok && replyAttemptCurrent(reattachAttempt, id)) {
+                setPending(permissionSnapshot.pending)
               }
             } catch { /* transient */ }
           }
@@ -1221,8 +1300,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       // The stored/opened session no longer exists (deleted here or in another tab, run-root reset).
       // Don't leave the dead id in `sid`/localStorage — that wedges the chat (every send targets the
       // 404'd session). Drop it back to a fresh composer.
-      if (e?.status === 404 && (!sidRef.current || sidRef.current === id)) newChat()
-      else flash(e?.status === 404 ? 'This Assistant chat no longer exists' : 'Could not open this Assistant chat')
+      if (e?.status === 404 && (!sidRef.current || sidRef.current === id)) {
+        const preserveAttentionHandoff = options.attentionHandoff === true
+        newChat({ preserveAttentionHandoff })
+        if (!preserveAttentionHandoff) flash('This Assistant chat no longer exists')
+      } else flash(e?.status === 404 ? 'This Assistant chat no longer exists' : 'Could not open this Assistant chat')
       return { ok: false, sessionId: id, status: e?.status || null }
     } finally {
       if (sessionRead && openSessionPendingRef.current === sessionRead) {
@@ -1235,34 +1317,119 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     return operation
   }
   openSessionRef.current = openSession
+  const onAttentionPermissionFocused = React.useCallback((requestId, token) => {
+    const focus = attentionPermissionFocusRef.current
+    if (token !== attentionPermissionHandoffRef.current
+        || attentionPermissionReceiptRef.current === token
+        || focus.phase !== 'ready' || focus.id !== requestId || focus.token !== token) return
+    attentionPermissionReceiptRef.current = token
+    try {
+      window.dispatchEvent(new CustomEvent('ll:assistant-permission-opened', {
+        detail: { requestId },
+      }))
+    } catch { /* the actionable card is already visible; polling keeps Attention consistent */ }
+    setAttentionPermissionFocus(current => current.token === token
+      ? { session: '', id: '', token, phase: 'idle' } : current)
+  }, [setAttentionPermissionFocus])
+  const onAttentionPermissionFocusFailed = React.useCallback((requestId, token) => {
+    const focus = attentionPermissionFocusRef.current
+    if (token !== attentionPermissionHandoffRef.current
+        || focus.phase !== 'ready' || focus.id !== requestId || focus.token !== token) return
+    setAttentionPermissionFocus({ session: '', id: '', token, phase: 'idle' })
+    flash('Could not focus this approval. It remains in Attention; reopen it to try again.')
+  }, [flash, setAttentionPermissionFocus])
   // The Attention Center can reveal an existing permission card, but opening attention must remain
   // observational: never let this navigation gesture recover/replay a dangling Assistant turn.
   useEffect(() => {
     if (hidden) return undefined
     let active = true
+    const handoffCurrent = (handoff, session, sessionChoiceSeq = null) => active
+      && attentionPermissionHandoffRef.current === handoff
+      && (session == null || sidRef.current === session)
+      && (sessionChoiceSeq == null || openSessionSeqRef.current === sessionChoiceSeq)
+    const clearHandoff = handoff => setAttentionPermissionFocus(current => current.token === handoff
+      ? { session: '', id: '', token: handoff, phase: 'idle' } : current)
+    const focusFallback = (handoff, session, sessionChoiceSeq, preferFeed = false,
+      releaseHandoff = false) => {
+      requestAnimationFrame(() => {
+        if (!active || attentionPermissionHandoffRef.current !== handoff) return
+        if (!handoffCurrent(handoff, session, sessionChoiceSeq)) {
+          clearHandoff(handoff)
+          return
+        }
+        if (releaseHandoff) clearHandoff(handoff)
+        const composer = inputRef.current
+        const target = !preferFeed && !historicalRef.current && composer && !composer.disabled
+          ? composer : feedRef.current
+        target?.focus({ preventScroll: true })
+      })
+    }
     const onOpenAttentionSession = async event => {
       const session = event?.detail?.session
-      if (typeof session !== 'string' || !/^[0-9a-f]{16}$/.test(session)) {
+      const requestId = event?.detail?.requestId
+      if (typeof session !== 'string' || !/^[0-9a-f]{16}$/.test(session)
+          || typeof requestId !== 'string' || !/^[0-9a-f]{16}$/.test(requestId)) {
         flash('The Assistant approval link is no longer valid; refresh the Attention Center')
         return
       }
-      if (sidRef.current !== session) {
-        await openSessionRef.current?.(session, { observeOnly: true })
-      }
-      if (!active) return
-      if (sidRef.current !== session) {
+      const handoff = attentionPermissionHandoffRef.current + 1
+      attentionPermissionHandoffRef.current = handoff
+      setAttentionPermissionFocus({ session, id: requestId, token: handoff, phase: 'loading' })
+      setAssistantView('side'); setHasNew(false)
+      // Always claim the session choice. Even when A is already current this invalidates an older
+      // pending A -> B selection, while observeOnly forbids Assistant turn recovery/replay.
+      const openResult = await openSessionRef.current?.(session, {
+        observeOnly: true, attentionHandoff: true,
+      })
+      if (!active || attentionPermissionHandoffRef.current !== handoff) return
+      const sessionChoiceSeq = openSessionSeqRef.current
+      if (!openResult?.ok || sidRef.current !== session) {
+        if (openResult?.reason === 'superseded') {
+          clearHandoff(handoff)
+          return
+        }
         flash('Could not open the Assistant session that owns this approval')
+        focusFallback(handoff, null, sessionChoiceSeq, true, true)
         return
       }
-      setAssistantView('side'); setHasNew(false)
-      requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }))
+      const permissionResult = await readPermissionSnapshot(session, { fresh: true })
+      if (!handoffCurrent(handoff, session, sessionChoiceSeq)) {
+        clearHandoff(handoff)
+        return
+      }
+      if (!permissionResult.ok) {
+        if (permissionResult.reason === 'superseded') {
+          clearHandoff(handoff)
+          return
+        }
+        flash('Could not load this approval. It remains in Attention; try again.')
+        focusFallback(handoff, session, sessionChoiceSeq, false, true)
+        return
+      }
+      const nextPending = permissionResult.pending
+      setPending(nextPending)
+      const target = nextPending.find(request => request?.id === requestId)
+      if (!target) {
+        flash('This Assistant approval is no longer pending.')
+        focusFallback(handoff, session, sessionChoiceSeq, false, true)
+        return
+      }
+      if (historicalRef.current) {
+        flash(`${readOnlyActionRef.current}. Return to live, then reopen this approval from Attention.`)
+        focusFallback(handoff, session, sessionChoiceSeq, true, true)
+        return
+      }
+      setAttentionPermissionFocus({ session, id: requestId, token: handoff, phase: 'ready' })
     }
     window.addEventListener('ll:open-assistant-session', onOpenAttentionSession)
     return () => {
       active = false
+      const cancelledHandoff = attentionPermissionHandoffRef.current
+      attentionPermissionHandoffRef.current = cancelledHandoff + 1
+      clearHandoff(cancelledHandoff)
       window.removeEventListener('ll:open-assistant-session', onOpenAttentionSession)
     }
-  }, [hidden]) // openSessionRef always points at the current render
+  }, [hidden, readPermissionSnapshot]) // openSessionRef always points at the current render
   const releaseOrphanedLaunchRecovery = (recovery, reason) => {
     openFull()
     const current = listLaunchTransports().find(item => item.identity === recovery.identity
@@ -1375,7 +1542,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     window.addEventListener('ll:focus-assistant', onFocusAssistant)
     return () => window.removeEventListener('ll:focus-assistant', onFocusAssistant)
   }, [hasChat, input])
-  const newChat = () => {
+  const newChat = ({ preserveAttentionHandoff = false } = {}) => {
+    if (!preserveAttentionHandoff) cancelAttentionPermissionHandoff()
     ++openSessionSeqRef.current
     openSessionPendingRef.current = null
     deferredRecoverySessionRef.current = null
@@ -1452,6 +1620,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       reportDeleteSessionBlock(block)
       return
     }
+    cancelAttentionPermissionHandoff()
     deleteConfirmBusyRef.current = true
     setDeleteConfirmBusy(true)
     setDeleteConfirmError('')
@@ -1567,12 +1736,28 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const resolvePerm = async (reqId, decision) => {
     if (historical) { flash(readOnlyAction); return }
     if (resolvingPermsRef.current.has(reqId)) return
-    const requestSession = pending.find(req => req.id === reqId)?.session || sidRef.current
+    const requestOwner = pending.find(req => req.id === reqId)?.session
+    const requestSession = typeof requestOwner === 'string' && /^[0-9a-f]{16}$/.test(requestOwner)
+      ? requestOwner : sidRef.current
+    if (!requestSession || requestSession !== sidRef.current) {
+      setPending(current => current.filter(request => request?.id !== reqId))
+      flash('This approval belongs to another Assistant chat; reopen it from Attention.')
+      requestAnimationFrame(() => {
+        const composer = inputRef.current
+        const target = !historicalRef.current && composer && !composer.disabled
+          ? composer : feedRef.current
+        target?.focus({ preventScroll: true })
+      })
+      return
+    }
     resolvingPermsRef.current.add(reqId)
     setResolvingPerms(current => new Set(current).add(reqId))
     try {
       await assistantResolve(reqId, decision)
-      resolvedPermsRef.current.add(reqId)   // a lagging poll must not re-add this now-resolved card
+      const resolvedSession = String(requestSession || '')
+      const resolvedForSession = resolvedPermsRef.current.get(resolvedSession) || new Set()
+      resolvedForSession.add(reqId)   // a lagging poll must not re-add this now-resolved card
+      resolvedPermsRef.current.set(resolvedSession, resolvedForSession)
       if (sidRef.current === requestSession) setPending(current => {
         const next = current.filter(req => req.id !== reqId)
         requestAnimationFrame(() => {
@@ -1588,8 +1773,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       // The POST response may have been lost after the server committed the decision. Re-read the
       // registry before offering another click; on a true network outage the original card remains.
       try {
-        const latest = requestSession ? await assistantPermissions(requestSession) : null
-        if (latest && sidRef.current === requestSession) setPending(reconcilePendingPermissions(latest.pending, resolvedPermsRef.current))
+        const permissionChoiceSeq = openSessionSeqRef.current
+        const latest = requestSession && sidRef.current === requestSession
+          ? await readPermissionSnapshot(requestSession, { fresh: true }) : null
+        if (latest?.ok && sidRef.current === requestSession
+            && openSessionSeqRef.current === permissionChoiceSeq) setPending(latest.pending)
       } catch { /* retain the exact pending request for a later retry */ }
     } finally {
       resolvingPermsRef.current.delete(reqId)
@@ -2218,6 +2406,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       acknowledgedLiveShareIds = [...assistantLiveShareIds(guardedSession)]
       setShareAckNotice(current => current?.sid === guardedSid ? null : current)
     }
+    cancelAttentionPermissionHandoff()
     turnCaptureRef.current = true
     setTurnStarting(true)
     const sessionSeq = ++openSessionSeqRef.current
@@ -2323,9 +2512,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     ;(async () => {
       while (polling && replyAttemptCurrent(localAttempt, id)) {
         try {
-          const p = await assistantPermissions(id)
-          if (replyAttemptCurrent(localAttempt, id)) {
-            setPending(reconcilePendingPermissions(p.pending, resolvedPermsRef.current))
+          const permissionSnapshot = await readPermissionSnapshot(id)
+          if (permissionSnapshot.ok && replyAttemptCurrent(localAttempt, id)) {
+            setPending(permissionSnapshot.pending)
           }
         } catch { /* transient */ }
         await sleep(800)
@@ -2548,6 +2737,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       flash(commandBusy ? 'A run command is pending' : 'Assistant is busy'); return
     }
     if (historical) { flash(readOnlyAction); return }
+    cancelAttentionPermissionHandoff()
     const failedTurn = msgs[assistantIndex]
     const prior = [...msgs.slice(0, assistantIndex)].reverse().find(m => m.role === 'user')
     if (!prior) { flash('The original message is no longer available'); return }
@@ -2654,6 +2844,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
 
   const openAssistantSettings = () => {
+    cancelAttentionPermissionHandoff()
     setAssistantView('bar')
     setHasNew(false)
     location.hash = '#/settings'
@@ -2720,6 +2911,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       else if (turnCaptureRef.current || directCaptureRef.current) flash('Another action is already starting')
       return
     }
+    cancelAttentionPermissionHandoff()
     const mNew = /^\/(new|genesis|run)\b\s*([\s\S]*)$/i.exec(t)
     if (mNew) {
       const goal = mNew[2].trim()
@@ -2769,6 +2961,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }, [launchDrafts, launchRecoveries.length])
 
   const stop = () => {
+    cancelAttentionPermissionHandoff()
     activeReplyAttemptRef.current = null
     turnCaptureRef.current = false
     setTurnStarting(false)
@@ -2791,6 +2984,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
   useEffect(() => {
     if (!historical) return
+    cancelAttentionPermissionHandoff()
     clearReplyAnnouncement()
     if (runningRef.current) { stop(); return }
     // A first message may already be waiting for its session-create receipt. Let it bind that durable
@@ -2804,7 +2998,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       setTurnStarting(false)
       setRetryChecking(false)
     }
-  }, [historical, retryChecking, turnStarting, clearReplyAnnouncement])
+  }, [historical, retryChecking, turnStarting, clearReplyAnnouncement,
+    cancelAttentionPermissionHandoff])
 
   const activeMode = MODES.find(x => x.id === mode) || MODES[0]
   const changeInput = e => {
@@ -3239,6 +3434,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const key = assistantRevertKey(sid, change)
     return key ? { busy: revertingChanges.has(key), done: revertedChanges.has(key) } : {}
   }
+  const attentionPermissionHandoffActive = attentionPermissionFocus.phase !== 'idle'
+  const attentionPermissionTargetVisible = attentionPermissionFocus.phase === 'ready'
+    && pending.some(request => request?.id === attentionPermissionFocus.id)
   const renderThread = () => <>
     {msgs.length === 0 && <div className="asst-empty">
       <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
@@ -3282,8 +3480,17 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     {!historical && pending.length > 0 && <div className="asst-perm-region" role="region"
       aria-label={`${pending.length} pending Assistant approval${pending.length === 1 ? '' : 's'}`}
       aria-live="assertive" aria-atomic="false">
-      {pending.map((req, index) => <PermCard key={req.id} req={req} onResolve={resolvePerm}
-        busy={resolvingPerms.has(req.id)} autoFocus={index === pending.length - 1} />)}
+      {pending.map((req, index) => {
+        const focusedFromAttention = attentionPermissionTargetVisible
+          && req.id === attentionPermissionFocus.id
+        return <PermCard key={req.id} req={req} onResolve={resolvePerm}
+          busy={resolvingPerms.has(req.id)}
+          autoFocus={index === pending.length - 1}
+          suppressAutoFocus={attentionPermissionHandoffActive}
+          focusRequest={focusedFromAttention ? attentionPermissionFocus.token : 0}
+          onFocused={onAttentionPermissionFocused}
+          onFocusFailed={onAttentionPermissionFocusFailed} />
+      })}
     </div>}
     {/* The streaming placeholder is itself in `msgs`; its Turn renders the activity timeline +
         the "thinking" indicator — no separate block here (which would double the label). */}
@@ -3369,9 +3576,17 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       <button type="button" className="btn sm ghost" onClick={revokeCurrentShares}
         disabled={shareBusy || forkingCurrentSession}>Unshare</button>
     </div>}
-    {sessionOpening && <div className="assistant-command-pending">
-      Opening the selected Assistant chat…
+    {sessionOpening && <div className="assistant-command-pending" role="status"
+      aria-live="polite" aria-atomic="true">
+      {attentionPermissionFocus.phase === 'loading'
+        ? 'Opening the selected Assistant chat; the exact approval will load next…'
+        : 'Opening the selected Assistant chat…'}
     </div>}
+    {attentionPermissionFocus.phase === 'loading' && !sessionOpening
+      && <div className="assistant-command-pending" role="status"
+        aria-live="polite" aria-atomic="true">
+        Loading the exact Assistant approval…
+      </div>}
     {retryChecking && <div className="assistant-command-pending">
       Checking the saved Assistant turn…
     </div>}
@@ -3490,7 +3705,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   return <>
     {hiddenFileInput}
     <output className="sr-only" aria-live="polite" aria-atomic="true">
-      {sessionOpening ? 'Opening Assistant chat.'
+      {sessionOpening ? view === 'bar' ? 'Opening Assistant chat.' : ''
         : retryChecking ? 'Checking saved Assistant turn.'
           : turnStarting ? 'Starting Assistant response.'
             : busy ? 'Assistant is responding.' : replyAnnouncement}

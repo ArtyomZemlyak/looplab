@@ -337,6 +337,18 @@ export default function AttentionCenter() {
     })
   }, [persistIds, setLiveMessage])
 
+  // Opening an approval is acknowledged only after Assistant has loaded and focused that exact
+  // request. A failed/superseded handoff therefore stays visibly unread and can be retried.
+  useEffect(() => {
+    const onPermissionOpened = event => {
+      const requestId = event?.detail?.requestId
+      if (typeof requestId !== 'string' || !/^[0-9a-f]{16}$/.test(requestId)) return
+      acknowledgeInBackground(`perm_${requestId}`)
+    }
+    window.addEventListener('ll:assistant-permission-opened', onPermissionOpened)
+    return () => window.removeEventListener('ll:assistant-permission-opened', onPermissionOpened)
+  }, [acknowledgeInBackground])
+
   const openRun = useCallback((event, id, href) => {
     if (!isPlainRunActivation(event) || typeof href !== 'string' || !href.startsWith('#/run/')) return
     event.preventDefault()
@@ -384,14 +396,14 @@ export default function AttentionCenter() {
     uncertainActionPhrase, unreadComplete, unreadCount, unreadItems])
 
   const openPermission = useCallback(item => {
-    if (item?.source !== 'permission' || !/^[0-9a-f]{16}$/.test(item.session || '')) return
+    if (item?.source !== 'permission' || !/^[0-9a-f]{16}$/.test(item.session || '')
+        || !/^[0-9a-f]{16}$/.test(item.requestId || '')) return
     closeForHandoff(() => {
       window.dispatchEvent(new CustomEvent('ll:open-assistant-session', {
-        detail: { session: item.session },
+        detail: { session: item.session, requestId: item.requestId },
       }))
-      acknowledgeInBackground(item.id)
     })
-  }, [acknowledgeInBackground, closeForHandoff])
+  }, [closeForHandoff])
 
   const enableNotifications = useCallback(async () => {
     if (notificationBusy) return

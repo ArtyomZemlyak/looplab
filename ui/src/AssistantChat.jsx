@@ -171,18 +171,66 @@ function Todos({ items }) {
 
 // A human-in-the-loop confirm card: the turn paused to ask before a mutating action. Approve/Reject
 // resolves it server-side and the turn resumes.
-export function PermCard({ req, onResolve, busy = false, autoFocus = false }) {
+export function PermCard({
+  req, onResolve, busy = false, autoFocus = false, suppressAutoFocus = false,
+  focusRequest = 0, onFocused = null, onFocusFailed = null,
+}) {
   const titleId = useId()
   const detailsId = useId()
+  const cardRef = useRef(null)
   const rejectRef = useRef(null)
+  const skipSuppressionReleaseRef = useRef(false)
   const permission = permissionPresentation(req)
   const a = permission.action
   const isDiff = a.tool === 'write_file' || a.tool === 'edit_file' || a.tool === 'apply_patch'
   const requiresCaution = permission.risk === 'HIGH' || permission.risk === 'UNKNOWN'
   useEffect(() => {
-    if (autoFocus && !busy) rejectRef.current?.focus({ preventScroll: true })
-  }, [autoFocus, busy])
-  return <div className={'asst-perm risk-' + permission.risk.toLowerCase()}
+    if (focusRequest) {
+      skipSuppressionReleaseRef.current = true
+      let cancelled = false
+      let retryFrame = null
+      const focusExact = remaining => {
+        if (cancelled) return
+        const card = cardRef.current
+        const target = busy ? card : rejectRef.current
+        target?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+        const rect = target?.getBoundingClientRect()
+        const feedRect = card?.closest('[role="log"]')?.getBoundingClientRect()
+        const visible = !!rect && !!feedRect && rect.bottom > feedRect.top
+          && rect.top < feedRect.bottom && rect.right > feedRect.left && rect.left < feedRect.right
+        if (visible) target?.focus({ preventScroll: true })
+        if (visible && document.activeElement === target) {
+          onFocused?.(req.id, focusRequest)
+          return
+        }
+        if (remaining > 0) {
+          retryFrame = requestAnimationFrame(() => focusExact(remaining - 1))
+          return
+        }
+        onFocusFailed?.(req.id, focusRequest)
+      }
+      focusExact(2)
+      return () => {
+        cancelled = true
+        if (retryFrame != null) cancelAnimationFrame(retryFrame)
+      }
+    }
+    if (suppressAutoFocus) {
+      // Existing cards must not steal focus when a failed exact handoff releases its suppression.
+      // Skip only that release render; later busy -> ready and newly-last transitions stay usable.
+      skipSuppressionReleaseRef.current = true
+      return
+    }
+    if (skipSuppressionReleaseRef.current) {
+      skipSuppressionReleaseRef.current = false
+      return
+    }
+    if (!autoFocus || busy) return
+    rejectRef.current?.focus({ preventScroll: true })
+  }, [autoFocus, busy, focusRequest, onFocusFailed, onFocused, req.id, suppressAutoFocus])
+  return <div ref={cardRef} className={'asst-perm risk-' + permission.risk.toLowerCase()}
+    data-assistant-permission-id={req.id}
+    tabIndex={-1}
     role="alertdialog" aria-modal="false" aria-labelledby={titleId} aria-describedby={detailsId}
     aria-busy={busy ? 'true' : 'false'}>
     <div className="asst-perm-h" id={titleId}>
@@ -214,7 +262,8 @@ export function PermCard({ req, onResolve, busy = false, autoFocus = false }) {
           ? 'high-risk actions' : 'actions without a verified risk classification'}.</div>}
     {busy && <div className="asst-perm-state" role="status">Submitting your decision…</div>}
     <div className="asst-perm-actions">
-      <button ref={rejectRef} className={'btn xs ' + (requiresCaution ? 'primary' : 'ghost')} disabled={busy}
+      <button ref={rejectRef} data-permission-reject
+        className={'btn xs ' + (requiresCaution ? 'primary' : 'ghost')} disabled={busy}
         onClick={() => onResolve(req.id, 'deny')}>Reject</button>
       {permission.canAlways && <button className="btn xs" disabled={busy || permission.expired}
         onClick={() => onResolve(req.id, 'allow_always')}
