@@ -229,6 +229,7 @@ _LAYOUT = {
     "stuck": "agents",
     "surrogate": "search",
     "tasks": "adapters",
+    "text": "core",              # the shared unicode word tokenizer (doc 25 EM-15)
     "timeseries": "adapters",
     "tool_loop": "agents",
     "toytask": "adapters",

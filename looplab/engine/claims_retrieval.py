@@ -19,9 +19,10 @@ import hashlib
 import json
 import math
 import re
-import unicodedata
 from collections.abc import Callable
 from typing import Optional
+
+from looplab.core.text import normalize_text, tokenize
 
 # The shared leaf (see its docstring). Named explicitly rather than star-imported: every name this
 # module needs from it is PRIVATE, and `import *` skips underscore names — so a wildcard here would
@@ -286,7 +287,7 @@ def _classify_intent(query: str) -> str:
     Deterministic, no LLM. `explore` (neutral) when no cue fires — the safe default that reorders nothing."""
     # DEFERRED: `claims.py` imports THIS module to re-export it, so importing back at module
     # scope would cycle. These names live in the ledger/store half of the split (EM-01).
-    toks = set(_CLAIM_WORD.findall(str(query or "").casefold()))
+    toks = set(_CLAIM_WORD.findall(str(query or "").casefold()))   # cue match: no NFKC, the cues are ASCII
     scored = [(sum(1 for w in cues if w in toks), name) for name, cues in _INTENT_CUES.items()]
     # An equal cue count is broken CAVEAT-FIRST, not alphabetically. The tie-break used to be the intent
     # NAME, which always resolves to the alphabetically-largest — "worked" > "failed" > "contested" — so a
@@ -327,8 +328,7 @@ _CAVEAT_QUERY_COVERAGE = 0.10
 def _retrieval_tokens(text: str) -> frozenset[str]:
     # DEFERRED: `claims.py` imports THIS module to re-export it, so importing back at module
     # scope would cycle. These names live in the ledger/store half of the split (EM-01).
-    normalized = unicodedata.normalize("NFKC", str(text or "")).casefold()
-    return frozenset(_CLAIM_WORD.findall(normalized))
+    return frozenset(tokenize(text))
 
 
 def _lexical_relevance(query: str, text: str) -> tuple[int, float, float]:
@@ -348,7 +348,7 @@ def _retrieval_doc(kind: str, text: str, meta: dict) -> tuple[str, str, dict]:
     identity = {"v": _RETRIEVAL_DOCUMENT_VERSION, "kind": kind,
                 "claim_uid": str(meta.get("claim_uid") or ""),
                 "metric": str(meta.get("metric") or ""),
-                "text": " ".join(unicodedata.normalize("NFKC", str(text or "")).casefold().split())}
+                "text": " ".join(normalize_text(text).split())}
     stable_id = f"{kind[:1]}_{_json_digest(identity, length=16)}"
     return kind, str(text or ""), {**meta, "stable_id": stable_id}
 

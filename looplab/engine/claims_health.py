@@ -20,9 +20,10 @@ import hashlib
 import json
 import math
 import re
-import unicodedata
 from collections.abc import Callable
 from typing import Optional
+
+from looplab.core.text import WORD_RE as _CLAIM_WORD
 
 from looplab.engine.governance_health import (
     GovernanceLedgerUnavailable,
@@ -305,36 +306,50 @@ def _load_claim_source_path(path, *, research: bool) -> _ClaimSourceRows:
     return _ClaimSourceRows(valid, read_health=health)
 
 
+_MAX_NODE_ID_TEXT = 24
+
+
+def _parse_node_id(value):
+    """The ONE spelling of "is this a citable node id", shared by the fence and the reader.
+
+    Returns the id as an int, or None when the element is not one. The rules, and why each exists:
+
+    * ``type(value) is int`` — exact int only. `bool` is an int subclass, so `True` would otherwise
+      cite node 1; other int subclasses are likewise not something a JSONL row can honestly contain.
+    * non-negative — a node id INDEXES the run's node table. A negative int (or a signed numeric
+      string) used to clear the completeness fence and then get run-qualified into an
+      authoritative-looking phantom ref like `run:-1`: a citation to a node that cannot exist, in a
+      row the health receipt still called complete.
+    * numeric strings, bounded to 24 characters and exactly digit-shaped — legacy compatibility that
+      stays narrow enough not to become an arbitrary-string channel. A URL or a source belongs in
+      `sources`, not in evidence.
+
+    Single-sourced (doc 25 EM-13) because the fence and the reader must not disagree: the fence's job
+    is to quarantine a row whose element the reader would silently DROP, and a rule that widens on one
+    side only turns "quarantined" into "complete but missing evidence" with nothing reporting it."""
+    if type(value) is int:
+        return value if value >= 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if text and len(text) <= _MAX_NODE_ID_TEXT and text.lstrip("-").isdigit():
+            try:
+                parsed = int(text)
+            except (ValueError, OverflowError):
+                return None
+            return parsed if parsed >= 0 else None
+    return None
+
+
 def _valid_node_source(raw) -> bool:
     if raw is None:
         return True
     values = [raw] if isinstance(raw, int) and not isinstance(raw, bool) else raw
     if not isinstance(values, (list, tuple)) or len(values) > _MAX_SOURCE_EVIDENCE:
         return False
-    for value in values:
-        # A node id is an INDEX into the run's node table and is therefore non-negative. A negative
-        # int (or a signed numeric string) used to clear this completeness fence and go on to be
-        # run-qualified into an authoritative-looking phantom ref like `run:-1` — a citation to a node
-        # that cannot exist, in a row the health receipt still called complete.
-        if type(value) is int:
-            if value < 0:
-                return False
-            continue
-        # claim source health is an authority signal, so a poisoned element cannot be
-        # silently dropped by ``_node_ids`` while the surrounding row remains "complete". Numeric-string
-        # compatibility stays bounded and exact; bool/float/container/arbitrary strings quarantine the row.
-        if isinstance(value, str):
-            text = value.strip()
-            if text and len(text) <= 24 and text.lstrip("-").isdigit():
-                try:
-                    parsed = int(text)
-                except (ValueError, OverflowError):
-                    return False
-                if parsed < 0:
-                    return False          # same phantom ref, spelled as a string
-                continue
-        return False
-    return True
+    # Claim source health is an authority signal, so a poisoned element cannot be silently dropped by
+    # ``_node_ids`` while the surrounding row remains "complete": anything the reader would not keep
+    # quarantines the whole row.
+    return all(_parse_node_id(value) is not None for value in values)
 
 
 def _indexable_research_claim(row) -> bool:
@@ -504,7 +519,6 @@ def _valid_claim_source_rows(rows, *, research: bool) -> list[dict]:
 # Token regex shared by the fuzzy-merge projection and the retrieval planner's intent
 # classifier. Both spell "a claim word" the same way on purpose: a divergence here would make
 # a claim retrievable by a query that the merge step considers a different statement.
-_CLAIM_WORD = re.compile(r"[^\W_]+", re.UNICODE)
 
 
 def _string_list(raw, *, maximum: int, item_maximum: int) -> list[str]:
@@ -539,22 +553,9 @@ def _node_ids(raw) -> list:
         raw = [raw]
     elif not isinstance(raw, (list, tuple)):
         return []
-    out = []
-    for x in raw:
-        if isinstance(x, bool):
-            continue
-        if isinstance(x, int):
-            if x >= 0:                    # a node id indexes the node table; `-1` is not a node
-                out.append(x)
-        elif (isinstance(x, str) and len(x.strip()) <= 24
-              and x.strip().lstrip("-").isdigit()):
-            try:
-                parsed = int(x)
-            except (ValueError, OverflowError):
-                continue
-            if parsed >= 0:
-                out.append(parsed)
-    return out
+    # Same rules as the `_valid_node_source` fence, by construction — see `_parse_node_id`. The fence
+    # rejects a row when any element parses to None; the reader simply drops those elements.
+    return [parsed for parsed in map(_parse_node_id, raw) if parsed is not None]
 
 
 def _qualify_refs(run_id, node_ids) -> list[str]:

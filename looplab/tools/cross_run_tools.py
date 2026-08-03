@@ -20,13 +20,12 @@ from __future__ import annotations
 import logging
 import re
 import difflib
-import unicodedata
 from pathlib import Path
 
+from looplab.core.text import normalize_text, tokenize
 from looplab.tools._base import RESULT_CAP, fn_spec
 from looplab.trust.cross_run import cross_run_text, same_live_direction, valid_live_direction
 
-_WORD = re.compile(r"[^\W_]+", re.UNICODE)
 _LOG = logging.getLogger(__name__)
 _TOOL_NAMES = frozenset({
     "cross_run_prior_attempts", "cross_run_claims", "cross_run_atlas", "cross_run_search",
@@ -50,8 +49,7 @@ def _slug_norm(s: str) -> str:
     """Separator/case-insensitive concept key so `r-drop`, `rdrop`, `R_Drop` collapse to one bucket —
     the whole point of the fuzzy slug search (an agent writing `rdrop` must still find `regularization/
     r-drop`). Unicode concept vocabularies remain searchable instead of collapsing to an empty key."""
-    normalized = unicodedata.normalize("NFKC", str(s or "")).casefold()
-    return "".join(char for char in normalized if char.isalnum())
+    return "".join(char for char in normalize_text(s) if char.isalnum())
 # The fuzzy slug match, in ONE place. `find_concept_slugs` and `concept_card` both need it, and the
 # second copy carried a comment saying "Scoring mirrors find_concept_slugs exactly" — i.e. the
 # duplication was known and the correspondence maintained by hand. That is the failure mode worth
@@ -88,8 +86,7 @@ _MAX_TOOL_RESULT_CHARS = RESULT_CAP - 400
 
 
 def _toks(s: str) -> set[str]:
-    text = unicodedata.normalize("NFKC", str(s or "")).casefold()
-    return {w for w in _WORD.findall(text) if len(w) > 2}
+    return {w for w in tokenize(s) if len(w) > 2}
 
 
 def _safe_text(value, limit: int) -> str:

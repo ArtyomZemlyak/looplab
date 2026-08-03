@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from looplab.core.atomicio import atomic_write_text
+from looplab.core.text import WORD_RE as _WORD_UNICODE
 from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER
 from looplab.events.eventstore import (read_jsonl_lenient, read_jsonl_lenient_with_health,
                                        replace_jsonl_rows_atomic_preserving_quarantine)
@@ -32,7 +33,6 @@ _STOP = {"the", "a", "an", "to", "of", "and", "or", "for", "on", "in", "with", "
 # special-case one language. Flagged (not default) because it changes which stored fingerprints a
 # LIVE run matches — a running portfolio must not silently re-key mid-flight (see docs/17 §21.20.12).
 _WORD_ASCII = re.compile(r"[a-z0-9]+")
-_WORD_UNICODE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
 def _goal_tokens(goal: str, *, universal: bool) -> list[str]:

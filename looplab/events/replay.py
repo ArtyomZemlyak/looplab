@@ -75,6 +75,23 @@ from looplab.events.types import (
     EV_STRATEGY_DECISION, EV_TRUST_GATE_CHANGED, EV_VERIFIER_GROUP_SCORED, EV_WORKSPACE_CHANGED)
 
 
+# The provenance tiers whose concept set is an EXACT membership statement, and therefore the ones a
+# child may inherit through (doc 25 EV-11). An explicit full-set producer may be low-trust display
+# taxonomy and still define inheritance (offline heuristic), but an unknown/future producer or a
+# missing provenance is not an exact set — those force the delta unavailable rather than guessing.
+#
+# Spelled ONCE because `_materialize_concept_deltas` consults it from two passes over the same log:
+# the Kahn topological walk and the cycle fallback. If those two disagree about which tiers are
+# inheritable, the same event log folds to different concept memberships depending only on whether
+# the node graph happened to contain a cycle — a replay-determinism break with no error anywhere.
+_INHERITABLE_CONCEPT_PROVENANCE = frozenset({
+    NODE_CONCEPT_PROVENANCE_AUTHORED,
+    NODE_CONCEPT_PROVENANCE_CLASSIFIER,
+    NODE_CONCEPT_PROVENANCE_OPERATOR,
+    NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
+})
+
+
 def flagged_node_ids(st: RunState) -> set:
     """T2: node ids excluded from best/holdout selection under trust_gate gate/block — those with a
     HIGH-PRECISION cheating/leakage signal (see `is_hard_signal`). One `critic:` signal —
@@ -1889,12 +1906,7 @@ def _materialize_concept_deltas(
                 # an explicit full-set producer may be low-trust display taxonomy and still
                 # define inheritance (offline heuristic), but an unknown/future producer or missing
                 # provenance is not an exact set. Classifier/operator/authored-full remain authoritative.
-                if parent_provenance not in {
-                    NODE_CONCEPT_PROVENANCE_AUTHORED,
-                    NODE_CONCEPT_PROVENANCE_CLASSIFIER,
-                    NODE_CONCEPT_PROVENANCE_OPERATOR,
-                    NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
-                }:
+                if parent_provenance not in _INHERITABLE_CONCEPT_PROVENANCE:
                     reasons.add(CONCEPT_DELTA_UNKNOWN_PARENT_MEMBERSHIP_REASON)
                     unavailable = True
                     continue
@@ -1962,12 +1974,8 @@ def _materialize_concept_deltas(
                         and parent_seed_receipt["status"] == "unavailable"):
                     continue
             if (parent_id not in st.node_concepts
-                    or st.node_concept_provenance.get(parent_id) not in {
-                        NODE_CONCEPT_PROVENANCE_AUTHORED,
-                        NODE_CONCEPT_PROVENANCE_CLASSIFIER,
-                        NODE_CONCEPT_PROVENANCE_OPERATOR,
-                        NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
-                    }):
+                    or st.node_concept_provenance.get(parent_id)
+                        not in _INHERITABLE_CONCEPT_PROVENANCE):
                 reasons.add(CONCEPT_DELTA_UNKNOWN_PARENT_MEMBERSHIP_REASON)
                 continue
             _concepts, parent_problems = resolve_concept_set_reasons(
@@ -4688,13 +4696,10 @@ def _card_cross_run_projection(d: dict) -> dict:
     }
 
 
-_CARD_NODE_CONCEPT_PROVENANCE = frozenset({
-    NODE_CONCEPT_PROVENANCE_AUTHORED,
-    NODE_CONCEPT_PROVENANCE_CLASSIFIER,
-    NODE_CONCEPT_PROVENANCE_OPERATOR,
-    NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
+_CARD_NODE_CONCEPT_PROVENANCE = _INHERITABLE_CONCEPT_PROVENANCE | {
+    # display-only: the card projection shows a low-trust taxonomy, it does not INHERIT through it.
     NODE_CONCEPT_PROVENANCE_UNTRUSTED,
-})
+}
 
 
 def _card_node_concept_projection(st: RunState, node: Node) -> tuple[list[str], CardConceptSource]:

@@ -934,6 +934,29 @@ paid-retry exposure is the KNOWN GAP already documented on `_maybe_snapshot_conc
 
 *Recommendation:* Add `resolve_role_parser(*roles, default='tool_call')` next to the existing chain-walk in lessons.py (or agents/roles.py) and use it at all four sites.
 
+*Resolution (2026-08-03):* `agents/roles.py` now owns the walk once —
+`role_wrapper_chain(researcher, developer)` returns the four-slot
+`researcher → inner → fallback → developer` tuple (`None` holes included, so callers keep using
+plain None-tolerant `getattr`), with `resolve_role_parser`, `resolve_role_prompts` and
+`resolve_role_client` on top of it. All four sites delegate: `strategy.py::_verifier_soundness`,
+`novelty.py::_verified_failed_direction_reopen`, `lessons_distill.py::_merge_prompt_opts` and
+`lessons.py::reflect_client`. `research_cadence.py` already delegated through `_merge_prompt_opts`
+and is unchanged.
+
+The three resolvers are NOT the same predicate, and the differences are the load-bearing part:
+
+* the parser takes the first TRUTHY `.parser` — an empty parser name is an unset field, not a choice,
+  and passing `""` into the structured-output layer is worse than the documented `tool_call` default;
+* prompts take the first NON-NONE `.prompts` — an empty PromptStore is a wired store that overrides
+  nothing, and skipping past it would walk on into a wrapper that was never configured at all;
+* the client additionally requires `hasattr(c, "complete_text")`, because toy backends carry a
+  `client` attribute that is not an LLM client; returning one turns "no LLM wired, skip this advisory
+  step" into an AttributeError inside run-end distillation.
+
+Covered by `tests/test_role_chain_resolution.py` (23 tests), including that a wrapper carrying no
+parser of its own is walked THROUGH — the failure mode the finding names, and one that reports
+nothing downstream because the fallback is a valid default rather than an error.
+
 #### EC-14 · LOW · dead-code · effort: small
 
 **_acquire_gpu/_release_gpu are production-dead, kept only for tests**
@@ -943,6 +966,24 @@ paid-retry exposure is the KNOWN GAP already documented on `_maybe_snapshot_conc
 *Evidence:* Repo-wide grep shows the single-GPU primitives are called only from tests/test_strategist.py:1231-1239; the in-tree comment admits 'The dispatcher itself uses the multi-GPU API and never relies on this non-blocking wrapper', and the historical call site the docs reference (evaluate.py::_acquire_gpu per command_eval.py:786 and docs/22) no longer exists. docs/23:1029 even lists replacing them as a planned step.
 
 *Recommendation:* Port the two test call sites to _acquire_gpus/_release_gpus and delete the wrappers (or, if kept deliberately, move the assertions they support into a test helper). Low cost, removes a second API surface for the same pool.
+
+*Resolution (2026-08-03):* `_acquire_gpu`/`_release_gpu` are deleted and
+`tests/test_strategist.py::test_gpu_pool_auto_max_parallel_and_distinct_pinning` now drives
+`_acquire_gpus`/`_release_gpus` — the API the dispatcher actually uses.
+
+The port is not purely mechanical, and that is the point. `_acquire_gpu` carried its own
+`if eval_parallel <= 1: return None` branch, which is a SECOND copy of the "an unspecified footprint
+pins a device only in parallel mode" rule that really lives in
+`resources.py::_resource_request_for_node`. A second answer to an admission question is worse than
+none: the old assertion could keep passing off the dead wrapper while the path the dispatcher takes
+disagreed. The serial-no-pin half of the test now asserts against `_resource_request_for_node`
+directly.
+
+The stale pointer in `runtime/command_eval.py` (`evaluate.py::_acquire_gpu`, a call site that no
+longer exists) now names `engine/resources.py::_acquire_gpus`.
+
+Covered by `tests/test_role_chain_resolution.py`'s last two tests (the wrappers stay gone; the
+pinning rule stays in admission) plus the ported strategist test.
 
 #### EC-15 · LOW · excessive-logic · effort: small — **RESOLVED (2026-08-02)**
 
@@ -1295,6 +1336,19 @@ a real construction.
 
 *Recommendation:* Implement one _parse_node_id(value) -> Optional[int] used by both: the validator rejects the row when any element parses to None, the reader drops Nones. Behavior identical, single spelling.
 
+*Resolution (2026-08-03):* `claims_health.py::_parse_node_id(value) -> Optional[int]` is the one rule;
+`_valid_node_source` rejects the row when any element parses to None, `_node_ids` drops them. The
+24-character bound moved to `_MAX_NODE_ID_TEXT` alongside it. Both names are re-exported through the
+`claims.py` barrel, as the barrel contract requires.
+
+One deliberate tightening rather than a pure move: the reader used `isinstance(x, int)` (after a bool
+guard) where the fence used `type(value) is int`, so an int SUBCLASS other than bool would have been
+kept by the reader and quarantined by the fence. The shared rule takes the fence's stricter spelling —
+the fail-closed direction, and unreachable in practice since these rows come from JSONL.
+
+Covered by `tests/test_shared_identity_rules.py`, whose central test asserts the invariant directly:
+over a mixed corpus, `_valid_node_source([v])` is true exactly when `_node_ids([v])` keeps `v`.
+
 #### EM-14 · LOW · dead-code · effort: small
 
 **apply_concept_curation retained with zero production callers**
@@ -1314,6 +1368,25 @@ a real construction.
 *Evidence:* The identical pattern re.compile(r"[^\W_]+", re.UNICODE) is defined as _WORD_UNICODE (memory.py:35), _WORD (concept_registry.py:56), _WORD (claim_key.py:31), and _CLAIM_WORD (claims.py:1726); the NFKC-normalize-then-casefold-then-tokenize pipeline is likewise repeated in claims.py _retrieval_tokens (2380-2382), claim_key._analyze (117-118), and concept_registry.normalize_key (105). memory.py's legacy/universal duality is deliberate and documented, but the other four copies are simply the same tokenizer independently declared; a Unicode-handling fix would need five edits.
 
 *Recommendation:* Export one WORD_RE (and a tokenize(text) helper doing NFKC+casefold+findall) from a low-level shared module (core or a small engine/_text.py) and import it; keep memory.py's legacy ASCII variant where it is since it is a versioned compatibility contract.
+
+*Resolution (2026-08-03):* New `looplab/core/text.py` exports `WORD_RE`, `normalize_text(text)`
+(NFKC → casefold) and `tokenize(text)` (that, then `findall`). Five modules now share the compiled
+object — `engine/memory.py`, `engine/concept_registry.py`, `engine/claim_key.py`,
+`engine/claims_health.py` and `tools/cross_run_tools.py`, the last of which the finding had not
+listed. Each imports it under its own existing private alias
+(`from looplab.core.text import WORD_RE as _CLAIM_WORD`), so no new public name appears in a
+barrel-guarded namespace.
+
+`normalize_text` is exposed separately because two callers need BOTH the tokens and the normalized
+string — `claim_key` matches the "n't" contraction against the string after tokenizing it, and
+`cross_run_tools._slug_norm` filters it to alphanumerics — and re-deriving the pipeline there would
+have been another copy. Two sites keep a bare `.casefold()` deliberately (an ASCII cue match), and
+`memory.py::_WORD_ASCII` stays exactly where it is: it is the VERSIONED pre-unicode fingerprint mode
+a running portfolio must still match, not a copy of this rule.
+
+Covered by `tests/test_shared_identity_rules.py`, including a repo-wide source scan that fails on any
+re-declaration of the pattern, and identity (not equality) assertions per module — a separately
+compiled twin would pass an equality check today and drift on the next unicode fix.
 
 
 ### 4.4 Events
@@ -1487,6 +1560,24 @@ directory-entry publish, uncertain-sync fence) against BOTH appenders.
 *Evidence:* The 4-member frozen set {AUTHORED, CLASSIFIER, OPERATOR, OFFLINE_HEURISTIC} appears as two inline set literals inside _materialize_concept_deltas (the Kahn pass at 1874-1879 and the cycle-fallback pass at 1947-1952), while _CARD_NODE_CONCEPT_PROVENANCE (4689) is the same set plus UNTRUSTED. Adding a new provenance tier requires editing three spellings; missing the second inline copy would make the cycle path disagree with the topo path on the same log.
 
 *Recommendation:* Define one module-level _INHERITABLE_CONCEPT_PROVENANCE frozenset and reference it from both loops (and derive _CARD_NODE_CONCEPT_PROVENANCE from it | {UNTRUSTED}). Consider also collapsing the two parallel parent-reason loops (1843-1885 vs 1930-1957) into a shared per-parent classifier.
+
+*Resolution (2026-08-03):* `replay.py::_INHERITABLE_CONCEPT_PROVENANCE` is the single spelling, read
+by BOTH passes of `_materialize_concept_deltas`, and `_CARD_NODE_CONCEPT_PROVENANCE` is now DERIVED
+(`_INHERITABLE_CONCEPT_PROVENANCE | {UNTRUSTED}`) rather than re-listed — so a new tier added to the
+inheritable set cannot be forgotten on the display side.
+
+The risk this closes is a replay-determinism break, not merely an edit-in-three-places chore: the two
+passes are the Kahn topological walk and the CYCLE FALLBACK over the same log. If they disagree about
+which tiers carry an exact membership statement, one event log folds to different concept memberships
+depending only on whether the node graph happened to contain a cycle, with no error raised anywhere.
+
+The two parallel parent-reason loops are left as they are: they compute different things (one
+materializes memberships, the other only accumulates reasons for nodes it cannot resolve), and
+merging them would mean threading a mode flag through both — recorded here rather than silently
+dropped.
+
+Covered by `tests/test_shared_identity_rules.py` (first four tests), including a source guard that
+BOTH passes still read the constant and that no inline set literal came back.
 
 #### EV-12 · LOW · layering · effort: medium
 

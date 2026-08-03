@@ -35,6 +35,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.text import WORD_RE as _WORD
+
 from looplab.engine.governance_health import (
     GovernanceLedgerUnavailable,
     confirm_governance_durable,
@@ -53,7 +55,6 @@ from looplab.engine.governance_health import (
 CONCEPT_KEY_VERSION = 1
 
 _TOMBSTONE = "\x00purged"   # canonical target that marks a concept purged (dropped from cross-run views)
-_WORD = re.compile(r"[^\W_]+", re.UNICODE)   # unicode word tokens (Cyrillic-safe), for split-rule matching
 _MAX_CONCEPT = 500
 _MAX_ACTOR = 120
 _MAX_AT = 120

@@ -24,11 +24,11 @@ from __future__ import annotations
 
 import hashlib
 import re
-import unicodedata
+
+from looplab.core.text import WORD_RE, normalize_text
 
 CLAIM_KEY_VERSION = 3
 
-_WORD = re.compile(r"[^\W_]+", re.UNICODE)
 # The "n't" contraction (a negation modifier the tokenizer splits off). The apostrophe is REQUIRED — a
 # `?`-optional apostrophe would match ANY word ending in "nt" (gradient, component, prevent, current, …) and
 # silently flip a claim's polarity (mega-review finding). Matches don't/doesn't/isn't/won't → the "n't" tail.
@@ -114,8 +114,8 @@ def _analyze(statement: str) -> tuple:
     ("Hurts is a supported negative-effect claim, not a refuted positive"). `polarity` (net stance) is kept
     for the contradiction pairing; `relation_sign`/`negated` enter the merge_key so null != harm never merge.
     """
-    low = unicodedata.normalize("NFKC", str(statement or "")).casefold()
-    words = _WORD.findall(low)
+    low = normalize_text(statement)
+    words = WORD_RE.findall(low)
     stems = [_stem(w) for w in words]
     # Preserve the historical rule that short alphabetic tokens are not claim content, while numeric
     # literals of any length remain distinguishing content.
