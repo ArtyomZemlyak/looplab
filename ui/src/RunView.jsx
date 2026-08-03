@@ -3065,6 +3065,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel === 'pareto' && panelAllowed('pareto') && <ParetoPanel state={state} onSelect={selectNodeFromPanel} onClose={closePanel} />}
       {panel === 'data' && panelAllowed('data') && <DataQualityPanel state={state} onClose={closePanel} />}
       {panel === 'compare' && panelAllowed('compare') && <ComparePanel state={state} runId={runId} initialPair={comparePair}
+        expectedGeneration={generation} reviewMode={reviewMode}
         onClose={() => { closePanel(); setComparePair(null) }} />}
       {panel === 'crossrun' && panelAllowed('crossrun') && <CrossRunPanel state={state} onClose={closePanel} />}
       {panel === 'collab' && panelAllowed('collab') && <CollabPanel state={state} runId={runId}

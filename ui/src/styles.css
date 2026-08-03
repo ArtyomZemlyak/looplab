@@ -721,7 +721,7 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 .code-line.diff-del .code-sign { color: var(--fail); }
 .code-line mark { background: color-mix(in srgb, var(--working) 42%, transparent); color: var(--fg); }
 .cmp-select { display: inline-flex; align-items: center; gap: 5px; color: var(--fg-dim); font-size: 12px; }
-.cmp-select select { width: 84px; }
+.cmp-select select { width: 132px; }
 .cmp-cols { display: flex; gap: 14px; }
 .cmp-col { flex: 1; min-width: 0; }
 .section-h { font-weight: 600; margin: 11px 0 5px; color: var(--fg); display: flex; align-items: center; gap: 8px; }

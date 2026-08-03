@@ -4170,47 +4170,154 @@ export function HypothesisBoard({ state, runId, runGeneration, onSelect, onClose
 
 // Module scope so their identity is stable across SSE frames (ComparePanel re-renders on every live
 // fold); defined inline they remounted the <select> each frame, closing an open dropdown mid-pick.
-function CmpSel({ label, v, set, ids }) {
+function CmpSel({ label, v, set, ids, nodes, currentAttempt = null, selectRef = null }) {
   return <label className="cmp-select"><span>{label}</span>
-    <select className="text" value={v ?? ''} aria-label={label}
-            onChange={e => set(Number(e.target.value))}>{ids.map(i => <option key={i} value={i}>#{i}</option>)}</select>
+    <select ref={selectRef} className="text" value={v ?? ''} aria-label={label}
+            onChange={e => set(Number(e.target.value))}>{ids.map(i => {
+              const attempt = i === v && Number.isSafeInteger(currentAttempt)
+                ? currentAttempt : nodes?.[i]?.attempt
+              return <option key={i} value={i}>
+                #{i} · attempt {Number.isSafeInteger(attempt) ? attempt : 'unknown'}
+              </option>
+            })}</select>
   </label>
 }
 
-function useNodeResource(runId, nodeId) {
-  const [resource, setResource] = useState({ nodeId: null, status: 'idle', data: null, error: null })
+function useNodeResource({ runId, stateRunId, nodeId, expectedGeneration, expectedAttempt, reviewMode }) {
+  const accessMode = reviewMode ? 'review' : 'owner'
+  const identityReady = String(stateRunId || '') === String(runId || '')
+    && RUN_GENERATION_RE.test(expectedGeneration || '')
+    && Number.isSafeInteger(nodeId) && nodeId >= 0
+    && Number.isSafeInteger(expectedAttempt) && expectedAttempt >= 0
+  const scope = JSON.stringify([
+    String(runId || ''), String(stateRunId || ''), expectedGeneration || '', nodeId,
+    expectedAttempt, accessMode,
+  ])
+  const [resource, setResource] = useState({
+    scope: null, status: 'idle', data: null, error: null, retryable: false,
+  })
   const [nonce, setNonce] = useState(0)
   useEffect(() => {
-    if (nodeId == null) { setResource({ nodeId, status: 'idle', data: null, error: null }); return }
-    let alive = true; const requested = nodeId
-    setResource({ nodeId: requested, status: 'loading', data: null, error: null })
-    get(runNodeApiPath(runId, requested))
-      .then(data => { if (alive) setResource({ nodeId: requested, status: 'ready', data, error: null }) })
-      .catch(error => { if (alive) setResource({ nodeId: requested, status: 'error', data: null, error: error.message }) })
-    return () => { alive = false }
-  }, [runId, nodeId, nonce])
-  const current = resource.nodeId === nodeId ? resource : { nodeId, status: 'loading', data: null, error: null }
-  return { ...current, retry: () => setNonce(n => n + 1) }
+    if (nodeId == null) {
+      setResource({ scope, status: 'idle', data: null, error: null, retryable: false })
+      return undefined
+    }
+    if (!identityReady) {
+      setResource({ scope, status: 'waiting', data: null, error: null, retryable: false })
+      return undefined
+    }
+    let alive = true
+    const requested = {
+      runId: String(runId), nodeId, generation: expectedGeneration,
+      attempt: expectedAttempt, accessMode,
+    }
+    setResource({ scope, status: 'loading', data: null, error: null, retryable: false })
+    const suffix = `?expected_generation=${encodeURIComponent(requested.generation)}`
+    const request = deadlineGet(runNodeApiPath(requested.runId, requested.nodeId, suffix),
+      PANEL_REQUEST_TIMEOUT_MS)
+    request.promise.then(data => {
+      if (!alive) return
+      const responseAttemptValid = Number.isSafeInteger(data?.attempt) && data.attempt >= 0
+      const attemptMatches = responseAttemptValid && (requested.accessMode === 'review'
+        ? data.attempt === requested.attempt : data.attempt >= requested.attempt)
+      const valid = isRecord(data) && String(data.id) === String(requested.nodeId)
+        && typeof data.status === 'string' && data.run_generation === requested.generation
+        && attemptMatches
+      setResource(valid
+        ? { scope, status: 'ready', data, error: null, retryable: false }
+        : { scope, status: 'error', data: null,
+            error: 'The run or experiment attempt changed while details were loading.',
+            retryable: false })
+    }, error => {
+      if (!alive || error?.name === 'AbortError') return
+      const identityChanged = ['invalid_run_generation', 'run_generation_changed',
+        'run_generation_unavailable'].includes(error?.code)
+      const httpStatus = Number(error?.status)
+      const retryable = !identityChanged && (error?.name === 'TimeoutError'
+        || error?.status == null || httpStatus === 0 || httpStatus === 408
+        || httpStatus === 429 || httpStatus >= 500)
+      setResource({
+        scope, status: 'error', data: null,
+        error: identityChanged
+          ? 'The run changed while details were loading.'
+          : error?.name === 'TimeoutError'
+            ? 'Detail loading timed out.' : 'Full details could not be loaded.',
+        retryable,
+      })
+    })
+    return () => { alive = false; request.controller.abort() }
+  }, [runId, stateRunId, nodeId, expectedGeneration, expectedAttempt, accessMode,
+    identityReady, scope, nonce])
+  const current = resource.scope === scope ? resource : {
+    scope, status: nodeId == null ? 'idle' : identityReady ? 'loading' : 'waiting',
+    data: null, error: null, retryable: false,
+  }
+  const retry = () => {
+    setResource(previous => previous.scope === scope
+      ? { ...previous, status: 'loading', data: null, error: null, retryable: false }
+      : previous)
+    setNonce(n => n + 1)
+  }
+  return { ...current, retry }
 }
 
-function CmpCol({ resource, label }) {
-  if (resource.status === 'error') return <div className="notice resource-error" style={{ flex: 1 }} role="alert"><span>{label}: full details could not be loaded.</span><button className="btn sm" onClick={resource.retry}>Retry</button></div>
+function CmpCol({ resource, label, surfaceRef = null, onFocusCapture = null, onRetry = null }) {
   const d = resource.data
-  return d ? <div className="cmp-col">
-    <div className="kv">
-      <div className="k">operator</div><div className="v">{d.operator}</div>
-      <div className="k">metric</div><div className="v">{fmt(d.confirmed_mean ?? d.metric)}</div>
-      <div className="k">status</div><div className="v">{d.status}</div>
-      <div className="k">params</div><div className="v">{JSON.stringify(d.idea?.params)}</div>
-    </div>
-    <CodeViewer code={d.code || '(no code)'} label={`${label} code`} maxHeight={280} />
-  </div> : <div className="muted" style={{ flex: 1 }}>…</div>
+  const failed = resource.status === 'error'
+  return <div ref={surfaceRef} tabIndex={-1} onFocusCapture={onFocusCapture}
+    className={`cmp-col${failed ? ' notice resource-error' : d ? '' : ' muted'}`}
+    role={failed ? 'alert' : d ? 'group' : 'status'}
+    aria-label={failed ? undefined : d ? `${label} details` : undefined}
+    aria-live={failed || d ? undefined : 'polite'}>
+    {failed
+      ? <>
+          <span>{label}: {resource.error || 'full details could not be loaded.'}</span>
+          {resource.retryable && <button className="btn sm" onClick={onRetry || resource.retry}
+            aria-label={`Retry ${label} details`}>Retry</button>}
+        </>
+      : d
+        ? <>
+            <div className="kv">
+              <div className="k">operator</div><div className="v">{d.operator}</div>
+              <div className="k">metric</div><div className="v">{fmt(d.confirmed_mean ?? d.metric)}</div>
+              <div className="k">status</div><div className="v">{d.status}</div>
+              <div className="k">params</div><div className="v">{JSON.stringify(d.idea?.params)}</div>
+            </div>
+            <CodeViewer code={d.code || '(no code)'} label={`${label} code`} maxHeight={280} />
+          </>
+        : <>Loading {label} details…</>}
+  </div>
 }
 
-export function ComparePanel({ state, runId, onClose, initialPair = null }) {
+export function ComparePanel({ state, runId, expectedGeneration, reviewMode = false, onClose, initialPair = null }) {
   const ids = Object.keys(state.nodes).map(Number).sort((a, b) => a - b)
   const [a, setA] = useState(null), [b, setB] = useState(null)
   const [diff, setDiff] = useState(false)   // U4: line diff between ANY two nodes (not just vs parent)
+  const leftSelectRef = useRef(null), rightSelectRef = useRef(null)
+  const leftSurfaceRef = useRef(null), rightSurfaceRef = useRef(null), diffSurfaceRef = useRef(null)
+  const emptyStateRef = useRef(null)
+  const detailFocusOwnerRef = useRef(null)
+  const previousNodeCountRef = useRef(ids.length)
+  const comparisonScope = JSON.stringify([
+    String(runId || ''), String(state?.run_id || ''), expectedGeneration || '', reviewMode ? 'review' : 'owner',
+  ])
+  const previousComparisonScopeRef = useRef(comparisonScope)
+  useLayoutEffect(() => {
+    if (previousComparisonScopeRef.current === comparisonScope) return
+    previousComparisonScopeRef.current = comparisonScope
+    const active = typeof document === 'undefined' ? null : document.activeElement
+    const diffFocusWouldBeLost = detailFocusOwnerRef.current === 'diff'
+      && (!active || active === document.body || !active.isConnected
+        || diffSurfaceRef.current?.contains(active))
+    if (diffFocusWouldBeLost) {
+      detailFocusOwnerRef.current = null
+      const resetFocusTarget = leftSelectRef.current || emptyStateRef.current
+      resetFocusTarget?.focus({ preventScroll: true })
+    }
+    setA(null)
+    setB(null)
+    setDiff(false)
+  }, [comparisonScope])
   // Seed from an explicit pair (e.g. canvas "diff vs champion"), else best vs latest.
   useEffect(() => {
     if (initialPair && initialPair.length === 2) {
@@ -4226,31 +4333,111 @@ export function ComparePanel({ state, runId, onClose, initialPair = null }) {
     if (!ids.length) return
     setA(cur => (cur == null || !ids.includes(cur)) ? (state.best_node_id ?? ids[0]) : cur)
     setB(cur => (cur == null || !ids.includes(cur)) ? ids[ids.length - 1] : cur)
-  }, [ids.join(','), state.best_node_id])
-  const resourceA = useNodeResource(runId, a)
-  const resourceB = useNodeResource(runId, b)
+  }, [comparisonScope, ids.join(','), state.best_node_id])
+  const attemptA = a == null ? null : state.nodes?.[a]?.attempt
+  const attemptB = b == null ? null : state.nodes?.[b]?.attempt
+  const resourceA = useNodeResource({ runId, stateRunId: state?.run_id, nodeId: a,
+    expectedGeneration, expectedAttempt: attemptA, reviewMode })
+  const resourceB = useNodeResource({ runId, stateRunId: state?.run_id, nodeId: b,
+    expectedGeneration, expectedAttempt: attemptB, reviewMode })
   const da = resourceA.data, db = resourceB.data
+  const displayedAttemptA = Number.isSafeInteger(da?.attempt) ? da.attempt : attemptA
+  const displayedAttemptB = Number.isSafeInteger(db?.attempt) ? db.attempt : attemptB
+  const selectionReady = Number.isSafeInteger(a) && ids.includes(a)
+    && Number.isSafeInteger(b) && ids.includes(b)
   const codeDiff = useMemo(
     () => diff && da?.code != null && db?.code != null ? diffLines(da.code, db.code) : null,
     [diff, da?.code, db?.code])
   const diffError = resourceA.status === 'error' || resourceB.status === 'error'
-  if (!ids.length) return <Panel title="Compare nodes" onClose={onClose}><div className="muted">No nodes yet.</div></Panel>
+  const diffErrorText = [
+    resourceA.status === 'error' ? `Left node #${a}: ${resourceA.error}` : '',
+    resourceB.status === 'error' ? `Right node #${b}: ${resourceB.error}` : '',
+  ].filter(Boolean).join(' ')
+  const previousDetailScopesRef = useRef([resourceA.scope, resourceB.scope])
+  useLayoutEffect(() => {
+    const previous = previousDetailScopesRef.current
+    const leftChanged = previous[0] !== resourceA.scope
+    const rightChanged = previous[1] !== resourceB.scope
+    previousDetailScopesRef.current = [resourceA.scope, resourceB.scope]
+    if ((!leftChanged && !rightChanged) || typeof document === 'undefined') return
+    const active = document.activeElement
+    if (active && active !== document.body && active.isConnected) return
+    const owner = detailFocusOwnerRef.current
+    const target = owner === 'left' && leftChanged
+      ? (leftSurfaceRef.current || leftSelectRef.current || emptyStateRef.current)
+      : owner === 'right' && rightChanged
+        ? (rightSurfaceRef.current || rightSelectRef.current || emptyStateRef.current)
+        : owner === 'diff' && (leftChanged || rightChanged)
+          ? (diffSurfaceRef.current || leftSelectRef.current || emptyStateRef.current)
+          : null
+    target?.focus({ preventScroll: true })
+  }, [resourceA.scope, resourceB.scope])
+  useLayoutEffect(() => {
+    const previousCount = previousNodeCountRef.current
+    previousNodeCountRef.current = ids.length
+    if (previousCount !== 0 || ids.length === 0 || detailFocusOwnerRef.current !== 'empty') return
+    const active = typeof document === 'undefined' ? null : document.activeElement
+    detailFocusOwnerRef.current = null
+    if (!active || active === document.body || !active.isConnected) {
+      leftSelectRef.current?.focus({ preventScroll: true })
+    }
+  }, [ids.length])
+  const retrySide = (owner, resource, surfaceRef) => {
+    if (!resource.retryable) return
+    detailFocusOwnerRef.current = owner
+    resource.retry()
+    requestAnimationFrame(() => surfaceRef.current?.focus({ preventScroll: true }))
+  }
+  const retryDiff = () => {
+    detailFocusOwnerRef.current = 'diff'
+    if (resourceA.retryable) resourceA.retry()
+    if (resourceB.retryable) resourceB.retry()
+    requestAnimationFrame(() => diffSurfaceRef.current?.focus({ preventScroll: true }))
+  }
+  if (!ids.length) return <Panel title="Compare nodes" onClose={onClose}>
+    <div ref={emptyStateRef} tabIndex={-1} className="muted" role="status"
+      onFocus={() => { detailFocusOwnerRef.current = 'empty' }}>No nodes yet.</div>
+  </Panel>
   return (
     <Panel title="Compare nodes" onClose={onClose} wide>
       <div className="toolbar" style={{ marginBottom: 10 }}>
-        <CmpSel label="Left node" v={a} set={setA} ids={ids} /><span className="muted">vs</span><CmpSel label="Right node" v={b} set={setB} ids={ids} />
+        <CmpSel label="Left node" v={a} set={setA} ids={ids} nodes={state.nodes}
+          currentAttempt={displayedAttemptA} selectRef={leftSelectRef} />
+        <span className="muted">vs</span>
+        <CmpSel label="Right node" v={b} set={setB} ids={ids} nodes={state.nodes}
+          currentAttempt={displayedAttemptB} selectRef={rightSelectRef} />
         <span className="spacer" style={{ flex: 1 }} />
-        <button className={'btn sm' + (diff ? ' primary' : '')} onClick={() => setDiff(d => !d)}
+        <button className={'btn sm' + (diff ? ' primary' : '')} aria-pressed={diff}
+          disabled={!selectionReady}
+          onClick={() => setDiff(d => !d)}
           title="ordered line diff of the two nodes' code">Code diff</button>
       </div>
-      {diff
-        ? (diffError
-            ? <div className="notice resource-error" role="alert"><span>Could not load both node details for the diff.</span><button className="btn sm" onClick={() => { resourceA.retry(); resourceB.retry() }}>Retry</button></div>
+      {!selectionReady
+        ? <div className="muted" role="status" aria-live="polite">Preparing node comparison…</div>
+        : diff
+        ? <div ref={diffSurfaceRef} tabIndex={-1} role="group" aria-label="Code comparison details"
+            onFocusCapture={() => { detailFocusOwnerRef.current = 'diff' }}>
+            {diffError
+            ? <div className="notice resource-error" role="alert">
+                <span>{diffErrorText || 'Could not load both node details for the diff.'}</span>
+                {(resourceA.retryable || resourceB.retryable) && <button className="btn sm"
+                  onClick={retryDiff}>Retry failed details</button>}
+              </div>
             : codeDiff
             ? <CodeViewer diff={codeDiff} copyText={db.code || ''}
-                label={`Code diff #${a} to #${b}`} maxHeight={460} />
-            : <div className="muted" role="status">Loading code for both nodes…</div>)
-        : <div className="cmp-cols"><CmpCol resource={resourceA} label={`Node #${a}`} /><CmpCol resource={resourceB} label={`Node #${b}`} /></div>}
+                label={`Code diff #${a} attempt ${displayedAttemptA} to #${b} attempt ${displayedAttemptB}`} maxHeight={460} />
+            : <div className="muted" role="status" aria-live="polite">
+                Loading code for #{a} attempt {displayedAttemptA ?? 'unknown'} and #{b} attempt {displayedAttemptB ?? 'unknown'}…
+              </div>}
+          </div>
+        : <div className="cmp-cols">
+            <CmpCol resource={resourceA} label={`Node #${a} · attempt ${displayedAttemptA ?? 'unknown'}`}
+              surfaceRef={leftSurfaceRef} onFocusCapture={() => { detailFocusOwnerRef.current = 'left' }}
+              onRetry={() => retrySide('left', resourceA, leftSurfaceRef)} />
+            <CmpCol resource={resourceB} label={`Node #${b} · attempt ${displayedAttemptB ?? 'unknown'}`}
+              surfaceRef={rightSurfaceRef} onFocusCapture={() => { detailFocusOwnerRef.current = 'right' }}
+              onRetry={() => retrySide('right', resourceB, rightSurfaceRef)} />
+          </div>}
     </Panel>
   )
 }
