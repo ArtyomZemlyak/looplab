@@ -175,10 +175,6 @@ def _pending(receipt: dict[str, Any], code: str, message: str) -> dict[str, Any]
         remediation="Retry or check only this exact deletion operation.")
 
 
-def _storage_pending(receipt: dict[str, Any], code: str, message: str) -> dict[str, Any]:
-    return _pending(receipt, code, message)
-
-
 def _flush_pending_costs(srv, rd: Path) -> None:
     flush = getattr(srv, "flush_pending_run_costs", None)
     if not callable(flush):
@@ -298,7 +294,7 @@ def _resume_after_quarantine(
             _retire_metadata(srv, rd, receipt)
             receipt = advance_deletion_receipt(receipt_path, receipt, "metadata_committed")
         except (DeletionReceiptError, OSError) as exc:
-            return _storage_pending(
+            return _pending(
                 receipt, "delete_metadata_pending",
                 f"The run left the workspace, but metadata cleanup is not yet confirmed: {exc}")
     if receipt["phase"] == "metadata_committed":
@@ -310,7 +306,7 @@ def _resume_after_quarantine(
                     receipt, "delete_purge_pending",
                     "The run left the workspace, but a previous writer still owns its quarantine.")
         except (DeletionReceiptError, OSError) as exc:
-            return _storage_pending(
+            return _pending(
                 receipt, "delete_purge_pending",
                 f"The run left the workspace, but quarantine cleanup is not yet confirmed: {exc}")
         receipt = advance_deletion_receipt(receipt_path, receipt, "retiring_fence")
@@ -326,7 +322,7 @@ def _resume_after_quarantine(
                     "Another deletion fence owns this run identity.")
             receipt = advance_deletion_receipt(receipt_path, receipt, "succeeded")
         except (RunDeletionStorageError, DeletionReceiptError, OSError) as exc:
-            return _storage_pending(
+            return _pending(
                 receipt, "delete_fence_unavailable",
                 f"Run files are gone, but the deletion fence could not be retired: {exc}")
     return deletion_result(receipt)
@@ -598,10 +594,10 @@ def begin_or_resume_run_deletion(
                         # before the receipt may advance beyond quarantining.
                         strict_fsync_parent(quarantine)
                     except DeletionReceiptError as exc:
-                        return _storage_pending(
+                        return _pending(
                             receipt, "delete_quarantine_unavailable", str(exc))
                     except OSError as exc:
-                        return _storage_pending(
+                        return _pending(
                             receipt, "delete_quarantine_unavailable",
                             f"Deletion quarantine durability is not yet confirmed: {exc}")
                     receipt = advance_deletion_receipt(

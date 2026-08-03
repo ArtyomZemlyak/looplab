@@ -1201,6 +1201,26 @@ def _counterfactual_owned_card_state(
     })
 
 
+def merged_alias_ids(state: RunState) -> frozenset[str]:
+    """Every Card id that was folded INTO a canonical Card (doc 25 SE-06).
+
+    The fold collapses a merged Card OUT of ``state.cards`` and records only its id in the
+    canonical's ``.aliases`` — ``Card.merged_into`` is never actually assigned by the fold. So a
+    merged id is proven merged by ALIAS MEMBERSHIP, not by a present `merged_into` row, and this set
+    is the only way to tell "merged away" from "missing".
+
+    That distinction is fail-closed-critical for the callers. An absent sibling id that IS here was
+    legitimately merged and may be skipped; an absent id that is NOT here is a corrupt or partial
+    ownership chain and must make the whole counterfactual fail closed rather than be silently passed
+    over. Two sites derived this set independently, each with its own copy of that explanation.
+    """
+    return frozenset(
+        alias for card in state.cards.values()
+        for alias in (getattr(card, "aliases", None) or [])
+        if isinstance(alias, str) and alias
+    )
+
+
 def _card_administratively_dead(card) -> bool:
     """Whether a PRESENT Card is closed to further work: operator/engine/freshness/novelty dropped
     (``status == "dropped"``). Deliberately keys on the FOLDED status, not ``dropped_reason`` — a
@@ -1237,14 +1257,7 @@ def _counterfactual_owned_selection_state(
         return None
     requested = (card_id, node_id)
     pairs = [requested]
-    # Ids folded INTO a canonical Card (the merge receipt). A sibling whose Card row is absent is proven
-    # to have been merged away only if its id is here; an absent id NOT in this set is a corrupt/partial
-    # ownership chain and must fail closed rather than be silently skipped (see the sibling loop below).
-    merged_alias_ids = {
-        alias for card in state.cards.values()
-        for alias in (getattr(card, "aliases", None) or [])
-        if isinstance(alias, str) and alias
-    }
+    merged_aliases = merged_alias_ids(state)
     for sibling_id, sibling in sorted(state.nodes.items()):
         if (
             sibling_id == node_id
@@ -1282,7 +1295,7 @@ def _counterfactual_owned_selection_state(
         #    projection check), NOT `dropped_reason` — a reason-less card_dropped folds to
         #    status="dropped" with dropped_reason=None (`dropped_reason = reason or None`), so a
         #    reason-keyed check would let it slip through and reintroduce the bug;
-        #  - present + merged_into set, OR absent but its id is in `merged_alias_ids` (folded INTO a
+        #  - present + merged_into set, OR absent but its id is in `merged_aliases` (folded INTO a
         #    canonical): a proven merge receipt.
         # An ABSENT id that is NOT a known merge alias is a corrupt/partial ownership chain — do NOT skip
         # it; let it enter `pairs` so the counterfactual fails closed rather than proceeding on an
@@ -1310,7 +1323,7 @@ def _counterfactual_owned_selection_state(
                 and set(sibling_card.selection_blockers) == {"freshness_stale", "work_in_flight"}
             ):
                 continue
-        elif sibling_card_id in merged_alias_ids:
+        elif sibling_card_id in merged_aliases:
             continue
         pairs.append((sibling_card_id, sibling_id))
 
@@ -1369,25 +1382,18 @@ def _reserved_speculative_slots(state: RunState, excluded_card_ids: frozenset[st
     """Count request/build reservations not represented by a Node budget row yet."""
 
     reserved = 0
-    # A merged-away Card is ABSENT from `state.cards`: the fold collapses an alias INTO its canonical and
-    # records the alias only in the canonical's `.aliases` — `Card.merged_into` is never actually assigned
-    # by the fold, so a merged id resolves via alias membership, NOT a present `merged_into` row.
-    merged_alias_ids = {
-        alias for card in state.cards.values()
-        for alias in (getattr(card, "aliases", None) or [])
-        if isinstance(alias, str) and alias
-    }
+    merged_aliases = merged_alias_ids(state)
     # `excluded_card_ids` also carries durable producer-failed ids (append-only). A live Card with no Node
     # budget row yet IS a genuine outstanding request/build reservation, so it counts. But an
     # administratively-DEAD Card owns no live request/build: operator-dropped / status=="dropped" (a
     # PRESENT row, caught by `_card_administratively_dead`), OR merged away (ABSENT, its id in
-    # `merged_alias_ids`). A producer-failed id later dropped/merged would otherwise be counted as an
+    # `merged_aliases`). A producer-failed id later dropped/merged would otherwise be counted as an
     # outstanding reservation FOREVER and monotonically starve speculative capacity. Exclude both shapes.
     for card_id in excluded_card_ids:
         card = state.cards.get(card_id)
         if card is not None and _card_administratively_dead(card):
             continue
-        if card is None and card_id in merged_alias_ids:
+        if card is None and card_id in merged_aliases:
             continue                                # merged into a canonical — folded, not outstanding
         if card is None or not card.evidence:
             reserved += 1

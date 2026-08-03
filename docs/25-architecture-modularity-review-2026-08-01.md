@@ -2180,6 +2180,21 @@ rather than sitting open behind a status note.
 
 *Recommendation:* Delete _storage_pending (or give it distinct behavior), drop _spec in favor of direct ControlSpec construction, and derive event_type from the mapping key (or assert key == spec.event_type).
 
+*Resolution (2026-08-03):* All three. `deletion_service._storage_pending` is deleted and its five
+call sites use `_pending` directly — it was `return _pending(...)`, a second name for one behaviour
+used interchangeably with the first, so a reader had to check whether they differed.
+
+`run_commands._spec` is gone and the registry is now `_CONTROL_POLICIES` (event type -> policy,
+postcondition) with `CONTROL_SPECS` derived by stamping the KEY onto each spec. The event type is
+therefore spelled once per entry rather than twice, which makes the mismatch structurally impossible
+instead of merely unasserted. That mismatch would not have raised anywhere: it would have surfaced as
+a control running under the WRONG engine policy — a NO_SPAWN intent waking a dead engine, or an
+ENSURE_RUNNING command quietly never spawning one. The registry's existing
+`set(CONTROL_SPECS) == set(CONTROL_EVENTS)` assertion is unchanged.
+
+Covered by `tests/test_registry_and_alias_seams.py`. SC-12 and SC-13 (the liveness-probe pairs and
+the five `cmd_*.json` scanners) are separate findings and remain open.
+
 
 ### 4.7 Serve — routers
 
@@ -2682,6 +2697,23 @@ Teeth-tested by re-admitting the bare reason string and by restoring the try/exc
 *Evidence:* The comprehension merged_alias_ids = {alias for card in state.cards.values() for alias in (getattr(card, 'aliases', None) or []) if isinstance(alias, str) and alias} appears byte-identically in _counterfactual_owned_selection_state and _reserved_speculative_slots, each preceded by its own multi-line comment re-explaining the same fold behavior ('the fold collapses an alias INTO its canonical... Card.merged_into is never actually assigned'). The dead-card check is likewise split between _card_administratively_dead plus per-site alias-membership checks.
 
 *Recommendation:* Extract a merged_alias_ids(state) helper (or a card_is_dead_or_merged(state, card_id) predicate) next to _card_administratively_dead and keep the fold-behavior comment in one place.
+
+*Resolution (2026-08-03):* `card_selection.py::merged_alias_ids(state) -> frozenset[str]` sits next
+to `_card_administratively_dead`, and both `_counterfactual_owned_selection_state` and
+`_reserved_speculative_slots` call it. The fold-behaviour explanation now lives once, in the helper's
+docstring, instead of being re-argued above each copy.
+
+The explanation is the load-bearing part. The fold collapses a merged Card OUT of `state.cards` and
+records only its id in the canonical's `.aliases` — `Card.merged_into` is never actually assigned —
+so a merged id is proven merged by ALIAS MEMBERSHIP, not by a present `merged_into` row. That is what
+lets the callers distinguish "legitimately merged away, skip it" from "absent with no merge receipt",
+which is a corrupt or partial ownership chain that must make the whole counterfactual fail CLOSED
+rather than be silently passed over.
+
+The `card_is_dead_or_merged(state, card_id)` predicate the finding also offers is NOT added: the two
+sites consume the set differently (one tests sibling ids inside a loop that must still append
+unproven ids to `pairs`, the other tests excluded ids while counting reservations), so a combined
+predicate would have to return more than a bool to serve both.
 
 #### SE-07 · MEDIUM · layering · effort: small
 

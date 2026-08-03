@@ -85,49 +85,54 @@ class ControlSpec:
     postcondition: str
 
 
-def _spec(event_type: str, policy: EnginePolicy, postcondition: str) -> ControlSpec:
-    return ControlSpec(event_type, policy, postcondition)
-
-
 # The single policy registry for every appendable control event.  Keep the equality assertion: a new
 # CONTROL_EVENTS member must make an explicit engine/postcondition choice instead of silently falling
 # into an unsafe default.
-CONTROL_SPECS: dict[str, ControlSpec] = {
-    EV_RUN_ABORT: _spec(EV_RUN_ABORT, EnginePolicy.ENSURE_DRIVER_PRESERVE_STOP, "finished_and_stopped"),
-    EV_PAUSE: _spec(EV_PAUSE, EnginePolicy.NO_SPAWN, "paused_and_stopped"),
-    EV_RESTART: _spec(EV_RESTART, EnginePolicy.RESTART_AFTER_EXIT, "restart_served"),
-    EV_RESUME: _spec(EV_RESUME, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
-    EV_RUN_REOPENED: _spec(EV_RUN_REOPENED, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
-    EV_NODE_ABORT: _spec(EV_NODE_ABORT, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_NODE_RESET: _spec(EV_NODE_RESET, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
-    EV_BUDGET_EXTEND: _spec(EV_BUDGET_EXTEND, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
-    EV_HINT: _spec(EV_HINT, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_SET_STRATEGY: _spec(EV_SET_STRATEGY, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
-    EV_FORCE_CONFIRM: _spec(EV_FORCE_CONFIRM, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
-    EV_FORCE_ABLATE: _spec(EV_FORCE_ABLATE, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
-    EV_FORK: _spec(EV_FORK, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
-    EV_INJECT_NODE: _spec(EV_INJECT_NODE, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
-    EV_DEEP_RESEARCH: _spec(EV_DEEP_RESEARCH, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
-    EV_APPROVAL_GRANTED: _spec(EV_APPROVAL_GRANTED, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
-    EV_SPEC_APPROVED: _spec(EV_SPEC_APPROVED, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
-    EV_ANNOTATION: _spec(EV_ANNOTATION, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_COMMENT_CREATED: _spec(EV_COMMENT_CREATED, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_COMMENT_EDITED: _spec(EV_COMMENT_EDITED, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_COMMENT_RESOLUTION_CHANGED: _spec(
-        EV_COMMENT_RESOLUTION_CHANGED, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_CONCEPT_TAG_EDITED: _spec(EV_CONCEPT_TAG_EDITED, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_RUN_CONCEPTS: _spec(EV_RUN_CONCEPTS, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_PROMOTE: _spec(EV_PROMOTE, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_HYPOTHESIS_ADDED: _spec(EV_HYPOTHESIS_ADDED, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_HYPOTHESIS_UPDATED: _spec(EV_HYPOTHESIS_UPDATED, EnginePolicy.NO_SPAWN, "folded_intent"),
+#
+# The event type is spelled ONCE, as the mapping key, and stamped onto each spec below (doc 25
+# SC-16). It used to appear twice per entry — key and first argument — so a copy-paste could pair one
+# event's key with another's spec, and NOTHING asserted the two agreed: the mismatch would surface as
+# a control silently running under the wrong engine policy (a NO_SPAWN intent waking a dead engine,
+# or an ENSURE_RUNNING command quietly never spawning one).
+_CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {
+    EV_RUN_ABORT: (EnginePolicy.ENSURE_DRIVER_PRESERVE_STOP, "finished_and_stopped"),
+    EV_PAUSE: (EnginePolicy.NO_SPAWN, "paused_and_stopped"),
+    EV_RESTART: (EnginePolicy.RESTART_AFTER_EXIT, "restart_served"),
+    EV_RESUME: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    EV_RUN_REOPENED: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    EV_NODE_ABORT: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_NODE_RESET: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    EV_BUDGET_EXTEND: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    EV_HINT: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_SET_STRATEGY: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    EV_FORCE_CONFIRM: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    EV_FORCE_ABLATE: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    EV_FORK: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    EV_INJECT_NODE: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    EV_DEEP_RESEARCH: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    EV_APPROVAL_GRANTED: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    EV_SPEC_APPROVED: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    EV_ANNOTATION: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_COMMENT_CREATED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_COMMENT_EDITED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_COMMENT_RESOLUTION_CHANGED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CONCEPT_TAG_EDITED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_RUN_CONCEPTS: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_PROMOTE: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_HYPOTHESIS_ADDED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_HYPOTHESIS_UPDATED: (EnginePolicy.NO_SPAWN, "folded_intent"),
     # Layer 6 operator Card steering never spawns compute, wakes a dead engine, or opens a
     # request/done counter. Live selection and scheduling observe these folded intents.
-    EV_CARD_REPRIORITIZED: _spec(
-        EV_CARD_REPRIORITIZED, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_CARD_EDITED: _spec(EV_CARD_EDITED, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_CARD_RESOURCE_PINNED: _spec(
-        EV_CARD_RESOURCE_PINNED, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_CARD_DROPPED: _spec(EV_CARD_DROPPED, EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CARD_REPRIORITIZED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CARD_EDITED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CARD_RESOURCE_PINNED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CARD_DROPPED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+}
+
+
+CONTROL_SPECS: dict[str, ControlSpec] = {
+    event_type: ControlSpec(event_type, policy, postcondition)
+    for event_type, (policy, postcondition) in _CONTROL_POLICIES.items()
 }
 assert set(CONTROL_SPECS) == set(CONTROL_EVENTS), "every control event needs an explicit ControlSpec"
 
