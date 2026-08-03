@@ -10,7 +10,6 @@ replay never re-runs it.
 """
 from __future__ import annotations
 
-import math
 import random
 from typing import Optional
 
@@ -22,7 +21,7 @@ from looplab.core.models import Idea, Node, RunState
 # describes the code: `events/digest.py` imports only `core.models`, so there is no cycle to dodge
 # and nothing above `core` is pulled in. Keeping the claim in three places invited a future reader
 # to "restore" it in the modules that legitimately import at module scope.
-from looplab.events.digest import knn_idw, numeric_params
+from looplab.core.numeric import euclidean, knn_idw, numeric_params
 
 
 def _fallback_telemetry(name: str) -> property:
@@ -126,7 +125,7 @@ class SurrogateResearcher:
         exploration signal). Returns (predicted_metric, nearest_distance). Eligibility here is
         "full bounds dimensionality" (enforced by _history); the IDW core is the shared knn_idw."""
         keys = self.bounds if bounds is None else bounds
-        pairs = [(math.sqrt(sum((x[k] - p[k]) ** 2 for k in keys)), m) for p, m in hist]
+        pairs = [(euclidean(x, p, keys), m) for p, m in hist]
         pred, nearest = knn_idw(pairs, self.k)    # hist is non-empty (propose() gates on warmup)
         return pred, nearest
 

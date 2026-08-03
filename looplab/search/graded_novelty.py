@@ -37,7 +37,7 @@ from looplab.search.concept_graph import (ConceptGraph, _experiment_nodes, tag_n
 # Tagging a single (proposed) idea
 # --------------------------------------------------------------------------- #
 
-def _idea_text(idea: Idea) -> str:
+def _idea_tag_text(idea: Idea) -> str:
     # concepts are authored by the proposal being admitted. They remain display metadata,
     # not classifier input; otherwise a proposal can self-assign a shared/failed concept and earn L4/L5.
     # Include the search-SPACE key names alongside params (as concept_graph._node_text does), so the idea
@@ -54,15 +54,15 @@ def _idea_text(idea: Idea) -> str:
 
 def tag_idea(idea: Idea, graph: ConceptGraph) -> frozenset[str]:
     """Concept tags for a single proposed idea (deterministic, alias/lineage — the shared `tag_text`)."""
-    return tag_text(_idea_text(idea), graph)
+    return tag_text(_idea_tag_text(idea), graph)
 
 
 def tag_idea_llm(idea: Idea, graph: ConceptGraph, client, *, parser: str = "tool_call") -> frozenset[str]:
     """AGENTIC single-idea tagger (§21.4 F2): tags the proposed idea with the LLM against the graph's grown
     vocabulary — CONSISTENT with the cached node tags — via the shared `tag_text_llm` (grow=False; respects
     an empty 'novel' verdict; heuristic `tag_text` fallback on no client / all-unknown / failure). The idea's
-    text is `_idea_text(idea)`, so the heuristic fallback equals `tag_idea(idea, graph)`."""
-    return tag_text_llm(_idea_text(idea), graph, client, parser=parser)
+    text is `_idea_tag_text(idea)`, so the heuristic fallback equals `tag_idea(idea, graph)`."""
+    return tag_text_llm(_idea_tag_text(idea), graph, client, parser=parser)
 
 
 def _params_identical(a: dict, b: dict, *, tol: float = 1e-9) -> bool:

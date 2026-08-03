@@ -17,7 +17,7 @@ import math
 from typing import Optional
 
 from looplab.core.models import Node, RunState
-from looplab.core.numeric import knn_idw
+from looplab.core.numeric import euclidean, knn_idw
 
 
 class ProxyScorer:
@@ -57,7 +57,7 @@ class ProxyScorer:
             keys = set(target) & set(p)
             if not keys:
                 continue
-            dist = math.sqrt(sum((target[key] - p[key]) ** 2 for key in keys))
+            dist = euclidean(target, p, keys)
             neighbours.append((dist, n.metric))
         # Shared IDW core (exact param match -> its metric via the zero-distance short-circuit;
         # the pre-extraction `any(d==0)` + first-zero pick is the same sample after the sort).

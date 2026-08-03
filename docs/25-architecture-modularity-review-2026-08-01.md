@@ -2975,6 +2975,30 @@ Covered by `tests/test_json_and_metric_contracts.py` (30).avoid the name collisi
 
 *Recommendation:* Add a shared euclidean+knn_idw predict helper in events/digest.py taking an eligibility callable; rename one _idea_text and centralize the experiment-text renderers next to _node_text with explicit variants (names-only vs with-values).
 
+*Resolution (2026-08-03):* both halves, with one deliberate narrowing.
+
+**The distance, not the predictor.** `core/numeric.euclidean(a, b, keys)` joins `knn_idw` there
+(XP-12 moved it out of `events/digest.py`, so that is where a shared numeric primitive belongs now),
+and all three predictors call it. What did NOT happen is the "eligibility callable" the finding
+suggests: the three rules — full-bounds dimensionality, target-subspace containment, any shared key —
+are each documented at their call site as what that predictor MEANS by "comparable", and folding them
+behind a parameter would hide the one thing about them worth seeing. Sharing the arithmetic while
+leaving the rules in place is what stops them drifting on the distance while claiming to differ on
+eligibility; a test pins each rule where it lives.
+
+**Four renderers, four names.** `foresight._idea_text` is now `_idea_prose` (predictor-facing prose)
+and `graded_novelty._idea_text` is `_idea_tag_text` (lowercased structural tagger surface). The
+engine's `_idea_text` keeps its name: it is a METHOD and a documented patch seam — `orchestrator.py`
+and `eval_stages.py` both name it — and it never collided with these two.
+
+The renderers were NOT physically moved next to `_node_text`; the MAP was written there instead.
+Moving them would mean `concept_graph` importing for `foresight`'s prompt-shaping and
+`novelty_recall`'s paraphrase judge, which puts three consumers' concerns in one module to save a
+grep. What a reader needed was to know the other three exist and why they differ — including the
+non-obvious one, that `novelty_recall` carries param VALUES precisely because `_node_text` drops
+them: two nodes differing only by `temperature=0.02` vs `0.05` would otherwise read identical and be
+judged duplicates, when a value tweak is a VARIANT.
+
 
 ### 4.9 Agents
 

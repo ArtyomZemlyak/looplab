@@ -12,6 +12,8 @@ where it is.
 """
 from __future__ import annotations
 
+import math
+
 
 def numeric_params(params: dict, keys=None) -> dict:
     """The NUMERIC (int/float — bools included, matching the historical isinstance check) subset of a
@@ -47,3 +49,19 @@ def knn_idw(pairs, k: int):
     nearest = nn[0][0]
     wsum = sum(1.0 / d for d, _ in nn)
     return sum((1.0 / d) * v for d, v in nn) / wsum, nearest
+
+
+def euclidean(a: dict, b: dict, keys) -> float:
+    """Euclidean distance between two param dicts over *keys*, which both must contain.
+
+    The three empirical predictors (`search/surrogate`, `search/panel`, `search/proxy`) each wrote
+    this loop out (doc 25 SE-15). Their neighbour-ELIGIBILITY rules differ deliberately — full-bounds
+    dimensionality, target-subspace containment, any shared key — and those stay at the call sites,
+    documented, because they are what each predictor means by "comparable". Only the arithmetic is
+    shared, so the three cannot drift on the distance itself while claiming to differ on eligibility.
+
+    Unnormalized on purpose: every caller has already projected through `numeric_params` (or, for the
+    proxy, its own string-tolerant variant) into the same param space, and normalizing here would
+    silently change what `knn_idw` weights.
+    """
+    return math.sqrt(sum((a[key] - b[key]) ** 2 for key in keys))

@@ -8,12 +8,11 @@ first proposal until there's enough history to rank.
 """
 from __future__ import annotations
 
-import math
 from typing import Optional
 
 from looplab.agents.roles import forward_hints
 from looplab.core.models import Idea, Node, RunState
-from looplab.events.digest import knn_idw, numeric_params
+from looplab.core.numeric import euclidean, knn_idw, numeric_params
 
 
 def _predict(params: dict, hist: list[tuple[dict, float]], bounds, k: int = 3) -> Optional[float]:
@@ -28,7 +27,7 @@ def _predict(params: dict, hist: list[tuple[dict, float]], bounds, k: int = 3) -
     for p, m in hist:
         if not tkeys.issubset(p):          # only full-dimensional points are comparable
             continue
-        pts.append((math.sqrt(sum((target[x] - p[x]) ** 2 for x in tkeys)), m))
+        pts.append((euclidean(target, p, tkeys), m))
     res = knn_idw(pts, k)
     if res is None:
         return None

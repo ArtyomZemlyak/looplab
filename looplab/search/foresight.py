@@ -205,10 +205,15 @@ def rank_agentic(client, tools, report: str, items: list[str], *, goal: str = ""
                     prompts=prompts, kind=kind)
 
 
-def _idea_text(idea) -> str:
+def _idea_prose(idea) -> str:
     """Render an idea for the predictor: the HYPOTHESIS (the belief under test) first, then the
     rationale + params/grid — so the ranking is over WHAT each experiment tests, not just its
-    numbers (which is exactly where the numeric surrogate is blind)."""
+    numbers (which is exactly where the numeric surrogate is blind).
+
+    Named `_idea_prose`, not `_idea_text` (doc 25 SE-15): `search/` had two unrelated module-level
+    `_idea_text`s rendering an Idea for different consumers, so a reader who found one had no way to
+    know the other existed. See `concept_graph._node_text` for the map of the four renderers.
+    """
     parts: list[str] = []
     hyp = getattr(idea, "hypothesis", None)
     if hyp:
@@ -462,7 +467,7 @@ class ForesightPanelResearcher:
             from looplab.trust.verifier import foresight_criteria, verify
             subject = ("This proposed experiment will improve the objective metric over the current best "
                        f"result (optimize direction: {state.direction}).")
-            evidence = _idea_text(idea) + (("\n\n" + report) if report else "")
+            evidence = _idea_prose(idea) + (("\n\n" + report) if report else "")
             # Grounding + repetition ARE applied: `samples=self.verify_samples` runs the criteria-decomposed
             # verifier repeatedly (agreement/spread is captured in each criterion's mean), over the idea text
             # + the Verified Data Analysis REPORT (already-grounded evidence). No live run-tools by design —
@@ -508,7 +513,7 @@ class ForesightPanelResearcher:
         stance = getattr(self, "_novelty_stance", "balanced")
         report = verified_report(data_profile=state.data_profile, memory=_memory_brief(state, parent))
         report += _novelty_rank_directive(stance)
-        r = self._rank(report, [_idea_text(i) for i in ideas],
+        r = self._rank(report, [_idea_prose(i) for i in ideas],
                        goal=state.goal, direction=state.direction)
         if r is None:
             self.last_foresight = None
@@ -540,7 +545,7 @@ class ForesightPanelResearcher:
             "kind": "idea", "method": "foresight", "n": len(ideas), "k": self.k,
             "chosen": order[0], "order": order, "confidence": conf, "reason": reason,
             "confidence_source": conf_source, "novelty_stance": stance,
-            "candidates": [" ".join(_idea_text(i).split())[:160] for i in ideas],
+            "candidates": [" ".join(_idea_prose(i).split())[:160] for i in ideas],
             "_trace_id": _tid, "_span_id": _sid}   # stamped onto the foresight_selected event by the engine
         best.rationale = (best.rationale
                           + f" [foresight: predicted best of {self.k} pre-execution]").strip()

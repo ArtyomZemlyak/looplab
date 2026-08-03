@@ -410,7 +410,23 @@ def _experiment_nodes(state: RunState) -> list:
 
 def _node_text(node) -> str:
     """The searchable surface text for a node: theme + rationale + hypothesis + operator + param names.
-    Lowercased. This is what the heuristic tagger and the LLM tagger both describe an experiment by."""
+    Lowercased. This is what the heuristic tagger and the LLM tagger both describe an experiment by.
+
+    THE MAP of "text of an experiment" renderers (doc 25 SE-15). Four exist; their divergence is
+    load-bearing, which is exactly why it needs writing down rather than merging:
+
+    * `_node_text` (here) — structural fields + param NAMES, lowercased. Classifier input, so
+      `Idea.concepts` is excluded: the proposer must not manufacture its own admission evidence.
+    * `graded_novelty._idea_tag_text` — the same fields off an un-executed IDEA, so the idea tagger
+      and the node tagger describe one experiment the same way.
+    * `novelty_recall._idea_full_text` — `_node_text` PLUS param VALUES. The paraphrase judge needs
+      them: two nodes differing only by `temperature=0.02` vs `0.05` would otherwise read identical
+      and be called a duplicate, when a value tweak is a VARIANT.
+    * `foresight._idea_prose` — not a tagger surface at all: prose for a predictor prompt
+      ("Hypothesis: …\\nRationale: …"), ranked on WHAT an experiment tests.
+
+    The two `search/` renderers that used to share the name `_idea_text` are the last two above.
+    """
     idea = getattr(node, "idea", None)
     # Idea.concepts is the proposer's claim. Feeding it to the classifier would let the
     # producer manufacture the supposedly independent evidence used by graded-novelty admission.

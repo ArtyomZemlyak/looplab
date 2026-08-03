@@ -143,12 +143,12 @@ def test_tag_idea_pins_the_concept_set(tmp_path):
 def test_classifier_surface_excludes_authored_concept_claims():
     # The Researcher authors idea.concepts; the independent tagger must infer them from descriptive
     # evidence rather than laundering the producer's own labels into classifier provenance.
-    from looplab.search.graded_novelty import _idea_text
+    from looplab.search.graded_novelty import _idea_tag_text
     from looplab.search.concept_graph import _node_text, _describe_node
     from types import SimpleNamespace
     idea = Idea(operator="improve", params={}, rationale="tweak the training setup",
                 concepts=["loss/contrastive", "negatives/hard-mining"])
-    text = _idea_text(idea)
+    text = _idea_tag_text(idea)
     assert "loss/contrastive" not in text and "negatives/hard-mining" not in text
     node = SimpleNamespace(idea=idea, operator="improve")
     assert "loss/contrastive" not in _node_text(node)
@@ -160,12 +160,12 @@ def test_idea_text_includes_search_space_keys_like_node_text():
     # must describe it by the same structural fields the node tagger uses, so idea and node tags agree and
     # graded-novelty's L4/L5 admission can fire for search-space proposals. Space keys are structural
     # dimension names (not the self-assertable `concepts` field), so this adds no gaming surface.
-    from looplab.search.graded_novelty import _idea_text
+    from looplab.search.graded_novelty import _idea_tag_text
     from looplab.search.concept_graph import _node_text
     from types import SimpleNamespace
     idea = Idea(operator="improve", params={}, rationale="tune the scaling",
                 space={"temperature": [0.01, 0.1], "warmup_steps": [100, 500]})
-    text = _idea_text(idea)
+    text = _idea_tag_text(idea)
     assert "temperature" in text and "warmup_steps" in text
     node = SimpleNamespace(idea=idea, operator="improve")
     assert "temperature" in _node_text(node)          # idea + node describe the same fields
