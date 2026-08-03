@@ -2129,24 +2129,6 @@ function Trust({ n, drifts = [] }) {
   </div>
 }
 
-function Agent({ n }) {
-  const r = n.agent_report
-  if (!r) return <div className="muted">Not produced by an external coding agent (templated/LLM developer).</div>
-  return <>
-    <div className="kv">
-      <KV k="ok" v={String(r.ok)} />
-      <KV k="fell back" v={String(r.fell_back)} />
-      <KV k="attempts" v={r.attempts} />
-      <KV k="shipped ok" v={String(r.shipped_ok)} />
-    </div>
-    <div className="section-h">Validation checks</div>
-    <DataTable caption="Implementation validation checks" card={false}><table className="tbl"><thead><tr><th>check</th><th>ok</th><th>detail</th></tr></thead>
-      <tbody>{(r.checks || []).map((c, i) => <tr key={i}>
-        <td>{c.name}</td><td style={{ color: c.ok ? 'var(--ok)' : 'var(--fail)' }}>{c.ok ? '✓' : '✗'}</td>
-        <td className="muted">{c.detail || c.severity || ''}</td></tr>)}</tbody></table></DataTable>
-  </>
-}
-
 function Cost({ state }) {
   const c = state.llm_cost
   if (!c) return <div className="muted">No LLM cost recorded (offline/toy run, or run not finished).</div>

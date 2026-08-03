@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
 import { OpIcon } from './icons.jsx'
 import { useMediaQuery, usePoll } from './hooks.js'
+import { useToast } from './useToast.js'
 import { getRunAccess } from './runMode.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 import { AttentionLauncher, openAttentionCenter, useAttentionIndicator } from './attentionIndicator.jsx'
@@ -371,7 +372,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [hasNew, setHasNew] = useState(false)     // highlight the bar until a view is opened
   const [view, setView] = useState('bar')         // 'bar' | 'side' | 'full'
   const [mode, setMode] = useState('plan')
-  const [toast, setToast] = useState(null)
+  const [toast, flash, clearToast] = useToast()   // shared timer discipline (doc 25 UI-13)
   const [commands, setCommands] = useState([])
   const [suggestionIndex, setSuggestionIndex] = useState(0)
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
@@ -482,7 +483,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const revertingChangesRef = useRef(new Set())
   const revertedChangesRef = useRef(new Set())
   const atBottomRef = useRef(true)     // is the feed scrolled to (near) the bottom? gates autoscroll
-  const flashTimerRef = useRef(null)   // single toast-clear timer so rapid flashes don't clip each other
   const fileRef = useRef(null)
   const commandStatusRef = useRef(null)
   const commandFocusRequestedRef = useRef(false)
@@ -683,11 +683,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }, [runId])
   useEffect(() => subscribeLaunchTransports(setLaunchRecoveries), [])
   useEffect(() => {
-    if (assistantRunChanged(toastRunIdRef.current, runId)) {
-      if (flashTimerRef.current) clearTimeout(flashTimerRef.current)
-      flashTimerRef.current = null
-      setToast(null)
-    }
+    // A run change makes the previous run's notice MISLEADING, not merely stale — retire it early
+    // and cancel its timer so a notice for the NEW run is not cut short by the old one's window.
+    if (assistantRunChanged(toastRunIdRef.current, runId)) clearToast()
     toastRunIdRef.current = runId
   }, [runId])
   useEffect(() => {
@@ -695,7 +693,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     return () => {
       mountedRef.current = false
       if (abortRef.current) abortRef.current.abort()
-      if (flashTimerRef.current) clearTimeout(flashTimerRef.current)
     }
   }, [])
   useEffect(() => { storageSet('ll.asstW', sideW) }, [sideW])
@@ -792,7 +789,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const onFeedScroll = (e) => { const f = e.currentTarget; atBottomRef.current = f.scrollHeight - f.scrollTop - f.clientHeight < 80 }
   useEffect(() => { if (feedOpen && feedRef.current && atBottomRef.current) requestAnimationFrame(() => { feedRef.current.scrollTop = feedRef.current.scrollHeight }) }, [msgs, view, busy])
 
-  const flash = (m) => { setToast(m); if (flashTimerRef.current) clearTimeout(flashTimerRef.current); flashTimerRef.current = setTimeout(() => mountedRef.current && setToast(null), 5000) }
   const patchLast = (patch) => setMsgs(m => {
     const c = [...m]; const i = c.length - 1
     if (i >= 0) c[i] = { ...c[i], ...(typeof patch === 'function' ? patch(c[i]) : patch) }

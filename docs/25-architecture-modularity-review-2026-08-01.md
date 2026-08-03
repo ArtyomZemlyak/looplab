@@ -3877,6 +3877,10 @@ server answered, no rethrow out of an event handler, plus source guards that the
 
 *Recommendation:* Delete the Agent function (AgentReport stays).
 
+*Resolution (2026-08-03):* Deleted. `AgentReport` (the component actually rendered by the Trace tab)
+is untouched; the removal is verified against the whole of `ui/src` and `ui/test` rather than by
+reading `TABS`, because a JSX reference can live anywhere.
+
 #### UI-11 · LOW · inconsistency · effort: small
 
 **runApiPath is documented as 'one constructor for every owner-style per-run endpoint' but ~15 endpoints in the same file bypass it**
@@ -3906,6 +3910,28 @@ server answered, no rethrow out of an event handler, plus source guards that the
 *Evidence:* RunView.showToast (5s timer, .toast div), AssistantBar.flash (5s timer, mountedRef guard, .cmdbar-toast variants including run-change suppression logic at 1569), and Settings' own toast state each re-implement the timer-reset pattern; toastTimerDiscipline.test.js exists to police the subtle clear-previous-timer bug that this duplication invites.
 
 *Recommendation:* One useToast hook (timer reset, unmount guard) with presentation left to callers.
+
+*Resolution (2026-08-03):* `ui/src/useToast.js` exports `useToast(ms = 5000) -> [toast, show,
+clearToast]`, used by `RunView` (5s), `AssistantBar` (5s) and `Settings` (2.5s). Presentation stays at
+each call site — the three surfaces render different elements with different classes, and that
+difference is real. Only the timing discipline is shared.
+
+The differences between the three copies were not features; they were the two guards each copy
+happened to remember. RESET the pending timer on every new notice, or the second toast inherits the
+first's remaining time and can vanish almost immediately. Do not clear state after UNMOUNT, because a
+5-second timer outlives a closed drawer. RunView's copy had no unmount teardown at all and the
+Assistant bar's lived in an unrelated effect; both now get both guards. `clearToast` is the Assistant
+bar's early-retire path (a run change makes the previous run's notice misleading, not merely stale)
+and it cancels the pending timer too, so a notice for the NEW run is not cut short by the old one's
+window.
+
+`ui/test/toastTimerDiscipline.test.js` is re-pointed from "each site remembers" to the stronger
+invariant the consolidation buys: exactly ONE arming site, in `useToast.js`, and no surface may grow
+a second. Its clear-before-arm check now walks back to the enclosing function body — two weaker
+spellings (a file-wide `includes`, then a bounded forward match) both passed while the reset was
+missing, because the early-retire path and the unmount teardown each call `clearTimeout` nearby.
+
+UI-12's request-timeout wrappers are a separate finding and remain open.
 
 #### UI-14 · LOW · over-engineering · effort: small
 

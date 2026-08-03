@@ -16,8 +16,14 @@ test('ephemeral command results use polite atomic live regions', async () => {
   const [runView, assistant] = await Promise.all([source('RunView.jsx'), source('AssistantBar.jsx')])
   assert.match(runView, /className="toast" role="status" aria-live="polite" aria-atomic="true"/)
   assert.equal((assistant.match(/className="cmdbar-toast(?: side)?" role="status" aria-live="polite" aria-atomic="true"/g) || []).length, 3)
-  assert.match(runView, /setTimeout\(\(\) => setToast\(null\), 5000\)/)
-  assert.match(assistant, /setTimeout\(\(\) => mountedRef\.current && setToast\(null\), 5000\)/)
+  // Both surfaces take the 5s window from the shared `useToast` hook now (doc 25 UI-13). The
+  // property here is that these notices stay EPHEMERAL — a status live region that never clears
+  // keeps re-announcing itself to a screen reader — so pin the hook and its default.
+  for (const [name, surface] of [['RunView', runView], ['AssistantBar', assistant]]) {
+    assert.match(surface, /import \{ useToast \} from '\.\/useToast\.js'/, `${name} lost the hook`)
+    assert.match(surface, /useToast\(\)/, `${name} no longer takes the default 5s window`)
+  }
+  assert.match(await source('useToast.js'), /export function useToast\(ms = 5000\)/)
 })
 
 test('trace loading, partial, and unavailable states expose recovery semantics', async () => {
@@ -356,7 +362,13 @@ test('collapsed recovery actions are not clipped and retain a 44px touch target'
 
 test('Assistant unmount cleanup clears its toast timer and every command poll clears its timer', async () => {
   const assistant = await source('AssistantBar.jsx')
-  assert.match(assistant, /if \(flashTimerRef\.current\) clearTimeout\(flashTimerRef\.current\)/)
+  // The toast timer's teardown moved into the shared `useToast` hook (doc 25 UI-13), which owns both
+  // halves of the guard; `toastTimerDiscipline.test.js` pins it there. What must stay true HERE is
+  // that the bar takes its toast from that hook rather than re-arming a timer of its own, and that
+  // its command poll still tears its own timer down.
+  assert.match(assistant, /import \{ useToast \} from '\.\/useToast\.js'/)
+  assert.doesNotMatch(assistant, /setTimeout\([^\n]*setToast\(null\)/,
+    'the Assistant bar re-grew its own toast timer')
   assert.match(assistant, /return \(\) => \{ active = false; clearTimeout\(timer\) \}/)
 })
 
@@ -369,7 +381,9 @@ test('direct command presentation is guarded by currentRunId while durable clean
 
 test('Assistant clears stale run-scoped toast immediately when the route run changes', async () => {
   const assistant = await source('AssistantBar.jsx')
-  assert.match(assistant, /assistantRunChanged\(toastRunIdRef\.current, runId\)[\s\S]*?clearTimeout\(flashTimerRef\.current\)[\s\S]*?setToast\(null\)[\s\S]*?toastRunIdRef\.current = runId/)
+  // `clearToast()` is the hook's early-retire path: it drops the pending timer AND clears the
+  // notice, so a message for the NEW run is not cut short by the old run's window.
+  assert.match(assistant, /assistantRunChanged\(toastRunIdRef\.current, runId\)\) clearToast\(\)[\s\S]*?toastRunIdRef\.current = runId/)
   assert.match(assistant, /const visibleToast = assistantRunChanged\(toastRunIdRef\.current, runId\) \? null : toast/)
   assert.equal((assistant.match(/\{visibleToast && <div className="cmdbar-toast(?: side)?"/g) || []).length, 3)
 })

@@ -2,6 +2,7 @@ import React, {
   lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
 } from 'react'
 import { useMediaQuery, useRunState } from './hooks.js'
+import { useToast } from './useToast.js'
 import { useTimeline } from './useTimeline.js'
 import { takeRunPanelHistoryEntry, useRunRouteState } from './useRunRouteState.js'
 import { reviewInspectorTabs, reviewPanelAllowed, runRouteStateHasTarget } from './runRouteState.js'
@@ -762,7 +763,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     return () => { if (!startOverMutationBlocked) clearRunAccess(runId) }
   }, [runId, reviewMode, mutationReadOnlyMode, viewSeq, historyActive, routeFenceBlocked,
     runStatus, runAuthorityBlocked, startOverMutationBlocked])
-  const [toast, setToast] = useState(null)
+  const [toast, showToast] = useToast()   // shared timer discipline (doc 25 UI-13)
   const [routeNotice, setRouteNotice] = useState('')
   const [attemptFenceNotice, setAttemptFenceNotice] = useState('')
   const routeNoticeRef = useRef(null)
@@ -1325,13 +1326,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // by resolveHistory for an historical fold. A stale generation-fenced route returns above before
   // Report can mount, so this fallback never weakens an explicit link fence.
   const reportGeneration = historyActive ? currentHistory?.resolvedGeneration : generation
-  const toastTimer = useRef(null)
-  const showToast = (m) => {
-    // Clear the previous timer so a second toast doesn't get hidden early by the first one's timeout.
-    if (toastTimer.current) clearTimeout(toastTimer.current)
-    setToast(m)
-    toastTimer.current = setTimeout(() => setToast(null), 5000)
-  }
   const copyRetainedCommentWork = async () => {
     const lines = [
       ...retainedCommentDrafts.map((text, index) => `Unsaved comment draft ${index + 1}:\n${text}`),
