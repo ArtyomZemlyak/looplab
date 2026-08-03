@@ -1400,21 +1400,51 @@ def _reserved_speculative_slots(state: RunState, excluded_card_ids: frozenset[st
     return reserved
 
 
+@dataclass(frozen=True)
+class SpeculativeSelectionContext:
+    """The SESSION-owned half of a speculative selection query (doc 25 SE-14).
+
+    Five entry points re-declared and forwarded the same bundle, so adding one field meant editing
+    five signatures — and one already HAD been added asymmetrically (`consumed_inflight`), which is
+    the failure mode: a difference that is meaningful lives as an absence in a parameter list nobody
+    reads side by side.
+
+    What belongs here is what one producer/consumer session holds constant across every query it
+    makes. The per-call SUBJECT — which owned Card/Node a query is about — deliberately stays an
+    ordinary argument, because it changes on every call and burying it here would hide the one thing
+    that distinguishes the entry points from each other.
+
+    `consumed_inflight` defaults to empty, and the two ELECTION entry points leave it that way ON
+    PURPOSE: election runs BEFORE the consumer admits an attempt, the freshness gate runs after. That
+    is now one visible unset field at a caller instead of a missing keyword in two of five signatures.
+    """
+
+    scoring: "CardScoring | Mapping[str, object] | None" = None
+    excluded_card_ids: Collection[str] = ()
+    ignored_pending_node_ids: Collection[int] = ()
+    resource_envelope: "CardResourceEnvelope | None" = None
+    consumed_inflight: Collection[tuple[int, int]] = ()
+
+
+# The "no session state" query: every field at its default. A module-level instance rather than a
+# `None` sentinel so the entry points never have to spell the empty case twice.
+NO_SPECULATIVE_CONTEXT = SpeculativeSelectionContext()
+
+
 def _speculative_selection(
     state: RunState,
     policy: object,
     max_nodes: int,
     *,
-    scoring: CardScoring | Mapping[str, object] | None,
-    excluded_card_ids: Collection[str],
-    ignored_pending_node_ids: Collection[int],
+    context: SpeculativeSelectionContext,
     include_owned_card_id: str | None,
     include_owned_node_id: int | None,
-    resource_envelope: CardResourceEnvelope | None,
-    consumed_inflight: Collection[tuple[int, int]] = (),
 ) -> tuple[list[Card], list[Action]]:
-    excluded = _card_id_set(excluded_card_ids)
-    ignored_pending = _node_id_set(ignored_pending_node_ids)
+    scoring = context.scoring
+    resource_envelope = context.resource_envelope
+    consumed_inflight = context.consumed_inflight
+    excluded = _card_id_set(context.excluded_card_ids)
+    ignored_pending = _node_id_set(context.ignored_pending_node_ids)
     selection_state = state
     reopened_card_ids: frozenset[str] = frozenset()
     reopened_node_ids: frozenset[int] = frozenset()
@@ -1552,13 +1582,9 @@ def speculative_card_selection_set(
     policy: object,
     max_nodes: int,
     *,
-    scoring: CardScoring | Mapping[str, object] | None = None,
-    excluded_card_ids: Collection[str] = (),
-    ignored_pending_node_ids: Collection[int] = (),
+    context: SpeculativeSelectionContext = NO_SPECULATIVE_CONTEXT,
     include_owned_card_id: str | None = None,
     include_owned_node_id: int | None = None,
-    resource_envelope: CardResourceEnvelope | None = None,
-    consumed_inflight: Collection[tuple[int, int]] = (),
 ) -> list[str]:
     """Return Card ids in the Layer-5 producer/freshness selection SET.
 
@@ -1571,16 +1597,9 @@ def speculative_card_selection_set(
     """
 
     selected, _ = _speculative_selection(
-        state,
-        policy,
-        max_nodes,
-        scoring=scoring,
-        excluded_card_ids=excluded_card_ids,
-        ignored_pending_node_ids=ignored_pending_node_ids,
+        state, policy, max_nodes, context=context,
         include_owned_card_id=include_owned_card_id,
         include_owned_node_id=include_owned_node_id,
-        resource_envelope=resource_envelope,
-        consumed_inflight=consumed_inflight,
     )
     return [card.id for card in selected]
 
@@ -1590,25 +1609,22 @@ def speculative_card_actions(
     policy: object,
     max_nodes: int,
     *,
-    scoring: CardScoring | Mapping[str, object] | None = None,
-    excluded_card_ids: Collection[str] = (),
-    ignored_pending_node_ids: Collection[int] = (),
+    context: SpeculativeSelectionContext = NO_SPECULATIVE_CONTEXT,
     include_owned_card_id: str | None = None,
     include_owned_node_id: int | None = None,
-    resource_envelope: CardResourceEnvelope | None = None,
 ) -> list[Action]:
-    """Action projection of ``speculative_card_selection_set`` for producer election."""
+    """Action projection of ``speculative_card_selection_set`` for producer ELECTION.
+
+    Election runs BEFORE the consumer admits an attempt, so it reads the context's
+    `consumed_inflight` at its empty default and callers leave it unset — see
+    `SpeculativeSelectionContext`. Passing a populated one here would mask attempts that have not
+    happened yet from this vantage point.
+    """
 
     selected, fallback = _speculative_selection(
-        state,
-        policy,
-        max_nodes,
-        scoring=scoring,
-        excluded_card_ids=excluded_card_ids,
-        ignored_pending_node_ids=ignored_pending_node_ids,
+        state, policy, max_nodes, context=context,
         include_owned_card_id=include_owned_card_id,
         include_owned_node_id=include_owned_node_id,
-        resource_envelope=resource_envelope,
     )
     actions: list[Action] = []
     for card in selected:
@@ -1625,10 +1641,7 @@ def speculative_raw_actions(
     policy: object,
     max_nodes: int,
     *,
-    scoring: CardScoring | Mapping[str, object] | None = None,
-    excluded_card_ids: Collection[str] = (),
-    ignored_pending_node_ids: Collection[int] = (),
-    resource_envelope: CardResourceEnvelope | None = None,
+    context: SpeculativeSelectionContext = NO_SPECULATIVE_CONTEXT,
 ) -> list[Action]:
     """Return the counterfactual raw proposal lane only when no durable Card owns it.
 
@@ -1643,17 +1656,10 @@ def speculative_raw_actions(
     if _builtin_policy_name(policy) is None:
         return []
 
-    excluded = _card_id_set(excluded_card_ids)
+    excluded = _card_id_set(context.excluded_card_ids)
     selected, fallback = _speculative_selection(
-        state,
-        policy,
-        max_nodes,
-        scoring=scoring,
-        excluded_card_ids=excluded,
-        ignored_pending_node_ids=ignored_pending_node_ids,
-        include_owned_card_id=None,
-        include_owned_node_id=None,
-        resource_envelope=resource_envelope,
+        state, policy, max_nodes, context=context,
+        include_owned_card_id=None, include_owned_node_id=None,
     )
     if selected or not fallback:
         return []
@@ -1684,11 +1690,7 @@ def speculative_card_is_fresh(
     *,
     card_id: str,
     node_id: int,
-    scoring: CardScoring | Mapping[str, object] | None = None,
-    excluded_card_ids: Collection[str] = (),
-    ignored_pending_node_ids: Collection[int] = (),
-    resource_envelope: CardResourceEnvelope | None = None,
-    consumed_inflight: Collection[tuple[int, int]] = (),
+    context: SpeculativeSelectionContext = NO_SPECULATIVE_CONTEXT,
 ) -> bool:
     """Whether one committed speculative subject remains in the current selection SET.
 
@@ -1706,20 +1708,12 @@ def speculative_card_is_fresh(
         or node.status is not NodeStatus.pending
         or node.attempt != 0
         or node.idea.card_id != card_id
-        or not card_fits_resource_envelope(card, resource_envelope, node=node)
+        or not card_fits_resource_envelope(card, context.resource_envelope, node=node)
     ):
         return False
     return card_id in speculative_card_selection_set(
-        state,
-        policy,
-        max_nodes,
-        scoring=scoring,
-        excluded_card_ids=excluded_card_ids,
-        ignored_pending_node_ids=ignored_pending_node_ids,
-        include_owned_card_id=card_id,
-        include_owned_node_id=node_id,
-        resource_envelope=resource_envelope,
-        consumed_inflight=consumed_inflight,
+        state, policy, max_nodes, context=context,
+        include_owned_card_id=card_id, include_owned_node_id=node_id,
     )
 
 

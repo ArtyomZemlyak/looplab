@@ -41,6 +41,7 @@ from looplab.search.card_selection import (
     CARD_FRESHNESS_SUPERSEDED_ERROR,
     META_CARD_ID,
     CardResourceEnvelope,
+    SpeculativeSelectionContext,
     card_budget_used,
     speculative_card_actions,
     speculative_card_is_fresh,
@@ -843,10 +844,12 @@ class SpeculationMixin:
             state,
             self.policy,
             self._speculative_selection_node_limit(state),
-            scoring=getattr(self, "_card_scoring", None),
-            excluded_card_ids=excluded,
-            ignored_pending_node_ids=self._acknowledged_pending_ids(state),
-            resource_envelope=self._resource_envelope(),
+            context=SpeculativeSelectionContext(
+                scoring=getattr(self, "_card_scoring", None),
+                excluded_card_ids=excluded,
+                ignored_pending_node_ids=self._acknowledged_pending_ids(state),
+                resource_envelope=self._resource_envelope(),
+            ),
         )
         if not actions:
             return False
@@ -914,10 +917,12 @@ class SpeculationMixin:
             state,
             self.policy,
             selection_limit,
-            scoring=getattr(self, "_card_scoring", None),
-            excluded_card_ids=excluded,
-            ignored_pending_node_ids=self._acknowledged_pending_ids(state),
-            resource_envelope=self._resource_envelope(),
+            context=SpeculativeSelectionContext(
+                scoring=getattr(self, "_card_scoring", None),
+                excluded_card_ids=excluded,
+                ignored_pending_node_ids=self._acknowledged_pending_ids(state),
+                resource_envelope=self._resource_envelope(),
+            ),
         )
         selected_action = next(
             (
@@ -1430,11 +1435,13 @@ class SpeculationMixin:
                 self._speculative_selection_node_limit(state),
                 card_id=card_id,
                 node_id=node.id,
-                scoring=getattr(self, "_card_scoring", None),
-                excluded_card_ids=excluded,
-                ignored_pending_node_ids=ignored_pending,
-                resource_envelope=envelope,
-                consumed_inflight=eval_inflight,
+                context=SpeculativeSelectionContext(
+                    scoring=getattr(self, "_card_scoring", None),
+                    excluded_card_ids=excluded,
+                    ignored_pending_node_ids=ignored_pending,
+                    resource_envelope=envelope,
+                    consumed_inflight=eval_inflight,
+                ),
             ):
                 continue
             tail = events[-1].seq if events else -1
@@ -1767,17 +1774,15 @@ class SpeculationMixin:
                                         self._speculative_selection_node_limit(current),
                                         card_id=chosen.idea.card_id,
                                         node_id=chosen.id,
-                                        scoring=getattr(self, "_card_scoring", None),
-                                        # Same election set as `_request_card_build`/`_drop_stale_speculation`:
-                                        # producer-failed ids must not compete in this counterfactual freshness
-                                        # check or a serial-fallback-only card would falsely supersede the subject.
-                                        excluded_card_ids=(
-                                            self._speculative_card_ids(current)
-                                            | self._producer_failed_card_ids(current)
+                                        context=SpeculativeSelectionContext(
+                                            scoring=getattr(self, "_card_scoring", None),
+                                            excluded_card_ids=self._speculative_card_ids(current)
+                                            | self._producer_failed_card_ids(current),
+                                            ignored_pending_node_ids=(
+                                                self._acknowledged_pending_ids(current)),
+                                            resource_envelope=self._resource_envelope(),
+                                            consumed_inflight=eval_inflight,
                                         ),
-                                        ignored_pending_node_ids=self._acknowledged_pending_ids(current),
-                                        resource_envelope=self._resource_envelope(),
-                                        consumed_inflight=eval_inflight,
                                     )
                                     if not fresh:
                                         self._release_gpus(reservation.get("gpu_ids"))
@@ -1868,12 +1873,14 @@ class SpeculationMixin:
                                         proposal_state,
                                         self.policy,
                                         self._speculative_selection_node_limit(proposal_state),
-                                        scoring=getattr(self, "_card_scoring", None),
-                                        excluded_card_ids=self._speculative_card_ids(
+                                        context=SpeculativeSelectionContext(
+                                            scoring=getattr(self, "_card_scoring", None),
+                                            excluded_card_ids=self._speculative_card_ids(
                                             proposal_state),
-                                        ignored_pending_node_ids=self._acknowledged_pending_ids(
+                                            ignored_pending_node_ids=self._acknowledged_pending_ids(
                                             proposal_state),
-                                        resource_envelope=self._resource_envelope(),
+                                            resource_envelope=self._resource_envelope(),
+                                        ),
                                     )
                                     roles = self._producer_role_pair()
                                     if raw_actions and roles is not None:

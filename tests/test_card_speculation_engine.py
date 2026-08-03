@@ -1966,8 +1966,8 @@ def test_drop_stale_speculation_excludes_producer_failed_from_freshness_set(
 
     captured: dict[str, set[str]] = {}
 
-    def _capture(*_args, excluded_card_ids, **_kwargs):
-        captured["excluded"] = set(excluded_card_ids)
+    def _capture(*_args, context, **_kwargs):
+        captured["excluded"] = set(context.excluded_card_ids)
         return True  # keep the node alive; we only inspect the election set it was checked against
 
     monkeypatch.setattr(speculation_module, "speculative_card_is_fresh", _capture)
@@ -1994,9 +1994,9 @@ def test_claim_requested_card_build_excludes_producer_failed_but_keeps_the_claim
     captured: dict[str, set[str]] = {}
     real_actions = speculation_module.speculative_card_actions
 
-    def _capture(*args, excluded_card_ids, **kwargs):
-        captured["excluded"] = set(excluded_card_ids)
-        return real_actions(*args, excluded_card_ids=excluded_card_ids, **kwargs)
+    def _capture(*args, context, **kwargs):
+        captured["excluded"] = set(context.excluded_card_ids)
+        return real_actions(*args, context=context, **kwargs)
 
     monkeypatch.setattr(speculation_module, "speculative_card_actions", _capture)
 
@@ -2016,15 +2016,28 @@ def test_run_card_session_pre_gpu_recheck_unions_producer_failed_but_raw_lane_do
     tree = ast.parse(source)
 
     def _excluded_src(callee: str) -> str | None:
+        """The `excluded_card_ids` SOURCE this callee is consulted with, read out of the session
+        object it is bundled into (doc 25 SE-14). Reading it from anywhere else in the function
+        would let the two lanes silently converge on one set again, which is what this pins."""
         for node in ast.walk(tree):
-            if (
+            if not (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
                 and node.func.id == callee
             ):
-                for keyword in node.keywords:
-                    if keyword.arg == "excluded_card_ids":
-                        return ast.unparse(keyword.value)
+                continue
+            for keyword in node.keywords:
+                if keyword.arg != "context":
+                    continue
+                context = keyword.value
+                assert (isinstance(context, ast.Call)
+                        and isinstance(context.func, ast.Name)
+                        and context.func.id == "SpeculativeSelectionContext"), (
+                    f"{callee} no longer builds its session inline; this scan cannot see the set")
+                for inner in context.keywords:
+                    if inner.arg == "excluded_card_ids":
+                        return ast.unparse(inner.value)
+                return ""       # a session that names no exclusions is not a missing session
         return None
 
     fresh_src = _excluded_src("speculative_card_is_fresh")

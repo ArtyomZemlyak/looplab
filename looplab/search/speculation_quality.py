@@ -73,6 +73,7 @@ from looplab.search.card_selection import (
     CARD_FRESHNESS_SUPERSEDED_ERROR,
     META_CARD_ID,
     CardResourceEnvelope,
+    SpeculativeSelectionContext,
     card_budget_used,
     speculative_card_actions,
     speculative_raw_actions,
@@ -1027,10 +1028,12 @@ def _validate_calibration_greedy_authority(
                         prefix,
                         _canonical_calibration_policy(live_max),
                         live_max,
-                        scoring=None,
-                        excluded_card_ids=excluded,
-                        ignored_pending_node_ids={node.id for node in pending},
-                        resource_envelope=envelope,
+                        context=SpeculativeSelectionContext(
+                            scoring=None,
+                            excluded_card_ids=excluded,
+                            ignored_pending_node_ids={node.id for node in pending},
+                            resource_envelope=envelope,
+                        ),
                     )
                 except Exception as exc:
                     raise ValueError(
@@ -1062,10 +1065,12 @@ def _validate_calibration_greedy_authority(
                     prefix,
                     _canonical_calibration_policy(live_max),
                     live_max,
-                    scoring=None,
-                    excluded_card_ids=excluded,
-                    ignored_pending_node_ids={node.id for node in pending},
-                    resource_envelope=envelope,
+                    context=SpeculativeSelectionContext(
+                        scoring=None,
+                        excluded_card_ids=excluded,
+                        ignored_pending_node_ids={node.id for node in pending},
+                        resource_envelope=envelope,
+                    ),
                 )
             except Exception as exc:
                 raise ValueError(

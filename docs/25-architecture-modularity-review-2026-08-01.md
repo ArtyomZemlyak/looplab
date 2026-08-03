@@ -3009,34 +3009,33 @@ Covered by `tests/test_json_and_metric_contracts.py` (30).avoid the name collisi
 
 *Recommendation:* Introduce a frozen SpeculativeSelectionContext dataclass (session-owned ids, envelope, scoring) passed once; the entry points keep only their distinguishing arguments.
 
-*NOT DONE (2026-08-03) — design decided, conversion pending.* Recorded here so the work starts from
-a measured plan rather than a re-read. This is a plan, not a resolution: nothing in `card_selection.py`
-has changed for SE-14.
+*Resolution (2026-08-03):* `SpeculativeSelectionContext` (frozen dataclass) + the module-level
+all-default instance `NO_SPECULATIVE_CONTEXT` now carry the session half of the query, and the four
+public entry points plus `_speculative_selection` keep only their distinguishing arguments. Every
+call site was converted — **29** that passed at least one bundled keyword; the rest already passed
+none and take the default untouched.
 
-Measured: **44 call sites** across `engine/speculation.py`, `engine/orchestrator.py`,
-`search/speculation_quality.py`, `tests/test_card_speculation_engine.py` and
-`tests/test_card_speculative_selection.py`; **33** of them pass at least one bundled keyword. The
-other 11 pass none, so a context with defaults leaves them untouched — which is why the dataclass
-should be a keyword-only argument with a module-level default instance rather than a required one.
-
-The split the dataclass should make:
+The split, as designed:
 
 * SESSION-owned, identical across every call in one producer/consumer session — `scoring`,
   `excluded_card_ids`, `ignored_pending_node_ids`, `resource_envelope`, `consumed_inflight`.
-* PER-CALL subject, which stays an ordinary argument — `include_owned_card_id` /
-  `include_owned_node_id`, and the freshness predicate's `card_id` / `node_id`.
+* PER-CALL subject, still an ordinary argument — `include_owned_card_id` / `include_owned_node_id`,
+  and the freshness predicate's `card_id` / `node_id`. Burying the subject in the session would hide
+  the one thing that distinguishes the entry points from each other.
 
-The asymmetry the finding spotted must be preserved, not "fixed" on the way past:
-`consumed_inflight` is absent from `speculative_card_actions` and `speculative_raw_actions` because
-producer ELECTION runs before consumption, while the freshness gate runs after it. Giving the context
-a default of `()` reproduces today's behaviour exactly for those two — but it makes the asymmetry
-visible in ONE place (a caller that does not set the field) instead of invisible in a signature list,
-which is the whole point of the change. A test should pin that election and freshness see different
-populations, so a later "consistency" edit cannot quietly unify them.
+The asymmetry the finding spotted is preserved, not "fixed" on the way past: `consumed_inflight`
+stays unset at the two ELECTION call sites because election runs before the consumer admits an
+attempt, while the freshness gate runs after it. The `()` default reproduces the old behaviour
+byte-for-byte, and the difference is now one visible unset field at a caller instead of a missing
+keyword in two of five signatures.
 
-Deliberately deferred rather than started: this is the hot, replay-affecting selection path, and a
-33-site mechanical conversion done without room to verify each site is a worse outcome than the
-duplication it removes.
+`tests/test_speculative_selection_context.py` pins both halves. The asymmetry half is pinned
+STRUCTURALLY as well as behaviourally: `_speculative_selection` may read `consumed_inflight` only
+inside the branch guarded by a named owned subject, so election — which passes no subject — cannot
+see consumer admissions BY CONSTRUCTION. A "let's make the lanes consistent" edit has to lift a read
+out from under that guard, and the test catches that even where a behavioural probe over one state
+would not. Teeth-verified against five separate breakages (re-declared session field, unfrozen
+context, subject migrated into the session, election reading the field, freshness losing it).
 
 #### SE-15 · LOW · inconsistency · effort: small
 

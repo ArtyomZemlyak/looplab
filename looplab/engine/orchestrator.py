@@ -93,9 +93,9 @@ from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limits,
                                      in_llm_lane, llm_broker_scope, llm_lane_scope)
 from looplab.search.card_selection import (
-    META_CARD_ID, card_action as projected_card_action, card_budget_used,
-    card_next_actions, card_selection_set, eligible_cards, forced_card_actions,
-    speculative_raw_actions,
+    META_CARD_ID, SpeculativeSelectionContext, card_action as projected_card_action,
+    card_budget_used, card_next_actions, card_selection_set, eligible_cards,
+    forced_card_actions, speculative_raw_actions,
 )
 from looplab.search.speculation_calibration import (
     SPECULATION_CALIBRATION_PROFILE_DIGEST,
@@ -1670,8 +1670,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             state,
                             self.policy,
                             self.policy.max_nodes,
-                            scoring=getattr(self, "_card_scoring", None),
-                            resource_envelope=self._resource_envelope(),
+                            context=SpeculativeSelectionContext(
+                                scoring=getattr(self, "_card_scoring", None),
+                                resource_envelope=self._resource_envelope(),
+                            ),
                         )
                         if stageable:
                             # Author one work item at a time. The live depth is filled by the isolated

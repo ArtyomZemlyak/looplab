@@ -20,6 +20,7 @@ from looplab.core.models import (
 from looplab.search.card_selection import (
     CARD_FRESHNESS_SUPERSEDED_ERROR,
     CardResourceEnvelope,
+    SpeculativeSelectionContext,
     card_budget_used,
     card_fits_resource_envelope,
     card_selection_set,
@@ -175,10 +176,16 @@ def test_producer_masks_acknowledged_initial_session_pending_and_preserves_actio
     assert card_selection_set(state, policy, 8) == []
     assert speculative_card_selection_set(state, policy, 8) == []
     assert speculative_card_selection_set(
-        state, policy, 8, ignored_pending_node_ids={1},
+        state,
+        policy,
+        8,
+        context=SpeculativeSelectionContext(ignored_pending_node_ids={1}),
     ) == ["next"]
     assert speculative_card_actions(
-        state, policy, 8, ignored_pending_node_ids={1},
+        state,
+        policy,
+        8,
+        context=SpeculativeSelectionContext(ignored_pending_node_ids={1}),
     ) == [{
         "kind": "improve", "parent_id": 0, "_card_id": "next",
         "_scores": {0: 0.9}, "_chosen": 0, "_reason": "exploit best",
@@ -224,8 +231,10 @@ def test_forced_seed_ignores_reserved_request_then_fail_closes_remaining_lane_ex
         state,
         policy,
         4,
-        excluded_card_ids={"1-requested"},
-        ignored_pending_node_ids={0},
+        context=SpeculativeSelectionContext(
+            excluded_card_ids={"1-requested"},
+            ignored_pending_node_ids={0},
+        ),
     ) == ["2-later"]
     assert speculative_card_is_fresh(
         state,
@@ -233,8 +242,10 @@ def test_forced_seed_ignores_reserved_request_then_fail_closes_remaining_lane_ex
         4,
         card_id="0-subject",
         node_id=0,
-        excluded_card_ids={"0-subject", "1-requested"},
-        ignored_pending_node_ids={0},
+        context=SpeculativeSelectionContext(
+            excluded_card_ids={"0-subject", "1-requested"},
+            ignored_pending_node_ids={0},
+        ),
     ) is True
 
 
@@ -250,10 +261,16 @@ def test_outstanding_request_is_excluded_and_reserves_uncommitted_budget_slot():
     policy = GreedyTree(n_seeds=1, max_nodes=8, debug_depth=0)
 
     assert speculative_card_selection_set(
-        state, policy, 2, excluded_card_ids={"requested"},
+        state,
+        policy,
+        2,
+        context=SpeculativeSelectionContext(excluded_card_ids={"requested"}),
     ) == []
     assert speculative_card_selection_set(
-        state, policy, 3, excluded_card_ids={"requested"},
+        state,
+        policy,
+        3,
+        context=SpeculativeSelectionContext(excluded_card_ids={"requested"}),
     ) == ["next"]
 
 
@@ -279,9 +296,9 @@ def test_include_owned_freshness_uses_population_set_not_strict_rank_one_without
         state,
         _PopulationPolicy(),
         5,
-        ignored_pending_node_ids={2},
         include_owned_card_id="subject",
         include_owned_node_id=2,
+        context=SpeculativeSelectionContext(ignored_pending_node_ids={2}),
     ) == ["rank-one", "subject"]
     assert speculative_card_is_fresh(
         state,
@@ -289,7 +306,7 @@ def test_include_owned_freshness_uses_population_set_not_strict_rank_one_without
         5,
         card_id="subject",
         node_id=2,
-        ignored_pending_node_ids={2},
+        context=SpeculativeSelectionContext(ignored_pending_node_ids={2}),
     ) is True
     assert state == before
 
@@ -319,22 +336,24 @@ def test_owned_population_uses_one_common_counterfactual_selection_set():
         },
     )
     before = state.model_copy(deep=True)
-    kwargs = {
-        "excluded_card_ids": {"owned-b", "owned-c"},
-        "ignored_pending_node_ids": {2, 3},
-    }
+    # One session object, three subjects: that the SAME context reaches election and both freshness
+    # probes is exactly the property this test is about.
+    context = SpeculativeSelectionContext(
+        excluded_card_ids={"owned-b", "owned-c"},
+        ignored_pending_node_ids={2, 3},
+    )
 
     assert speculative_card_selection_set(
-        state, _RankedPopulationPolicy(), 5,
-        include_owned_card_id="owned-c", include_owned_node_id=3, **kwargs,
+        state, _RankedPopulationPolicy(), 5, context=context,
+        include_owned_card_id="owned-c", include_owned_node_id=3,
     ) == ["ready-top", "owned-b"]
     assert speculative_card_is_fresh(
-        state, _RankedPopulationPolicy(), 5,
-        card_id="owned-b", node_id=2, **kwargs,
+        state, _RankedPopulationPolicy(), 5, context=context,
+        card_id="owned-b", node_id=2,
     ) is True
     assert speculative_card_is_fresh(
-        state, _RankedPopulationPolicy(), 5,
-        card_id="owned-c", node_id=3, **kwargs,
+        state, _RankedPopulationPolicy(), 5, context=context,
+        card_id="owned-c", node_id=3,
     ) is False
     assert state == before
 
@@ -372,22 +391,24 @@ def test_consumed_speculative_sibling_stays_masked_from_next_prefetch_population
             3: {"card_id": "prefetched", "generation": 8},
         },
     )
-    kwargs = {
-        "card_id": "prefetched",
-        "node_id": 3,
-        "excluded_card_ids": {"consumed", "prefetched"},
-        "ignored_pending_node_ids": {2, 3},
-    }
+    subject = {"card_id": "prefetched", "node_id": 3}
+    shared = {"excluded_card_ids": {"consumed", "prefetched"},
+              "ignored_pending_node_ids": {2, 3}}
 
     # With no consumer admission both unconsumed siblings share K=1 and the stronger Card wins.
-    assert speculative_card_is_fresh(state, _OneSlotPolicy(), 5, **kwargs) is False
+    assert speculative_card_is_fresh(
+        state, _OneSlotPolicy(), 5,
+        context=SpeculativeSelectionContext(**shared), **subject,
+    ) is False
     # Once that stronger lifecycle is already being consumed, it cannot also occupy the next slot.
     assert speculative_card_is_fresh(
-        state, _OneSlotPolicy(), 5, consumed_inflight={(2, 0)}, **kwargs,
+        state, _OneSlotPolicy(), 5,
+        context=SpeculativeSelectionContext(consumed_inflight={(2, 0)}, **shared), **subject,
     ) is True
     # Admission is attempt-scoped: a stale generation cannot mask a reset lifecycle with the same id.
     assert speculative_card_is_fresh(
-        state, _OneSlotPolicy(), 5, consumed_inflight={(2, 1)}, **kwargs,
+        state, _OneSlotPolicy(), 5,
+        context=SpeculativeSelectionContext(consumed_inflight={(2, 1)}, **shared), **subject,
     ) is False
 
 
@@ -445,10 +466,15 @@ def test_terminally_excluded_speculative_sibling_does_not_poison_common_populati
     )
 
     assert speculative_card_is_fresh(
-        state, _PopulationPolicy(), 5,
-        card_id="subject", node_id=2,
-        excluded_card_ids={"subject", "excluded"},
-        ignored_pending_node_ids={2, 3},
+        state,
+        _PopulationPolicy(),
+        5,
+        card_id="subject",
+        node_id=2,
+        context=SpeculativeSelectionContext(
+            excluded_card_ids={"subject", "excluded"},
+            ignored_pending_node_ids={2, 3},
+        ),
     ) is True
 
 
@@ -491,10 +517,15 @@ def test_alive_but_stale_speculative_sibling_does_not_collapse_the_healthy_lane(
     state = _stale_sibling_state(_stale_owned("excluded"))
 
     assert speculative_card_is_fresh(
-        state, _PopulationPolicy(), 5,
-        card_id="subject", node_id=2,
-        excluded_card_ids={"subject", "excluded"},
-        ignored_pending_node_ids={2, 3},
+        state,
+        _PopulationPolicy(),
+        5,
+        card_id="subject",
+        node_id=2,
+        context=SpeculativeSelectionContext(
+            excluded_card_ids={"subject", "excluded"},
+            ignored_pending_node_ids={2, 3},
+        ),
     ) is True
 
 
@@ -510,10 +541,15 @@ def test_stale_sibling_with_an_extra_blocker_still_fails_the_counterfactual_clos
     state = _stale_sibling_state(corrupt_stale)
 
     assert speculative_card_is_fresh(
-        state, _PopulationPolicy(), 5,
-        card_id="subject", node_id=2,
-        excluded_card_ids={"subject", "excluded"},
-        ignored_pending_node_ids={2, 3},
+        state,
+        _PopulationPolicy(),
+        5,
+        card_id="subject",
+        node_id=2,
+        context=SpeculativeSelectionContext(
+            excluded_card_ids={"subject", "excluded"},
+            ignored_pending_node_ids={2, 3},
+        ),
     ) is False
 
 
@@ -541,10 +577,15 @@ def test_corrupt_absent_speculative_sibling_fails_the_counterfactual_closed():
     )
 
     assert speculative_card_is_fresh(
-        state, _PopulationPolicy(), 5,
-        card_id="subject", node_id=2,
-        excluded_card_ids={"subject", "ghost"},
-        ignored_pending_node_ids={2, 3},
+        state,
+        _PopulationPolicy(),
+        5,
+        card_id="subject",
+        node_id=2,
+        context=SpeculativeSelectionContext(
+            excluded_card_ids={"subject", "ghost"},
+            ignored_pending_node_ids={2, 3},
+        ),
     ) is False
 
 
@@ -563,8 +604,12 @@ def test_include_owned_keeps_exact_parent_generation_fence():
     )
 
     assert speculative_card_is_fresh(
-        state, GreedyTree(n_seeds=1, max_nodes=8, debug_depth=0), 8,
-        card_id="subject", node_id=2, ignored_pending_node_ids={2},
+        state,
+        GreedyTree(n_seeds=1, max_nodes=8, debug_depth=0),
+        8,
+        card_id="subject",
+        node_id=2,
+        context=SpeculativeSelectionContext(ignored_pending_node_ids={2}),
     ) is False
 
 
@@ -593,8 +638,12 @@ def test_merge_freshness_requires_exact_metric_top_two_and_both_breedable(
     )
 
     assert speculative_card_is_fresh(
-        state, _PopulationPolicy(), 8,
-        card_id="merge", node_id=3, ignored_pending_node_ids={3},
+        state,
+        _PopulationPolicy(),
+        8,
+        card_id="merge",
+        node_id=3,
+        context=SpeculativeSelectionContext(ignored_pending_node_ids={3}),
     ) is False
 
 
@@ -618,7 +667,10 @@ def test_effective_resource_clamp_keeps_overdeclarations_but_invalid_card_fails_
     one_gpu = CardResourceEnvelope(gpu_count=1, gpu_memory_mib=(16_000,))
 
     assert speculative_card_selection_set(
-        state, policy, 8, resource_envelope=one_gpu,
+        state,
+        policy,
+        8,
+        context=SpeculativeSelectionContext(resource_envelope=one_gpu),
     ) == ["wide"]
 
     assert card_fits_resource_envelope(
@@ -640,9 +692,15 @@ def test_effective_resource_clamp_keeps_overdeclarations_but_invalid_card_fails_
         cards={"compiled": owned},
     )
     assert speculative_card_is_fresh(
-        compiled_state, policy, 8,
-        card_id="compiled", node_id=2, ignored_pending_node_ids={2},
-        resource_envelope=one_gpu,
+        compiled_state,
+        policy,
+        8,
+        card_id="compiled",
+        node_id=2,
+        context=SpeculativeSelectionContext(
+            ignored_pending_node_ids={2},
+            resource_envelope=one_gpu,
+        ),
     ) is True
 
 
@@ -678,9 +736,15 @@ def test_zero_gpu_envelope_preserves_positive_requirement_and_fails_freshness_cl
         cards={"positive": owned},
     )
     assert speculative_card_is_fresh(
-        state, GreedyTree(n_seeds=1, max_nodes=8, debug_depth=0), 8,
-        card_id="positive", node_id=2, ignored_pending_node_ids={2},
-        resource_envelope=zero_gpu,
+        state,
+        GreedyTree(n_seeds=1, max_nodes=8, debug_depth=0),
+        8,
+        card_id="positive",
+        node_id=2,
+        context=SpeculativeSelectionContext(
+            ignored_pending_node_ids={2},
+            resource_envelope=zero_gpu,
+        ),
     ) is False
 
 
@@ -730,8 +794,13 @@ def test_asha_can_fill_same_survivor_lane_but_does_not_cross_pending_rung_bounda
     policy = ASHAPolicy(n_seeds=4, max_nodes=12, eta=2, debug_depth=0)
 
     assert speculative_card_selection_set(
-        state, policy, 12,
-        excluded_card_ids={"built-a"}, ignored_pending_node_ids={4},
+        state,
+        policy,
+        12,
+        context=SpeculativeSelectionContext(
+            excluded_card_ids={"built-a"},
+            ignored_pending_node_ids={4},
+        ),
     ) == ["same-rung-b"]
 
     state.nodes[5] = _node(
@@ -742,9 +811,13 @@ def test_asha_can_fill_same_survivor_lane_but_does_not_cross_pending_rung_bounda
     state.cards["duplicate-a"] = _ready_card("duplicate-a", parents=(0,))
 
     assert speculative_card_selection_set(
-        state, policy, 12,
-        excluded_card_ids={"built-a", "built-b"},
-        ignored_pending_node_ids={4, 5},
+        state,
+        policy,
+        12,
+        context=SpeculativeSelectionContext(
+            excluded_card_ids={"built-a", "built-b"},
+            ignored_pending_node_ids={4, 5},
+        ),
     ) == []
 
 
@@ -768,7 +841,7 @@ def test_asha_never_masks_unresolved_rung_zero_roots_into_replacement_drafts():
         state,
         policy,
         12,
-        ignored_pending_node_ids={0, 1, 2, 3},
+        context=SpeculativeSelectionContext(ignored_pending_node_ids={0, 1, 2, 3}),
     ) == []
 
 
@@ -798,5 +871,5 @@ def test_asha_reserves_non_spec_pending_promotion_action_without_excluded_card_i
         state,
         policy,
         12,
-        ignored_pending_node_ids={4},
+        context=SpeculativeSelectionContext(ignored_pending_node_ids={4}),
     ) == ["sibling-b"]
