@@ -54,7 +54,21 @@ test('the shared RunList mutation guard is single-flight, bounded, and honest ab
   assert.match(copy, /follow-up refresh timed out[\s\S]*follow-up refresh failed/)
   assert.match(hook, /const outcome = settlement\.value[\s\S]*if \(outcome === false\)[\s\S]*return false/,
     'a stronger caller-owned reconciliation result cannot be relabeled as success')
-  assert.match(hook, /catch \(error\)[\s\S]*settleWithin\(reconcile, LIST_RECONCILE_TIMEOUT_MS\)[\s\S]*setState\(message\); return false/)
+  // The failure state grew a `cause`, so a `setState(message)`-exact anchor stopped seeing this
+  // branch. The properties are what matter: a thrown mutation reconciles the store, and EVERY exit
+  // from the failure path reports failure — a `return true` here would relabel a failed write as a
+  // success and let the caller close its dialog over it.
+  const caught = hook.slice(hook.indexOf('catch (error)'), hook.indexOf('finally {'))
+  assert.match(caught, /settleWithin\(reconcile, LIST_RECONCILE_TIMEOUT_MS\)/)
+  assert.equal((caught.match(/return false/g) || []).length,
+    (caught.match(/\breturn\b/g) || []).length,
+    'every exit from the failure path must report failure')
+  // A purely LOCAL failure (saved-view storage/naming/capacity) has nothing on the server to
+  // reconcile against, so it short-circuits before paying for a refresh that could not tell it
+  // anything. Pinned because the ordering is the whole point of the branch.
+  assert.match(caught, /if \(localMutationError\(error\)\)[\s\S]*return false/)
+  assert.ok(caught.indexOf('localMutationError(error)') < caught.indexOf('settleWithin(reconcile'),
+    'a local failure must short-circuit before the reconcile, not after it')
   assert.match(hook, /finally \{ lock\.current = false \}/)
   assert.doesNotMatch(hook, /setTimeout|setInterval|while\s*\(/,
     'RunList must never schedule or loop an automatic mutation replay')
@@ -108,8 +122,14 @@ test('prompt dialogs retain their draft, focus layer, and controls until success
   assert.match(modal, /!busy && event\.target === event\.currentTarget/)
   assert.match(modal, /aria-busy=\{busy\}/)
   assert.match(modal, /disabled=\{busy\} onClick=\{onClose\}/)
-  assert.match(prompt, /await mutate\(\(\) => onSubmit\(v\.trim\(\)\), onReconcile\)[\s\S]*onClose\(\)/,
+  // `onSubmit` gained a second argument (the typed confirmation), which an argument-exact anchor
+  // could not see. The property is the GUARD: the dialog closes only on a truthy awaited result, and
+  // there is exactly one `onClose()` in the submit path — so every failure keeps the draft.
+  const go = prompt.slice(prompt.indexOf('const go = async'), prompt.indexOf('return <Modal'))
+  assert.match(go, /await mutate\(\(\) => onSubmit\([\s\S]*?\), onReconcile\)\) onClose\(\)/,
     'close happens only after the authoritative request resolves')
+  assert.equal((go.match(/onClose\(\)/g) || []).length, 1,
+    'a second close path would discard the draft on some failure')
   assert.match(prompt, /readOnly=\{busy \|\| blocked\}/,
     'a blocked row must not accept a new value either, not only a busy one')
   assert.match(prompt, /disabled=\{!ok \|\| busy\}/)
