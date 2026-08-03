@@ -1898,23 +1898,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         # (the serial path gets this for free — each node lands before the next proposes).
                         if _i:
                             state = fold(self.store.read_all())
-                        _ideas = self._propose_batch(state, len(_chunk))
-                        _dropped_batch = list(
-                            getattr(self, "_pending_batch_dropped", None) or [])
+                        # Per-idea FOREAGENT telemetry snapshots captured by _propose_batch (aligned
+                        # 1:1 with _ideas), so each build emits ITS OWN
+                        # hypothesis_ranked/foresight_selected.
+                        _ideas, _telem, _dropped_batch = self._consume_batch_proposal(
+                            state, len(_chunk))
                         if not _ideas:
-                            for _drop in _dropped_batch:
-                                if isinstance(_drop, dict) and isinstance(_drop.get("idea"), Idea):
-                                    self._record_node_less_card(
-                                        _drop["idea"],
-                                        reason=str(_drop.get("reason") or "proposal_rejected")[:160],
-                                        steering_context=_drop.get("steering_context", []),
-                                    )
+                            self._record_dropped_batch_cards(_dropped_batch)
                             self._pending_batch_dropped = []
                             self._pending_batch_novelty_gated = []
                             continue
-                        # Per-idea FOREAGENT telemetry snapshots captured by _propose_batch (aligned 1:1
-                        # with _ideas), so each build emits ITS OWN hypothesis_ranked/foresight_selected.
-                        _telem = getattr(self, "_pending_batch_telemetry", None) or [None] * len(_ideas)
                         _chunk = _chunk[:len(_ideas)]
                         for _a in _chunk:               # surface the audit events only for what we build
                             if "_scores" in _a:
@@ -1937,13 +1930,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         ]
                         # Accepted preplanned ids are durable first. Node-less rejects then receive fresh
                         # closed Card ids without shifting any reservation the workers are about to use.
-                        for _drop in _dropped_batch:
-                            if isinstance(_drop, dict) and isinstance(_drop.get("idea"), Idea):
-                                self._record_node_less_card(
-                                    _drop["idea"],
-                                    reason=str(_drop.get("reason") or "proposal_rejected")[:160],
-                                    steering_context=_drop.get("steering_context", []),
-                                )
+                        self._record_dropped_batch_cards(_dropped_batch)
                         self._pending_batch_dropped = []
                         # The accepted Ideas are now durably reserved, so the unreserved compatibility
                         # capability is no longer reachable or needed.
@@ -3743,6 +3730,46 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # `_triage_crash` / `_repair_error_context` / `_prepare_env` live in
     # looplab/engine/crash_repair.py (CrashRepairMixin — inherited, zero call-site churn).
 
+    def _consume_batch_proposal(self, state, width: int):
+        """Run one batched proposal and READ its three-attribute result. Returns
+        ``(ideas, telemetry, dropped)``.
+
+        `_propose_batch` (novelty.py) signals its results through three instance attributes rather
+        than a return value: `_pending_batch_telemetry`, `_pending_batch_dropped` and
+        `_pending_batch_novelty_gated`. Two call sites — `run`'s concurrent-build chunk and
+        `_stage_card_creates` — each read that protocol by hand, including the padding rule and the
+        snapshot-before-reset ordering (doc 25 ES-08).
+
+        The padding is load-bearing: telemetry must align 1:1 with `ideas` so each build emits ITS
+        OWN hypothesis_ranked/foresight_selected. A short list silently shifts every later idea's
+        telemetry onto the wrong node.
+
+        Both `dropped` and `telemetry` are SNAPSHOTTED (copied) here, so a caller may reset the
+        attributes at whatever point its own durability ordering requires without losing what it is
+        about to record. Resetting stays at the call sites precisely because that ordering differs:
+        `run` clears after the reservations are durable, `_stage_card_creates` clears in a `finally`.
+        """
+        ideas = self._propose_batch(state, width)
+        telemetry = list(getattr(self, "_pending_batch_telemetry", None) or [])
+        if len(telemetry) < len(ideas):
+            telemetry.extend([None] * (len(ideas) - len(telemetry)))
+        dropped = list(getattr(self, "_pending_batch_dropped", None) or [])
+        return ideas, telemetry, dropped
+
+    def _record_dropped_batch_cards(self, dropped) -> None:
+        """Give every rejected proposal in a batch its node-less closed Card.
+
+        The reason string is TRUNCATED and defaulted here rather than at three call sites: a card
+        whose reason silently became the empty string reads on the board as a drop with no cause.
+        """
+        for drop in dropped or []:
+            if isinstance(drop, dict) and isinstance(drop.get("idea"), Idea):
+                self._record_node_less_card(
+                    drop["idea"],
+                    reason=str(drop.get("reason") or "proposal_rejected")[:160],
+                    steering_context=drop.get("steering_context", []),
+                )
+
     @staticmethod
     def _node_id_ceiling(events, state) -> int:
         """The next unique, monotonic node id = 1 + max of every id EVER reserved (a `node_building` event)
@@ -4360,13 +4387,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         dropped_batch: list[dict] = []
         try:
             if len(raw) > 1 and all(action.get("kind") == "draft" for action in raw):
-                ideas = self._propose_batch(proposal_state, len(raw))
-                telemetry = list(
-                    getattr(self, "_pending_batch_telemetry", None) or [])
-                if len(telemetry) < len(ideas):
-                    telemetry.extend([None] * (len(ideas) - len(telemetry)))
-                dropped_batch = list(
-                    getattr(self, "_pending_batch_dropped", None) or [])
+                ideas, telemetry, dropped_batch = self._consume_batch_proposal(
+                    proposal_state, len(raw))
                 for offset, (action, idea, record) in enumerate(
                         zip(raw, ideas, telemetry)):
                     steering = ((record or {}).get("_steering_context", [])
@@ -4419,13 +4441,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
             # Preserve the existing audit treatment for batch proposals rejected before Node ownership.
             # Accepted staged Cards land first, so rejected receipts allocate fresh ids after them.
-            for dropped in dropped_batch:
-                if isinstance(dropped, dict) and isinstance(dropped.get("idea"), Idea):
-                    self._record_node_less_card(
-                        dropped["idea"],
-                        reason=str(dropped.get("reason") or "proposal_rejected")[:160],
-                        steering_context=dropped.get("steering_context", []),
-                    )
+            self._record_dropped_batch_cards(dropped_batch)
             return staged
         finally:
             self._pending_batch_dropped = []

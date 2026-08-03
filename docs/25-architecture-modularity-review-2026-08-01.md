@@ -591,6 +591,37 @@ created/closed/lost) are now stated rather than divergent. Pinned by three tests
 
 *Recommendation:* Extract a `_consume_batch_proposal(state, n) -> (ideas, telemetry, dropped)` helper that owns the _pending_batch_* attribute protocol (including the finally-reset), leaving only the commit strategy (reserve vs stage) at each call site. Longer term, make _propose_batch return a result object instead of signaling through instance attributes.
 
+*Resolution (2026-08-02):* extracted with the recommended signature —
+`Engine._consume_batch_proposal(state, width) -> (ideas, telemetry, dropped)` — plus
+`_record_dropped_batch_cards(dropped)` for the node-less-card loop, which was a THIRD copy the
+finding's location list did not separate out (twice in `run`, once in `_stage_card_creates`).
+
+The reset deliberately stays at the call sites, contrary to the recommendation's parenthetical. The
+two orderings are not interchangeable: `run` clears after its reservations are durable so a crash
+mid-batch still replays the same reservations, while `_stage_card_creates` clears in a `finally`
+because it must not leak into a later repair/legacy build. Folding them together would have made one
+of those two orderings wrong. Instead the helper SNAPSHOTS both lists, which is what makes deferring
+the reset safe at all.
+
+Two rules in the hand-written reading were load-bearing and silent when wrong, and are now pinned:
+telemetry is PADDED to align 1:1 with the ideas (`zip` truncates to the shortest, so a short list
+drops the tail of the batch — ideas proposed and gated, then never built), and the results are copied
+rather than aliased.
+
+`tests/test_batch_proposal_consume.py` (23) drives both helpers against a minimal host and pins the
+padding rules, the snapshot identity, the reason default/truncation, junk-row tolerance, and that
+both call sites go through the shared helpers. One test's premise was wrong on the first pass — it
+asserted the snapshot survives the caller's RESET, but the reset rebinds and an alias survives a
+rebind; it now asserts the identity directly and clears the producer's buffer in place, which is the
+hazard a copy actually removes.
+
+A near-miss earned a permanent guard. The first application inserted the new helpers between
+`@staticmethod` and `def _node_id_ceiling(`, which re-decorated the NEW function and silently demoted
+`_node_id_ceiling` to an instance method — surfacing as "takes 2 positional arguments but 3 were
+given" across 57 tests, and only that loudly because that helper is called everywhere. A quieter
+neighbour would have failed on one path. `test_the_staticmethods_around_the_new_helpers_are_still_staticmethods`
+now checks the decorators directly.
+
 #### ES-09 · LOW · duplication · effort: small
 
 **_apply_control_overrides contains two copy-pasted parallelism-override loops**
