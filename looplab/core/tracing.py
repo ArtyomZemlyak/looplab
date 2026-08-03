@@ -31,7 +31,8 @@ from typing import Optional
 
 import orjson
 
-from looplab.core.redact import is_secret_key_name, redact_persisted_text
+from looplab.core.redact import (bounded_redacted_tree, is_secret_key_name,
+                                 redact_persisted_text)
 
 
 _TRACE_TEXT_CAP = 64_000
@@ -74,62 +75,18 @@ def sanitize_trace_value(value, *, max_chars: int = _TRACE_TEXT_CAP,
                          max_items: int = _TRACE_TREE_ITEMS_MAX,
                          max_depth: int = _TRACE_TREE_DEPTH_MAX,
                          max_total_items: int = _TRACE_TREE_TOTAL_ITEMS_MAX):
-    """Bound and redact an untrusted structured value while preserving a small JSON-compatible shape."""
-    remaining = [max(0, int(max_chars))]
-    total_items = [max(0, int(max_total_items))]
-    item_cap = max(0, int(max_items))
-    depth_cap = max(0, int(max_depth))
+    """Bound and redact an untrusted structured value while preserving a small JSON-compatible shape.
 
-    def safe_text(item, *, cap=None, single_line=False):
-        allowed = remaining[0] if cap is None else min(remaining[0], max(0, int(cap)))
-        text = _trace_text(item, cap=allowed, single_line=single_line)
-        remaining[0] = max(0, remaining[0] - len(text))
-        return text
+    The walk itself is `core/redact.py::bounded_redacted_tree`, shared with the advisory-payload
+    projection (doc 25 CO-06). A trace value spends its WHOLE remaining character budget on one
+    string (`str_cap=None`): a span is already the bounded record, and truncating each field again
+    would drop the tail of the one field that mattered.
+    """
+    return bounded_redacted_tree(
+        value, [max(0, int(max_chars))], [max(0, int(max_total_items))],
+        max_items=max(0, int(max_items)), max_depth=max(0, int(max_depth)),
+        str_cap=None, key_cap=160)
 
-    def walk(item, depth):
-        if remaining[0] <= 0:
-            return ""
-        if item is None or isinstance(item, bool):
-            return item
-        if isinstance(item, str):
-            return safe_text(item)
-        if isinstance(item, int):
-            return item if -(1 << 63) <= item <= (1 << 63) - 1 else safe_text(item, cap=128)
-        if isinstance(item, float):
-            return item if math.isfinite(item) else safe_text(item, cap=32)
-        if depth >= depth_cap:
-            return safe_text("<depth-limited>", cap=32, single_line=True)
-        if isinstance(item, dict):
-            out = {}
-            try:
-                for key, child in islice(item.items(), item_cap):
-                    if total_items[0] <= 0:
-                        break
-                    total_items[0] -= 1
-                    safe_key = safe_text(key, cap=160, single_line=True)
-                    if not safe_key:
-                        continue
-                    if is_secret_key_name(key):
-                        out[safe_key] = "***"
-                        remaining[0] = max(0, remaining[0] - 3)
-                    else:
-                        out[safe_key] = walk(child, depth + 1)
-                    if remaining[0] <= 0:
-                        break
-                return out
-            except Exception:  # noqa: BLE001 - tracing must never perturb the operation
-                return safe_text("<mapping unavailable>", cap=64, single_line=True)
-        if isinstance(item, (list, tuple)):
-            out = []
-            for child in islice(item, item_cap):
-                if remaining[0] <= 0 or total_items[0] <= 0:
-                    break
-                total_items[0] -= 1
-                out.append(walk(child, depth + 1))
-            return out
-        return safe_text(item)
-
-    return walk(value, 0)
 
 # Active span stack (per async task / thread — contextvars are copied across anyio.to_thread
 # and task spawns, so nesting works through the worker-thread eval too).

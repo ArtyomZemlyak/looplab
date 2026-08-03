@@ -11,7 +11,8 @@ import itertools
 import json
 import math
 
-from looplab.core.redact import is_secret_key_name, redact_persisted_text
+from looplab.core.redact import (bounded_redacted_tree, is_secret_key_name,
+                                 redact_persisted_text)
 from looplab.core.source_identity import canonical_source_ref, valid_source_identity
 
 
@@ -465,38 +466,15 @@ def _source_url(value, persisted_identity, budget: list[int]) -> tuple[str, str]
 
 
 def _tree(value, budget: list[int], items: list[int], depth: int = 0):
-    if depth > 5:
-        return "<depth-limited>"
-    if isinstance(value, str):
-        return _text(value, 2_000, budget)
-    if value is None or isinstance(value, bool):
-        return value
-    if type(value) is int:
-        return value if -(1 << 63) <= value <= (1 << 63) - 1 else _text(value, 128, budget)
-    if type(value) is float:
-        return value if math.isfinite(value) else _text(value, 32, budget)
-    if isinstance(value, dict):
-        out = {}
-        for key, child in itertools.islice(value.items(), 64):
-            if items[0] <= 0:
-                break
-            items[0] -= 1
-            safe_key = _text(key, 128, budget, single_line=True)
-            if is_secret_key_name(key):
-                out[safe_key] = "***"
-                budget[0] = max(0, budget[0] - 3)
-            else:
-                out[safe_key] = _tree(child, budget, items, depth + 1)
-        return out
-    if isinstance(value, (list, tuple)):
-        out = []
-        for child in itertools.islice(value, 64):
-            if items[0] <= 0:
-                break
-            items[0] -= 1
-            out.append(_tree(child, budget, items, depth + 1))
-        return out
-    return _text(value, 2_000, budget)
+    """Bound and redact one untrusted advisory subtree, spending the SHARED page budget.
+
+    The walk is `core/redact.py::bounded_redacted_tree`, shared with the span/trace sanitizer (doc 25
+    CO-06). This projection caps each string at 2 000 rather than letting one field spend the whole
+    page: an advisory payload is a LIST of rows a human reads, and an oversized early statement must
+    not starve the later ones.
+    """
+    return bounded_redacted_tree(value, budget, items, max_items=64, max_depth=5,
+                                 str_cap=2_000, key_cap=128, depth=depth)
 
 
 def _verification(value, budget: list[int], items: list[int]):

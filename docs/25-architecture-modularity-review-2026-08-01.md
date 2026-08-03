@@ -1526,6 +1526,44 @@ Scope: `looplab/core/`: models.py, config.py, llm.py + siblings, tracing, parsin
 
 *Recommendation:* Move one parameterized `bounded_redacted_tree(value, *, max_chars, max_items, max_depth, max_total_items)` into redact.py (which both already import) and have tracing and advisory_payloads call it with their own constants.
 
+*Resolution (2026-08-02):* done — `core/redact.py::bounded_redacted_tree(value, budget, items, *,
+max_items, max_depth, str_cap, key_cap)`. The two mutable cells are passed IN rather than created
+inside, because `advisory_payloads` charges URLs and verdict rows against the same page budget; a
+private copy would let the page double-spend.
+
+The recommendation understated the problem: the two walkers differed in BEHAVIOUR, not only in
+constants, so the collapse had to choose. A differential harness over a 41-value corpus (nested,
+deep, wide, secret keys, oversized strings, big ints, non-finite floats, unicode, control characters,
+bytes, an `IntEnum`, an opaque object, a mapping whose `items()` raises) measured it, run against a
+`git worktree` of the pre-refactor tree:
+
+* **the TRACE boundary is byte-identical, 0/41** — that half is provably behaviour-preserving;
+* **the advisory boundary changes in exactly 7 places**, all four adopted divergences and nothing
+  else.
+
+Every divergence had tracing safer, so tracing's semantics won, each named in the docstring:
+
+1. **A hostile mapping degrades instead of RAISING.** This is a defect fix, not a tightening: a
+   `dict` subclass whose `items()` throws took the advisory projection down with a `RuntimeError`,
+   where tracing already answered `"<mapping unavailable>"`. A redaction boundary that can raise is
+   one that can drop a whole payload.
+2. **A key that redacts to empty is dropped**, not emitted as `""` — two of them collide into one
+   JSON member and silently discard a value.
+3. **Depth is cut at `>= max_depth`**, the earlier of the two cuts, with the marker charged to the
+   budget like any other emitted text.
+4. **An `int` SUBCLASS stays an int** (`isinstance`, not `type(...) is`), so an `IntEnum` keeps the
+   number a reader is trying to compare instead of becoming a string.
+
+Only `str_cap` and `key_cap` remain per-caller, and both are load-bearing: a trace value spends its
+whole remaining budget on one string (a span is already the bounded record), while an advisory
+payload caps each at 2 000 so one oversized early row cannot starve the rows below it.
+
+`tests/test_bounded_redacted_tree.py` (34) pins the redaction properties, both budgets, the cyclic
+and depth cuts, the scalar table, each caller's declared cap, and — the point of the whole finding —
+that the two boundaries now AGREE on what a value becomes. Teeth-tested against five breaks: the
+mapping guard narrowed, secret masking limited to depth 0, the depth cap effectively removed, the
+budget cell copied instead of shared, and the advisory per-string cap dropped.
+
 #### CO-07 · MEDIUM · layering · effort: small — **RESOLVED (2026-08-02)**
 
 **core→agents layering violation: Settings validation lazily imports agents.cli_agent**

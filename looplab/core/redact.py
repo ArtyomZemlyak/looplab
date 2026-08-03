@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from itertools import islice as _islice
 import re
 import unicodedata
 
@@ -193,3 +194,86 @@ def redact_persisted_identity(value, *, max_chars: int) -> str:
     # Raw newlines were replaced above; only the truncation receipt can introduce one.  Replace that
     # delimiter without collapsing otherwise-significant whitespace in the opaque identity.
     return _bounded_redacted_text(text, max_chars).replace("\n", " ")
+
+
+def bounded_redacted_tree(value, budget: list[int], items: list[int], *,
+                          max_items: int = 64, max_depth: int = 5,
+                          str_cap: int | None = None, key_cap: int = 160, depth: int = 0):
+    """Bound and redact an untrusted structured value into a small JSON-compatible shape.
+
+    ONE walker for both durable boundaries that need this (doc 25 CO-06): the span/trace records in
+    `core/tracing.py` and the advisory payload projections in `core/advisory_payloads.py`. They had
+    written it twice, and the copies had already drifted — which is exactly the harm, because what
+    this function does is REDACT: a fix landing in one walker silently missed the other.
+
+    `budget` and `items` are shared mutable cells (a total character budget and a total node budget),
+    passed in rather than created here so a caller that also spends the same budget on sibling text —
+    `advisory_payloads` charges URLs and verdict rows against it — cannot be starved or double-spend.
+
+    Callers differ ONLY in constants: `str_cap` (None = spend the whole remaining budget on one
+    string; advisory caps each at 2000 so one oversized early field cannot consume the page) and
+    `key_cap`. Everything else is uniform, deliberately, on the STRICTER of the two prior behaviours:
+
+    * **A hostile mapping degrades, it does not raise.** A `dict` subclass whose `items()` throws used
+      to take down the advisory projection with a RuntimeError; tracing already answered
+      `"<mapping unavailable>"`. A redaction boundary that can raise is a boundary that can drop a
+      whole payload, so the guard is now universal.
+    * **A key that redacts to empty is DROPPED**, not emitted as `""`. Two such keys collide into one
+      JSON member, silently discarding a value.
+    * **Depth is cut at `>= max_depth`**, the earlier of the two cuts, and the marker is charged to
+      the budget like any other emitted text.
+    * **An `int` SUBCLASS stays an int** (`isinstance`, not `type(...) is`), so an `IntEnum` keeps its
+      value instead of becoming a string.
+    * **The walk stops as soon as the character budget is spent**, at every container level.
+    """
+    def safe_text(item, *, cap=None, single_line=False):
+        allowed = budget[0] if cap is None else min(budget[0], max(0, int(cap)))
+        text = redact_persisted_text(item, max_chars=allowed, entropy=True,
+                                     single_line=single_line)
+        budget[0] = max(0, budget[0] - len(text))
+        return text
+
+    def walk(item, level):
+        if budget[0] <= 0:
+            return ""
+        if item is None or isinstance(item, bool):
+            return item
+        if isinstance(item, str):
+            return safe_text(item, cap=str_cap)
+        if isinstance(item, int):
+            return item if -(1 << 63) <= item <= (1 << 63) - 1 else safe_text(item, cap=128)
+        if isinstance(item, float):
+            return item if math.isfinite(item) else safe_text(item, cap=32)
+        if level >= max_depth:
+            return safe_text("<depth-limited>", cap=32, single_line=True)
+        if isinstance(item, dict):
+            out = {}
+            try:
+                for key, child in _islice(item.items(), max_items):
+                    if items[0] <= 0:
+                        break
+                    items[0] -= 1
+                    safe_key = safe_text(key, cap=key_cap, single_line=True)
+                    if not safe_key:
+                        continue
+                    if is_secret_key_name(key):
+                        out[safe_key] = "***"
+                        budget[0] = max(0, budget[0] - 3)
+                    else:
+                        out[safe_key] = walk(child, level + 1)
+                    if budget[0] <= 0:
+                        break
+                return out
+            except Exception:  # noqa: BLE001 - a redaction boundary must never raise at its caller
+                return safe_text("<mapping unavailable>", cap=64, single_line=True)
+        if isinstance(item, (list, tuple)):
+            out = []
+            for child in _islice(item, max_items):
+                if budget[0] <= 0 or items[0] <= 0:
+                    break
+                items[0] -= 1
+                out.append(walk(child, level + 1))
+            return out
+        return safe_text(item, cap=str_cap)
+
+    return walk(value, depth)
