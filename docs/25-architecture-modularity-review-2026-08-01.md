@@ -1835,6 +1835,37 @@ since close() does not unblock a recv() wedged in the kernel.
 
 *Recommendation:* After deleting the legacy path (see dead-code finding), extract one `_open_bounded_stream()` helper (permit + bounded create + _streaming_body + close-on-exit) shared by `_sdk_chat` and `complete_text_stream`, one delta-merge helper for tool-call slots, and one `_fallback_to_blocking()` local for the triplicated block.
 
+*Resolution (2026-08-03):* Most of this finding was DISCHARGED BY CO-03 rather than refactored: the
+legacy `_read_stream` is gone, so the three reassembly loops are two, and the duplicated tool-call
+slot-merge (548-559 vs 618-630) had its second copy inside the deleted function. What remained is
+done here.
+
+* `_header_join()` — the `header_timeout + min(10.0, header_timeout)` budget, computed once instead
+  of at both streaming entry points. This is the budget that makes a black-holed request fail over
+  near `header_timeout` rather than minutes later on the ~180s idle timeout, so two expressions for
+  it is precisely how one gets loosened alone.
+* `_fallback_to_blocking()` — the block that appeared three times verbatim inside
+  `complete_text_stream`. It is a nested GENERATOR delegated to with `yield from`, because the
+  caller is one; the `return` stays at each call site so the stream's termination remains visible
+  where it matters.
+
+`_open_bounded_stream()` was NOT extracted. The two remaining creates differ in the ways that
+matter — `_sdk_chat` holds ONE broker slot continuously across the header wait AND the body and
+passes `counted=True` so `_bounded_create` does not take a second, while `complete_text_stream` owns
+its Stream across a `yield` so a consumer that cancels mid-answer still closes the socket. Both
+arrangements carry incident comments explaining why the simpler nesting was wrong. Merging them
+would either re-introduce the double-count or hide the close-on-cancel ownership, so the shared part
+(the budget) was extracted and the divergent part left explicit.
+
+**What the teeth pass established about the accounting flag.** `delegated_to_fallback` reads as the
+guard that stops a delegated stream being billed on top of the fallback's own call — but all three
+delegation sites sit under `if not pieces:`, so at each of them `stream_completed` is False and
+`pieces` is empty, and `(stream_completed or bool(pieces))` is already False. The clause changes no
+arithmetic today; it is a guard against a fourth site that delegates AFTER yielding content. A
+behavioural test therefore passes with the clause deleted, and would keep passing right up until
+someone adds the site that needs it — so `tests/test_llm_stream_setup.py` pins the INVARIANT the
+guard rests on (every delegation site is under `not pieces`) and says why. All 9 teeth bite.
+
 #### CO-05 · MEDIUM · under-decomposition · effort: medium
 
 **OpenAICompatibleClient._post is a ~200-line multi-concern method inside an ~890-line class**

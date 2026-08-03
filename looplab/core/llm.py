@@ -461,6 +461,18 @@ class OpenAICompatibleClient:
             # explicit configuration changes and must pass the credential-binding guard again.
             http_client=httpx.Client(trust_env=self._trust_env, follow_redirects=False))
 
+    def _header_join(self) -> float:
+        """The wall-clock budget a streaming `create()` gets to produce RESPONSE HEADERS.
+
+        `header_timeout` plus at most 10s of slack, so a small `header_timeout` still fails over
+        fast. Deliberately NOT the idle `timeout` (which can be ~180s): an endpoint that accepts the
+        socket, TLS-handshakes and then never sends headers must fail over near `header_timeout`,
+        not minutes later. Both streaming entry points bound their create on it, and they used to
+        compute it separately (doc 25 CO-04) — two expressions for one budget is how one of them
+        ends up loosened alone.
+        """
+        return self.header_timeout + min(10.0, self.header_timeout)
+
     def _sdk_chat(self, payload: dict, use_stream: bool) -> dict:
         """The single transport seam: one openai-SDK chat call, returned in the legacy body shape
         ({"choices":[{"message":{content,reasoning?,tool_calls?},"finish_reason"}],"usage"}) the rest
@@ -503,7 +515,7 @@ class OpenAICompatibleClient:
             # `_accumulate_stream`'s idle watchdog then governs the body. Iterating that streaming Response
             # on THIS thread after a worker thread created it is safe: sync-httpx sequential handoff, no
             # concurrent access.
-            header_join = self.header_timeout + min(10.0, self.header_timeout)
+            header_join = self._header_join()
             # ONE slot held CONTINUOUSLY across the header wait AND the body, taken here and passed
             # down as `counted=True` so `_bounded_create` does not add a second.
             #
@@ -978,6 +990,24 @@ class OpenAICompatibleClient:
         usage_observed = False
         stream_completed = False
         delegated_to_fallback = False
+
+        def _fallback_to_blocking():
+            """Hand this answer to the BLOCKING path and yield whatever it produces.
+
+            Three sites reach it — a clean EOF with no content, a non-retryable BadRequestError, and
+            any other APIError — and each used to write the same five lines (doc 25 CO-04). The
+            duplication mattered because of the flag: `delegated_to_fallback` is what stops the
+            `finally` below from charging this envelope on top of the call the fallback makes and
+            accounts for itself. A fourth site that forgot to set it would double-bill silently.
+
+            A generator, delegated to with `yield from`, because the caller is one: the `return`
+            that ends the stream stays at the call site so the control flow remains visible there.
+            """
+            nonlocal delegated_to_fallback
+            delegated_to_fallback = True
+            text = self.complete_text(messages)
+            if text:
+                yield text
         # The generation span stays open for the whole stream (its duration = time-to-full-answer).
         with tracing.generation(op="complete_text_stream", model=self.model, messages=messages,
                                 model_parameters=self._model_params()) as gen:
@@ -1004,7 +1034,7 @@ class OpenAICompatibleClient:
                             # that accepts the connection then never sends response HEADERS would hang
                             # here until the long idle read timeout. Now it fails over near
                             # `header_timeout`; `_stream_with_idle_guard` then governs the body.
-                            header_join = self.header_timeout + min(10.0, self.header_timeout)
+                            header_join = self._header_join()
                             # OWN the SDK Stream so it is closed on EVERY exit, including a consumer
                             # that closes/cancels this generator while suspended at the `yield` below.
                             # Passing `create(...)` inline left the only reference on the C stack of a
@@ -1041,10 +1071,7 @@ class OpenAICompatibleClient:
                         # way those do; `account_here` in the `finally` still charges this envelope
                         # when the provider reported usage for it.
                         if not pieces:
-                            delegated_to_fallback = True
-                            text = self.complete_text(messages)
-                            if text:
-                                yield text
+                            yield from _fallback_to_blocking()
                             return
                         stream_completed = True
                         break                    # streamed (or cleanly ended) -> done
@@ -1058,20 +1085,14 @@ class OpenAICompatibleClient:
                             self._reasoning_ok = False
                             continue             # retry the stream once without the reasoning toggle
                         if not pieces:           # any other bad request -> blocking fallback
-                            delegated_to_fallback = True
-                            text = self.complete_text(messages)
-                            if text:
-                                yield text
+                            yield from _fallback_to_blocking()
                             return
                         break
                     except openai.APIError:
                         # A fallback owns/accountants its own provider call.  The outer stream still
                         # records independently if it had already observed provider usage.
                         if not pieces:
-                            delegated_to_fallback = True
-                            text = self.complete_text(messages)
-                            if text:
-                                yield text
+                            yield from _fallback_to_blocking()
                             return
                         break
             finally:
