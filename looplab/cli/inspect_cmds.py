@@ -25,6 +25,7 @@ from looplab.events.replay import fold
 from looplab.events.types import EV_FINALIZE_STEP, EV_NODE_CONCEPTS, EV_RUN_FINISHED
 from looplab.cli import _engine_singleton, _print_result, _require_run_dir, app
 from looplab.core.llm import apply_llm_model_override
+from looplab.core.latebind import late_bound
 
 
 def _governance_cli_error(exc: GovernanceLedgerUnavailable | EventStoreLockError):
@@ -384,11 +385,11 @@ def inspect(run_dir: Path = typer.Argument(...)):
 
 
 def _make_llm_client(settings):
-    """Late-bound `make_llm_client` (mirrors export_cmds) so a test patching `looplab.cli.make_llm_client`
-    also stubs these diagnostics — a frozen `from looplab.cli import make_llm_client` would not."""
-    from looplab import cli
+    """Late-bound `make_llm_client` so a test patching `looplab.cli.make_llm_client` also stubs these
+    diagnostics. Unlike the other shims this one COMPOSES the seam rather than forwarding to it — the
+    diagnostics go through `make_llm_client_for`, which wants the builder as a factory argument."""
     from looplab.core.llm import make_llm_client_for
-    return make_llm_client_for(settings, factory=cli.make_llm_client)
+    return make_llm_client_for(settings, factory=late_bound("looplab.cli", "make_llm_client"))
 
 
 def _run_tools_for(state):
@@ -405,19 +406,13 @@ def _settings_for_run(run_dir=None, model=None):
 
     This helper needs endpoint/model provenance, not the seven event-pinned selection-treatment fields;
     the effective per-run config API owns that latter overlay.
+
+    The ambient fallback is `strict=False` on the SHARED loader (doc 25 CT-08), not a second parse:
+    this used to re-read and re-validate the JSON itself, so the same file had two decision tables
+    depending on whether you typed a lifecycle command or a diagnostic.
     """
-    from looplab.core.config import Settings, settings_from_snapshot
-    settings = None
-    try:
-        snap = (Path(run_dir) / "config.snapshot.json") if run_dir is not None else None
-        if snap is not None and snap.exists():
-            import json
-            data = json.loads(snap.read_text(encoding="utf-8"))
-            settings = settings_from_snapshot(data)
-    except Exception:  # noqa: BLE001 — any snapshot issue -> ambient fallback
-        settings = None
-    if settings is None:
-        settings = Settings()
+    from looplab.cli import load_run_settings
+    settings = load_run_settings(run_dir, strict=False)
     if model is not None:
         apply_llm_model_override(settings, model)
     return settings

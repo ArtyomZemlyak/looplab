@@ -146,6 +146,70 @@ def _require_run_dir(run_dir: Path) -> EventStore:
     return EventStore(run_dir / "events.jsonl")
 
 
+def load_run_settings(run_dir, *, strict: bool) -> Settings:
+    """Load a run's `config.snapshot.json` into Settings — the ONE answer to "which settings does
+    this command actually run with" (doc 25 CT-08).
+
+    There used to be three: a strict loader in `run_cmds`, two verbatim inline prologues that called
+    it, and an independent re-implementation in `inspect_cmds` that re-parsed the JSON itself and
+    fell back silently. Same file, three failure semantics, chosen by which command you happened to
+    type.
+
+    `strict` names the two that are actually legitimate, and both matter:
+
+    * ``strict=True`` (run / resume / finalize) — a corrupt or hand-edited snapshot is an
+      OPERATOR-FACING input error. Every failure maps to a one-line `BadParameter` naming the file,
+      because a raw JSONDecodeError/ValidationError traceback tells the operator nothing about WHICH
+      file to fix. Falling back to ambient Settings here would silently drop run-only flags
+      (require_approval, trust_mode, confirm_*, eval_trust_mode, backend, …) — e.g. finishing a
+      paused not-yet-approved run without any approval.
+    * ``strict=False`` (read-only diagnostics) — the snapshot supplies endpoint/model PROVENANCE so a
+      diagnostic reaches the endpoint recorded for that run. An absent or unreadable snapshot must
+      not stop someone from reading an old or partially-written run, so it degrades to ambient.
+
+    An absent snapshot is ambient Settings under BOTH modes: `strict` is about corruption, not about
+    requiring the file. Callers that need the file to exist check for it themselves and say why
+    (`_finalization_recovery_inputs` names both snapshots in one message).
+    """
+    snap = Path(run_dir) / "config.snapshot.json" if run_dir is not None else None
+    if snap is None or not snap.exists():
+        return Settings()
+    if strict:
+        return _settings_from_config_snapshot(snap)
+    try:
+        return _settings_from_config_snapshot(snap)
+    except Exception:  # noqa: BLE001 — any snapshot issue -> ambient fallback for a read-only path
+        return Settings()
+
+
+def _settings_from_config_snapshot(config_snap: Path) -> Settings:
+    """Load `config.snapshot.json` into Settings, mapping every failure to a one-line BadParameter.
+
+    A corrupt or hand-edited snapshot is an operator-facing input error, not an internal fault: raw
+    JSONDecodeError/ValidationError tracebacks tell the operator nothing about WHICH file to fix.
+    Shared by `run`'s finalization recovery and by `resume`/`finalize`, which read the same file.
+    """
+    import json
+
+    from pydantic import ValidationError
+
+    from looplab.core.config import settings_from_snapshot
+
+    try:
+        config_data = json.loads(config_snap.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise typer.BadParameter(
+            f"cannot load original config snapshot {config_snap}: {exc}") from exc
+    if not isinstance(config_data, dict):
+        raise typer.BadParameter(
+            f"cannot load original config snapshot {config_snap}: expected a JSON object")
+    try:
+        return settings_from_snapshot(config_data)
+    except ValidationError as exc:
+        raise typer.BadParameter(
+            f"cannot load original config snapshot {config_snap}: {exc}") from exc
+
+
 def _truthy_env(name: str) -> bool:
     """A LOOPLAB_* deployment env var read as a boolean (1/true/yes/on, case-insensitive). Not a
     Settings field on purpose: it's a property of the FILESYSTEM/deployment, not the run, so it must

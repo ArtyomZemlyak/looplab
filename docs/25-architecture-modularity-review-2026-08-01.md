@@ -1508,6 +1508,12 @@ Scope: `looplab/core/`: models.py, config.py, llm.py + siblings, tracing, parsin
 
 *Recommendation:* Move the developer-backend name registry (the PRESETS keys, not the preset bodies) into core — e.g. a `DEVELOPER_BACKENDS` tuple in task_kinds.py or a new core module — have cli_agent build PRESETS keyed off it, and validate against the core constant. A two-way source-scan test (the project's established registry pattern) keeps them in sync.
 
+*Resolution (2026-08-02):* DUPLICATE of **XP-04**, and already closed by it — two review lanes found
+the same upward import from different angles. `core/config.py::DEVELOPER_BACKENDS` is the closed set,
+`agents/cli_agent.py` asserts at IMPORT time that its PRESETS are covered by it, and
+`tests/test_developer_backend_registry.py` checks both directions plus the layering rule for the
+whole `core/` package. Nothing further to do here; see XP-04 for the reasoning and the teeth tests.
+
 #### CO-08 · LOW · inconsistency · effort: small
 
 **Six bespoke canonical-JSON→SHA-256 digest minters with no shared core**
@@ -1673,6 +1679,11 @@ six full `validate_run_child`-shaped validators, which carry per-caller HTTP err
 *Recommendation:* Replace both baselines with observation.latest_seq (the CAS expected_last_seq on append remains the correctness authority, as the comment itself notes), and remove the review-artifact comment.
 
 *Status (post-baseline):* Fixed on `master` by commit `c92b89f` (2026-08-01, immediately after this review's baseline): both call sites now read `self._observe(rd).latest_seq` from the incremental observation index, `self._events(rd)` is gone, and the marker was replaced by a why-comment. The finding is retained as accurate at the baseline.
+
+*Resolution (2026-08-02):* re-verified against the live tree, not just the commit message: no
+`CLAUDE REVIEW` marker remains anywhere in `serve/run_commands.py`, and both decision baselines read
+`self._observe(rd).latest_seq`. Nothing left to do — recorded here so the finding is counted closed
+rather than sitting open behind a status note.
 
 #### SC-09 · MEDIUM · mergeable-entities · effort: medium
 
@@ -2950,6 +2961,28 @@ escapes; delete the novelty guard; re-inline one wrapper's copy).
 
 *Recommendation:* One factory in the cli package, e.g. `def _late(name): def call(*a, **k): from looplab import cli; return getattr(cli, name)(*a, **k); return call`, then `_engine = _late("_engine")` etc., with the why-comment written once at the factory.
 
+*Resolution (2026-08-02):* done, as `looplab/core/latebind.py::late_bound(module, name)` — `core`
+rather than the cli package, because `looplab/bench.py` needs the same shim and importing
+`looplab.cli` at its module scope would pull the whole Typer command surface into a module that today
+has no CLI dependency at all. `late_bound` names its target by STRING and imports inside the call, so
+`core` gains no dependency either (and it imports nothing above itself).
+
+Four sites are now one-liners (`_engine = late_bound("looplab.cli", "_engine")`, …). The fifth,
+`inspect_cmds._make_llm_client`, is NOT identical and stays a function: it COMPOSES the seam, handing
+the builder to `make_llm_client_for` as a factory argument. It now passes `late_bound(...)` as that
+factory, and its docstring says why it differs.
+
+The five paragraphs became one, at the factory, explaining the actual hazard: `from looplab.cli
+import _engine` binds the object that exists at import time, so a test patching `looplab.cli._engine`
+patches an attribute the frozen copy no longer reads — and the command then drives the REAL engine
+against a test that believed it was offline, passing, having tested nothing.
+
+`tests/test_cli_shared_indirection.py` pins call-time resolution at all five sites, verbatim argument
+forwarding, and a grep guard that no module hand-writes `from looplab import cli` inside a forwarding
+function again. Teeth-tested by freezing the shim, by re-inlining one, and — after a first attempt at
+the diagnostics break turned out to be call-time resolution in disguise — by a genuine module-scope
+`from looplab.cli import make_llm_client as _FROZEN_FACTORY`.
+
 #### CT-08 · MEDIUM · inconsistency · effort: small
 
 **config.snapshot.json loaded three different ways with three failure semantics**
@@ -2959,6 +2992,30 @@ escapes; delete the novelty guard; re-inline one wrapper's copy).
 *Evidence:* run_cmds has the strict loader _settings_from_config_snapshot (BadParameter on any corruption), but resume (661-664) and finalize (820-823) each duplicate the same 4-line `settings = Settings(); snap = run_dir/"config.snapshot.json"; if snap.exists(): settings = _settings_from_config_snapshot(snap)` prologue; and inspect_cmds independently re-implements snapshot loading as _settings_for_run with SILENT fallback to ambient Settings on any exception (its docstring justifies the ambient fallback for diagnostics, but it re-parses the JSON itself instead of composing the shared loader). Three call shapes for the same file means the "which settings does this command actually run with" question has three answers depending on entry point.
 
 *Recommendation:* One `load_run_settings(run_dir, *, strict: bool) -> Settings` in the cli package (or core/appconfig): strict=True raises BadParameter (run/resume/finalize), strict=False degrades to ambient (diagnostics). Kill the two inline duplicates.
+
+*Resolution (2026-08-02):* done exactly as recommended — `looplab/cli/__init__.py::load_run_settings(
+run_dir, *, strict)`, alongside the other shared CLI helpers. The strict loader moved there with it;
+`run_cmds`' three call sites are now `load_run_settings(run_dir, strict=True)` and `inspect_cmds`'
+re-implementation is `strict=False` on the same function instead of a second parse.
+
+`strict` names the two semantics that are actually legitimate, and the docstring says why each is:
+strict is for the LIFECYCLE commands, where a corrupt snapshot is an operator-facing input error and
+falling back to ambient would silently drop run-only flags (require_approval, trust_mode, confirm_*,
+eval_trust_mode, backend, …) — e.g. finishing a paused, not-yet-approved run without any approval.
+Lenient is for read-only diagnostics, where the snapshot supplies endpoint/model provenance and an
+unreadable one must not stop someone reading a partially-written run.
+
+One behaviour was clarified rather than preserved verbatim: an ABSENT snapshot is ambient Settings
+under both modes. That matches what all three call shapes already did (each guarded with
+`if snap.exists()`), and the one caller that genuinely requires the file —
+`_pending_finalization_inputs` — keeps its own check, which names BOTH snapshots in one message.
+
+`tests/test_cli_shared_indirection.py` pins both modes against five corruption shapes, the
+absent-file rule, that recovery still refuses a missing snapshot by name, and a grep guard on the
+PARSE (`settings_from_snapshot` outside `cli/__init__.py`) rather than on the filename — commands
+legitimately still name `config.snapshot.json` to write it, to check it exists, and to print it
+verbatim. Teeth-tested by making strict degrade silently and by flipping one lifecycle call to
+lenient.
 
 #### CT-09 · MEDIUM · mergeable-entities · effort: medium
 

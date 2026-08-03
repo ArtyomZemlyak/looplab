@@ -17,7 +17,7 @@ import typer
 from pydantic import ValidationError
 
 from looplab.core.atomicio import atomic_write_text
-from looplab.core.config import Settings, settings_from_snapshot
+from looplab.core.latebind import late_bound
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
 from looplab.events.types import (EV_APPROVAL_GRANTED, EV_PAUSE, EV_RESUME, EV_RESUME_SERVED,
                                   EV_RUN_ABORT, EV_RUN_FINISHED, EV_RUN_REOPENED, EV_SPEC_APPROVED)
@@ -35,7 +35,7 @@ from looplab.serve.run_files import run_config_write_lock
 from looplab.cli import (_BACKENDS, _DEV_BACKENDS, _TASK_KINDS, _choice, _engine_singleton,
                          _apply_speculation_calibration_profile,
                          _assert_run_deletion_namespace_available, _load_task, _print_result,
-                         _require_run_dir, app)
+                         _require_run_dir, app, load_run_settings)
 
 
 # How long `resume` waits for a stopped run's previous owner to release engine.lock, and how often
@@ -46,21 +46,12 @@ _HANDOFF_WAIT_S = 600.0
 _HANDOFF_ECHO_EVERY_S = 15.0
 
 
-def _engine(*args, **kwargs):
-    """Late-bound through the package module: tests patch `looplab.cli._engine`
-    (test_cli.py::_capture_backend) and the command bodies here must see that patch at call time —
-    a plain `from looplab.cli import _engine` would freeze the pre-patch object into this module's
-    globals when the package initializes."""
-    from looplab import cli
-    return cli._engine(*args, **kwargs)
-
-
-def make_llm_client(*args, **kwargs):
-    """Late-bound for the same monkeypatch seam as `_engine` above: test_cli.py patches
-    `cli.make_llm_client` (×5) to stub the Genesis path offline, and `run` below must pick the
-    patched object up at call time."""
-    from looplab import cli
-    return cli.make_llm_client(*args, **kwargs)
+# Late-bound through the package module: tests patch `looplab.cli._engine`
+# (test_cli.py::_capture_backend) and `cli.make_llm_client` (×5, to stub the Genesis path offline),
+# and the command bodies here must see those patches at call time. `looplab.core.latebind` explains
+# the freeze-at-import hazard these shims exist to avoid.
+_engine = late_bound("looplab.cli", "_engine")
+make_llm_client = late_bound("looplab.cli", "make_llm_client")
 
 
 def _run_engine_guarded(eng: Engine):
@@ -213,29 +204,7 @@ def _pending_finalization_inputs(run_dir: Path, task_id: str | None):
         raise typer.BadParameter(
             f"task.snapshot.json belongs to task {recovery_task.id!r}, but the event log belongs "
             f"to {task_id!r}; refusing to finalize with mismatched inputs")
-    return recovery_task, _settings_from_config_snapshot(config_snap)
-
-
-def _settings_from_config_snapshot(config_snap: Path):
-    """Load `config.snapshot.json` into Settings, mapping every failure to a one-line BadParameter.
-
-    A corrupt or hand-edited snapshot is an operator-facing input error, not an internal fault: raw
-    JSONDecodeError/ValidationError tracebacks tell the operator nothing about WHICH file to fix.
-    Shared by `run`'s finalization recovery and by `resume`/`finalize`, which read the same file.
-    """
-    try:
-        config_data = json.loads(config_snap.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise typer.BadParameter(
-            f"cannot load original config snapshot {config_snap}: {exc}") from exc
-    if not isinstance(config_data, dict):
-        raise typer.BadParameter(
-            f"cannot load original config snapshot {config_snap}: expected a JSON object")
-    try:
-        return settings_from_snapshot(config_data)
-    except ValidationError as exc:
-        raise typer.BadParameter(
-            f"cannot load original config snapshot {config_snap}: {exc}") from exc
+    return recovery_task, load_run_settings(run_dir, strict=True)
 
 
 def _missing_task_paths(task_dict: dict) -> list[tuple[str, str]]:
@@ -671,10 +640,7 @@ def resume(
     # Restore the ORIGINAL run's settings from the snapshot `run` wrote — a fresh Settings()
     # would silently drop run-only flags (require_approval, trust_mode, confirm_*, eval_trust_mode,
     # backend, …), e.g. finishing a paused not-yet-approved run without any approval.
-    settings = Settings()
-    snap = run_dir / "config.snapshot.json"
-    if snap.exists():
-        settings = _settings_from_config_snapshot(snap)
+    settings = load_run_settings(run_dir, strict=True)
     # Settings.max_nodes carries ge=1, but assignment validation is disabled (flat-settings/snapshot
     # design), so a direct override would silently accept 0/negative and then append resume/reopen work
     # that can only finish immediately. Enforce the field's own floor here, before `_engine` and before
@@ -830,10 +796,7 @@ def finalize(
         typer.echo(f"marked {run_dir} for finalize; a running engine will wrap it up "
                    f"(task file not found: {snap})")
         return
-    settings = Settings()
-    csnap = run_dir / "config.snapshot.json"
-    if csnap.exists():
-        settings = _settings_from_config_snapshot(csnap)
+    settings = load_run_settings(run_dir, strict=True)
     eng = _engine(run_dir, _load_task(snap), settings, crash_after=None)
     _preflight_speculation_authority(eng)
     with _engine_singleton(run_dir) as ok:

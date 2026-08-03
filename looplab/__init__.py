@@ -137,6 +137,7 @@ _LAYOUT = {
     "lessons_distill": "engine",
     "lessons_priors": "engine",
     "lessons_reconcile": "engine",
+    "latebind": "core",
     "literature": "tools",
     "llm": "core",
     # the shared paid-call concurrency boundary is a canonical core module; registering

@@ -14,19 +14,17 @@ import anyio
 import orjson
 
 from looplab.core.config import Settings
+from looplab.core.latebind import late_bound
 from looplab.adapters.tasks import load_task
 # Top-level on purpose (this was a lazy in-function import "to avoid an import cycle"): the cycle is
 # gone — the CLI's `bench` command imports looplab.bench lazily inside its own body
 # (looplab/cli/export_cmds.py), so nothing in the looplab.cli package imports this module at import
 # time, in either direction. Importing the shared engine builder here retires that load-bearing lazy
 # import (docs/15 §P5.2b).
-def _engine(*args, **kwargs):
-    """Late-binding shim: resolve `looplab.cli._engine` at CALL time, matching the cli package's
-    own command-module shims — so a test patching `cli._engine` (to stub the engine for an
-    offline bench) is seen here too. A top-level `from ... import _engine` froze the original
-    object and silently bypassed that seam."""
-    from looplab import cli
-    return cli._engine(*args, **kwargs)
+# Late-binding shim matching the cli package's own command-module shims — so a test patching
+# `cli._engine` (to stub the engine for an offline bench) is seen here too. `looplab.core.latebind`
+# names it by STRING, so this module still does not import the Typer command surface.
+_engine = late_bound("looplab.cli", "_engine")
 
 
 def run_benchmark(task_files, settings: Settings, out_dir) -> list[dict]:

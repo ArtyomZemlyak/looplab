@@ -14,16 +14,14 @@ import typer
 
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.config import Settings
+from looplab.core.latebind import late_bound
 from looplab.events.replay import fold
 from looplab.cli import _BACKENDS, _choice, _require_run_dir, app
 
 
-def make_llm_client(*args, **kwargs):
-    """Late-bound through the package module so a test patching `looplab.cli.make_llm_client`
-    (the documented seam, test_cli.py) also stubs `smoke` here — a plain
-    `from looplab.cli import make_llm_client` would freeze the pre-patch object."""
-    from looplab import cli
-    return cli.make_llm_client(*args, **kwargs)
+# Late-bound so a test patching `looplab.cli.make_llm_client` (the documented seam, test_cli.py)
+# also stubs `smoke` here. See `looplab.core.latebind` for the freeze-at-import hazard.
+make_llm_client = late_bound("looplab.cli", "make_llm_client")
 
 
 @app.command()
