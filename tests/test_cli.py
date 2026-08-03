@@ -175,12 +175,12 @@ def test_claims_and_atlas_cli_disclose_corrupt_only_claim_store(tmp_path):
 
 
 def test_asset_brief_llm_uses_ambient_settings_without_a_run_dir(tmp_path, monkeypatch):
-    import looplab.cli.inspect_cmds as inspect_cmds
+    import looplab.cli.concept_cmds as concept_cmds
     import looplab.tools.asset_brief as asset_brief_module
 
     repo = tmp_path / "repo"
     repo.mkdir()
-    monkeypatch.setattr(inspect_cmds, "_make_llm_client", lambda settings: object())
+    monkeypatch.setattr(concept_cmds, "_make_llm_client", lambda settings: object())
     monkeypatch.setattr(asset_brief_module, "asset_brief",
                         lambda repo, client=None, task_type=None: "brief-ok")
     result = runner.invoke(app, ["asset-brief", str(repo), "--llm"])

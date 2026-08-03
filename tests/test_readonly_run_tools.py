@@ -118,7 +118,7 @@ def test_no_caller_hand_builds_a_lone_run_tools_composite():
 
 @pytest.mark.parametrize("module,wrapper", [
     ("looplab.trust.verify", "_verify_tools"),
-    ("looplab.cli.inspect_cmds", "_run_tools_for"),
+    ("looplab.cli.concept_cmds", "_run_tools_for"),
     ("looplab.serve.report", "_report_tools"),
 ])
 def test_each_named_wrapper_is_now_a_delegate(module, wrapper):

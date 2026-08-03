@@ -913,8 +913,13 @@ test('partial Atlas UI never presents an unavailable source as an empty current 
   assert.doesNotMatch(atlas, /errorText|result\.reason\?\.message/,
     'transport failures must use client-owned copy instead of reflecting internal error text')
   assert.match(atlas, /errors\.every\(error => error\.status === 400\)/)
-  assert.match(atlas, /state !== 'current'[\s\S]*disabled=\{busy\}[\s\S]*retry\(sourceKey\)/,
+  // Every non-current watermark keeps its own retry, and a retry in flight locks the OTHER
+  // sources out. The active button is deliberately not `disabled` — a disabled button loses focus
+  // mid-interaction — so it reports busy through aria instead; that distinction is the property.
+  assert.match(atlas, /retryable && state !== 'current'[\s\S]*retry\(sourceKey, 'watermark'/,
     'failed and retained-stale watermarks both need their own retry action')
+  assert.match(atlas, /disabled=\{busy && !activeRetry\}[\s\S]*aria-busy=\{activeRetry \|\| undefined\}/,
+    'a retry in flight must lock out the other sources without disabling itself')
   for (const key of ['atlas', 'claims']) {
     assert.match(atlas, new RegExp(`sourceKey="${key}"[\\s\\S]*?retry=\\{retry\\}`))
   }
@@ -935,7 +940,7 @@ test('Atlas empty state distinguishes evidence runs and each independent source'
       sourceStates: {
         atlas: current, claims: current, conceptCuration: current, claimCuration: current,
       }, conceptSource: { status: 'complete' }, claimSource: { status: 'complete' },
-      pending: [], retry() {}, busy: false, onBack() {},
+      pending: [], retry() {}, busy: false,
     }))
     const currentDom = new JSDOM(allCurrent)
     assert.match(currentDom.window.document.querySelector('h2').textContent, /No cross-run evidence/)
@@ -945,16 +950,28 @@ test('Atlas empty state distinguishes evidence runs and each independent source'
     assert.deepEqual([...currentDom.window.document.querySelectorAll('.atlas-readiness-state')]
       .map(node => node.textContent), ['complete', 'complete', 'complete', 'complete'])
     assert.equal(currentDom.window.document.querySelectorAll('.atlas-empty-source .btn').length, 0)
-    assert.equal(currentDom.window.document.querySelector('a[href="#/settings"]')?.textContent,
-      'Memory settings')
-    assert.equal(currentDom.window.document.querySelector('.atlas-empty-actions button')?.textContent,
-      'Back to runs')
+    // A genuinely empty portfolio offers no action: every source loaded, so neither a settings trip
+    // nor a retry would change anything, and offering one would read as "something is broken".
+    assert.equal(currentDom.window.document.querySelector('a[href="#/settings"]'), null)
+    assert.equal(currentDom.window.document.querySelector('.atlas-empty-actions'), null)
+
+    // ...but when the evidence sources refused because memory is not configured, the one action
+    // that CAN fix it is offered, and only then.
+    const unconfigured = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
+      sourceStates: {
+        atlas: current, claims: current, conceptCuration: current, claimCuration: current,
+      }, conceptSource: { status: 'complete' }, claimSource: { status: 'complete' },
+      pending: [], retry() {}, busy: false, memorySettingsNeeded: true,
+    }))
+    const unconfiguredDom = new JSDOM(unconfigured)
+    assert.equal(unconfiguredDom.window.document.querySelector('.atlas-empty-actions a[href="#/settings"]')
+      ?.textContent, 'Memory settings')
 
     const bounded = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
       sourceStates: {
         atlas: current, claims: current, conceptCuration: current, claimCuration: current,
       }, conceptSource: { status: 'partial' }, claimSource: { status: 'complete' },
-      pending: [], retry() {}, busy: false, onBack() {},
+      pending: [], retry() {}, busy: false,
     }))
     const boundedDom = new JSDOM(bounded)
     assert.match(boundedDom.window.document.querySelector('h2').textContent,
@@ -977,17 +994,21 @@ test('Atlas empty state distinguishes evidence runs and each independent source'
         atlas: current, claims: failed, conceptCuration: failed, claimCuration: stale,
       }, conceptSource: { status: 'complete' }, claimSource: { status: 'unknown' },
       pending: ['conceptCuration'],
-      retry() {}, busy: false, onBack() {},
+      retry() {}, busy: false,
     }))
     const partialDom = new JSDOM(partial)
     assert.match(partialDom.window.document.querySelector('h2').textContent,
       /Atlas evidence unavailable/)
     assert.deepEqual([...partialDom.window.document.querySelectorAll('.atlas-readiness-state')]
       .map(node => node.textContent), ['complete', 'unavailable', 'loading', 'stale'])
+    // Every non-current source keeps a retry control, INCLUDING the one currently reloading. The
+    // control used to be removed while loading, which reflowed the row out from under the pointer
+    // and blurred it for a keyboard user; it is now held in place and gated by `busy` instead.
     assert.deepEqual([...partialDom.window.document.querySelectorAll('.atlas-empty-source .btn')]
       .map(node => node.getAttribute('aria-label')),
-    ['Retry Claim records', 'Retry Claim steward log'])
-    assert.equal(partialDom.window.document.querySelector('.atlas-empty-source-loading .btn'), null)
+    ['Retry Claim records', 'Retry Concept steward log', 'Retry Claim steward log'])
+    assert.ok(partialDom.window.document.querySelector('.atlas-empty-source-loading .btn'),
+      'a reloading source keeps its control in place rather than reflowing the row')
   } finally {
     await vite.close()
   }
@@ -1106,10 +1127,14 @@ test('mounted Atlas settles sources progressively and fences timed-out or supers
     assert.equal(localBatch.length, 1)
     assert.match(localBatch[0].url, /\/api\/cross-run\/claim-curation-log\?limit=20$/)
     retryButton = sourceNote('Claim steward log').querySelector('button')
-    assert.equal(retryButton.disabled, true)
-    assert.equal(retryButton.getAttribute('aria-label'), 'Retry Claim steward log')
+    // The button the operator just pressed stays focusable and announces itself busy; a `disabled`
+    // attribute here would blur it mid-interaction and drop the keyboard user back to the document.
+    assert.equal(retryButton.disabled, false)
+    assert.equal(retryButton.getAttribute('aria-disabled'), 'true')
+    assert.equal(retryButton.getAttribute('aria-busy'), 'true')
+    assert.equal(retryButton.getAttribute('aria-label'), 'Retrying Claim steward log')
     assert.equal(sourceNote('Concept projection').querySelector('button').disabled, true,
-      'all retries are disabled while any source request is active')
+      'every OTHER retry is hard-disabled while a source request is active')
     await reply(localBatch[0], curationEnvelope([{ run_id: 'claim-current', outcome: 'empty' }]))
     assert.match(document.body.textContent, /claim steward.*empty/is)
 
@@ -1178,7 +1203,7 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
     'Atlas content must be wrapped by the owner authentication gate')
   assert.match(runList, /aria-label="Open Research Atlas preview"/)
   assert.match(atlas, /requestedSources\.forEach/)
-  for (const state of [/Loading Atlas/, /Atlas unavailable/,
+  for (const state of [/Loading Atlas/, /Research Atlas couldn.t load/,
     /No cross-run evidence/, /Some sources unavailable\./]) assert.match(atlas, state)
   assert.match(atlas, /Research Atlas preview[\s\S]*Experimental · bounded · read-only/)
   assert.match(atlas, /D8 receipts cover processed rows,[\s\S]*not every run/)

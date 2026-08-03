@@ -7,7 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from looplab.cli import _engine_singleton, app
-from looplab.cli.inspect_cmds import _persist_node_concepts
+from looplab.cli.concept_cmds import _persist_node_concepts
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                  NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
                                  classifier_verified_node_concepts)

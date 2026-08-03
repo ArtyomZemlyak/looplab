@@ -3849,6 +3849,41 @@ Scope: `looplab/cli/`, `looplab/trust/`, `looplab/__init__.py`, bench.py, sweep.
 
 *Recommendation:* Split into three command-group modules mirroring the existing package pattern (e.g. inspect_cmds.py, concept_cmds.py, governance_cmds.py), re-exporting through looplab/cli/__init__ like the other groups, and rewrite the module docstrings to state which commands mutate what. This is the same split the package already performed once (run/export/inspect/ui), so the mechanism and back-compat seam are proven.
 
+*Resolution (2026-08-03):* Split three ways along the recommended lines, every command body moved
+VERBATIM by line range so no comment or prompt string changed:
+
+* `inspect_cmds.py` (1701 → 211 lines) — run diagnostics only: `replay`, `speculation-gate`,
+  `timings`, `inspect`, `tensorboard`.
+* `concept_cmds.py` (new) — the Part IV concept/novelty diagnostics.
+* `governance_cmds.py` (new) — everything that WRITES cross-run memory or spends money on a steward,
+  plus the read-only portfolio views over the same sources.
+
+Each header now states its own mutation contract, which is the half of the finding that was really
+about the docstring: the governance header names its three classes (durable writes through
+`_governed_write`, paid stewards fenced at-most-once by `--action-id`, and fail-closed reads through
+`_governance_cli_read`) instead of sitting under a "read-only inspection" claim.
+
+`_make_llm_client` and `_settings_for_run` moved UP to `looplab/cli/__init__.py` rather than into
+either group, because both groups that reach an endpoint need them. Each group imports them into its
+own namespace, so `monkeypatch.setattr(<group>, "_make_llm_client", …)` still works — and now names
+the module that actually calls it. Twelve such patch sites across seven test files were re-pointed
+and re-verified rather than shimmed: adding back-compat re-exports on `inspect_cmds` would have kept
+the imports working while silently turning every one of those seams into a no-op.
+
+**The split surfaced a live defect.** `_concept_map_for` and `concept_coverage` each bound
+`_settings, client = _optional_client(...)` — the underscore that means "deliberately unused" — and
+then read plain `settings.llm_parser` inside the `client is not None` branch. There is no
+module-level `settings`, so the AGENTIC path (the DEFAULT for these commands) raised
+`NameError: name 'settings' is not defined` the moment an endpoint was actually reachable. Every
+offline test takes the `client is None` branch, so nothing had gone red. Both are fixed.
+
+`tests/test_cli_command_groups.py` pins the boundary as a per-group command inventory (so a new
+command has to be placed on purpose), that all 25 still reach the live typer app, that each header
+keeps its mutation contract, and that no group is a god-module again. The `NameError` is pinned via
+`symtable` — the interpreter's OWN scope analysis, not a hand-rolled approximation that would miss
+comprehension scopes or closure cells — so the guard covers the whole class, not the two known
+sites. Teeth-verified: restoring either underscore turns three assertions red.
+
 #### CT-02 · HIGH · under-decomposition · effort: medium
 
 **run() is a 347-line command function doing at least seven distinct jobs**

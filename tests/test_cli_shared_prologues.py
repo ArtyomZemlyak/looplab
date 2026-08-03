@@ -22,7 +22,7 @@ import typer
 from typer.testing import CliRunner
 
 from looplab.cli import _require_healthy_log, _require_run_dir, app
-from looplab.cli import inspect_cmds, run_cmds
+from looplab.cli import concept_cmds, run_cmds
 from looplab.events.eventstore import EventStore
 
 runner = CliRunner()
@@ -122,7 +122,7 @@ def test_the_shared_prologue_returns_the_store_it_validated(tmp_path):
 # ------------------------------------------------------------------ CT-14: one degrade block
 
 def test_every_degrading_diagnostic_uses_the_shared_optional_client():
-    source = inspect.getsource(inspect_cmds)
+    source = inspect.getsource(concept_cmds)
     # The literal lives in `_optional_client`'s default argument and nowhere else. A command that
     # re-derived the block would spell it again.
     assert source.count('"no LLM endpoint') == 1
@@ -137,11 +137,11 @@ def test_the_optional_client_degrades_with_the_callers_wording(tmp_path, monkeyp
     def _boom(_settings):
         raise RuntimeError("no base_url configured")
 
-    monkeypatch.setattr(inspect_cmds, "_make_llm_client", _boom)
+    monkeypatch.setattr(concept_cmds, "_make_llm_client", _boom)
     echoed: list[str] = []
-    monkeypatch.setattr(inspect_cmds.typer, "echo", lambda msg, **kw: echoed.append(str(msg)))
+    monkeypatch.setattr(concept_cmds.typer, "echo", lambda msg, **kw: echoed.append(str(msg)))
 
-    settings, client = inspect_cmds._optional_client(run_dir, None, "showing heuristic tags only")
+    settings, client = concept_cmds._optional_client(run_dir, None, "showing heuristic tags only")
     assert client is None, "an unreachable endpoint degrades rather than raising"
     assert settings is not None, "the run's pinned settings still come back for the offline path"
     assert echoed == ["(no LLM endpoint: no base_url configured; showing heuristic tags only)"]
@@ -150,7 +150,7 @@ def test_the_optional_client_degrades_with_the_callers_wording(tmp_path, monkeyp
 def test_lesson_guard_deliberately_does_not_degrade():
     """It is LLM-ONLY and exits 1. Folding it in would turn "I could not check this" into "checked,
     nothing found" — a different contract, not a different message."""
-    source = inspect.getsource(inspect_cmds.lesson_guard_cmd)
+    source = inspect.getsource(concept_cmds.lesson_guard_cmd)
     assert "_optional_client(" not in source
     assert "_make_llm_client(" in source
     assert "raise typer.Exit(1)" in source
@@ -161,12 +161,12 @@ def test_lesson_guard_deliberately_does_not_degrade():
 def test_the_persist_helper_takes_no_state():
     """It reads the log itself (it needs the CAS tail seq anyway), so a `state` parameter invited a
     reader to believe the caller's fold was consulted here — and to keep a stale one alive to pass."""
-    params = inspect.signature(inspect_cmds._persist_node_concepts).parameters
+    params = inspect.signature(concept_cmds._persist_node_concepts).parameters
     assert "state" not in params
     assert list(params)[:4] == ["store", "raw_tags", "mode", "vocab_size"]
 
 
 def test_no_caller_still_passes_one():
-    source = inspect.getsource(inspect_cmds)
+    source = inspect.getsource(concept_cmds)
     assert "_persist_node_concepts(store, state," not in source
     assert "_persist_node_concepts(store," in source

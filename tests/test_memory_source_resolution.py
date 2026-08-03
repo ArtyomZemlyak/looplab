@@ -16,7 +16,7 @@ import os
 
 import pytest
 
-from looplab.cli.inspect_cmds import quarantined_claim_counts, resolve_memory_source
+from looplab.cli.governance_cmds import quarantined_claim_counts, resolve_memory_source
 
 
 # ------------------------------------------------------------------ the resolution
@@ -135,10 +135,10 @@ def test_no_read_command_re_derives_the_file_or_directory_dance():
     where a canonical-vs-path declaration goes wrong without failing."""
     import inspect
 
-    from looplab.cli import inspect_cmds
+    from looplab.cli import governance_cmds
 
-    source = inspect.getsource(inspect_cmds)
-    resolver = inspect.getsource(inspect_cmds.resolve_memory_source)
+    source = inspect.getsource(governance_cmds)
+    resolver = inspect.getsource(governance_cmds.resolve_memory_source)
     assert source.count("S_ISREG") == resolver.count("S_ISREG") == 1
     assert source.count("S_ISDIR") == resolver.count("S_ISDIR") == 1
 
@@ -146,8 +146,8 @@ def test_no_read_command_re_derives_the_file_or_directory_dance():
 def test_no_command_re_extracts_the_quarantined_rows_by_hand():
     import inspect
 
-    from looplab.cli import inspect_cmds
+    from looplab.cli import governance_cmds
 
-    source = inspect.getsource(inspect_cmds)
-    helper = inspect.getsource(inspect_cmds.quarantined_claim_counts)
+    source = inspect.getsource(governance_cmds)
+    helper = inspect.getsource(governance_cmds.quarantined_claim_counts)
     assert source.count('"rows_quarantined"') == helper.count('"rows_quarantined"') == 2

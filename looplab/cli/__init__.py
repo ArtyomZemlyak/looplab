@@ -213,6 +213,40 @@ def load_run_settings(run_dir, *, strict: bool) -> Settings:
         return Settings()
 
 
+def _make_llm_client(settings):
+    """Late-bound `make_llm_client` so a test patching `looplab.cli.make_llm_client` also stubs these
+    diagnostics. Unlike the other shims this one COMPOSES the seam rather than forwarding to it — the
+    diagnostics go through `make_llm_client_for`, which wants the builder as a factory argument.
+
+    Lives here rather than in a command group because BOTH groups that reach an endpoint need it:
+    the Part IV diagnostics (`concept_cmds`) and the paid cross-run stewards (`governance_cmds`).
+    Each group imports it into its own namespace, so a test still patches the module that CALLS it.
+    """
+    from looplab.core.latebind import late_bound
+    from looplab.core.llm import make_llm_client_for
+    return make_llm_client_for(settings, factory=late_bound("looplab.cli", "make_llm_client"))
+
+
+def _settings_for_run(run_dir=None, model=None):
+    """Load the run's launch Settings snapshot so a diagnostic sends run code/logs to the same
+    endpoint recorded for that run, not a possibly different ambient endpoint. Falls back to ambient
+    Settings when the snapshot is absent/unreadable; ``model`` is the only explicit override.
+
+    This helper needs endpoint/model provenance, not the seven event-pinned selection-treatment fields;
+    the effective per-run config API owns that latter overlay.
+
+    The ambient fallback is `strict=False` on the SHARED loader (doc 25 CT-08), not a second parse:
+    this used to re-read and re-validate the JSON itself, so the same file had two decision tables
+    depending on whether you typed a lifecycle command or a diagnostic.
+    """
+    from looplab.core.llm import apply_llm_model_override
+
+    settings = load_run_settings(run_dir, strict=False)
+    if model is not None:
+        apply_llm_model_override(settings, model)
+    return settings
+
+
 def _settings_from_config_snapshot(config_snap: Path) -> Settings:
     """Load `config.snapshot.json` into Settings, mapping every failure to a one-line BadParameter.
 
@@ -604,7 +638,8 @@ def _print_result(state) -> None:
 # against the `app` above. This block MUST stay at the bottom — the groups import the shared
 # builders back from this (still-initializing) package, which is safe only because everything they
 # need is already defined by this point.
-from looplab.cli import export_cmds, inspect_cmds, run_cmds, ui_cmds  # noqa: E402,F401
+from looplab.cli import (concept_cmds, export_cmds, governance_cmds,  # noqa: E402,F401
+                         inspect_cmds, run_cmds, ui_cmds)
 
 # Back-compat re-exports: when `looplab/cli.py` was one flat module, every command was an attribute
 # of `looplab.cli` (tests call `cli.stop(...)`/`cli.finalize(...)` directly; tools import `app`).

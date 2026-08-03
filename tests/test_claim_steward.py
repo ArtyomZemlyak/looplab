@@ -325,13 +325,13 @@ def test_cli_claim_steward_refuses_poisoned_paid_history_before_client(tmp_path,
     from typer.testing import CliRunner
 
     from looplab.cli import app
-    import looplab.cli.inspect_cmds as inspect_cmds
+    import looplab.cli.governance_cmds as governance_cmds
 
     poisoned = "SECRET_PAID_HISTORY_MUST_NOT_LEAK"
     (tmp_path / "claim_curation_log.jsonl").write_text(poisoned + "\n", encoding="utf-8")
     clients = []
     monkeypatch.setattr(
-        inspect_cmds, "_make_llm_client",
+        governance_cmds, "_make_llm_client",
         lambda _settings: clients.append("created") or object(),
     )
 

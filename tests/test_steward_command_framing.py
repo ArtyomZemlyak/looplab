@@ -21,8 +21,8 @@ from __future__ import annotations
 import pytest
 import typer
 
-from looplab.cli import inspect_cmds
-from looplab.cli.inspect_cmds import _governed_write, _steward_command
+from looplab.cli import governance_cmds
+from looplab.cli.governance_cmds import _governed_write, _steward_command
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
 from looplab.events.eventstore import EventStoreLockError
 
@@ -38,7 +38,7 @@ _UNSET = object()
 
 def _run(monkeypatch, *, apply=False, model=None, preflight=_UNSET, order=None):
     order = order if order is not None else []
-    monkeypatch.setattr(inspect_cmds, "_make_llm_client",
+    monkeypatch.setattr(governance_cmds, "_make_llm_client",
                         lambda settings: order.append("client") or "the-client")
     def _transaction(*_a, prepare, **_k):
         # the durable transaction OWNS client construction: it calls `prepare` only once it has
@@ -48,7 +48,7 @@ def _run(monkeypatch, *, apply=False, model=None, preflight=_UNSET, order=None):
         prepare()
         return {"proposals": {}}
 
-    monkeypatch.setattr(inspect_cmds, "_run_cli_steward", _transaction)
+    monkeypatch.setattr(governance_cmds, "_run_cli_steward", _transaction)
     if preflight is _UNSET:
         preflight = lambda: order.append("preflight")  # noqa: E731 - order probe, not a name
     return _steward_command(
@@ -81,9 +81,9 @@ def test_the_client_is_a_THUNK_the_transaction_calls_not_one_built_up_front(monk
     the framing would construct one — and, for providers that validate credentials eagerly, fail —
     on every replay of an action that will never call the model."""
     order = []
-    monkeypatch.setattr(inspect_cmds, "_make_llm_client",
+    monkeypatch.setattr(governance_cmds, "_make_llm_client",
                         lambda settings: order.append("client") or "the-client")
-    monkeypatch.setattr(inspect_cmds, "_run_cli_steward",
+    monkeypatch.setattr(governance_cmds, "_run_cli_steward",
                         lambda *a, **k: order.append("transaction") or {})
     _steward_command("mem", "concept", "act-1", apply=False, apply_refusal="no", model=None,
                      preflight=None, invoke=lambda client: {}, request={})
@@ -112,7 +112,7 @@ def test_the_model_override_goes_through_the_validated_setter(monkeypatch):
     `Settings`, so the write lands a phantom attribute and the paid call goes to the default model.
     The override has to run through `apply_llm_model_override`."""
     seen = []
-    monkeypatch.setattr(inspect_cmds, "apply_llm_model_override",
+    monkeypatch.setattr(governance_cmds, "apply_llm_model_override",
                         lambda settings, model: seen.append(model))
     _run(monkeypatch, model="a-specific-model")
     assert seen == ["a-specific-model"]
@@ -120,7 +120,7 @@ def test_the_model_override_goes_through_the_validated_setter(monkeypatch):
 
 def test_no_model_flag_means_no_override_call(monkeypatch):
     seen = []
-    monkeypatch.setattr(inspect_cmds, "apply_llm_model_override",
+    monkeypatch.setattr(governance_cmds, "apply_llm_model_override",
                         lambda settings, model: seen.append(model))
     _run(monkeypatch, model=None)
     assert seen == []
@@ -130,8 +130,8 @@ def test_the_durable_transaction_receives_the_kind_and_action_id(monkeypatch):
     """The action id is what fences the paid call across crash/retry; losing it in the framing would
     turn at-most-once into at-least-once, silently."""
     captured = {}
-    monkeypatch.setattr(inspect_cmds, "_make_llm_client", lambda settings: "client")
-    monkeypatch.setattr(inspect_cmds, "_run_cli_steward",
+    monkeypatch.setattr(governance_cmds, "_make_llm_client", lambda settings: "client")
+    monkeypatch.setattr(governance_cmds, "_run_cli_steward",
                         lambda memory_dir, kind, action_id, **kw: captured.update(
                             memory_dir=memory_dir, kind=kind, action_id=action_id, **kw) or {})
     _steward_command("mem", "claim", "act-42", apply=False, apply_refusal="no", model=None,
@@ -150,7 +150,7 @@ def test_a_ledger_or_lock_failure_is_REDACTED_not_echoed(exc, monkeypatch, capsy
     """`_governance_cli_error` withholds the OS path and the platform's parser text. Echoing the
     exception here instead would print storage shape the redaction boundary exists to keep out."""
     seen = []
-    monkeypatch.setattr(inspect_cmds, "_governance_cli_error",
+    monkeypatch.setattr(governance_cmds, "_governance_cli_error",
                         lambda e: seen.append(type(e).__name__))
     with _governed_write():
         raise exc
@@ -189,7 +189,7 @@ def test_an_unexpected_exception_is_not_swallowed():
 def test_every_paid_steward_goes_through_the_shared_framing(command):
     import inspect
 
-    source = inspect.getsource(getattr(inspect_cmds, command))
+    source = inspect.getsource(getattr(governance_cmds, command))
     assert "_steward_command(" in source, f"{command} re-derives the steward preamble"
     assert "_run_cli_steward(" not in source, f"{command} bypasses the framing"
     assert "apply_llm_model_override(" not in source, f"{command} resolves the model itself"
@@ -200,7 +200,7 @@ def test_every_paid_steward_goes_through_the_shared_framing(command):
 def test_every_deterministic_write_goes_through_the_shared_refusal(command):
     import inspect
 
-    source = inspect.getsource(getattr(inspect_cmds, command))
+    source = inspect.getsource(getattr(governance_cmds, command))
     assert "with _governed_write():" in source, f"{command} re-derives the refusal block"
     assert "GovernanceLedgerUnavailable" not in source, f"{command} still catches it by hand"
 
@@ -210,6 +210,6 @@ def test_the_refusal_block_exists_in_exactly_one_place():
     shared helpers is a fifth copy, and a copy is where the two arms get collapsed."""
     import inspect
 
-    source = inspect.getsource(inspect_cmds)
+    source = inspect.getsource(governance_cmds)
     assert source.count("(GovernanceLedgerUnavailable, EventStoreLockError)") == 2, (
         "expected exactly two: `_governance_cli_read` and `_governed_write`")

@@ -24,7 +24,7 @@ import pytest
 import typer
 
 from looplab import bench, cli
-from looplab.cli import export_cmds, inspect_cmds, load_run_settings, run_cmds
+from looplab.cli import export_cmds, load_run_settings, run_cmds
 from looplab.core.latebind import late_bound
 
 
@@ -71,7 +71,7 @@ def test_the_shim_keeps_the_targets_name_so_a_traceback_still_reads_right():
 
 
 def test_the_diagnostics_shim_composes_the_seam_rather_than_forwarding_to_it(monkeypatch):
-    """`inspect_cmds._make_llm_client` is the one that differs: it hands the builder to
+    """`cli._make_llm_client` is the one that differs: it hands the builder to
     `make_llm_client_for` as a FACTORY. Late binding still has to reach it, or the diagnostics call a
     live endpoint from an offline test."""
     from looplab.core import llm as llm_module
@@ -86,7 +86,7 @@ def test_the_diagnostics_shim_composes_the_seam_rather_than_forwarding_to_it(mon
 
     monkeypatch.setattr(cli, "make_llm_client", lambda *a, **k: "the patched client")
     monkeypatch.setattr(llm_module, "make_llm_client_for", _build)
-    inspect_cmds._make_llm_client(object())
+    cli._make_llm_client(object())
     assert seen["built"] == "the patched client"
 
 
