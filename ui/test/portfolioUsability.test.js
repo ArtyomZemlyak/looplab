@@ -6,7 +6,8 @@ import { createServer } from 'vite'
 
 import {
   bestComparableRun, comparableRunRanking, configDifferences, decodePortfolioViews,
-  DEFAULT_COMPARE_COLUMNS, normalizeCompareColumns, portfolioViewSignature, upsertPortfolioView,
+  DEFAULT_COMPARE_COLUMNS, MAX_PORTFOLIO_VIEWS, normalizeCompareColumns,
+  portfolioViewSignature, preparePortfolioViewSave, upsertPortfolioView,
 } from '../src/portfolioModel.js'
 import { parseRunRouteState } from '../src/runRouteState.js'
 
@@ -44,6 +45,41 @@ test('saved portfolio views are bounded, sanitized, replaceable, and exact-state
   const decoded = decodePortfolioViews(JSON.stringify(many))
   assert.equal(decoded.length, 12)
   assert.equal(decoded[0].compare.length, 8)
+
+  const lossy = preparePortfolioViewSave(saved, 'Too long', {
+    ...state, query: 'x'.repeat(241),
+  })
+  assert.equal(lossy.ok, false)
+  assert.equal(lossy.code, 'state')
+  assert.deepEqual(lossy.views, saved)
+
+  const full = Array.from({ length: MAX_PORTFOLIO_VIEWS }, (_, index) => ({
+    ...state, name: `saved-${index}`,
+  }))
+  const capacity = preparePortfolioViewSave(full, 'one more', state)
+  assert.equal(capacity.ok, false)
+  assert.equal(capacity.code, 'capacity')
+  assert.deepEqual(capacity.views, full)
+
+  const protectedName = preparePortfolioViewSave(full, 'saved-1', state)
+  assert.equal(protectedName.ok, false)
+  assert.equal(protectedName.code, 'exists')
+  const allowedUpdate = preparePortfolioViewSave(full, 'saved-1', state, { replaceName: 'saved-1' })
+  assert.equal(allowedUpdate.ok, true)
+  assert.equal(allowedUpdate.views.length, MAX_PORTFOLIO_VIEWS)
+
+  assert.equal(preparePortfolioViewSave([], 'long task', {
+    ...state, task: '😀'.repeat(500),
+  }).ok, true)
+  assert.equal(preparePortfolioViewSave([], 'too long task', {
+    ...state, task: 't'.repeat(501),
+  }).code, 'state')
+  assert.equal(preparePortfolioViewSave([], 'long run', {
+    ...state, compare: ['r'.repeat(255), 'b'],
+  }).ok, true)
+  assert.equal(preparePortfolioViewSave([], 'too long run', {
+    ...state, compare: ['r'.repeat(256), 'b'],
+  }).code, 'state')
 })
 
 test('compare columns accept only the known persistent layout vocabulary', () => {

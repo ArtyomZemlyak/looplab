@@ -1,6 +1,10 @@
 const CONTROL = /[\u0000-\u001f\u007f]/
 const CONTROL_GLOBAL = /[\u0000-\u001f\u007f]/g
-const MAX_VIEWS = 12
+export const MAX_PORTFOLIO_VIEWS = 12
+export const MAX_PORTFOLIO_VIEW_NAME_LENGTH = 48
+export const MAX_PORTFOLIO_QUERY_LENGTH = 240
+export const MAX_PORTFOLIO_SCOPE_ID_LENGTH = 500
+export const MAX_PORTFOLIO_RUN_ID_LENGTH = 255
 const MAX_COMPARE_RUNS = 8
 
 export const COMPARE_COLUMNS = Object.freeze([
@@ -27,8 +31,10 @@ const SORTS = new Set(['time', 'name', 'metric', 'task', 'nodes', 'phase'])
 const STATUSES = new Set([
   'all', 'running', 'finalizing', 'paused', 'approval', 'stalled', 'unknown', 'finished',
 ])
-const scalarText = (value, fallback, maximum = 200) =>
-  typeof value === 'string' && value.length <= maximum && !CONTROL.test(value) ? value : fallback
+// Python's producer-side identity bounds count Unicode code points; `[...value]` keeps the browser
+// validator on the same metric instead of rejecting an otherwise valid astral-character id.
+const scalarText = (value, fallback, maximum = MAX_PORTFOLIO_SCOPE_ID_LENGTH) =>
+  typeof value === 'string' && [...value].length <= maximum && !CONTROL.test(value) ? value : fallback
 
 export function normalizeCompareColumns(value) {
   if (typeof value === 'string') {
@@ -40,23 +46,25 @@ export function normalizeCompareColumns(value) {
 
 function normalizeView(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const name = scalarText(typeof value.name === 'string' ? value.name.trim() : '', '', 48)
+  const name = scalarText(typeof value.name === 'string' ? value.name.trim() : '', '',
+    MAX_PORTFOLIO_VIEW_NAME_LENGTH)
   if (!name) return null
-  const task = scalarText(value.task, '__all__')
+  const task = scalarText(value.task, '__all__', MAX_PORTFOLIO_SCOPE_ID_LENGTH)
   const exactAllTask = task === '__all__' && value.task === '__all__' && value.taskExact === true
   const compare = Array.isArray(value.compare)
-    ? [...new Set(value.compare.map(id => scalarText(id, '')).filter(Boolean))].slice(0, MAX_COMPARE_RUNS)
+    ? [...new Set(value.compare.map(id => scalarText(id, '', MAX_PORTFOLIO_RUN_ID_LENGTH))
+      .filter(Boolean))].slice(0, MAX_COMPARE_RUNS)
     : []
   return {
     name,
-    project: scalarText(value.project, '__all__'),
-    query: scalarText(value.query, '', 240),
+    project: scalarText(value.project, '__all__', MAX_PORTFOLIO_SCOPE_ID_LENGTH),
+    query: scalarText(value.query, '', MAX_PORTFOLIO_QUERY_LENGTH),
     task,
     // Existing views omit this flag: `__all__` therefore keeps its legacy All meaning. Persist the
     // flag only for the one ambiguous real task id so normal saved-view object shapes stay stable.
     ...(exactAllTask ? { taskExact: true } : {}),
     status: STATUSES.has(value.status) ? value.status : 'all',
-    supertask: scalarText(value.supertask, '__all__'),
+    supertask: scalarText(value.supertask, '__all__', MAX_PORTFOLIO_SCOPE_ID_LENGTH),
     sort: SORTS.has(value.sort) ? value.sort : 'time',
     direction: value.direction === 'asc' ? 'asc' : 'desc',
     view: value.view === 'map' || (value.view === 'compare' && compare.length > 1)
@@ -71,25 +79,60 @@ export function decodePortfolioViews(raw) {
     const value = typeof raw === 'string' ? JSON.parse(raw) : raw
     if (!Array.isArray(value)) return []
     const names = new Set()
-    return value.slice(0, MAX_VIEWS * 2).map(normalizeView).filter(view => {
+    return value.slice(0, MAX_PORTFOLIO_VIEWS * 2).map(normalizeView).filter(view => {
       if (!view || names.has(view.name)) return false
       names.add(view.name); return true
-    }).slice(0, MAX_VIEWS)
+    }).slice(0, MAX_PORTFOLIO_VIEWS)
   } catch { return [] }
 }
 
-export function upsertPortfolioView(views, name, state) {
-  const view = normalizeView({ ...state, name })
-  if (!view) return decodePortfolioViews(views)
-  return [view, ...decodePortfolioViews(views).filter(item => item.name !== view.name)]
-    .slice(0, MAX_VIEWS)
+const exactViewState = value => ({
+  project: value?.project,
+  query: value?.query,
+  task: value?.task,
+  taskExact: value?.task === '__all__' && value?.taskExact === true,
+  status: value?.status,
+  supertask: value?.supertask,
+  sort: value?.sort,
+  direction: value?.direction,
+  view: value?.view,
+  compare: Array.isArray(value?.compare) ? [...value.compare] : value?.compare,
+  columns: Array.isArray(value?.columns) ? [...value.columns] : value?.columns,
+})
+
+// Decoding is intentionally forgiving because storage can contain legacy or corrupt data. Authoring
+// is strict: a saved view must restore the exact state the operator can currently see, never a
+// fallback scope produced by normalizeView.
+export const portfolioViewSignature = view => {
+  if (!view || typeof view !== 'object' || Array.isArray(view)) return ''
+  try { return JSON.stringify(exactViewState(view)) } catch { return '' }
 }
 
-export const portfolioViewSignature = view => {
-  const normalized = normalizeView({ ...view, name: 'view' })
-  if (!normalized) return ''
-  delete normalized.name
-  return JSON.stringify(normalized)
+export function preparePortfolioViewSave(views, name, state, { replaceName = '' } = {}) {
+  const current = decodePortfolioViews(views)
+  const requestedName = typeof name === 'string' ? name.trim() : ''
+  const view = normalizeView({ ...state, name })
+  if (!view || view.name !== requestedName) return { ok: false, code: 'name', views: current }
+  if (portfolioViewSignature(view) !== portfolioViewSignature(state)) {
+    return { ok: false, code: 'state', views: current }
+  }
+  const existing = current.find(item => item.name === view.name)
+  if (existing && existing.name !== replaceName) {
+    return { ok: false, code: 'exists', views: current }
+  }
+  if (!existing && current.length >= MAX_PORTFOLIO_VIEWS) {
+    return { ok: false, code: 'capacity', views: current }
+  }
+  return {
+    ok: true,
+    view,
+    views: [view, ...current.filter(item => item.name !== view.name)],
+  }
+}
+
+export function upsertPortfolioView(views, name, state) {
+  const replaceName = typeof name === 'string' ? name.trim() : ''
+  return preparePortfolioViewSave(views, name, state, { replaceName }).views
 }
 
 const configSignature = (config, key) => {

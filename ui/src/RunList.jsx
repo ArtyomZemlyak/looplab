@@ -17,7 +17,8 @@ import { defaultCollapsedClusters } from './runMapModel.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 import { followClientRoute, nextRovingIndex } from './accessibility.jsx'
 import {
-  decodePortfolioViews, normalizeCompareColumns, portfolioViewSignature, upsertPortfolioView,
+  decodePortfolioViews, MAX_PORTFOLIO_QUERY_LENGTH, MAX_PORTFOLIO_VIEW_NAME_LENGTH,
+  normalizeCompareColumns, portfolioViewSignature, preparePortfolioViewSave,
 } from './portfolioModel.js'
 import { deadlineRequest } from './requestDeadline.js'
 import { getRunAccess, listStartOverRunAccesses } from './runMode.js'
@@ -41,6 +42,178 @@ const LIST_SORT_KEYS = new Set(['time', 'name', 'metric', 'task', 'nodes', 'phas
 const LIST_VIEWS = new Set(['list', 'map', 'compare'])
 const LIST_STATUSES = new Set(['all', 'running', 'finalizing', 'paused', 'approval', 'stalled', 'unknown', 'finished'])
 const TASK_SELECT_ALL = 'all'
+const PORTFOLIO_VIEWS_LOCK = 'looplab:portfolio-views'
+const PORTFOLIO_VIEWS_COORDINATION_DB = 'looplab-ui-coordination'
+const PORTFOLIO_VIEWS_COORDINATION_STORE = 'locks'
+const PORTFOLIO_VIEWS_COORDINATION_WAIT_MS = 2_000
+
+const portfolioViewError = flag => Object.assign(new Error(flag), { [flag]: true })
+
+const createPortfolioViewsCoordinator = () => {
+  let indexedDb
+  try { indexedDb = globalThis.indexedDB } catch { return null }
+  if (!indexedDb?.open) return null
+  let busy = false
+  let closed = false
+  let databasePromise = null
+  const openDatabase = () => new Promise(resolve => {
+    let request
+    let settled = false
+    let openTimer = null
+    const finish = database => {
+      if (settled) { database?.close(); return }
+      settled = true
+      clearTimeout(openTimer)
+      resolve(database)
+    }
+    openTimer = setTimeout(() => finish(null), PORTFOLIO_VIEWS_COORDINATION_WAIT_MS)
+    try { request = indexedDb.open(PORTFOLIO_VIEWS_COORDINATION_DB, 1) }
+    catch { finish(null); return }
+    request.onupgradeneeded = () => {
+      try {
+        const database = request.result
+        if (!database.objectStoreNames.contains(PORTFOLIO_VIEWS_COORDINATION_STORE)) {
+          database.createObjectStore(PORTFOLIO_VIEWS_COORDINATION_STORE)
+        }
+      } catch { try { request.transaction?.abort() } catch { /* The open will fail closed. */ } }
+    }
+    request.onerror = () => finish(null)
+    request.onblocked = () => finish(null)
+    request.onsuccess = () => {
+      const database = request.result
+      database.onversionchange = () => database.close()
+      if (closed) { database.close(); finish(null); return }
+      finish(database)
+    }
+  })
+  const getDatabase = () => {
+    if (!databasePromise) databasePromise = openDatabase()
+    return databasePromise
+  }
+  return {
+    async run(mutation) {
+      if (closed) throw portfolioViewError('viewCoordination')
+      if (busy) throw portfolioViewError('viewBusy')
+      busy = true
+      try {
+        const database = await getDatabase()
+        if (!database || closed) {
+          databasePromise = null
+          throw portfolioViewError('viewCoordination')
+        }
+        return await new Promise((resolve, reject) => {
+          let transaction
+          let result
+          let failure = null
+          let waitTimer = null
+          const abortWith = error => {
+            clearTimeout(waitTimer)
+            failure = error || portfolioViewError('viewCoordination')
+            try { transaction.abort() } catch { reject(failure) }
+          }
+          try {
+            // Read/write transactions over the same object store are serialized across tabs. The
+            // localStorage mutation runs synchronously while this transaction owns that browser-wide
+            // turn, providing a real mutex even on insecure HTTP/LAN origins without Web Locks.
+            transaction = database.transaction(PORTFOLIO_VIEWS_COORDINATION_STORE, 'readwrite')
+            const store = transaction.objectStore(PORTFOLIO_VIEWS_COORDINATION_STORE)
+            const guard = store.get(PORTFOLIO_VIEWS_LOCK)
+            waitTimer = setTimeout(() => abortWith(portfolioViewError('viewBusy')),
+              PORTFOLIO_VIEWS_COORDINATION_WAIT_MS)
+            guard.onerror = () => abortWith(portfolioViewError('viewCoordination'))
+            guard.onsuccess = () => {
+              clearTimeout(waitTimer)
+              if (closed) { abortWith(portfolioViewError('viewCoordination')); return }
+              try {
+                result = mutation()
+                if (result && typeof result.then === 'function') {
+                  throw portfolioViewError('viewCoordination')
+                }
+              } catch (error) { abortWith(error) }
+            }
+            transaction.onerror = () => {
+              if (!failure) failure = portfolioViewError('viewCoordination')
+            }
+            transaction.onabort = () => {
+              clearTimeout(waitTimer)
+              reject(failure || portfolioViewError('viewCoordination'))
+            }
+            transaction.oncomplete = () => {
+              clearTimeout(waitTimer)
+              resolve(result)
+            }
+          } catch {
+            databasePromise = null
+            reject(portfolioViewError('viewCoordination'))
+          }
+        })
+      } finally { busy = false }
+    },
+    close() {
+      closed = true
+      databasePromise?.then(database => database?.close())
+    },
+  }
+}
+
+const withPortfolioViewsLock = async (mutation, coordinator) => {
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : null
+  if (!locks?.request) {
+    if (coordinator) return coordinator.run(mutation)
+    throw portfolioViewError('viewCoordination')
+  }
+  let callbackEntered = false
+  try {
+    const result = await locks.request(PORTFOLIO_VIEWS_LOCK, { ifAvailable: true }, async lock => {
+      callbackEntered = true
+      if (!lock) throw portfolioViewError('viewBusy')
+      return mutation()
+    })
+    return result
+  } catch (error) {
+    // Older implementations may expose Web Locks but reject `ifAvailable` before entering the
+    // callback. The IndexedDB coordinator provides the same cross-tab exclusion in that case.
+    if (!callbackEntered) {
+      if (coordinator) return coordinator.run(mutation)
+      throw portfolioViewError('viewCoordination')
+    }
+    throw error
+  }
+}
+
+const mutateStoredPortfolioViews = (transform, {
+  onCommitted = null, coordinator = null, onSuperseded = null,
+  supersededPreservesOutcome = null,
+} = {}) => {
+  let committedEncoding = null
+  return withPortfolioViewsLock(() => {
+    const current = decodePortfolioViews(storageGet(SAVED_VIEWS_KEY, '[]'))
+    const next = transform(current)
+    if (next && typeof next.then === 'function') throw portfolioViewError('viewCoordination')
+    const encoded = JSON.stringify(next)
+    if (!storageSet(SAVED_VIEWS_KEY, encoded)) throw portfolioViewError('storage')
+    if (storageGet(SAVED_VIEWS_KEY, null) !== encoded) throw portfolioViewError('viewConflict')
+    committedEncoding = encoded
+    return next
+  }, coordinator).then(next => {
+    // The lock is released before this continuation. A queued peer may already have committed a
+    // newer snapshot, and its storage event may even have rendered first. Never overwrite that UI
+    // with this operation's now-stale `next`; accept success only if the operation-specific effect
+    // is still present in the current authority, otherwise reconcile it and report conflict.
+    const authoritativeRaw = storageGet(SAVED_VIEWS_KEY, null)
+    if (authoritativeRaw !== committedEncoding) {
+      const authoritative = decodePortfolioViews(authoritativeRaw)
+      if (supersededPreservesOutcome?.(authoritative) === true) {
+        onCommitted?.(authoritative)
+        return authoritative
+      }
+      onSuperseded?.(authoritative)
+      throw portfolioViewError('viewConflict')
+    }
+    onCommitted?.(next)
+    return next
+  })
+}
 
 const taskSelectValue = taskId => JSON.stringify(['task', String(taskId)])
 const readTaskSelectValue = value => {
@@ -202,6 +375,18 @@ const mutationMessage = (error, timedOut = false) => timedOut
   ? 'Save timed out; its outcome is unknown.'
   : error?.viewName
     ? 'Use a view name of 1–48 characters without control characters.'
+  : error?.viewState
+    ? 'Current filters or selections cannot be saved exactly. Shorten the filter to 240 characters; scope IDs support 500 characters and compared run IDs 255. Nothing was saved.'
+  : error?.viewCapacity
+    ? 'All 12 saved-view slots are in use. Enter an existing name to replace it, or cancel and delete one; existing views were kept.'
+  : error?.viewExists
+    ? 'A saved view with this name appeared in another tab. Save again to review and confirm replacing it.'
+  : error?.viewBusy
+    ? 'Saved views are being changed in another tab. Nothing was changed; try again.'
+  : error?.viewConflict
+    ? 'Saved views changed during this write. Current filters were kept; review the list before retrying.'
+  : error?.viewCoordination
+    ? 'This page cannot safely coordinate saved views. Nothing changed; allow site storage, open LoopLab through localhost or HTTPS, or use a current browser.'
   : error?.storage
     ? 'Browser storage is blocked or full; this view was not saved.'
   : FENCE_CONFLICT_CODES.has(error?.code)
@@ -211,6 +396,10 @@ const mutationMessage = (error, timedOut = false) => timedOut
     : error?.status === 503
       ? 'Unavailable; current input or selection kept.'
       : 'Save failed; current input or selection kept.'
+
+const localMutationError = error => error?.storage || error?.viewName || error?.viewState
+  || error?.viewCapacity || error?.viewExists || error?.viewBusy || error?.viewConflict
+  || error?.viewCoordination
 
 // Resource reads intentionally resolve an explicit result so callers can keep their last good data.
 // A resolved reconciliation is therefore authoritative only when none of those results reports that
@@ -248,8 +437,8 @@ function useMutation() {
       const settlement = await settleWithin(action, LIST_WRITE_TIMEOUT_MS)
       if (!settlement.ok) {
         let message = mutationMessage(settlement.error, settlement.timeout)
-        if (settlement.error?.storage || settlement.error?.viewName) {
-          setState(message); return false
+        if (localMutationError(settlement.error)) {
+          setState({ message, cause: settlement.error }); return false
         }
         if (typeof reconcile === 'function') {
           const check = await settleWithin(reconcile, LIST_RECONCILE_TIMEOUT_MS)
@@ -257,7 +446,7 @@ function useMutation() {
         } else {
           message += ' Reload this view before retrying.'
         }
-        setState(message); return false
+        setState({ message, cause: settlement.error }); return false
       }
       const outcome = settlement.value
       // A caller may own a stronger reconciliation contract (for example useListMutation below).
@@ -267,8 +456,8 @@ function useMutation() {
     }
     catch (error) {
       let message = mutationMessage(error)
-      if (error?.storage || error?.viewName) {
-        setState(message); return false
+      if (localMutationError(error)) {
+        setState({ message, cause: error }); return false
       }
       if (typeof reconcile === 'function') {
         const check = await settleWithin(reconcile, LIST_RECONCILE_TIMEOUT_MS)
@@ -276,11 +465,12 @@ function useMutation() {
       } else {
         message += ' Reload this view before retrying.'
       }
-      setState(message); return false
+      setState({ message, cause: error }); return false
     }
     finally { lock.current = false }
   }
-  return [state === true, typeof state === 'string' ? state : '', run, setState]
+  return [state === true, typeof state === 'object' && state ? state.message : '', run, setState,
+    typeof state === 'object' && state ? state.cause : null]
 }
 
 const focusSoon = target => requestAnimationFrame(() => target?.isConnected && target.focus({ preventScroll: true }))
@@ -465,29 +655,49 @@ function Modal({ title, onClose, children, busy = false }) {
 
 function PromptModal({ title, label, description = '', placeholder, initial = '', confirm = 'Create', allowEmpty = false,
   maxLength, blocked = false, blockedMessage = '',
-  onSubmit, onReconcile, onClose }) {
+  confirmationForValue = null, onSubmit, onReconcile, onClose }) {
   const reactId = React.useId().replace(/:/g, '')
   const inputId = `prompt-${reactId}`
   const descriptionId = description ? `${inputId}-description` : undefined
+  const errorId = `${inputId}-error`
+  const inputRef = useRef(null)
+  const errorRef = useRef(null)
   const [v, setV] = useState(initial)
-  const [busy, error, mutate] = useMutation()
+  const [busy, error, mutate, clearError, errorCause] = useMutation()
   const ok = !blocked && (allowEmpty || !!v.trim())
+  const confirmation = typeof confirmationForValue === 'function'
+    ? confirmationForValue(v.trim()) : null
+  const fieldError = !!error && errorCause?.viewName
+  const editCanResolveError = fieldError || errorCause?.viewCapacity || errorCause?.viewExists
+  useEffect(() => {
+    if (error) focusSoon(fieldError ? inputRef.current : errorRef.current)
+  }, [error, fieldError])
   const go = async () => {
-    if (ok && await mutate(() => onSubmit(v.trim()), onReconcile)) onClose()
+    if (ok && await mutate(() => onSubmit(v.trim(), confirmation), onReconcile)) onClose()
   }
   return <Modal title={title} onClose={onClose} busy={busy}>
     {label && <label htmlFor={inputId} className="muted"
       style={{ display: 'block', marginBottom: description ? 4 : 8 }}>{label}</label>}
     {description && <div id={descriptionId} className="muted" style={{ marginBottom: 8 }}>{description}</div>}
-    <input id={inputId} className="text" autoFocus readOnly={busy || blocked}
+    <input ref={inputRef} id={inputId} className="text" autoFocus readOnly={busy || blocked}
            aria-label={label || title} aria-describedby={descriptionId}
-           placeholder={placeholder} maxLength={maxLength} value={v} onChange={e => setV(e.target.value)}
+           aria-invalid={fieldError || undefined} aria-errormessage={fieldError ? errorId : undefined}
+           placeholder={placeholder} maxLength={maxLength} value={v} onChange={e => {
+             setV(e.target.value)
+             if (error && editCanResolveError) clearError(null)
+           }}
            onKeyDown={e => { if (e.key === 'Enter') go(); if (e.key === 'Escape' && !busy) onClose() }} />
+    {confirmation?.message && <div className="notice resource-warning" role="status" aria-live="polite">
+      {confirmation.message}
+    </div>}
     {blocked && blockedMessage && <div className="flag" role="alert">{blockedMessage}</div>}
-    {error && <div className="flag" role="alert">{error}</div>}
+    {error && <div ref={errorRef} id={errorId} className="flag" role="alert"
+      tabIndex={fieldError ? undefined : -1}>{error}</div>}
     <div className="modal-actions">
       <button className="btn sm ghost" disabled={busy} onClick={onClose}>Cancel</button>
-      <button className="btn sm primary" disabled={!ok || busy} onClick={go}>{busy ? 'Saving…' : confirm}</button>
+      <button className="btn sm primary" disabled={!ok || busy} onClick={go}>
+        {busy ? 'Saving…' : confirmation?.confirm || confirm}
+      </button>
     </div>
   </Modal>
 }
@@ -891,10 +1101,69 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   const [activeSavedView, setActiveSavedView] = useState(() => initialNavigation.activeSavedView)
   const [viewModal, setViewModal] = useState(false)
   const [viewMessage, setViewMessage] = useState('')
+  const [staleSavedViewName, setStaleSavedViewName] = useState('')
   const [listLimit, setListLimit] = useState(() => initialNavigation.listLimit)
-  const savedViewReturnRef = useRef(null)
+  const savedViewsRef = useRef(savedViews)
+  const activeSavedViewRef = useRef(activeSavedView)
+  const savedViewSelectRef = useRef(null)
+  const saveViewButtonRef = useRef(null)
+  const deleteSavedViewRef = useRef(null)
+  const portfolioCoordinatorRef = useRef(null)
+  const commitSavedViewsState = next => {
+    savedViewsRef.current = next
+    setSavedViews(next)
+  }
+  const commitActiveSavedViewState = next => {
+    activeSavedViewRef.current = next
+    setActiveSavedView(next)
+  }
+  const reconcileSavedViewsState = (next, announce = false) => {
+    const previous = savedViewsRef.current
+    if (JSON.stringify(previous) === JSON.stringify(next)) return false
+    const activeName = activeSavedViewRef.current
+    if (activeName) {
+      const before = previous.find(item => item.name === activeName)
+      const after = next.find(item => item.name === activeName)
+      if (!after || portfolioViewSignature(before) !== portfolioViewSignature(after)) {
+        const deleteOwnedFocus = document.activeElement === deleteSavedViewRef.current
+        // Keep the visible candidate intact. Clearing only the association prevents an external
+        // update from being silently overwritten as though this tab still owned that saved view.
+        commitActiveSavedViewState('')
+        setStaleSavedViewName(activeName)
+        if (deleteOwnedFocus) {
+          focusAfterTransientAction(deleteSavedViewRef.current,
+            () => [savedViewSelectRef.current, saveViewButtonRef.current])
+        }
+      }
+    }
+    commitSavedViewsState(next)
+    if (announce) setViewMessage('Saved views changed in another tab. Current filters were kept.')
+    return true
+  }
   const runListRef = useRef(null)
   const listScrollTopRef = useRef(initialNavigation.scrollTop)
+  useEffect(() => {
+    const coordinator = createPortfolioViewsCoordinator()
+    portfolioCoordinatorRef.current = coordinator
+    return () => {
+      if (portfolioCoordinatorRef.current === coordinator) portfolioCoordinatorRef.current = null
+      coordinator?.close()
+    }
+  }, [])
+  useEffect(() => {
+    const syncSavedViews = event => {
+      if (event && event.key !== SAVED_VIEWS_KEY && event.key !== null) return
+      // A queued storage event is only an invalidation signal: its newValue may already be older
+      // than this tab's own newer commit. Re-read the authoritative value at handling time.
+      const next = decodePortfolioViews(storageGet(SAVED_VIEWS_KEY, '[]'))
+      reconcileSavedViewsState(next, true)
+    }
+    window.addEventListener('storage', syncSavedViews)
+    // Subscribe before the authoritative reread so a peer write between the state initializer and
+    // this passive effect cannot leave the mounted list stale indefinitely.
+    syncSavedViews()
+    return () => window.removeEventListener('storage', syncSavedViews)
+  }, [])
   const navigationRestoreStartedRef = useRef(false)
   const [projectsOpen, setProjectsOpen] = useState(false)   // compact-screen Projects drawer
   const projectsToggleRef = useRef(null)
@@ -1335,35 +1604,129 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
     && portfolioViewSignature(activeView) !== portfolioViewSignature(portfolioState)
   const applySavedView = name => {
     const saved = savedViews.find(item => item.name === name)
-    if (!saved) { setActiveSavedView(''); return }
+    if (!saved) { commitActiveSavedViewState(''); return }
     setSel(saved.project); setQuery(saved.query); setTaskFilter(saved.task)
     setTaskFilterExact(saved.task !== ALL || saved.taskExact === true)
     setStatusFilter(saved.status); setStFilter(saved.supertask)
     setSortKey(saved.sort); setSortDir(saved.direction); setView(saved.view)
     setCompareIds(new Set(saved.compare)); setCompareColumns(saved.columns)
-    setActiveSavedView(saved.name); setViewMessage('')
+    commitActiveSavedViewState(saved.name); setStaleSavedViewName(''); setViewMessage('')
   }
-  const savePortfolioView = async name => {
-    const next = upsertPortfolioView(savedViews, name, portfolioState)
-    if (!next.some(item => item.name === name)) {
-      throw Object.assign(new Error('invalid portfolio view name'), { viewName: true })
-    }
-    if (!storageSet(SAVED_VIEWS_KEY, JSON.stringify(next))) {
-      throw Object.assign(new Error('portfolio storage unavailable'), { storage: true })
-    }
-    setSavedViews(next); setActiveSavedView(name); setViewMessage(''); return true
+  const savePortfolioView = async (name, confirmation) => {
+    let savedView = null
+    await mutateStoredPortfolioViews(current => {
+      const authoritative = current.find(item => item.name === name)
+      const authoritativeActive = current.find(item => item.name === activeSavedView)
+      const replaceRequested = confirmation?.replaceName === name
+      const recreateRequested = confirmation?.recreateName === name
+      const confirmedReplace = replaceRequested && authoritative
+        && confirmation.expectedSignature === portfolioViewSignature(authoritative)
+      const confirmedRecreate = recreateRequested && !authoritative
+      const implicitUpdate = activeView?.name === name && authoritative
+        && portfolioViewSignature(activeView) === portfolioViewSignature(authoritative)
+      if (replaceRequested && !confirmedReplace) {
+        commitSavedViewsState(current)
+        if (!authoritative) setStaleSavedViewName(name)
+        if (activeSavedView && (!authoritativeActive
+            || portfolioViewSignature(activeView) !== portfolioViewSignature(authoritativeActive))) {
+          commitActiveSavedViewState('')
+        }
+        throw portfolioViewError('viewConflict')
+      }
+      if (recreateRequested && !confirmedRecreate) {
+        commitSavedViewsState(current)
+        throw portfolioViewError('viewConflict')
+      }
+      if (activeView?.name === name && !authoritative && !confirmedReplace && !confirmedRecreate) {
+        commitSavedViewsState(current); commitActiveSavedViewState('')
+        setStaleSavedViewName(name)
+        throw portfolioViewError('viewConflict')
+      }
+      const prepared = preparePortfolioViewSave(current, name, portfolioState, {
+        replaceName: confirmedReplace || implicitUpdate ? name : '',
+      })
+      if (!prepared.ok) {
+        commitSavedViewsState(current)
+        if (activeSavedView && (!authoritativeActive
+            || portfolioViewSignature(activeView) !== portfolioViewSignature(authoritativeActive))) {
+          commitActiveSavedViewState('')
+        }
+        const flag = prepared.code === 'name' ? 'viewName'
+          : prepared.code === 'state' ? 'viewState'
+            : prepared.code === 'capacity' ? 'viewCapacity' : 'viewExists'
+        throw portfolioViewError(flag)
+      }
+      savedView = prepared.view
+      return prepared.views
+    }, {
+      onCommitted: next => {
+        commitSavedViewsState(next); commitActiveSavedViewState(savedView.name)
+        setStaleSavedViewName(''); setViewMessage('')
+      },
+      coordinator: portfolioCoordinatorRef.current,
+      onSuperseded: reconcileSavedViewsState,
+      supersededPreservesOutcome: authoritative => {
+        const persisted = authoritative.find(item => item.name === savedView.name)
+        return !!persisted
+          && portfolioViewSignature(persisted) === portfolioViewSignature(savedView)
+      },
+    })
+    return true
   }
   const closeViewModal = () => {
-    setViewModal(false); focusSoon(savedViewReturnRef.current)
+    setViewModal(false); focusSoon(saveViewButtonRef.current)
   }
-  const deleteSavedView = () => {
-    if (!activeView || !confirm(`Delete saved view "${activeView.name}"?`)) return
-    const next = savedViews.filter(item => item.name !== activeView.name)
-    if (!storageSet(SAVED_VIEWS_KEY, JSON.stringify(next))) {
-      setViewMessage('This browser could not delete the saved view. Storage may be blocked or full.')
-      return
+  const deleteSavedView = async event => {
+    if (!activeView) return
+    const focusOwner = event?.currentTarget || deleteSavedViewRef.current
+    const deletedName = activeView.name
+    const expectedSignature = portfolioViewSignature(activeView)
+    if (!confirm(`Delete saved view "${deletedName}"?`)) return
+    try {
+      await mutateStoredPortfolioViews(current => {
+        const authoritative = current.find(item => item.name === deletedName)
+        if (!authoritative || portfolioViewSignature(authoritative) !== expectedSignature) {
+          commitSavedViewsState(current); commitActiveSavedViewState('')
+          focusAfterTransientAction(focusOwner,
+            () => [savedViewSelectRef.current, saveViewButtonRef.current])
+          throw portfolioViewError('viewConflict')
+        }
+        return current.filter(item => item.name !== deletedName)
+      }, {
+        onCommitted: next => {
+          commitSavedViewsState(next); commitActiveSavedViewState(''); setViewMessage('')
+          focusAfterTransientAction(focusOwner,
+            () => [savedViewSelectRef.current, saveViewButtonRef.current])
+        },
+        coordinator: portfolioCoordinatorRef.current,
+        onSuperseded: reconcileSavedViewsState,
+        supersededPreservesOutcome: authoritative =>
+          !authoritative.some(item => item.name === deletedName),
+      })
+    } catch (error) {
+      setViewMessage(error?.storage
+        ? 'Browser storage is blocked or full; this saved view was not deleted.'
+        : error?.viewBusy
+          ? 'Saved views are being changed in another tab. Nothing was deleted; try again.'
+          : error?.viewCoordination
+            ? 'This page cannot safely coordinate saved views. Nothing was deleted; allow site storage, open LoopLab through localhost or HTTPS, or use a current browser.'
+            : 'This saved view changed or was removed in another tab. Nothing was deleted; review the list and confirm again.')
     }
-    setSavedViews(next); setActiveSavedView(''); setViewMessage('')
+  }
+  const savedViewConfirmation = name => {
+    const existing = savedViews.find(item => item.name === name)
+    if (existing && existing.name !== activeView?.name) return {
+      replaceName: existing.name,
+      expectedSignature: portfolioViewSignature(existing),
+      confirm: 'Replace view',
+      message: `“${existing.name}” already exists. Replace it with the current filters and layout?`,
+    }
+    if (name && !existing && staleSavedViewName === name) return {
+      recreateName: name,
+      confirm: 'Recreate view',
+      message: `“${name}” was removed in another tab. Create it again with the current filters and layout?`,
+    }
+    return null
   }
   const openComparison = focusOwner => {
     compareEntryFocusRef.current = focusOwner
@@ -1849,19 +2212,20 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
           </div>
           {runs && <div className="portfolio-viewbar">
             <label>Saved view
-              <select className="sel" aria-label="Saved portfolio view" value={activeSavedView}
+              <select ref={savedViewSelectRef} className="sel" aria-label="Saved portfolio view" value={activeSavedView}
                 onChange={event => event.target.value
-                  ? applySavedView(event.target.value) : setActiveSavedView('')}>
+                  ? applySavedView(event.target.value) : commitActiveSavedViewState('')}>
                 <option value="">Custom / unsaved</option>
                 {savedViews.map(saved => <option key={saved.name} value={saved.name}>
                   {saved.name}{saved.name === activeSavedView && activeViewDirty ? ' · modified' : ''}
                 </option>)}
               </select>
             </label>
-            <button className="btn sm" onClick={event => {
-              savedViewReturnRef.current = event.currentTarget; setViewModal(true)
-            }}>Save current view</button>
-            <button className="btn sm ghost" disabled={!activeView} onClick={deleteSavedView}>Delete</button>
+            <button ref={saveViewButtonRef} className="btn sm" onClick={() => setViewModal(true)}>
+              Save current view
+            </button>
+            <button ref={deleteSavedViewRef} className="btn sm ghost" disabled={!activeView}
+              onClick={deleteSavedView}>Delete</button>
             {activeViewDirty && <span className="muted" role="status">Modified</span>}
           </div>}
           {viewMessage && <div className="notice resource-warning portfolio-message" role="alert">
@@ -1870,7 +2234,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
           {runs && !projectScopeBlocked && view !== 'compare' && <div className="runbar">
             <OpIcon name="search" className="t-ic" />
             <input ref={filterInputRef} className="text runbar-q" aria-label="Filter runs" placeholder="filter runs…" value={query}
-                   onChange={e => setQuery(e.target.value)} />
+                   maxLength={MAX_PORTFOLIO_QUERY_LENGTH} onChange={e => setQuery(e.target.value)} />
             <select className="sel" aria-label="Filter by status" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
               <option value="all">all status</option>
                <option value="running">running</option>
@@ -2169,8 +2533,10 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
         onSubmit={submitRunRename} onReconcile={loadRuns} onClose={closeRunRename} />}
 
       {viewModal && <PromptModal title="Save portfolio view"
-        label="Name this scope, filter, sort, layout, and comparison selection."
-        placeholder="e.g. active baselines" initial={activeView?.name || ''} confirm="Save view" maxLength={48}
+        label="View name" description="Saves the current scope, filter, sort, layout, and comparison selection. Use an existing name to review and replace that saved view."
+        placeholder="e.g. active baselines" initial={activeView?.name || ''} confirm="Save view"
+        maxLength={MAX_PORTFOLIO_VIEW_NAME_LENGTH}
+        confirmationForValue={savedViewConfirmation}
         onSubmit={savePortfolioView} onClose={closeViewModal} />}
 
       {stModal && <SuperTaskModal supertasks={superdata.supertasks} state={superState} onRetry={loadSupers}
