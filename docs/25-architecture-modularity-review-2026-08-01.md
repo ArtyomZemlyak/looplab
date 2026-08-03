@@ -4156,6 +4156,29 @@ entry, and a fresh upward import from `core/parse.py`.
 
 *Recommendation:* Keep one canonical formatter (tui_format's is the most complete) in core or events and have the other call sites delegate, parameterizing the None sentinel if the '?' vs '—' distinction is intentional.
 
+*Resolution (2026-08-03):* `core/fitness.format_metric(value, *, absent, precision, exponent,
+absent_nan)`, with `tui_format`'s rule as the DEFAULT (it was the most complete, as the finding says)
+and the other two delegating with explicit keywords. It lives beside `is_usable_metric` /
+`finite_metric` because "what counts as a metric" and "how a metric reads" are the same question
+asked twice.
+
+The '?' vs '—' distinction IS intentional and is now named: the digest is PROMPT text, and a model
+must not be able to read a dash as a value. Two further differences turned out to be real and are
+parameters rather than accidents — the digest keeps `%.4g` with no exponent switch because that
+output is frozen prompt text, and it passes `absent_nan=False` because `fmt_params` routes raw param
+VALUES through the same helper, where turning a NaN into "unknown" would hide that the parameter
+itself diverged.
+
+One behaviour changed, deliberately: the scope report used to print the bare text `nan` for a
+diverged metric in a table that already spells absence `—`.
+
+The `ui/src/format.js::fmt` twin the finding counts as a fourth stays a copy — it cannot import
+Python — but a test now pins the five decisions it must keep in step. That test also RECORDS a
+divergence rather than papering over it: `%g` and JS `Number.toString` disagree on rendering the same
+result (`1e+06` vs `1000000`, `1.00e-07` vs `1.00e-7`). It predates the extraction on both sides and
+is display-only, so it is documented instead of "fixed" — changing either would move numbers an
+operator is already used to reading.
+
 #### XP-10 · LOW · duplication · effort: small
 
 **Registry sprawl verdict: the 9 registries should stay separate, but their 6 guard tests copy-paste the source-scan skeleton**

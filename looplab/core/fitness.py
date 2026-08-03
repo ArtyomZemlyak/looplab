@@ -52,6 +52,42 @@ def finite_metric(value) -> "float | None":
     return float(value) if is_usable_metric(value) else None
 
 
+def format_metric(value, *, absent: str = "—", precision: int = 4,
+                  exponent: bool = True, absent_nan: bool = True) -> str:
+    """Render a metric for a human or a model. THE one metric formatter (doc 25 XP-09).
+
+    There were three, and the same best-metric value printed differently in agent-facing digests, the
+    TUI and cross-run scope reports — so a formatting fix had to be found and applied three times, and
+    two operators comparing a run across two surfaces could read two numbers. This lives beside
+    `is_usable_metric`/`finite_metric` because "what counts as a metric" and "how a metric reads" are
+    the same question asked twice.
+
+    The four keywords ARE the intentional differences, not configurability for its own sake:
+
+    * `absent` — the digest says ``?`` (a prompt: the model must not read a dash as a value) while
+      every human surface says ``—``. The finding asked whether that distinction was deliberate; it is.
+    * `precision` — significant digits; the scope report shows one more than the rest.
+    * `exponent` — the human surfaces switch to ``1.23e-07`` outside [1e-3, 1e6), where a ``%g``
+      rendering is unreadable at a glance. The digest does not: its `%.4g` output is frozen prompt
+      text, and prompt strings are contracts.
+    * `absent_nan` — whether NaN reads as absent. True for a METRIC (a diverged run has no score);
+      the digest passes False because it also formats raw param VALUES, where turning a NaN into "?"
+      would hide that the parameter itself diverged.
+
+    `ui/src/format.js::fmt` is the JS twin of the default configuration, kept in step by test.
+    """
+    if value is None or (absent_nan and isinstance(value, float) and value != value):
+        return absent
+    if not isinstance(value, (int, float)):
+        return str(value)
+    if not exponent:
+        return f"{value:.{precision}g}"
+    magnitude = abs(value)
+    if magnitude != 0 and (magnitude < 1e-3 or magnitude >= 1e6):
+        return f"{value:.2e}"
+    return f"{float(f'{value:.{precision}g}'):g}"
+
+
 def is_better(direction: str, a: float, b: float) -> bool:
     """Direction-aware strict improvement: lower wins when minimizing, higher when maximizing. THE
     comparator — `RunState.is_better` delegates here so there is exactly one spelling of "better"."""

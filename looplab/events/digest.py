@@ -14,6 +14,7 @@ from looplab.core.models import NodeStatus, RunState
 # Both moved to `core/numeric.py` (doc 25 XP-12): neither reads an event log, and keeping them here
 # forced `runtime` to import `events` purely to reach a math function. Re-exported so the historical
 # import path — which several modules and tests still use — keeps resolving to the SAME objects.
+from looplab.core.fitness import format_metric
 from looplab.core.numeric import knn_idw, numeric_params
 
 
@@ -168,9 +169,14 @@ def top_nodes(state: RunState, k: int, *, worst: bool = False) -> list:
 
 
 def fmt_num(v: Optional[float]) -> str:
-    if v is None:
-        return "?"
-    return f"{v:.4g}"
+    """The digest's spelling of `core.fitness.format_metric` (doc 25 XP-09).
+
+    Its two departures from the human default are both about this being PROMPT text, which is a
+    contract: `?` rather than `—` so the model cannot read a dash as a value, no exponent switch
+    because the `%.4g` output is what the Researcher has been reading, and `absent_nan=False` because
+    `fmt_params` routes raw param VALUES through here too — a NaN param must not print as "unknown"
+    when the point is that it diverged."""
+    return format_metric(v, absent="?", precision=4, exponent=False, absent_nan=False)
 
 
 def fmt_params(params: dict, max_k: int = 4) -> str:

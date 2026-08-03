@@ -15,8 +15,10 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Optional
 
-# The one looplab import this module allows itself: the wire-protocol vocabulary it shares with the
-# server (phase names). Everything else stays stdlib so the TUI adds no dependencies.
+# The two looplab imports this module allows itself: the wire-protocol vocabulary it shares with the
+# server (phase names), and the shared metric formatter (doc 25 XP-09 — a dependency-free `core`
+# function, so the TUI still adds no dependencies).
+from looplab.core.fitness import format_metric
 from looplab.serve.protocol import (PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINISHED, PHASE_GROUNDING,
                                     PHASE_ONBOARDING, PHASE_PAUSED, PHASE_SEARCH,
                                     PHASE_SPEC_APPROVAL)
@@ -26,15 +28,12 @@ from looplab.serve.tui_api import Api, ApiError
 # (kept side-effect-free so they're unit-testable without a live server or a terminal.)
 
 def fmt_metric(v: Any, precision: int = 4) -> str:
-    """Compact metric formatting — the Python twin of util.js `fmt` (exp form for very small/large)."""
-    if v is None or (isinstance(v, float) and v != v):     # None or NaN
-        return "—"
-    if not isinstance(v, (int, float)):
-        return str(v)
-    a = abs(v)
-    if a != 0 and (a < 1e-3 or a >= 1e6):
-        return f"{v:.2e}"
-    return f"{float(f'{v:.{precision}g}'):g}"
+    """Compact metric formatting — the Python twin of format.js `fmt` (exp form for very small/large).
+
+    The rule moved to `core.fitness.format_metric` (doc 25 XP-09) — this WAS the most complete of the
+    three copies, so it is the shape the shared default keeps; the name stays because the TUI and its
+    tests call it."""
+    return format_metric(v, precision=precision)
 
 
 def fmt_ago(sec: Optional[float], now: Optional[float] = None) -> str:

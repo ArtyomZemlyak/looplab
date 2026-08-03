@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from looplab.core.advisory_payloads import sanitize_report_payload
 from looplab.core.pathsafe import WINDOWS_RESERVED
 from looplab.core.comparison import canonical_comparison_contract, finite_measurement
+from looplab.core.fitness import format_metric
 from looplab.core.redact import redact_persisted_text
 
 
@@ -77,9 +78,13 @@ class _AggNarrative(BaseModel):
 
 
 def _fmt_metric(m) -> str:
-    if m is None:
-        return "—"
-    return f"{m:.5g}" if isinstance(m, (int, float)) else str(m)
+    """The scope report's spelling of `core.fitness.format_metric` (doc 25 XP-09).
+
+    One extra significant digit, and no exponent switch — a cross-run table is read column-by-column,
+    where a lone `1.23e-07` among plain decimals is harder to scan than the long form. Routing through
+    the shared rule also fixes a NaN, which used to print the bare text `nan` here: a diverged run has
+    no score, and the report already spells that `—`."""
+    return format_metric(m, precision=5, exponent=False)
 
 
 def _text(value: object, cap: int, *, single_line: bool = False) -> str:
