@@ -94,7 +94,15 @@ test('Settings page imports coercion and saves against its last baseline', () =>
   const source = readFileSync(new URL('../src/Settings.jsx', import.meta.url), 'utf8')
   assert.match(source, /import \{[^}]*\bfromForm\b[^}]*\} from ['"]\.\/settingsSchema\.js['"]/)
   assert.match(source, /settingsSavePayload\(submittedForm, submittedControl, saved, savedAC, schema\)/)
-  assert.match(source, /disabled=\{!unsaved \|\| invalidCount > 0 \|\| !!mutationBusy \|\| !!mutationUnknown \|\| healthRecoveryBlocked\}/)
+  // The guard list keeps growing and now wraps across lines, so assert each TERM instead of the
+  // whole expression: every one of them is a state in which saving would write against a
+  // baseline the server has not confirmed.
+  const saveDisabled = source.slice(source.indexOf('<button ref={saveButtonRef}'),
+    source.indexOf('onClick={onSave}'))
+  for (const term of ['!unsaved', 'invalidCount > 0', '!!mutationBusy', '!!mutationUnknown',
+                      'healthRecoveryBlocked']) {
+    assert.ok(saveDisabled.includes(term), `Save no longer refuses while ${term}`)
+  }
   const formSource = readFileSync(new URL('../src/SettingsForm.jsx', import.meta.url), 'utf8')
   assert.match(formSource, /aria-invalid=\{error \? 'true' : undefined\}/)
   assert.match(formSource, /className="sf-error" role="alert"/)

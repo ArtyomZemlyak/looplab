@@ -261,11 +261,21 @@ test('Assistant run links hand off modal routes without breaking native modified
   assert.match(chat, /onClick=\{onOpen \? event => onOpen\(event, href\) : undefined\}/)
   assert.match(chat, /interactive=\{!publicAudience\} onOpen=\{onRunOpen\}/,
     'public transcripts keep run references inert while owner transcripts delegate navigation')
-  assert.match(assistant, /followClientRoute\(event, \(\) => \{/,
+  // The callback is now a one-expression arrow rather than a block, which a `{`-exact anchor
+  // could not see. The property is that the run link goes through the SHARED helper: it is what
+  // lets an ordinary click route in-app while ctrl/cmd/middle clicks keep native link behavior.
+  assert.match(assistant, /followClientRoute\(event,\s*\(\) =>/,
     'ordinary clicks use the tested SPA helper while modified clicks retain native link behavior')
+  assert.equal((assistant.match(/followClientRoute\(/g) || []).length, 1,
+    'one route hand-off, not a second hand-rolled modifier check')
   assert.match(assistant, /view === 'full' \|\| \(view === 'side' && compactAssistant\)/)
-  assert.match(assistant, /pendingRunHandoffRef\.current = href[\s\S]*?collapseForNavigationRef\.current\?\.\(\)/)
-  assert.match(assistant, /view !== 'bar' \|\| !pendingRunHandoffRef\.current[\s\S]*?commitAssistantRunRoute\(href\)/,
+  // The hand-off generalized from run links to any route (`pendingRunHandoffRef` ->
+  // `pendingRouteHandoffRef`, `commitAssistantRunRoute` -> `commitAssistantRoute`), so the old
+  // names stopped matching. The property is unchanged and is the reason the deferral exists:
+  // while the Assistant owns a MODAL surface it must not navigate underneath itself — it parks
+  // the href, collapses, and commits only once aria-modal and inert ownership are released.
+  assert.match(assistant, /pendingRouteHandoffRef\.current = href[\s\S]*?collapseForNavigationRef\.current\?\.\(\)/)
+  assert.match(assistant, /view !== 'bar' \|\| !pendingRouteHandoffRef\.current[\s\S]*?commitAssistantRoute\(href\)/,
     'modal navigation commits only after the Assistant has released aria-modal and inert ownership')
   assert.match(assistant, /location\.hash === href[\s\S]*?\[data-route-main\][\s\S]*?location\.hash = href/,
     'same-route activation still closes the modal and hands focus to the already mounted route')

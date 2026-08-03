@@ -60,7 +60,10 @@ test('no component re-declares its own deadline helper', async () => {
 
 test('the assistant reads through the shared awaited form', async () => {
   const text = await source('AssistantBar.jsx')
-  assert.match(text, /import \{ boundedRequest \} from '\.\/requestDeadline\.js'/)
+  // The import list may carry `deadlineRequest` too — the assistant uses the handle form in
+  // places. What must hold is that `boundedRequest` comes from the shared module and is not
+  // re-declared locally (the previous test covers that half).
+  assert.match(text, /import \{[^}]*\bboundedRequest\b[^}]*\} from '\.\/requestDeadline\.js'/)
   assert.ok((text.match(/boundedRequest\(/g) || []).length > 10,
     'the assistant is the heaviest user of the awaited form; it must not have drifted back')
 })

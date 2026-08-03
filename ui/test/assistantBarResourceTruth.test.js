@@ -44,7 +44,10 @@ test('session selection commits only a current, bounded read and preserves the p
   // anchor could not see. The property is the ordering inside it: claiming a newer epoch and then
   // dropping the pending read is what stops an in-flight transcript GET from committing over the
   // blank chat the user just asked for.
-  assert.match(source, /const newChat = \([^)]*\) => \{[\s\S]{0,200}?\+\+openSessionSeqRef\.current\s*\n\s*openSessionPendingRef\.current = null/)
+  // The window is generous because guard clauses keep landing above the bump (a pending
+  // run-command confirmation now refuses the whole action). The ORDER is the property: claim a
+  // newer epoch, then drop the pending read, so an in-flight transcript GET cannot commit over it.
+  assert.match(source, /const newChat = \([^)]*\) => \{[\s\S]{0,600}?\+\+openSessionSeqRef\.current\s*\n\s*openSessionPendingRef\.current = null/)
 })
 
 test('session creation and send are single-flight while a failed create preserves the draft', async () => {
@@ -71,8 +74,13 @@ test('session creation and send are single-flight while a failed create preserve
     'a route that becomes read-only during Stop handoff must preserve the draft and prevent the POST')
   assert.match(send, /turnCaptureRef\.current \|\| directCaptureRef\.current[\s\S]*?Another action is already starting/,
     'the shared Send surface must gate both mutation preflights synchronously')
-  assert.match(source, /disabled=\{turnStarting \|\| retryChecking\} onClick=\{newChat\}/,
-    'a first-turn session create must not be orphaned by starting another chat')
+  // Additional guards may be added (a pending run-command confirmation now blocks it too); these
+  // two must never be dropped, because either one means an unsent first turn would be orphaned.
+  for (const match of source.matchAll(/disabled=\{([^}]*)\} onClick=\{newChat\}/g)) {
+    assert.match(match[1], /turnStarting/, 'a first-turn session create must not be orphaned')
+    assert.match(match[1], /retryChecking/, 'a saved-turn check must not be orphaned either')
+  }
+  assert.ok([...source.matchAll(/onClick=\{newChat\}/g)].length >= 2, 'both new-chat buttons')
   assert.doesNotMatch(normalSend, /setInput\(''\)/)
   assert.match(normalSend, /clearComposer: true/)
 })
@@ -83,7 +91,10 @@ test('direct-command recovery shares the Assistant mutation gate', async () => {
   const check = section(source, 'const checkDirect =', 'const retryDirect =')
   const retry = section(source, 'const retryDirect =', 'const dismissDirectFailure =')
 
-  assert.match(launch, /const directRunId = runId[\s\S]*?await get\(runApiPath\(directRunId, '\/state'\)\)[\s\S]*?currentRunIdRef\.current[\s\S]*?runId: directRunId/,
+  // The preflight read is now deadline-bounded (`boundedRequest`), which an anchor on the bare
+  // `get(...)` could not see. The property is the FENCE around it: after the await, the open run is
+  // re-checked before the command is bound to `directRunId`.
+  assert.match(launch, /const directRunId = binding\.runId \|\| runId[\s\S]*?runApiPath\(directRunId, '\/state'\)[\s\S]*?currentRunIdRef\.current[\s\S]*?runId: directRunId/,
     'an async direct-command preflight must remain bound to the run that the user acted on')
   for (const handler of [check, retry]) {
     assert.match(handler, /historicalRef\.current[\s\S]*?flash\(readOnlyAction\)/,
@@ -131,8 +142,16 @@ test('public-link verification fences authority while unknown truth preserves lo
   assert.match(source, /shareMutationEpochRef\.current \+= 1[\s\S]*?setSessions\(update\)/,
     'confirmed local mutations must invalidate exact reads that started before their receipt')
 
-  assert.match(source, /const composerPaused = sessionOpening \|\| turnStarting \|\| retryChecking \|\| sharePaused \|\| forkingCurrentSession/,
-    'unknown truth still fences every Assistant mutation')
+  // The list keeps growing (a pending run-command confirmation now pauses the composer too), and
+  // it wrapped across lines. Each TERM is the property — dropping any one lets a mutation start
+  // against a state the server has not agreed to — so assert them individually.
+  const composerPaused = source.slice(source.indexOf('const composerPaused ='),
+    source.indexOf('const composerEditingPaused ='))
+  for (const term of ['sessionOpening', 'turnStarting', 'retryChecking', 'sharePaused',
+                      'forkingCurrentSession']) {
+    assert.match(composerPaused, new RegExp(`\\b${term}\\b`),
+      `unknown truth still fences every Assistant mutation: ${term} stopped pausing the composer`)
+  }
   assert.match(source, /const composerEditingPaused = sessionOpening \|\| shareBusy \|\| forkingCurrentSession/,
     'session switching freezes the old composer while passive share uncertainty remains editable')
   assert.match(source, /<textarea[\s\S]*?disabled=\{historical \|\| commandBusy \|\| composerEditingPaused\}/)

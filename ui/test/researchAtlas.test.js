@@ -1166,7 +1166,10 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   // the assertion below it (the owner gate) never ran once this stopped matching. What matters is
   // that Atlas navigates to the canonical hash the same way its sibling routes do.
   assert.match(app, /const researchAtlas = useCallback\(snapshot => \{\s*navigateWithListState\('#\/atlas', snapshot, null\)/)
-  assert.match(app, /const settings = useCallback\(snapshot => \{\s*navigateWithListState\('#\/settings', snapshot, null\)/,
+  // The sibling gained a fourth argument (a focus target for the Settings route). The property is
+  // that BOTH go through `navigateWithListState` to their canonical hash — a private mechanism on
+  // either would lose the run-list scroll and selection across the round trip.
+  assert.match(app, /const settings = useCallback\(snapshot => \{\s*navigateWithListState\('#\/settings', snapshot, null/,
     'Atlas must navigate like its sibling owner routes, not by a private mechanism')
   assert.match(app, /history\.replaceState\(history\.state, '', route\.canonicalHash\)/)
   assert.match(app, /route\.view === 'research-atlas'/)
