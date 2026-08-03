@@ -10,10 +10,11 @@ import json
 import pytest
 
 from looplab.engine.concept_steward import (
-    apply_concept_curation, concept_curation_input_digest, curation_is_empty,
+    concept_curation_input_digest, curation_is_empty,
     propose_concept_curation, steward_concepts,
 )
-from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
+from looplab.engine.concept_registry import (load_concept_aliases, load_concept_splits,
+                                            record_concept_alias, record_concept_split)
 from looplab.engine.memory import build_concept_capsule, ConceptCapsuleStore, portfolio_concept_overview
 
 
@@ -294,36 +295,33 @@ def test_bad_output_degrades_to_empty():
     assert curation_is_empty(propose_concept_curation(ov, _Boom()))   # never raises
 
 
-def test_apply_records_through_governance_writes(tmp_path):
-    curation = {"merges": [{"from_concept": "data/hn", "to_concept": "data/hard-neg"}],
-                "splits": [{"from_concept": "data/aug", "rules": [{"to": "data/syn", "when_any": ["synonym"]}],
-                            "default": "data/aug"}],
-                "purges": [{"from_concept": "junk"}]}
-    rc = apply_concept_curation(str(tmp_path), curation, by="steward")
-    assert len(rc["applied"]) == 3 and not rc["skipped"]
+# `apply_concept_curation` — a batch applier the steward never invoked, and which passed neither
+# `expected_revision` nor `action_id` to the `record_*` writers — is deleted (doc 25 EM-14). It was a
+# footgun one import away from the module's whole invariant: the steward PROPOSES, and the operator
+# applies through a typed single action or owner HTTP CAS governance. Its two writer-level properties
+# are re-pointed at the writers themselves below; its third (a batch rejecting conflicting operations
+# on one source) went with it, being batch semantics no caller had.
+
+def test_the_governance_writers_land_merges_splits_and_purges(tmp_path):
+    record_concept_alias(str(tmp_path), from_concept="data/hn", to_concept="data/hard-neg")
+    record_concept_alias(str(tmp_path), from_concept="junk", to_concept="")
+    record_concept_split(str(tmp_path), from_concept="data/aug",
+                         rules=[{"to": "data/syn", "when_any": ["synonym"]}], default="data/aug")
     aliases = load_concept_aliases(str(tmp_path))
-    assert aliases["data/hn"] == "data/hard-neg" and aliases["junk"] == "\x00purged"
+    assert aliases["data/hn"] == "data/hard-neg"
+    assert aliases["junk"] == "\x00purged", "an empty target is a PURGE, not a merge into nothing"
     assert load_concept_splits(str(tmp_path))["data/aug"]["rules"][0]["to"] == "data/syn"
 
 
-def test_apply_skips_invalid_without_sinking_the_batch(tmp_path):
-    # a cycle-closing merge is rejected at record time; the OTHER merge still lands
-    apply_concept_curation(str(tmp_path), {"merges": [{"from_concept": "a", "to_concept": "b"}]})
-    rc = apply_concept_curation(str(tmp_path), {"merges": [
-        {"from_concept": "b", "to_concept": "a"},          # cycle -> skipped
-        {"from_concept": "c", "to_concept": "d"}]})         # valid -> applied
-    assert any(s["from_concept"] == "b" for s in rc["skipped"])
-    assert any(a["from_concept"] == "c" for a in rc["applied"])
-
-
-def test_apply_rejects_conflicting_operations_for_same_source(tmp_path):
-    rc = apply_concept_curation(str(tmp_path), {
-        "merges": [{"from_concept": "a", "to_concept": "b"}],
-        "splits": [{"from_concept": "a", "rules": [{"to": "fine", "when_any": ["x"]}]}],
-        "purges": [{"from_concept": "a"}],
-    })
-    assert [x["action"] for x in rc["applied"]] == ["merge"]
-    assert len([x for x in rc["skipped"] if "conflicting" in x["reason"]]) == 2
+def test_a_cycle_closing_merge_is_rejected_at_RECORD_time(tmp_path):
+    """The rejection is the writer's, not a batch applier's — which is why it survives the deletion.
+    A cycle in the alias graph makes read-time resolution non-terminating, so it must never land."""
+    record_concept_alias(str(tmp_path), from_concept="a", to_concept="b")
+    with pytest.raises(ValueError):
+        record_concept_alias(str(tmp_path), from_concept="b", to_concept="a")
+    # ...and a refusal leaves the store usable: an unrelated merge still records.
+    record_concept_alias(str(tmp_path), from_concept="c", to_concept="d")
+    assert load_concept_aliases(str(tmp_path))["c"] == "d"
 
 
 def test_steward_apply_is_rejected_before_llm_or_mutation(tmp_path):

@@ -70,6 +70,33 @@ class SpecBuildResult:
         return self.card_id, self.generation
 
 
+# One rendering of a producer fault, and one notification swallow (doc 25 EC-12).
+#
+# Both are bounded on purpose. The message is CAPPED because it is folded into a durable result an
+# operator reads: a provider traceback repr can run to megabytes, and an unbounded one turns a single
+# failed proposal into an unreadable log line. The type name is kept in front of it because the bare
+# `str(exc)` of several provider errors is empty.
+_PRODUCER_ERROR_CAP = 2_048
+
+
+def producer_error_text(exc: BaseException, prefix: str = "") -> str:
+    return f"{prefix}{type(exc).__name__}: {exc}"[:_PRODUCER_ERROR_CAP]
+
+
+def notify_producer(notify, key) -> None:
+    """Post a producer wake-up. Notifications are only HINTS.
+
+    Every one of the three swallowed errors means the consumer is already gone or saturated
+    (`WouldBlock` / `ClosedResourceError` / `BrokenResourceError`), and in each case the main task
+    re-scans the durable result slots anyway. Letting any of them escape would tear down the task
+    group during teardown — i.e. cancel live evaluations — over a hint nobody needed.
+    """
+    try:
+        notify.send_nowait(key)
+    except (anyio.WouldBlock, anyio.ClosedResourceError, anyio.BrokenResourceError):
+        pass
+
+
 @dataclass(frozen=True)
 class SpecRawStageResult:
     """One isolated raw-policy proposal awaiting a short main-task Card commit."""
@@ -461,7 +488,7 @@ class SpeculationMixin:
             self._discard_node_build_telemetry(researcher=researcher, developer=developer)
             return SpecBuildResult(
                 card_id, generation, dict(action), False, roles=roles,
-                error=f"{type(exc).__name__}: {exc}"[:2_048],
+                error=producer_error_text(exc),
             )
 
     def _research_origin_for_node(self, state: RunState, node_id: int) -> Optional[dict]:
@@ -979,7 +1006,7 @@ class SpeculationMixin:
                     node_id=reservation.node_id,
                     card_id=reservation.card_id,
                     generation=0,
-                    error=f"speculative node commit failed: {type(exc).__name__}: {exc}"[:2_048],
+                    error=producer_error_text(exc, "speculative node commit failed: "),
                     reason="build_interrupted",
                 )
             return "stale", None
@@ -1150,17 +1177,14 @@ class SpeculationMixin:
             except Exception as exc:  # the main task must still advance the durable gate
                 result = SpecBuildResult(
                     key[0], key[1], {}, False, roles=roles,
-                    error=f"{type(exc).__name__}: {exc}"[:2_048],
+                    error=producer_error_text(exc),
                 )
             self._discard_spec_result(self._spec_builds.get(key))
             self._spec_builds[key] = result
         finally:
             self._spec_build_inflight.discard(key)
             # Notifications are only hints. Never let a full/closing stream block task-group teardown.
-            try:
-                notify.send_nowait(("producer", key))
-            except (anyio.WouldBlock, anyio.ClosedResourceError, anyio.BrokenResourceError):
-                pass
+            notify_producer(notify, ("producer", key))
 
     @in_llm_lane("build")
     def _prepare_raw_card_stage(
@@ -1224,7 +1248,7 @@ class SpeculationMixin:
                 cue_fence=cue_fence,
                 success=False,
                 audit_events=tuple(audit_events),
-                error=f"{type(exc).__name__}: {exc}"[:2_048],
+                error=producer_error_text(exc),
             )
         finally:
             self._discard_node_build_telemetry(researcher=researcher, developer=developer)
@@ -1272,15 +1296,12 @@ class SpeculationMixin:
                     source="engine" if action.get("kind") == "merge" else "researcher",
                     cue_fence=cue_fence,
                     success=False,
-                    error=f"{type(exc).__name__}: {exc}"[:2_048],
+                    error=producer_error_text(exc),
                 )
             self._spec_raw_stage_result = result
         finally:
             self._spec_raw_stage_inflight = False
-            try:
-                notify.send_nowait(("raw_proposal", proposal_state.search_epoch))
-            except (anyio.WouldBlock, anyio.ClosedResourceError, anyio.BrokenResourceError):
-                pass
+            notify_producer(notify, ("raw_proposal", proposal_state.search_epoch))
 
     def _serve_raw_card_stage(self) -> tuple[bool, bool]:
         """Main-task-only commit of one prepared proposal and its buffered audit intents."""
@@ -1494,10 +1515,7 @@ class SpeculationMixin:
                     self._clear_eval_resource_reservation(node_id, generation)
                     self._release_gpus(reservation.get("gpu_ids"))
                 eval_inflight.discard((node_id, generation))
-                try:
-                    send.send_nowait(("eval", (node_id, generation)))
-                except (anyio.WouldBlock, anyio.ClosedResourceError, anyio.BrokenResourceError):
-                    pass
+                notify_producer(send, ("eval", (node_id, generation)))
 
         async with anyio.create_task_group() as bg_tg:
             if evals:

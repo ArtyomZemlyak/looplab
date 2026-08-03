@@ -1098,12 +1098,7 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         st.confirm_seed_results.pop(nid, None)
         st.proxy_scores.pop(nid, None)
     st.proxy_skipped = [nid for nid in st.proxy_skipped if nid not in requeued]
-    st.confirm_requests = [nid for nid in st.confirm_requests if nid not in requeued]
-    st.confirm_request_generations = [
-        r for r in st.confirm_request_generations if r.get("node_id") not in requeued]
-    st.ablate_requests = [nid for nid in st.ablate_requests if nid not in requeued]
-    st.ablate_request_generations = [
-        r for r in st.ablate_request_generations if r.get("node_id") not in requeued]
+    _purge_node_requests(st, requeued)
     st.policy_scores = {}
     st.policy_chosen = None
     st.policy_reason = ""
@@ -1204,12 +1199,7 @@ def _on_node_tombstoned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
     # Remove only references/actions that name deleted lifecycles. A post-hoc delete of an already
     # finished run is an audit edit, not an implicit search reopen: the finish/report/finalization and
     # unaffected node evidence remain intact until an explicit resume creates the next epoch.
-    st.confirm_requests = [nid for nid in st.confirm_requests if nid not in affected]
-    st.confirm_request_generations = [
-        r for r in st.confirm_request_generations if r.get("node_id") not in affected]
-    st.ablate_requests = [nid for nid in st.ablate_requests if nid not in affected]
-    st.ablate_request_generations = [
-        r for r in st.ablate_request_generations if r.get("node_id") not in affected]
+    _purge_node_requests(st, affected)
     if st.champion in affected:
         st.champion = None
     if st.approval_subject in affected:
@@ -1282,17 +1272,12 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # single seed. Pending force-confirm requests are lifecycle-scoped and are cancelled below;
         # completed fulfillment history stays for audit while its generation-aware twin prevents ABA.
         st.confirm_seed_results.pop(n.id, None)
-        st.confirm_requests = [queued for queued in st.confirm_requests if queued != n.id]
-        st.confirm_request_generations = [
-            r for r in st.confirm_request_generations if r.get("node_id") != n.id]
+        _purge_node_requests(st, {n.id})
         # Abort/proxy decisions belong to the lifecycle that was active when they were recorded.
         # Keeping them would immediately abort/skip every reset generation forever.
         st.aborted_nodes = [nid for nid in st.aborted_nodes if nid != n.id]
         st.proxy_scores.pop(n.id, None)
         st.proxy_skipped = [nid for nid in st.proxy_skipped if nid != n.id]
-        st.ablate_requests = [nid for nid in st.ablate_requests if nid != n.id]
-        st.ablate_request_generations = [
-            r for r in st.ablate_request_generations if r.get("node_id") != n.id]
         if st.champion == n.id:
             st.champion = None
         ranked = st.hypothesis_ranking or {}
@@ -3300,12 +3285,7 @@ def _on_node_abort(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             st.paused = False
             st.pause_node_id = None
             st.pause_generation = None
-        st.ablate_requests = [queued for queued in st.ablate_requests if queued != nid]
-        st.ablate_request_generations = [
-            r for r in st.ablate_request_generations if r.get("node_id") != nid]
-        st.confirm_requests = [queued for queued in st.confirm_requests if queued != nid]
-        st.confirm_request_generations = [
-            r for r in st.confirm_request_generations if r.get("node_id") != nid]
+        _purge_node_requests(st, {nid})
         if st.approval_subject == nid or st.approved_node_id == nid:
             # A FINISHED run keeps its certificates; only the grant that named THIS node is void.
             _clear_approval(st)
@@ -3410,27 +3390,52 @@ def _on_set_strategy(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Strategist keeps tuning everything else (see Engine._maybe_consult_strategist).
     st.pending_strategy = d.get("strategy")
 
-def _on_force_confirm(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+def _purge_node_requests(st: RunState, drop) -> None:
+    """Drop queued force-confirm / force-ablate intents naming any node in `drop` (doc 25 EV-09).
+
+    FOUR lists, in two pairs, and each pair must move together: a legacy bare-id list and a
+    generation-stamped record list. Filtering one and forgetting its twin is the failure this
+    single-sources, and it is not symmetric — the engine's `_pending_forced_*` readers consult the
+    STAMPED list first, so a record left behind wins over an id the caller believed it had removed,
+    and the request fires against a lifecycle that no longer exists.
+
+    All four call sites — requeue-on-partition, tombstone, reset and abort — drop both queues. They
+    are the events that end a node's current lifecycle, and a queued intent names a lifecycle, not
+    a node.
+    """
+    st.confirm_requests = [nid for nid in st.confirm_requests if nid not in drop]
+    st.confirm_request_generations = [
+        r for r in st.confirm_request_generations if r.get("node_id") not in drop]
+    st.ablate_requests = [nid for nid in st.ablate_requests if nid not in drop]
+    st.ablate_request_generations = [
+        r for r in st.ablate_request_generations if r.get("node_id") not in drop]
+
+
+def _queue_forced_request(st: RunState, d: dict, requests: list, generations: list) -> None:
+    """Fold a `force_confirm` / `force_ablate` intent onto its queue pair.
+
+    The two handlers were byte-identical but for the target lists. The shape is a generation CAS:
+    a stamped intent is queued only when the node is live and its `attempt` still matches, so a
+    control authored against a since-reset lifecycle is DROPPED rather than applied to new code.
+    The legacy arm exists for logs predating the stamp — an unstamped intent for a node that has not
+    been created yet binds when it appears, which is why it is admitted with no generation check.
+    """
     nid = _coerce_node_id(d)
     n = st.nodes.get(nid) if nid is not None else None
     if (n is not None and not n.tombstoned and nid not in st.aborted_nodes
             and _control_generation_matches(n, d)):
-        st.confirm_requests.append(nid)
-        st.confirm_request_generations.append({"node_id": nid, "generation": n.attempt})
+        requests.append(nid)
+        generations.append({"node_id": nid, "generation": n.attempt})
     elif (nid is not None and nid not in st.aborted_nodes and n is None
           and _event_generation(d) is _MISSING):
-        st.confirm_requests.append(nid)   # legacy queued-before-create intent
+        requests.append(nid)   # legacy queued-before-create intent
+
+
+def _on_force_confirm(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    _queue_forced_request(st, d, st.confirm_requests, st.confirm_request_generations)
 
 def _on_force_ablate(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    nid = _coerce_node_id(d)
-    n = st.nodes.get(nid) if nid is not None else None
-    if (n is not None and not n.tombstoned and nid not in st.aborted_nodes
-            and _control_generation_matches(n, d)):
-        st.ablate_requests.append(nid)
-        st.ablate_request_generations.append({"node_id": nid, "generation": n.attempt})
-    elif (nid is not None and nid not in st.aborted_nodes and n is None
-          and _event_generation(d) is _MISSING):
-        st.ablate_requests.append(nid)    # legacy queued-before-create intent
+    _queue_forced_request(st, d, st.ablate_requests, st.ablate_request_generations)
 
 def _on_fork(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     nid = _coerce_node_id(d, "from_node_id")

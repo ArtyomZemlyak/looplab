@@ -982,6 +982,26 @@ governance-sensitive sections, are left explicit as the finding itself recommend
 
 *Recommendation:* Extract a generic `_run_isolated_producer(worker, on_result, inflight_clear, notify_key)` coroutine, and one `SpecRawStageResult.failure(...)` classmethod so the 12-field failure payload is built in one place.
 
+*Resolution (2026-08-03, partial by design):* The two genuinely duplicated pieces are single-sourced;
+the generic producer coroutine is NOT, and deliberately.
+
+`speculation.py::producer_error_text(exc, prefix="")` and `notify_producer(notify, key)` replace five
+and three hand-written copies respectively. Both carry a rule that a copy can drop silently: the error
+text is CAPPED because it lands in a durable result an operator reads (an unbounded provider
+traceback repr turns one failed proposal into an unreadable log line) and keeps the type name in
+front because `str(exc)` is empty for several provider errors; the notification swallow covers all
+THREE anyio teardown errors, each of which means the consumer is already gone or saturated while the
+main task re-scans the durable slots anyway — letting one escape would tear down the task group, i.e.
+cancel live evaluations, over a hint nobody needed.
+
+The `_run_isolated_producer` wrapper is not extracted: the two producers' lifecycles genuinely
+differ (one clears a KEY from a set and discards a superseded result, the other clears a bool flag
+and additionally discards role telemetry) and their result types are different dataclasses. Forcing
+them into one shape would mean threading three callbacks through it — more machinery than the
+duplication it removes. The `SpecRawStageResult.failure(...)` classmethod is likewise left open: the
+two payload sites differ in which optional fields they carry, and a classmethod defaulting the rest would
+hide that. Recorded as a deliberate partial rather than dropped.
+
 #### EC-13 · LOW · duplication · effort: small
 
 **Parser-resolution wrapper-chain walk duplicated outside its canonical helper**
@@ -1417,6 +1437,17 @@ over a mixed corpus, `_valid_node_source([v])` is true exactly when `_node_ids([
 
 *Recommendation:* Delete it (its tests exercise record_* behavior reachable directly), or if a batch path must survive, require expected_governance_revision/action_id parameters so it cannot bypass the CAS discipline the rest of the module enforces.
 
+*Resolution (2026-08-03):* Deleted. It bypassed the CAS discipline entirely — neither
+`expected_revision` nor `action_id` reached the `record_*` writers — while the module's stated
+invariant is that the steward only PROPOSES and the operator applies through a typed single action or
+owner HTTP governance. Dead code that contradicts the invariant one import away is worse than dead
+code.
+
+Two of its three tests pinned WRITER properties and are re-pointed at the writers themselves: that
+merges/splits/purges land (with an empty target meaning PURGE, not a merge into nothing), and that a
+cycle-closing merge is rejected at record time while the store stays usable. The third pinned the
+batch applier's own conflicting-source rule and went with it — batch semantics no caller had.
+
 #### EM-15 · LOW · inconsistency · effort: small
 
 **The unicode word-token regex and NFKC+casefold normalization re-declared in five places**
@@ -1598,6 +1629,24 @@ directory-entry publish, uncertain-sync fence) against BOTH appenders.
 *Evidence:* _on_force_confirm and _on_force_ablate (3403-3423) are byte-identical except for the target lists (confirm_requests/confirm_request_generations vs ablate_requests/ablate_request_generations); _on_fork (3425-3436) is a third variant of the same shape. The corresponding purge idiom — filter nid out of `<x>_requests` and `<x>_request_generations` — is repeated for both queues in four handlers (_on_node_tombstoned 1160-1165, _on_node_reset 1244-1254, _on_node_abort 3284-3289, _requeue_partition_bound_results 1086-1095), i.e. 8 near-identical two-line filter pairs. The _advance_request_cursor extraction (3438-3469) shows the codebase already unified the done-side of this family after the hand-rolled copies grew "complementary holes"; the request-side purges remain unshared.
 
 *Recommendation:* Parametrize a `_queue_forced_request(st, d, requests, generations)` helper for the two force handlers and a `_purge_node_requests(st, nid_or_set)` for the 4 purge sites, mirroring what _advance_request_cursor already did for cursors.
+
+*Resolution (2026-08-03):* Both extracted exactly as recommended.
+`replay.py::_queue_forced_request(st, d, requests, generations)` backs `_on_force_confirm` and
+`_on_force_ablate`; `_purge_node_requests(st, drop)` backs all four purge sites
+(requeue-on-partition, tombstone, reset, abort).
+
+The purge is the one that mattered. Each queue is TWO lists — a legacy bare-id list and a
+generation-stamped record list — and they must move together, ASYMMETRICALLY so: the engine's
+`_pending_forced_*` readers consult the stamped list FIRST, so a record left behind wins over an id
+the caller believed it had removed, and the request fires against a lifecycle that no longer exists.
+`_on_node_reset` in particular spelled its two queues twelve lines apart, which is precisely how a
+partial purge hides in review.
+
+`_on_fork` is left as its own handler: it queues a whole RECORD (with `from_node_id` and a defaulted
+generation) rather than an id/generation pair, so it shares the shape but not the data.
+
+Covered by `tests/test_replay_queue_and_producer_seams.py` (20), including the generation CAS, the
+legacy queued-before-create arm, and a source guard that the purge exists in exactly one place.
 
 #### EV-10 · LOW · duplication · effort: medium
 

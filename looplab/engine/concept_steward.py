@@ -352,68 +352,6 @@ def curation_is_empty(curation: dict) -> bool:
     return not (curation.get("merges") or curation.get("splits") or curation.get("purges"))
 
 
-def apply_concept_curation(memory_dir, curation: dict, *, by: str = "steward", at: str = "") -> dict:
-    """Low-level compatibility helper for an already-reviewed batch; the steward never invokes it.
-
-    New operator workflows should use one typed concept action at a time (or owner HTTP CAS governance).
-    Records through the deterministic `record_*` writers and returns an explicit partial-apply receipt.
-    """
-    from looplab.engine.concept_registry import normalize_key, record_concept_alias, record_concept_split
-    applied, skipped = [], []
-    if not isinstance(curation, dict):
-        return {"applied": [], "skipped": [{"reason": "curation must be an object"}]}
-    used_sources: set[str] = set()
-
-    def _claim_source(item, action: str) -> str:
-        if not isinstance(item, dict):
-            skipped.append({"action": action, "reason": "operation must be an object"})
-            return ""
-        src = normalize_key(item.get("from_concept"))
-        if not src:
-            skipped.append({"action": action, "reason": "empty from_concept"})
-            return ""
-        if src in used_sources:
-            skipped.append({"action": action, "from_concept": src,
-                            "reason": "duplicate/conflicting operation for source"})
-            return ""
-        used_sources.add(src)
-        return src
-
-    for m in (curation.get("merges") or [])[:_MAX_PROPOSALS]:
-        src = _claim_source(m, "merge")
-        if not src:
-            continue
-        try:
-            record_concept_alias(memory_dir, from_concept=src, to_concept=m["to_concept"],
-                                 by=by, at=at)
-            applied.append({"action": "merge", "from_concept": src, "to_concept": m["to_concept"]})
-        except Exception as e:  # noqa: BLE001 — one invalid proposal must not sink the batch
-            skipped.append({"action": "merge", "from_concept": src, "reason": str(e)[:160]})
-    remaining = max(0, _MAX_PROPOSALS - len(used_sources))
-    for s in (curation.get("splits") or [])[:remaining]:
-        src = _claim_source(s, "split")
-        if not src:
-            continue
-        try:
-            record_concept_split(memory_dir, from_concept=src, rules=s["rules"],
-                                 default=s.get("default", ""), by=by, at=at)
-            applied.append({"action": "split", "from_concept": src,
-                            "into": [r["to"] for r in s["rules"]]})
-        except Exception as e:  # noqa: BLE001
-            skipped.append({"action": "split", "from_concept": src, "reason": str(e)[:160]})
-    remaining = max(0, _MAX_PROPOSALS - len(used_sources))
-    for p in (curation.get("purges") or [])[:remaining]:
-        src = _claim_source(p, "purge")
-        if not src:
-            continue
-        try:
-            record_concept_alias(memory_dir, from_concept=src, to_concept="", by=by, at=at)
-            applied.append({"action": "purge", "from_concept": src})
-        except Exception as e:  # noqa: BLE001
-            skipped.append({"action": "purge", "from_concept": src, "reason": str(e)[:160]})
-    return {"applied": applied, "skipped": skipped}
-
-
 def steward_concepts(memory_dir, client, *, aliases: Optional[dict] = None, splits: Optional[dict] = None,
                      apply: bool = False, by: str = "steward", at: str = "",
                      max_proposals: int = _MAX_PROPOSALS,
