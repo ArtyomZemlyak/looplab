@@ -2217,6 +2217,32 @@ rather than sitting open behind a status note.
 
 *Recommendation:* One owner_liveness(row_or_path) pair taking a parsed claim dict (file loading as a thin adapter), and one guarded_claim_resolution(claims, phrase, revalidate) helper for both escape hatches.
 
+*Resolution (2026-08-03) — the probe pair. The escape-hatch scaffold is NOT yet done.*
+
+`_owner_definitely_gone(row)` and `_owner_exactly_alive(row, *, own_process_counts=False)` are the
+one decision; the four old names are now thin carriers, with file loading (including the legacy
+bare-PID line) as the adapter the recommendation asks for.
+
+The decision was worth unifying because of what it gates: whether a SECOND worker may take over
+durable command state. Two copies of that rule are two chances to answer "the owner is gone" about a
+process that is merely suspended, and the asymmetry it encodes is easy to get subtly wrong in a
+copy — "definitely gone" is the destructive direction and treats every ambiguity (unknown liveness,
+unreadable pid, incomparable identity token) as NOT gone, while "exactly alive" treats the same
+ambiguities as NOT alive.
+
+`own_process_counts` is the single genuine difference and is now a named argument rather than a
+second function: an EXECUTION claim written by this very server process counts as live even where
+creation identity is unavailable, because its worker context may still be running; a SPAWN claim
+gets no such fallback.
+
+One behaviour TIGHTENED, in the fail-closed direction: the claim-dict path had no pid shape check and
+handed `row.get("pid")` straight to `process_alive`. It now refuses a non-int/bool/non-positive pid
+before probing, so a malformed claim can never read as "definitely gone".
+
+Still open: the second half — `resolve_active_claims` / `resolve_spawn_claim` repeat the same
+escape-hatch scaffold (confirmation phrase, `minimum_age` window, revalidate-then-unlink, structured
+409s). That is a separate extraction and has not been done.
+
 #### SC-13 · LOW · duplication · effort: small
 
 **Five near-identical cmd_*.json directory scanners in RunCommandService**

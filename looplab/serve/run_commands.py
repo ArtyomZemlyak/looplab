@@ -1521,27 +1521,50 @@ class RunCommandService:
             except (HTTPException, OSError):
                 pass
 
-    def _claim_child_definitely_gone(self, row: dict) -> bool:
+    # ---- owner liveness: ONE decision, two claim carriers (doc 25 SC-12) ---------------------
+    # A spawn claim arrives as an already-parsed dict; an execution claim arrives as a file that has
+    # to be read (and may be a legacy bare-PID line). That is the only difference, and it belongs in
+    # the loading, not in the decision — the decision below is a safety rule about process identity
+    # that must answer the same way for both, because both gate the same thing: whether a second
+    # worker may take over durable command state.
+
+    def _owner_definitely_gone(self, row: dict) -> bool:
+        """True only when a claim's owner CANNOT still be running.
+
+        Deliberately asymmetric with `_owner_exactly_alive`: this is the destructive direction, so
+        everything ambiguous — an unreadable pid, an inaccessible process, an identity token that
+        cannot be compared — answers False and the claim is left alone.
+        """
         pid = row.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return False
         try:
             pid_state = self.process_alive(pid)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - ambiguous ownership must fail closed
             pid_state = None
         if pid_state is False:
             return True
         stored_identity = row.get("process_identity")
-        if stored_identity:
+        if isinstance(stored_identity, str) and stored_identity:
             try:
                 current_identity = self.process_identity(pid)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 - ambiguous ownership must fail closed
                 current_identity = None
             # A mismatch proves reuse only when both tokens share a comparable source encoding.
             if _process_identity_proves_reuse(stored_identity, current_identity):
                 return True
         return False
 
-    def _claim_child_exactly_alive(self, row: dict) -> bool:
-        """Whether a spawn claim names the exact currently-live PID generation."""
+    def _owner_exactly_alive(self, row: dict, *, own_process_counts: bool = False) -> bool:
+        """True only when the claim names the exact live process generation that created it.
+
+        `own_process_counts` is the ONE rule that differs between the two carriers, so it is a named
+        argument rather than a second copy of the function. An EXECUTION claim written by this very
+        server process counts as live even where creation identity is unavailable — its worker or
+        activity context may still be running, and letting an operator clear it would be the same
+        double-writer hazard the identity check exists to prevent. A SPAWN claim gets no such
+        fallback: without a comparable identity it is simply not proof of an exact live generation.
+        """
         pid = row.get("pid")
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
             return False
@@ -1551,12 +1574,19 @@ class RunCommandService:
         except Exception:  # noqa: BLE001 - an inaccessible process is ambiguous, not known-live
             return False
         stored_identity = row.get("process_identity")
-        if not isinstance(stored_identity, str) or not stored_identity:
-            return False
-        try:
-            return self.process_identity(pid) == stored_identity
-        except Exception:  # noqa: BLE001 - identity lookup failure stays fail-closed/uncertain
-            return False
+        if isinstance(stored_identity, str) and stored_identity:
+            try:
+                return self.process_identity(pid) == stored_identity
+            except Exception:  # noqa: BLE001 - identity lookup failure stays fail-closed/uncertain
+                return False
+        return own_process_counts and pid == os.getpid()
+
+    def _claim_child_definitely_gone(self, row: dict) -> bool:
+        return self._owner_definitely_gone(row)
+
+    def _claim_child_exactly_alive(self, row: dict) -> bool:
+        """Whether a spawn claim names the exact currently-live PID generation."""
+        return self._owner_exactly_alive(row)
 
     def _execution_owner_definitely_gone(self, path: Path) -> bool:
         """Return true only when a stale execution claim cannot still have a live owner.
@@ -1575,53 +1605,19 @@ class RunCommandService:
         except (ValueError, TypeError):
             parsed = None
         if isinstance(parsed, dict):
-            pid = parsed.get("pid")
-            stored_identity = parsed.get("process_identity")
-        else:
-            try:
-                pid = int(raw)
-            except (TypeError, ValueError, OverflowError):
-                return False
-            stored_identity = None
-        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-            return False
+            return self._owner_definitely_gone(parsed)
+        # Legacy bare-PID claim: adapt it to the same row shape rather than deciding again here.
         try:
-            pid_state = self.process_alive(pid)
-        except Exception:  # noqa: BLE001 - ambiguous ownership must fail closed
-            pid_state = None
-        if pid_state is False:
-            return True
-        if isinstance(stored_identity, str) and stored_identity:
-            try:
-                current_identity = self.process_identity(pid)
-            except Exception:  # noqa: BLE001 - ambiguous ownership must fail closed
-                current_identity = None
-            if _process_identity_proves_reuse(stored_identity, current_identity):
-                return True
-        return False
+            return self._owner_definitely_gone({"pid": int(raw)})
+        except (TypeError, ValueError, OverflowError):
+            return False
 
     def _execution_owner_exactly_alive(self, path: Path) -> bool:
         """True only when the claim names the exact live process generation that created it."""
         row = self._load(path)
-        if not row:
-            return False
-        pid = row.get("pid")
-        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-            return False
-        try:
-            if self.process_alive(pid) is not True:
-                return False
-        except Exception:  # noqa: BLE001 - unknown is not exact-live proof
-            return False
-        stored_identity = row.get("process_identity")
-        if isinstance(stored_identity, str) and stored_identity:
-            try:
-                return self.process_identity(pid) == stored_identity
-            except Exception:  # noqa: BLE001
-                return False
-        # Even on a platform where creation identity is unavailable, never let an operator clear a
-        # claim owned by this very server process: its worker/activity context may still be running.
-        return pid == os.getpid()
+        # `own_process_counts`: even where creation identity is unavailable, never let an operator
+        # clear a claim owned by THIS server process — its worker/activity context may still run.
+        return bool(row) and self._owner_exactly_alive(row, own_process_counts=True)
 
     def resolve_active_claims(self, rd: Path, confirmation: str = "") -> dict:
         """Retire orphaned execution/activity claims without ever clearing a proven live owner.
