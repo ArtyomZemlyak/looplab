@@ -267,13 +267,15 @@ export function projectRunCounts(runs = [], projects = []) {
 
 export function filterRuns(runs = [], {
   project = ALL_RUNS, projects = [], query = '', task = ALL_RUNS,
-  supertask = ALL_RUNS, status = 'all',
+  taskExact = task !== ALL_RUNS, supertask = ALL_RUNS, status = 'all',
 } = {}) {
   let result = scopeRuns(runs, project, projects)
   const q = query.trim().toLowerCase()
   if (q) result = result.filter(run => [run.label, run.run_id, run.task_id, run.goal]
     .some(value => String(value || '').toLowerCase().includes(q)))
-  if (task !== ALL_RUNS) result = result.filter(run => run.task_id === task)
+  // `__all__` is a legal opaque task id as well as the legacy UI sentinel. Callers that preserve
+  // selection identity pass taskExact so a real task carrying that id remains filterable.
+  if (taskExact) result = result.filter(run => run.task_id === task)
   if (supertask === UNASSIGNED_RUNS) result = result.filter(run => !run.supertask_id)
   else if (supertask !== ALL_RUNS) result = result.filter(run => run.supertask_id === supertask)
   if (status !== 'all') result = result.filter(run => effectiveRunStatus(run) === status)

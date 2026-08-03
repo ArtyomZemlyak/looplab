@@ -42,6 +42,8 @@ function normalizeView(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const name = scalarText(typeof value.name === 'string' ? value.name.trim() : '', '', 48)
   if (!name) return null
+  const task = scalarText(value.task, '__all__')
+  const exactAllTask = task === '__all__' && value.task === '__all__' && value.taskExact === true
   const compare = Array.isArray(value.compare)
     ? [...new Set(value.compare.map(id => scalarText(id, '')).filter(Boolean))].slice(0, MAX_COMPARE_RUNS)
     : []
@@ -49,7 +51,10 @@ function normalizeView(value) {
     name,
     project: scalarText(value.project, '__all__'),
     query: scalarText(value.query, '', 240),
-    task: scalarText(value.task, '__all__'),
+    task,
+    // Existing views omit this flag: `__all__` therefore keeps its legacy All meaning. Persist the
+    // flag only for the one ambiguous real task id so normal saved-view object shapes stay stable.
+    ...(exactAllTask ? { taskExact: true } : {}),
     status: STATUSES.has(value.status) ? value.status : 'all',
     supertask: scalarText(value.supertask, '__all__'),
     sort: SORTS.has(value.sort) ? value.sort : 'time',

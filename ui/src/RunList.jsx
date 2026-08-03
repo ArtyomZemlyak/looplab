@@ -40,6 +40,18 @@ const RUN_DELETION_POLL_MS = 2_500
 const LIST_SORT_KEYS = new Set(['time', 'name', 'metric', 'task', 'nodes', 'phase'])
 const LIST_VIEWS = new Set(['list', 'map', 'compare'])
 const LIST_STATUSES = new Set(['all', 'running', 'finalizing', 'paused', 'approval', 'stalled', 'unknown', 'finished'])
+const TASK_SELECT_ALL = 'all'
+
+const taskSelectValue = taskId => JSON.stringify(['task', String(taskId)])
+const readTaskSelectValue = value => {
+  if (value === TASK_SELECT_ALL) return { id: ALL, exact: false }
+  try {
+    const parsed = JSON.parse(value)
+    if (Array.isArray(parsed) && parsed.length === 2 && parsed[0] === 'task'
+        && typeof parsed[1] === 'string') return { id: parsed[1], exact: true }
+  } catch { /* Options are generated locally; malformed values fail closed to All. */ }
+  return { id: ALL, exact: false }
+}
 
 function mapNavigationSignature(projects, runs) {
   let hash = 0x811c9dc5
@@ -64,6 +76,7 @@ function mapNavigationSignature(projects, runs) {
 function normalizeListNavigation(value) {
   const saved = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
   const text = (candidate, fallback) => typeof candidate === 'string' ? candidate : fallback
+  const task = text(saved.task, ALL)
   const compare = Array.isArray(saved.compare)
     ? [...new Set(saved.compare.filter(id => typeof id === 'string' && id).slice(0, 8))] : []
   const mapCollapse = Array.isArray(saved.mapCollapse)
@@ -87,7 +100,10 @@ function normalizeListNavigation(value) {
   return {
     project: text(saved.project, ALL),
     query: text(saved.query, ''),
-    task: text(saved.task, ALL),
+    task,
+    // Legacy navigation used the raw `__all__` sentinel. Only the explicit flag distinguishes a
+    // real task carrying that id; every other non-sentinel string remains exact for compatibility.
+    taskExact: task !== ALL || (saved.task === ALL && saved.taskExact === true),
     status: LIST_STATUSES.has(saved.status) ? saved.status : 'all',
     supertask: text(saved.supertask, ALL),
     sort: LIST_SORT_KEYS.has(saved.sort) ? saved.sort : 'time',
@@ -134,6 +150,25 @@ function ResourceNotice({ state, label, retry }) {
   return <div className={'notice ' + (stale ? 'resource-warning' : 'resource-error')}
     role={stale ? 'status' : 'alert'}>
     {label}: {stale ? 'Last loaded data; refresh failed.' : 'Unavailable.'} <button className="btn sm" onClick={retry}>Retry</button>
+  </div>
+}
+
+function UnavailableFilterNotice({ id, state, children, actionLabel, disabled, onAction,
+  controlRef, fallbackRef, mainRef }) {
+  const noticeRef = useRef(null)
+  useLayoutEffect(() => () => {
+    const owner = noticeRef.current
+    // A successful background refresh can remove this warning while its button owns focus. Hand
+    // focus to the now-truthful select instead of letting the browser fall back to <body>.
+    if (!owner?.contains(document.activeElement)) return
+    focusAfterTransientAction(owner,
+      () => [controlRef.current, fallbackRef.current, mainRef.current])
+  }, [controlRef, fallbackRef, mainRef])
+  return <div ref={noticeRef} id={id} className="notice resource-warning"
+    role={state === 'ready' ? 'alert' : 'status'} aria-atomic="true">
+    <span>{children}</span>
+    <button type="button" className="btn sm" disabled={disabled}
+      onClick={event => onAction(event.currentTarget)}>{actionLabel}</button>
   </div>
 }
 
@@ -803,6 +838,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   const compareEntryFocusRef = useRef(null)
   const compareSurfaceFocusRef = useRef(null)
   const filterInputRef = useRef(null)
+  const taskFilterRef = useRef(null)
+  const superFilterRef = useRef(null)
   const setCompareHeadingRef = useCallback(node => {
     compareHeadingRef.current = node
     const owner = compareEntryFocusRef.current
@@ -839,6 +876,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   const [sortDir, setSortDir] = useState(() => initialNavigation.direction)
   const [query, setQuery] = useState(() => initialNavigation.query)
   const [taskFilter, setTaskFilter] = useState(() => initialNavigation.task)
+  const [taskFilterExact, setTaskFilterExact] = useState(() => initialNavigation.taskExact)
   const [statusFilter, setStatusFilter] = useState(() => initialNavigation.status)
   const [stFilter, setStFilter] = useState(() => initialNavigation.supertask)
   const [superdata, superState, loadSupers] = useResource(
@@ -1074,13 +1112,36 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   const tasks = useMemo(
     () => Array.from(new Set((runs || []).map(r => r.task_id).filter(Boolean))).sort(),
     [runs])
+  // Restored navigation and saved views may outlive the flat registries that populate these
+  // selects. A controlled select without a matching option visually falls back to its first option
+  // even though React state (and filterRuns) keeps the missing id. Preserve the exact flat-id scope,
+  // but always render its truth and require an explicit operator action before widening to All.
+  const taskFilterKnown = !taskFilterExact || tasks.includes(taskFilter)
+  const taskFilterUnavailable = taskFilterExact && !taskFilterKnown
+  const taskFilterOptionLabel = runsState === 'ready'
+    ? `${taskFilter} — no current runs`
+    : runsState === 'stale'
+      ? `${taskFilter} — not in last loaded runs`
+      : `${taskFilter} — selected task unverified`
+  const superFilterKnown = stFilter === ALL || stFilter === UNASSIGNED
+    || superdata.supertasks.some(task => task.id === stFilter)
+  const superFilterUnavailable = stFilter !== ALL && stFilter !== UNASSIGNED && !superFilterKnown
+  const superFilterOptionLabel = superState === 'ready'
+    ? `${stFilter} — removed super-task`
+    : superState === 'stale'
+      ? `${stFilter} — not in last loaded super-tasks`
+      : superState === 'loading'
+        ? `${stFilter} — checking selected super-task`
+        : `${stFilter} — super-task registry unavailable`
 
   // List and Map consume this exact same derived result set.  Map no longer performs an independent
   // fetch, so switching representation cannot silently reset scope or show stale assignments.
   const filtered = useMemo(() => projectScopeBlocked ? [] : filterRuns(runs || [], {
     project: sel, projects: proj.projects, query, task: taskFilter,
+    taskExact: taskFilterExact,
     supertask: stFilter, status: statusFilter,
-  }), [projectScopeBlocked, runs, sel, proj.projects, query, taskFilter, stFilter, statusFilter])
+  }), [projectScopeBlocked, runs, sel, proj.projects, query, taskFilter, taskFilterExact,
+    stFilter, statusFilter])
   const visible = useMemo(() => sortRuns(filtered, sortKey, sortDir), [filtered, sortKey, sortDir])
   const displayedRuns = visible.slice(0, listLimit)
   const displayedRunOrder = displayedRuns.map(run => run.run_id).join('\u001f')
@@ -1104,15 +1165,22 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
       && control.getClientRects().length && !control.matches(':disabled'))
   const compareCheckboxFor = runId => visibleCompareControl('data-compare-run-id', runId)
   const compareRemoveFor = runId => visibleCompareControl('data-compare-remove-id', runId)
-  const metricSortAvailable = taskFilter !== ALL && metricComparable(filtered)
-  const hasActiveFilters = !!query.trim() || taskFilter !== ALL || statusFilter !== 'all' || stFilter !== ALL
+  const metricSortAvailable = taskFilterExact && metricComparable(filtered)
+  const hasActiveFilters = !!query.trim() || taskFilterExact
+    || statusFilter !== 'all' || stFilter !== ALL
   const listCriteriaKey = JSON.stringify([
-    sel, query, taskFilter, statusFilter, stFilter, sortKey, sortDir,
+    sel, query, taskFilter, taskFilterExact, statusFilter, stFilter, sortKey, sortDir,
   ])
   const previousListCriteriaKeyRef = useRef(listCriteriaKey)
   const clearFilters = focusOwner => {
-    setQuery(''); setTaskFilter(ALL); setStatusFilter('all'); setStFilter(ALL)
+    setQuery(''); setTaskFilter(ALL); setTaskFilterExact(false)
+    setStatusFilter('all'); setStFilter(ALL)
     focusAfterTransientAction(focusOwner, () => [filterInputRef.current, runsMainRef.current])
+  }
+  const useAllForUnavailableFilter = (clear, controlRef, focusOwner) => {
+    clear()
+    focusAfterTransientAction(focusOwner,
+      () => [controlRef.current, filterInputRef.current, runsMainRef.current])
   }
   useEffect(() => {
     if (sortKey === 'metric' && filtered.length > 0 && !metricSortAvailable) setSortKey('time')
@@ -1149,9 +1217,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
       setViewMessage('Saved project no longer exists. Switched to All runs.')
       setSel(ALL)
     }
-    if (superState === 'ready' && stFilter !== ALL && stFilter !== UNASSIGNED
-        && !superdata.supertasks.some(task => task.id === stFilter)) setStFilter(ALL)
-  }, [projectsState, proj.projects, sel, superState, superdata.supertasks, stFilter])
+  }, [projectsState, proj.projects, sel])
   useEffect(() => {
     if (previousListCriteriaKeyRef.current === listCriteriaKey) return
     previousListCriteriaKeyRef.current = listCriteriaKey
@@ -1160,11 +1226,13 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   const portfolioState = {
     project: sel, query, task: taskFilter, status: statusFilter, supertask: stFilter,
     sort: sortKey, direction: sortDir, view, compare: [...compareIds], columns: compareColumns,
+    ...(taskFilterExact && taskFilter === ALL ? { taskExact: true } : {}),
   }
   const captureNavigationState = useCallback(() => ({
     project: sel,
     query,
     task: taskFilter,
+    ...(taskFilterExact && taskFilter === ALL ? { taskExact: true } : {}),
     status: statusFilter,
     supertask: stFilter,
     sort: sortKey,
@@ -1178,7 +1246,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
     scrollTop: initialNavigationState && !navigationRestoreStartedRef.current
       ? listScrollTopRef.current
       : runListRef.current?.scrollTop ?? listScrollTopRef.current,
-  }), [sel, query, taskFilter, statusFilter, stFilter, sortKey, sortDir, view,
+  }), [sel, query, taskFilter, taskFilterExact, statusFilter, stFilter, sortKey, sortDir, view,
     compareIds, mapCollapseOverrides, mapViewport, activeSavedView, listLimit,
     initialNavigationState])
   const publishNavigationState = useCallback((options = null) => {
@@ -1269,6 +1337,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
     const saved = savedViews.find(item => item.name === name)
     if (!saved) { setActiveSavedView(''); return }
     setSel(saved.project); setQuery(saved.query); setTaskFilter(saved.task)
+    setTaskFilterExact(saved.task !== ALL || saved.taskExact === true)
     setStatusFilter(saved.status); setStFilter(saved.supertask)
     setSortKey(saved.sort); setSortDir(saved.direction); setView(saved.view)
     setCompareIds(new Set(saved.compare)); setCompareColumns(saved.columns)
@@ -1360,11 +1429,11 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   // no filter) → hide the Report button.
   const scope = useMemo(() => {
     if (stFilter !== ALL && stFilter !== UNASSIGNED) return { type: 'supertask', id: stFilter, label: (stName[stFilter] || stFilter) }
-    if (taskFilter !== ALL) return { type: 'task', id: taskFilter, label: 'task ' + taskFilter }
+    if (taskFilterExact) return { type: 'task', id: taskFilter, label: 'task ' + taskFilter }
     if (projectScopeBlocked) return null
     if (sel !== ALL && sel !== UNASSIGNED) return { type: 'project', id: sel, label: (projName[sel] || sel) }
     return null
-  }, [projectScopeBlocked, stFilter, taskFilter, sel, stName, projName])
+  }, [projectScopeBlocked, stFilter, taskFilter, taskFilterExact, sel, stName, projName])
 
   const toggle = (id) => setExpanded(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
   const refresh = () => Promise.all([loadProjects(), loadRuns()])
@@ -1630,7 +1699,6 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   const removeSuper = async (s) => {
     if (!confirm(`Delete super-task "${s.name}"? Runs in it become unassigned (the runs themselves are kept).`)) return false
     await deleteSupertask(s.id)
-    if (stFilter === s.id) setStFilter(ALL)
     await Promise.all([loadSupers(), loadRuns()]); return true
   }
 
@@ -1799,7 +1867,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
           {viewMessage && <div className="notice resource-warning portfolio-message" role="alert">
             {viewMessage} <button className="btn xs" onClick={() => setViewMessage('')}>Dismiss</button>
           </div>}
-          {runs && !!scoped.length && view !== 'compare' && <div className="runbar">
+          {runs && !projectScopeBlocked && view !== 'compare' && <div className="runbar">
             <OpIcon name="search" className="t-ic" />
             <input ref={filterInputRef} className="text runbar-q" aria-label="Filter runs" placeholder="filter runs…" value={query}
                    onChange={e => setQuery(e.target.value)} />
@@ -1813,14 +1881,26 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
                <option value="unknown">ownership unknown</option>
               <option value="finished">finished</option>
             </select>
-            <select className="sel" aria-label="Filter by task" value={taskFilter} onChange={e => setTaskFilter(e.target.value)}>
-              <option value={ALL}>all tasks</option>
-              {tasks.map(t => <option key={t} value={t}>{t}</option>)}
+            <select ref={taskFilterRef} className="sel" aria-label="Filter by task"
+              aria-describedby={taskFilterUnavailable ? 'run-task-filter-warning' : undefined}
+              value={taskFilterExact ? taskSelectValue(taskFilter) : TASK_SELECT_ALL}
+              onChange={event => {
+                const next = readTaskSelectValue(event.target.value)
+                setTaskFilter(next.id); setTaskFilterExact(next.exact)
+              }}>
+              <option value={TASK_SELECT_ALL}>all tasks</option>
+              {taskFilterUnavailable
+                && <option value={taskSelectValue(taskFilter)}>{taskFilterOptionLabel}</option>}
+              {tasks.map(t => <option key={t} value={taskSelectValue(t)}>{t}</option>)}
             </select>
             <div className="runbar-super-control">
-              <select className="sel" aria-label="Filter by super-task" value={stFilter} onChange={e => setStFilter(e.target.value)}>
+              <select ref={superFilterRef} className="sel" aria-label="Filter by super-task"
+                aria-describedby={superFilterUnavailable ? 'run-super-filter-warning' : undefined}
+                value={stFilter} onChange={e => setStFilter(e.target.value)}>
                 <option value={ALL}>all super-tasks</option>
                 <option value={UNASSIGNED}>— no super-task —</option>
+                {superFilterUnavailable
+                  && <option value={stFilter}>{superFilterOptionLabel}</option>}
                 {superdata.supertasks.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
               <button className="btn sm ghost" disabled={navigationBusy} aria-label="Create or manage super-tasks"
@@ -1860,6 +1940,31 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
           <ResourceNotice state={runsState} label="Runs" retry={loadRuns} />
           <ResourceNotice state={projectsState} label="Projects" retry={loadProjects} />
           {!stModal && <ResourceNotice state={superState} label="Super-tasks" retry={loadSupers} />}
+          {taskFilterUnavailable && <UnavailableFilterNotice id="run-task-filter-warning"
+            state={runsState} actionLabel="Use all tasks" disabled={navigationBusy}
+            controlRef={taskFilterRef} fallbackRef={filterInputRef} mainRef={runsMainRef}
+            onAction={focusOwner => useAllForUnavailableFilter(() => {
+              setTaskFilter(ALL); setTaskFilterExact(false)
+            }, taskFilterRef, focusOwner)}>
+            {runsState === 'ready'
+              ? <><b>Selected task “{taskFilter}” has no current runs.</b> Its exact filter is still active.</>
+              : runsState === 'stale'
+                ? <><b>Selected task “{taskFilter}” is absent from the last loaded runs.</b> Its exact filter stays active until Runs refresh succeeds.</>
+                : <><b>Selected task “{taskFilter}” cannot be verified yet.</b> Its exact filter is still active.</>}
+          </UnavailableFilterNotice>}
+          {superFilterUnavailable && <UnavailableFilterNotice id="run-super-filter-warning"
+            state={superState} actionLabel="Use all super-tasks" disabled={navigationBusy}
+            controlRef={superFilterRef} fallbackRef={filterInputRef} mainRef={runsMainRef}
+            onAction={focusOwner => useAllForUnavailableFilter(
+              () => setStFilter(ALL), superFilterRef, focusOwner)}>
+            {superState === 'ready'
+              ? <><b>Selected super-task “{stFilter}” no longer exists.</b> Its exact filter is still active.</>
+              : superState === 'stale'
+                ? <><b>Selected super-task “{stFilter}” is absent from the last loaded registry.</b> Its exact filter stays active until Super-tasks refresh succeeds.</>
+                : superState === 'loading'
+                  ? <><b>Checking selected super-task “{stFilter}”.</b> Its exact filter is still active.</>
+                  : <><b>Selected super-task “{stFilter}” cannot be verified.</b> The registry is unavailable; its exact filter is still active.</>}
+          </UnavailableFilterNotice>}
           {projectScopePending && <div className="notice resource-warning" role="status">
             <span><b>Saved project cannot be verified yet.</b> Runs stay hidden to preserve this scope.</span>
             <button type="button" className="btn sm" disabled={navigationBusy}
@@ -1878,7 +1983,9 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
                   Start a new run
                 </button>
               : <span>Drag a run onto this project, or use its <b>Move</b> menu.</span>}</div>}
-          {runs && !!scoped.length && !visible.length && <div className="notice" role="status">
+          {runs && !!scoped.length && !visible.length
+            && !taskFilterUnavailable && !superFilterUnavailable
+            && <div className="notice" role="status">
             {runsState === 'stale' ? 'No runs in the last loaded data match the filters.' : 'No runs match the filters.'}
             {hasActiveFilters && <button type="button" className="btn sm" disabled={navigationBusy}
               onClick={event => clearFilters(event.currentTarget)}>Clear filters</button>}
