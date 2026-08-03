@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from looplab.events.belief_projection import grouped_beliefs
 from looplab.core.models import (
     IDEA_PROPOSAL_DIGEST_V1_FIELDS,
     Event,
@@ -1106,7 +1107,7 @@ def test_grouped_beliefs_aggregates_same_seed_cards_keeping_ids_distinct():
         "card-9": Card(id="card-9", seed_statement=other, statement=other, verdict="open",
                        evidence=[], status="proposed"),
     }
-    groups = st.grouped_beliefs()
+    groups = grouped_beliefs(st)
     assert len(groups) == 2                                   # two distinct beliefs
     belief = next(g for g in groups if g["seed_hash"] == hypothesis_id(seed))
     assert belief["card_ids"] == ["card-1", "card-2"]         # work items stay DISTINCT, grouped together
@@ -1117,7 +1118,7 @@ def test_grouped_beliefs_aggregates_same_seed_cards_keeping_ids_distinct():
     # a merged-away alias never appears; a belief whose EVERY member is abandoned rolls up to abandoned
     st.cards["card-2"].merged_into = "card-1"
     st.cards["card-1"].verdict = "abandoned"
-    solo = next(g for g in st.grouped_beliefs() if g["seed_hash"] == hypothesis_id(seed))
+    solo = next(g for g in grouped_beliefs(st) if g["seed_hash"] == hypothesis_id(seed))
     assert solo["card_ids"] == ["card-1"] and solo["verdict"] == "abandoned"
 
 
@@ -1158,7 +1159,7 @@ def test_grouped_beliefs_keys_by_full_digest_not_the_short_hash():
         "card-1": Card(id="card-1", seed_statement=first, statement=first, verdict="open", evidence=[]),
         "card-2": Card(id="card-2", seed_statement=second, statement=second, verdict="open", evidence=[]),
     }
-    groups = st.grouped_beliefs()
+    groups = grouped_beliefs(st)
     assert len(groups) == 2                                                    # NOT merged into one belief
     assert {g["seed_digest"] for g in groups} == {hypothesis_statement_digest(first),
                                                   hypothesis_statement_digest(second)}
@@ -1176,7 +1177,7 @@ def test_grouped_beliefs_excludes_an_abandoned_members_evidence_from_the_union()
         "card-2": Card(id="card-2", seed_statement=seed, statement=seed, verdict="open",
                        evidence=[3], status="proposed"),
     }
-    [group] = st.grouped_beliefs()
+    [group] = grouped_beliefs(st)
     assert group["card_ids"] == ["card-1", "card-2"]     # both are still listed as members
     assert group["evidence"] == [3]                       # the abandoned member's [1, 2] is excluded
     assert group["verdict"] == "open"                     # verdict + evidence describe the live member
@@ -1195,5 +1196,5 @@ def test_grouped_beliefs_verdict_matches_evidence_verdict_on_the_union():
         "card-2": Card(id="card-2", seed_statement=seed, statement=seed, verdict="testing",
                        evidence=[2], status="pending"),
     }
-    [group] = st.grouped_beliefs()
+    [group] = grouped_beliefs(st)
     assert group["verdict"] == "testing"          # active experiment not hidden by the finished sibling

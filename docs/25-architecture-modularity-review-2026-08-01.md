@@ -1756,7 +1756,24 @@ whole `core/` package. Nothing further to do here; see XP-04 for the reasoning a
 
 *Evidence:* llm.py re-imports ~32 underscore-private names from the three split siblings so "tests and callers import/monkeypatch them THROUGH this module" and both paths "keep resolving to the SAME objects". The 'same objects' claim holds for reads, but the monkeypatch claim does not hold for intra-sibling calls: `_stream_with_idle_guard` calls `_stream_raw_socket` through llm_streaming's own namespace (llm_streaming.py:123), so patching `looplab.core.llm._stream_raw_socket` rebinds only llm.py's alias and never reaches the live call — the exact silent-no-op failure mode the project's registry-guard convention exists to prevent, here with no guard. The shim also permanently publishes private helpers (`_backoff`, `_err_body`, `_tool_call_slot`, ...) as de-facto API surface of core.llm. The split itself is documented and sound; the blanket private re-export is the accidental-complexity part.
 
-*Recommendation:* Trim the re-export list to the names tests actually import (grep-driven), patch the remaining tests to import from the owning sibling, and correct the docstrings' monkeypatch claim (patch the sibling module for intra-module call sites). Alternatively add a small source-scan test asserting every re-exported name is referenced somewhere outside core/, so the list can shrink safely over time.
+*Recommendation:* Trim the re-export list to the names tests actually import (grep-driven), patch the remaining tests to import from the owning sibling, and correct the docstrings' monkeypatch
+
+*Resolution (2026-08-03):* The false claim is corrected; the re-export list is deliberately KEPT.
+
+The docstrings now say what the shim actually gives you: `looplab.core.llm._X`, the flat
+`looplab.llm._X` and the owning sibling's `_X` all READ the same object, which is what keeps existing
+imports and direct calls working — and that this is NOT a monkeypatch seam. Rebinding the barrel
+alias replaces only that alias; a sibling calling `_X` through its own module globals keeps calling
+the original, so the patch is a silent no-op. `llm_streaming`'s own docstring now names the affected
+helpers and says to patch that module instead.
+
+Trimming the list was considered and rejected. `CLAUDE.md` documents the barrel as "every split name
+re-exported through `llm.py`", the re-export costs nothing at runtime, and a grep of the suite shows
+NO test patches a private llm name through the barrel today — the tests only read through it, which
+the shim supports correctly. Trimming would therefore buy churn against a documented convention
+rather than safety. `tests/test_core_contracts.py` pins that: the read-identity holds for every
+shared name, the affected set really is non-empty (`_stream_raw_socket` is in it), and a test that
+ever starts patching through the barrel fails immediately. claim (patch the sibling module for intra-module call sites). Alternatively add a small source-scan test asserting every re-exported name is referenced somewhere outside core/, so the list can shrink safely over time.
 
 #### CO-11 · LOW · dead-code · effort: small
 
@@ -1768,6 +1785,21 @@ whole `core/` package. Nothing further to do here; see XP-04 for the reasoning a
 
 *Recommendation:* Either wire grouped_beliefs to its intended consumer or move it (and its tests) out of RunState into the events/ projection layer where the other derived views live; fix selection_key's stale 'no callers' note.
 
+*Resolution (2026-08-03):* Moved, not wired — there is still no production consumer, and inventing
+one would be worse than leaving the view available. `events/belief_projection.py::grouped_beliefs(st)`
+now holds it, with the other derived views, and `RunState` no longer carries it. `tests/test_cards.py`
+follows the move.
+
+Kept computation-identical. The verdict roll-up stays a per-member LABEL MAX rather than a call to
+`_evidence_verdict` over the unioned evidence — the two agree, and the label max is what the existing
+tests pin. What changed is that the choice is now a choice: on `RunState` it was forced, because
+calling the helper would have crossed the core → events layer the wrong way.
+
+`selection_key`'s "no non-test callers today" note is corrected. It is the soundness-blind,
+metric-first leader that `rank_promotion` sorts by and that `ci_tie_set`/`best_ci` both start from;
+the stale note invited exactly the deletion that would break them. A test asserts the live caller
+count so the note cannot go stale silently again.
+
 #### CO-12 · LOW · other · effort: small
 
 **Stale load-bearing REVIEW comment in atomicio: 'zero production callers' is now false**
@@ -1776,7 +1808,23 @@ whole `core/` package. Nothing further to do here; see XP-04 for the reasoning a
 
 *Evidence:* strict_atomic_write_bytes carries a REVIEW(2026-07-16) comment whose point (2) asserts "ZERO PRODUCTION CALLERS: the actual paid-record writers ... never route through this helper, so the Windows write-through publication added for them protects nothing yet." Grep shows strict_atomic_write_text/bytes now have many production callers: core/run_reset.py:116, core/run_deletion.py:186, serve/reset_route.py:326, serve/routers/control.py:546,789, serve/routers/reports.py (4 sites), serve/deletion_transaction.py:167, search/speculation_quality.py:2471. In a codebase whose stated convention is "comments are load-bearing" and "stale docs are treated as a bug", a security-adjacent durability helper describing itself as unused misleads exactly the reviewer that comment was written for. Points (1) and (3) of the same comment (indeterminate postcondition, Windows race/leak) remain open and undocumented in the docstring proper.
 
-*Recommendation:* Update the REVIEW comment: delete point (2), promote point (1)'s 'exception means INDETERMINATE' into the docstring contract, and file/point at an issue for point (3)'s Windows temp-dir leak.
+*Recommendation:* Update the REVIEW comment: delete point (2), promote point (1)'s 'exception means INDETERMINATE' into the docstring contract, and file/point at an issue for po
+
+*Resolution (2026-08-03):* Point (1) is promoted into the docstring, where a caller reads it: an
+exception from `strict_atomic_write_bytes` means INDETERMINATE, not "not written" — a
+`strict_fsync_parent` failure AFTER the replace raises while the destination already holds the NEW
+bytes, so a writer that rolls back on exception can leave a visible record it will never reconcile.
+Callers owning a paid-work claim need a recovery probe, not a bare rollback.
+
+Point (2) is deleted rather than corrected in place: the helper now has ten calling modules across
+`core/`, `search/` and `serve/` (reset, deletion, reports, trace-clear, assistant, control). The
+comment does not repeat the old phrase, so a grep for it does not land on a note explaining that it
+is false.
+
+Point (3) is RETAINED under a `STILL OPEN:` heading — the Windows parent-publication race and the
+orphaned `.{name}.{rand}.tmp` directory are real, Windows-only, and unreachable from this repo's
+POSIX CI. A test asserts both the promoted contract and that the retained gaps were not lost with
+the deleted point.int (3)'s Windows temp-dir leak.
 
 #### CO-13 · LOW · flat-code · effort: small
 
@@ -1787,6 +1835,23 @@ whole `core/` package. Nothing further to do here; see XP-04 for the reasoning a
 *Evidence:* The model_validator named `_check_trust_gate` validates trust_gate, merge_mode, novelty_mode, strategist_backend, eval_trust_mode, seed_mode, backend, developer_backend and llm_parser — nine independent closed-vocabulary fields — as a linear if-chain of hand-written `raise ValueError` blocks, each repeating the same "must be a|b|c, got {!r}" message format. New enum-ish fields keep being appended here (the comment trail shows three accretion waves).
 
 *Recommendation:* Replace with a declarative `_ENUM_FIELDS = {"trust_gate": ("audit","gate","block"), ...}` table iterated by one loop (message format preserved), with the two lazy-registry cases (developer_backend, llm_parser) resolved via callables in the same table. Rename to `_check_enum_fields`.
+
+*Resolution (2026-08-03):* Done as recommended. `Settings._ENUM_FIELDS` is the table and
+`_check_enum_fields` the one loop; the refusal message keeps the `"<field> must be a|b|c, got <v>"`
+shape (`llm_parser` loses a stray "one of", the only wording change). The two lazy cases are
+callables in the same table: `developer_backend` resolves `DEVELOPER_BACKENDS` and `llm_parser` the
+parser registry through a small `_parser_names()` helper, both deferred so core neither executes
+agents-package code on every `Settings()` (doc 25 XP-04) nor drags the parser module into
+`config`'s import.
+
+The stale `_check_trust_gate` references in `core/parse.py` and two `config.py` comments are
+re-pointed at the new name.
+
+What the table buys is not brevity. A new enum-ish field added to `Settings` and forgotten here fails
+SILENTLY — an out-of-set value does not raise, it falls through whatever consumes the field as a
+no-op, which is how a mis-cased `LOOPLAB_NOVELTY_MODE=LLM` turned the novelty gate off with no
+diagnostic. `tests/test_core_contracts.py` pins the covered field set exactly, so adding a field
+without a vocabulary is a failing test.
 
 
 ### 4.6 Serve — non-router modules

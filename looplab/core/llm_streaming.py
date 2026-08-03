@@ -4,9 +4,14 @@ The idle-guard watchdogs that interrupt a stalled stream (`_stream_with_idle_gua
 openai-SDK path, `_socket_watchdog` + `_sse_chunks` for the urllib-era reassembly path), the
 raw-socket plumbing they need (`_raw_socket` / `_stream_raw_socket` / `_shutdown_pool_sockets` —
 only socket.shutdown() unblocks a recv() wedged in the kernel), and the non-SSE whole-body
-fallback parser (`_parse_chat_body`). `core.llm` re-imports every name under its original name,
-so `looplab.core.llm._stream_with_idle_guard` (and the flat `looplab.llm.…`) keep resolving to
-the SAME objects — tests and callers import and monkeypatch through those paths.
+fallback parser (`_parse_chat_body`). `core.llm` re-imports every name under its original name, so
+`looplab.core.llm._stream_with_idle_guard` (and the flat `looplab.llm.…`) READ the same objects —
+tests and callers import and call through those paths.
+
+MONKEYPATCH THROUGH THIS MODULE, not through `core.llm` (doc 25 CO-10). Several helpers here call
+each other by bare global name — `_stream_with_idle_guard` -> `_stream_raw_socket`, `_sse_chunks` ->
+`_chunk_has_content`/`_SSETail` — and those lookups resolve in THIS module's namespace. Rebinding
+the `core.llm` alias replaces only that alias and never reaches the live call.
 """
 from __future__ import annotations
 

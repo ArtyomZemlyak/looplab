@@ -305,6 +305,16 @@ def default_agent_control() -> dict[str, list[str]]:
 DEVELOPER_BACKENDS: tuple[str, ...] = ("default", "aider", "continue", "goose", "opencode")
 
 
+def _parser_names() -> tuple[str, ...]:
+    """The structured-output parser vocabulary, read from the registry that actually resolves it.
+
+    Deferred (not a module-level import) to keep `config` import-light, and sorted so the refusal
+    message is stable rather than dependent on registry insertion order."""
+    from looplab.core.parse import _ORDER
+
+    return tuple(sorted(_ORDER))
+
+
 class Settings(BaseSettings):
     """The engine settings schema (every knob a run accepts).
 
@@ -888,14 +898,14 @@ class Settings(BaseSettings):
     # of this value; retained so old snapshots still validate and logs can disclose that auto was requested.
     cross_run_curation_auto: bool = False
     # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model). Validated in
-    # `_check_trust_gate` alongside the other enum-ish strings — every consumer tests `== "llm"`
+    # `_check_enum_fields` alongside the other enum-ish strings — every consumer tests `== "llm"`
     # exactly (cli/__init__.py, adapters/tasks.py), so an untyped `--set`/file/env typo (or a mis-cased
     # "LLM") used to fall through to the OFFLINE toy roles and quietly produce a run that never called
     # the model. Left as `str`, not `Literal`, so old snapshots still validate through the same path.
     backend: str = "toy"
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external
     # CLI coding agent: "opencode" | "aider" | "goose" | "continue". A CLOSED enum ("default" +
-    # cli_agent.PRESETS keys), validated loudly in `_check_trust_gate` — an unknown value used to reach
+    # cli_agent.PRESETS keys), validated loudly in `_check_enum_fields` — an unknown value used to reach
     # adapters/tasks.py (`developer_backend not in PRESETS`) and silently wire the DEFAULT in-house
     # developer, the same silent downgrade the `backend` guard closes.
     developer_backend: str = "default"
@@ -1351,54 +1361,41 @@ class Settings(BaseSettings):
                 data[key] = val
         return data
 
+    # The closed-vocabulary string fields, as a TABLE rather than a hand-written if-chain (doc 25
+    # CO-13). Three accretion waves had appended to that chain, each repeating the same
+    # "must be a|b|c, got {!r}" message, and a new enum-ish field is exactly the kind of thing that
+    # gets added to `Settings` and forgotten here — where forgetting is silent: an out-of-set value
+    # does not fail, it falls through whatever consumes the field as a NO-OP. A mis-cased
+    # `LOOPLAB_NOVELTY_MODE=LLM` turned the novelty gate off with no diagnostic; a mis-cased
+    # `strategist_backend` quietly ran the default; a typo'd `llm_parser` is indistinguishable from
+    # asking for the default fallback order.
+    #
+    # Two entries resolve their vocabulary LAZILY, and for different reasons:
+    #   * `developer_backend` is validated against `DEVELOPER_BACKENDS`, which `agents/cli_agent.py`
+    #     asserts its PRESETS match — so a typo still fails loud without core executing
+    #     agents-package code on every Settings construction (doc 25 XP-04: the one upward import
+    #     out of core).
+    #   * `llm_parser` is validated against the parser registry itself, imported inside the callable
+    #     to keep `config` import-light.
+    _ENUM_FIELDS: typing.ClassVar[tuple] = (
+        ("trust_gate", ("audit", "gate", "block")),
+        ("merge_mode", ("auto", "mean", "ensemble")),
+        ("novelty_mode", ("off", "algo", "llm")),
+        ("strategist_backend", ("off", "rule", "llm", "agent")),
+        ("eval_trust_mode", ("ratify_freeze", "autonomous", "ratify_freeze_drift")),
+        ("seed_mode", ("auto", "tracked", "all")),
+        ("backend", ("toy", "llm")),
+        ("developer_backend", lambda: DEVELOPER_BACKENDS),
+        ("llm_parser", lambda: _parser_names()),
+    )
+
     @model_validator(mode="after")
-    def _check_trust_gate(self):
-        if self.trust_gate not in ("audit", "gate", "block"):
-            raise ValueError(
-                f"trust_gate must be audit|gate|block, got {self.trust_gate!r}")
-        if self.merge_mode not in ("auto", "mean", "ensemble"):
-            raise ValueError(
-                f"merge_mode must be auto|mean|ensemble, got {self.merge_mode!r}")
-        # novelty_mode drives the dedup/novelty gate; an out-of-set value (e.g. a mis-cased
-        # LOOPLAB_NOVELTY_MODE=LLM, or "on") used to fall through _apply_novelty_gate silently as a
-        # NO-OP — turning the gate off with no diagnostic. Fail loudly at config time like trust_gate/
-        # merge_mode do. (seed_mode / eval_trust_mode / strategist_backend share the pattern and are
-        # validated in this same block, just below.)
-        if self.novelty_mode not in ("off", "algo", "llm"):
-            raise ValueError(
-                f"novelty_mode must be off|algo|llm, got {self.novelty_mode!r}")
-        # The remaining enum-ish string fields (arch-review §5 P3): a typo used to be accepted at
-        # construction and only fail-safe/later-loud downstream (e.g. a mis-cased strategist_backend
-        # silently ran the default). Fail loudly here like the fields above.
-        if self.strategist_backend not in ("off", "rule", "llm", "agent"):
-            raise ValueError(
-                f"strategist_backend must be off|rule|llm|agent, got {self.strategist_backend!r}")
-        if self.eval_trust_mode not in ("ratify_freeze", "autonomous", "ratify_freeze_drift"):
-            raise ValueError(
-                "eval_trust_mode must be ratify_freeze|autonomous|ratify_freeze_drift, "
-                f"got {self.eval_trust_mode!r}")
-        if self.seed_mode not in ("auto", "tracked", "all"):
-            raise ValueError(f"seed_mode must be auto|tracked|all, got {self.seed_mode!r}")
-        if self.backend not in ("toy", "llm"):
-            raise ValueError(f"backend must be toy|llm, got {self.backend!r}")
-        # developer_backend is a CLOSED enum: "default" (in-house developer) plus the external
-        # coding-agent keys in agents/cli_agent.py::PRESETS. The CLI --developer-backend flag guards it
-        # (_DEV_BACKENDS), but a file/env/`--set` value reached here unchecked and adapters/tasks.py then
-        # silently wired the DEFAULT developer for anything not in PRESETS. Validate against the SAME
-        # closed set below, which `agents/cli_agent.py` asserts its PRESETS match — so a typo still
-        # fails loud instead of downgrading, WITHOUT core executing agents-package code on every
-        # Settings construction (doc 25 XP-04: this was the one upward import out of core).
-        if self.developer_backend not in DEVELOPER_BACKENDS:
-            raise ValueError(
-                f"developer_backend must be {'|'.join(DEVELOPER_BACKENDS)}, "
-                f"got {self.developer_backend!r}")
-        # `parse_structured` resolves an unknown name to the DEFAULT fallback order, so a typo'd
-        # llm_parser is indistinguishable from asking for the default. Validate against the parser
-        # registry itself (imported here, not at module scope, to keep config import-light).
-        from looplab.core.parse import _ORDER as _PARSER_ORDER
-        if self.llm_parser not in _PARSER_ORDER:
-            raise ValueError(f"llm_parser must be one of {'|'.join(sorted(_PARSER_ORDER))}, "
-                             f"got {self.llm_parser!r}")
+    def _check_enum_fields(self):
+        for field, vocabulary in self._ENUM_FIELDS:
+            allowed = vocabulary() if callable(vocabulary) else vocabulary
+            value = getattr(self, field)
+            if value not in allowed:
+                raise ValueError(f"{field} must be {'|'.join(allowed)}, got {value!r}")
         self._check_llm_profiles()
         return self
 

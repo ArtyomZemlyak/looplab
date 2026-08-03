@@ -453,21 +453,27 @@ def strict_atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
     effect starts.  Both the temporary file contents and, after ``os.replace``, the destination's
     parent directory entry must receive a successful strict sync receipt.  Any newly-created parent
     directories are also durably published before the temporary file is opened.
+
+    **An exception means INDETERMINATE, not "not written."**  A failure before the replace leaves the
+    old destination intact, but a `strict_fsync_parent` failure AFTER it raises while the destination
+    already holds the NEW bytes — so a caller cannot tell "not published" from "published but
+    unconfirmed".  A writer that aborts on exception and believes nothing was recorded can therefore
+    leave a visible record it will never reconcile.  Callers that own a paid-work claim need a
+    recovery probe (re-read the destination) rather than a bare rollback.
     """
-    # REVIEW(2026-07-16): three gaps against the docstring's contract. (1) POSTCONDITION AMBIGUITY:
-    # a failure BEFORE _strict_replace leaves the old destination intact, but a strict_fsync_parent
-    # failure AFTER it raises while the destination already holds the NEW bytes — the caller cannot
-    # distinguish "not published" from "published but unconfirmed", so a paid-claim writer that
-    # aborts on exception can leave a visible claim it believes was never recorded (orphan
-    # "work begun" with no receipt). An exception here means INDETERMINATE; the docstring should say
-    # so and callers need a recovery probe. (2) ZERO PRODUCTION CALLERS: the actual paid-record
-    # writers (engine/lessons.py claim writer via open('xb'), concept_registry._append_governance,
-    # the scope-report record via atomic_write_text) never route through this helper, so the Windows
-    # write-through publication added for them protects nothing yet. (3) Windows parent-dir
-    # publication (_ensure_strict_parent -> _strict_publish_directory, replace=False) makes two
-    # racing writers of the SAME missing parent fail one of them with ERROR_ALREADY_EXISTS (POSIX
-    # mkdir(exist_ok=True) tolerates the identical race), and a crash between mkdtemp and the move
-    # leaves a permanent '.{name}.{rand}.tmp' directory no sweeper removes.
+    # REVIEW(2026-07-16, revised 2026-08-03 for doc 25 CO-12): the indeterminate-postcondition gap
+    # this comment opened with is now stated in the docstring above, where a caller will actually
+    # read it. Its second point claimed this helper had no production callers, and that has not been
+    # true for some time: `strict_atomic_write_text`/`_bytes` are on the reset, deletion, report,
+    # trace-clear, assistant and control write paths (ten modules across `core/`, `search/` and
+    # `serve/`). A durability helper describing itself as unused misleads exactly the reviewer the
+    # note was written for, so that point is dropped rather than corrected in place.
+    #
+    # STILL OPEN: Windows parent-dir publication (_ensure_strict_parent -> _strict_publish_directory,
+    # replace=False) makes two racing writers of the SAME missing parent fail one of them with
+    # ERROR_ALREADY_EXISTS, where POSIX mkdir(exist_ok=True) tolerates the identical race; and a
+    # crash between mkdtemp and the move leaves a permanent '.{name}.{rand}.tmp' directory no sweeper
+    # removes. Both are Windows-only and neither is reachable from the POSIX CI this repo runs.
     p = Path(path)
     _ensure_strict_parent(p.parent)
     fd, tmpname = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.", suffix=".tmp")

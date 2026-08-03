@@ -186,7 +186,7 @@ def _coerce_to_model(obj: dict, model: Type[T]) -> dict:
 
 
 # The parser vocabulary. `Settings.llm_parser` is validated against these keys at construction
-# (config.py::_check_trust_gate), so a typo fails loudly instead of silently resolving to the default
+# (config.py::_check_enum_fields), so a typo fails loudly instead of silently resolving to the default
 # order below — which is otherwise indistinguishable from asking for the default. Adding a key here
 # widens what the setting accepts; `tests/test_parse_llm.py` pins the two together.
 _ORDER = {

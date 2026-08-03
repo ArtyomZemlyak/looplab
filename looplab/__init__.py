@@ -84,6 +84,7 @@ _LAYOUT = {
     "bg_tasks": "runtime",
     "classification": "adapters",
     "cli_agent": "agents",
+    "belief_projection": "events",   # derived belief view over the card board (doc 25 CO-11)
     "comment_projection": "events",
     "command_eval": "runtime",
     "command_observation": "serve",

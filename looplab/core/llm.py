@@ -55,8 +55,15 @@ from looplab.core.parse import split_think  # noqa: F401  (also a re-export)
 # Split siblings (docs/15 §P5.2): retry/backoff + error classification (`llm_transient`), the
 # SSE/stream machinery (`llm_streaming`), and native tool-call / assistant-message parsing
 # (`llm_toolcall`) were split out of this module. Every moved name is RE-IMPORTED here under its
-# original name because tests and callers import/monkeypatch them THROUGH this module — both
-# `looplab.core.llm._X` and the flat `looplab.llm._X` must keep resolving to the SAME objects.
+# original name, so `looplab.core.llm._X`, the flat `looplab.llm._X` and the owning sibling's own
+# `_X` all READ the same object — that is what keeps existing imports and direct calls working.
+#
+# What the shim does NOT give you is a monkeypatch seam (doc 25 CO-10). Rebinding
+# `looplab.core.llm._X` replaces only THIS module's alias; a sibling that calls `_X` through its own
+# module globals keeps calling the original, so the patch is a silent no-op — the exact failure mode
+# the project's registry-guard convention exists to prevent. Patch the OWNING module instead
+# (`looplab.core.llm_streaming._X`). `tests/test_llm_reexport_seam.py` enumerates which names are
+# affected and fails if a new one appears without this note being true of it.
 from looplab.core.llm_transient import (  # noqa: F401
     BACKOFF_CAP_S, RETRY_AFTER_CAP_S, _REASONING_REJECT_KEYS, _backoff, _err_body,
     _is_reasoning_reject, _is_stream_options_reject, _is_throttle_403, _retry_after_of,

@@ -160,8 +160,12 @@ class SearchFitness:
     def selection_key(node):
         """The PLAIN promotion ranked-scalar key: `(robust_metric, id)`. `robust_metric` is the multi-seed
         confirmed mean when present, else the raw metric (`models.Node.robust_metric`). Byte-identical to
-        the verifier-tie-break-OFF path of `promotion_key`/`holdout_key`; retained as the plain-tuple
-        reference (no non-test callers today — holdout_topk now ranks by `promotion_key`)."""
+        the verifier-tie-break-OFF path of `promotion_key`/`holdout_key`.
+
+        It is the SOUNDNESS-BLIND, metric-first leader, and it is live: `rank_promotion` sorts by it,
+        and `ci_tie_set`/`best_ci` both start from the leader it picks before applying the verifier
+        tie-break. (An earlier note called it a no-caller reference kept for readability — that was
+        true only of `holdout_topk`, which now ranks by `promotion_key`; doc 25 CO-11.)"""
         return (node.robust_metric, node.id)
 
     @staticmethod
