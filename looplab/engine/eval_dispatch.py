@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.core.models import normalize_extra_metrics
-from looplab.engine.action_governance import effective_researcher_eval_timeout
+from looplab.engine.shared import effective_researcher_eval_timeout
 from looplab.events.replay import fold
 from looplab.events.types import (EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED,
                                   SETUP_THREAD_APPENDABLE)
@@ -29,22 +29,6 @@ _LOG = logging.getLogger(__name__)
 class EvalDispatchMixin:
     """The engine's eval-dispatch cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
-
-    def _agent_may(self, role: str, setting: str) -> bool:
-        """Governance gate (Settings.agent_control): may `role` (strategist|boss|researcher) change
-        `setting` at runtime? A setting absent from the map is LOCKED for everyone. Pure + cheap —
-        called at each agent seam so the matrix is the single source of truth."""
-        from looplab.core.config import parallelism_aliases
-
-        aliases = parallelism_aliases(setting)
-        if len(aliases) == 1:
-            return role in (self._agent_control.get(setting) or ())
-        canonical, legacy = aliases
-        # a canonical entry is the migrated authority record even when its allow-list is
-        # empty (an explicit revocation). Fall back to a legacy snapshot grant only when the canonical
-        # key is absent; unioning both would let a stale alias silently bypass a new canonical lock.
-        authority_key = canonical if canonical in self._agent_control else legacy
-        return role in (self._agent_control.get(authority_key) or ())
 
     def _ensure_run_setup(self) -> None:
         """Run the eval's RUN-LEVEL `run_setup` exactly ONCE, before the first eval — e.g. a one-time

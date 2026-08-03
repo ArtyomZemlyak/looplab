@@ -28,7 +28,7 @@ from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, Idea, NodeStatus, RunState,
                                   idea_proposal_digest, idea_proposal_ref)
-from looplab.engine.action_governance import effective_researcher_eval_timeout
+from looplab.engine.shared import effective_researcher_eval_timeout
 from looplab.core.tracing import current_ids
 from looplab.events.types import EV_CROSS_RUN_PRIOR, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
 

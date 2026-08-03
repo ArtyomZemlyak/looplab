@@ -716,6 +716,27 @@ reverse direction too — a module that DROPS the import has stopped participati
 
 *Recommendation:* Create a tiny engine/_shared.py (or fold into action_governance.py renamed engine/governance.py) for _agent_may + effective_researcher_eval_timeout, and move _op_span/_cadence_due there; keeps orchestrator.py shrinking monotonically.
 
+*Resolution (2026-08-03):* the first option, with `action_governance.py` renamed to
+`engine/shared.py` and given a `SharedEngineMixin` — an EIGHTEENTH member of the split, composed last
+in the MRO so a concern mixin can still specialize a member exactly as it could when they sat on the
+Engine body.
+
+`_agent_may` moved out of `EvalDispatchMixin` and now sits with its own sibling
+`effective_researcher_eval_timeout`, which is the pairing that mattered: the timeout helper CALLS the
+gate to decide whether a researcher override is even an action, so splitting them across two modules
+is how a reader ends up believing there are two governance systems. `_op_span` and `_cadence_due`
+moved off `orchestrator.py`, each of which carried a comment explaining that it is shared — which was
+the symptom the finding named, not a resolution.
+
+The module's docstring states the BAR for entering it, because the obvious failure mode of "a home
+for shared things" is becoming a second god-module: called from more than one cluster AND no state of
+its own. A helper used once still belongs where it is used.
+
+Two things the finding's evidence overstated, checked against the code: `_cadence_due` was already a
+`staticmethod(cadence_due)` delegating to `engine/cadence.py` (doc 25 EC-07), so only the NAME needed
+a home, not the rule; and the flat `looplab.action_governance` alias was retired rather than kept,
+since nothing imported it by that path.
+
 
 ### 4.2 Engine — cadence / monitoring / wrap-up mixins
 

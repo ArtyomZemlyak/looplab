@@ -47,7 +47,6 @@ from looplab.events.types import (
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED,
     EV_ENV_CHANGED, EV_WORKSPACE_CHANGED)
 from looplab.engine.ablation import AblationMixin
-from looplab.engine.cadence import cadence_due
 from looplab.engine.widths import EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width
 from looplab.engine.audit import AuditMixin
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
@@ -63,6 +62,7 @@ from looplab.engine.resources import (ResourceSchedulingMixin, cuda_visible_devi
 from looplab.engine.speculation import SpeculationMixin
 from looplab.engine.train_monitor import TrainingMonitorMixin
 from looplab.engine.asha_monitor import AshaMonitorMixin
+from looplab.engine.shared import SharedEngineMixin
 from looplab.engine.novelty import NoveltyGateMixin
 from looplab.engine.strategy import StrategyCadenceMixin
 from looplab.engine.research_cadence import ResearchCadenceMixin
@@ -300,7 +300,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
              AuditMixin, ResourceSchedulingMixin, SpeculationMixin, EvaluateMixin, NodeBuildMixin,
              ProposalCuesMixin,
-             TrainingMonitorMixin, AshaMonitorMixin):
+             TrainingMonitorMixin, AshaMonitorMixin,
+             # Last: the cross-cluster members every other mixin may call (doc 25 ES-14). Kept at the
+             # END of the MRO so a concern mixin that ever needs to specialize one can, exactly as it
+             # could when they lived on the Engine body.
+             SharedEngineMixin):
     @property
     def max_parallel(self) -> int:
         """Deprecated read-through alias for the canonical evaluation width.
@@ -3393,14 +3397,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # `_maybe_snapshot_coverage`, `_maybe_consult_strategist`) lives in looplab/engine/strategy.py
     # (StrategyCadenceMixin — inherited, zero call-site churn). `_op_span` STAYS here: it is a
     # generic new-trace span helper shared by the research / hypothesis-merge / lessons clusters too.
-    def _op_span(self, name: str, **attrs):
-        """A named NEW-trace span for a sub-operation (strategist consult, hypothesis merge …) so the
-        event appended inside it is auto-stamped with THIS op's trace_id (eventstore reads current_ids),
-        letting the UI scope the event's trace to just that operation. Null-context when no tracer is
-        wired (tests build Engine via __new__ and skip __init__) — the op still runs, just untraced."""
-        import contextlib
-        tr = getattr(self, "tracer", None)
-        return tr.span(name, new_trace=True, **attrs) if tr is not None else contextlib.nullcontext()
 
     # ------------------------------ research cadence (extracted to engine/research_cadence.py)
     # The P2 deep-research + open-hypothesis-board merge + run-report cadence cluster
@@ -3532,10 +3528,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _store_task_facets(self, final: RunState) -> str:
         return self.lessons.store_task_facets(final)
 
-    # The shared since-last node-count gate (report/distill/refresh/strategist/coverage cadences).
-    # `engine/cadence.py` states why since-last and not `n % every == 0`; the name stays here because
-    # several mixins call it as `self._cadence_due`.
-    _cadence_due = staticmethod(cadence_due)
 
     # -------------------------------------------------- novelty gate (extracted to engine/novelty.py)
     # The E1/T5 novelty/dedup gate cluster (`_idea_text`, `_idea_vec`, `_semantic_duplicate`,

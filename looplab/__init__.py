@@ -73,7 +73,6 @@ _LAYOUT = {
     "task_facets": "engine",     # PART IV cross-run §21.20.2: agentic task faceting overlay (off the index)
     "governance_health": "engine",  # PART IV cross-run: paid-curation ledger health / fail-closed gates
     "steward_invocation": "engine",  # PART IV cross-run: agentic steward invocation/session bookkeeping
-    "action_governance": "engine",   # native batch action identity/diversity governance seam
     "concept_tools": "tools",    # PART V Phase 2a: assistant-editable cross-run concept taxonomy (merge/purge/split, gated)
     "cross_run_tools": "tools",  # PART V §22: read-only cross-run knowledge tool for the agent tool-loop
     "assistant": "serve",
@@ -221,6 +220,7 @@ _LAYOUT = {
     "settings_store": "serve",
     "shell_tools": "tools",
     "span_index": "events",   # derived light span index behind the UI trace views (perf)
+    "shared": "engine",     # cross-cluster Engine members (doc 25 ES-14)
     "signal_delivery": "engine",   # §1 signal-delivery registry (docs/14-agent-framework-mega-review)
     "skills": "tools",
     "speculation": "engine",  # durable speculative Card build queue and worker contracts
