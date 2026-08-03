@@ -411,6 +411,41 @@ def _engine_singleton(run_dir: Path):
         f.close()
 
 
+def _foresight_panel_applies(settings, researcher) -> bool:
+    """Whether the FOREAGENT predict-before-execute panel should wrap this researcher.
+
+    The two call sites spelled this guard out with ONE clause of difference — the non-unified branch
+    also tested `backend == "llm"`, which the unified branch gets for free from `_unified` itself.
+    Written twice with a difference, it read as though the two paths were checking different things
+    (doc 25 CT-15); folding the clause in here is equivalent and says plainly that they are not.
+
+    Yields to an explicitly-configured numeric `researcher_panel > 1`, so opting into the k-NN panel
+    is never silently overridden by this default. Needs a client — a bare surrogate wrapper exposes
+    none, and falls through.
+    """
+    return bool(
+        getattr(settings, "foresight", True)
+        and settings.backend == "llm"
+        and getattr(settings, "foresight_panel", 2) > 1
+        and settings.researcher_panel <= 1
+        and getattr(researcher, "client", None) is not None)
+
+
+def _wrap_with_foresight_panel(researcher, settings, ftools):
+    """Build the foresight panel around *researcher*. ONE constructor call, deliberately.
+
+    Five getattr-defaulted kwargs written out in two branches is exactly the shape that grows a
+    sixth in only one of them, and a drift there would silently change unified-vs-plain behaviour
+    with nothing to catch it (doc 25 CT-15).
+    """
+    from looplab.search.foresight import ForesightPanelResearcher
+    return ForesightPanelResearcher(
+        researcher, k=settings.foresight_panel, tools=ftools,
+        min_confidence=getattr(settings, "foresight_min_confidence", 0.0),
+        verify_score=getattr(settings, "foresight_verify", False),
+        verify_samples=getattr(settings, "foresight_verify_samples", 3))
+
+
 def _apply_speculation_calibration_profile(settings: Settings) -> None:
     """Force the source-owned offline measurement profile before any role/client is built."""
     for field, value in SPECULATION_CALIBRATION_PROFILE_SETTINGS.items():
@@ -496,38 +531,21 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
                                              explore=settings.surrogate_explore)
         # FOREAGENT predict-before-execute for HYPOTHESES: rank K candidate ideas with the LLM world
         # model primed with the data profile + experiment memory — it compares the structural / text
-        # ideas the numeric surrogate can't. ON by default for the LLM backend. Needs a client (a bare
-        # surrogate wrapper exposes none -> falls through). YIELDS to an explicitly-configured numeric
-        # `researcher_panel > 1` so opting into the k-NN panel is never silently overridden by the default.
-        if (getattr(settings, "foresight", True) and settings.backend == "llm"
-                and getattr(settings, "foresight_panel", 2) > 1
-                and settings.researcher_panel <= 1
-                and getattr(researcher, "client", None) is not None):
-            from looplab.search.foresight import ForesightPanelResearcher
-            researcher = ForesightPanelResearcher(
-            researcher, k=settings.foresight_panel, tools=_ftools,
-            min_confidence=getattr(settings, "foresight_min_confidence", 0.0),
-            verify_score=getattr(settings, "foresight_verify", False),
-            verify_samples=getattr(settings, "foresight_verify_samples", 3))
+        # ideas the numeric surrogate can't. ON by default for the LLM backend.
+        if _foresight_panel_applies(settings, researcher):
+            researcher = _wrap_with_foresight_panel(researcher, settings, _ftools)
         # E2 researcher panel: generate K ideas and keep the best by the empirical surrogate.
         elif settings.researcher_panel > 1:
             from looplab.search.panel import PanelResearcher
             researcher = PanelResearcher(researcher, k=settings.researcher_panel)
-    elif (getattr(settings, "foresight", True) and getattr(settings, "foresight_panel", 2) > 1
-          and settings.researcher_panel <= 1
-          and getattr(researcher, "client", None) is not None):
+    elif _foresight_panel_applies(settings, researcher):
         # Foresight in UNIFIED mode: the wrappers above are skipped because they'd re-wrap only the
         # researcher handle, but ForesightPanelResearcher now DELEGATES its whole developer surface to
         # the wrapped agent (__getattr__), so wrapping the single unified agent and using it for BOTH
         # handles keeps them identical — predict-before-execute + hypothesis-board prioritization work,
         # implement/repair pass straight through. (Numeric surrogate/panel stay researcher-only, so
         # they remain unified-skipped; only the client-based foresight is safe to share.)
-        from looplab.search.foresight import ForesightPanelResearcher
-        researcher = ForesightPanelResearcher(
-            researcher, k=settings.foresight_panel, tools=_ftools,
-            min_confidence=getattr(settings, "foresight_min_confidence", 0.0),
-            verify_score=getattr(settings, "foresight_verify", False),
-            verify_samples=getattr(settings, "foresight_verify_samples", 3))
+        researcher = _wrap_with_foresight_panel(researcher, settings, _ftools)
         developer = researcher
     # RepoTask onboarding (Phase 3): if the task can propose its own eval spec, build the
     # onboarder (Researcher proposes + Developer writes the adapter).

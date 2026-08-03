@@ -159,6 +159,67 @@ def _preflight_speculation_authority(eng: Engine, events=None) -> None:
     guard(fold(source))
 
 
+def terminal_projection_incomplete(state, events) -> bool:
+    """Whether a folded run has an ACCEPTED terminal boundary whose wrap-up did not complete.
+
+    `run_finished` lands BEFORE the engine's finalization checklist, and a richer scoped checklist
+    can be interrupted part-way, so "finished" never answers "is the wrap-up done" on its own. Three
+    commands need this exact disjunction and each used to spell it out (doc 25 CT-03) — and it is
+    replay-critical, because it decides whether a command may append a lifecycle event at all.
+    """
+    return incomplete_finalize_scope(events) is not None or state.finalization_pending()
+
+
+# The two notices that were byte-identical in `run` and `resume`. Both mean the same thing — respect
+# the wrap-up already on disk, do NOT lift the run — so the mapping is owned here.
+WRAP_UP_NOTICE = {
+    "finalization_pending":
+        "run has an incomplete terminal projection — completing its existing wrap-up",
+    "pending_finalize":
+        "run has a pending finalize — wrapping it up (report / cross-run lessons / cost)",
+}
+
+
+def classify_prior_run(prior, prior_events) -> str:
+    """Which lifecycle boundary a folded prior run sits at, before a command re-enters the loop.
+
+    `run` and `resume` each carried this ladder inline with identical echo strings for the first two
+    rungs, and `finalize` a third variant of the same predicates. It decides WHICH EVENT, if any, is
+    appended before re-entry, so a fix applied to one copy and not the others silently gives the
+    entry points different lifecycles (doc 25 CT-03).
+
+    The ORDER is the contract, not an implementation detail:
+
+    * an incomplete terminal projection outranks everything — the wrap-up on disk owns the boundary;
+    * a stop request newer than the finish, or a finish whose reason is `error`, is a PENDING
+      FINALIZE and must be respected rather than lifted (the UI's finalize path spawns `resume` and
+      still has to finalize);
+    * only then the liftable states: a plain finish, then a plain pause.
+
+    Callers keep their surface-specific differences — `run` REOPENS a finished dir while `resume`
+    appends `resume` to it — because those genuinely differ; only the classification is shared.
+    """
+    if terminal_projection_incomplete(prior, prior_events):
+        return "finalization_pending"
+    if prior.stop_requested and (
+            not prior.finished or str(prior.stop_reason or "").lower() == "error"):
+        return "pending_finalize"
+    if prior.finished:
+        return "finished"
+    if prior.paused:
+        return "paused"
+    return "live"
+
+
+def announce_wrap_up(kind: str) -> bool:
+    """Echo the shared notice for a wrap-up state. True means "the caller must not lift this run"."""
+    notice = WRAP_UP_NOTICE.get(kind)
+    if notice is None:
+        return False
+    typer.echo(notice)
+    return True
+
+
 def _pending_finalize(state) -> bool:
     """A stop/finalize request is newer than the terminal finish that last served one."""
     last_stop = state.last_stop_request_seq
@@ -190,6 +251,127 @@ def _pending_finalization_inputs(run_dir: Path, task_id: str | None):
             f"task.snapshot.json belongs to task {recovery_task.id!r}, but the event log belongs "
             f"to {task_id!r}; refusing to finalize with mismatched inputs")
     return recovery_task, load_run_settings(run_dir, strict=True)
+
+
+def _pin_offline_speculation_profile(settings, *, calibration: bool, genesis: bool, goal) -> None:
+    """Force the immutable offline speculation profile when this run is a calibration/receipt run.
+
+    Runs BEFORE Genesis client construction or any role wiring — the bootstrap must be provably
+    offline, and merely resolving to a ToyTask AFTER a model-authored Genesis call is insufficient.
+    Lifted out of `run` (doc 25 CT-02): it is a maintainer-only lane that most readers of `run`
+    never need, and it was ~20 of the lines between "merge settings" and "author the task".
+    """
+    if calibration:
+        if genesis:
+            raise typer.BadParameter(
+                "--speculation-gate-calibration requires --no-genesis")
+        if settings.speculation_gate_receipt is not None:
+            raise typer.BadParameter(
+                "--speculation-gate-calibration is restricted: "
+                "speculation_gate_receipt must be unset")
+        _apply_speculation_calibration_profile(settings)
+        typer.echo(
+            "Speculation calibration profile "
+            f"{SPECULATION_CALIBRATION_PROFILE_DIGEST} (offline toy/greedy/GPU)"
+        )
+    elif settings.speculation_gate_receipt is not None:
+        # A receipt is not a general product rollout. Force the exact offline profile before Genesis
+        # or any role/client construction, preserving only max_nodes/depth/receipt. An explicit
+        # model-authored task would cross that boundary before Engine admission, so reject it here.
+        if genesis and goal is not None:
+            raise typer.BadParameter(
+                "receipt-backed Card speculation requires --no-genesis")
+        _apply_speculation_calibration_profile(settings)
+
+
+def _calibration_envelope_task_dict(task, settings) -> dict:
+    """Prove the calibration envelope, then return the canonical task dict its evidence needs.
+
+    A receipt cannot bootstrap itself after an implementation digest changes.  Keep the only
+    no-receipt path narrow and non-production: an explicit CLI-only flag, a deterministic toy
+    adapter/backend, a real-GPU requirement, Card authority and a small budget. Both the serial
+    depth=0 baseline and a positive-depth treatment use this same immutable envelope.
+    It is deliberately absent from Settings/snapshots/env/UI and resume has no corresponding
+    option, so it cannot silently authorize an application workload or survive re-entry.
+
+    Every clause is collected before raising so an operator sees the whole envelope at once rather
+    than fixing it one rejection per invocation.
+    """
+    from looplab.adapters.toytask import ToyTask
+    calibration_errors: list[str] = []
+    if type(task) is not ToyTask:
+        calibration_errors.append("task must be the exact offline quadratic ToyTask")
+    else:
+        try:
+            canonical_speculation_toy_task(task, require_seed_set=True)
+        except ValueError as exc:
+            calibration_errors.append(str(exc))
+    if settings.backend != "toy":
+        calibration_errors.append("backend must be toy")
+    if settings.policy != "greedy" or settings.strategist_backend != "off":
+        calibration_errors.append("policy must be greedy and strategist must be off")
+    if settings.card_driven_selection is not True:
+        calibration_errors.append("card_driven_selection must be true")
+    if not 1 <= settings.max_nodes <= 64:
+        calibration_errors.append("max_nodes must be in 1..64")
+    if settings.speculation_gate_receipt is not None:
+        calibration_errors.append("speculation_gate_receipt must be unset")
+    try:
+        from looplab.core.hardware import effective_gpu_inventory
+        if not effective_gpu_inventory():
+            calibration_errors.append("an effective visible GPU must be detected")
+    except Exception:
+        calibration_errors.append("GPU inventory could not be detected")
+    if calibration_errors:
+        raise typer.BadParameter(
+            "--speculation-gate-calibration is restricted: "
+            + "; ".join(calibration_errors)
+        )
+    # Unlike an ordinary authoring snapshot, calibration evidence must contain every defaulted
+    # task identity/provenance field (id/direction/noise/seed included), not just the flags the
+    # command happened to spell.
+    return task.model_dump(mode="json", exclude_none=False)
+
+
+def _assert_calibration_dir_is_fresh(out: Path, prior_events) -> None:
+    """Calibration evidence is only meaningful from a directory with exactly zero prior anything.
+
+    Checked under the singleton lock, against the events this command actually read — a prior log,
+    a non-empty events file, or any leftover material means the run dir already carries history the
+    receipt would silently inherit.
+    """
+    stale_material = sorted(
+        path.name for path in out.iterdir()
+        if path.name not in {"engine.lock", "events.jsonl"}
+    )
+    events_path = out / "events.jsonl"
+    if prior_events != [] or (events_path.exists() and events_path.stat().st_size) \
+            or stale_material:
+        detail = (f"; stale material: {', '.join(stale_material)}"
+                  if stale_material else "")
+        raise typer.BadParameter(
+            "--speculation-gate-calibration requires a fresh empty run directory "
+            "with exactly zero prior events" + detail
+        )
+
+
+def _publish_run_snapshots(out: Path, task_dict: dict, settings) -> None:
+    """Publish this epoch's input snapshots, both inside ONE reset-aware config transaction.
+
+    Called only after the new Engine is viable, so a construction failure leaves the PRIOR run's
+    provenance intact. Self-describing run: the RESOLVED task dict (after file + flags) goes to
+    disk as canonical JSON so `resume` (CLI or UI) can re-enter without the original file. The task
+    snapshot shares the config lock deliberately — a direct `looplab run` must not refresh either
+    snapshot while Replay has archived generation A but not proven generation B.
+    """
+    config_snapshot = out / "config.snapshot.json"
+    with run_config_write_lock(config_snapshot):
+        atomic_write_text(
+            config_snapshot, json.dumps(settings.masked_snapshot(), indent=2))
+        try:
+            atomic_write_text(out / "task.snapshot.json", json.dumps(task_dict, indent=2))
+        except OSError:
+            pass
 
 
 def _missing_task_paths(task_dict: dict) -> list[tuple[str, str]]:
@@ -352,29 +534,8 @@ def run(
         # the active profile while retaining that profile's endpoint and credential binding.
         from looplab.core.llm import apply_llm_model_override
         apply_llm_model_override(settings, str(effective_model_override))
-    if speculation_gate_calibration:
-        # This guard precedes Genesis client construction/authoring.  The bootstrap must be provably
-        # offline; merely resolving to a ToyTask after a model-authored Genesis call is insufficient.
-        if genesis:
-            raise typer.BadParameter(
-                "--speculation-gate-calibration requires --no-genesis")
-        if settings.speculation_gate_receipt is not None:
-            raise typer.BadParameter(
-                "--speculation-gate-calibration is restricted: "
-                "speculation_gate_receipt must be unset")
-        _apply_speculation_calibration_profile(settings)
-        typer.echo(
-            "Speculation calibration profile "
-            f"{SPECULATION_CALIBRATION_PROFILE_DIGEST} (offline toy/greedy/GPU)"
-        )
-    elif settings.speculation_gate_receipt is not None:
-        # A receipt is not a general product rollout. Force the exact offline profile before Genesis
-        # or any role/client construction, preserving only max_nodes/depth/receipt. An explicit
-        # model-authored task would cross that boundary before Engine admission, so reject it here.
-        if genesis and goal is not None:
-            raise typer.BadParameter(
-                "receipt-backed Card speculation requires --no-genesis")
-        _apply_speculation_calibration_profile(settings)
+    _pin_offline_speculation_profile(
+        settings, calibration=speculation_gate_calibration, genesis=genesis, goal=goal)
     # 3b. Genesis: you described the goal in words — let the LLM author the task (the headless
     # counterpart of the UI's "New run"). Fires on an explicit --goal (so no file-based / legacy flow
     # is affected). --kind does NOT skip it: it PINS the kind and Genesis fills the rest within it;
@@ -436,46 +597,7 @@ def run(
     except (ValueError, KeyError, TypeError) as e:
         raise typer.BadParameter(f"invalid task: {e}")
     if speculation_gate_calibration:
-        # A receipt cannot bootstrap itself after an implementation digest changes.  Keep the only
-        # no-receipt path narrow and non-production: an explicit CLI-only flag, a deterministic toy
-        # adapter/backend, a real-GPU requirement, Card authority and a small budget. Both the serial
-        # depth=0 baseline and a positive-depth treatment use this same immutable envelope.
-        # It is deliberately absent from Settings/snapshots/env/UI and resume has no corresponding
-        # option, so it cannot silently authorize an application workload or survive re-entry.
-        from looplab.adapters.toytask import ToyTask
-        calibration_errors: list[str] = []
-        if type(task) is not ToyTask:
-            calibration_errors.append("task must be the exact offline quadratic ToyTask")
-        else:
-            try:
-                canonical_speculation_toy_task(task, require_seed_set=True)
-            except ValueError as exc:
-                calibration_errors.append(str(exc))
-        if settings.backend != "toy":
-            calibration_errors.append("backend must be toy")
-        if settings.policy != "greedy" or settings.strategist_backend != "off":
-            calibration_errors.append("policy must be greedy and strategist must be off")
-        if settings.card_driven_selection is not True:
-            calibration_errors.append("card_driven_selection must be true")
-        if not 1 <= settings.max_nodes <= 64:
-            calibration_errors.append("max_nodes must be in 1..64")
-        if settings.speculation_gate_receipt is not None:
-            calibration_errors.append("speculation_gate_receipt must be unset")
-        try:
-            from looplab.core.hardware import effective_gpu_inventory
-            if not effective_gpu_inventory():
-                calibration_errors.append("an effective visible GPU must be detected")
-        except Exception:
-            calibration_errors.append("GPU inventory could not be detected")
-        if calibration_errors:
-            raise typer.BadParameter(
-                "--speculation-gate-calibration is restricted: "
-                + "; ".join(calibration_errors)
-            )
-        # Unlike an ordinary authoring snapshot, calibration evidence must contain every defaulted
-        # task identity/provenance field (id/direction/noise/seed included), not just the flags the
-        # command happened to spell.
-        task_dict = task.model_dump(mode="json", exclude_none=False)
+        task_dict = _calibration_envelope_task_dict(task, settings)
     # the task adapters own comparison-contract validation and identity.  Persist their
     # canonical value (including contract_id), never the pre-validation authoring dict, so CLI and
     # Web/TUI/API launches produce the same scientific provenance in task.snapshot.json.
@@ -508,22 +630,9 @@ def run(
         prior_events = store.read_all()
         prior = fold(prior_events)
         if speculation_gate_calibration:
-            stale_material = sorted(
-                path.name for path in out.iterdir()
-                if path.name not in {"engine.lock", "events.jsonl"}
-            )
-            events_path = out / "events.jsonl"
-            if prior_events != [] or (events_path.exists() and events_path.stat().st_size) \
-                    or stale_material:
-                detail = (f"; stale material: {', '.join(stale_material)}"
-                          if stale_material else "")
-                raise typer.BadParameter(
-                    "--speculation-gate-calibration requires a fresh empty run directory "
-                    "with exactly zero prior events" + detail
-                )
-        pending_finalize_scope = incomplete_finalize_scope(prior_events)
-        finalization_pending = (
-            pending_finalize_scope is not None or prior.finalization_pending())
+            _assert_calibration_dir_is_fresh(out, prior_events)
+        prior_kind = classify_prior_run(prior, prior_events)
+        finalization_pending = prior_kind == "finalization_pending"
         if prior.run_id and prior.task_id and prior.task_id != task.id:
             typer.echo(
                 f"run dir {out} already holds task {prior.task_id!r}, not {task.id!r} — refusing to "
@@ -555,38 +664,25 @@ def run(
             # This existing prefix is still the authority until the new snapshots are published.
             # Refuse a stale/missing/different receipt before replacing either snapshot.
             _preflight_speculation_authority(eng, prior_events)
-            config_snapshot = out / "config.snapshot.json"
-            with run_config_write_lock(config_snapshot):
-                atomic_write_text(
-                    config_snapshot, json.dumps(settings.masked_snapshot(), indent=2))
-                # Self-describing run: write the RESOLVED task dict (after file + flags) as canonical
-                # JSON so `resume` (CLI or UI) can re-enter without the original file. Keep it in the
-                # same reset-aware config transaction: a direct `looplab run` must not refresh either
-                # snapshot while Replay has archived generation A but not proven generation B.
-                try:
-                    atomic_write_text(out / "task.snapshot.json", json.dumps(task_dict, indent=2))
-                except OSError:
-                    pass
+            _publish_run_snapshots(out, task_dict, settings)
         # Continue a run dir that ALREADY FINISHED. Without this, re-entering the loop folds the log,
         # sees finished=True and breaks at once — printing the OLD best and doing no work. That silently
         # no-ops a re-run with a bigger --max-nodes, and (worse) makes a run that finished with
         # reason=error un-retryable: fixing the cause and re-running the same command does nothing.
         # Reopen it (the same event the Web UI/TUI append to continue a finished run) so the loop
         # processes the new budget / retries the failure, and SAY so — never silently no-op.
-        if finalization_pending:
-            typer.echo("run has an incomplete terminal projection — completing its existing wrap-up")
-        elif prior.stop_requested and (
-                not prior.finished or str(prior.stop_reason or "").lower() == "error"):
-            # a pending finalize (a stop was requested) — let the loop wrap it up; don't reopen/resume.
-            typer.echo("run has a pending finalize — wrapping it up (report / cross-run lessons / cost)")
-        elif prior.finished:
+        # Both wrap-up states are RESPECTED, never lifted: let the loop finish the existing
+        # boundary rather than reopening or resuming behind it.
+        if announce_wrap_up(prior_kind):
+            pass
+        elif prior_kind == "finished":
             typer.echo(
                 f"run dir {out} already finished"
                 + (f" (reason={prior.stop_reason})" if prior.stop_reason else "")
                 + " — reopening to continue with the current task/settings "
                   "(use a new --out for a fresh run).")
             eng.store.append(EV_RUN_REOPENED, {})
-        elif prior.paused:
+        elif prior_kind == "paused":
             # a STOPped (paused) run: the loop would fold paused=True and break at once, printing the
             # STALE best and doing no work — the exact silent no-op the finished branch guards against.
             # Lift the pause and continue, mirroring `resume` (whose paused branch appends EV_RESUME).
@@ -672,20 +768,12 @@ def resume(
                 # A control may have landed while this command waited for singleton ownership.
                 # Re-authorize the exact prefix immediately before resume/resume_served can append.
                 _preflight_speculation_authority(eng, prior_events)
-                pending_finalize_scope = incomplete_finalize_scope(prior_events)
-                finalization_pending = (
-                    pending_finalize_scope is not None or prior.finalization_pending())
-                if finalization_pending:
+                prior_kind = classify_prior_run(prior, prior_events)
+                # `resume` LIFTS both liftable states the same way; `run` reopens a finished dir
+                # instead. That difference is real, so it stays here rather than in the classifier.
+                if not announce_wrap_up(prior_kind) and prior_kind in ("finished", "paused"):
                     typer.echo(
-                        "run has an incomplete terminal projection — completing its existing wrap-up")
-                elif prior.stop_requested and (
-                        not prior.finished or str(prior.stop_reason or "").lower() == "error"):
-                    typer.echo(
-                        "run has a pending finalize — wrapping it up "
-                        "(report / cross-run lessons / cost)")
-                elif prior.paused or prior.finished:
-                    typer.echo(
-                        f"run was {'finished' if prior.finished else 'stopped'} — "
+                        f"run was {'finished' if prior_kind == 'finished' else 'stopped'} — "
                         "resuming to continue with the current settings")
                     eng.store.append(EV_RESUME, {})
                 # P1-1: we hold the singleton lock and are about to drive the loop, so FULFILL any
@@ -747,17 +835,15 @@ def finalize(
     while True:
         events = store.read_all()
         before = fold(events)
-        pending_finalize_scope = incomplete_finalize_scope(events)
-        if (before.finished and pending_finalize_scope is None
-                and not before.finalization_pending()
+        wrap_up_incomplete = terminal_projection_incomplete(before, events)
+        if (before.finished and not wrap_up_incomplete
                 and not _pending_finalize(before) and not before.resume_pending()):
             # Already complete is a pure read/no-op. Appending a fresh run_abort here would leave a
             # misleading last_stop_request_seq newer than last_finish_seq and make a later raw resume
             # look like an unserved FINALIZE request.
             typer.echo(f"finalized {run_dir}")
             return
-        if (pending_finalize_scope is not None or before.finalization_pending()
-                or _pending_finalize(before)):
+        if wrap_up_incomplete or _pending_finalize(before):
             break
         tail = events[-1].seq if events else -1
         try:
@@ -797,8 +883,7 @@ def finalize(
         # must be wrapped up even though Engine.run() would immediately hit the terminal gate. This
         # emits no resume event, so it cannot advance the search epoch or launch candidate work.
         current_events = eng.store.read_all()
-        if (incomplete_finalize_scope(current_events) is not None
-                or current.finalization_pending()):
+        if terminal_projection_incomplete(current, current_events):
             finalize_run(eng, entry_finished=current.finished, start_time=started)
             current = fold(eng.store.read_all())
 

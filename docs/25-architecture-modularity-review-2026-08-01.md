@@ -3894,6 +3894,31 @@ sites. Teeth-verified: restoring either underscore turns three assertions red.
 
 *Recommendation:* Extract per-phase helpers: _resolve_task_and_settings(...), _validate_calibration_envelope(task, settings, out), _publish_snapshots(out, task_dict, settings), and _triage_prior_run(prior, prior_events, eng) (the latter shared with resume — see the duplication finding). run() becomes a ~60-line pipeline, and the calibration lane becomes independently testable.
 
+*Resolution (2026-08-03):* Four of the five recommended extractions landed; `run()`'s BODY went from
+347 to 210 lines (the remaining 65 lines of the function are its frozen `--flag` signature and
+docstring, which are not work it does).
+
+* `_pin_offline_speculation_profile(settings, *, calibration, genesis, goal)` — the pre-Genesis
+  profile guard, which has to run before any client construction.
+* `_calibration_envelope_task_dict(task, settings)` — the restricted envelope, returning the
+  canonical dump its evidence needs. Every clause is still collected before raising, so an operator
+  sees the whole envelope at once rather than fixing it one rejection per invocation.
+* `_assert_calibration_dir_is_fresh(out, prior_events)` — the zero-prior-anything requirement.
+* `_publish_run_snapshots(out, task_dict, settings)` — both snapshots in ONE reset-aware config
+  transaction, including the deliberate `except OSError: pass` around the task snapshot.
+* the prior-run triage is CT-03's shared `classify_prior_run` (below).
+
+`_resolve_task_and_settings(...)` was deliberately NOT extracted, and this is a decision rather than
+an omission: steps 1–3 read 21 of `run`'s typer parameters, so the helper would take 21 arguments —
+the precise shape RA-02 flags as a defect three findings later. Turning a readable prologue into a
+21-argument call would move the problem, not fix it. The lane that made `run` hard to read was the
+maintainer-only calibration envelope, and that is gone.
+
+`tests/test_cli_lifecycle_triage.py` bounds the body length (measured on the body, so a regression
+cannot hide behind the option surface), asserts `run` calls each helper rather than inlining it, and
+pins the two behaviours that a tidy-up would quietly drop: the envelope reports every violation at
+once, and an unwritable task snapshot does not lose the config snapshot that already landed.
+
 #### CT-03 · MEDIUM · duplication · effort: medium
 
 **Prior-run lifecycle triage duplicated across run / resume / finalize**
@@ -3903,6 +3928,26 @@ sites. Teeth-verified: restoring either underscore turns three assertions red.
 *Evidence:* run() (557-627) and resume() (707-732) both compute pending_finalize_scope = incomplete_finalize_scope(prior_events); finalization_pending = scope is not None or prior.finalization_pending(); then branch identically on (finalization_pending | stop_requested-with-error | finished | paused) with byte-identical echo strings ("run has an incomplete terminal projection — completing its existing wrap-up", "run has a pending finalize — wrapping it up (report / cross-run lessons / cost)") and the same EV_RESUME append. finalize() (793-848) carries a third variant of the same predicate cluster plus _pending_finalize(). This is a replay-critical decision (which event, if any, to append before re-entering the loop) implemented three times; a fix to one branch (as the history of these comments shows happens often) must be manually mirrored.
 
 *Recommendation:* Extract one shared classifier, e.g. classify_prior_run(prior, prior_events) -> Literal["finalization_pending","pending_finalize","finished","paused","live","fresh"] plus a small act-on-it helper that appends EV_RUN_REOPENED/EV_RESUME and echoes. run/resume/finalize each keep only their surface-specific differences (run reopens, resume waits for handoff, finalize CAS-appends run_abort).
+
+*Resolution (2026-08-03):* `run_cmds.classify_prior_run(prior, prior_events)` is now the single
+answer, over `terminal_projection_incomplete(state, events)` — the disjunction all three commands
+needed and all three spelled out. `announce_wrap_up(kind)` owns the two byte-identical notices and
+returns whether the caller may lift the run at all.
+
+`run` and `resume` call the classifier; `finalize` uses `terminal_projection_incomplete` in the
+three places it had its own variant. The surface differences stay where they belong — `run` reopens
+a finished dir with `run_reopened` so the loop processes a new budget, `resume` appends the
+universal `resume`, `finalize` still CAS-appends `run_abort` — because those genuinely differ;
+collapsing them would be the wrong deduplication.
+
+The ladder ORDER is the contract and is pinned rung by rung in
+`tests/test_cli_lifecycle_triage.py`: an incomplete terminal projection outranks everything, a stop
+newer than the finish (or a finish whose reason is `error`) is a pending finalize that must be
+RESPECTED rather than lifted, and only then the liftable states. Teeth-verified — reordering any
+rung, dropping the scope half of the predicate, making a wrap-up state liftable, or re-spelling a
+shared notice each turns exactly the matching assertion red. The notice guard joins Python's
+implicit adjacent-literal concatenation first, so a re-spelled copy cannot hide by being wrapped
+across two lines.
 
 #### CT-04 · MEDIUM · mergeable-entities · effort: small
 
@@ -4211,6 +4256,22 @@ answer a guard must never give. A test pins the exclusion so it reads as a decis
 *Evidence:* _engine assembles the whole object graph — profile validation, calibration lane, researcher-wrapper selection (surrogate/foresight/panel × unified/non-unified), onboarder, strategist, deep researcher, report writer, proxy scorer, embedder, lesson abstractor — in one function. The ForesightPanelResearcher constructor call with its five getattr-defaulted kwargs (k, tools, min_confidence, verify_score, verify_samples) is written twice, once in the non-unified branch (377-382) and once in the unified branch (396-401); the guard conditions differ by one clause. A drift between the two copies would silently change unified-vs-plain behavior.
 
 *Recommendation:* Extract at least _wrap_researcher(researcher, developer, settings, ftools) returning the wrapped pair, with the Foresight ctor written once; consider further splitting strategist/deep-research/report construction into small builders. Keep the function's name and signature — ~10 tests patch looplab.cli._engine.
+
+*Resolution (2026-08-03):* `_wrap_with_foresight_panel(researcher, settings, ftools)` writes the
+constructor once, and `_foresight_panel_applies(settings, researcher)` writes the guard once.
+`_engine` keeps its name and signature, so the ~10 tests that patch `looplab.cli._engine` are
+untouched.
+
+The one-clause difference between the two guards is gone rather than preserved: the non-unified
+branch tested `backend == "llm"` and the unified branch did not, because `_unified` already implies
+it. Folding the clause into the shared predicate is equivalent and says plainly that the two paths
+were never checking different things. `tests/test_cli_lifecycle_triage.py` pins that exactly one
+`ForesightPanelResearcher(` call exists, that `_engine` no longer re-derives the guard, and — as
+behaviour, not shape — that the guard still yields to an explicitly-configured `researcher_panel > 1`
+so opting into the k-NN panel is never silently overridden by the foresight default.
+
+The further split of strategist/deep-research/report construction was not done; the duplicated
+constructor was the defect, and those are each written once already.
 
 
 ### 4.13 Cross-package / whole-tree analysis
