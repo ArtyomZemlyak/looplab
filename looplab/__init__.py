@@ -109,6 +109,7 @@ _LAYOUT = {
     "env_inspect": "tools",
     "errors": "core",
     "eval_dispatch": "engine",
+    "fence": "core",           # the shared durable writer-fence protocol (doc 25 CO-01)
     "fitness": "core",
     "eval_stages": "engine",
     "eventstore": "events",

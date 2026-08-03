@@ -15,16 +15,20 @@ import stat
 from pathlib import Path
 from typing import Any, Optional
 
-from looplab.core.atomicio import (
-    file_identity, strict_atomic_write_text, strict_fsync_parent)
+from looplab.core.atomicio import file_identity, strict_fsync_parent
+from looplab.core.fence import (
+    FENCE_GENERATION_RE, FENCE_MAX_BYTES, FENCE_OPERATION_RE,
+    load_bounded_json_marker, publish_bounded_json_marker)
 from looplab.core.pathsafe import filesystem_identity, is_reparse
 
 
 RUN_DELETION_FENCE_PREFIX = ".looplab-delete-fence-"
-RUN_DELETION_OPERATION_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-RUN_DELETION_FENCE_MAX_BYTES = 8 * 1024
-_RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
+# Aliases, not second declarations — see `core/fence.py` (doc 25 CO-01).
+RUN_DELETION_OPERATION_RE = FENCE_OPERATION_RE
+RUN_DELETION_FENCE_MAX_BYTES = FENCE_MAX_BYTES
+_RUN_GENERATION_RE = FENCE_GENERATION_RE
+# The run key is a sha256 of the filesystem identity, so it happens to share the generation's shape
+# while meaning something else entirely. Kept as its own name for exactly that reason.
 _RUN_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -88,55 +92,37 @@ def run_deletion_fence_path(run_dir: str | os.PathLike) -> Path:
     return rd.parent / f"{RUN_DELETION_FENCE_PREFIX}{run_deletion_key(rd)}.json"
 
 
-def load_run_deletion_fence(run_dir: str | os.PathLike) -> Optional[dict[str, Any]]:
-    path = run_deletion_fence_path(run_dir)
-    try:
-        before = path.lstat()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise RunDeletionStorageError(f"deletion fence cannot be inspected: {exc}") from exc
-    if is_reparse(before) or not stat.S_ISREG(before.st_mode):
-        raise RunDeletionStorageError("deletion fence is not a regular service-owned file")
-    if before.st_size > RUN_DELETION_FENCE_MAX_BYTES:
-        raise RunDeletionStorageError("deletion fence exceeds its safety limit")
-    try:
-        with path.open("rb") as stream:
-            raw = stream.read(RUN_DELETION_FENCE_MAX_BYTES + 1)
-        after = path.lstat()
-    except OSError as exc:
-        raise RunDeletionStorageError(f"deletion fence cannot be read: {exc}") from exc
-    identity = lambda info: (
-        info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
-        int(getattr(info, "st_file_attributes", 0) or 0),
-    )
-    if identity(before) != identity(after):
-        raise RunDeletionStorageError("deletion fence changed while it was being read")
-    if len(raw) > RUN_DELETION_FENCE_MAX_BYTES:
-        raise RunDeletionStorageError("deletion fence exceeds its safety limit")
-    try:
-        value = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeError, RecursionError) as exc:
-        raise RunDeletionStorageError(f"deletion fence cannot be decoded: {exc}") from exc
-    expected_key = run_deletion_key(run_dir)
-    if (not isinstance(value, dict)
-            or set(value) != {
+def _deletion_fence_is_valid(value: dict[str, Any], expected_key: str) -> bool:
+    """This module's half of the fence: WHAT a deletion fence must say. Unlike the reset marker it
+    also binds the fence to the exact run — `run_key` is checked against the key derived from the
+    directory being asked about, so a fence file moved or copied beside a different run is malformed
+    rather than authoritative. The read protocol itself lives in `core/fence.py` (doc 25 CO-01)."""
+    return (set(value) == {
                 "version", "operation_id", "run_key", "expected_generation", "expected_seq",
                 "receipt_name",
             }
-            or value.get("version") != 1
-            or not isinstance(value.get("operation_id"), str)
-            or RUN_DELETION_OPERATION_RE.fullmatch(value["operation_id"]) is None
-            or not isinstance(value.get("run_key"), str)
-            or _RUN_KEY_RE.fullmatch(value["run_key"]) is None
-            or value["run_key"] != expected_key
-            or not isinstance(value.get("expected_generation"), str)
-            or _RUN_GENERATION_RE.fullmatch(value["expected_generation"]) is None
-            or type(value.get("expected_seq")) is not int or value["expected_seq"] < -1
-            or not isinstance(value.get("receipt_name"), str) or not value["receipt_name"]
-            or Path(value["receipt_name"]).name != value["receipt_name"]):
-        raise RunDeletionStorageError("deletion fence is malformed")
-    return value
+            and value.get("version") == 1
+            and isinstance(value.get("operation_id"), str)
+            and RUN_DELETION_OPERATION_RE.fullmatch(value["operation_id"]) is not None
+            and isinstance(value.get("run_key"), str)
+            and _RUN_KEY_RE.fullmatch(value["run_key"]) is not None
+            and value["run_key"] == expected_key
+            and isinstance(value.get("expected_generation"), str)
+            and _RUN_GENERATION_RE.fullmatch(value["expected_generation"]) is not None
+            and type(value.get("expected_seq")) is int and value["expected_seq"] >= -1
+            and isinstance(value.get("receipt_name"), str) and bool(value["receipt_name"])
+            and Path(value["receipt_name"]).name == value["receipt_name"])
+
+
+def load_run_deletion_fence(run_dir: str | os.PathLike) -> Optional[dict[str, Any]]:
+    expected_key = run_deletion_key(run_dir)
+    return load_bounded_json_marker(
+        run_deletion_fence_path(run_dir),
+        label="deletion fence",
+        error_cls=RunDeletionStorageError,
+        validate=lambda value: _deletion_fence_is_valid(value, expected_key),
+        max_bytes=RUN_DELETION_FENCE_MAX_BYTES,
+    )
 
 
 def publish_run_deletion_fence(
@@ -156,24 +142,21 @@ def publish_run_deletion_fence(
             or type(expected_seq) is not int or expected_seq < -1
             or Path(receipt_name).name != receipt_name):
         raise ValueError("invalid deletion fence identity")
-    path = run_deletion_fence_path(run_dir)
+    # Unlike the reset marker, an existing fence is NOT overwritten: a different operation already
+    # owns this run, and replacing its fence would hand ownership to a second deleter. An identical
+    # fence is the same operation retrying, which is idempotent.
     current = load_run_deletion_fence(run_dir)
     if current is not None:
         if current != value:
             raise RunDeletionStorageError("another deletion operation owns this run")
         return current
-    try:
-        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
-        if len(encoded.encode("utf-8")) > RUN_DELETION_FENCE_MAX_BYTES:
-            raise ValueError("deletion fence exceeds its safety limit")
-        strict_atomic_write_text(path, encoded)
-    except (OSError, TypeError, ValueError) as exc:
-        raise RunDeletionStorageError(
-            f"deletion fence could not be published durably: {exc}") from exc
-    confirmed = load_run_deletion_fence(run_dir)
-    if confirmed != value:
-        raise RunDeletionStorageError("deletion fence publication could not be confirmed")
-    return value
+    return publish_bounded_json_marker(
+        run_deletion_fence_path(run_dir), value,
+        label="deletion fence",
+        error_cls=RunDeletionStorageError,
+        confirm=lambda: load_run_deletion_fence(run_dir),
+        max_bytes=RUN_DELETION_FENCE_MAX_BYTES,
+    )
 
 
 def assert_run_deletion_write_allowed(

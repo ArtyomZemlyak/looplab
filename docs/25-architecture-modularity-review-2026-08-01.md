@@ -1752,6 +1752,33 @@ Scope: `looplab/core/`: models.py, config.py, llm.py + siblings, tracing, parsin
 
 *Recommendation:* Extract a shared `_fence.py` helper: `load_bounded_json_marker(path, schema_validator, max_bytes, error_cls)` (lstat-identity-checked bounded read), `publish_marker(...)` (encode+strict write+read-back confirm), and the shared `_is_reparse`/regex constants. Keep the two thin modules as the public schema owners so their distinct key-sets and error types stay explicit.
 
+*Resolution (2026-08-03):* `looplab/core/fence.py` owns the PROTOCOL;
+`run_reset.py` and `run_deletion.py` stay the schema owners. `load_bounded_json_marker` performs the
+lstat / reject-non-regular / reject-oversized / bounded-read / re-lstat / identity-compare / decode
+sequence and hands the decoded object to the owner's validator; `publish_bounded_json_marker` does
+encode + size check + strict atomic write + read-back confirm through the owner's own loader. The
+UUID and 64-hex shapes and the 8 KiB cap are declared once; the two modules alias them under their
+existing public names so importers are unaffected.
+
+Each owner keeps what is genuinely its own: its error classes, its key-set, and the decisions that
+differ. The deletion fence also binds `run_key` to the exact directory being asked about (it lives
+BESIDE the run, so a fence copied next to another run must be malformed rather than authoritative),
+and it REFUSES to overwrite a live fence where the reset marker republishes — replacing one would
+hand ownership to a second deleter mid-operation.
+
+**The drift the finding predicted had already happened.** `load_run_deletion_fence` re-derived
+`atomicio.file_identity` as a local six-field lambda while importing the canonical helper two lines
+above, so a change to the canonical tuple would have left the deletion fence comparing a weaker
+identity with nothing to notice. That copy is gone.
+
+`tests/test_fence_protocol.py` proves the protocol as BEHAVIOUR on BOTH fences (absent is `None`;
+undecodable, malformed, extra-key, oversized and non-regular all fail CLOSED into the owner's
+storage error), and pins the parts a shape-only test would miss: the read-back lstat actually
+refuses a marker replaced under it, the oversized marker is refused WITHOUT being opened (asserting
+only "it raised" would stay green with the pre-read guard deleted, because the post-read guard still
+catches it — after doing the very read the first guard exists to prevent), and the two fences keep
+distinct error types. Teeth-verified against 13 separate breakages.
+
 #### CO-02 · HIGH · under-decomposition · effort: large
 
 **models.py is a god-module: card/idea identity-digest machinery (~800 lines) buried among domain models**
