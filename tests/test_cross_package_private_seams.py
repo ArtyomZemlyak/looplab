@@ -36,6 +36,12 @@ _PKG = Path(__file__).resolve().parents[1] / "looplab"
 # consumer package -> provider module -> the private names it imports.
 CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
     "adapters": {
+        # The BACK-COMPAT re-export of the composition root that split out of this module
+        # (doc 25 RA-01). These are private-by-convention helpers whose names dozens of call
+        # sites and tests already spell as `looplab.adapters.tasks._make_abstractor` &c., so the
+        # re-export has to carry them or the split stops being invisible.
+        "looplab.agents.factory": ("_agent_model", "_make_abstractor", "_memora_cache_path",
+                                   "_set_role_client", "_shared_providers"),
         "looplab.runtime.sandbox": ("_last_json_dict",),
         "looplab.tools.reposcout": ("_SKIP_DIRS",),
     },

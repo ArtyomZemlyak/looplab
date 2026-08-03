@@ -3756,6 +3756,17 @@ rather than sitting as three separable blocks; splitting them needs its own pass
 each backend, and doing it badly would scatter the wiring instead of naming it. Recorded so the
 remaining half is visible rather than assumed done. Teeth-verified against 6 breakages.
 
+Two REGISTRY guards caught the split, which is what they exist for, and both needed a real update
+rather than a green-making edit:
+
+* `tests/test_cross_package_private_seams.py` — the back-compat re-export pulls five
+  private-by-convention names (`_agent_model`, `_make_abstractor`, `_memora_cache_path`,
+  `_set_role_client`, `_shared_providers`) across a package boundary. Declared, with the reason:
+  dozens of call sites and tests already spell them as `looplab.adapters.tasks._make_abstractor`, so
+  the re-export has to carry them or the split stops being invisible.
+* `tests/test_task_adapter_contract.py` — the `params` hook's consumer probe moved with the
+  composition root, so the hook read as orphaned. `agents/factory.py` added to the consumer scan.
+
 #### RA-02 · HIGH · under-decomposition · effort: medium
 
 **run_command_eval is a ~265-line god-function with 23 parameters (19 keyword) and two hand-mirrored eval branches**

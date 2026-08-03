@@ -24,6 +24,9 @@ _CONSUMER_FILES = [
     *(_PKG / "cli").glob("*.py"),   # cli became a package (docs/15 §P5.2) — scan every command module
 
     _PKG / "adapters" / "tasks.py",
+    # The agent/role composition root split out of `adapters/tasks.py` (doc 25 RA-01) and took the
+    # `params` probe with it; the hooks it consumes are the same hooks, in a new file.
+    _PKG / "agents" / "factory.py",
     _PKG / "adapters" / "repo_task.py",
     _PKG / "adapters" / "repo_developer.py",
     _PKG / "adapters" / "repo_write_tools.py",
