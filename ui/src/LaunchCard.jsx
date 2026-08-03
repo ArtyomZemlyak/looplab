@@ -167,6 +167,7 @@ export default function LaunchCard({
   const [unknownStart, setUnknownStart] = useState(null)
   const [damagedRecovery, setDamagedRecovery] = useState(null)
   const [missingStart, setMissingStart] = useState(false)
+  const [hydratedTransportIdentity, setHydratedTransportIdentity] = useState('')
   const [startedRunId, setStartedRunId] = useState('')
   const [reservedRunId, setReservedRunId] = useState('')
   const [errors, setErrors] = useState({})
@@ -202,12 +203,20 @@ export default function LaunchCard({
   const statusFlightRef = useRef(null)
   const settingsBlockedRef = useRef(settingsLaunchBlocked)
   const transportIdentityRef = useRef(transportIdentity)
+  const navigationEpochRef = useRef(0)
   transportIdentityRef.current = transportIdentity
-  useEffect(() => () => {
-    transportIdentityRef.current = ''
-    validationRequestRef.current += 1
-    statusRequestRef.current += 1
-    statusFlightRef.current = null
+  useEffect(() => {
+    const noteNavigation = () => { navigationEpochRef.current += 1 }
+    window.addEventListener('hashchange', noteNavigation)
+    window.addEventListener('popstate', noteNavigation)
+    return () => {
+      window.removeEventListener('hashchange', noteNavigation)
+      window.removeEventListener('popstate', noteNavigation)
+      transportIdentityRef.current = ''
+      validationRequestRef.current += 1
+      statusRequestRef.current += 1
+      statusFlightRef.current = null
+    }
   }, [])
 
   useEffect(() => {
@@ -230,7 +239,10 @@ export default function LaunchCard({
     validationRequestRef.current += 1
     statusRequestRef.current += 1
     statusFlightRef.current = null
-    setValidating(false); setValidation(null); setChecking(false)
+    // A keyed render normally remounts the card, but keep an in-place identity transition safe too:
+    // detach the old request while its durable recovery record remains available globally.
+    startRequestRef.current = null
+    setValidating(false); setValidation(null); setStarting(false); setChecking(false)
     const saved = loadLaunchTransport(transportIdentity)
     setStorageBlocked(false); setUnknownStart(null); setDamagedRecovery(null)
     setMissingStart(false); setStartedRunId(''); setReservedRunId(''); setErrors({})
@@ -249,6 +261,7 @@ export default function LaunchCard({
     } else {
       setNotice('Review the proposal, then validate it before starting.')
     }
+    setHydratedTransportIdentity(transportIdentity)
   }, [transportIdentity])
 
   const fingerprint = launchFingerprint(draft, chat)
@@ -256,7 +269,10 @@ export default function LaunchCard({
   fingerprintRef.current = fingerprint
   const validatedCurrent = !!validation?.token && validation.fingerprint === fingerprint
   const settingsParsed = parseObjectJson(draft.settings_json, 'Settings')
-  const operationBusy = validating || starting || checking
+  // The first paint (and any in-place identity change) is non-interactive until tab recovery has
+  // been read. Otherwise Reset could erase an unresolved paid-Start fence before this effect runs.
+  const transportPending = hydratedTransportIdentity !== transportIdentity
+  const operationBusy = transportPending || validating || starting || checking
   const locked = operationBusy || !!unknownStart || !!damagedRecovery || !!startedRunId
   const taskRows = summarizeLaunchTask(draft)
   const launchErrorTarget = path => {
@@ -304,6 +320,7 @@ export default function LaunchCard({
   }
 
   const reset = () => {
+    if (transportPending) return
     const saved = loadLaunchTransport(transportIdentity)
     if (saved?.invalid || damagedRecovery) {
       setStorageBlocked(true)
@@ -397,18 +414,29 @@ export default function LaunchCard({
     }
   }
 
+  const captureNavigation = () => ({
+    navigationEpoch: navigationEpochRef.current,
+    navigationHash: location.hash,
+  })
+  const navigationStillOwned = operation => operation.navigationEpoch === navigationEpochRef.current
+    && operation.navigationHash === location.hash
+
   const presentStartupResult = (result, operation, { checked = false, pollTimedOut = false } = {}) => {
     const outcome = launchStatusOutcome(result, operation.runId)
     if (outcome.kind === 'started') {
       const cleared = clearRecovery(operation)
+      const keepNavigation = navigationStillOwned(operation)
       setUnknownStart(null)
       setStartedRunId(outcome.runId)
-      setNotice(cleared
+      const receipt = cleared
         ? `Startup is proven for ${outcome.runId}. This card is locked against another Start.`
-        : `Startup is proven for ${outcome.runId}. This card is locked, but tab recovery storage could not be cleared.`)
+        : `Startup is proven for ${outcome.runId}. This card is locked, but tab recovery storage could not be cleared.`
+      setNotice(`${receipt}${keepNavigation ? '' : ' Open the started run from this card when ready.'}`)
       onStarted?.(outcome.runId)
-      location.hash = `#/run/${encodeURIComponent(outcome.runId)}`
-      requestAnimationFrame(() => startedActionRef.current?.focus())
+      if (keepNavigation) {
+        location.hash = `#/run/${encodeURIComponent(outcome.runId)}`
+        requestAnimationFrame(() => startedActionRef.current?.focus())
+      }
       return
     }
     if (outcome.kind === 'unknown-paid') {
@@ -439,7 +467,8 @@ export default function LaunchCard({
   }
 
   const start = async () => {
-    if (startRequestRef.current || unknownStart || startedRunId || settingsLaunchBlocked) return
+    if (transportPending || startRequestRef.current || unknownStart || startedRunId
+        || settingsLaunchBlocked) return
     const built = buildLaunchBody(draft, chat)
     if (!built.ok || !validatedCurrent) {
       const nextErrors = built.errors || { form: 'Validate this exact proposal before starting' }
@@ -449,6 +478,7 @@ export default function LaunchCard({
     }
     const operation = {
       transportIdentity, runId: String(draft.run_id), idempotencyKey: createIdempotencyKey(),
+      ...captureNavigation(),
     }
     startRequestRef.current = operation
     setStarting(true)
@@ -516,8 +546,8 @@ export default function LaunchCard({
   }
 
   const checkStartup = async () => {
-    if (!unknownStart || statusFlightRef.current) return
-    const operation = { ...unknownStart, transportIdentity }
+    if (transportPending || !unknownStart || statusFlightRef.current) return
+    const operation = { ...unknownStart, transportIdentity, ...captureNavigation() }
     const requestId = statusRequestRef.current + 1
     statusRequestRef.current = requestId; statusFlightRef.current = requestId
     setChecking(true); setMissingStart(false); setErrors({}); setNotice('Checking the same startup request…')
@@ -553,7 +583,7 @@ export default function LaunchCard({
   }
 
   const releaseStartupRecovery = () => {
-    if (!unknownStart || (!missingStart && !unknownStart.paidEffectUnknown)) return
+    if (transportPending || !unknownStart || (!missingStart && !unknownStart.paidEffectUnknown)) return
     const paidUnknown = unknownStart.paidEffectUnknown === true
     const prompt = paidUnknown
       ? 'Provider work or cost cannot be ruled out. Release this local recovery key only after inspecting the run and provider usage. The original run name remains reserved; use a new name for any later launch. Continue?'
@@ -579,7 +609,7 @@ export default function LaunchCard({
   }
 
   const releaseDamagedRecovery = () => {
-    if (!damagedRecovery) return
+    if (transportPending || !damagedRecovery) return
     if (!damagedRecovery.storageKey) {
       setStorageBlocked(true)
       const nextErrors = { form: 'The damaged recovery record cannot be addressed while session storage is unavailable. Restore access and reload.' }
