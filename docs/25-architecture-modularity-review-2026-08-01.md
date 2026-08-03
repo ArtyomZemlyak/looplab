@@ -1825,6 +1825,23 @@ a `_raw_socket` substring check flags the SURVIVING `_stream_raw_socket`, and `"
 stays green when `sock.shutdown(...)` becomes `sock.close()` — which is precisely the regression,
 since close() does not unblock a recv() wedged in the kernel.
 
+*Follow-up (2026-08-03):* a THIRD test depended on the removed `urllib.request` import —
+`test_complete_text_stream_bails_on_a_keepalive_stall` in `tests/test_assistant_mega_review.py`.
+It was missed because the reference sweep that cleared the deletion was read through `head -20` and
+this file fell below the cut; the lesson is that a truncated grep is not a clearance.
+
+The test is now re-pointed rather than deleted, because its PROPERTY is real and was not being
+tested: it scripted the stall by patching `llm.urllib.request.urlopen`, which the openai-SDK path
+never calls, so the patch was inert and what actually made it pass was the client failing for
+unrelated reasons. The stall is injected at the live seam instead — a stream of content-free
+keepalive chunks over a socket the watchdog can shut down — so the idle guard is the thing under
+test.
+
+It is also drained on a worker thread with a hard join. The regression here is a HANG: with the idle
+clock reset by keepalives the generator never ends, and an in-line `list(...)` wedges the whole
+suite instead of reporting a failure. Teeth-verified — flipping `_chunk_has_content` to always-true
+now fails in ~5s with "the keepalive stall was never detected; the stream ran forever".
+
 #### CO-04 · MEDIUM · duplication · effort: medium
 
 **Three parallel stream-reassembly loops in one client; fallback block triplicated**

@@ -222,18 +222,68 @@ def test_compaction_is_in_place_for_the_caller():
 
 # ---- the final-answer stream can't spin forever on keepalive heartbeats -------------------------
 def test_complete_text_stream_bails_on_a_keepalive_stall(monkeypatch):
-    class _Ctx:
-        def __enter__(self):
-            return iter([b": keepalive\n"] * 10000)              # heartbeats, never a token
+    """A provider that emits content-free chunks forever must be abandoned for the blocking path,
+    not streamed indefinitely.
 
-        def __exit__(self, *a):
-            return False
+    Re-pointed at the LIVE transport (doc 25 CO-03): this used to script the stall by patching
+    `llm.urllib.request.urlopen`, which the openai-SDK path never calls — so the patch was inert and
+    what actually made the test pass was the client failing for unrelated reasons. The stall is now
+    injected where the stream really comes from, so the idle guard is the thing under test.
+    """
     import looplab.core.llm as llm
-    monkeypatch.setattr(llm.urllib.request, "urlopen", lambda req, timeout=None: _Ctx())
-    c = OpenAICompatibleClient("m", base_url="http://x/v1", timeout=0.0)
+
+    import threading
+
+    shot = threading.Event()
+
+    class _Sock:
+        def shutdown(self, _how):
+            shot.set()
+
+    class _NetworkStream:
+        def get_extra_info(self, _key):
+            return _Sock()
+
+    class _Resp:
+        request = None
+        extensions = {"network_stream": _NetworkStream()}
+
+        def close(self):
+            shot.set()
+
+    class _Keepalive:
+        """Chunks with no choices: heartbeats that hold the connection open without ever producing
+        content, so `_chunk_has_content` never resets the idle clock. Ends only when the watchdog
+        shuts the socket down — which is the mechanism under test."""
+
+        response = _Resp()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if shot.wait(timeout=0.01):
+                raise StopIteration
+            return type("Ev", (), {"choices": [], "usage": None})()
+
+        def close(self):
+            pass
+
+    c = OpenAICompatibleClient("m", base_url="http://x/v1", timeout=0.3, header_timeout=0.3)
+    monkeypatch.setattr(c, "_bounded_create", lambda *a, **k: _Keepalive())
     monkeypatch.setattr(c, "complete_text", lambda messages: "FALLBACK")
+
+    # Drained on a worker with a hard join, because the REGRESSION here is a hang: with the idle
+    # clock reset by keepalives the generator never ends, and an in-line `list(...)` would wedge the
+    # whole suite instead of reporting a failure. Bounded consumption turns that into a red test.
+    got: list = []
+    drain = threading.Thread(
+        target=lambda: got.extend(c.complete_text_stream([{"role": "user", "content": "hi"}])),
+        daemon=True)
     t0 = time.monotonic()
-    got = list(c.complete_text_stream([{"role": "user", "content": "hi"}]))
+    drain.start()
+    drain.join(timeout=5)
+    assert not drain.is_alive(), "the keepalive stall was never detected; the stream ran forever"
     assert got == ["FALLBACK"]                                   # stall detected -> blocking fallback
     assert time.monotonic() - t0 < 5
 
