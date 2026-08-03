@@ -1060,7 +1060,7 @@ button.ptree-row { width: 100%; border: 0; background: transparent; color: inher
 .run-compare { min-width: 0; }
 .compare-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
 .compare-head > div:first-child { flex: 1; min-width: 220px; }
-.compare-head h2 { margin: 0; font-size: 18px; }
+.compare-head h2 { width: fit-content; margin: 0; font-size: 18px; }
 .compare-head p, .compare-config > p { margin: 2px 0 0; color: var(--fg-mut); }
 .compare-head > .btn[aria-disabled="true"] { opacity: .4; cursor: wait; }
 .compare-columns { position: relative; }
