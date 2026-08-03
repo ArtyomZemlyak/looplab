@@ -2293,6 +2293,34 @@ charged to only its first parent.
 
 *Recommendation:* Compute (explored, rename) once in _selection_after_forced_gates and thread it into card_score via a scoring-context parameter; compute eligible_cards once per _speculative_selection invocation.
 
+*Resolution (2026-08-02, hoist half):* the per-candidate rebuild is gone. The election computes
+`_coverage_inputs(state)` ONCE and threads it to `card_score` through an optional
+`coverage_inputs=` keyword.
+
+The keyword is optional, and the dispatch never forwards it to an EXTERNAL policy hook, because
+`card_score(state, card, *, scoring=...)` is the published scoring-hook signature: a third-party
+policy would raise `TypeError` on an unknown keyword, `_score_for_policy` swallows exceptions, and
+the lane would then silently fall back to legacy actions with that policy's scoring never consulted
+again. Nothing would go red. Only the built-in scorer, which we own, receives the snapshot.
+
+The projection is an immutable view of a `state` that does not change while the lane is scored, so
+recomputing it per candidate was not merely slow — every candidate was paying to derive an answer
+identical by construction.
+
+`tests/test_card_scoring_snapshot.py` (10) pins that it is built once at several lane sizes, that
+scoring with the shared snapshot equals scoring without it for every card, that the FULL ordering is
+unchanged (a re-rank below the cut is still a behaviour change), that the two-argument public hook
+still works, and that the extra keyword never reaches an external hook.
+
+The first "built once" test was SILENT against the undone hoist: its fixture had a seed prefix still
+due, so `card_selection_set` returned before scoring anything and the counter only ever saw the
+election's own call. The fixture now asserts the election actually selected something, and the teeth
+break reddens four tests.
+
+The finding's smaller second half — `eligible_cards` computed once per `_speculative_selection` — is
+NOT done and stays noted here; the two calls sit on mutually exclusive control paths and never both
+execute in one election, which the finding itself records.
+
 #### SE-05 · MEDIUM · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
 **concept_projection.py carries an unreachable 'paired core commit' fallback lattice — the owner module shipped long ago**

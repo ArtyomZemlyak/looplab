@@ -738,6 +738,7 @@ def card_score(
     *,
     scoring: CardScoring | Mapping[str, object] | None = None,
     policy_actions: Sequence[Mapping[str, object]] = (),
+    coverage_inputs: tuple[set[str], dict[str, str | None]] | None = None,
 ) -> CardScore:
     """Score an eligible open Card by ``(band, exploration_key)``.
 
@@ -756,11 +757,12 @@ def card_score(
     band = 3.0 if card.pinned else 2.0 if exact_match else 1.0 if same_operator else 0.0
 
     novelty = _novelty_signal(card)
-    # card_score runs once per candidate, but this rebuilds the complete concept projection
-    # over every Node each time. Large Card lanes make one election O(cards * nodes/concepts). Compute
-    # explored+rename once per selection snapshot and pass that immutable scoring context through every
-    # candidate score.
-    explored, rename = _coverage_inputs(state)
+    # `_coverage_inputs` rebuilds the COMPLETE concept projection over every Node, and card_score runs
+    # once per candidate — so recomputing it here made one election O(cards x nodes*concepts) (doc 25
+    # SE-04). The selection loop now computes it ONCE per snapshot and threads it in. The argument is
+    # optional because `card_score` is also the documented public scoring hook: an external policy
+    # calling it with two arguments still gets a correct, if slower, score.
+    explored, rename = coverage_inputs if coverage_inputs is not None else _coverage_inputs(state)
     coverage = _coverage_signal(card, explored, rename)
     total_weight = treatment.novelty_weight + treatment.coverage_weight
     exploration = (
@@ -924,6 +926,7 @@ def _score_for_policy(
     *,
     scoring: CardScoring,
     policy_actions: Sequence[Mapping[str, object]],
+    coverage_inputs: tuple[set[str], dict[str, str | None]] | None = None,
 ) -> CardScore | None:
     hook = getattr(policy, "card_score", None)
     if callable(hook):
@@ -933,7 +936,10 @@ def _score_for_policy(
             return None
     if _builtin_policy_name(policy) is None:
         return None
-    return card_score(state, card, scoring=scoring, policy_actions=policy_actions)
+    # The external hook keeps its published two-argument shape; only the built-in scorer, which we
+    # own, receives the pre-computed snapshot.
+    return card_score(state, card, scoring=scoring, policy_actions=policy_actions,
+                      coverage_inputs=coverage_inputs)
 
 
 def _lane_limit(policy: object, remaining: int) -> int:
@@ -1076,10 +1082,16 @@ def _selection_after_forced_gates(
     if remaining <= 0:
         return [], fallback
     treatment = normalize_card_scoring(scoring)
+    # ONE projection per election, not one per candidate. It is an immutable view of `state`, which
+    # does not change while the lane is scored, so every candidate must see exactly the same one —
+    # recomputing it per card was not only slow, it made the ranking depend on work that is identical
+    # by construction.
+    coverage = _coverage_inputs(state)
     scored: list[tuple[Card, CardScore]] = []
     for card in cards:
         score = _score_for_policy(
             policy, state, card, scoring=treatment, policy_actions=fallback,
+            coverage_inputs=coverage,
         )
         if score is not None:
             scored.append((card, score))
