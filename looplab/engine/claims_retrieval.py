@@ -48,6 +48,7 @@ from looplab.engine.claims_health import (
     _string_list,
     _unknown_claim_source_summary,
     _valid_claim_source_rows,
+    scope_cross_run_sources,
 )
 from looplab.engine.memory import _CLAIM_STANCES, _NEGATIVE, _filter_capsule_rows, normalize_statement
 from looplab.trust.cross_run import (
@@ -439,14 +440,8 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     lessons = _valid_claim_source_rows(lessons, research=False)
     # Scope EVERY source before joining. Decisions are a governance overlay; they never grant visibility.
     research = load_research_claims(memory_dir) if research_claims is None else research_claims
-    if scope_task:
-        wanted = str(scope_task)
-        lessons = _filter_claim_source_rows(
-            lessons, lambda r: str(r.get("task_id") or "") == wanted, research=False)
-        capsules = _filter_capsule_rows(
-            capsules, lambda r: str(r.get("task_id") or "") == wanted)
-        research = _filter_claim_source_rows(
-            research, lambda r: str(r.get("task_id") or "") == wanted, research=True)
+    lessons, capsules, research = scope_cross_run_sources(
+        task_id=scope_task, lessons=lessons, capsules=capsules, research=research)
     research = _valid_claim_source_rows(research, research=True)
     research_source = _research_source_summary(research)
     governance = _governance

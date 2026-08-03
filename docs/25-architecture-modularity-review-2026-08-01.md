@@ -1142,6 +1142,34 @@ would serve one task's paid overlay to another.
 
 *Recommendation:* Add a governed_projection decorator/helper that handles the source_names derivation + recursion, and a _scope_all_sources(lessons, research, capsules, task_id) helper so the access-boundary filter has a single implementation.
 
+*Resolution (2026-08-02, scope half):* the ACCESS BOUNDARY half is done —
+`claims_health.py::scope_cross_run_sources(*, task_id, lessons, capsules, research)` returns the
+scoped triple, and all three joining readers (`claims_for_memory`, `atlas_for_memory`,
+`cross_run_retrieve`) call it. This was the half worth doing first: the comment that used to sit at
+the atlas site recorded the leak literally — filtering research rows and forgetting the others
+returned another task's lessons and capsules in the same payload, and the response looked complete,
+just wider than it should be.
+
+Two contract decisions are pinned rather than left implicit. A store passed as `None` comes back as
+`None`, because "capsules were not read" and "this task has no capsules" are different claims and the
+caller renders them differently. And a BLANK `task_id` filters NOTHING: the callers guard on
+`if scope_task` before calling, so a helper that silently emptied everything on a blank scope would
+turn a missing argument into a plausible "this task has no cross-run history".
+
+`tests/test_cross_run_scope_boundary.py` (21) covers the three-store leak, exact-match only (case,
+whitespace, prefix and numeric near-misses all out), unattributed rows, read-health survival through
+the filter, the None/blank contract, a narrow grep guard over the two joining modules, and an
+end-to-end atlas read proving a foreign task's lesson text and concept id are absent from the
+rendered payload. Teeth-tested against five breaks.
+
+The `_governance is None → recurse via project_governed_sources` half of this finding is NOT done and
+stays open: it is a different shape (a recursion/decorator over four functions with differing
+`source_names` derivations) and does not gate an access boundary.
+
+Worth noting for the next collapse in this area: dropping `_filter_claim_source_rows` from
+`claims.py`'s import list broke 37 tests, because `claims.py` RE-EXPORTS it as a guarded post-split
+import contract (`tests/test_claims.py` asserts the re-export set). The import is back, now labelled.
+
 #### EM-09 · MEDIUM · mergeable-entities · effort: medium
 
 **Three parallel 'list subclass carrying a receipt' types with per-type copy/filter helpers and dynamic attribute stashing**

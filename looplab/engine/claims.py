@@ -81,7 +81,7 @@ from looplab.engine.claims_health import (  # noqa: F401
     _empty_claim_read_segment,
     _epistemic,
     _filter_claim_assessments,
-    _filter_claim_source_rows,
+    _filter_claim_source_rows,      # re-exported: a guarded post-split import contract
     _identity_text,
     _indexable_research_claim,
     _lesson_claim_stance,
@@ -101,6 +101,7 @@ from looplab.engine.claims_health import (  # noqa: F401
     _unknown_claim_source_summary,
     _valid_claim_source_row,
     _valid_claim_source_rows,
+    scope_cross_run_sources,
     _valid_node_source,
     _valid_research_evidence_receipt,
     _valid_research_node_refs,
@@ -719,12 +720,8 @@ def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisio
     lessons = _valid_claim_source_rows(lessons, research=False)
     research = load_research_claims(memory_dir) if research_claims is None else research_claims
     research = _valid_claim_source_rows(research, research=True)
-    if scope_task:
-        wanted = str(scope_task)
-        lessons = _filter_claim_source_rows(
-            lessons, lambda r: str(r.get("task_id") or "") == wanted, research=False)
-        research = _filter_claim_source_rows(
-            research, lambda r: str(r.get("task_id") or "") == wanted, research=True)
+    lessons, _capsules, research = scope_cross_run_sources(
+        task_id=scope_task, lessons=lessons, research=research)
     dec = load_claim_decisions(memory_dir) if decisions is None else decisions
     return claim_assessments(lessons, research_claims=research, decisions=dec,
                              fuzzy=fuzzy, structured=structured)
@@ -741,8 +738,7 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
     from pathlib import Path
 
     from looplab.engine.governance_health import observed_path_missing, project_governed_sources
-    from looplab.engine.memory import (ConceptCapsuleStore, _dedup_valid_capsules,
-                                       _filter_capsule_rows)
+    from looplab.engine.memory import ConceptCapsuleStore, _dedup_valid_capsules
     if _governance is None:
         source_names = []
         if lessons is None:
@@ -775,16 +771,8 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
     capsules = _dedup_valid_capsules(capsule_source)
     research = load_research_claims(memory_dir) if research_claims is None else research_claims
     research = _valid_claim_source_rows(research, research=True)
-    if scope_task:
-        wanted = str(scope_task)
-        # Scope is an access boundary across every joined store, not just D8. Filtering only
-        # research rows still leaked other tasks through lessons and concept capsules in the same response.
-        lessons = _filter_claim_source_rows(
-            lessons, lambda r: str(r.get("task_id") or "") == wanted, research=False)
-        capsules = _filter_capsule_rows(
-            capsules, lambda r: str(r.get("task_id") or "") == wanted)
-        research = _filter_claim_source_rows(
-            research, lambda r: str(r.get("task_id") or "") == wanted, research=True)
+    lessons, capsules, research = scope_cross_run_sources(
+        task_id=scope_task, lessons=lessons, capsules=capsules, research=research)
     governance = _governance
     atlas = portfolio_atlas(
         lessons, capsules, max_items=max_items,

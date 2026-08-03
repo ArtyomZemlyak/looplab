@@ -192,6 +192,39 @@ def _filter_claim_source_rows(rows, predicate, *, research: bool) -> _ClaimSourc
         (row for row in source if predicate(row)), read_health=source.read_health)
 
 
+def scope_cross_run_sources(*, task_id: str, lessons=None, capsules=None, research=None):
+    """Filter every joined cross-run store to ONE task. Returns ``(lessons, capsules, research)``.
+
+    This is an ACCESS BOUNDARY, not a convenience (doc 25 EM-08). Three call sites — the claim
+    assessment convenience, the portfolio atlas, and cross-run retrieval — each open several stores
+    and join them into one response. Scoping is per-STORE, so a site that filtered research rows and
+    forgot lessons still returned another task's lessons in the same payload; that leak has happened
+    once already and the comment recording it now lives here instead of in one of the three copies.
+
+    A store passed as ``None`` is "not part of this join" and comes back as ``None`` — the caller
+    that does not read capsules must not be handed an empty list it might then treat as "this task
+    has no capsules".
+
+    An empty/blank ``task_id`` scopes NOTHING and returns the inputs unchanged: the callers guard on
+    `if scope_task` before calling, and a helper that silently filtered everything away on a blank
+    scope would turn a missing argument into an empty, plausible-looking answer.
+    """
+    if not str(task_id or "").strip():
+        return lessons, capsules, research
+    wanted = str(task_id)
+
+    from looplab.engine.memory import _filter_capsule_rows
+
+    def _same_task(row) -> bool:
+        return str(row.get("task_id") or "") == wanted
+
+    return (
+        None if lessons is None else _filter_claim_source_rows(lessons, _same_task, research=False),
+        None if capsules is None else _filter_capsule_rows(capsules, _same_task),
+        None if research is None else _filter_claim_source_rows(research, _same_task, research=True),
+    )
+
+
 def _claim_source_semantic_projection(row: dict) -> dict:
     """Exact fields consumed by claim identity, evidence, scope and producer-receipt logic."""
     out = {key: row[key] for key in _CLAIM_SOURCE_SEMANTIC_FIELDS if key in row}
