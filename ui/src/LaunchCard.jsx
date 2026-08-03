@@ -231,9 +231,12 @@ export default function LaunchCard({
       return
     }
     if (wasBlocked && !startRequestRef.current && !unknownStart && !startedRunId && !damagedRecovery) {
-      setNotice('Settings are saved. Validate this proposal again before starting.')
+      setNotice(settingsLaunchGuard.status === 'ready'
+        ? 'Settings are saved. Validate this proposal again before starting.'
+        : 'Settings draft closed. Validate this proposal again before starting.')
     }
-  }, [damagedRecovery, settingsLaunchBlocked, settingsLaunchReason, startedRunId, unknownStart])
+  }, [damagedRecovery, settingsLaunchBlocked, settingsLaunchGuard.status,
+    settingsLaunchReason, startedRunId, unknownStart])
 
   useEffect(() => {
     validationRequestRef.current += 1

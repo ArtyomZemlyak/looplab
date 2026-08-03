@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createIdempotencyKey, deadlineGet, saveSettings, saveSecret, llmHealth } from './util.js'
 import {
   toForm, fromForm, settingsSavePayload, settingsValidationErrors, loadSettingsSchema, sameAgentRoles,
@@ -11,7 +11,17 @@ import SettingsForm from './SettingsForm.jsx'
 import { OpIcon } from './icons.jsx'
 import { deadlineRequest } from './requestDeadline.js'
 import { installNavigationLossGuard } from './navigationLossGuard.js'
-import { publish as publishSettingsLaunchGuard } from './settingsLaunchGuard.js'
+import {
+  beginOperation as beginSettingsLaunchOperation,
+  captureAuthoritativeRead as captureSettingsLaunchRead,
+  claimPublisher as claimSettingsLaunchGuard,
+  confirmAuthoritativeRead as confirmSettingsLaunchRead,
+  getSnapshot as getSettingsLaunchGuard,
+  publish as publishSettingsLaunchGuard,
+  releasePublisher as releaseSettingsLaunchGuard,
+  settleOperation as settleSettingsLaunchOperation,
+  subscribe as subscribeSettingsLaunchGuard,
+} from './settingsLaunchGuard.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 import { useToast } from './useToast.js'
 
@@ -659,6 +669,8 @@ function ResetDefaultsDialog({ hasSecretDraft, onCancel, onConfirm }) {
 // Full-page editor for the engine defaults used by every new run. Per-run overrides remain in each
 // run's Settings panel; this page deliberately starts with the small set most people need.
 export default function Settings({ onBack }) {
+  const settingsLaunchSnapshot = useSyncExternalStore(
+    subscribeSettingsLaunchGuard, getSettingsLaunchGuard, getSettingsLaunchGuard)
   const [defaults, setDefaults] = useState(null)
   const [schema, setSchema] = useState(null)
   const [form, setForm] = useState(null)
@@ -686,18 +698,27 @@ export default function Settings({ onBack }) {
   const settingsHashRef = useRef(typeof location === 'undefined' ? '#/settings' : location.hash)
   const searchInputRef = useRef(null)
   const providerHeadingRef = useRef(null)
+  const loadErrorHeadingRef = useRef(null)
+  const recoveryHeadingRef = useRef(null)
+  const mutationUnknownHeadingRef = useRef(null)
+  const launchGuardOwnerRef = useRef(null)
+  const launchGuardReleaseRef = useRef({ retain: false })
 
-  const load = (reloadSchema = false, preserveExisting = false) => {
+  const load = (reloadSchema = false, preserveExisting = false, explicitReconciliation = false) => {
     const owner = ++loadRef.current
     loadControllerRef.current?.abort()
     const timed = deadlineGet('/api/settings', SETTINGS_READ_TIMEOUT_MS)
+    const launchRead = captureSettingsLaunchRead(launchGuardOwnerRef.current, {
+      explicit: explicitReconciliation,
+    })
     loadControllerRef.current = timed.controller
     // Keep a stale-data warning visible while an authoritative refresh is in flight. Clearing it
     // early briefly made launch look safe and removed the only progress affordance on this page.
     if (!preserveExisting) setLoadError('')
     return Promise.all([timed.promise, loadSettingsSchema({ reload: reloadSchema })]).then(([data, nextSchema]) => {
-      if (loadRef.current !== owner) return false
+      if (loadRef.current !== owner) return { loaded: false, reconciled: false }
       validateSettingsResource(data, nextSchema)
+      const reconciled = confirmSettingsLaunchRead(launchRead)
       const settings = data.settings || {}
       const nextForm = toForm(settings, nextSchema)
       setLoadError('')
@@ -711,13 +732,13 @@ export default function Settings({ onBack }) {
       setCredential(data.credential)
       setCredentialWriteError('')
       setRevisions({ settings: data.settings_revision, secret: data.secret_revision })
-      return true
+      return { loaded: true, reconciled }
     }).catch(() => {
       if (loadRef.current === owner) {
         if (!preserveExisting) setSchema(null)
         setLoadError('Settings or their editor schema could not be loaded.')
       }
-      return false
+      return { loaded: false, reconciled: false }
     }).finally(() => {
       if (loadRef.current === owner && loadControllerRef.current === timed.controller) {
         loadControllerRef.current = null
@@ -759,6 +780,8 @@ export default function Settings({ onBack }) {
 
   const validationErrors = useMemo(() => form && schema
     ? settingsValidationErrors(form, schema) : {}, [form, schema])
+  const savedValidationErrors = useMemo(() => saved && schema
+    ? settingsValidationErrors(saved, schema) : {}, [saved, schema])
 
   // Valid form values compare in their persisted/coerced shape (an input's "8" is the saved number 8).
   // Invalid transitional input stays unsaved in its raw shape; secrets are write-only and stay raw too.
@@ -785,6 +808,7 @@ export default function Settings({ onBack }) {
   }, [form, saved, schema, validationErrors, agentControl, savedAC])
   const unsaved = unsavedKeys.size > 0
   const invalidCount = Object.keys(validationErrors).length
+  const savedInvalidCount = Object.keys(savedValidationErrors).length
   // The storage fence is written synchronously before a provider POST, while the child-to-parent
   // status callback lands in an effect. Read both so a same-tick Save/clear/navigation cannot slip
   // through that render gap.
@@ -797,28 +821,52 @@ export default function Settings({ onBack }) {
   const launchDefaultsLoaded = !!form && !!schema && !!defaults && !!saved
     && typeof revisions.settings === 'string' && revisions.settings.length > 0
     && typeof revisions.secret === 'string' && revisions.secret.length > 0
+  const currentLaunchGuard = launchGuardState({
+    loaded: launchDefaultsLoaded,
+    loadError,
+    invalidCount,
+    unsaved,
+    mutationBusy,
+    mutationUnknown,
+    healthRecoveryBlocked,
+    credentialBlockedReason: '',
+  })
+  const launchGuardRetainable = !!loadError || !!mutationBusy || !!mutationUnknown
+    || healthRecoveryBlocked || savedInvalidCount > 0
+  const launchGuardResolved = launchDefaultsLoaded && !loadError && !mutationBusy
+    && !mutationUnknown && !healthRecoveryBlocked
+  const launchGuardExternalPending = settingsLaunchSnapshot.status === 'operation-pending'
+  const launchGuardExternalRecovery = launchGuardExternalPending
+    || settingsLaunchSnapshot.status === 'reconcile-required'
+  const settingsActionRecoveryBlocked = launchGuardExternalRecovery || !!loadError
+  launchGuardReleaseRef.current = {
+    retain: launchGuardRetainable || launchGuardExternalRecovery,
+  }
 
   // The persistent Assistant lives beside this route. Publish before paint so its paid launch CTA
   // cannot observe one permissive frame while Settings is mounting or changing state.
-  useLayoutEffect(() => () => {
-    publishSettingsLaunchGuard({ active: false })
+  useLayoutEffect(() => {
+    const owner = claimSettingsLaunchGuard()
+    launchGuardOwnerRef.current = owner
+    return () => {
+      // React state may not have rendered yet when navigation follows a click in the same tick. The
+      // synchronous mutation token and durable provider-recovery record close that final gap.
+      const retain = launchGuardReleaseRef.current.retain
+        || !!mutationRef.current || !!readHealthRecovery()
+      releaseSettingsLaunchGuard(owner, { retain })
+      if (launchGuardOwnerRef.current === owner) launchGuardOwnerRef.current = null
+    }
   }, [])
   useLayoutEffect(() => {
-    publishSettingsLaunchGuard({
+    publishSettingsLaunchGuard(launchGuardOwnerRef.current, {
       active: true,
-      ...launchGuardState({
-        loaded: launchDefaultsLoaded,
-        loadError,
-        invalidCount,
-        unsaved,
-        mutationBusy,
-        mutationUnknown,
-        healthRecoveryBlocked,
-        credentialBlockedReason: '',
-      }),
+      ...currentLaunchGuard,
+      retainable: launchGuardRetainable,
+      requiresReconciliation: !!loadError || !!mutationUnknown || healthRecoveryBlocked,
+      resolved: launchGuardResolved,
     })
   }, [healthRecoveryBlocked, invalidCount, launchDefaultsLoaded, loadError,
-    mutationBusy, mutationUnknown, unsaved])
+    launchGuardResolved, launchGuardRetainable, mutationBusy, mutationUnknown, unsaved])
 
   useEffect(() => {
     if (!navigationUnsafe) return undefined
@@ -856,22 +904,37 @@ export default function Settings({ onBack }) {
   const focusProviderHeading = () => {
     requestAnimationFrame(() => providerHeadingRef.current?.focus())
   }
+  const focusSettingsRecovery = () => {
+    requestAnimationFrame(() => {
+      const target = recoveryHeadingRef.current || mutationUnknownHeadingRef.current
+        || loadErrorHeadingRef.current || providerHeadingRef.current
+      target?.focus()
+    })
+  }
   // State-driven `disabled` attributes render one tick after a click. The token closes that gap so
   // save and secret-clear can never issue overlapping writes, even under a same-tick double click.
   const beginMutation = kind => {
     if (mutationRef.current || (mutationUnknown && kind !== 'reconciling')) return null
-    const token = { kind }
+    const tracksServerWrite = kind === 'saving' || kind === 'clearing secret'
+    const launchLease = tracksServerWrite
+      ? beginSettingsLaunchOperation(launchGuardOwnerRef.current, kind) : null
+    if (tracksServerWrite && !launchLease) return null
+    const token = { kind, launchLease, unresolved: false }
     mutationRef.current = token
     setMutationBusy(kind)
     return token
   }
   const finishMutation = token => {
     if (mutationRef.current !== token) return
+    if (token.launchLease) {
+      settleSettingsLaunchOperation(token.launchLease, { resolved: token.unresolved !== true })
+    }
     mutationRef.current = null
     setMutationBusy('')
   }
   const rememberUnknown = (stage, submittedForm, submittedControl = {},
     uncertainKeys = [], uncertainControlKeys = [], ordinarySettingsAccepted = false) => {
+    if (mutationRef.current) mutationRef.current.unresolved = true
     // Never copy a credential into recovery metadata, logs or error UI. The controlled password
     // field already owns the in-memory draft; recovery retains only its non-secret comparison shape.
     const normalizedSubmitted = schema
@@ -894,9 +957,15 @@ export default function Settings({ onBack }) {
     const mutation = beginMutation('reconciling')
     if (!mutation) return
     const timed = deadlineGet('/api/settings', SETTINGS_READ_TIMEOUT_MS)
+    const launchRead = captureSettingsLaunchRead(launchGuardOwnerRef.current, { explicit: true })
     try {
       const data = await timed.promise
       validateSettingsResource(data, schema)
+      if (!confirmSettingsLaunchRead(launchRead)) {
+        show('An earlier Settings operation changed while this refresh was in flight; refresh again after it settles')
+        focusSettingsRecovery()
+        return
+      }
       const settings = data.settings || {}
       const acceptedForm = toForm(settings, schema)
       const acceptedControl = settings.agent_control || {}
@@ -928,6 +997,7 @@ export default function Settings({ onBack }) {
       focusProviderHeading()
     } catch {
       show('Could not refresh authoritative settings; the previous outcome is still unknown')
+      focusSettingsRecovery()
     } finally {
       finishMutation(mutation)
     }
@@ -1168,15 +1238,24 @@ export default function Settings({ onBack }) {
     const mutation = beginMutation('reloading settings')
     if (!mutation) return false
     try {
-      const reloaded = await load(reloadSchema, true)
-      if (!reloaded) {
+      const result = await load(reloadSchema, true, true)
+      if (!result.loaded) {
         show('Saved settings could not be reloaded; current values and warnings were kept')
+        focusSettingsRecovery()
+      } else if (!result.reconciled) {
+        show('Settings could not be reconciled yet; wait for earlier activity or browser storage to recover, then refresh again')
+        focusSettingsRecovery()
       } else {
         show(successMessage)
         focusProviderHeading()
       }
-      return reloaded
+      return result.loaded && result.reconciled
     } finally { finishMutation(mutation) }
+  }
+  const retryInitialSettings = async () => {
+    const result = await load(true, false, true)
+    if (result.loaded && result.reconciled) focusProviderHeading()
+    else focusSettingsRecovery()
   }
   const requestBack = () => {
     if (navigationUnsafe && !window.confirm(navigationWarning(
@@ -1195,8 +1274,10 @@ export default function Settings({ onBack }) {
     </div>
 
     <main className="settings-page" data-route-main tabIndex={-1}>
-      {!form || !schema ? (loadError
-        ? <div className="notice resource-error" role="alert"><b>Could not load settings.</b><span>{loadError}</span><button className="btn sm primary" onClick={() => load(true)}>Retry</button></div>
+      {!form || !schema ? (launchGuardExternalPending
+        ? <div className="notice resource-error" role="status"><b ref={recoveryHeadingRef} tabIndex={-1}>An earlier Settings action is still finishing.</b><span>{settingsLaunchSnapshot.reason}</span></div>
+        : loadError
+        ? <div className="notice resource-error" role="alert"><b ref={loadErrorHeadingRef} tabIndex={-1}>Could not load settings.</b><span>{loadError}</span><button className="btn sm primary" onClick={retryInitialSettings}>Retry</button></div>
         : <div className="notice" role="status">Loading settings…</div>) : <>
         <section className="settings-overview" aria-labelledby="settings-heading">
           <div className="settings-heading-row">
@@ -1261,11 +1342,11 @@ export default function Settings({ onBack }) {
           <CredentialState credential={credential} writeError={credentialWriteError}
             onRefresh={mutationUnknown ? reconcileUnknown : reloadSavedSettings}
             refreshing={mutationBusy === 'reloading settings' || mutationBusy === 'reconciling'}
-            refreshDisabled={!!mutationBusy && mutationBusy !== 'reloading settings'
-              && mutationBusy !== 'reconciling'} />
+            refreshDisabled={(!!mutationBusy && mutationBusy !== 'reloading settings'
+              && mutationBusy !== 'reconciling') || launchGuardExternalPending} />
           <LlmHealth savedSettingsRevision={revisions.settings} savedSecretRevision={revisions.secret}
             unsavedCount={unsavedKeys.size}
-            actionBlocked={!!mutationBusy || !!mutationUnknown}
+            actionBlocked={!!mutationBusy || !!mutationUnknown || settingsActionRecoveryBlocked}
             actionKind={mutationBusy}
             providerBlockedReason={credentialBlockedReason}
             beginAction={beginMutation} finishAction={finishMutation}
@@ -1273,10 +1354,26 @@ export default function Settings({ onBack }) {
             reloadSavedSettings={reloadSavedSettings} />
         </section>
 
-        {loadError && <div className="notice resource-error settings-stale-warning" role="alert">
-          <b>Could not refresh settings.</b>
+        {launchGuardExternalRecovery && <div className="notice resource-error settings-stale-warning" role="alert">
+          <b ref={recoveryHeadingRef} tabIndex={-1}>{launchGuardExternalPending
+            ? 'An earlier Settings action is still finishing.'
+            : 'Refresh Settings before starting a run.'}</b>
+          <span>{launchGuardExternalPending
+            ? settingsLaunchSnapshot.reason
+            : 'The visible values may predate an earlier Settings action. Refresh once more to load a causally newer server snapshot.'}</span>
+          {!launchGuardExternalPending && <button className="btn sm primary" disabled={!!mutationBusy}
+            onClick={() => reloadSavedSettings({
+              reloadSchema: true,
+              successMessage: 'Settings reconciled with the current server state',
+            })}>Refresh server state</button>}
+        </div>}
+
+        {loadError && !launchGuardExternalRecovery
+          && <div className="notice resource-error settings-stale-warning" role="alert">
+          <b ref={loadErrorHeadingRef} tabIndex={-1}>Could not refresh settings.</b>
           <span>The last loaded values remain visible, but new runs stay blocked until the current server state is loaded.</span>
-          <button className="btn sm primary" disabled={!!mutationBusy || !!mutationUnknown}
+          <button className="btn sm primary"
+            disabled={!!mutationBusy || !!mutationUnknown || launchGuardExternalPending}
             onClick={() => reloadSavedSettings({
               reloadSchema: true,
               successMessage: 'Settings and editor schema refreshed from the server',
@@ -1284,7 +1381,7 @@ export default function Settings({ onBack }) {
         </div>}
 
         {mutationUnknown && <div className="notice resource-error" role="alert">
-          <b>{mutationUnknown.stage.endsWith('-conflict')
+          <b ref={mutationUnknownHeadingRef} tabIndex={-1}>{mutationUnknown.stage.endsWith('-conflict')
             ? 'Server state changed in another client.' : 'Update outcome unknown.'}</b>
           <span>{mutationUnknown.stage === 'settings-conflict'
             ? 'Your draft is retained. Refresh the current server state before deliberately saving it against the new revision.'
@@ -1310,8 +1407,9 @@ export default function Settings({ onBack }) {
                       errors={validationErrors}
                       agentControl={agentControl} onToggleAgent={onToggleAgent}
                       credential={credential} onClearSecret={onClearSecret}
-                      secretActionDisabled={!!mutationBusy || !!mutationUnknown || healthRecoveryBlocked}
-                      interactionDisabled={mutationBusy === 'reloading settings'}
+                      secretActionDisabled={!!mutationBusy || !!mutationUnknown || healthRecoveryBlocked
+                        || settingsActionRecoveryBlocked}
+                      interactionDisabled={mutationBusy === 'reloading settings' || settingsActionRecoveryBlocked}
                       mode={mode} query={query} schema={schema}
                       focusKey={invalidFocus.key} focusRequest={invalidFocus.request} />
       </>}
@@ -1326,12 +1424,15 @@ export default function Settings({ onBack }) {
             ref={saveStateRef} role="status" aria-live="polite" tabIndex={-1}>
           {unsaved ? countLabel(unsavedKeys.size, 'unsaved change') : 'All changes saved'}
         </span>}
-      <button className="btn sm ghost" disabled={!!mutationBusy || !canResetDefaults}
+      <button className="btn sm ghost" disabled={!!mutationBusy || !canResetDefaults
+        || settingsActionRecoveryBlocked}
               onClick={requestResetToDefaults}
               title="Reset ordinary settings, runtime access controls, and typed credential drafts">
         ↻ Reset all
       </button>
-      <button ref={saveButtonRef} className="btn sm primary" disabled={!unsaved || invalidCount > 0 || !!mutationBusy || !!mutationUnknown || healthRecoveryBlocked} onClick={onSave}>
+      <button ref={saveButtonRef} className="btn sm primary" disabled={!unsaved || invalidCount > 0
+        || !!mutationBusy || !!mutationUnknown || healthRecoveryBlocked
+        || settingsActionRecoveryBlocked} onClick={onSave}>
         {mutationBusy === 'saving' ? 'Saving...' : 'Save'}
       </button>
     </div></div>}
