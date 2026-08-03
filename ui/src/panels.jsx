@@ -565,7 +565,7 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
   useEffect(() => {
     let alive = true
     setConfigResource({ status: 'loading', data: null, error: null })
-    get(`/api/runs/${encodeURIComponent(runId)}/config`)
+    get(runApiPath(runId, '/config'))
       .then(data => { if (alive) setConfigResource({ status: 'ready', data, error: null }) })
       .catch(error => { if (alive) setConfigResource({ status: 'error', data: null, error: error.message || 'Request failed' }) })
     return () => { alive = false }

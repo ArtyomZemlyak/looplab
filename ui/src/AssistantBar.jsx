@@ -37,7 +37,7 @@ import {
   clearAssistantRunTransport, clearRunCommandLock, loadRunCommandLock, saveRunCommandLock,
   clearDamagedLaunchTransport, clearLaunchTransport, listLaunchTransports, loadLaunchTransport,
   subscribeLaunchTransports, subscribeRunCommandLock,
-  storageGet, storageSet, storageRemove,
+  storageGet, storageSet, storageRemove, runApiPath,
 } from './util.js'
 import { deadlineRequest } from './requestDeadline.js'
 import { followClientRoute } from './accessibility.jsx'
@@ -1667,7 +1667,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       let nodeGeneration = null
       let expectedGeneration = getObservedRunGeneration(runId)
       if (d.name === 'approve') {
-        const payload = await get(`/api/runs/${encodeURIComponent(runId)}/state`)
+        const payload = await get(runApiPath(runId, '/state'))
         const target = pendingApprovalTarget(payload?.state)
         if (!target) throw new Error('Approval target changed; inspect Events')
         if (target.nodeId !== d.arg) {

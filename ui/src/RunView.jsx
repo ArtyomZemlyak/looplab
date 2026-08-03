@@ -7,7 +7,7 @@ import { useTimeline } from './useTimeline.js'
 import { takeRunPanelHistoryEntry, useRunRouteState } from './useRunRouteState.js'
 import { reviewInspectorTabs, reviewPanelAllowed, runRouteStateHasTarget } from './runRouteState.js'
 import { deadlineGet, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback, createIdempotencyKey, resetRun,
-  storageGet, storageSet } from './util.js'
+  storageGet, storageSet, runApiPath } from './util.js'
 import { computeGroups, autoCollapseSet } from './grouping.js'
 import EnergyToggle from './EnergyToggle.jsx'
 import { OpIcon } from './icons.jsx'
@@ -1258,7 +1258,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     }
     let active = true
     const request = deadlineGet(
-      `/api/runs/${encodeURIComponent(runId)}/config`,
+      runApiPath(runId, '/config'),
       RUN_CONFIG_REQUEST_TIMEOUT_MS,
     )
     setConfigResource(current => {
@@ -1302,7 +1302,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     const want = Number(viewSeq)
     setHistory(requestHistory(want, generation))
     const request = deadlineGet(
-      `/api/runs/${encodeURIComponent(runId)}/state?seq=${want}`,
+      runApiPath(runId, `/state?seq=${want}`),
       HISTORICAL_SNAPSHOT_REQUEST_TIMEOUT_MS,
     )
     request.promise

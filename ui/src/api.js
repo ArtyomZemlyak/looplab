@@ -756,7 +756,7 @@ function runGenerationError(code, message, remediation) {
 }
 
 export async function getRunGeneration(runId) {
-  const payload = await get(`/api/runs/${encodeURIComponent(runId)}/state`)
+  const payload = await get(runApiPath(runId, '/state'))
   if (payload?.generation == null) {
     throw runGenerationError(
       'run_generation_unavailable',
@@ -869,7 +869,7 @@ export async function submitRunCommand(runId, type, data = {}, {
   idempotencyKey = createIdempotencyKey(), expectedGeneration,
   requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS,
 } = {}) {
-  const path = `/api/runs/${encodeURIComponent(runId)}/commands`
+  const path = runApiPath(runId, '/commands')
   assertNotReviewMutation(path)
   assertRunMutationAllowed(path)
   if (!validRunGeneration(expectedGeneration)) {
@@ -896,7 +896,7 @@ export async function submitRunCommand(runId, type, data = {}, {
 }
 
 export async function getRunCommand(runId, commandId, { requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS } = {}) {
-  const path = `/api/runs/${encodeURIComponent(runId)}/commands/${encodeURIComponent(commandId)}`
+  const path = runApiPath(runId, `/commands/${encodeURIComponent(commandId)}`)
   return validatedCommandRecord(await commandRead(path, { requestTimeoutMs }), path, commandId)
 }
 
@@ -937,7 +937,7 @@ export async function retryRunCommand(runId, commandId, {
   waitMs = 8000, pollMs = 250, requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS, onRecord = null,
 } = {}) {
   const encodedId = encodeURIComponent(commandId)
-  const path = `/api/runs/${encodeURIComponent(runId)}/commands/${encodedId}/retry`
+  const path = runApiPath(runId, `/commands/${encodedId}/retry`)
   assertNotReviewMutation(path)
   assertRunMutationAllowed(path)
   let record
@@ -1337,7 +1337,7 @@ export async function appendAction(runId, action, options = {}) {
 // Generation-fenced, operation-idempotent Replay: archive the finished generation and re-spawn the
 // same run id. The durable operation id lets an unknown browser outcome rejoin the exact request.
 export const resetRun = (rid, expectedGeneration, operationId, options = {}) =>
-  post(`/api/runs/${encodeURIComponent(rid)}/reset`, {
+  post(runApiPath(rid, '/reset'), {
     expected_generation: expectedGeneration,
     operation_id: operationId,
   }, { ...options, allowRunMutationModes: ['start-over', 'stale-link', 'history'] })
@@ -2058,10 +2058,10 @@ const runOrganizationBody = (field, value, expectedGeneration, expectedCurrent) 
   }
 }
 export const assignRun = (runId, project_id, expectedGeneration, expectedProjectId) => post(
-  `/api/runs/${encodeURIComponent(runId)}/project`,
+  runApiPath(runId, '/project'),
   runOrganizationBody('project_id', project_id, expectedGeneration, expectedProjectId))
 export const renameRun = (runId, label, expectedGeneration, expectedLabel) => send(
-  `/api/runs/${encodeURIComponent(runId)}`, 'PATCH',
+  runApiPath(runId), 'PATCH',
   runOrganizationBody('label', label, expectedGeneration, expectedLabel))
 export function submitRunDeletion(runId, expectedGeneration, expectedSeq, operationId, options = {}) {
   if (!validRunGeneration(expectedGeneration)) {
@@ -2099,12 +2099,12 @@ export function getRunDeletion(runId, operationId, options = {}) {
 export const createRunReview = (runId, {
   ttl_seconds, include_evidence = false, expected_generation, request_id, token_secret,
 } = {}, options) =>
-  post(`/api/runs/${encodeURIComponent(runId)}/reviews`,
+  post(runApiPath(runId, '/reviews'),
     { ttl_seconds, include_evidence, expected_generation, request_id, token_secret }, options)
 export const listRunReviews = (runId, options) =>
-  get(`/api/runs/${encodeURIComponent(runId)}/reviews`, options)
+  get(runApiPath(runId, '/reviews'), options)
 export const revokeRunReview = (runId, linkId, options) =>
-  send(`/api/runs/${encodeURIComponent(runId)}/reviews/${encodeURIComponent(linkId)}`,
+  send(runApiPath(runId, `/reviews/${encodeURIComponent(linkId)}`),
     'DELETE', null, options)
 
 // Bounded collaboration projections. In review mode reviewReadPath() translates both owner paths to
@@ -2120,14 +2120,14 @@ export const runComments = (runId, {
   query.set('include_resolved', includeResolved ? 'true' : 'false')
   query.set('limit', String(Math.max(1, Math.min(100, Math.trunc(Number(limit) || 100)))))
   if (cursor != null) query.set('cursor', String(cursor))
-  return get(`/api/runs/${encodeURIComponent(runId)}/comments?${query}`,
+  return get(runApiPath(runId, `/comments?${query}`),
     { cache: 'no-store', signal })
 }
 export const commentHistory = (runId, commentId, { limit = 100, cursor = null } = {}) => {
   const query = new URLSearchParams()
   query.set('limit', String(Math.max(1, Math.min(100, Math.trunc(Number(limit) || 100)))))
   if (cursor != null) query.set('cursor', String(cursor))
-  return get(`/api/runs/${encodeURIComponent(runId)}/comments/${encodeURIComponent(commentId)}/history?${query}`,
+  return get(runApiPath(runId, `/comments/${encodeURIComponent(commentId)}/history?${query}`),
     { cache: 'no-store' })
 }
 
@@ -2140,7 +2140,7 @@ export const deleteSupertask = (id) => send(`/api/supertasks/${encodeURIComponen
 export const assignSupertask = (
   runId, supertask_id, expectedGeneration, expectedSupertaskId,
 ) => post(
-  `/api/runs/${encodeURIComponent(runId)}/supertask`,
+  runApiPath(runId, '/supertask'),
   runOrganizationBody(
     'supertask_id', supertask_id, expectedGeneration, expectedSupertaskId))
 
@@ -2172,7 +2172,7 @@ export const saveSecret = (key, value, {
 export const saveRunConfig = (rid, settings, {
   expectedRevision, expectedGeneration, ...options
 } = {}) =>
-  send(`/api/runs/${encodeURIComponent(rid)}/config`, 'PUT', {
+  send(runApiPath(rid, '/config'), 'PUT', {
     settings, ...(expectedRevision == null ? {} : { expected_revision: expectedRevision }),
     ...(expectedGeneration == null ? {} : { expected_generation: expectedGeneration }),
   }, options)
@@ -2803,7 +2803,7 @@ export async function assistantMessageStream(sid, instruction, mode, cbs = {}, s
 }
 // Bounded/redacted I/O projection for one observation, with explicit omission metadata.
 export const spanDetail = (runId, spanId) =>
-  get(`/api/runs/${encodeURIComponent(runId)}/spans/${encodeURIComponent(spanId)}`)
+  get(runApiPath(runId, `/spans/${encodeURIComponent(spanId)}`))
 
 // Linear, de-duplicated conversation view of a node's trace (request once per sub-loop, then each
 // generation's delta interleaved with tool calls) — the readable alternative to the raw span tree.

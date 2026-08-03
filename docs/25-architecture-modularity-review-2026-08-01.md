@@ -3891,6 +3891,20 @@ reading `TABS`, because a JSX reference can live anywhere.
 
 *Recommendation:* Convert the inline sites to runApiPath/runNodeApiPath (mechanical change), or soften the comment; a simple grep-based test could then enforce it like the repo's other registry-guard tests.
 
+*Resolution (2026-08-03):* Converted, not softened. Nineteen inline sites now go through
+`runApiPath` — fourteen in `api.js` (`getRunGeneration`, `submitRunCommand`, `getRunCommand`,
+`retryRunCommand`, `resetRun`, `assignRun`, `renameRun`, `saveRunConfig`, the three review-link
+calls, `runComments`, `commentHistory`, `spanDetail`) plus five outside it (`timelineModel`,
+`AssistantBar`, `RunCompare`, `RunView` x2, `panels`). The suffix stays explicit at each call site,
+which is what the constructor's own comment asks for; only the identity boundary is centralised.
+
+`ui/test/runApiPathBoundary.test.js` is the grep guard the finding asked for, plus the behaviour it
+protects: a run id carrying `#`, `/`, `%2F` and `?` must come back as ONE encoded path segment with
+no fragment and no query. That is not hypothetical — run ids are filesystem names, so `#` truncates
+the request path and a literal `%2F` decodes into a second segment that reaches a different route.
+Every converted site already encoded correctly, so nothing was broken; the point is that the next
+author copies whichever neighbour they land on.
+
 #### UI-12 · LOW · duplication · effort: small
 
 **Four coexisting request-timeout wrappers**

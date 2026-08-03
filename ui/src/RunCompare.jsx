@@ -1,11 +1,11 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { get, fmt, fmtAgo, fmtElapsedSeconds, normalizeRunGeneration } from './util.js'
+import { get, fmt, fmtAgo, fmtElapsedSeconds, normalizeRunGeneration, runApiPath } from './util.js'
 import { effectiveRunStatus } from './runIndex.js'
 import { comparableRunRanking, COMPARE_COLUMNS, configDifferences } from './portfolioModel.js'
 import { deadlineRequest } from './requestDeadline.js'
 import { hashWithRunRouteState } from './runRouteState.js'
 
-const path = (id, suffix) => `/api/runs/${encodeURIComponent(id)}${suffix}`
+const path = runApiPath
 const COMPARE_DETAIL_TIMEOUT_MS = 8000
 
 const captureToken = run => normalizeRunGeneration(run?.generation)

@@ -1,3 +1,5 @@
+import { runApiPath } from './api.js'
+
 // Pure state transitions for the bounded event timeline.  The server cursor is deliberately opaque:
 // the browser never derives byte offsets or trusts event sequence numbers as pagination tokens.
 
@@ -348,5 +350,5 @@ export function timelinePagePath(runId, {
     if (!finiteSeq(anchorSeq)) throw new TypeError('around timeline requests require anchorSeq')
     params.set('anchor_seq', String(Number(anchorSeq)))
   }
-  return `/api/runs/${encodeURIComponent(String(runId))}/log-page?${params}`
+  return runApiPath(runId, `/log-page?${params}`)
 }
