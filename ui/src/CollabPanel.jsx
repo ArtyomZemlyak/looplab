@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   apiPrefix, createRunReview, listRunReviews, revokeRunReview,
 } from './util.js'
@@ -59,17 +59,70 @@ export default function CollabPanel({
   })
   const [recoveryResource, setRecoveryResource] = useState(() => emptyRecovery(''))
   const [revokeResource, setRevokeResource] = useState({ key: '', ids: new Set(), error: '' })
+  const [actionFocusRequest, setActionFocusRequest] = useState({
+    key: '', target: '', targetId: '', sequence: 0,
+  })
   const listRequestRef = useRef(null)
   const createRequestRef = useRef(null)
   const revokeRequestsRef = useRef(new Map())
   const createdInputRef = useRef(null)
+  const createdSurfaceRef = useRef(null)
+  const recoveryStatusRef = useRef(null)
   const createButtonRef = useRef(null)
+  const linksSectionRef = useRef(null)
+  const linksStatusRef = useRef(null)
+  const linksRetryRef = useRef(null)
+  const linkRowRefs = useRef(new Map())
+  const linkActionRefs = useRef(new Map())
   const prefix = apiPrefix()
   const origin = typeof location === 'undefined' ? '' : location.origin
   const recoveryScope = reviewRecoveryScope(origin, prefix)
   const viewKey = `${reviewMode ? 'review' : 'owner'}\u0000${recoveryScope}\u0000${String(runId)}\u0000${String(expectedGeneration || '')}`
   const renderRef = useRef({ key: viewKey, runId: String(runId) })
   renderRef.current = { key: viewKey, runId: String(runId) }
+  const requestActionFocus = useCallback((key, target, targetId = '') => {
+    setActionFocusRequest(previous => ({
+      key, target, targetId, sequence: previous.sequence + 1,
+    }))
+  }, [])
+  const actionFocusOwned = () => {
+    if (typeof document === 'undefined') return false
+    const active = document.activeElement
+    if (!active || active === document.body || !active.isConnected) return true
+    return [createButtonRef, recoveryStatusRef, createdSurfaceRef]
+      .some(ref => ref.current && (ref.current === active || ref.current.contains(active)))
+  }
+  const idleActionFocusTarget = () => reviewRecoveryGenerationValid(expectedGeneration)
+    ? 'create' : 'recovery'
+  const elementFocusOwned = element => {
+    if (typeof document === 'undefined') return false
+    const active = document.activeElement
+    if (!active || active === document.body || !active.isConnected) return true
+    return !!element && (element === active || element.contains(active))
+  }
+  const linkFocusOwned = linkId => elementFocusOwned(linkRowRefs.current.get(linkId))
+  const linksFocusOwned = () => [linksSectionRef, linksStatusRef, linksRetryRef]
+    .some(ref => elementFocusOwned(ref.current))
+  useLayoutEffect(() => {
+    if (!actionFocusRequest.target || actionFocusRequest.key !== viewKey) return
+    const target = actionFocusRequest.target === 'created'
+      ? createdInputRef.current
+      : actionFocusRequest.target === 'recovery'
+        ? recoveryStatusRef.current
+        : actionFocusRequest.target === 'link-row'
+          ? linkRowRefs.current.get(actionFocusRequest.targetId)
+          : actionFocusRequest.target === 'link-action'
+            ? linkActionRefs.current.get(actionFocusRequest.targetId)
+            : actionFocusRequest.target === 'links-status'
+              ? linksStatusRef.current
+              : actionFocusRequest.target === 'links-retry'
+                ? linksRetryRef.current
+                : actionFocusRequest.target === 'links-section'
+                  ? linksSectionRef.current : createButtonRef.current
+    if (!target) return
+    target.focus({ preventScroll: true })
+    if (actionFocusRequest.target === 'created') target.select()
+  }, [actionFocusRequest, viewKey])
 
   const recovery = recoveryResource.key === viewKey
     ? recoveryResource : emptyRecovery(viewKey)
@@ -82,26 +135,40 @@ export default function CollabPanel({
     setRecoveryResource(previous => previous.key === key ? update(previous) : previous)
   }, [])
 
-  const refreshLinks = useCallback(async () => {
+  const refreshLinks = useCallback(async ({
+    preserveFocus = false, preserveLinkId = '',
+  } = {}) => {
     if (reviewMode) return null
     const key = viewKey
     const previousRequest = listRequestRef.current
+    const inheritFocus = previousRequest?.key === key && previousRequest.preserveFocus
+    const focusLinkId = preserveLinkId || (inheritFocus ? previousRequest.preserveLinkId : '')
+    const refreshFocusOwned = () => linksFocusOwned()
+      || (focusLinkId && linkFocusOwned(focusLinkId))
+    const restoreFocus = (preserveFocus || !!preserveLinkId || inheritFocus)
+      && refreshFocusOwned()
     previousRequest?.timed.controller.abort()
     const timed = boundedLinkRequest(signal => listRunReviews(runId, { signal }))
-    const operation = { key, timed }
+    const operation = {
+      key, timed, preserveFocus: restoreFocus, preserveLinkId: focusLinkId,
+    }
     listRequestRef.current = operation
     setLinksResource(previous => {
       const links = previous.key === key ? previous.links : []
       return { key, links, status: links.length ? 'refreshing' : 'loading', error: '' }
     })
+    if (restoreFocus) requestActionFocus(key, 'links-status')
     try {
       const result = await timed.promise
       if (listRequestRef.current !== operation || renderRef.current.key !== key) return null
       if (!Array.isArray(result?.links)) throw new Error('invalid review-link list')
+      const followFocus = restoreFocus && refreshFocusOwned()
       setLinksResource({ key, links: result.links, status: 'ready', error: '' })
+      if (followFocus) requestActionFocus(key, 'links-section')
       return result.links
     } catch (caught) {
       if (listRequestRef.current !== operation || renderRef.current.key !== key) return null
+      const followFocus = restoreFocus && refreshFocusOwned()
       setLinksResource(previous => {
         const links = previous.key === key ? previous.links : []
         return {
@@ -111,11 +178,12 @@ export default function CollabPanel({
             : 'Review links are unavailable.',
         }
       })
+      if (followFocus) requestActionFocus(key, 'links-retry')
       return null
     } finally {
       if (listRequestRef.current === operation) listRequestRef.current = null
     }
-  }, [reviewMode, runId, viewKey])
+  }, [reviewMode, requestActionFocus, runId, viewKey])
 
   useEffect(() => {
     let active = true
@@ -188,11 +256,7 @@ export default function CollabPanel({
       return true
     } catch {
       if (renderRef.current.key === key) {
-        setTimeout(() => {
-          if (renderRef.current.key !== key) return
-          createdInputRef.current?.focus()
-          createdInputRef.current?.select()
-        }, 0)
+        if (actionFocusOwned()) requestActionFocus(key, 'created')
         onToast?.('Copy the visible link manually')
       }
       return false
@@ -200,16 +264,23 @@ export default function CollabPanel({
   }
 
   const finishIntent = (intent, key, message) => {
+    const restoreFocus = actionFocusOwned()
     if (!clearReviewCreateIntent(intent)) {
       if (renderRef.current.key === key) updateRecovery(key, previous => ({
         ...previous, busy: false,
         error: 'The link reached a terminal state, but its saved recovery could not be cleared.',
       }))
+      if (renderRef.current.key === key && restoreFocus) {
+        requestActionFocus(key, intent.phase === 'confirmed' ? 'created' : 'recovery')
+      }
       return false
     }
     if (renderRef.current.key === key) setRecoveryResource({
       ...emptyRecovery(key), loaded: true, message,
     })
+    if (renderRef.current.key === key && restoreFocus) {
+      requestActionFocus(key, idleActionFocusTarget())
+    }
     return true
   }
 
@@ -228,6 +299,7 @@ export default function CollabPanel({
     const operation = { key, intent, timed }
     createRequestRef.current = operation
     updateRecovery(key, previous => ({ ...previous, intent, busy: true, error: '', message: '' }))
+    requestActionFocus(key, 'recovery')
     try {
       const raw = await timed.promise
       const receipt = await validateReviewCreateReceipt(raw, intent)
@@ -245,10 +317,12 @@ export default function CollabPanel({
         code: 'REVIEW_RECOVERY_PROTOCOL_ERROR',
       })
       if (renderRef.current.key === key) {
+        const restoreFocus = actionFocusOwned()
         setRecoveryResource({
           ...emptyRecovery(key), loaded: true, intent: confirmed,
           message: receipt.replayed ? 'The same review link was recovered.' : 'Review link created.',
         })
+        if (restoreFocus) requestActionFocus(key, 'created')
         if (copyOnSuccess) await copy(url, key)
         void refreshLinks()
       }
@@ -269,6 +343,7 @@ export default function CollabPanel({
         catch { /* the exact intent remains pending and no unrelated link is exposed */ }
         if (linkId && linkId === expectedLinkId) {
           try {
+            const restoreFocus = actionFocusOwned()
             const conflicted = transitionReviewCreateIntent(intent, {
               phase: 'conflict', linkId, token: null, expiresAt: null,
             })
@@ -276,6 +351,7 @@ export default function CollabPanel({
               ...emptyRecovery(key), loaded: true, intent: conflicted,
               error: 'A different saved request already owns this recovery identity. Revoke that link before creating another.',
             })
+            if (restoreFocus) requestActionFocus(key, 'recovery')
           } catch (storageError) {
             updateRecovery(key, previous => ({
               ...previous, busy: false, error: storageError.message,
@@ -291,9 +367,11 @@ export default function CollabPanel({
         void refreshLinks()
         return
       }
+      const restoreFocus = actionFocusOwned()
       updateRecovery(key, previous => ({
         ...previous, intent, busy: false, error: createFailureCopy(caught),
       }))
+      if (restoreFocus) requestActionFocus(key, 'recovery')
     } finally {
       if (createRequestRef.current === operation) {
         createRequestRef.current = null
@@ -327,10 +405,12 @@ export default function CollabPanel({
       const code = caught?.code
       const blocksRecovery = code === 'REVIEW_RECOVERY_STORAGE_UNAVAILABLE'
         || code === 'REVIEW_RECOVERY_INVALID'
+      const restoreFocus = blocksRecovery && actionFocusOwned()
       updateRecovery(viewKey, previous => ({
         ...previous, loaded: true, invalid: blocksRecovery ? code : null,
         error: caught?.message || 'Review-link recovery could not be saved. No request was sent.',
       }))
+      if (restoreFocus) requestActionFocus(viewKey, 'recovery')
     }
   }
 
@@ -348,9 +428,7 @@ export default function CollabPanel({
       ...emptyRecovery(viewKey), loaded: true,
       message: 'Saved recovery cleared. The existing review link remains active until expiry or revocation.',
     })
-    setTimeout(() => {
-      if (renderRef.current.key === key) createButtonRef.current?.focus()
-    }, 0)
+    requestActionFocus(key, idleActionFocusTarget())
   }
 
   const discardInvalid = () => {
@@ -364,6 +442,7 @@ export default function CollabPanel({
       ...emptyRecovery(viewKey), loaded: true,
       message: 'Unreadable recovery data discarded. Check Existing links before creating another link.',
     })
+    requestActionFocus(viewKey, idleActionFocusTarget())
   }
 
   const revoke = async id => {
@@ -373,6 +452,12 @@ export default function CollabPanel({
     const requestKey = `${key}\u0000${linkId}`
     if (revokeRequestsRef.current.has(requestKey)) return
     let durableIntent = recovery.intent?.linkId === linkId ? recovery.intent : null
+    const restoreDurableFocus = !!durableIntent && actionFocusOwned()
+    const restoreRowFocus = linkFocusOwned(linkId)
+    const focusSurface = restoreDurableFocus ? 'durable' : restoreRowFocus ? 'row' : ''
+    const revokeFocusOwned = () => focusSurface === 'durable'
+      ? actionFocusOwned() : focusSurface === 'row' && linkFocusOwned(linkId)
+    let restoreRowAction = false
     if (durableIntent?.phase === 'confirmed') {
       try {
         durableIntent = transitionReviewCreateIntent(durableIntent, {
@@ -399,6 +484,8 @@ export default function CollabPanel({
       ids.add(linkId)
       return { key, ids, error: '' }
     })
+    if (focusSurface === 'durable') requestActionFocus(key, 'recovery')
+    else if (focusSurface === 'row') requestActionFocus(key, 'link-row', linkId)
     try {
       const result = await timed.promise
       if (result?.ok !== true || result.id !== linkId || result.run_id !== String(runId)
@@ -409,19 +496,25 @@ export default function CollabPanel({
         throw new Error('The link was revoked, but its saved recovery could not be cleared.')
       }
       if (renderRef.current.key === key) {
+        const restoreFocus = revokeFocusOwned()
         if (durableIntent) setRecoveryResource({
           ...emptyRecovery(key), loaded: true, message: 'Review link revoked.',
         })
+        if (restoreFocus) requestActionFocus(key, focusSurface === 'durable'
+          ? idleActionFocusTarget() : 'link-row', focusSurface === 'row' ? linkId : '')
         setLinksResource(previous => previous.key === key ? {
           ...previous,
           links: previous.links.map(link => link.id === linkId
             ? { ...link, status: 'revoked', revoked_at: result.revoked_at } : link),
         } : previous)
         onToast?.('review link revoked')
-        void refreshLinks()
+        void refreshLinks({
+          preserveLinkId: restoreFocus && focusSurface === 'row' ? linkId : '',
+        })
       }
     } catch {
       if (revokeRequestsRef.current.get(requestKey) !== operation || renderRef.current.key !== key) return
+      restoreRowAction = focusSurface === 'row' && revokeFocusOwned()
       const message = 'Revocation was not confirmed. Retry the same revoke before sharing or creating another link.'
       if (durableIntent) updateRecovery(key, previous => ({
         ...previous, intent: durableIntent, error: message,
@@ -437,6 +530,9 @@ export default function CollabPanel({
           ids.delete(linkId)
           return { ...previous, ids }
         })
+        if (renderRef.current.key === key && restoreRowAction) {
+          requestActionFocus(key, 'link-action', linkId)
+        }
       }
     }
   }
@@ -471,8 +567,11 @@ export default function CollabPanel({
       {!recovery.loaded && <div className="muted" role="status">Checking this tab for a saved review link…</div>}
       {recovery.loaded && !intent && !recovery.invalid
         && !reviewRecoveryGenerationValid(expectedGeneration)
-        && <div className="muted" role="status">Waiting for the current run version before sharing…</div>}
-      {recovery.invalid && <div className="notice resource-error review-recovery" role="alert">
+        && <div ref={recoveryStatusRef} tabIndex={-1} className="muted" role="status">
+          Waiting for the current run version before sharing…
+        </div>}
+      {recovery.invalid && <div ref={recoveryStatusRef} tabIndex={-1}
+        className="notice resource-error review-recovery" role="alert">
         <span>{recovery.error}</span>
         {!['REVIEW_RECOVERY_STORAGE_UNAVAILABLE', 'REVIEW_RECOVERY_CRYPTO_UNAVAILABLE']
           .includes(recovery.invalid)
@@ -480,7 +579,8 @@ export default function CollabPanel({
             Discard unreadable recovery
           </button>}
       </div>}
-      {recovering && <div className="notice warn review-recovery" role="status" aria-live="polite">
+      {recovering && <div ref={recoveryStatusRef} tabIndex={-1}
+        className="notice warn review-recovery" role="status" aria-live="polite">
         <b>{recovery.busy ? 'Recovering the same review link…' : 'Review-link creation was not confirmed.'}</b>
         <span>The exact run version, expiry, evidence scope, and secret are saved in this tab. Recovery replays them without minting a second identity.</span>
         {!recovery.busy && <button type="button" className="btn sm primary"
@@ -488,7 +588,8 @@ export default function CollabPanel({
           Recover the same review link
         </button>}
       </div>}
-      {recoveryConflict && <div className="notice resource-error review-recovery" role="alert">
+      {recoveryConflict && <div ref={recoveryStatusRef} tabIndex={-1}
+        className="notice resource-error review-recovery" role="alert">
         <b>Saved link identity conflict</b>
         <span>{recovery.error
           || `A different request already owns ${intent.linkId}. Revoke it before creating another link.`}</span>
@@ -497,7 +598,8 @@ export default function CollabPanel({
           {revokeView.ids.has(intent.linkId) ? 'Revoking…' : 'Revoke conflicting link'}
         </button>
       </div>}
-      {revokePending && <div className="notice warn review-recovery" role="status" aria-live="polite">
+      {revokePending && <div ref={recoveryStatusRef} tabIndex={-1}
+        className="notice warn review-recovery" role="status" aria-live="polite">
         <b>Revocation is not confirmed.</b>
         <span>{recovery.error
           || 'Retrying targets the same recovered link and cannot revoke a different link.'}</span>
@@ -513,7 +615,7 @@ export default function CollabPanel({
         type="button" className="btn sm primary" disabled={controlsLocked} onClick={create}>
         <OpIcon name="link" size={12} /> Create and copy review link
       </button>}
-      {createdUrl && <div className="review-created" role="status" aria-live="polite">
+      {createdUrl && <div ref={createdSurfaceRef} className="review-created" role="status" aria-live="polite">
         <label htmlFor="created-review-url">Review link ready</label>
         <div><input ref={createdInputRef} id="created-review-url" readOnly value={createdUrl}
           aria-describedby="created-review-url-note" onFocus={event => event.target.select()} />
@@ -530,19 +632,31 @@ export default function CollabPanel({
           </button>
         </div>
       </div>}
-      <div className="section-h">Existing links</div>
+      <div ref={linksSectionRef} tabIndex={-1} className="section-h">Existing links</div>
       {linksView.status === 'loading' && !linksView.links.length
-        && <div className="muted" role="status">Loading review links…</div>}
+        && <div ref={linksStatusRef} tabIndex={-1} className="muted" role="status">
+          Loading review links…
+        </div>}
       {linksView.status === 'refreshing'
-        && <div className="muted" role="status">Refreshing review links…</div>}
+        && <div ref={linksStatusRef} tabIndex={-1} className="muted" role="status">
+          Refreshing review links…
+        </div>}
       {linksView.links.length > 0 && <div className="review-link-list">{linksView.links.map(link => {
         const expires = dateLabel(link.expires_at)
         const evidence = (link.scopes || []).includes('evidence')
         const rowBusy = revokeView.ids.has(link.id)
-        return <div key={link.id} className="review-link-row">
+        const rowId = reviewRecoveryLinkId(link.id) || String(link.id)
+        return <div key={link.id} ref={element => {
+          if (element) linkRowRefs.current.set(rowId, element)
+          else linkRowRefs.current.delete(rowId)
+        }} tabIndex={-1} className="review-link-row">
           <div><b>{link.status}</b> · {evidence ? 'summary + evidence' : 'summary'}
             <div className="muted">expires {expires}</div></div>
           {activeLink(link) && <button type="button" className="btn sm danger" disabled={rowBusy}
+            ref={element => {
+              if (element) linkActionRefs.current.set(rowId, element)
+              else linkActionRefs.current.delete(rowId)
+            }}
             aria-label={`Revoke ${evidence ? 'summary and evidence' : 'summary'} review link expiring ${expires}`}
             onClick={() => revoke(link.id)}>{rowBusy ? 'Revoking…' : 'Revoke'}</button>}
         </div>
@@ -552,7 +666,8 @@ export default function CollabPanel({
       {['error', 'stale'].includes(linksView.status) && <div className="review-links-error"
         role={linksView.status === 'error' ? 'alert' : 'status'}>
         <span className="muted">{linksView.error}</span>
-        <button type="button" className="btn sm" onClick={refreshLinks}>Retry</button>
+        <button ref={linksRetryRef} type="button" className="btn sm"
+          onClick={() => refreshLinks({ preserveFocus: true })}>Retry</button>
       </div>}
       {revokeView.error && <div className="notice resource-error" role="alert">{revokeView.error}</div>}
     </div>}
