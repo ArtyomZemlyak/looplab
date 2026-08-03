@@ -75,11 +75,18 @@ test('project and super-task empties require a successful current response', asy
 test('run empties and filtered recovery preserve current resource truth', async () => {
   const text = await source()
 
-  assert.match(text, /runsState === 'ready' && runs && !scoped\.length[\s\S]*No runs here\./,
+  // Both settled states now render an empty notice, with DIFFERENT copy — pin the distinction rather
+  // than the old "only `ready` renders one" spelling, because collapsing the two is exactly how a
+  // stale snapshot starts reading as a current empty workspace.
+  assert.match(text, /\['ready', 'stale'\]\.includes\(runsState\) && runs && !scoped\.length[\s\S]*?runsState === 'stale' \? 'No runs in the last loaded data here\.' : 'No runs here\.'/,
     'a stale empty snapshot must not be presented as a current empty workspace')
+  assert.match(text, /!projectScopeBlocked && \['ready', 'stale'\]\.includes\(runsState\)/,
+    'a blocked project scope is not evidence that the workspace is empty')
   assert.match(text, /runsState === 'stale' \? 'No runs in the last loaded data match the filters\.'/)
-  assert.match(text, /hasActiveFilters && <button[^>]*onClick=\{clearFilters\}>Clear filters<\/button>/,
+  assert.match(text, /hasActiveFilters && <button[\s\S]{0,160}?onClick=\{event => clearFilters\(event\.currentTarget\)\}>Clear filters<\/button>/,
     'a zero-result combination must have one-step recovery')
+  assert.match(text, /hasActiveFilters && <button type="button" className="btn sm" disabled=\{navigationBusy\}/,
+    'the recovery must not fire while the scope it would clear is still changing')
   assert.match(text, /aria-label=\{`Sort \$\{sortKey === 'metric'/,
     'the direction control needs a semantic name, not an arrow glyph alone')
 })

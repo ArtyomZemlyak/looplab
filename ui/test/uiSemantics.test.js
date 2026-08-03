@@ -47,7 +47,13 @@ test('permission cards expose an accessible pending decision and safe default fo
   assert.match(chat, /Approve once/)
   assert.match(bar, /className="asst-perm-region" role="region"/)
   assert.match(bar, /aria-live="assertive" aria-atomic="false"/)
-  assert.match(bar, /pending\.length > 0 && view === 'bar'[\s\S]*?setView\('side'\)/)
+  // Auto-reveal is now keyed on NEW request ids rather than "any pending exists": a card the
+  // operator has already seen and collapsed must not keep re-opening the side panel, while a
+  // genuinely new decision still must surface. Pin both halves plus the historical-transcript guard.
+  assert.match(bar, /const newIds = \[\.\.\.liveIds\]\.filter\(id => !autoRevealedPendingIdsRef\.current\.has\(id\)\)[\s\S]*?if \(!newIds\.length\) return[\s\S]*?if \(view === 'bar'\) \{\s*setView\('side'\)/,
+    'a NEW pending permission must reveal the side panel')
+  assert.match(bar, /if \(hidden \|\| historical\) return/,
+    'a historical transcript must not auto-open a decision the operator cannot make')
   const resolve = bar.slice(bar.indexOf('const resolvePerm = async'), bar.indexOf('const onRevert = async'))
   assert.ok(resolve.indexOf('await assistantResolve') < resolve.indexOf('setPending(current =>'),
     'the card must remain visible until the resolve POST succeeds')

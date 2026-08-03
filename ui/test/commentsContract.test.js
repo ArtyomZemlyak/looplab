@@ -521,12 +521,25 @@ test('retryable create, edit, resolve, and reopen failures re-arm only their exa
     await setTextarea(editor, 'Second edit')
     assert.equal(buttonByText('Retry same command'), undefined,
       'changing the visible draft invalidates retry of the old payload')
-    assert.ok(buttonByText('Save comment'))
+    // The unresolved command OWNS this edit until the operator deals with it, so the newer draft is
+    // BLOCKED rather than sent as a competing command — two outstanding edits of one comment is how
+    // a lost update happens. The block is explicit (a disabled control with a reason and a two-way
+    // recovery panel), not a button that looks live and quietly does nothing.
+    assert.equal(buttonByText('Save comment').disabled, true)
+    assert.equal(buttonByText('Save comment').title, 'Resolve the saved failed edit before saving new text')
+    assert.match(document.querySelector('.comment-recovery-panel')?.textContent || '',
+      /Restore its text to retry when valid, or discard that terminal failure/)
     await React.act(async () => { buttonByText('Save comment').click() })
     await harness.flush()
-    const currentEditId = commandIds.at(-1).id
-    assert.notEqual(currentEditId, abandonedEditId)
-    assert.equal(calls.some(call => call.url.endsWith(`/commands/${abandonedEditId}/retry`)), false)
+    assert.equal(commandIds.at(-1).id, abandonedEditId,
+      'a competing edit command was minted while the first one was still unresolved')
+    assert.equal(calls.some(call => call.url.endsWith(`/commands/${abandonedEditId}/retry`)), false,
+      'the OLD payload was retried behind the operator, under newer visible text')
+
+    // Recovery: restoring the failed edit's exact text is what re-arms retry of that exact command.
+    await React.act(async () => { buttonByText('Restore failed edit').click() })
+    await harness.flush()
+    assert.equal(editor.value, 'First edit')
     await React.act(async () => { buttonByText('Retry same command').click() })
     await harness.flush()
     // assert.ok over a boolean (=== compare), NOT assert.equal over two live DOM nodes: building an
@@ -548,19 +561,21 @@ test('retryable create, edit, resolve, and reopen failures re-arm only their exa
     await React.act(async () => { buttonWithExactText('Retry reopen').click() })
     await harness.flush()
 
+    // Four intents, not five: the second edit never became a command, because the first one was
+    // still unresolved. That is the whole point of the block above.
     assert.deepEqual(commandIds.map(item => item.type), [
-      'comment_created', 'comment_edited', 'comment_edited',
+      'comment_created', 'comment_edited',
       'comment_resolution_changed', 'comment_resolution_changed',
     ])
     assert.deepEqual(commandIds.map(item => item.text), [
-      'Create retry', 'First edit', 'Second edit', undefined, undefined,
+      'Create retry', 'First edit', undefined, undefined,
     ])
     assert.deepEqual(commandIds.map(item => item.resolved), [
-      undefined, undefined, undefined, true, false,
+      undefined, undefined, true, false,
     ])
     const retryCalls = calls.filter(call => call.method === 'POST' && /\/retry$/.test(call.url))
     assert.deepEqual(retryCalls.map(call => call.url.match(/commands\/(cmd_[0-9a-f]{32})\/retry$/)[1]), [
-      commandIds[0].id, currentEditId, commandIds[3].id, commandIds[4].id,
+      commandIds[0].id, abandonedEditId, commandIds[2].id, commandIds[3].id,
     ])
     assert.equal(retryCalls.every(call => call.body === undefined), true)
     const submitCalls = calls.filter(call => call.method === 'POST' && /\/commands$/.test(call.url))
@@ -692,8 +707,12 @@ test('RunView refreshes comment feeds only from comments_revision, never global 
     'both the success and the failure path must drop a settlement the current request no longer owns')
   assert.match(inspector, /const finish = \(ok, data = null, error = ''\) => \{\s*if \(detailFlightRef\.current !== request\) return/)
   assert.match(runView, /const preserveComment = id === current\.nodeId && nextTab === 'Comments'/)
-  assert.match(runView, /nodeGeneration: preserveComment \? current\.nodeGeneration : null/,
+  // The non-preserved arm now takes the caller's requested generation instead of a hard `null`; what
+  // must not happen is either field surviving a transition that left the comment's own node or tab.
+  assert.match(runView, /nodeGeneration: preserveComment \? current\.nodeGeneration : targetNodeGeneration/,
     'dock/report node transitions must not retarget an old comment to a different node')
+  assert.match(runView, /const preserveComment = id === current\.nodeId && nextTab === 'Comments'[\s\S]*?commentId: preserveComment \? current\.commentId : null/,
+    'a comment id may only survive a transition that stayed on its own node and Comments tab')
   assert.match(hook, /const renderScopeChanged = scopeRef\.current !== scopeKey \|\| !resourceEnabled/)
   assert.match(hook, /comments: renderScopeChanged \? \[\] : comments/,
     'scope changes must hide prior comment pages during render, before passive effects')

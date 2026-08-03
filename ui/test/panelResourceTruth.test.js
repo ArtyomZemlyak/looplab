@@ -96,11 +96,26 @@ test('secondary panels validate reads and serialize poll/retry recovery without 
     assert.doesNotMatch(document.body.textContent, /No knowledge notes/)
     await click(button('Retry'))
     assert.equal(button('Retrying…')?.disabled, true)
-    await reply(requests.at(-1), { dir: null, files: [] })
-    assert.match(document.body.textContent, /No knowledge notes/)
+    // A CONFIGURED directory that is simply empty. `dir: null` is a different fact ("no knowledge
+    // directory is configured") with its own copy, so replying null here would assert the recovery
+    // through a message that never mentions notes at all.
+    await reply(requests.at(-1),
+                { dir: '/kb', target_root_id: `root-sha256:${'0'.repeat(64)}`, files: [] })
+    assert.match(document.body.textContent, /No knowledge notes yet \(\/kb\)/)
     await click(button('Lessons'))
     await click(button('Retry'))
-    await reply(requests.at(-1), { dir: null, cases: [], lessons: [], notes: [] })
+    // Again a CONFIGURED but empty store: `dir: null` renders "no cross-run memory directory is
+    // configured", which would let the retry look recovered without ever exercising the empty-tier
+    // copy. The tier receipts are what make an empty tier legible as complete rather than truncated.
+    await reply(requests.at(-1), {
+      dir: '/memory', cases: [], lessons: [], notes: [], projection: 'bounded_recent_tail',
+      page: {
+        truncated: false, unavailable: false, partial: false,
+        tiers: Object.fromEntries(['cases', 'lessons', 'notes'].map(key => [key, {
+          limit: 50, returned: 0, skipped: 0, source_window_truncated: false, unavailable: false,
+        }])),
+      },
+    })
     assert.match(document.body.textContent, /No lessons yet/)
 
     await render(panels.RegistryPanel, { state: { nodes: {}, promotions: [] } })

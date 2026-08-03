@@ -127,7 +127,9 @@ test('New Run CTA opens and prefills the composer without auto-submitting or rep
 test('proposal chat and in-memory draft ownership are passed into the card', async () => {
   const [assistant, chat] = await Promise.all([source('AssistantBar.jsx'), source('AssistantChat.jsx')])
   assert.match(assistant, /const launchChatThrough = index => proposalLaunchChat\(msgs, index\)/)
-  assert.match(assistant, /onOpenSettings=\{openAssistantSettings\} launchChat=\{launchChatThrough\(i\)\}/)
+  // Same JSX element, now spread over two lines by the `onRunOpen` prop that landed between them —
+  // the property is that the card receives BOTH, not that they share a source line.
+  assert.match(assistant, /onOpenSettings=\{openAssistantSettings\}[\s\S]{0,160}?launchChat=\{launchChatThrough\(i\)\}/)
   assert.match(assistant, /const \[launchDrafts, setLaunchDrafts\] = useState\(\{\}\)/)
   assert.match(assistant, /const \[launchRecoveries, setLaunchRecoveries\] = useState\(\(\) => listLaunchTransports\(\)\)/)
   assert.match(assistant, /const launchRecoveryButton = launchRecoveries\.length > 0/,

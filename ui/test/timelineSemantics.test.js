@@ -23,7 +23,12 @@ test('RunView owns one paged timeline shared by Dock and EventExplorer', async (
   assert.match(runView, /<Dock[\s\S]*?timeline=\{timeline\}/)
   assert.match(runView, /<EventExplorer runId=\{runId\} timeline=\{timeline\}/)
   assert.match(runView, /const returnToLive = \(\) => \{[\s\S]*?changeViewSeq\(null\)[\s\S]*?timeline\.jumpToLive\(\)/)
-  assert.equal((runView.match(/onClick=\{returnToLive\}>Return to live/g) || []).length, 2)
+  // The two visible buttons now go through the focus-moving wrapper rather than `returnToLive`
+  // directly. Pin the wrapper AND its refusal guard: leaving history is what earns the focus move,
+  // so a refused return must not steal focus into a workspace that is still showing a snapshot.
+  assert.equal((runView.match(/onClick=\{returnToLiveAndFocusWorkspace\}>Return to live/g) || []).length, 2)
+  assert.match(runView, /const returnToLiveAndFocusWorkspace = \(\) => \{\s*if \(!returnToLive\(\)\) return/,
+    'a refused return to live must not move focus')
   assert.match(runView, /const MIN_DOCK_HEIGHT = 200/)
   assert.match(runView, /aria-valuemin=\{MIN_DOCK_HEIGHT\}/)
   assert.doesNotMatch(dock, /\/api\/runs\/\$\{runId\}\/log[`'?]/)
