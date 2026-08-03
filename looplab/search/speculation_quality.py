@@ -1585,8 +1585,9 @@ def _analyze_speculation_run(run_dir: str | Path) -> tuple[dict[str, Any], dict[
 
     # Calibration is a purpose-built, offline Greedy/Toy measurement protocol.  A copied ordinary
     # run with hand-edited snapshots must not become receipt evidence merely because it has Card
-    # events.  Import lazily to avoid making read-only replay import the full Engine at module load.
-    from looplab.engine.orchestrator import (
+    # events.  The profile identity is a SIBLING module now, not the engine (doc 25 SE-07) — this
+    # layer no longer reaches upward for it.
+    from looplab.search.speculation_calibration import (
         SPECULATION_CALIBRATION_PROFILE_DIGEST,
         SPECULATION_CALIBRATION_PROFILE_SETTINGS,
     )

@@ -97,6 +97,8 @@ from looplab.search.card_selection import (
     speculative_raw_actions,
 )
 from looplab.search.speculation_calibration import (
+    SPECULATION_CALIBRATION_PROFILE_DIGEST,
+    SPECULATION_CALIBRATION_PROFILE_SETTINGS,
     SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS,
     SPECULATION_CALIBRATION_SEEDS,
     SPECULATION_POLICY_SCOPE,
@@ -127,6 +129,9 @@ _DIFF_DIGEST_CAP = 8 * 1024 * 1024
 
 # Back-compatible export: the source-owned definition lives beside the shared runtime-scope digest.
 SPECULATION_CALIBRATION_VARIANT_FIELDS = SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS
+# The immutable calibration profile and its digest live in `search/speculation_calibration.py`, which
+# exists to own exactly this source-scoped identity (doc 25 SE-07). They are re-exported here because
+# the engine, the CLI and the tests all spell them on this module.
 
 
 class SpeculationAuthorizationError(RuntimeError):
@@ -138,177 +143,14 @@ class SpeculationAuthorizationError(RuntimeError):
     """
 
 
-def _declared_settings_json_defaults() -> dict[str, object]:
-    """Read schema-declared defaults without consulting Settings env/.env sources.
-
-    ``BaseSettings()`` is intentionally forbidden here: its environment precedence would make the
-    supposedly source-owned profile depend on the launcher's machine. ``model_construct`` receives
-    every field's declared default/default_factory directly, then Pydantic's JSON serializer turns
-    tuples and other schema-native containers into the same representation written to snapshots.
-    """
-    declared: dict[str, object] = {}
-    for name, field in Settings.model_fields.items():
-        if field.is_required():
-            raise RuntimeError(
-                f"calibration profile cannot infer required Settings field {name!r}")
-        declared[name] = field.get_default(call_default_factory=True)
-    snapshot = Settings.model_construct(**declared).model_dump(mode="json")
-    try:
-        # Round-trip now so a future non-JSON default fails at import/source review, not after an
-        # expensive GPU calibration has begun.
-        canonical = orjson.loads(orjson.dumps(snapshot, option=orjson.OPT_SORT_KEYS))
-    except (TypeError, ValueError, orjson.JSONEncodeError) as exc:
-        raise RuntimeError("Settings declared defaults are not calibration-snapshot JSON") from exc
-    if not isinstance(canonical, dict) or set(canonical) != set(Settings.model_fields):
-        raise RuntimeError("Settings declared-default snapshot is incomplete")
-    return canonical
-
-
-# Start from *all* deterministic schema defaults, then turn every optional model/network/memory/
-# adaptive path off. This literal is only the source-owned overrides; the public profile below is the
-# complete Settings map minus the exact three variants above.
-_SPECULATION_CALIBRATION_PROFILE_OVERRIDES: dict[str, object] = {
-    "profile": "default",
-    "backend": "toy",
-    "developer_backend": "default",
-    "n_seeds": 3,
-    "max_parallel": 1,
-    "parallel_build": 1,
-    "eval_parallel": 1,
-    "llm_parallel": 1,
-    "train_monitor": False,
-    "train_monitor_kill": False,
-    "asha_live": False,
-    "asha_live_kill": False,
-    "trust_mode": "trusted_local",
-    "policy": "greedy",
-    "ablate_every": 0,
-    "ablate_code_blocks": False,
-    "merge_mode": "mean",
-    "complexity_cue": False,
-    "feature_engineering": False,
-    "budget_aware": False,
-    "failure_reflection": False,
-    "watchdog_reflection": False,
-    "deep_repair": False,
-    "inline_repair": False,
-    "auto_install_deps": False,
-    "agent_control": {},
-    "localize_faults": False,
-    "surrogate_proposer": False,
-    "researcher_panel": 1,
-    "proxy_scoring": False,
-    "proxy_kill_fraction": 0.0,
-    "novelty_mode": "off",
-    "novelty_gate": False,
-    "novelty_semantic": False,
-    "debug_depth": 1,
-    "operator_bandit": False,
-    "track_hypotheses": False,
-    "reflection_priors": False,
-    "comparative_lessons": False,
-    "lessons_every": 0,
-    "lessons_refresh_every": 0,
-    "reward_hack_detect": False,
-    "code_leakage_detect": False,
-    "workdir_audit": False,
-    "research_verify": False,
-    "critic_check": False,
-    "strategist_backend": "off",
-    "confirm_top_k": 0,
-    "confirm_seeds": 0,
-    "holdout_fraction": 0.0,
-    "holdout_select": False,
-    "holdout_top_k": 1,
-    "select_verifier": False,
-    "verifier_ci_tie": False,
-    "max_seconds": None,
-    "max_eval_seconds": None,
-    "memory_dir": None,
-    "require_approval": False,
-    "coverage_context": False,
-    "concept_pivot": False,
-    "graded_novelty": False,
-    "capability_expansion": False,
-    "fingerprint_universal": False,
-    "cross_run_concepts": False,
-    "concept_run_base": False,
-    "cross_run_advisory": False,
-    "cross_run_structured_claims": False,
-    "cross_run_curation": False,
-    "cross_run_curation_auto": False,
-    "best_of_n": 1,
-    "best_of_n_listwise": False,
-    "foresight": False,
-    "foresight_panel": 1,
-    "foresight_agentic": False,
-    "foresight_verify": False,
-    "unified_agent": False,
-    "agent_drives_actions": False,
-    "card_driven_selection": True,
-    "llm_cache": False,
-    "phase_handoff_summary": False,
-    "trace_llm_io": False,
-    "researcher_tools": False,
-    "cross_run_tools": False,
-    "all_runs_tools": False,
-    "cross_run_read_tools": False,
-    "knowledge_dir": None,
-    "embed_model": None,
-    "embed_base_url": None,
-    "memora": False,
-    "memora_llm": False,
-    "memora_cache": None,
-    "literature_search": False,
-    "web_search": False,
-    "deep_research_every": 0,
-    "concurrent_research": False,
-    "concurrent_research_repeat": False,
-    "concurrent_research_max_calls": 0,
-    "concurrent_consolidate": False,
-    "report_every": 0,
-    "skills_dir": None,
-    "prompt_dir": None,
-    # Never inherit/persist a credential even though the toy profile constructs no LLM client.
-    "llm_api_key": None,
-    "llm_api_key_base_url": None,
-}
-SPECULATION_CALIBRATION_PROFILE_SETTINGS = _declared_settings_json_defaults()
-SPECULATION_CALIBRATION_PROFILE_SETTINGS.update(
-    _SPECULATION_CALIBRATION_PROFILE_OVERRIDES)
-for _variant_field in SPECULATION_CALIBRATION_VARIANT_FIELDS:
-    SPECULATION_CALIBRATION_PROFILE_SETTINGS.pop(_variant_field, None)
-_expected_calibration_profile_fields = (
-    set(Settings.model_fields) - set(SPECULATION_CALIBRATION_VARIANT_FIELDS))
-if set(SPECULATION_CALIBRATION_PROFILE_SETTINGS) != _expected_calibration_profile_fields:
-    missing = sorted(
-        _expected_calibration_profile_fields - set(SPECULATION_CALIBRATION_PROFILE_SETTINGS))
-    extra = sorted(
-        set(SPECULATION_CALIBRATION_PROFILE_SETTINGS) - _expected_calibration_profile_fields)
-    raise RuntimeError(
-        f"calibration Settings coverage drifted (missing={missing}, extra={extra})")
-try:
-    # Enforce the same plain-JSON shape the quality reader compares after json.loads().
-    _profile_json = orjson.loads(orjson.dumps(
-        SPECULATION_CALIBRATION_PROFILE_SETTINGS, option=orjson.OPT_SORT_KEYS))
-except (TypeError, ValueError, orjson.JSONEncodeError) as exc:
-    raise RuntimeError("calibration Settings profile must remain JSON-safe") from exc
-if _profile_json != SPECULATION_CALIBRATION_PROFILE_SETTINGS:
-    raise RuntimeError("calibration Settings profile is not canonical snapshot JSON")
 # Bounded aging for continuous eval dispatch (`_dispatch_evals`). After this many consecutive
 # bypasses the queue head gets exclusive claim on GPU releases, so a wide request stops losing every
 # partial release to the small jobs behind it. The claim ends the moment the head is admitted, or —
 # see the scan — when the pool has fully drained and the head STILL does not fit, which proves it
 # wants more than the box physically has and must not be allowed to wedge the batch.
 _HEAD_BYPASS_LIMIT = 3
-_SPECULATION_CALIBRATION_PROFILE_SCHEMA = "looplab.speculation-calibration-profile/v1"
-SPECULATION_CALIBRATION_PROFILE_DIGEST = "sha256:" + hashlib.sha256(orjson.dumps(
-    {
-        "schema": _SPECULATION_CALIBRATION_PROFILE_SCHEMA,
-        "settings": SPECULATION_CALIBRATION_PROFILE_SETTINGS,
-    },
-    option=orjson.OPT_SORT_KEYS,
-)).hexdigest()
+
+
 def _stable_effective_gpu_inventory(raw) -> list[dict]:
     """Canonical, resume-stable projection of ``effective_gpu_inventory``.
 

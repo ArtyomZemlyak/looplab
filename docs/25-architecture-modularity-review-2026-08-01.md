@@ -2430,6 +2430,44 @@ Teeth-tested by re-admitting the bare reason string and by restoring the try/exc
 
 *Recommendation:* Move SPECULATION_CALIBRATION_PROFILE_DIGEST/_SETTINGS into speculation_calibration.py (which already exists exactly to own such source-scoped identity), and move/export incomplete_finalize_scope through events/ or core so the search→engine edge disappears.
 
+*Resolution (2026-08-02, profile half):* the two profile constants moved into
+`search/speculation_calibration.py` exactly as recommended, along with the derivation that produces
+them (`_declared_settings_json_defaults`, the overrides map, the coverage and canonical-JSON
+self-checks). Nothing in that block touches the engine — it reads `Settings`' DECLARED defaults from
+`core` and this module's own variant-field set — so the module now IS what its docstring always
+claimed. `speculation_quality` imports a sibling instead of the orchestrator, and
+`engine/orchestrator.py` re-exports both names because the engine, the CLI and the tests all spell
+them there.
+
+The digest is a RECEIPT GATE, so the move was verified byte-identical rather than merely "still
+passes": `sha256:5515fda7…` before and after. If it shifted, every calibration receipt issued before
+the move would stop verifying and the gate would refuse legitimately calibrated runs with no error
+saying why. `tests/test_calibration_profile_home.py` (12) pins that exact value, the engine's
+re-export identity, profile coverage vs the variant fields, canonical snapshot JSON, and that the
+derivation still ignores the launcher's environment (a `BaseSettings()` read would make a
+source-OWNED profile depend on whose machine built it).
+
+**The last `search` → `engine` edge is still there and is named rather than glossed:**
+`speculation_quality` imports `engine.finalize.incomplete_finalize_scope`. That is a different move —
+a cluster of event-log helpers (`_adjacent_claim`, `_scope_has_step`, `finalize_scope_quiescent`)
+with five `serve` consumers — and `finalize.py` imports `engine.costs` at module scope, so relocating
+it into `events/` needs its own change. One test asserts the edge count is exactly one and points at
+that file, so when it goes the layer is provably clean.
+
+Teeth-tested by changing the digest's schema string, by pointing the quality reader back at the
+orchestrator, and by making the orchestrator re-derive the digest itself. A fourth attempt — leaking
+a variant field into the profile — never reached the tests: the module's own coverage self-check
+raises at import, which is a stronger guard than a test and worth recording as such.
+
+One lesson from the verification, not the change. The first version of the environment-independence
+test used `importlib.reload(speculation_calibration)`. It passed alone and in pairs, and reddened SIX
+unrelated tests in `test_concept_lens_durability.py` on the full run — because a reload hands every
+already-imported holder (here, `engine/orchestrator.py`'s re-exports) a stale object, and the damage
+only shows up once enough of the suite has been imported. The property is now driven by re-deriving
+under a poisoned environment, one function call away and with no shared state touched. Worth stating
+plainly: a test that mutates module state mid-suite can cost a whole run, and the failure will point
+anywhere but at the test.
+
 #### SE-08 · LOW · duplication · effort: small
 
 **Three near-identical bespoke JSON/finite-number helpers re-implemented across the package (and repo)**
