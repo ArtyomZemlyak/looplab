@@ -76,7 +76,7 @@ baseline.
 `master` has since advanced by further commits (mobile/UI hardening, settings, attention and
 assistant features, a test re-pointing sweep — and `a077d86`, the first structural commit acting
 on this document). A dedicated per-finding status pass over the new HEAD produced the
-remediation ledger in **§5** (running total as of `cea97c3`: 7 fixed, 4 partial, 177 open — and
+remediation ledger in **§5** (running total as of `2d96bed`, §5.4: 43 resolved, 13 partial, 132 open — and
 several flagged god-modules grew substantially in the same window, §5.3). **§6** adds the
 target-design proposals for resolving the finding clusters; §6 was itself adversarially
 validated against HEAD `a077d86` by nine design reviewers, whose corrections (naming collisions
@@ -762,7 +762,7 @@ worker-seam case.
 
 *Recommendation:* Add two tiny shared helpers in train_monitor.py (which asha_monitor already imports from): `last_diagnostic_row(events, event_type, node_id, generation)` for the resume scan, and optionally a `watchdog_tick_loop(cadence, cancel, tick_fn)` scaffold. Full merger of the two monitors is NOT recommended (one is LLM-judged health, the other metric-rank; the split is documented), but the mechanical scaffolding should be single-sourced.
 
-#### EC-05 · MEDIUM · duplication · effort: small
+#### EC-05 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **Novelty reject/repropose/audit block duplicated between LLM and semantic gates**
 
@@ -806,7 +806,7 @@ degradations that actually distinguish the two rules.
 
 *Recommendation:* Extract `_build_refine_block_child(parent_id, generation, idea, state)` for the shared tail, and a `_probe(ablated_code_or_idea, workdir_suffix)` helper for the timed lifecycle-checked probe. The two entry points keep only their distinct impact computation and Idea construction.
 
-#### EC-07 · MEDIUM · inconsistency · effort: small
+#### EC-07 · MEDIUM · inconsistency · effort: small — **RESOLVED (2026-08-02)**
 
 **Strategist/concept cadence uses modulo gating that its sibling cadence explicitly fixed as a bug**
 
@@ -913,7 +913,7 @@ paid-retry exposure is the KNOWN GAP already documented on `_maybe_snapshot_conc
 
 *Recommendation:* Port the two test call sites to _acquire_gpus/_release_gpus and delete the wrappers (or, if kept deliberately, move the assertions they support into a test helper). Low cost, removes a second API surface for the same pool.
 
-#### EC-15 · LOW · excessive-logic · effort: small
+#### EC-15 · LOW · excessive-logic · effort: small — **RESOLVED (2026-08-02)**
 
 **Acknowledged unfixed hot-path cost: invalid operator pin defeats the strategist short-circuit**
 
@@ -1073,7 +1073,7 @@ campaign keeps finding:
 
 *Recommendation:* Move the finalize claim/recovery protocol out of lessons.py into a curation_protocol.py module beside steward_invocation.py, and converge new writes on one protocol (the semantic-key v2 shape) so the validator's other branches become legacy-read-only code that can be isolated and eventually retired. The schema plurality is historical, not a requirement of new writes.
 
-#### EM-04 · MEDIUM · duplication · effort: small
+#### EM-04 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **Durable identity derivation (_curation_source_key / _facets_curation_key) duplicated between writer and validator**
 
@@ -1132,7 +1132,7 @@ would serve one task's paid overlay to another.
 
 *Recommendation:* Extract an _ingest_evidence(groups_lookup, lessons, research_claims) helper taking the group-resolver as a parameter; both paths differ only in that resolver and the structured path's extra _ev weight bookkeeping (passable as a callback or handled by the group dict shape).
 
-#### EM-08 · MEDIUM · duplication · effort: small
+#### EM-08 · MEDIUM · duplication · effort: small — **PARTIALLY RESOLVED (2026-08-02)**
 
 **The '_governance is None → recurse via project_governed_sources' pattern and the scope-filter block are copy-pasted across four/three call sites**
 
@@ -1190,7 +1190,7 @@ import contract (`tests/test_claims.py` asserts the re-export set). The import i
 
 *Recommendation:* Extract concept_capsules.py (validation + store + overview/graph/digest + profit signs) and lesson_hygiene.py (consolidate/filter/rank/parse); keep fingerprints + case libraries in memory.py. The private cross-module imports (_dedup_valid_capsules etc.) become public names of the new module, honestly reflecting their real API status. Wire through the existing back-compat shim.
 
-#### EM-11 · MEDIUM · dead-code · effort: small
+#### EM-11 · MEDIUM · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
 **Vector-backed CaseLibrary is dead in production — only tests use it**
 
@@ -1379,7 +1379,7 @@ directory-entry publish, uncertain-sync fence) against BOTH appenders.
 
 *Recommendation:* Extract a private `_locked_append(payload_bytes, last_logical_seq, expected_last_seq, require_lock, require_durable)` that owns the critical section, called by both public methods with their pre-serialized payload. This shrinks ~110 lines to ~65 and makes future durability changes single-site.
 
-#### EV-07 · MEDIUM · excessive-logic · effort: medium
+#### EV-07 · MEDIUM · excessive-logic · effort: medium — **RESOLVED (2026-08-02)**
 
 **Acknowledged-but-unfixed O(n²) read cost for cross-process readers in EventStore.read_all**
 
@@ -1526,7 +1526,7 @@ Scope: `looplab/core/`: models.py, config.py, llm.py + siblings, tracing, parsin
 
 *Recommendation:* Move one parameterized `bounded_redacted_tree(value, *, max_chars, max_items, max_depth, max_total_items)` into redact.py (which both already import) and have tracing and advisory_payloads call it with their own constants.
 
-#### CO-07 · MEDIUM · layering · effort: small
+#### CO-07 · MEDIUM · layering · effort: small — **RESOLVED (2026-08-02)**
 
 **core→agents layering violation: Settings validation lazily imports agents.cli_agent**
 
@@ -1666,7 +1666,7 @@ six full `validate_run_child`-shaped validators, which carry per-caller HTTP err
 
 *Recommendation:* Extract _PathLocks (and ideally the shared _Index lifecycle: identity/metadata fences, resume-from-valid_end scanning, LRU registry) into one serve/_log_index.py used by both; the payload-specific _apply_delta/_row_from stay per-module.
 
-#### SC-05 · MEDIUM · duplication · effort: small
+#### SC-05 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **ctypes no-replace durable rename duplicated between reset and deletion**
 
@@ -1725,7 +1725,7 @@ dropped; the declared private-seam surface is one name smaller.
 
 *Recommendation:* Extract _spawn_and_await_startup(rd, record, path) and _try_restart_claim(rd, record, path) helpers used by both occurrences, and split the monitor loop body from the admission phase.
 
-#### SC-08 · MEDIUM · other · effort: small
+#### SC-08 · MEDIUM · other · effort: small — **RESOLVED (2026-08-02)**
 
 **Unresolved embedded review marker acknowledging an O(events) full-log read on the per-command append path**
 
@@ -1857,7 +1857,7 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 
 *Recommendation:* Move the lease/fence/receipt machinery to looplab/serve/scope_actions.py (or fold into scope_report.py), and `_prior_learnings_index` next to its consumers (it is a Genesis prompt projection, not a report route). The router should shrink to endpoint wiring plus the staleness GET.
 
-#### SR-03 · HIGH · under-decomposition · effort: medium
+#### SR-03 · HIGH · under-decomposition · effort: medium — **RESOLVED (2026-08-02)**
 
 **control.py trace-clear: ~640-line durable state machine as closures inside build_router**
 
@@ -1892,7 +1892,7 @@ match. Each pins the same property — an unconfirmed or unreconstructable outco
 another deletion. Six independent breaks in the production module were each caught by exactly the
 test that guards the property they broke.
 
-#### SR-04 · MEDIUM · under-decomposition · effort: medium
+#### SR-04 · MEDIUM · under-decomposition · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
 **runs.py concept-lens subsystem (~1000 lines) with a triplicated generation-fence preamble**
 
@@ -1927,7 +1927,7 @@ pretending the clause was already load-bearing.
 **Still open:** the ~1,000-line concept-lens subsystem still lives inside `routers/runs.py`; the
 `serve/concept_lens.py` service extraction is a separate change.
 
-#### SR-05 · MEDIUM · duplication · effort: small
+#### SR-05 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **_json_object body parser copy-pasted 4x at module level plus ~10 inline re-implementations**
 
@@ -1983,7 +1983,7 @@ path, the same reason `serve/engine_proc.py` imports it inside its functions.
 
 *Recommendation:* One configurable bounded-projection walker in core/redact.py (budget, depth, fanout, secret-key policy, truncation receipts as parameters); migrate the two near-identical copies first.
 
-#### SR-07 · MEDIUM · mergeable-entities · effort: small
+#### SR-07 · MEDIUM · mergeable-entities · effort: small — **RESOLVED (2026-08-02)**
 
 **cross_run.py: five concept-governance POSTs and two steward POSTs are the same endpoint modulo one function**
 
@@ -2010,7 +2010,7 @@ portfolio that does not exist, and the operator has already paid for them — so
 `test_an_unhealthy_projection_refuses_the_steward_before_any_paid_call` now pins the ordering by
 asserting the invocation is never reached, not merely that the response is an error.
 
-#### SR-08 · MEDIUM · other · effort: medium
+#### SR-08 · MEDIUM · other · effort: medium — **RESOLVED (2026-08-02)**
 
 **Twelve unresolved async-handler-blocks-event-loop defects, flagged in-code but unfixed**
 
@@ -2022,7 +2022,7 @@ asserting the invocation is never reached, not merely that the response is an er
 
 *Status (post-baseline):* Fixed on `master` by commit `c92b89f` (2026-08-01, immediately after this review's baseline): all flagged handlers now offload their blocking sections via `anyio.to_thread.run_sync` (the assistant SSE drain was inverted to a no-pool-hop loop drain), the span_io fallback scan is bounded to the index's coverage boundary, and every `CLAUDE REVIEW: [PERF]` marker was removed. Behavioural tests pin the fix. The finding is retained as accurate at the baseline.
 
-#### SR-09 · MEDIUM · duplication · effort: small
+#### SR-09 · MEDIUM · duplication · effort: small — **PARTIALLY RESOLVED (2026-08-02)**
 
 **Generation-fence 409 envelopes hand-built ~26 times; comment-cursor error duplicated between reviews and collaboration**
 
@@ -2044,7 +2044,7 @@ valid for a run state that has since moved, and only the second is worth re-fetc
 **Still open:** the `generation_conflict` sweep over the ~26 hand-built `run_generation_changed`
 409s. Three of them were already collapsed by SR-04's `_assert_lens_generation`.
 
-#### SR-10 · MEDIUM · duplication · effort: small
+#### SR-10 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **Attempt-fenced node-metrics read copy-pasted between owner and reviewer routes**
 
@@ -2074,7 +2074,7 @@ just made green — the attempt-fence test still fails when the fence is broken 
 breaks; the third, "read unwindowed for any attempt", is caught by the new tests instead, because
 that test's no-receipt case only exercises attempt zero).
 
-#### SR-11 · MEDIUM · duplication · effort: small
+#### SR-11 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **Agentic emit-loop scaffolding duplicated between genesis and boss command router**
 
@@ -2121,7 +2121,7 @@ disconnects the injection tests from the loops they guard is worse than the dupl
 
 *Recommendation:* Move `_defaults_backend_llm` to serve/launch.py, `_prior_learnings_index` to serve/scope_report.py, and make the run-summary/membership/tasks projections real AppState methods instead of build_router side effects.
 
-#### SR-13 · LOW · dead-code · effort: small
+#### SR-13 · LOW · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
 **Orphaned endpoints and unused helpers**
 
@@ -2143,7 +2143,7 @@ deprecation flag is precisely the mechanism for giving a caller this repository 
 notice before removal. Deleting them on the strength of a first-party grep would be treating
 "I cannot see a consumer" as "there is no consumer".
 
-#### SR-14 · LOW · duplication · effort: small
+#### SR-14 · LOW · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **Dual-schema OpenAPI compatibility pattern duplicated between misc and runs config routes**
 
@@ -2170,7 +2170,7 @@ The `legacy_envelope` factory half is NOT done: the two legacy models differ in 
 revision regex (`misc` excludes the reserved `settings` key through `json_schema_extra`), and
 folding them would have meant inventing a parameterization neither caller asked for.
 
-#### SR-15 · LOW · duplication · effort: small
+#### SR-15 · LOW · duplication · effort: small — **PARTIALLY RESOLVED (2026-08-02)**
 
 **Boss LLM endpoints repeat an identical prologue/epilogue quartet**
 
@@ -2217,7 +2217,7 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 
 *Recommendation:* Introduce one WrapsResearcher base (parity with WrapsDeveloper) owning the delegation contract (parser/prompts/client/bounds/space_hint pass-through, hint forwarding, telemetry attrs) and have all three wrappers extend it, so a forwarding rule is fixed once.
 
-#### SE-03 · MEDIUM · duplication · effort: small
+#### SE-03 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **ASHA survivor-retirement logic duplicated between policy and card_selection, with no fidelity guard covering ASHA**
 
@@ -2255,7 +2255,7 @@ charged to only its first parent.
 
 *Recommendation:* Compute (explored, rename) once in _selection_after_forced_gates and thread it into card_score via a scoring-context parameter; compute eligible_cards once per _speculative_selection invocation.
 
-#### SE-05 · MEDIUM · dead-code · effort: small
+#### SE-05 · MEDIUM · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
 **concept_projection.py carries an unreachable 'paired core commit' fallback lattice — the owner module shipped long ago**
 
@@ -2357,7 +2357,7 @@ Teeth-tested by re-admitting the bare reason string and by restoring the try/exc
 
 *Recommendation:* If receipt-embedded proof must stay, shrink the runtime matrix to a digest of the offline test result or a handful of forced-gate cases; keep the full 15-case matrix in tests/ where the fixtures belong.
 
-#### SE-13 · LOW · dead-code · effort: small
+#### SE-13 · LOW · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
 **Dead helper: _explored_concepts is never called**
 
@@ -2422,7 +2422,7 @@ Scope: `looplab/agents/`: roles.py, tool_loop.py, agent.py, cli_agent.py, unifie
 
 *Recommendation:* Move SPECULATION_CUDA_PROBE_* (and the calibration hooks on ToyResearcher/ToyObjectiveDeveloper if feasible) into a dedicated agents/calibration.py or next to search/speculation_quality.py, preserving comments verbatim and adding the old names to the import shim; consider a follow-up split of the wrapper stack (WrapsDeveloper/ValidatingDeveloper) into roles_wrappers.py with re-exports, mirroring the tool_loop split pattern already proven here.
 
-#### AG-03 · MEDIUM · inconsistency · effort: medium
+#### AG-03 · MEDIUM · inconsistency · effort: medium — **RESOLVED (2026-08-02)**
 
 **Strategy field set is manually synchronized across five parallel encodings with no registry/source-scan guard, contrary to the codebase's own convention** — **RESOLVED (2026-08-02)**
 
@@ -2653,7 +2653,7 @@ arbitrary card at 0.9. All three deliberate breaks fail loudly.
 *Still open:* the 856-line `if name == ...` chain itself, and the ~10 hand-rolled partial-source /
 partial-scope warning sequences.
 
-#### TO-02 · HIGH · over-engineering · effort: medium
+#### TO-02 · HIGH · over-engineering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
 **machine_runs_tools.py is a 1659-line god-module: 3 providers + crash-recovery fence + command adapter, with _subtree defined three times**
 
@@ -2695,7 +2695,7 @@ inputs and wrong when a descendant is visited before its parent joins.
 **Still open:** the module is 1,721 lines and still holds `_TurnMutationFence`, `_RunCommandAdapter`
 and three unrelated providers. That split is a separate change with its own verification.
 
-#### TO-03 · MEDIUM · layering · effort: medium
+#### TO-03 · MEDIUM · layering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
 **tools -> serve layering violation in machine_runs_tools, contradicting the rule other tools modules explicitly state**
 
@@ -2705,7 +2705,11 @@ and three unrelated providers. That split is a separate change with its own veri
 
 *Recommendation:* Inject the serve dependencies the way `alive_fn` already is: pass lifecycle-lock / launch-pending / config-write-lock callables into RunControlTools' constructor from serve/assistant.py, and have the command service expose `run_generation` so `_local_run_generation` can be deleted. This restores the one-direction rule the package's own comments assert.
 
-#### TO-04 · MEDIUM · duplication · effort: small
+*Status (2026-08-02):* the injection seam landed — `RunLifecycleFns` injected by serve, with the
+lazy serve import kept as the deliberate default fallback (`e4722db`; resolved per call so read-only
+assistant sessions never pay for the server package). Same seam as XP-03; see there for what remains.
+
+#### TO-04 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **The permission-gate ceremony (decide_action -> deny message -> approver -> approval_allows -> declined message) is re-implemented ~6 times**
 
@@ -2900,7 +2904,7 @@ solution-tier cases.
 
 *Recommendation:* Extract a shared builder in sandbox.py, e.g. docker_run_base(image, network, runtime, gpu_args, mem, cpus, mount_root, env) -> list[str] plus a require_docker_cli(context) helper, and have both DockerSandbox.run and make_docker_wrap compose on top of it. Security hardening flags should have exactly one home.
 
-#### RA-04 · MEDIUM · dead-code · effort: small
+#### RA-04 · MEDIUM · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
 **METRIC_READERS is dead code with a false docstring; metric-reader kinds are maintained in three parallel places**
 
@@ -2922,7 +2926,7 @@ registry-guarded seam CLAUDE.md's convention asks for: a reader that exists but 
 unconfigurable, and a listed kind with no reader is a red test rather than a spec that validates at
 submit and then returns no metric forever.
 
-#### RA-05 · MEDIUM · flat-code · effort: small
+#### RA-05 · MEDIUM · flat-code · effort: small — **RESOLVED (2026-08-02)**
 
 **read_metric is a 120-line flat if-chain with the security-critical workdir-confinement guard copy-pasted three times**
 
@@ -3084,7 +3088,7 @@ Scope: `looplab/cli/`, `looplab/trust/`, `looplab/__init__.py`, bench.py, sweep.
 
 *Recommendation:* Extract a resolve_memory_source(p, canonical_name) -> (path, base, source_names, source_paths) helper and a render_source_warnings(receipt) formatter; each command keeps only its _project body.
 
-#### CT-06 · MEDIUM · duplication · effort: small
+#### CT-06 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **Read-only RunTools builder copy-pasted five times across four packages**
 
@@ -3119,7 +3123,7 @@ never REACHED.
 Four deliberate breaks in total (drop `parent` from `bind_state`; narrow the except so `MemoryError`
 escapes; delete the novelty guard; re-inline one wrapper's copy).
 
-#### CT-07 · MEDIUM · duplication · effort: small
+#### CT-07 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **Five hand-written late-binding monkeypatch shims with identical bodies**
 
@@ -3151,7 +3155,7 @@ function again. Teeth-tested by freezing the shim, by re-inlining one, and — a
 the diagnostics break turned out to be call-time resolution in disguise — by a genuine module-scope
 `from looplab.cli import make_llm_client as _FROZEN_FACTORY`.
 
-#### CT-08 · MEDIUM · inconsistency · effort: small
+#### CT-08 · MEDIUM · inconsistency · effort: small — **RESOLVED (2026-08-02)**
 
 **config.snapshot.json loaded three different ways with three failure semantics**
 
@@ -3280,7 +3284,7 @@ Scope: import graph, cross-package duplication, dead top-level code, registries,
 
 *Recommendation:* Promote the functions cross_run_tools actually needs into a public read-model API (drop the underscore, add to engine/memory's public surface or a dedicated cross-run read-model module) so the boundary is explicit; alternatively guard the private-import list with the same registry+source-scan discipline used for the other seams. Rename _interprocess_lock to a public name since four packages outside events (serve, cli, engine, tools) depend on it.
 
-#### XP-02 · MEDIUM · duplication · effort: medium
+#### XP-02 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-02)**
 
 **File-identity signature tuple (dev, ino, ctime_ns, size, mtime_ns) hand-rolled in 10+ modules across five packages**
 
@@ -3376,7 +3380,7 @@ entry, and a fresh upward import from `core/parse.py`.
 
 *Recommendation:* Move the calibration-profile constants into search (or a shared core module) so engine imports them downward, and implement the comment's own recommendation: pin receipts to an explicit rollout/protocol version plus exact hashes of only execution-affecting files.
 
-#### XP-08 · LOW · dead-code · effort: small
+#### XP-08 · LOW · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
 **Seven verified-dead functions, including a ~60-line unused locking context manager**
 
@@ -3669,6 +3673,38 @@ fast-forward — the largest flagged files grew, none shrank:
 This is not a criticism of those commits — they are behavior and security work the product
 needed — but it is direct evidence for §6.8: without a ratchet, the god-modules absorb every
 feature by default.
+
+### 5.4 Third reconciliation (2026-08-02, HEAD `2d96bed`)
+
+Roughly 110 further commits landed in the following hours — about 45 of them structural commits
+**executing this document**, most tagged with finding IDs in their subjects and each updating
+its §4 entry in the same change (the §6.8.3 ledger-upkeep rule, working as designed; the
+per-finding `*Resolution:*` paragraphs in §4 are the authoritative detail — this section is the
+roll-up). The header marks in §4 were normalized in this pass so every non-open finding carries
+one. Running total: **43 resolved, 13 partially resolved, 132 open.**
+
+Newly resolved since §5.1's table: ES-07, ES-11; EC-01, EC-03, EC-05, EC-07; EM-01 (claims.py
+2,896 → 831 lines across five modules), EM-02, EM-04, EM-11; EV-03, EV-05, EV-06; CO-07;
+SC-05; SR-03, SR-05, SR-07, SR-10, SR-11, SR-13, SR-14; SE-03, SE-05; AG-03, AG-04, AG-06,
+AG-07; TO-04; RA-03, RA-05; CT-06, CT-07, CT-08; XP-02, XP-04. Newly partial: ES-02
+(telemetry-consume step extracted), EM-08 (scope-boundary half), TO-01, TO-02, TO-03/XP-03
+(injection seam with a deliberate lazy default), TO-09/XP-01 (the guard arm:
+`tests/test_cross_package_private_seams.py` pins all 26 private cross-package edges two-way),
+RA-06 (direction validator on all nine models), SR-04 (generation-fence preamble), SR-09 (the
+comment-error half).
+
+The sprint also validated §6's corrected designs in practice: §6.1's kernel is largely shipped
+(`core/pathsafe.py`, `atomicio.file_identity` + `durable_no_replace_rename`,
+`core/latebind.py`), §6.2's protocol layer mostly shipped (`retry_tail_cas`-equivalent loops
+gone via `ES-07`'s helper, `developer_crash_records`, `DEVELOPER_ERROR_PREFIX`,
+`_invalidate_completion_certificates`, the JSONL scanner, `_locked_append`), §6.4's
+`serve/http.py` and `serve/trace_clear.py` exist as proposed, §6.5's claims split completed
+with behavior-preservation proven by test, and §6.6's registries landed (STRATEGY_FIELDS, the
+agents↔search direction note, the core `DEVELOPER_BACKENDS` set ending the single upward core
+import). Two new themes were added by the executing sessions: **T8** (non-deterministic
+full-suite failures diagnosed as GIL starvation — a live defect class, §2) and **T9** (the UI
+suite's source-regex idiom had silently retired 30 assertions — found, restored, and closed the
+same day, §2).
 
 ## 6. Architectural resolution proposals
 
