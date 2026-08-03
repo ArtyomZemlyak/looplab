@@ -3154,6 +3154,35 @@ Scope: `looplab/cli/`, `looplab/trust/`, `looplab/__init__.py`, bench.py, sweep.
 
 *Recommendation:* Extract a resolve_memory_source(p, canonical_name) -> (path, base, source_names, source_paths) helper and a render_source_warnings(receipt) formatter; each command keeps only its _project body.
 
+*Resolution (2026-08-02):* `inspect_cmds.resolve_memory_source(memory_dir, canonical_name, *,
+missing_is_dir)` returns exactly the recommended `(path, base, source_names, source_paths)`, and all
+three commands keep only their `_project` body. Three now-orphaned `import stat` lines went with it.
+
+The dance is not cosmetic: the file-vs-directory split decides which governed SOURCE the read
+declares. A source declared by NAME gets `project_governed_sources`' health/quarantine bookkeeping
+applied to a store it recognises; one declared by PATH gets the same locking with no such claim.
+Getting that backwards does not fail — it silently changes what "complete" means in the receipt the
+operator reads.
+
+`missing_is_dir` is the one behaviour that legitimately differed and is now named rather than
+implied: `cross-run-concepts` treats a non-existent argument as a directory so its refusal can name
+the capsule file the operator expected, while `claims` refuses outright because it has no useful
+answer about a directory that is not there. `cross-run-digest` stays directory-ONLY, which is now an
+explicit check on the resolved base rather than a differently-shaped `stat` call.
+
+The warning half was taken narrower than proposed. A `render_source_warnings(receipt)` formatter
+would have flattened four DIFFERENT operator-facing sentences into one, and those strings are what an
+operator reads to know a count is a lower bound. What was actually duplicated is the extraction, so
+`quarantined_claim_counts(claim_source)` owns that and each site keeps its own wording — a receipt
+read with the wrong nesting reports 0 quarantined rows and turns "these counts are lower bounds" into
+a confident exact answer, in three commands at once.
+
+`tests/test_memory_source_resolution.py` (20) pins canonical-by-name vs other-file-by-path, relative
+paths absolutised before they cross into the governance layer, symlink following, a FIFO refused
+rather than treated as a directory, the per-command missing-path rule, every receipt shape, and grep
+guards that `S_ISREG`/`S_ISDIR`/`rows_quarantined` each appear in exactly one place. Teeth-tested
+against five breaks.
+
 #### CT-06 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **Read-only RunTools builder copy-pasted five times across four packages**

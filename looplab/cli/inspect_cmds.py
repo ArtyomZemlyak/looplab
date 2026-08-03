@@ -52,6 +52,61 @@ def _governance_cli_read(project):
             GovernanceLedgerUnavailable("cross_run_sources", "storage_unreadable"))
 
 
+def resolve_memory_source(memory_dir, canonical_name: str, *, missing_is_dir: bool):
+    """Resolve a `--memory-dir` argument that may name the DIRECTORY or the FILE itself.
+
+    Returns ``(path, base, source_names, source_paths)`` for `project_governed_sources`, or None when
+    the argument is neither a regular file nor a directory (doc 25 CT-05). Three read commands wrote
+    this dance out — `cross-run-concepts`, `cross-run-digest` and `claims` — and it is not cosmetic:
+    the file-vs-directory split decides which governed SOURCE the read declares, and declaring the
+    wrong one silently changes what the governance snapshot locks and reports as complete.
+
+    `canonical` is the interesting bit. When the resolved path IS `base / canonical_name`, the source
+    is declared by NAME so the governance layer applies its own health/quarantine bookkeeping to a
+    store it knows. When the operator pointed at some other file, it is declared by PATH instead —
+    the same locking, but no claim that this is the canonical store.
+
+    `missing_is_dir` is the one behaviour that legitimately differs. `cross-run-concepts` treats a
+    non-existent argument as a directory so it can print "no concept capsules at <path>" naming the
+    file the operator expected; `claims` refuses instead. Both are right for their command, so the
+    caller says which.
+    """
+    import stat as _stat
+
+    base_path = Path(memory_dir)
+    try:
+        mode = base_path.stat().st_mode
+    except FileNotFoundError:
+        if not missing_is_dir:
+            return None
+        path, base = base_path / canonical_name, base_path
+    else:
+        if _stat.S_ISREG(mode):
+            path, base = base_path, base_path.parent
+        elif _stat.S_ISDIR(mode):
+            path, base = base_path / canonical_name, base_path
+        else:
+            return None
+
+    canonical = path.absolute() == (base / canonical_name).absolute()
+    return (path, base,
+            [canonical_name] if canonical else [],
+            [] if canonical else [path.absolute()])
+
+
+def quarantined_claim_counts(claim_source) -> tuple[int, int]:
+    """`(lessons, research)` durable rows quarantined out of one claim-source receipt.
+
+    Three commands render this pair in their own prose; only the extraction was duplicated, and it is
+    the half that must not drift — a receipt read with the wrong nesting reports 0 quarantined rows
+    and turns "these counts are lower bounds" into a confident exact answer.
+    """
+    source = claim_source if isinstance(claim_source, dict) else {}
+    lessons = ((source.get("lessons") or {}).get("rows_quarantined", 0))
+    research = ((source.get("research") or {}).get("rows_quarantined", 0))
+    return int(lessons or 0), int(research or 0)
+
+
 def _safe_steward_error(exc: Exception, phase: str) -> str:
     """Classify a paid failure without persisting provider text, endpoints, paths, or credentials."""
     from looplab.serve.assistant import safe_assistant_failure
@@ -880,26 +935,18 @@ def cross_run_concepts_cmd(
     """PART IV cross-run Step 3 (§21.20): portfolio overview over the per-run CONCEPT capsules written when
     `cross_run_concepts` is on. Shows which concepts have been explored across the portfolio and in which
     runs — each with its OWN outcome (raw metrics are NOT compared across tasks). Pure read; no endpoint."""
-    import stat
 
     from looplab.engine.governance_health import observed_path_missing, project_governed_sources
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
     p = Path(memory_dir)
 
     def _snapshot():
-        try:
-            mode = p.stat().st_mode
-        except FileNotFoundError:
-            path, base = p / "concept_capsules.jsonl", p
-        else:
-            if stat.S_ISREG(mode):
-                path, base = p, p.parent
-            elif stat.S_ISDIR(mode):
-                path, base = p / "concept_capsules.jsonl", p
-            else:
-                return p, None
-
-        canonical = path.absolute() == (base / "concept_capsules.jsonl").absolute()
+        # A missing argument resolves AS a directory here so the refusal below can name the capsule
+        # file the operator expected, rather than echoing back the bare directory they typed.
+        resolved = resolve_memory_source(p, "concept_capsules.jsonl", missing_is_dir=True)
+        if resolved is None:
+            return p, None
+        path, base, source_names, source_paths = resolved
 
         def _project(governance):
             if observed_path_missing(path):
@@ -912,8 +959,7 @@ def cross_run_concepts_cmd(
 
         overview = project_governed_sources(
             base, _project, include_concepts=True,
-            source_names=(("concept_capsules.jsonl",) if canonical else ()),
-            source_paths=(() if canonical else (path.absolute(),)),
+            source_names=tuple(source_names), source_paths=tuple(source_paths),
         )
         return path, overview
 
@@ -1351,7 +1397,6 @@ def cross_run_digest_cmd(
     """PART IV cross-run Step 7 (§21.20.11, GATED): a recursive summary — concepts grouped by AXIS prefix
     into clusters with rollup counts. Deterministic inspector DATA; NOT wired into any prompt until it
     beats the flat baseline on the benchmark corpus (the hierarchy gate). Honors concept aliases. No LLM."""
-    import stat
 
     from looplab.engine.governance_health import observed_path_missing, project_governed_sources
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_digest
@@ -1359,11 +1404,11 @@ def cross_run_digest_cmd(
     caps_p = base / "concept_capsules.jsonl"
 
     def _snapshot():
-        try:
-            if not stat.S_ISDIR(base.stat().st_mode):
-                return None
-        except FileNotFoundError:
-            pass
+        # Digest is DIRECTORY-only: it reads the whole governed memory dir, not one named file, so a
+        # regular-file argument is a mistake rather than a narrower read.
+        resolved = resolve_memory_source(base, "concept_capsules.jsonl", missing_is_dir=True)
+        if resolved is None or resolved[1] != base:
+            return None
 
         def _project(governance):
             caps = [] if observed_path_missing(caps_p) else ConceptCapsuleStore(caps_p).all()
@@ -1431,13 +1476,12 @@ def cross_run_search_cmd(
                    + (f"; {rc.get('source_rows_quarantined', 0)} durable row(s) quarantined"
                       if rc.get("source_rows_quarantined", 0) else ""))
     if claim_source.get("source_complete") is not True:
-        lesson_bad = ((claim_source.get("lessons") or {}).get("rows_quarantined", 0))
-        research_bad = ((claim_source.get("research") or {}).get("rows_quarantined", 0))
+        lesson_bad, research_bad = quarantined_claim_counts(claim_source)
         typer.echo(
             "  WARNING: claim evidence source is partial; retained claim matches/counts are lower bounds "
             "and an empty match is not proof of absence: "
-            f"lessons quarantined={int(lesson_bad or 0)}; "
-            f"research quarantined={int(research_bad or 0)}"
+            f"lessons quarantined={lesson_bad}; "
+            f"research quarantined={research_bad}"
         )
     for h in r["results"]:
         if h["kind"] == "claim":
@@ -1505,13 +1549,12 @@ def atlas_cmd(
                if concept_source.get("source_rows_quarantined", 0) else "")
             + ").")
     if claim_source.get("source_complete") is not True:
-        lesson_bad = ((claim_source.get("lessons") or {}).get("rows_quarantined", 0))
-        research_bad = ((claim_source.get("research") or {}).get("rows_quarantined", 0))
+        lesson_bad, research_bad = quarantined_claim_counts(claim_source)
         typer.echo(
             "WARNING: claim evidence source is PARTIAL; retained claims/counts are lower bounds and "
             "absence is not exact "
-            f"(lessons quarantined={int(lesson_bad or 0)}; "
-            f"research quarantined={int(research_bad or 0)})."
+            f"(lessons quarantined={lesson_bad}; "
+            f"research quarantined={research_bad})."
         )
     if atlas["explored"]:
         typer.echo("Concept observations (concept × returned runs):")
@@ -1569,29 +1612,17 @@ def claims_cmd(
     )
     from looplab.engine.governance_health import observed_path_missing, project_governed_sources
     from looplab.engine.memory import ConceptCapsuleStore, _portfolio_concept_overview_data
-    import stat
 
     p = Path(memory_dir)
 
     def _snapshot():
-        try:
-            mode = p.stat().st_mode
-        except FileNotFoundError:
+        # Unlike `cross-run-concepts`, a non-existent argument REFUSES here: the claims read has no
+        # useful "no lessons at <path>" answer to give about a directory that is not there.
+        resolved = resolve_memory_source(p, "lessons.jsonl", missing_is_dir=False)
+        if resolved is None:
             return None
-        if stat.S_ISREG(mode):
-            path, base = p, p.parent
-        elif stat.S_ISDIR(mode):
-            path, base = p / "lessons.jsonl", p
-        else:
-            return None
-
-        canonical_lessons = path.absolute() == (base / "lessons.jsonl").absolute()
-        source_names = ["research_claims.jsonl"]
-        source_paths = []
-        if canonical_lessons:
-            source_names.append("lessons.jsonl")
-        else:
-            source_paths.append(path.absolute())
+        path, base, lesson_names, source_paths = resolved
+        source_names = ["research_claims.jsonl", *lesson_names]
         if pack:
             source_names.append("concept_capsules.jsonl")
 
@@ -1664,13 +1695,12 @@ def claims_cmd(
             "exact one-sided states are withheld."
         )
     if claim_source.get("source_complete") is not True:
-        lesson_bad = ((claim_source.get("lessons") or {}).get("rows_quarantined", 0))
-        research_bad = ((claim_source.get("research") or {}).get("rows_quarantined", 0))
+        lesson_bad, research_bad = quarantined_claim_counts(claim_source)
         typer.echo(
             "WARNING: claim evidence stores are partial; retained claims/counts are lower bounds and "
             "absence is not exact "
-            f"(lessons quarantined={int(lesson_bad or 0)}; "
-            f"research quarantined={int(research_bad or 0)})."
+            f"(lessons quarantined={lesson_bad}; "
+            f"research quarantined={research_bad})."
         )
     _mark = {"supported": "✓", "refuted": "✗", "mixed": "⚖", "inconclusive": "·"}
     _mat = {"operator-ratified": "RATIFIED", "operator-rejected": "REJECTED",
