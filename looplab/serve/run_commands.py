@@ -2179,18 +2179,41 @@ class RunCommandService:
             }
         return public
 
+    # One walk of a run's durable command records (doc 25 SC-13). Five scanners had each opened the
+    # directory, globbed, applied a symlink policy and loaded the record themselves — and the symlink
+    # policies had ALREADY diverged between them, which is the failure worth removing: a symlinked
+    # `cmd_*.json` is an attempt to make one run's command file point at another's, so a scanner that
+    # forgets the check reads a record it does not own and answers a liveness question about the
+    # wrong run.
+    #
+    # `on_symlink` names the two policies explicitly rather than leaving them implicit:
+    #   * ``"refuse"`` — the four scanners that answer a question about a SPECIFIC record refuse the
+    #     whole request, because a planted link means the answer cannot be trusted at all;
+    #   * ``"unreadable"`` — `_active_command_ids`, which is a fail-CLOSED liveness census: it must
+    #     count anything it cannot read as still active, so refusing would let a planted link block a
+    #     destructive mutation's safety check instead of tripping it.
+    def _scan_command_records(self, rd: Path, *, on_symlink: str):
+        """Yield ``(path, record)`` per durable command file; ``record`` is None when unreadable."""
+        directory = self._directory(rd)
+        if not directory.exists():
+            return
+        for path in directory.glob("cmd_*.json"):
+            if path.is_symlink():
+                if on_symlink == "refuse":
+                    raise HTTPException(409, "run command record must not be a symlink")
+                yield path, None
+                continue
+            yield path, self._load(path)
+
     def _active_command_ids(self, rd: Path) -> list[str]:
         directory = self._directory(rd)
         if not directory.exists():
             return []
         active = []
-        for path in directory.glob("cmd_*.json"):
-            if path.is_symlink():
-                active.append(path.stem)
-                continue
-            record = self._load(path)
-            # A malformed durable record is fail-closed: destructive mutation must not erase the only
-            # evidence of a command whose state cannot be determined.
+        for path, record in self._scan_command_records(rd, on_symlink="unreadable"):
+            # An unreadable durable record — malformed, or a planted symlink — is fail-closed:
+            # destructive mutation must not erase the only evidence of a command whose state cannot
+            # be determined.
             if record is None or record.get("status") not in TERMINAL_STATUSES:
                 active.append(path.stem)
         for claim in directory.glob(".cmd_*.executing"):
@@ -2226,14 +2249,8 @@ class RunCommandService:
                                semantic_payload_digest: str) -> tuple[Optional[Path], Optional[dict]]:
         if event_type not in _RETRY_GUARDED_EVENTS:
             return None, None
-        directory = self._directory(rd)
-        if not directory.exists():
-            return None, None
         candidates = []
-        for path in directory.glob("cmd_*.json"):
-            if path.is_symlink():
-                raise HTTPException(409, "run command record must not be a symlink")
-            record = self._load(path)
+        for path, record in self._scan_command_records(rd, on_symlink="refuse"):
             if not record or record.get("event_type") != event_type:
                 continue
             record_semantic = record.get("semantic_payload_digest")
@@ -2312,14 +2329,8 @@ class RunCommandService:
                                  ) -> tuple[Optional[Path], Optional[dict]]:
         """Find the durable finalize a reload/new browser key should observe, not duplicate."""
         finalize_incomplete = self._finalize_incomplete(rd)
-        directory = self._directory(rd)
-        if not directory.exists():
-            return None, None
         candidates = []
-        for path in directory.glob("cmd_*.json"):
-            if path.is_symlink():
-                raise HTTPException(409, "run command record must not be a symlink")
-            record = self._load(path)
+        for path, record in self._scan_command_records(rd, on_symlink="refuse"):
             if not record or record.get("event_type") != EV_RUN_ABORT:
                 continue
             if (semantic_payload_digest is not None
@@ -2346,14 +2357,8 @@ class RunCommandService:
 
     def _active_record(self, rd: Path) -> tuple[Optional[Path], Optional[dict]]:
         """Return the earliest reserved nonterminal command, including the pre-append window."""
-        directory = self._directory(rd)
-        if not directory.exists():
-            return None, None
         candidates = []
-        for path in directory.glob("cmd_*.json"):
-            if path.is_symlink():
-                raise HTTPException(409, "run command record must not be a symlink")
-            record = self._load(path)
+        for path, record in self._scan_command_records(rd, on_symlink="refuse"):
             if record is None:
                 # A malformed/half-reserved record is an active unknown, so submission fails closed.
                 record = {"id": path.stem, "status": "executing", "created_at": 0}
@@ -2379,14 +2384,8 @@ class RunCommandService:
         command whose late postcondition is now proven: those are safe terminal history, not a
         permanent compatibility lock.
         """
-        directory = self._directory(rd)
-        if not directory.exists():
-            return None, None
         candidates = []
-        for path in directory.glob("cmd_*.json"):
-            if path.is_symlink():
-                raise HTTPException(409, "run command record must not be a symlink")
-            record = self._load(path)
+        for path, record in self._scan_command_records(rd, on_symlink="refuse"):
             # Malformed and nonterminal records are handled fail-closed by _active_record.
             if record is None or record.get("status") not in {"failed", "timed_out"}:
                 continue

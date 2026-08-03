@@ -2150,6 +2150,28 @@ rather than sitting open behind a status note.
 
 *Recommendation:* One _scan_command_records(rd, *, on_symlink) generator yielding (path, record); each caller keeps only its filter and selection lambda.
 
+*Resolution (2026-08-03):* `RunCommandService._scan_command_records(rd, *, on_symlink)` is the one
+walk; all five scanners keep only their filter and their min/max selection.
+
+The finding's own observation — "whose symlink handling has already diverged" — is the reason this
+mattered more than the line count. A symlinked `cmd_*.json` is an attempt to make one run's command
+file point at another's, so a scanner that forgets the check reads a record it does not own and
+answers a liveness question about the wrong run. The two surviving policies are now NAMED, because
+they are opposites and each is right for its caller:
+
+* `"refuse"` — the four scanners that answer a question about a SPECIFIC record raise 409, because a
+  planted link means the answer cannot be trusted at all;
+* `"unreadable"` — `_active_command_ids`, a fail-CLOSED liveness census feeding a destructive
+  mutation's safety check. Refusing there would let a planted link BLOCK the check; counting the link
+  as active TRIPS it, which is the safe direction. The record is not read.
+
+A third policy survives deliberately and is pinned by a test: the cross-run stranded-restart sweep
+SKIPS a linked record, because a 409 over one planted link would abort the sweep for every other run.
+
+Covered by `tests/test_command_record_scan.py` (14), including both policies end to end and a guard
+that the refusal message appears in exactly the two places that should own it (the walk, and `_path`
+for a single named record).
+
 #### SC-14 · MEDIUM · under-decomposition · effort: medium
 
 **_reset_blocking is a ~410-line function nesting six lock scopes and all recovery branches inline**
