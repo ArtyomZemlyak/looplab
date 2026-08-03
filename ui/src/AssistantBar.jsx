@@ -393,11 +393,33 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [revertedChanges, setRevertedChanges] = useState(() => new Set())
   const sessionsLoadedRef = useRef(false)
   const sessionsRequestSeqRef = useRef(0)
+  const activeSessionsRequestRef = useRef(null)
+  const refreshSessionsRef = useRef(null)
   const sessionDeleteTombstonesRef = useRef(new Map())
+  const shareMutationEpochRef = useRef(0)
+  const shareMetaReadSeqRef = useRef(new Map())
+  const shareVerificationRef = useRef({ seq: 0, sid: null, promise: null })
+  const [shareVerifySid, setShareVerifySid] = useState(null)
+  const beginShareMetaRead = React.useCallback(sessionId => {
+    const id = String(sessionId || '')
+    const seq = (shareMetaReadSeqRef.current.get(id) || 0) + 1
+    shareMetaReadSeqRef.current.set(id, seq)
+    return { id, seq, mutationEpoch: shareMutationEpochRef.current,
+      listRequestSeq: sessionsRequestSeqRef.current }
+  }, [])
+  const shareMetaReadCurrent = React.useCallback(read => !!read?.id
+    && shareMetaReadSeqRef.current.get(read.id) === read.seq
+    && shareMutationEpochRef.current === read.mutationEpoch
+    && sessionsRequestSeqRef.current === read.listRequestSeq, [])
   const mutateSessionsLocally = React.useCallback(update => {
     // A locally confirmed mutation is newer than every list read already in flight. Fence those
     // responses so a slow refresh cannot resurrect a deleted chat or undo share-state truth.
     sessionsRequestSeqRef.current += 1
+    shareMutationEpochRef.current += 1
+    activeSessionsRequestRef.current = null
+    const verificationSeq = shareVerificationRef.current.seq + 1
+    shareVerificationRef.current = { seq: verificationSeq, sid: null, promise: null }
+    setShareVerifySid(null)
     setSessions(update)
     // assistantGet can already have supplied one authoritative session row while the complete list is
     // still loading. Apply exact share/unshare/delete receipts to that known row, but do not label the
@@ -583,10 +605,24 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       return next
     })
   }, [])
-  const applyAssistantShareMeta = React.useCallback((sessionId, meta) => {
+  const applyAssistantShareMeta = React.useCallback((sessionId, meta, read) => {
     const id = String(sessionId || '')
-    if (!id || !meta || String(meta.id || '') !== id
-        || sessionDeleteTombstonesRef.current.has(id)) {
+    if (!id || sessionDeleteTombstonesRef.current.has(id) || !shareMetaReadCurrent(read)) return undefined
+    // An exact per-session read supersedes every list read already in flight. A confirmed local
+    // share/unshare receipt changes the mutation epoch instead, so a GET that started before that
+    // receipt can never roll it back.
+    const invalidatedListRequest = activeSessionsRequestRef.current
+    sessionsRequestSeqRef.current += 1
+    if (invalidatedListRequest != null) {
+      activeSessionsRequestRef.current = null
+      queueMicrotask(() => {
+        if (mountedRef.current && activeSessionsRequestRef.current == null) {
+          refreshSessionsRef.current?.()
+        }
+      })
+    }
+    shareMetaReadSeqRef.current.set(id, read.seq + 1)
+    if (!meta || String(meta.id || '') !== id) {
       if (id && !sessionDeleteTombstonesRef.current.has(id)) setShareUnknown(id, true)
       return false
     }
@@ -616,17 +652,20 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       return next
     })
     return shareMetaValid
-  }, [setShareUnknown])
+  }, [setShareUnknown, shareMetaReadCurrent])
   const refreshSessionShareMeta = React.useCallback(async sessionId => {
+    const read = beginShareMetaRead(sessionId)
     try {
       const session = await boundedRequest(signal => assistantGet(sessionId, { signal }))
-      if (!mountedRef.current) return null
-      return applyAssistantShareMeta(sessionId, session?.meta) ? session : null
+      if (!mountedRef.current || !shareMetaReadCurrent(read)) return undefined
+      const outcome = applyAssistantShareMeta(sessionId, session?.meta, read)
+      return outcome === undefined ? undefined : outcome ? session : null
     } catch {
-      if (mountedRef.current) setShareUnknown(sessionId, true)
+      if (!mountedRef.current || !shareMetaReadCurrent(read)) return undefined
+      setShareUnknown(sessionId, true)
       return null
     }
-  }, [applyAssistantShareMeta, setShareUnknown])
+  }, [applyAssistantShareMeta, beginShareMetaRead, setShareUnknown, shareMetaReadCurrent])
   useEffect(() => {
     const accessKey = runId == null ? null : String(runId)
     setRunAccessState({ runId: accessKey, access: getRunAccess(runId) })
@@ -677,10 +716,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const runsById = React.useMemo(() => Object.fromEntries(runs.map(r => [r.run_id, r])), [runs])
   const refreshSessions = React.useCallback(async () => {
     const requestSeq = ++sessionsRequestSeqRef.current
+    activeSessionsRequestRef.current = requestSeq
+    const requestedSid = sidRef.current
+    const mutationEpoch = shareMutationEpochRef.current
     setSessionsStatus(sessionsLoadedRef.current ? 'refreshing' : 'loading')
     try {
       const result = await boundedRequest(signal => assistantSessions({ signal }))
-      if (!mountedRef.current || requestSeq !== sessionsRequestSeqRef.current) return null
+      if (!mountedRef.current || requestSeq !== sessionsRequestSeqRef.current
+          || mutationEpoch !== shareMutationEpochRef.current) return null
       if (!Array.isArray(result?.sessions)) throw new Error('Invalid Assistant session list.')
       if (!result.sessions.every(session => validAssistantShareMeta(session))) {
         throw new Error('Invalid Assistant public-link state.')
@@ -720,14 +763,18 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       sessionsLoadedRef.current = true
       setSessions(visibleSessions)
       setSessionsStatus('ready')
+      if (activeSessionsRequestRef.current === requestSeq) activeSessionsRequestRef.current = null
       return visibleSessions
     } catch {
-      if (!mountedRef.current || requestSeq !== sessionsRequestSeqRef.current) return null
-      if (sidRef.current) setShareUnknown(sidRef.current, true)
+      if (!mountedRef.current || requestSeq !== sessionsRequestSeqRef.current
+          || mutationEpoch !== shareMutationEpochRef.current) return null
+      if (requestedSid && sidRef.current === requestedSid) setShareUnknown(requestedSid, true)
       setSessionsStatus(sessionsLoadedRef.current ? 'stale' : 'error')
+      if (activeSessionsRequestRef.current === requestSeq) activeSessionsRequestRef.current = null
       return null
     }
   }, [setShareUnknown])
+  refreshSessionsRef.current = refreshSessions
   // Share privacy terms matter even in the compact bar: a legacy/API-created live link follows new
   // replies. Re-check on session switches in every surface, and still load the list for New chat.
   useEffect(() => {
@@ -901,6 +948,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       return { ok: true, sessionId: id, messages: null, loaded: false }
     }
     const seq = observingLiveSession ? openSessionSeqRef.current : ++openSessionSeqRef.current
+    const shareMetaRead = beginShareMetaRead(id)
     try {
       // Keep the current transcript intact until the target is known to exist. The sequence fence
       // rejects a slow A response after the user has already selected B (or started a new chat).
@@ -912,7 +960,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       if (!Array.isArray(arr)) throw new Error('Invalid Assistant session transcript')
       // assistant_get carries authoritative public-link terms, so compact views can warn about a
       // live link immediately instead of briefly treating an unloaded session list as private.
-      applyAssistantShareMeta(id, s.meta)
+      applyAssistantShareMeta(id, s.meta, shareMetaRead)
       if (observingLiveSession) {
         if (sidRef.current !== id) return { ok: false, sessionId: id, reason: 'superseded' }
         return { ok: true, sessionId: id, messages: arr, loaded: true }
@@ -949,6 +997,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           if (observeOnly || !dangling || exactState !== 'idle') return
           exactState = 'checking'
           let latest
+          const latestShareMetaRead = beginShareMetaRead(id)
           try {
             latest = await boundedRequest(signal => assistantGet(id, { signal }))
           } catch { exactState = 'idle'; return }
@@ -962,7 +1011,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           if (!recovery) { exactState = 'settled'; exactFailure = unavailableAssistantRecovery; return }
           // The exact retry acknowledges only capabilities observed on this fresh assistant_get. A
           // missing/malformed list is not equivalent to "private": pause without issuing the POST.
-          if (!applyAssistantShareMeta(id, latest.meta)) {
+          const shareMetaOutcome = applyAssistantShareMeta(id, latest.meta, latestShareMetaRead)
+          if (shareMetaOutcome === undefined) { exactState = 'idle'; return }
+          if (!shareMetaOutcome) {
             exactState = 'settled'
             exactFailure = assistantLiveShareRecoveryFailure
             setShareAckNotice({ sid: id,
@@ -1908,8 +1959,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       flash('Wait for the current public-link action before sending another turn')
       return
     }
+    if (guardedSid && shareVerificationRef.current.sid === String(guardedSid)
+        && shareVerificationRef.current.promise) {
+      flash('Still checking public-link status · nothing sent')
+      return
+    }
     if (guardedSid && shareUnknownSids.has(guardedSid)) {
-      flash('Messaging paused · retry or revoke the unknown public-link state first')
+      flash('Nothing sent · checking public-link status')
+      verifyShareStatus(guardedSid)
       return
     }
     if (turnCaptureRef.current || runningRef.current) { flash('Assistant is busy'); return }
@@ -1922,14 +1979,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             ? acknowledgedShareMeta : null)
         : sessions.find(session => String(session?.id || '') === String(guardedSid))
       if (!guardedSession || !validAssistantShareMeta(guardedSession)) {
-        // Do not infer "no live links" from a missing/stale row. Refresh both authoritative views and
-        // require a deliberate second send after the exact capabilities are visible.
+        // Do not infer "no live links" from a missing/stale row. Verify the exact session and require
+        // a deliberate second send after the capabilities are visible.
         setShareUnknown(guardedSid, true)
         setShareAckNotice({ sid: guardedSid,
           message: 'Nothing sent · live public-link status must be verified first. Your draft is preserved.' })
-        refreshSessions()
-        refreshSessionShareMeta(guardedSid)
-        flash('Messaging paused · verifying live public-link status')
+        verifyShareStatus(guardedSid)
+        flash('Nothing sent · checking live public-link status')
         return
       }
       acknowledgedLiveShareIds = [...assistantLiveShareIds(guardedSession)]
@@ -2050,11 +2106,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         // Reconcile by GET only; never turn this terminal frame into a new logical POST.
         const failureText = streamedFailure || normalizedFailureText(res.error || 'assistant reply not saved')
         try {
+          const terminalShareMetaRead = beginShareMetaRead(id)
           const session = await boundedRequest(signal => assistantGet(id, { signal }))
           if (!mountedRef.current || sidRef.current !== id || !runningRef.current) return
           const durableMessages = session.messages
           if (!Array.isArray(durableMessages)) throw new Error('Invalid Assistant session transcript')
-          const shareMetaValid = applyAssistantShareMeta(id, session.meta)
+          const shareMetaValid = applyAssistantShareMeta(id, session.meta, terminalShareMetaRead)
           const latest = durableMessages[durableMessages.length - 1]
           if (durableMessages.length >= priorLen && latest?.role === 'assistant' && latest.content) {
             setMsgs(durableMessages)
@@ -2177,8 +2234,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       flash('Wait for this Assistant chat to finish forking before sending')
       return
     }
+    if (guardedSid && shareVerificationRef.current.sid === String(guardedSid)
+        && shareVerificationRef.current.promise) {
+      flash('Retry paused · still checking public-link status')
+      return
+    }
     if (guardedSid && shareUnknownSids.has(guardedSid)) {
-      flash('Retry paused · retry or revoke the unknown public-link state first')
+      flash('Turn not retried · checking public-link status')
+      verifyShareStatus(guardedSid)
       return
     }
     if (busy || commandBusy) { flash(commandBusy ? 'A run command is pending' : 'Assistant is busy'); return }
@@ -2198,9 +2261,19 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         // Refresh first: if the original POST was staged, openSession performs exact raw/mode recovery;
         // if its reply landed late, simply surface it. Only a genuinely unstaged request falls through
         // to the ordinary new-turn retry below.
+        const retryShareMetaRead = beginShareMetaRead(id)
         const session = await boundedRequest(signal => assistantGet(id, { signal }))
         if (!mountedRef.current || sidRef.current !== id) return
-        if (!applyAssistantShareMeta(id, session.meta)) {
+        const shareMetaOutcome = applyAssistantShareMeta(id, session.meta, retryShareMetaRead)
+        if (shareMetaOutcome === undefined) {
+          setShareUnknown(id, true)
+          setShareAckNotice({ sid: id,
+            message: 'Saved turn not retried · public-link status changed while checking.' })
+          verifyShareStatus(id)
+          flash('Retry paused · public-link status changed while checking')
+          return
+        }
+        if (!shareMetaOutcome) {
           setShareAckNotice({ sid: id,
             message: 'Saved turn not retried · live public-link status could not be verified.' })
           refreshSessions()
@@ -2282,8 +2355,16 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       return
     }
     const guardedSid = sidRef.current || sid
+    if (guardedSid && shareVerificationRef.current.sid === String(guardedSid)
+        && shareVerificationRef.current.promise) {
+      flash('Still checking public-link status · nothing sent')
+      return
+    }
     if (guardedSid && shareUnknownSids.has(guardedSid)) {
-      flash('Messaging paused · retry or revoke the unknown public-link state first')
+      flash('Nothing sent · checking public-link status')
+      setShareAckNotice({ sid: guardedSid,
+        message: 'Nothing sent · public-link status was unknown. Your draft is preserved; send again after verification completes.' })
+      verifyShareStatus(guardedSid)
       return
     }
     const liveDraft = composerDraftRef.current
@@ -2477,7 +2558,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const currentShareAckNotice = shareAckNotice?.sid === sid ? shareAckNotice : null
   const liveShareActive = currentSession?.share_live === true
   const shareBusy = shareBusySid != null
-  const sharePaused = shareBusy || shareUnknown
+  const shareVerifying = !!sid && shareVerifySid === sid
+  const sharePaused = shareBusy || shareUnknown || shareVerifying
   const deletingCurrentSession = !!sid && deletingSessionsRef.current.has(sid)
   const shareTurnIncomplete = busy || commandBusy || pending.length > 0
     || runningRef.current || turnCaptureRef.current || msgs[msgs.length - 1]?.role === 'user'
@@ -2485,6 +2567,49 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const forkingCurrentSession = !!sid && forkBusySid === sid
   const currentForkRecovery = forkRecovery?.sid === sid ? forkRecovery : null
   const composerPaused = sharePaused || forkingCurrentSession
+  // Unknown public-link truth blocks every server mutation, but it must not destroy a local draft or
+  // native focus. Keep editing controls available; Send remains focusable and performs a fail-closed
+  // verification without staging a turn.
+  const composerEditingPaused = shareBusy || forkingCurrentSession
+  const verifyShareStatus = (targetSid, retrySuperseded = true) => {
+    const target = String(targetSid || '')
+    if (!target) return Promise.resolve(null)
+    const active = shareVerificationRef.current
+    if (active.sid === target && active.promise) return active.promise
+    const seq = active.seq + 1
+    setShareVerifySid(target)
+    let verification
+    verification = refreshSessionShareMeta(target).then(session => {
+      const latest = shareVerificationRef.current
+      if (latest.seq !== seq || latest.sid !== target || latest.promise !== verification) return session
+      shareVerificationRef.current = { seq, sid: null, promise: null }
+      if (mountedRef.current) setShareVerifySid(current => current === target ? null : current)
+      if (!mountedRef.current || sidRef.current !== target) return session
+      if (session === undefined) {
+        if (retrySuperseded) return verifyShareStatus(target, false)
+        flash('Public-link status changed while checking · review the current status before sending')
+      } else if (session) {
+        setShareAckNotice(current => current?.sid === target ? null : current)
+        flash('Public-link status verified · your draft is ready to send')
+      } else {
+        flash('Public-link status could not be verified · your draft is still preserved')
+      }
+      return session
+    })
+    shareVerificationRef.current = { seq, sid: target, promise: verification }
+    return verification
+  }
+  const retryShareStatus = event => {
+    const returnToDraft = document.activeElement === event.currentTarget
+    const targetSid = sid
+    verifyShareStatus(targetSid)
+    if (returnToDraft) requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }))
+  }
+  const shareStatusMessage = shareVerifying
+    ? 'Checking public-link status. You can keep editing this draft; nothing has been sent.'
+    : shareUnknown
+      ? 'Public-link status unknown. You can keep editing this draft; sending is paused until the status is verified or public links are revoked.'
+    : ''
   const rememberForkRecovery = (sourceSid, recovery) => {
     const stored = loadAssistantForkRecovery(sourceSid)
     const durable = stored?.actionId === recovery.actionId
@@ -2734,11 +2859,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
   const retryHandlerFor = (assistantIndex) => {
     if (historical) return null
-    if (composerPaused || shareActionSessionRef.current
-        || forkActionSessionRef.current === (sidRef.current || sid)) return null
     if (msgs[assistantIndex]?.recoveryBlocked) return null
     const prior = [...msgs.slice(0, assistantIndex)].reverse().find(x => x.role === 'user')
     if (prior?.context?.files?.length && !prior.retryPayload) return null
+    if (shareUnknown || shareVerifying) {
+      return () => verifyShareStatus(sidRef.current || sid)
+    }
+    if (composerPaused || shareActionSessionRef.current
+        || forkActionSessionRef.current === (sidRef.current || sid)) return null
     return () => retryTurn(assistantIndex)
   }
   // /api/start already knows how to seed a run with its creation conversation.  Scope it from the
@@ -2770,6 +2898,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       </div>}
       <Turn m={m} runsById={runsById} readOnly={historical} onRevert={historical ? null : onRevert}
         onRetry={retryHandlerFor(i)}
+        retryLabel={shareUnknown || shareVerifying
+          ? shareVerifying ? 'Checking status…' : 'Verify status' : 'Retry'}
+        retryBusy={shareVerifying}
         onOpenSettings={openAssistantSettings} onRunOpen={openRunFromAssistant}
         launchChat={launchChatThrough(i)}
         revertState={revertState}
@@ -2801,12 +2932,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   </div>
 
   const attachBtn = (cls) => <button className={cls} aria-label="Attach text files"
-    title={historical ? readOnlyShort : shareUnknown ? 'Messaging paused until public-link status is verified'
+    title={historical ? readOnlyShort : shareUnknown ? 'Attach to this draft; sending is paused until public-link status is verified'
       : shareBusy ? 'Wait for the current public-link action'
         : forkingCurrentSession ? 'Wait for this chat to finish forking'
           : draftRunMismatch ? draftRunMismatchMessage
             : pendingFileReads > 0 ? 'Wait for the selected attachment to finish reading' : 'attach text file(s)'}
-    disabled={historical || composerPaused || draftRunMismatch || pendingFileReads > 0}
+    disabled={historical || composerEditingPaused || draftRunMismatch || pendingFileReads > 0}
     onClick={() => fileRef.current?.click()}>
     <OpIcon name="clip" size={14} /></button>
 
@@ -2815,8 +2946,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     <div className="asst-modes">
       {MODES.map(x => <button key={x.id} aria-pressed={x.id === mode}
         className={'asst-mode' + (x.id === mode ? ' on' : '')}
-        disabled={historical || composerPaused} title={historical ? readOnlyShort
-          : shareUnknown ? 'Messaging paused until public-link status is verified'
+        disabled={historical || composerEditingPaused} title={historical ? readOnlyShort
+          : shareUnknown ? 'Choose a draft mode; sending is paused until public-link status is verified'
             : forkingCurrentSession ? 'Wait for this chat to finish forking' : x.hint}
         onClick={() => setComposerMode(x.id)}>{x.label}</button>)}
     </div>
@@ -2860,6 +2991,16 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         Dismiss
       </button>
     </div>}
+    {(shareUnknown || shareVerifying) && <div className="assistant-command-pending assistant-share-pending error">
+      <span>{shareStatusMessage}</span>
+      <button type="button" className="btn sm" onClick={retryShareStatus}
+        disabled={shareBusy || shareVerifying || sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}>
+        {shareVerifying || sessionsStatus === 'loading' || sessionsStatus === 'refreshing'
+          ? 'Checking status…' : 'Retry status'}
+      </button>
+      <button type="button" className="btn sm ghost" onClick={revokeCurrentShares}
+        disabled={shareBusy || forkingCurrentSession}>Unshare</button>
+    </div>}
     {(commandBusy || directFailure) && <div ref={commandStatusRef} tabIndex={-1}
       className={'assistant-command-pending' + (showDirectFailure ? ' error' : '')}
       role={directNeedsAlert ? 'alert' : 'status'} aria-live={directNeedsAlert ? 'assertive' : 'polite'} aria-atomic="true">
@@ -2889,19 +3030,23 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       {suggestionPop}
       {attachBtn('asst-attach')}
       <textarea className="text" ref={inputRef} value={input}
-        aria-label="Assistant message" aria-describedby={draftingNewRun ? 'assistant-new-run-hint' : undefined}
+        aria-label="Assistant message" aria-describedby={[
+          draftingNewRun ? 'assistant-new-run-hint' : '',
+          shareUnknown || shareVerifying ? 'assistant-share-status' : '',
+        ].filter(Boolean).join(' ') || undefined}
         {...comboAria}
-        disabled={historical || commandBusy || composerPaused} onChange={changeInput} onKeyDown={onKey}
+        disabled={historical || commandBusy || composerEditingPaused} onChange={changeInput} onKeyDown={onKey}
         placeholder={historical ? readOnlyShort : shareUnknown
-          ? 'Public-link status unknown · messaging paused' : shareBusy
+          ? 'Public-link status unknown · keep drafting; Send will verify it' : shareBusy
             ? 'Finishing public-link action…' : forkingCurrentSession
               ? 'Forking this chat…' : placeholder} />
       {busy
         ? <button className="btn sm" aria-label="Stop Assistant" title="stop" onClick={stop}>■</button>
         : <button className="btn sm primary"
-            disabled={historical || commandBusy || composerPaused || draftRunMismatch || pendingFileReads > 0
+            disabled={historical || commandBusy || composerEditingPaused || draftRunMismatch || pendingFileReads > 0
               || (!input.trim() && files.length === 0)}
-            onClick={send}>{shareUnknown ? 'Paused' : commandBusy || shareBusy ? 'Waiting…'
+            onClick={send}>{shareUnknown || shareVerifying ? shareVerifying ? 'Checking…' : 'Verify to send'
+              : commandBusy || shareBusy ? 'Waiting…'
               : forkingCurrentSession ? 'Forking…'
                 : pendingFileReads > 0 ? 'Reading…' : 'Send'}</button>}
     </div>
@@ -2913,7 +3058,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   </div>
 
   const hiddenFileInput = <input ref={fileRef} type="file" multiple style={{ display: 'none' }}
-    disabled={historical || composerPaused || draftRunMismatch || pendingFileReads > 0}
+    disabled={historical || composerEditingPaused || draftRunMismatch || pendingFileReads > 0}
     onChange={e => { onFiles(e.target.files); e.target.value = '' }} />
 
   useEffect(() => {
@@ -2963,6 +3108,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     <output className="sr-only">
       {busy ? 'Assistant is responding.' : preview ? 'Assistant response ready.' : ''}
     </output>
+    <div id="assistant-share-status" className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+      {shareStatusMessage}
+    </div>
 
     {/* ── bottom bar — ONLY in bar view (moves into the side panel otherwise) ── */}
     {view === 'bar' && <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (busy || commandBusy || forkingCurrentSession ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
@@ -2982,25 +3130,27 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {suggestionPop}
         <input className="cmdbar-in" ref={inputRef} value={input}
           aria-label="Assistant command or question"
+          aria-describedby={shareUnknown || shareVerifying ? 'assistant-share-status' : undefined}
           role="combobox" aria-autocomplete="list" aria-expanded={showSuggestions}
           aria-controls="assistant-command-listbox"
           aria-activedescendant={activeSuggestionIndex >= 0 ? `assistant-command-option-${activeSuggestionIndex}` : undefined}
-          disabled={historical || commandBusy || composerPaused} onChange={changeInput} onKeyDown={onKey}
+          disabled={historical || commandBusy || composerEditingPaused} onChange={changeInput} onKeyDown={onKey}
           placeholder={historical ? readOnlyShort : shareUnknown
-            ? 'Public-link status unknown · messaging paused' : shareBusy
+            ? 'Public-link status unknown · keep drafting; Send will verify it' : shareBusy
               ? 'Finishing public-link action…' : forkingCurrentSession
                 ? 'Forking this chat…' : runId
                   ? 'Command or ask…  /stop · pause · #12 to attach an experiment · or describe what to do'
                   : 'Describe a run to start, or ask the assistant…  ( / for commands )'} />
       </div>
       {attachBtn('cmdbar-attach')}
-      {shareUnknown
-        ? <span className="cmdbar-status thinking recovery error" role="alert"
-            aria-live="assertive" aria-atomic="true">
-            <span><span className="cmdbar-who">public-link status unknown</span> · messaging paused</span>
-            <button type="button" className="btn sm" onClick={refreshSessions}
-              disabled={shareBusy || sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}>
-              Retry status
+      {shareUnknown || shareVerifying
+        ? <span className="cmdbar-status thinking recovery error">
+            <span><span className="cmdbar-who">{shareVerifying
+              ? 'checking public-link status' : 'public-link status unknown'}</span>
+              {' · '}draft available · nothing sent</span>
+            <button type="button" className="btn sm" onClick={retryShareStatus}
+              disabled={shareBusy || shareVerifying || sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}>
+              {shareVerifying ? 'Checking…' : 'Retry status'}
             </button>
             <button type="button" className="btn sm ghost" onClick={revokeCurrentShares}
               disabled={shareBusy}>Unshare</button>
@@ -3068,13 +3218,18 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           so stopping never opens a view. */}
       {busy
         ? <button className="cmdbar-go stop" aria-label="Stop Assistant" title="stop the assistant" onClick={stop}>■</button>
-        : <button className="cmdbar-go" aria-label="Send Assistant message"
+        : <button className="cmdbar-go"
+            aria-label={shareUnknown || shareVerifying ? shareVerifying
+              ? 'Checking public-link status; nothing sent'
+              : 'Verify public-link status before sending' : 'Send Assistant message'}
             title={draftRunMismatch ? draftRunMismatchMessage
-              : shareUnknown ? 'Messaging paused until public-link status is verified'
+              : shareUnknown || shareVerifying ? shareVerifying
+                ? 'Checking public-link status; your draft remains editable'
+                : 'Messaging paused until public-link status is verified'
               : commandBusy ? 'Waiting for the current run command' : historical ? readOnlyShort
                 : forkingCurrentSession ? 'Wait for this chat to finish forking'
                   : pendingFileReads > 0 ? 'Wait for the selected attachment to finish reading' : 'send (Enter)'}
-            disabled={historical || commandBusy || composerPaused || draftRunMismatch || pendingFileReads > 0
+            disabled={historical || commandBusy || composerEditingPaused || draftRunMismatch || pendingFileReads > 0
               || (!input.trim() && files.length === 0)} onClick={send}>▶</button>}
       <button className="cmdbar-drawer-btn" aria-label="Open Assistant in side view"
         title="open chat on the right (side view)" onClick={openSide}><OpIcon name="chat" size={13} /></button>
@@ -3202,10 +3357,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               {shareUnknown ? 'share state unknown' : liveShareActive
                 ? 'LIVE public link · new replies public' : 'public snapshot active'}
             </span>}
-          {shareUnknown && <button className="btn sm" type="button" onClick={refreshSessions}
-            disabled={shareBusy || sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}
+          {shareUnknown && <button className="btn sm" type="button" onClick={retryShareStatus}
+            disabled={shareBusy || shareVerifying || sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}
             title="Verify the exact active public-link capabilities before messaging">
-            {sessionsStatus === 'loading' || sessionsStatus === 'refreshing' ? 'checking share…' : 'retry share status'}
+            {shareVerifying || sessionsStatus === 'loading' || sessionsStatus === 'refreshing'
+              ? 'checking share…' : 'retry share status'}
           </button>}
           {sid && !currentSession && !shareCopy && !shareUnknown
             && <button className="btn sm ghost" type="button"

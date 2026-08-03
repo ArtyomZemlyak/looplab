@@ -103,6 +103,9 @@
   color: var(--fail-text);
   background: color-mix(in srgb, var(--fail) 7%, transparent);
 }
+.assistant-share-pending { flex-wrap: wrap; justify-content: flex-start; }
+.assistant-share-pending > span { flex: 1 1 220px; min-width: 0; }
+.assistant-share-pending .btn { flex: none; }
 
 .cmdbar-status.recovery {
   max-width: min(70%, 620px);

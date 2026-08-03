@@ -62,7 +62,7 @@ const exactRecoveryAvailable = action => !!action
       && action.recovery_postimage_mode >= 0 && action.recovery_postimage_mode <= 0o7777
     : action.recovery_postimage_digest == null && action.recovery_postimage_mode == null)
 
-function AssistantErrorCard({ error, onRetry, onOpenSettings }) {
+function AssistantErrorCard({ error, onRetry, retryLabel = 'Retry', retryBusy = false, onOpenSettings }) {
   return <div className={`assistant-error-card ${error.kind}`} role="alert">
     <div className="assistant-error-card__head">
       <span className="assistant-error-card__icon" aria-hidden="true">!</span>
@@ -73,13 +73,16 @@ function AssistantErrorCard({ error, onRetry, onOpenSettings }) {
     </div>
     {error.technical && <code className="assistant-error-card__technical">{error.technical}</code>}
     <div className="assistant-error-card__actions">
-      {error.retryable && onRetry && <button className="btn xs primary" onClick={onRetry}>Retry</button>}
+      {error.retryable && onRetry && <button className="btn xs primary"
+        aria-disabled={retryBusy || undefined}
+        onClick={event => { if (!retryBusy) onRetry(event) }}>{retryLabel}</button>}
       {onOpenSettings && <button className="btn xs ghost" onClick={onOpenSettings}>Open Settings</button>}
     </div>
   </div>
 }
 export function Turn({
-  m, runsById, onRevert, onRetry, onOpenSettings, onRunOpen, launchChat, readOnly = false,
+  m, runsById, onRevert, onRetry, retryLabel, retryBusy, onOpenSettings, onRunOpen, launchChat,
+  readOnly = false,
   audience = 'owner',
   launchSessionId, launchMessageId, launchMessageIndex, launchDrafts, launchDisclosures,
   onLaunchDraft, onLaunchDisclosure, onLaunchStarted,
@@ -132,7 +135,9 @@ export function Turn({
         role={m.recoveryBlocked ? 'alert' : undefined}>
         {m.role === 'assistant'
           ? assistantError
-            ? <AssistantErrorCard error={assistantError} onRetry={onRetry} onOpenSettings={onOpenSettings} />
+            ? <AssistantErrorCard error={assistantError} onRetry={onRetry} retryLabel={retryLabel}
+                retryBusy={retryBusy}
+                onOpenSettings={onOpenSettings} />
             : <><Markdown text={m.content || ''} className="chat-text" externalOnly={publicAudience} />{m.streaming && <span className="asst-cursor">▍</span>}</>
           : <div className="chat-text">{content}</div>}
       </div>}
