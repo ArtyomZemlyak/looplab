@@ -3239,6 +3239,32 @@ Scope: `looplab/cli/`, `looplab/trust/`, `looplab/__init__.py`, bench.py, sweep.
 
 *Recommendation:* Add a second-tier helper (e.g. _steward_command(kind, memory_dir, action_id, model, apply, preflight, invoke, render)) that owns the --apply rejection, model override, preflight and invocation echo; and a @_governance_errors decorator/context manager for the repeated except block in the four deterministic governance writes.
 
+*Resolution (2026-08-03):* `inspect_cmds._steward_command(memory_dir, kind, action_id, *, apply,
+apply_refusal, model, preflight, invoke, request)` now owns the four-step paid-steward preamble, and
+the `_governed_write()` context manager owns the refusal block for the four deterministic governance
+writes. `concept-steward`, `task-facets` and `claim-steward` call the first; `concept-merge`,
+`concept-split`, `claim-decide` and `task-facets-set` call the second. What legitimately differs
+stays at the call site: the refusal wording (each names the command to use instead), the preflight
+body, the invocation and the per-command rendering.
+
+Two details drove the shape. The preamble's SEQUENCE is the contract, not the reuse: `--apply` is
+refused before anything costs money; the audit preflight runs before a provider client exists, so
+corrupting the ledger cannot become a way to spend money; and the model override goes through
+`apply_llm_model_override` rather than `settings.llm_model = model` — assignment validation is off on
+`Settings`, so a direct write lands a phantom attribute and the flag silently does nothing. The
+client stays a THUNK (`prepare=lambda: …`) so a replayed action id never constructs one. On the write
+side the two `except` arms are different KINDS of failure and must not collapse: a ledger/lock error
+is redacted (an unreadable governance store must not leak filesystem shape into CLI output), while a
+`ValueError` is the operator's own bad argument and its text is the whole diagnosis.
+
+The duplicated two-line why-comment about the phantom attribute now lives once, in
+`apply_llm_model_override`'s caller-facing docstring in `_steward_command`.
+
+Covered by `tests/test_steward_command_framing.py` (21 tests): the preamble order, the no-preflight
+path, the thunk, the redact-vs-echo split, an unexpected exception NOT being swallowed, plus source
+guards that every call site goes through the shared helpers and that the
+`(GovernanceLedgerUnavailable, EventStoreLockError)` pair appears in exactly two places.
+
 #### CT-05 · MEDIUM · duplication · effort: small
 
 **Memory-dir stat-resolution + governed-snapshot boilerplate duplicated (plus a simpler third variant)**

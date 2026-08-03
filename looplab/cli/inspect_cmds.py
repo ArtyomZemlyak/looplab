@@ -8,6 +8,8 @@ atomically writes a local quality receipt without changing any source run.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from pathlib import Path
 from typing import Optional
 
@@ -112,6 +114,67 @@ def _safe_steward_error(exc: Exception, phase: str) -> str:
     from looplab.serve.assistant import safe_assistant_failure
 
     return f"{phase}:{safe_assistant_failure(exc)['error_kind']}"
+
+
+@contextmanager
+def _governed_write():
+    """The refusal contract shared by the four DETERMINISTIC governance writes (doc 25 CT-04).
+
+    `concept-merge`, `concept-split`, `claim-decide` and `task-facets-set` each wrote this same
+    four-line block. The two arms are different KINDS of failure and must stay different:
+
+    * a ledger/lock failure goes through `_governance_cli_error`, which withholds the OS path and the
+      platform's parser text — an unreadable governance store must not leak filesystem shape into CLI
+      output;
+    * a `ValueError` is the caller's own argument being wrong (a self-link, a cycle-closing edge, an
+      unknown axis) and SHOULD be echoed verbatim, because that text is the whole diagnosis.
+
+    Collapsing the two, in either direction, either hides a real usage error behind a generic
+    governance refusal or prints a storage path the redaction boundary exists to keep out.
+    """
+    try:
+        yield
+    except (GovernanceLedgerUnavailable, EventStoreLockError) as exc:
+        _governance_cli_error(exc)
+    except ValueError as exc:
+        typer.echo(f"error: {exc}")
+        raise typer.Exit(2)
+
+
+def _steward_command(memory_dir: Path, kind: str, action_id: str, *, apply: bool,
+                     apply_refusal: str, model, preflight, invoke, request: dict) -> dict:
+    """The framing every PAID steward command shares, in the order that ordering matters (CT-04).
+
+    `concept-steward`, `task-facets` and `claim-steward` each wrote out these four steps. The
+    SEQUENCE is the point, and each step is a fail-closed boundary that has to come before the next:
+
+    1. **Reject the deprecated `--apply` first**, before anything costs money. These commands are
+       proposal-only; an operator who passes it is asking for a mutation that will not happen, and
+       must learn that without being billed for a proposal they did not want.
+    2. **Preflight the governance/audit history**, still before a provider client exists — a paid
+       proposal must not run against an invocation log that cannot be read, or corruption becomes a
+       way to spend money.
+    3. **Resolve the model override** onto a fresh `Settings` via `apply_llm_model_override` rather
+       than `settings.llm_model = model`: assignment validation is disabled on `Settings`, so a
+       direct write lands a phantom attribute and the override silently does nothing.
+    4. **Run the durable at-most-once transaction**, which owns crash/retry fencing.
+
+    The refusal wording, the preflight body, the invocation and the rendering stay at each call site:
+    they are what actually differs, and the refusal names the command to use instead.
+    """
+    if apply:
+        typer.echo(apply_refusal)
+        raise typer.Exit(2)
+    if preflight is not None:
+        _governance_cli_read(preflight)
+    from looplab.core.config import Settings
+
+    settings = Settings()
+    if model:
+        apply_llm_model_override(settings, model)
+    return _run_cli_steward(
+        memory_dir, kind, action_id,
+        prepare=lambda: _make_llm_client(settings), invoke=invoke, request=request)
 
 
 def _run_cli_steward(memory_dir: Path, kind: str, action_id: str, *, prepare, invoke,
@@ -1063,14 +1126,9 @@ def concept_merge_cmd(
     concept → several finer ones) use `concept-split`."""
     from looplab.engine.concept_registry import record_concept_alias
     import datetime as _dt
-    try:
+    with _governed_write():
         rec = record_concept_alias(str(memory_dir), from_concept=from_concept, to_concept=to_concept,
                                    at=_dt.datetime.now().isoformat(timespec="seconds"))
-    except (GovernanceLedgerUnavailable, EventStoreLockError) as e:
-        _governance_cli_error(e)
-    except ValueError as e:
-        typer.echo(f"error: {e}")
-        raise typer.Exit(2)
     if rec["to"]:
         typer.echo(f"merged: '{rec['from']}' -> '{rec['to']}'")
     else:
@@ -1098,14 +1156,9 @@ def concept_split_cmd(
     for spec in rule:
         target, _, terms = spec.partition(":")
         rules.append({"to": target.strip(), "when_any": [t.strip() for t in terms.split(",") if t.strip()]})
-    try:
+    with _governed_write():
         rec = record_concept_split(str(memory_dir), from_concept=from_concept, rules=rules, default=default,
                                    at=_dt.datetime.now().isoformat(timespec="seconds"))
-    except (GovernanceLedgerUnavailable, EventStoreLockError) as e:
-        _governance_cli_error(e)
-    except ValueError as e:
-        typer.echo(f"error: {e}")
-        raise typer.Exit(2)
     tgts = [r["to"] for r in rec["rules"]] + ([rec["default"]] if rec["default"] else [])
     typer.echo(f"split: '{rec['from']}' -> {{{', '.join(sorted(set(tgts)))}}} ({len(rec['rules'])} rule(s))")
 
@@ -1127,12 +1180,6 @@ def concept_steward_cmd(
     `concept-split`, or owner HTTP governance. The deprecated `--apply` option is rejected before any paid
     LLM call or mutation. A stable action id durably fences the paid call across crash/retry. Needs a
     reachable LLM."""
-    if apply:
-        typer.echo("error: --apply is deprecated and disabled; concept-steward is proposal-only. "
-                   "Run without --apply, review the exact proposal, then use concept-merge/concept-split "
-                   "or owner HTTP governance.")
-        raise typer.Exit(2)
-    from looplab.core.config import Settings
     from looplab.engine.concept_steward import curation_is_empty, steward_concepts
     from looplab.engine.concept_registry import concept_governance_snapshot
     from looplab.engine.governance_health import read_curation_rows
@@ -1143,13 +1190,11 @@ def concept_steward_cmd(
         # Validate that history before even constructing a provider client so corruption cannot spend money.
         read_curation_rows(Path(memory_dir) / "concept_curation_log.jsonl")
 
-    _governance_cli_read(_preflight)
-    settings = Settings()
-    if model:
-        apply_llm_model_override(settings, model)
-    out = _run_cli_steward(
-        memory_dir, "concept", action_id,
-        prepare=lambda: _make_llm_client(settings),
+    out = _steward_command(
+        memory_dir, "concept", action_id, apply=apply, model=model, preflight=_preflight,
+        apply_refusal=("error: --apply is deprecated and disabled; concept-steward is proposal-only. "
+                       "Run without --apply, review the exact proposal, then use "
+                       "concept-merge/concept-split or owner HTTP governance."),
         invoke=lambda client: steward_concepts(
             str(memory_dir), client, apply=False, max_proposals=max_proposals,
             raise_on_failure=True),
@@ -1216,7 +1261,7 @@ def claim_decide_cmd(
         typer.echo("error: required governance receipt option(s): " + ", ".join(missing))
         raise typer.Exit(2)
     import datetime as _dt
-    try:
+    with _governed_write():
         rec = record_observed_claim_decision(
             str(memory_dir), statement=statement, claim_uid=claim_uid,
             evidence_digest=evidence_digest, decision=picked[0], note=note,
@@ -1224,11 +1269,6 @@ def claim_decide_cmd(
             action_id=action_id,
             at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
         )
-    except (GovernanceLedgerUnavailable, EventStoreLockError) as e:
-        _governance_cli_error(e)
-    except ValueError as e:
-        typer.echo(f"error: {e}")
-        raise typer.Exit(2)
     typer.echo(f"recorded: {rec['decision']} — {rec['statement'][:80]}")
 
 
@@ -1252,24 +1292,18 @@ def task_facets_cmd(
     `task_facets_curation_log.jsonl`; review the classification, then record it deterministically with
     `task-facets-set`. Finalize may queue another proposal but cannot ratify it. A stable action id durably
     fences this paid call across crash/retry."""
-    from looplab.core.config import Settings
     from looplab.engine.governance_health import read_curation_rows
     from looplab.engine.task_facets import steward_task_facets, task_facets_input_digest
-    if apply:
-        typer.echo("error: --apply is deprecated and disabled; task-facets is proposal-only. Review the "
-                   "classification, then record it with `task-facets-set MEMORY TASK_ID --domain ... "
-                   "--language ...`.")
-        raise typer.Exit(2)
-    # task faceting is the third paid steward. Its audit history gets the same pre-client
-    # fail-closed boundary as concept/claim stewardship, even though this CLI remains proposal-only.
-    _governance_cli_read(
-        lambda: read_curation_rows(Path(memory_dir) / "task_facets_curation_log.jsonl"))
-    settings = Settings()
-    if model:
-        apply_llm_model_override(settings, model)
-    out = _run_cli_steward(
-        memory_dir, "facets", action_id,
-        prepare=lambda: _make_llm_client(settings),
+
+    out = _steward_command(
+        memory_dir, "facets", action_id, apply=apply, model=model,
+        apply_refusal=("error: --apply is deprecated and disabled; task-facets is proposal-only. "
+                       "Review the classification, then record it with `task-facets-set MEMORY "
+                       "TASK_ID --domain ... --language ...`."),
+        # task faceting is the third paid steward. Its audit history gets the same pre-client
+        # fail-closed boundary as concept/claim stewardship, even though this CLI is proposal-only.
+        preflight=lambda: read_curation_rows(
+            Path(memory_dir) / "task_facets_curation_log.jsonl"),
         invoke=lambda client: {
             "proposals": {
                 "task_id": "",
@@ -1316,14 +1350,9 @@ def task_facets_set_cmd(
     if not facets:
         typer.echo("error: give at least one facet axis (e.g. --domain information-retrieval)")
         raise typer.Exit(2)
-    try:
+    with _governed_write():
         rec = record_task_facets(str(memory_dir), task_id=task_id, facets=facets, by="operator",
                                  at=_dt.datetime.now().isoformat(timespec="seconds"))
-    except (GovernanceLedgerUnavailable, EventStoreLockError) as e:
-        _governance_cli_error(e)
-    except ValueError as e:
-        typer.echo(f"error: {e}")
-        raise typer.Exit(2)
     typer.echo(f"recorded facets for task '{task_id}': {rec['facets']}")
 
 
@@ -1344,12 +1373,6 @@ def claim_steward_cmd(
     HTTP governance. The deprecated `--apply` option is rejected before any paid LLM call or mutation.
     Scope-precise via the structured claim key; a stable action id durably fences the paid call across
     crash/retry. Needs a reachable LLM."""
-    if apply:
-        typer.echo("error: --apply is deprecated and disabled; claim-steward is proposal-only. "
-                   "Run without --apply, review the exact proposal, then use claim-decide or owner HTTP "
-                   "governance.")
-        raise typer.Exit(2)
-    from looplab.core.config import Settings
     from looplab.engine.claim_steward import curation_is_empty, steward_claims
     from looplab.engine.claims import claim_governance_revision
     from looplab.engine.governance_health import read_curation_rows
@@ -1359,13 +1382,11 @@ def claim_steward_cmd(
         # fail before provider construction when the paid-call audit trail is unknown.
         read_curation_rows(Path(memory_dir) / "claim_curation_log.jsonl")
 
-    _governance_cli_read(_preflight)
-    settings = Settings()
-    if model:
-        apply_llm_model_override(settings, model)
-    out = _run_cli_steward(
-        memory_dir, "claim", action_id,
-        prepare=lambda: _make_llm_client(settings),
+    out = _steward_command(
+        memory_dir, "claim", action_id, apply=apply, model=model, preflight=_preflight,
+        apply_refusal=("error: --apply is deprecated and disabled; claim-steward is proposal-only. "
+                       "Run without --apply, review the exact proposal, then use claim-decide or "
+                       "owner HTTP governance."),
         invoke=lambda client: steward_claims(
             str(memory_dir), client, apply=False, max_proposals=max_proposals,
             raise_on_failure=True),
