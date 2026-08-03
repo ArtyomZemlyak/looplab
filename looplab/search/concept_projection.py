@@ -10,32 +10,20 @@ from dataclasses import dataclass
 import json
 from typing import Any, Literal, Optional
 
-from looplab.core.models import (CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,
-                                 NODE_CONCEPT_PROVENANCE_AUTHORED,
+from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED,
                                  NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                  NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
                                  NODE_CONCEPT_PROVENANCE_OPERATOR, valid_concept_id)
 
-try:  # the owner lands in the paired core commit; keep this commit testable alone.
-    from looplab.core.concepts import (
-        CONCEPT_MATERIALIZATION_REASONS as _CORE_MATERIALIZATION_REASONS,
-        normalize_concept_id as _core_normalize_concept_id,
-        normalized_concept_materialization_receipt as _core_normalized_receipt,
-        normalized_concept_renames as _core_normalized_renames,
-        resolve_concept as _core_resolve_concept,
-    )
-except ModuleNotFoundError as exc:  # pragma: no cover - paired core commit removes this path
-    if exc.name != "looplab.core.concepts":
-        raise
-    _CORE_MATERIALIZATION_REASONS = (CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,)
-    _core_normalize_concept_id = None
-    _core_normalized_receipt = None
-    _core_normalized_renames = None
-    _core_resolve_concept = None
+from looplab.core.concepts import (
+    normalize_concept_id as _core_normalize_concept_id,
+    normalized_concept_materialization_receipt as _core_normalized_receipt,
+    normalized_concept_renames as _core_normalized_renames,
+    resolve_concept as _core_resolve_concept,
+)
 
 
 ProjectionStatus = Literal["complete", "partial", "unavailable"]
-_RENAME_HOP_CAP = 16
 _MISSING = object()
 _EXACT_INHERITANCE_PROVENANCE = frozenset({
     NODE_CONCEPT_PROVENANCE_AUTHORED,
@@ -47,41 +35,16 @@ _UNKNOWN_PARENT_MEMBERSHIP_REASON = "delta_dependency_unknown_parent_membership"
 
 
 def _normalized_id(raw: Any) -> Optional[str]:
-    if _core_normalize_concept_id is not None:
-        value = _core_normalize_concept_id(raw)
-        return value if isinstance(value, str) and valid_concept_id(value) else None
-    if not isinstance(raw, str):
-        return None
-    value = raw.strip().lower().replace(" ", "-").strip("/")
-    return value if valid_concept_id(value) else None
-
-
-def _fallback_resolve(raw: Any, rename: dict[str, Optional[str]]) -> tuple[Optional[str], Optional[str]]:
-    current = _normalized_id(raw)
-    if current is None:
-        return None, "invalid_concept_id"
-    seen: set[str] = set()
-    for _hop in range(_RENAME_HOP_CAP + 1):
-        if current in seen:
-            return None, "rename_cycle"
-        seen.add(current)
-        if current not in rename:
-            return current, None
-        nxt = rename[current]
-        if nxt is None:
-            return None, "invalid_consolidation_map"
-        current = nxt
-    return None, "rename_hop_cap"
+    value = _core_normalize_concept_id(raw)
+    return value if isinstance(value, str) and valid_concept_id(value) else None
 
 
 def canonical_recorded_concept(
     raw: Any, rename: dict[str, Optional[str]],
 ) -> tuple[Optional[str], Optional[str]]:
     """Strictly resolve one recorded id through the canonical bounded identity projection."""
-    if _core_resolve_concept is not None:
-        concept_id, reason = _core_resolve_concept(raw, rename)
-        return concept_id, str(reason) if reason is not None else None
-    return _fallback_resolve(raw, rename)
+    concept_id, reason = _core_resolve_concept(raw, rename)
+    return concept_id, str(reason) if reason is not None else None
 
 
 def _rename_projection(raw: Any) -> tuple[dict[str, Optional[str]], set[str]]:
@@ -90,39 +53,17 @@ def _rename_projection(raw: Any) -> tuple[dict[str, Optional[str]], set[str]]:
     if not isinstance(raw, dict):
         return {}, {"invalid_consolidation_map"}
     reasons: set[str] = set()
-    if _core_normalized_renames is not None:
-        normalized = _core_normalized_renames(raw)
-        # Use the helper's OWN corruption signals, not a len() heuristic. A benign consolidation where two
-        # raw spellings normalize to the SAME source id (e.g. 'reg dropout' and 'reg-dropout') collapses
-        # the map BY DESIGN — the helper resolves such duplicate spellings deterministically and does not
-        # flag them. Only a source/target that fails to canonicalize (`endpoint_problem`) or a non-dict map
-        # (`problem`) is genuine identity corruption. The old `len(projected) != len(raw)` check treated
-        # every legitimate merge as corruption, poisoning global_reasons run-wide so every node_concept_delta
-        # returned unavailable and delta_safe was False for the whole run.
-        if getattr(normalized, "problem", None) is not None or getattr(normalized, "endpoint_problem", False):
-            reasons.add("invalid_consolidation_map")
-        projected = dict(normalized)
-    else:
-        # Fallback (standalone base commit, no core owner): mirror the core helper's semantics — gather the
-        # valid targets per normalized source, resolve duplicates deterministically (min), and flag only a
-        # source or target that could not be canonicalized. Two sources that COLLAPSE are not corruption.
-        candidates: dict[str, set[str]] = {}
-        invalid_sources: set[str] = set()
-        for source, target in raw.items():
-            source_id = _normalized_id(source)
-            if source_id is None:
-                reasons.add("invalid_consolidation_map")   # unnormalizable source -> dropped -> corrupt
-                continue
-            target_id = _normalized_id(target)
-            if target_id is None:
-                reasons.add("invalid_consolidation_map")   # unnormalizable target -> poison this source
-                invalid_sources.add(source_id)
-            else:
-                candidates.setdefault(source_id, set()).add(target_id)
-        projected: dict[str, Optional[str]] = {}
-        for source_id in candidates.keys() | invalid_sources:
-            targets = candidates.get(source_id)
-            projected[source_id] = min(targets) if targets else None
+    normalized = _core_normalized_renames(raw)
+    # Use the helper's OWN corruption signals, not a len() heuristic. A benign consolidation where two
+    # raw spellings normalize to the SAME source id (e.g. 'reg dropout' and 'reg-dropout') collapses
+    # the map BY DESIGN — the helper resolves such duplicate spellings deterministically and does not
+    # flag them. Only a source/target that fails to canonicalize (`endpoint_problem`) or a non-dict map
+    # (`problem`) is genuine identity corruption. The old `len(projected) != len(raw)` check treated
+    # every legitimate merge as corruption, poisoning global_reasons run-wide so every node_concept_delta
+    # returned unavailable and delta_safe was False for the whole run.
+    if getattr(normalized, "problem", None) is not None or getattr(normalized, "endpoint_problem", False):
+        reasons.add("invalid_consolidation_map")
+    projected = dict(normalized)
 
     if any(target is None for target in projected.values()):
         reasons.add("invalid_consolidation_map")
@@ -136,25 +77,13 @@ def _rename_projection(raw: Any) -> tuple[dict[str, Optional[str]], set[str]]:
 
 
 def _materialization_receipt(raw: Any) -> Optional[tuple[ProjectionStatus, tuple[str, ...]]]:
-    """Normalize a canonical receipt envelope, with old bare-reason compatibility at this read boundary."""
-    if _core_normalized_receipt is not None:
-        # once the owner exists, only its exact typed envelope crosses this boundary.
-        # In particular, a recognized bare reason is still malformed and must fail closed.
-        normalized = _core_normalized_receipt(raw)
-    else:
-        normalized = None
-        if (isinstance(raw, dict)
-                and raw.get("status") in ("partial", "unavailable")
-                and set(raw) == {"status", "reasons"}
-                and isinstance(raw.get("reasons"), list)
-                and raw["reasons"]
-                and all(isinstance(reason, str) and reason for reason in raw["reasons"])):
-            # Standalone test compatibility for the future typed envelope. The paired core helper owns
-            # the closed reason vocabulary and exact canonical validation in the integrated stack.
-            normalized = raw
-        elif isinstance(raw, str) and raw in _CORE_MATERIALIZATION_REASONS:
-            # Compatibility for the standalone base commit, whose model predates the envelope owner.
-            normalized = {"status": "unavailable", "reasons": [raw]}
+    """Normalize a canonical receipt envelope through the core owner's exact typed validation.
+
+    ONLY that envelope crosses this boundary. In particular a bare reason string — even a RECOGNIZED
+    one — is malformed here and fails closed: a receipt that lost its status is not evidence that the
+    materialization was merely partial.
+    """
+    normalized = _core_normalized_receipt(raw)
     if not isinstance(normalized, dict):
         return None
     status = normalized.get("status")

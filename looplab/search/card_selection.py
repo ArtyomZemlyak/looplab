@@ -26,7 +26,7 @@ from looplab.core.models import (
 )
 from looplab.search.concept_projection import (
     canonical_recorded_concept, current_concept_projection)
-from looplab.search.policy import (_ASHA_MAX_FAILED_PROMOTIONS, META_RUNG, debug_action,
+from looplab.search.policy import (META_RUNG, asha_expansion, debug_action,
                                    rank_by_metric)
 
 
@@ -847,19 +847,8 @@ def _asha_lane(state: RunState, fallback: Sequence[Mapping[str, object]]) -> _AS
             return _ASHALane(frozenset(), 0)
         survivors.append(parent_id)
 
-    has_live_child: set[int] = set()
-    failed_children: dict[int, int] = {}
-    for node in state.nodes.values():
-        if node.status is NodeStatus.failed:
-            for parent_id in node.parent_ids:
-                failed_children[parent_id] = failed_children.get(parent_id, 0) + 1
-        else:
-            has_live_child.update(node.parent_ids)
-    retired = {
-        parent_id
-        for parent_id, count in failed_children.items()
-        if count >= _ASHA_MAX_FAILED_PROMOTIONS and parent_id not in has_live_child
-    }
+    # The policy is the authority on ASHA expansion/retirement; this lane must not re-derive it.
+    has_live_child, retired = asha_expansion(state)
     breedable_ids = {node.id for node in state.breedable_nodes()}
     legal_survivors = [
         parent_id for parent_id in survivors

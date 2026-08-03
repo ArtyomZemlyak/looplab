@@ -2170,6 +2170,24 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 
 *Recommendation:* Extract a shared asha_retired_survivors(state) helper in policy.py and call it from both sites; consider adding an ASHA case to the fidelity matrix or a source-scan test.
 
+*Resolution (2026-08-02):* extracted as `search/policy.py::asha_expansion(state) -> (has_live_child,
+retired)`, called by both `ASHAPolicy.next_actions` and `card_selection._asha_lane`. It returns BOTH
+sets rather than just the retired one, because the Card lane uses `has_live_child` independently for
+its `legal_survivors` filter — returning only half would have left the other half duplicated.
+
+Took the source-scan option rather than the fidelity-matrix one: adding an ASHA case to
+`SCORER_FIDELITY_CASE_NAMES` changes a runtime gate's case count and schema, which is a bigger
+behavioural change than this finding warrants. `tests/test_asha_expansion_parity.py` (12) instead
+pins the semantics directly — live-vs-failed, the retry cap, a live child rescuing a capped survivor,
+per-parent counting, and a failed MERGE counting against every parent it names — plus a scan
+asserting `_ASHA_MAX_FAILED_PROMOTIONS` is read nowhere in `search/` outside the helper. One test
+pins the finding's own premise (the matrix is still GreedyTree-only), so if an ASHA case is ever
+added, that test is the reminder the scan can be relaxed.
+
+Teeth-tested by re-inlining the Card lane's copy, by collapsing the live/failed distinction so a
+PENDING child counts as a failure, and by dropping the multi-parent fan-out so a failed merge is
+charged to only its first parent.
+
 #### SE-04 · MEDIUM · excessive-logic · effort: small
 
 **card_score rebuilds the full concept projection per candidate; the code's own review comment says to hoist it but it never was**
@@ -2189,6 +2207,28 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 *Evidence:* The module wraps its imports in try/except ModuleNotFoundError with the comment 'the owner lands in the paired core commit; keep this commit testable alone' and 'pragma: no cover - paired core commit removes this path'. looplab/core/concepts.py exists in-tree and is imported UNCONDITIONALLY by sibling modules (concept_graph.py:51, card_selection via this module), so the fallback branches — _fallback_resolve (rename hop-cap walker), the manual rename-normalization branch of _rename_projection (:108-125), the bare-string receipt compat of _materialization_receipt (:144-157), and the _normalized_id fallback (:53-56) — can never execute. No test removes the module to exercise them (grep of tests/ shows none). ~80 lines of dead dual-implementation that must be mentally diffed against core.concepts on every read.
 
 *Recommendation:* Delete the try/except and all fallback branches; import looplab.core.concepts unconditionally as the sibling modules already do.
+
+*Resolution (2026-08-02):* deleted as recommended — the `try/except ModuleNotFoundError`,
+`_fallback_resolve`, the hand-rolled consolidation-map normalizer, the bare-string receipt
+compatibility branch, `_RENAME_HOP_CAP`, and the `CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON` import that
+existed only to seed the fallback's reason tuple. `looplab.core.concepts` is now imported the way
+`concept_graph.py` already imported it.
+
+The cost was never runtime — it was that reading this module meant mentally diffing two
+implementations of an identity projection whose disagreements are SILENT: a rename resolved one way
+here and another way in `core.concepts` changes which concepts a proposal inherits, with no error
+anywhere. `tests/test_concept_projection_core_owner.py` (26) therefore pins the behaviours the dead
+branches were shadowing rather than just asserting they are gone: rename chains, cycles,
+unnormalizable ids, and — the one that matters most — that resolution agrees with
+`core.concepts.resolve_concept` EXACTLY, reason string included, across a matrix of inputs.
+
+The bare-recognized-reason branch gets its own test with its own argument, because on paper it is the
+one place the deletion removes a behaviour: the fallback accepted a bare reason and synthesized
+`status="unavailable"` around it. The core owner does not and must not — a receipt that lost its
+status is not evidence the materialization was merely partial, and inventing one downgrades a hard
+failure into a softer story the reader will believe.
+
+Teeth-tested by re-admitting the bare reason string and by restoring the try/except lattice.
 
 #### SE-06 · LOW · duplication · effort: small
 

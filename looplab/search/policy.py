@@ -506,6 +506,37 @@ class MCTSPolicy:
         return [{"kind": KIND_IMPROVE, "parent_id": chosen, META_SCORES: scores, META_CHOSEN: chosen}]
 
 
+def asha_expansion(state) -> tuple[set[int], set[int]]:
+    """ASHA's view of which survivors are already expanded and which are retired.
+
+    Returns ``(has_live_child, retired)``:
+
+    * ``has_live_child`` — "expanded" means a child that is still LIVE (evaluated or pending). A
+      FAILED child leaves the survivor re-promotable so ONE transient crash doesn't abandon a
+      (possibly best) lineage.
+    * ``retired`` — but CAP the retries: after `_ASHA_MAX_FAILED_PROMOTIONS` failed children and no
+      live child the survivor is retired, else a lineage that crashes deterministically would be
+      re-promoted every iteration (chosen = lowest-id unexpanded survivor), starving its siblings and
+      burning the whole node budget on it.
+
+    `ASHAPolicy.next_actions` is the authority for ASHA promotion and `card_selection._asha_lane` must
+    agree with it, or the Card lane silently promotes a lineage the policy has retired — a divergence
+    with no runtime guard, because the 15-case scorer-fidelity matrix covers only GreedyTree (doc 25
+    SE-03). Both now read this one function; the constant was already shared, the algorithm was not.
+    """
+    has_live_child: set[int] = set()
+    failed_children: dict[int, int] = {}
+    for node in state.nodes.values():
+        if node.status is NodeStatus.failed:
+            for parent_id in node.parent_ids:
+                failed_children[parent_id] = failed_children.get(parent_id, 0) + 1
+        else:
+            has_live_child.update(node.parent_ids)
+    retired = {parent_id for parent_id, count in failed_children.items()
+               if count >= _ASHA_MAX_FAILED_PROMOTIONS and parent_id not in has_live_child}
+    return has_live_child, retired
+
+
 class ASHAPolicy:
     """A1 · Asynchronous Successive Halving (ASHA / Hyperband, ADR-2). Allocates compute by
     *racing*: seed a wide rung-0 of cheap drafts, then promote only the top 1/eta survivors to the
@@ -559,22 +590,7 @@ class ASHAPolicy:
         feasible = {n.id for n in state.breedable_nodes()}
         if not feasible:
             return [{"kind": KIND_DRAFT}]
-        # "expanded" = has a child that is still LIVE (evaluated or pending). A FAILED child leaves the
-        # survivor re-promotable so ONE transient crash doesn't abandon a (possibly best) lineage — but
-        # CAP the retries: after `_ASHA_MAX_FAILED_PROMOTIONS` failed children and no live child the
-        # survivor is retired, else a lineage that crashes deterministically would be re-promoted every
-        # iteration (chosen = lowest-id unexpanded survivor), starving its siblings and burning the whole
-        # node budget on it.
-        has_child: set[int] = set()
-        failed_children: dict[int, int] = {}
-        for n in state.nodes.values():
-            if n.status is NodeStatus.failed:
-                for pid in n.parent_ids:
-                    failed_children[pid] = failed_children.get(pid, 0) + 1
-            else:
-                has_child.update(n.parent_ids)
-        retired = {pid for pid, c in failed_children.items()
-                   if c >= _ASHA_MAX_FAILED_PROMOTIONS and pid not in has_child}
+        has_child, retired = asha_expansion(state)
 
         # Promote from the LOWEST rung that still has an unexpanded survivor (asynchronous: don't
         # wait for a whole rung to finish before promoting from a lower one).
