@@ -4236,6 +4236,34 @@ lenient.
 
 *Recommendation:* Rename one module (e.g. verify.py -> memo_verify.py, keeping a _LAYOUT/back-compat alias as the repo already does for renames) and extract the shared judge-call helper (structured-judge invocation with agentic fallback) into one place both import.
 
+*Partially resolved (2026-08-03).* The duplicated plumbing — the substantive half — is done; the
+rename is not, and that is a decision with a stated reason rather than a gap.
+
+`looplab/trust/judge.py::structured_judge(client, msgs, model, *, parser, tools=None)` is now the one
+judge-call contract: agentic through `agentic_struct` when tools are supplied with the plain parse as
+its FALLBACK, plain `parse_structured` otherwise, and `JUDGE_MAX_TURNS = 15` as a constant instead of
+two literals. Both verifiers call it. What each keeps is its own FAILURE policy, because those are
+deliberately different — `verify_memo` falls back to its deterministic verdicts, `verify` drops the
+sample and averages the rest — so the helper owns no `except` at all.
+
+**One piece of the finding's evidence is wrong.** The two `_evidence_text` helpers share a NAME, not
+an implementation: `verify.py`'s takes a CLAIM dict plus a frozen source map and emits bounded
+REDACTED JSON, because a memo claim can cite external URLs that must never reach the model
+unredacted; `lesson_guard.py`'s takes a distilled LESSON record and renders node outcomes as prose
+for a judge prompt. Merging them would drag a redaction contract into a path that has no URLs. The
+comment claiming one "mirrors" the other was itself the defect — it sent readers looking for a
+duplication that is not there — and is corrected to say what actually differs.
+
+**Why the rename is deferred.** `engine/research_cadence.py` documents that monkeypatching
+`looplab.trust.verify.verify_memo` intercepts the live call, and tests rely on it. The repo's
+`_LAYOUT` meta-path shim maps FLAT paths (`looplab.verify` -> `looplab.trust.verify`); it does not
+alias one submodule path to another, so a rename needs an explicit
+`sys.modules["looplab.trust.verify"] = memo_verify` so both spellings resolve to ONE module object.
+That is a small change, but it is a change to a patch seam whose failure mode is silent — a second
+module object would make every existing patch a no-op — and it earns nothing beyond a better name.
+`tests/test_structured_judge.py` pins the deferral so it stays visible, and states the constraint any
+future rename has to satisfy. Teeth-verified against 7 breakages.
+
 #### CT-10 · LOW · inconsistency · effort: medium
 
 **Three finding-dict vocabularies for the same 'trust flag' concept, adapted inline at the consumer**

@@ -68,8 +68,15 @@ def _lesson_records(state: RunState) -> list[dict]:
 
 
 def _evidence_text(rec: dict, state: RunState) -> str:
-    """The checkable outcome of each cited node — mirrors trust/verify.py::_evidence_text so the verifier
-    grades against what actually happened, not the lesson's own wording."""
+    """The checkable outcome of each cited node, as prose, so the verifier grades against what
+    actually happened rather than the lesson's own wording.
+
+    NOT a copy of `trust/verify.py::_evidence_text` despite the shared name, and the comment that
+    said "mirrors" it was misleading (doc 25 CT-09): that one takes a CLAIM dict plus a frozen
+    source map and emits bounded REDACTED JSON, because a memo claim can cite external URLs that
+    must never reach the model unredacted. This one takes a distilled LESSON record and renders node
+    outcomes for a human-readable judge prompt. Same intent, different inputs, different output
+    format — merging them would drag a redaction contract into a path that has no URLs."""
     parts: list[str] = []
     if rec.get("outcome"):
         parts.append(f"distilled outcome: {rec['outcome']}")

@@ -414,7 +414,6 @@ def verify_memo(memo: dict, state: RunState, client=None,
             if v["verdict"] == "cited"]
     if client is not None and todo:
         try:
-            from looplab.core.parse import parse_structured
             payload = []
             for k, (i, c) in enumerate(todo, start=1):
                 payload.append({
@@ -431,11 +430,9 @@ def verify_memo(memo: dict, state: RunState, client=None,
             # the plain parse_structured pass when tools can't be built (tools=None) or the loop yields
             # nothing valid (fallback below) — byte-identical to the old behavior. max_turns=15: read a
             # bit, then emit (these judge, they don't investigate for 300 turns) — mirrors reflect_lessons.
-            from looplab.agents.agent import agentic_struct
-            out = agentic_struct(
-                client, _verify_tools(state), msgs, _VerdictOut, parser=parser,
-                loop_opts={"max_turns": 15},
-                fallback=lambda m: parse_structured(client, m, _VerdictOut, parser))
+            from looplab.trust.judge import structured_judge
+            out = structured_judge(client, msgs, _VerdictOut, parser=parser,
+                                   tools=_verify_tools(state))
             for k, (i, _c) in enumerate(todo):
                 if k < len(out.verdicts) and out.verdicts[k] in ("supported", "unsupported",
                                                                  "unclear"):

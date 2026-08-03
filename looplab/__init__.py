@@ -110,6 +110,7 @@ _LAYOUT = {
     "errors": "core",
     "eval_dispatch": "engine",
     "fence": "core",           # the shared durable writer-fence protocol (doc 25 CO-01)
+    "judge": "trust",         # one structured-judge invocation (doc 25 CT-09)
     "findings": "trust",      # one trust-finding shape + the gate namespaces (doc 25 CT-10)
     "fitness": "core",
     "eval_stages": "engine",

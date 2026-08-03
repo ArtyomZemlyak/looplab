@@ -239,7 +239,6 @@ def verify(subject: str, evidence: str, criteria: list[Criterion], *, client=Non
 
     from pydantic import BaseModel, Field
 
-    from looplab.core.parse import parse_structured
 
     class _Verdicts(BaseModel):
         verdicts: list[str] = Field(default_factory=list)
@@ -249,13 +248,10 @@ def verify(subject: str, evidence: str, criteria: list[Criterion], *, client=Non
 
     def _one_sample() -> Optional[_Verdicts]:
         try:
-            if tools is not None:
-                # Grounded/agentic variant: read the run, then emit (mirrors verify_memo exactly).
-                from looplab.agents.agent import agentic_struct
-                return agentic_struct(
-                    client, tools, msgs, _Verdicts, parser=parser, loop_opts={"max_turns": 15},
-                    fallback=lambda m: parse_structured(client, m, _Verdicts, parser))
-            return parse_structured(client, msgs, _Verdicts, parser)
+            # Grounded/agentic when tools are supplied, plain parse otherwise — the SAME
+            # judge-call contract `verify_memo` uses, now written once (doc 25 CT-09).
+            from looplab.trust.judge import structured_judge
+            return structured_judge(client, msgs, _Verdicts, parser=parser, tools=tools)
         except Exception:  # noqa: BLE001 — a bad sample is dropped, never crashes the verifier
             return None
 
