@@ -1075,13 +1075,18 @@ button.ptree-row { width: 100%; border: 0; background: transparent; color: inher
 .compare-table .compare-pinned { position: sticky; left: 0; z-index: 2; min-width: 180px;
   background: var(--bg-1); box-shadow: 1px 0 var(--line); }
 .compare-table thead .compare-pinned { z-index: 3; }
+.compare-table tr.best-row > :is(th, td) {
+  background: color-mix(in srgb, var(--bg-1) 90%, var(--best) 10%); }
+.compare-table tr.best-row > th.compare-pinned {
+  box-shadow: inset 3px 0 var(--best), 1px 0 var(--line); }
 .compare-link { padding: 0; border: 0; background: transparent; color: var(--accent);
   font: inherit; cursor: pointer; text-align: left; }
 .compare-link:hover { text-decoration: underline; }
 .compare-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
 .compare-table small { display: block; max-width: 210px; overflow: hidden; color: var(--fg-mut);
   text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
-.compare-best { margin-left: 7px; color: var(--best-text); font-size: 10px; }
+.compare-best { display: inline-block; margin-left: 7px; color: var(--best-text); font-size: 10px;
+  white-space: nowrap; }
 .compare-config { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line);
   border-radius: 8px; background: var(--bg-1); }
 .compare-config[open] > summary { margin-bottom: 8px; }

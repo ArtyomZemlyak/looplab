@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
 
 import {
-  bestComparableRun, configDifferences, decodePortfolioViews, DEFAULT_COMPARE_COLUMNS,
-  normalizeCompareColumns, portfolioViewSignature, upsertPortfolioView,
+  bestComparableRun, comparableRunRanking, configDifferences, decodePortfolioViews,
+  DEFAULT_COMPARE_COLUMNS, normalizeCompareColumns, portfolioViewSignature, upsertPortfolioView,
 } from '../src/portfolioModel.js'
 import { parseRunRouteState } from '../src/runRouteState.js'
 
@@ -56,7 +56,7 @@ test('compare columns accept only the known persistent layout vocabulary', () =>
 test('cross-run ranking never compares different tasks or objectives', () => {
   const min = [
     { run_id: 'a', task_id: 't', direction: 'min', best_metric: 0.4 },
-    { run_id: 'b', task_id: 't', direction: 'min', best_confirmed: 0.2 },
+    { run_id: 'b', task_id: 't', direction: 'min', best_metric: 0.2 },
   ]
   assert.equal(bestComparableRun(min).run_id, 'b')
   assert.equal(bestComparableRun(min.map(run => ({ ...run, direction: 'max' }))).run_id, 'a')
@@ -64,6 +64,22 @@ test('cross-run ranking never compares different tasks or objectives', () => {
   assert.equal(bestComparableRun([{ ...min[0], direction: 'max' }, min[1]]), null)
   assert.equal(bestComparableRun([{ ...min[0], task_id: null }, min[1]]), null)
   assert.equal(bestComparableRun(min.map(run => ({ ...run, direction: null }))), null)
+
+  const tied = comparableRunRanking([
+    { ...min[0], best_metric: 0.2 }, min[1],
+  ])
+  assert.equal(tied.status, 'ranked')
+  assert.equal(tied.phase, 'raw')
+  assert.deepEqual(tied.bestRunIds, ['a', 'b'])
+  assert.equal(comparableRunRanking([
+    min[0], { ...min[1], best_confirmed: 0.2 },
+  ]).status, 'mixed-phase')
+  assert.equal(comparableRunRanking([
+    min[0], { ...min[1], best_metric: null },
+  ]).status, 'missing-metric')
+  assert.equal(comparableRunRanking([
+    { ...min[0], best_confirmed: Number.NaN }, { ...min[1], best_confirmed: 0.2 },
+  ]).status, 'missing-metric')
 })
 
 test('configuration differences are bounded and preserve unavailable evidence', () => {
@@ -95,12 +111,14 @@ test('compare detail is deadline-bounded and champion links keep their generatio
 
     const generation = 'a'.repeat(64)
     const href = championRunHref({ run_id: 'run/one' }, {
-      generation, state: { best_node_id: 7 },
+      generation, sequence: 42, state: { best_node_id: 7, nodes: { 7: { attempt: 3 } } },
     })
-    assert.equal(href, `#/run/run%2Fone?gen=${generation}&node=7`)
+    assert.equal(href, `#/run/run%2Fone?gen=${generation}&node=7&attempt=3&seq=42`)
     const parsed = parseRunRouteState(href)
     assert.equal(parsed.state.generation, generation)
     assert.equal(parsed.state.nodeId, 7)
+    assert.equal(parsed.state.nodeGeneration, 3)
+    assert.equal(parsed.state.sequence, 42)
     assert.deepEqual(parsed.issues, [])
   } finally {
     globalThis.fetch = originalFetch
@@ -123,8 +141,9 @@ test('portfolio UI exposes saved views, bounded selection, fenced detail, and co
   assert.match(compare, /probe\?\.generation === expectedGeneration/)
   assert.match(compare, /deadlineRequest/)
   assert.match(compare, /hashWithRunRouteState/)
-  assert.match(compare, /role="region" aria-label="Selected run comparison" tabIndex=\{0\}/)
-  assert.match(compare, /do not share one task and objective/)
+  assert.match(compare, /aria-label="Selected run comparison"[\s\S]*aria-describedby=\{`run-compare-receipt/)
+  assert.match(compare, /id="run-compare-ranking-warning"/)
+  assert.match(compare, /selected runs use different tasks or objectives/)
   assert.match(density, /data-comfortable/)
   assert.match(app, /initDensity\(\)/)
   assert.match(css, /data-comfortable[\s\S]*font-size: 12px/)

@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { get, fmt, fmtAgo, fmtElapsedSeconds, normalizeRunGeneration } from './util.js'
-import { effectiveRunStatus, metricComparable } from './runIndex.js'
-import { bestComparableRun, COMPARE_COLUMNS, configDifferences } from './portfolioModel.js'
+import { effectiveRunStatus } from './runIndex.js'
+import { comparableRunRanking, COMPARE_COLUMNS, configDifferences } from './portfolioModel.js'
 import { deadlineRequest } from './requestDeadline.js'
 import { hashWithRunRouteState } from './runRouteState.js'
 
@@ -34,6 +34,23 @@ const retainedCapture = (resource, nextRuns) => {
     runs: retainedRuns,
     details: resource.details.filter(detail => retainedIds.has(detail.runId)),
   }
+}
+
+const comparisonMetricFormatter = runs => {
+  const values = runs.map(run => run.best_confirmed ?? run.best_metric)
+    .filter(value => typeof value === 'number' && Number.isFinite(value))
+  const distinct = [...new Set(values)]
+  for (let precision = 4; precision <= 17; precision += 1) {
+    const labels = distinct.map(value => fmt(value, precision))
+    if (new Set(labels).size === distinct.length) {
+      const byValue = new Map(distinct.map((value, index) => [value, labels[index]]))
+      return value => typeof value === 'number' && Number.isFinite(value)
+        ? byValue.get(value) ?? fmt(value, precision) : '—'
+    }
+  }
+  const byValue = new Map(distinct.map(value => [value, String(value)]))
+  return value => typeof value === 'number' && Number.isFinite(value)
+    ? byValue.get(value) ?? String(value) : '—'
 }
 
 export async function loadDetail(run, signal, timeoutMs = COMPARE_DETAIL_TIMEOUT_MS) {
@@ -106,11 +123,11 @@ export function championRunHref(run, detail) {
     })
 }
 
-const valueFor = (id, run, detail, names) => {
+const valueFor = (id, run, detail, names, formatMetric) => {
   const state = detail?.state
   if (id === 'status') return effectiveRunStatus(run)
   if (id === 'task') return run.task_id || '—'
-  if (id === 'best') return fmt(run.best_confirmed ?? run.best_metric)
+  if (id === 'best') return formatMetric(run.best_confirmed ?? run.best_metric)
   if (id === 'objective') return run.direction || '—'
   if (id === 'nodes') return run.nodes ?? '—'
   if (id === 'eval') return fmtElapsedSeconds(state?.total_eval_seconds)
@@ -211,8 +228,10 @@ export default function RunCompare({
   const snapshotStatus = resourceMatches ? resource.status
     : compatibleCapture ? 'refreshing' : 'loading'
   const detailById = Object.fromEntries(snapshotDetails.map(detail => [detail.runId, detail]))
-  const best = bestComparableRun(snapshotRuns)?.run_id
-  const comparable = metricComparable(snapshotRuns)
+  const ranking = comparableRunRanking(snapshotRuns)
+  const formatMetric = comparisonMetricFormatter(snapshotRuns)
+  const bestRunIds = new Set(ranking.bestRunIds)
+  const tiedBest = ranking.bestRunIds.length > 1
   const config = configDifferences(snapshotRuns.map(run => detailById[run.run_id]))
   const snapshotTime = resource.loadedAt
     ? new Date(resource.capturedAt || resource.loadedAt).toLocaleTimeString() : ''
@@ -230,6 +249,19 @@ export default function RunCompare({
           : snapshotStatus === 'partial'
             ? `Summary capture completed ${snapshotTime}; run details could not be verified.`
             : `Comparison captured ${snapshotTime}.`
+  const rankingReceipt = ranking.status === 'ranked'
+    ? ranking.bestRunIds.length > 1
+      ? ` ${ranking.bestRunIds.length} runs tied for best ${ranking.phase === 'confirmed'
+        ? 'confirmed mean' : 'raw metric'} in this capture: ${formatMetric(ranking.bestValue)}.`
+      : ` Best ${ranking.phase === 'confirmed' ? 'confirmed mean' : 'raw metric'} in this capture: ${formatMetric(ranking.bestValue)}.`
+    : ''
+  const rankingWarning = ranking.status === 'incompatible'
+    ? 'Metrics are shown but not ranked; selected runs use different tasks or objectives.'
+    : ranking.status === 'mixed-phase'
+      ? 'Metrics are shown but not ranked because confirmed means and raw metrics are mixed.'
+      : ranking.status === 'missing-metric'
+        ? 'Metrics are shown but not ranked because one or more selected runs lack a finite metric.'
+        : ''
   const refreshCapture = () => {
     if (snapshotBusy) return
     setRetry(value => value + 1)
@@ -284,16 +316,19 @@ export default function RunCompare({
           : snapshotStatus === 'refreshing' ? 'Refreshing…' : 'Refresh snapshot'}
       </button>
     </div>
-    <div className="compare-receipt" role="status" aria-live="polite">
+    <div id="run-compare-receipt" className="compare-receipt" role="status" aria-live="polite">
       {snapshotReceipt}
       {snapshotPartial && ' Some detail was unavailable or could not be verified for this capture.'}
+      {rankingReceipt}
     </div>
-    {snapshotRuns.length > 0 && !comparable && <div className="notice resource-warning" role="status">
-      Best metrics are shown but not ranked because the selected runs do not share one task and objective.
+    {snapshotRuns.length > 0 && rankingWarning && <div id="run-compare-ranking-warning"
+      className="notice resource-warning" role="status">
+      {rankingWarning}
     </div>}
     <div className="data-table-region">
       <div className="data-table-scroll" role="region" aria-label="Selected run comparison"
-        aria-busy={snapshotBusy} tabIndex={0}>
+        aria-describedby={`run-compare-receipt${rankingWarning
+          ? ' run-compare-ranking-warning' : ''}`} aria-busy={snapshotBusy} tabIndex={0}>
         <table className="tbl data-table compare-table">
           <caption className="sr-only">Comparison of selected runs</caption>
           <thead><tr><th scope="col" className="compare-pinned">Run</th>
@@ -302,14 +337,14 @@ export default function RunCompare({
           <tbody>{snapshotRuns.map(run => {
             const label = run.label || run.run_id
             const detail = detailById[run.run_id]
-            const isBest = comparable && run.run_id === best
+            const isBest = ranking.status === 'ranked' && bestRunIds.has(run.run_id)
             const championHref = championRunHref(run, detail)
             return <tr key={run.run_id} className={isBest ? 'best-row' : ''}>
               <th scope="row" className="compare-pinned">
                 <button type="button" className="compare-link" data-run-open-id={run.run_id}
                   onClick={() => openComparisonRoute(onOpen, run.run_id,
                     `#/run/${encodeURIComponent(run.run_id)}`)}>{label}</button>
-                {isBest && <span className="pill compare-best">Best</span>}
+                {isBest && <span className="pill compare-best">{tiedBest ? 'Tied best' : 'Best'}</span>}
                 {run.label && <small>{run.run_id}</small>}
                 {detail?.partial && <small>partial detail</small>}
               </th>
@@ -318,7 +353,7 @@ export default function RunCompare({
                     onClick={() => openComparisonRoute(onOpen, run.run_id, championHref)}
                     aria-label={`Open captured champion experiment ${detail.state.best_node_id} in ${label}`}>
                     #{detail.state.best_node_id}</button>
-                : valueFor(id, run, detail, snapshotNames)}</td>)}
+                : valueFor(id, run, detail, snapshotNames, formatMetric)}</td>)}
               <td><button className="btn xs ghost" data-compare-remove-id={run.run_id}
                 onClick={event => removeRun(run.run_id, event.currentTarget)}
                 aria-label={`Remove ${label} from comparison`}>Remove</button></td>

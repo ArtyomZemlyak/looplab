@@ -118,14 +118,65 @@ export function configDifferences(items, maximum = 160) {
   }
 }
 
-export function bestComparableRun(runs = []) {
+const metricObservation = run => {
+  if (run?.best_confirmed != null) return {
+    runId: run.run_id,
+    phase: typeof run.best_confirmed === 'number' && Number.isFinite(run.best_confirmed)
+      ? 'confirmed' : 'invalid',
+    value: typeof run.best_confirmed === 'number' && Number.isFinite(run.best_confirmed)
+      ? run.best_confirmed : null,
+  }
+  if (run?.best_metric != null) return {
+    runId: run.run_id,
+    phase: typeof run.best_metric === 'number' && Number.isFinite(run.best_metric)
+      ? 'raw' : 'invalid',
+    value: typeof run.best_metric === 'number' && Number.isFinite(run.best_metric)
+      ? run.best_metric : null,
+  }
+  return { runId: run?.run_id, phase: 'missing', value: null }
+}
+
+export function comparableRunRanking(runs = []) {
   const task = runs[0]?.task_id
   const direction = runs[0]?.direction
+  const observations = runs.map(metricObservation)
+  const result = (status, extra = {}) => ({
+    status,
+    taskId: task || null,
+    direction: ['min', 'max'].includes(direction) ? direction : null,
+    phase: null,
+    observations,
+    bestValue: null,
+    bestRunIds: [],
+    ...extra,
+  })
+  if (runs.length < 2) return result('insufficient-population')
   if (!task || !['min', 'max'].includes(direction)
-      || runs.some(run => run.task_id !== task || run.direction !== direction)) return null
-  const values = runs.map(run => [run, run.best_confirmed ?? run.best_metric])
-    .filter(([, value]) => typeof value === 'number' && Number.isFinite(value))
-  if (!values.length) return null
-  const max = direction === 'max'
-  return values.reduce((best, item) => (max ? item[1] > best[1] : item[1] < best[1]) ? item : best)[0]
+      || runs.some(run => run.task_id !== task || run.direction !== direction)) {
+    return result('incompatible')
+  }
+  if (observations.some(item => item.phase === 'missing' || item.phase === 'invalid')) {
+    return result('missing-metric')
+  }
+  const phases = new Set(observations.map(item => item.phase))
+  if (phases.size !== 1) return result('mixed-phase')
+  const phase = observations[0].phase
+  const values = observations.map(item => item.value)
+  const bestValue = direction === 'max' ? Math.max(...values) : Math.min(...values)
+  return result('ranked', {
+    phase,
+    bestValue,
+    bestRunIds: observations.filter(item => item.value === bestValue).map(item => item.runId),
+  })
+}
+
+export function bestComparableRuns(runs = []) {
+  const ids = new Set(comparableRunRanking(runs).bestRunIds)
+  return runs.filter(run => ids.has(run.run_id))
+}
+
+// Compatibility helper for callers that explicitly need one representative. UI ranking must use
+// comparableRunRanking/bestComparableRuns so selection order never turns an exact tie into a winner.
+export function bestComparableRun(runs = []) {
+  return bestComparableRuns(runs)[0] || null
 }
