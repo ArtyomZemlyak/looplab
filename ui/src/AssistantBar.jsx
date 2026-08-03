@@ -40,7 +40,7 @@ import {
   subscribeLaunchTransports, subscribeRunCommandLock,
   storageGet, storageSet, storageRemove, runApiPath,
 } from './util.js'
-import { deadlineRequest } from './requestDeadline.js'
+import { boundedRequest } from './requestDeadline.js'
 import { followClientRoute } from './accessibility.jsx'
 
 // ── ONE assistant, three flowing views: bar ⇄ side(right) ⇄ full ───────────────────────────────
@@ -62,7 +62,6 @@ import { followClientRoute } from './accessibility.jsx'
 // session — the background worker persists the reply — so "could not reach" no longer strands a turn.
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
-const boundedRequest = (read, ms = 12000) => deadlineRequest(read, ms).promise
 const commitAssistantRunRoute = href => {
   if (location.hash === href) {
     requestAnimationFrame(() => document.querySelector('[data-route-main]')?.focus({ preventScroll: true }))

@@ -13,9 +13,12 @@ import {
 import { OpIcon } from './icons.jsx'
 import CommentsThread from './CommentsThread.jsx'
 import PanelShell from './PanelShell.jsx'
-import { deadlineRequest } from './requestDeadline.js'
+import { DEFAULT_REQUEST_TIMEOUT_MS, deadlineRequest } from './requestDeadline.js'
 
-const REVIEW_LINK_TIMEOUT_MS = 12_000
+// Named locally because these three call sites want the HANDLE (they cancel a stale list/create
+// on a newer one), not just the promise — but the bound itself is the shared default, not a
+// second opinion about how long a component read may take (doc 25 UI-12).
+const REVIEW_LINK_TIMEOUT_MS = DEFAULT_REQUEST_TIMEOUT_MS
 const boundedLinkRequest = read => deadlineRequest(read, REVIEW_LINK_TIMEOUT_MS)
 const activeLink = link => link?.status === 'active' || link?.status === 'stale'
 const terminalCopy = status => `The saved review link is ${status} and can no longer be shared. Create a new link.`

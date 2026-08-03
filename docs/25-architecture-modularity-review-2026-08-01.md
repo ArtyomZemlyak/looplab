@@ -4424,6 +4424,26 @@ author copies whichever neighbour they land on.
 
 *Recommendation:* Keep deadlineRequest and commandFetch (distinct semantics), fold boundedRequest into deadlineRequest usage, and document when each applies.
 
+*Resolution (2026-08-03):* `deadlineRequest` and `commandFetch` kept, as the finding says; the choice
+between all four shapes is now written down in `requestDeadline.js`, where they live.
+
+`boundedRequest` was **moved rather than inlined**, which is a deliberate deviation from "fold into
+deadlineRequest usage". It has 20 call sites in `AssistantBar`, none of which need the handle;
+spelling `deadlineRequest(read, ms).promise` at each would be longer at every site and would put the
+12s default back into 20 places. The problem was never that the alias existed — it was that it was a
+PRIVATE one-liner, which is why `CollabPanel` had already grown its own (`boundedLinkRequest`, with
+the same bound spelled `12_000` instead of `12000`). One exported `boundedRequest` plus a shared
+`DEFAULT_REQUEST_TIMEOUT_MS` removes the drift without moving the verbosity to the callers.
+
+`CollabPanel` keeps its named local because its three call sites genuinely want the handle (they
+cancel a stale list/create on a newer one) — but the bound now comes from the shared constant. The
+guard test enforces exactly that distinction: a local wrapper is fine, a local NUMBER is not.
+
+`commandFetch` is pinned as deliberately NOT built on the primitive. It bounds a durable COMMAND
+submission where the body read is part of the operation, and its timeout must surface as a typed
+`COMMAND_REQUEST_TIMEOUT` the command lifecycle can classify; collapsing it would turn a submission
+timeout into a generic `TimeoutError` the retry path cannot act on.
+
 #### UI-13 · LOW · duplication · effort: small
 
 **Three independent toast implementations**
