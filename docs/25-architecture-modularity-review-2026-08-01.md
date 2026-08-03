@@ -2823,6 +2823,18 @@ solution-tier cases.
 
 *Recommendation:* Either make METRIC_READERS the real single source (import it in _valid_metric_kind as METRIC_READERS - {"auto"}, and derive read_metric's dispatch from it) or delete it and fix the docstring. The repo's own registry-guarded-seam convention (CLAUDE.md) argues for the former.
 
+*Resolution (2026-08-02):* both options, in that order, and the second is what actually closes it.
+A peer took the delete option first (`a077d86` removed the dead constant and its false "shared"
+docstring), which fixed the lie but left the finding's real complaint — the kinds enumerated in three
+parallel places — untouched.
+
+Closed under **RA-05**: `runtime/command_eval.py::METRIC_READERS` is now a live `{kind: reader_fn}`
+dispatch table that `read_metric` dispatches through, and `repo_task.EvalSpec._valid_metric_kind`
+validates against `set(METRIC_READERS)` rather than its own local copy. The name is back, but as the
+registry-guarded seam CLAUDE.md's convention asks for: a reader that exists but is unlisted is
+unconfigurable, and a listed kind with no reader is a red test rather than a spec that validates at
+submit and then returns no metric forever.
+
 #### RA-05 · MEDIUM · flat-code · effort: small
 
 **read_metric is a 120-line flat if-chain with the security-critical workdir-confinement guard copy-pasted three times**
@@ -2832,6 +2844,35 @@ solution-tier cases.
 *Evidence:* Six reader kinds are handled in one linear if-chain, and the containment idiom `if not _is_within(X.resolve(), Path(workdir).resolve()): return None` wrapped in `try/except (OSError, ValueError)` appears verbatim three times (file_json/file_regex path, host_score predictions path, adapter module path). This is the guard that stops answer-key reads and arbitrary host-code exec; three hand-copies means a future fourth reader can plausibly forget it.
 
 *Recommendation:* Extract one _confined(workdir, rel) -> Optional[Path] helper (resolve + _is_within + exception handling) used by all file-touching branches, and consider a {kind: reader_fn} dispatch table so a new reader kind must go through the table (and the confinement helper) rather than a new elif.
+
+*Resolution (2026-08-02):* both halves done. `_confined(workdir, rel)` is the one containment guard,
+and `read_metric` is now a `METRIC_READERS` dispatch table over five reader functions, so `read_metric`
+itself is two lines.
+
+**The extraction surfaced a real latent bug, present identically in all three hand-copies.** They
+caught `(OSError, ValueError)`, but `Path.resolve()` also raises `RuntimeError("Symlink loop from
+…")` — and the candidate can CREATE that loop inside its own workdir at eval time (`ln -s b a;
+ln -s a b`, then a `file_json` spec naming `a`). Verified against the pre-refactor function: it
+raised out of `read_metric` and took down the RUN, where every other malformed-spec branch fails the
+node. `_confined` catches it. This is the concrete form of the finding's own argument — three copies
+means one place to fix it and two places to forget.
+
+The table also closes **RA-04**'s remaining half. `repo_task.EvalSpec._valid_metric_kind` now
+validates against `set(METRIC_READERS)` instead of its own local copy, so the reader kinds are
+enumerated ONCE. A new reader is unconfigurable until it is registered, and registering it is what
+routes it past `_confined`.
+
+`tests/test_metric_reader_confinement.py` (29) pins traversal, absolute paths, symlinks out (and
+symlinks that legitimately stay in), the NUL and symlink-loop refusals, that every registered
+path-touching reader routes through the guard, that `_is_within` is spelled in exactly three places
+(its definition, `_confined`, and host_score's INVERSE labels-must-be-outside assertion), the
+validator/table agreement, and that an unknown kind still falls through to no-metric rather than a
+KeyError. The adapter case asserts a marker file is NOT written — that branch `runpy`s what it is
+given, so a missed guard there is code execution, not a wrong number.
+
+Teeth-tested against five breaks: the adapter skipping the guard, string-prefix containment instead
+of `.resolve()`, the validator drifting back to a local copy, the narrowed except (the symlink-loop
+crash), and host_score's inverse assertion degrading to a silent None.
 
 #### RA-06 · MEDIUM · mergeable-entities · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 

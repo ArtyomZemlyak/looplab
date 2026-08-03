@@ -186,6 +186,159 @@ def _read_metric_file(p: Path) -> Optional[str]:
         return None
 
 
+def _confined(workdir, rel) -> Optional[Path]:
+    """``workdir / rel``, resolved — or None when it does not land INSIDE ``workdir``.
+
+    THE containment guard for every metric-source path, written once (doc 25 RA-05) instead of the
+    three hand-copies it replaces. `.resolve()` collapses `..` and symlinks, so an absolute `path` in
+    the spec, a `../` traversal, and a symlink pointing out of the sandbox all fail here alike.
+
+    What it is guarding is not uniform, which is why a fourth reader forgetting it is the plausible
+    next bug rather than a cosmetic one: for the file readers and for `host_score`'s predictions it
+    stops an answer-key (or planted-result) read; for the `adapter` reader it stops an arbitrary
+    HOST .py being handed to `runpy`, i.e. code execution.
+
+    A failure out of `.resolve()` is a REFUSAL, not a crash: a malformed spec must fail the NODE,
+    like every other malformed-spec branch here, not take down the run.
+
+    `RuntimeError` is in that list deliberately, and it is a FIX, not a widening for tidiness. All
+    three hand-copies caught only `(OSError, ValueError)`, but `Path.resolve()` raises
+    `RuntimeError("Symlink loop from ...")` — and the candidate can CREATE that loop inside its own
+    workdir at eval time (`ln -s b a; ln -s a b`, then a `file_json` spec naming `a`). Pre-extraction
+    that escaped `read_metric` and took down the run instead of failing the node.
+    """
+    try:
+        path = (Path(workdir) / rel).resolve()
+        return path if _is_within(path, Path(workdir).resolve()) else None
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _read_stdout_json(stdout, workdir, spec, wrap, since) -> Optional[float]:
+    return json_line_metric(stdout, spec.get("key", "metric"))
+
+
+def _read_stdout_regex(stdout, workdir, spec, wrap, since) -> Optional[float]:
+    pat = spec.get("pattern") or spec.get("key")   # key = tolerant fallback (composable authoring)
+    return _regex_metric(stdout, pat, spec.get("group", 1)) if pat else None
+
+
+def _read_file(stdout, workdir, spec, wrap, since) -> Optional[float]:
+    """`file_json` / `file_regex`: parse a file the candidate wrote into its own workdir."""
+    fp = spec.get("path")
+    if not fp:
+        return None                                 # malformed spec must fail the NODE, not crash the run
+    p = _confined(workdir, fp)
+    if p is None or not p.is_file():
+        return None
+    if not _file_is_fresh(p, since):
+        return None                                 # stale prior-attempt file in a reused workdir
+    text = _read_metric_file(p)                      # size-bounded: a huge candidate file can't OOM the host
+    if text is None:
+        return None
+    if spec.get("kind") == "file_regex":
+        pat = spec.get("pattern") or spec.get("key")
+        return _regex_metric(text, pat, spec.get("group", 1)) if pat else None
+    try:
+        return _to_float(_dig(json.loads(text), spec.get("key", "metric")))
+    except json.JSONDecodeError:
+        return None
+
+
+def _read_host_score(stdout, workdir, spec, wrap, since) -> Optional[float]:
+    # B1 host-side scoring (trust): the candidate WRITES predictions into its workdir; the HOST
+    # scores them against held-out labels it holds at a path OUTSIDE the candidate's workspace
+    # (never mounted under the untrusted tier, never writable by the candidate). The metric is
+    # computed here, on the host — the candidate cannot self-report or see the labels. This turns
+    # `stdout_json` self-reporting into an enforced guarantee for untrusted real tasks.
+    #
+    # Contain the CANDIDATE-controlled predictions path INSIDE the workdir. A `../preds.json` (or an
+    # absolute path, or a symlink out) would read a stale/planted file outside the attempt workspace
+    # and could return a perfect score (arch-review §3 P0-7). Labels are guarded to be OUTSIDE the
+    # workspace below; predictions must be INSIDE it.
+    preds_path = _confined(workdir, spec.get("predictions", "predictions.json"))
+    if preds_path is None:
+        return None
+    # A host_score spec with no `labels` path is malformed — `_valid_metric_kind` accepts it (it
+    # only checks `kind`), so guard here and FAIL THE NODE (return None) rather than raising a
+    # KeyError that has no terminal event and crashes the whole run (like every other malformed-spec
+    # branch in this function).
+    _lbl = spec.get("labels")
+    if not _lbl:
+        return None
+    labels_path = Path(_lbl).resolve()   # operator-declared host path (trusted)
+    # Enforce the invariant the docstring asserts: the answer key must live OUTSIDE the
+    # candidate's workspace. Under the untrusted/hostile tier the whole MOUNT ROOT (the run root)
+    # is bind-mounted into the container — not just the eval cwd — so a labels path anywhere under
+    # the mount root is readable AND writable by the candidate, defeating held-out grading. Guard
+    # against the mounted root when a docker wrap is active (it's a strict superset of the cwd);
+    # fall back to the cwd otherwise. Fail loud on misconfig.
+    guard_root = Path(workdir).resolve()
+    mount_root = getattr(wrap, "_mount_root", None) if wrap is not None else None
+    if mount_root:
+        guard_root = Path(mount_root).resolve()
+    if _is_within(labels_path, guard_root):
+        raise ValueError(
+            f"host_score labels path {labels_path} is inside the candidate workspace "
+            f"{guard_root} — it would be mounted/writable by the candidate. "
+            "Place the held-out labels outside the eval workspace.")
+    if not preds_path.is_file() or not labels_path.is_file():
+        return None
+    if not _file_is_fresh(preds_path, since):
+        # The candidate's predictions must be written by THIS eval — a stale predictions.json from a
+        # prior attempt in a reused workdir could otherwise score as a perfect result (false promo).
+        return None
+    preds_text = _read_metric_file(preds_path)      # candidate-controlled: size-bounded against host OOM
+    if preds_text is None:
+        return None
+    try:
+        preds = json.loads(preds_text)
+        labels = json.loads(labels_path.read_text(encoding="utf-8-sig", errors="replace"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return _to_float(host_score(spec.get("scorer", "rmse"), preds, labels, key=spec.get("key")))
+
+
+def _read_adapter(stdout, workdir, spec, wrap, since) -> Optional[float]:
+    # A (human-ratified, frozen) agent-written module exposing read_metric(workdir)->
+    # float, for an arbitrary tracker (TensorBoard/ClearML/custom). Run as a SUBPROCESS
+    # in the workdir (not in-process) so it inherits the same timeout/tree-kill harness
+    # and can't hang or crash the orchestrator; its printed metric is parsed back.
+    rel = spec.get("path", "LOOPLAB_adapter.py")
+    # Contain the adapter module INSIDE the workdir before EXECing it: an absolute or `../` path
+    # (or a symlink out) would runpy an arbitrary host .py — a code-exec escape the file readers
+    # already guard but this branch did not (arch-review §3 P0-7).
+    ap = _confined(workdir, rel)
+    if ap is None or not ap.is_file():
+        return None
+    runner = ("import json, runpy; "
+              f"_ns = runpy.run_path({rel!r}); "
+              "print(json.dumps({'metric': _ns['read_metric']('.')}))")
+    # In the container use its `python` (the host sys.executable path doesn't exist there);
+    # locally use the same interpreter that runs the engine.
+    argv = (["python", "-c", runner] if wrap else [sys.executable, "-c", runner])
+    if wrap:
+        argv = wrap(argv, str(workdir))
+    rc, out, _, to = run_argv(argv, str(workdir),
+                               finite_timeout(spec.get("timeout", 120), 120), None, 64_000)
+    return json_line_metric(out, "metric") if (rc == 0 and not to) else None
+
+
+# THE closed set of metric readers, and the only enumeration of it. The kinds used to be spelled out
+# three times — this if-chain, `repo_task.EvalSpec._valid_metric_kind`'s local set, and a
+# `METRIC_READERS` constant whose docstring claimed to be shared but had zero consumers (doc 25
+# RA-04/RA-05). The validator now reads THIS dict, so a new reader is unconfigurable until it is
+# registered here, and registering it is what routes it past `_confined`.
+METRIC_READERS = {
+    "stdout_json": _read_stdout_json,
+    "stdout_regex": _read_stdout_regex,
+    "file_json": _read_file,
+    "file_regex": _read_file,
+    "host_score": _read_host_score,
+    "adapter": _read_adapter,
+}
+
+
 def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
                 since: Optional[float] = None) -> Optional[float]:
     """Read the metric for one eval according to `spec` (an eval_spec['metric']). Built-in
@@ -194,122 +347,12 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
     eval — pass `wrap` (from make_docker_wrap) to run it inside the container.
 
     `since` (eval start time, from run_command_eval): FILE-based readers reject a metric-source file
-    older than it — a stale artifact left in a reused workdir must not read as this eval's result."""
-    kind = spec.get("kind", "stdout_json")
-    if kind == "stdout_json":
-        return json_line_metric(stdout, spec.get("key", "metric"))
-    if kind == "stdout_regex":
-        pat = spec.get("pattern") or spec.get("key")   # key = tolerant fallback (composable authoring)
-        return _regex_metric(stdout, pat, spec.get("group", 1)) if pat else None
-    if kind in ("file_json", "file_regex"):
-        fp = spec.get("path")
-        if not fp:
-            return None                                 # malformed spec must fail the NODE, not crash the run
-        p = Path(workdir) / fp
-        # Confine the reader to the workdir (same guard as host_score's held-out-labels check): an
-        # absolute `path` or a `../` traversal in the spec would otherwise escape the sandbox and read
-        # any host file (a direct answer-key read the moment reader paths become agent-authorable).
-        wd = Path(workdir)
-        try:
-            if not _is_within(p.resolve(), wd.resolve()):
-                return None
-        except (OSError, ValueError):
-            return None
-        if not p.is_file():
-            return None
-        if not _file_is_fresh(p, since):
-            return None                                 # stale prior-attempt file in a reused workdir
-        text = _read_metric_file(p)                      # size-bounded: a huge candidate file can't OOM the host
-        if text is None:
-            return None
-        if kind == "file_regex":
-            pat = spec.get("pattern") or spec.get("key")
-            return _regex_metric(text, pat, spec.get("group", 1)) if pat else None
-        try:
-            return _to_float(_dig(json.loads(text), spec.get("key", "metric")))
-        except json.JSONDecodeError:
-            return None
-    if kind == "host_score":
-        # B1 host-side scoring (trust): the candidate WRITES predictions into its workdir; the HOST
-        # scores them against held-out labels it holds at a path OUTSIDE the candidate's workspace
-        # (never mounted under the untrusted tier, never writable by the candidate). The metric is
-        # computed here, on the host — the candidate cannot self-report or see the labels. This turns
-        # `stdout_json` self-reporting into an enforced guarantee for untrusted real tasks.
-        preds_path = Path(workdir) / spec.get("predictions", "predictions.json")
-        # Contain the CANDIDATE-controlled predictions path INSIDE the workdir. A `../preds.json` (or an
-        # absolute path, or a symlink out) would read a stale/planted file outside the attempt workspace
-        # and could return a perfect score (arch-review §3 P0-7). Labels are guarded to be OUTSIDE the
-        # workspace below; predictions must be INSIDE it. `.resolve()` also collapses a symlink escape.
-        try:
-            if not _is_within(preds_path.resolve(), Path(workdir).resolve()):
-                return None
-        except (OSError, ValueError):
-            return None
-        # A host_score spec with no `labels` path is malformed — `_valid_metric_kind` accepts it (it
-        # only checks `kind`), so guard here and FAIL THE NODE (return None) rather than raising a
-        # KeyError that has no terminal event and crashes the whole run (like every other malformed-spec
-        # branch in this function).
-        _lbl = spec.get("labels")
-        if not _lbl:
-            return None
-        labels_path = Path(_lbl).resolve()   # operator-declared host path (trusted)
-        # Enforce the invariant the docstring asserts: the answer key must live OUTSIDE the
-        # candidate's workspace. Under the untrusted/hostile tier the whole MOUNT ROOT (the run root)
-        # is bind-mounted into the container — not just the eval cwd — so a labels path anywhere under
-        # the mount root is readable AND writable by the candidate, defeating held-out grading. Guard
-        # against the mounted root when a docker wrap is active (it's a strict superset of the cwd);
-        # fall back to the cwd otherwise. Fail loud on misconfig.
-        guard_root = Path(workdir).resolve()
-        mount_root = getattr(wrap, "_mount_root", None) if wrap is not None else None
-        if mount_root:
-            guard_root = Path(mount_root).resolve()
-        if _is_within(labels_path, guard_root):
-            raise ValueError(
-                f"host_score labels path {labels_path} is inside the candidate workspace "
-                f"{guard_root} — it would be mounted/writable by the candidate. "
-                "Place the held-out labels outside the eval workspace.")
-        if not preds_path.is_file() or not labels_path.is_file():
-            return None
-        if not _file_is_fresh(preds_path, since):
-            # The candidate's predictions must be written by THIS eval — a stale predictions.json from a
-            # prior attempt in a reused workdir could otherwise score as a perfect result (false promo).
-            return None
-        preds_text = _read_metric_file(preds_path)      # candidate-controlled: size-bounded against host OOM
-        if preds_text is None:
-            return None
-        try:
-            preds = json.loads(preds_text)
-            labels = json.loads(labels_path.read_text(encoding="utf-8-sig", errors="replace"))
-        except (json.JSONDecodeError, OSError):
-            return None
-        return _to_float(host_score(spec.get("scorer", "rmse"), preds, labels, key=spec.get("key")))
-    if kind == "adapter":
-        # A (human-ratified, frozen) agent-written module exposing read_metric(workdir)->
-        # float, for an arbitrary tracker (TensorBoard/ClearML/custom). Run as a SUBPROCESS
-        # in the workdir (not in-process) so it inherits the same timeout/tree-kill harness
-        # and can't hang or crash the orchestrator; its printed metric is parsed back.
-        rel = spec.get("path", "LOOPLAB_adapter.py")
-        ap = Path(workdir) / rel
-        # Contain the adapter module INSIDE the workdir before EXECing it: an absolute or `../` path
-        # (or a symlink out) would runpy an arbitrary host .py — a code-exec escape the file readers
-        # already guard but this branch did not (arch-review §3 P0-7). `.resolve()` collapses symlinks.
-        try:
-            if not _is_within(ap.resolve(), Path(workdir).resolve()) or not ap.is_file():
-                return None
-        except (OSError, ValueError):
-            return None
-        runner = ("import json, runpy; "
-                  f"_ns = runpy.run_path({rel!r}); "
-                  "print(json.dumps({'metric': _ns['read_metric']('.')}))")
-        # In the container use its `python` (the host sys.executable path doesn't exist there);
-        # locally use the same interpreter that runs the engine.
-        argv = (["python", "-c", runner] if wrap else [sys.executable, "-c", runner])
-        if wrap:
-            argv = wrap(argv, str(workdir))
-        rc, out, _, to = run_argv(argv, str(workdir),
-                                   finite_timeout(spec.get("timeout", 120), 120), None, 64_000)
-        return json_line_metric(out, "metric") if (rc == 0 and not to) else None
-    return None
+    older than it — a stale artifact left in a reused workdir must not read as this eval's result.
+
+    An unknown `kind` returns None (the node fails with no_metric) exactly as the old if-chain's
+    fall-through did; `_valid_metric_kind` is what turns it into a submit-time error instead."""
+    reader = METRIC_READERS.get(spec.get("kind", "stdout_json"))
+    return reader(stdout, workdir, spec, wrap, since) if reader is not None else None
 
 
 def _is_within(child: Path, parent: Path) -> bool:

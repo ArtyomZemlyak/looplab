@@ -176,7 +176,10 @@ class EvalSpec(BaseModel):
         # `kind` is HOW to READ the metric, not the optimization direction — catch the common mix-up of
         # putting "max"/"min" here (that goes in the task's `direction`). An unknown kind makes the metric
         # unreadable → every node fails with no_metric, so reject it at submit with a clear message.
-        _KINDS = {"stdout_json", "stdout_regex", "file_json", "file_regex", "host_score", "adapter"}
+        # The reader table in `runtime/command_eval.py` is the authority; validating against a local
+        # copy is how the kinds came to be enumerated in three places (doc 25 RA-04/RA-05).
+        from looplab.runtime.command_eval import METRIC_READERS
+        _KINDS = set(METRIC_READERS)
         if isinstance(v, dict):
             k = v.get("kind", "stdout_json")
             if k not in _KINDS:
