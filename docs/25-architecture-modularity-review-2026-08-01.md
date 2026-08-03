@@ -3777,6 +3777,33 @@ rather than a green-making edit:
 
 *Recommendation:* Extract the staged loop into a _run_stages(ctx, stages, ...) helper returning (rc, out, err, to, sig, stage_results | early RunResult), and bundle the shared execution knobs (wrap, is_docker, grace, env, cancel, log_dir, tracer, stall settings, max_output_bytes) into a small context dataclass. That removes the cross-branch variable leakage and the triplicated timeout-fold/stall-window expressions.
 
+*Partially resolved (2026-08-03).* The two duplicated EXPRESSIONS are done; the `_run_stages`
+extraction and the context dataclass are not, and that is recorded rather than assumed.
+
+* `_timed_out(to, rc, is_docker)` replaces the triplicated docker-timeout fold. This is
+  correctness-relevant, not cosmetic: under the container tier the deadline is enforced by coreutils
+  `timeout` INSIDE the container, so the host subprocess exits normally and `run_argv` reports
+  `to=False` — the timeout appears only as exit 124/137. A run site that omits the fold reports a
+  timed-out eval as an ordinary non-zero failure, which sends the Developer to repair code that
+  never got to finish.
+* `_stall_window_for(stall_timeout, budget, stall_cap)` replaces the duplicated window derivation.
+  The staged pipeline and the single-command path must agree, or a staged run kills healthy long
+  stages the serial path would have let run.
+
+`tests/test_command_eval_folds.py` pins the semantics AND that every run site goes through the
+helpers, because the failure mode is a NEW site added without the fold — which no behavioural test
+of the existing sites would catch.
+
+**Not done:** `_run_stages` + the execution-knob dataclass. That is the half that removes the
+cross-branch variable leakage (the `_sig` UnboundLocalError fix the finding cites as evidence), and
+it needs room to verify the staged and single-command branches against each other rather than a
+mechanical lift. Left explicit so the remaining work is visible.
+
+One process note, because it cost a cycle: `runtime/command_eval.py` carries a UTF-8 BOM, so a
+scripted edit that reads it as plain `utf-8` hands `ast.parse` a leading U+FEFF and dies before
+writing. Third occurrence in this campaign — `encoding="utf-8-sig"` on read plus writing the BOM
+back explicitly is the spelling that works.
+
 #### RA-03 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-02)**
 
 **Docker `run` hardening argv is duplicated between DockerSandbox.run and make_docker_wrap, kept in sync only by comments**

@@ -766,6 +766,27 @@ def _violations(out, wd, constraints, wrap, since=None) -> list[dict]:
     return out_list
 
 
+def _timed_out(to: bool, rc: int, is_docker: bool) -> bool:
+    """Fold a DOCKER timeout exit code into the subprocess-level timed-out flag (doc 25 RA-02).
+
+    Under the container tier the deadline is enforced by coreutils `timeout` INSIDE the container,
+    so the host subprocess exits normally and `run_argv` reports `to=False`; the timeout shows up
+    only as exit 124 (SIGTERM) or 137 (SIGKILL escalation). Written out at all three run sites, and
+    a site that forgets it reports a timed-out eval as an ordinary non-zero failure — which sends
+    the Developer to repair code that never got to finish.
+    """
+    return bool(to or (is_docker and docker_timed_out(rc)))
+
+
+def _stall_window_for(stall_timeout: Optional[float], budget: float,
+                      stall_cap: Optional[float]) -> Optional[float]:
+    """The no-output window for one command: an explicit `stall_timeout` wins, else derive it from
+    that command's own budget. Two sites spelled this, and they must agree — a staged pipeline whose
+    stages derived a different window from the single-command path would kill healthy long stages.
+    """
+    return stall_timeout if stall_timeout is not None else _stall_window(budget, stall_cap)
+
+
 def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      env: Optional[dict] = None, max_output_bytes: int = 64_000,
                      setup: Optional[list] = None, setup_timeout: float = 600.0,
@@ -844,7 +865,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             rc, out, err, to = run_argv(_w(_bound(setup, setup_timeout), str(swd)), swd,
                                          setup_timeout + grace, env, max_output_bytes, cancel,
                                          log_path=_log("setup.log"))
-        to = to or (is_docker and docker_timed_out(rc))   # coreutils timeout -> exit 124 or 137
+        to = _timed_out(to, rc, is_docker)
         if rc != 0 or to:
             return RunResult(exit_code=rc, stdout=out, stderr="setup failed:\n" + err,
                              metric=None, timed_out=to)
@@ -921,10 +942,9 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                 rc, out, err, to = run_argv(
                     _w(_bound(_scmd, _sto), str(wd)), wd, _sto + grace, env, max_output_bytes, cancel,
                     log_path=_log(f"{_sname}.log"), health_check=True,
-                    stall_timeout=(stall_timeout if stall_timeout is not None
-                                   else _stall_window(_sto, stall_cap)),
+                    stall_timeout=_stall_window_for(stall_timeout, _sto, stall_cap),
                     signals=_sig)
-                to = to or (is_docker and docker_timed_out(rc))
+                to = _timed_out(to, rc, is_docker)
                 if _sh is not None:
                     _sh.set_many(exit_code=rc, timed_out=to, stage=_sname)
             _status = "timeout" if to else ("ok" if rc == 0 else "fail")
@@ -982,10 +1002,9 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             rc, out, err, to = run_argv(
                 _w(_bound(command, timeout), str(wd)), wd, timeout + grace, env, max_output_bytes, cancel,
                 log_path=_log("eval.log"),
-                stall_timeout=(stall_timeout if stall_timeout is not None
-                               else _stall_window(timeout, stall_cap)),
+                stall_timeout=_stall_window_for(stall_timeout, timeout, stall_cap),
                 signals=_sig)
-            to = to or (is_docker and docker_timed_out(rc))   # 124 (SIGTERM) or 137 (SIGKILL escalation)
+            to = _timed_out(to, rc, is_docker)
             if _h is not None:
                 _h.set_many(exit_code=rc, timed_out=to)
     with _sp("read_metric", kind=metric.get("kind", "stdout_json")):
