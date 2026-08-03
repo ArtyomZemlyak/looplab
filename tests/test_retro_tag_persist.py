@@ -35,7 +35,7 @@ def test_offline_persist_folds_as_display_only_provenance(tmp_path):
     tags = {0: frozenset({"loss/contrastive", "hyperparameter/temperature"}),
             1: frozenset({"regularization/r-drop"}),
             2: frozenset()}                       # empty -> skipped
-    n = _persist_node_concepts(s, st, tags, "offline-heuristic", vocab_size=12)
+    n = _persist_node_concepts(s, tags, "offline-heuristic", vocab_size=12)
     assert n == 2                                 # node 2 (empty) skipped
     st2 = fold(s.read_all())
     assert st2.node_concepts[0] == ["hyperparameter/temperature", "loss/contrastive"]   # sorted
@@ -49,7 +49,7 @@ def test_offline_persist_folds_as_display_only_provenance(tmp_path):
 def test_persist_skips_unknown_node_ids(tmp_path):
     s = _store(tmp_path)
     st = fold(s.read_all())
-    n = _persist_node_concepts(s, st, {99: frozenset({"loss/x"})}, "offline-heuristic", 3)
+    n = _persist_node_concepts(s, {99: frozenset({"loss/x"})}, "offline-heuristic", 3)
     assert n == 0
     assert fold(s.read_all()).node_concepts == {}
 
@@ -61,7 +61,7 @@ def test_persist_yields_to_operator_retag(tmp_path):
              {"node_id": 0, "concepts": ["operator/pinned"], "generation": 0})
     st = fold(s.read_all())
     assert st.node_concept_provenance.get(0) == "operator-edited"
-    _persist_node_concepts(s, st, {0: frozenset({"loss/contrastive"})}, "offline-heuristic", 5)
+    _persist_node_concepts(s, {0: frozenset({"loss/contrastive"})}, "offline-heuristic", 5)
     st2 = fold(s.read_all())
     assert st2.node_concepts[0] == ["operator/pinned"]              # operator still wins
     assert st2.node_concept_provenance[0] == "operator-edited"
@@ -70,9 +70,9 @@ def test_persist_yields_to_operator_retag(tmp_path):
 def test_same_agentic_ids_upgrade_heuristic_once_then_deduplicate(tmp_path):
     s = _store(tmp_path)
     tags = {0: frozenset({"loss/contrastive"})}
-    first = _persist_node_concepts(s, fold(s.read_all()), tags, "offline-heuristic", 5)
-    upgraded = _persist_node_concepts(s, fold(s.read_all()), tags, "agentic", 9)
-    repeated = _persist_node_concepts(s, fold(s.read_all()), tags, "agentic", 9)
+    first = _persist_node_concepts(s, tags, "offline-heuristic", 5)
+    upgraded = _persist_node_concepts(s, tags, "agentic", 9)
+    repeated = _persist_node_concepts(s, tags, "agentic", 9)
 
     assert (first, upgraded, repeated) == (1, 1, 0)
     events = [event for event in s.read_all() if event.type == "node_concepts"]
@@ -89,10 +89,7 @@ def test_mixed_agentic_persist_keeps_fallback_rows_display_only(tmp_path):
         0: frozenset({"loss/coarse-fallback"}),
         1: frozenset({"loss/reviewed"}),
     }
-    n = _persist_node_concepts(
-        s,
-        fold(s.read_all()),
-        tags,
+    n = _persist_node_concepts(s, tags,
         "agentic",
         9,
         node_modes={0: "offline-heuristic", 1: "agentic"},
@@ -110,10 +107,7 @@ def test_mixed_agentic_persist_keeps_fallback_rows_display_only(tmp_path):
 
 def test_classifier_empty_is_durable_but_empty_fallback_stays_pending(tmp_path):
     s = _store(tmp_path)
-    n = _persist_node_concepts(
-        s,
-        fold(s.read_all()),
-        {0: frozenset(), 1: frozenset()},
+    n = _persist_node_concepts(s, {0: frozenset(), 1: frozenset()},
         "agentic",
         9,
         # JSON-shaped maps use string keys; persistence intentionally accepts both spellings.
@@ -132,7 +126,7 @@ def test_malformed_overwide_classifier_row_is_bounded_and_downgraded(tmp_path):
     s = _store(tmp_path)
     tags = {0: frozenset([None, *(f"axis/c{i:03d}" for i in range(70))])}
 
-    assert _persist_node_concepts(s, fold(s.read_all()), tags, "llm", 70) == 1
+    assert _persist_node_concepts(s, tags, "llm", 70) == 1
 
     event = [event for event in s.read_all() if event.type == "node_concepts"][0]
     assert event.data["mode"] == "offline-heuristic"
@@ -145,8 +139,7 @@ def test_malformed_overwide_classifier_row_is_bounded_and_downgraded(tmp_path):
 def test_duplicate_overflow_cannot_bypass_classifier_row_bound(tmp_path):
     s = _store(tmp_path)
 
-    assert _persist_node_concepts(
-        s, fold(s.read_all()), {0: ["loss/repeated"] * 65}, "llm", 1) == 1
+    assert _persist_node_concepts(s, {0: ["loss/repeated"] * 65}, "llm", 1) == 1
 
     event = [event for event in s.read_all() if event.type == "node_concepts"][0]
     assert event.data["mode"] == "offline-heuristic"
@@ -157,11 +150,11 @@ def test_duplicate_overflow_cannot_bypass_classifier_row_bound(tmp_path):
 def test_offline_repeat_is_idempotent_and_cannot_downgrade_classifier(tmp_path):
     s = _store(tmp_path)
     initial = {0: frozenset({"loss/agentic"})}
-    assert _persist_node_concepts(s, fold(s.read_all()), initial, "llm", 8) == 1
-    assert _persist_node_concepts(s, fold(s.read_all()), initial, "llm", 8) == 0
+    assert _persist_node_concepts(s, initial, "llm", 8) == 1
+    assert _persist_node_concepts(s, initial, "llm", 8) == 0
     # Even different coarse ids may not replace independent classifier evidence.
     coarse = {0: frozenset({"loss/coarse"})}
-    assert _persist_node_concepts(s, fold(s.read_all()), coarse, "offline-heuristic", 3) == 0
+    assert _persist_node_concepts(s, coarse, "offline-heuristic", 3) == 0
     state = fold(s.read_all())
     assert state.node_concepts[0] == ["loss/agentic"]
     assert state.node_concept_provenance[0] == NODE_CONCEPT_PROVENANCE_CLASSIFIER
@@ -170,8 +163,7 @@ def test_offline_repeat_is_idempotent_and_cannot_downgrade_classifier(tmp_path):
 def test_persist_helper_rejects_unknown_producer_mode(tmp_path):
     s = _store(tmp_path)
     with pytest.raises(ValueError, match="unsupported node-concept producer mode"):
-        _persist_node_concepts(
-            s, fold(s.read_all()), {0: frozenset({"loss/x"})}, "classifier-v-next", 1)
+        _persist_node_concepts(s, {0: frozenset({"loss/x"})}, "classifier-v-next", 1)
 
 
 def _finish_modern(store: EventStore, *, complete: bool) -> None:

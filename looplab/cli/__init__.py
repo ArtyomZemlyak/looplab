@@ -135,15 +135,46 @@ def _load_task(task_file: Path) -> TaskAdapter:
         raise typer.BadParameter(f"could not load task {task_file}: {e}")
 
 
-def _require_run_dir(run_dir: Path) -> EventStore:
+_RUN_DIR_HINT = "Pass the run directory created by `looplab run --out <dir>`."
+
+
+def _require_healthy_log(store: EventStore, run_dir: Path) -> None:
+    """Fail closed BEFORE appending when the event log has a MID-FILE divergence (arch-review §3
+    P0-4): a corrupt complete line followed by valid records. Appending would grow a durable tail
+    behind the boundary that fold can never see. Direct the operator to `repair-log` and exit, rather
+    than warn-and-continue (which silently dropped the tail and grew the invisible one)."""
+    div = store.divergence
+    if div:
+        typer.echo(
+            f"events.jsonl in {run_dir} is corrupted at line {div['corrupt_line']} — "
+            f"{div['dropped_lines']} later record(s) are on disk but DROPPED on replay (an invisible "
+            f"tail). Refusing to resume. Run `looplab repair-log {run_dir}` to back up and truncate "
+            f"the log to its last valid boundary, then resume.", err=True)
+        raise typer.Exit(2)
+
+
+def _require_run_dir(run_dir: Path, *, hint: str = _RUN_DIR_HINT,
+                     healthy: bool = False) -> EventStore:
     """Open a run's event log, erroring clearly if the dir has none. Without this guard a typo'd path
     folds to an empty state and the read commands print a blank `run=` line with exit 0 — looking like
-    a real but empty run rather than a wrong path."""
+    a real but empty run rather than a wrong path.
+
+    `hint` is the second sentence — what the operator should do instead — because `resume` can say
+    something sharper than the generic advice ("use `run` to start one").
+
+    `healthy=True` additionally runs the mid-file divergence check (doc 25 CT-13). Every MUTATING
+    caller pairs the two, and pairing them by hand is how they drifted: three commands re-derived the
+    existence check inline, two of them with a shorter message, and each re-opened its own EventStore
+    on the very path this function had just validated. Read commands leave it False (they only ever
+    fold the recoverable prefix), and `repair-log` MUST leave it False — a corrupt log is its input.
+    """
     if not (run_dir / "events.jsonl").exists():
-        typer.echo(f"no run found at {run_dir} (no events.jsonl). "
-                   f"Pass the run directory created by `looplab run --out <dir>`.")
+        typer.echo(f"no run found at {run_dir} (no events.jsonl). {hint}")
         raise typer.Exit(2)
-    return EventStore(run_dir / "events.jsonl")
+    store = EventStore(run_dir / "events.jsonl")
+    if healthy:
+        _require_healthy_log(store, run_dir)
+    return store
 
 
 def load_run_settings(run_dir, *, strict: bool) -> Settings:

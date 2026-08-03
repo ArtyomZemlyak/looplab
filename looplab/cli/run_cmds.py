@@ -35,7 +35,7 @@ from looplab.serve.run_files import run_config_write_lock
 from looplab.cli import (_BACKENDS, _DEV_BACKENDS, _TASK_KINDS, _choice, _engine_singleton,
                          _apply_speculation_calibration_profile,
                          _assert_run_deletion_namespace_available, _load_task, _print_result,
-                         _require_run_dir, app, load_run_settings)
+                         _require_healthy_log, _require_run_dir, app, load_run_settings)
 
 
 # How long `resume` waits for a stopped run's previous owner to release engine.lock, and how often
@@ -166,21 +166,6 @@ def _pending_finalize(state) -> bool:
         return last_stop > state.last_finish_seq
     # Compatibility while folding logs written before the sequence field existed.
     return bool(state.stop_requested and not state.finished)
-
-
-def _require_healthy_log(store: EventStore, run_dir: Path) -> None:
-    """Fail closed BEFORE appending when the event log has a MID-FILE divergence (arch-review §3
-    P0-4): a corrupt complete line followed by valid records. Appending would grow a durable tail
-    behind the boundary that fold can never see. Direct the operator to `repair-log` and exit, rather
-    than warn-and-continue (which silently dropped the tail and grew the invisible one)."""
-    div = store.divergence
-    if div:
-        typer.echo(
-            f"events.jsonl in {run_dir} is corrupted at line {div['corrupt_line']} — "
-            f"{div['dropped_lines']} later record(s) are on disk but DROPPED on replay (an invisible "
-            f"tail). Refusing to resume. Run `looplab repair-log {run_dir}` to back up and truncate "
-            f"the log to its last valid boundary, then resume.", err=True)
-        raise typer.Exit(2)
 
 
 def _pending_finalization_inputs(run_dir: Path, task_id: str | None):
@@ -619,15 +604,14 @@ def resume(
     max_nodes: Optional[int] = typer.Option(None),
 ):
     """Resume a crashed/incomplete run by re-entering the loop (replay-based)."""
-    if not (run_dir / "events.jsonl").exists():
-        typer.echo(f"no run found at {run_dir} (no events.jsonl). "
-                   f"`resume` continues a run started by `looplab run`; use `run` to start one.")
-        raise typer.Exit(2)
-    # Fail closed on a MID-FILE log corruption before re-entering the loop: iter_jsonl stops at the
-    # first bad line, so a byte flipped mid-log (FUSE/NFS/S3 only) would replay just the prefix, drop a
-    # valid tail, and — worse — resume would append MORE records behind the boundary (an invisible
-    # tail). Refuse and direct to `repair-log` (P0-4); a torn TAIL (normal crash-mid-append) is fine.
-    _require_healthy_log(EventStore(run_dir / "events.jsonl"), run_dir)
+    # `healthy=True` fails closed on a MID-FILE log corruption before re-entering the loop: iter_jsonl
+    # stops at the first bad line, so a byte flipped mid-log (FUSE/NFS/S3 only) would replay just the
+    # prefix, drop a valid tail, and — worse — resume would append MORE records behind the boundary (an
+    # invisible tail). Refuse and direct to `repair-log` (P0-4); a torn TAIL (normal crash-mid-append)
+    # is fine.
+    _require_run_dir(
+        run_dir, healthy=True,
+        hint="`resume` continues a run started by `looplab run`; use `run` to start one.")
     # Fall back to the verbatim task snapshot `run` wrote into the run dir, so a run can be resumed
     # from the dir alone (the UI relies on this to continue a finished run without ui_meta.json).
     snap = run_dir / "task.snapshot.json"
@@ -738,11 +722,8 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
     """STOP a run: freeze it WITHOUT finalizing — no end-of-run report/lessons/cost roll-up. A running
     engine breaks on its next iteration; the run is resumable (`looplab resume`) or you can `finalize`
     it later to wrap it up."""
-    if not (run_dir / "events.jsonl").exists():
-        typer.echo(f"no run found at {run_dir}")
-        raise typer.Exit(2)
-    store = EventStore(run_dir / "events.jsonl")
-    _require_healthy_log(store, run_dir)   # fail closed on a mid-file corruption before appending (P0-4)
+    # `healthy=True`: fail closed on a mid-file corruption before appending (P0-4).
+    store = _require_run_dir(run_dir, healthy=True)
     store.append(EV_PAUSE, {})
     typer.echo(f"stopped {run_dir} (frozen, not finalized) — `looplab resume` to continue, "
                "`looplab finalize` to wrap it up")
@@ -757,11 +738,8 @@ def finalize(
 ):
     """FINALIZE a run: stop it AND run the end-of-run wrap-up (report, cross-run lessons/case, cost
     roll-up, tree.html). Works whether the run is live or already `stop`ped. Idempotent."""
-    if not (run_dir / "events.jsonl").exists():
-        typer.echo(f"no run found at {run_dir}")
-        raise typer.Exit(2)
-    store = EventStore(run_dir / "events.jsonl")
-    _require_healthy_log(store, run_dir)   # fail closed on a mid-file corruption before appending (P0-4)
+    # `healthy=True`: fail closed on a mid-file corruption before appending (P0-4).
+    store = _require_run_dir(run_dir, healthy=True)
     # Record exactly one stop intent. The server may already have appended it before spawning this
     # command; two direct CLIs can also race. A tail CAS makes both cases idempotent. A terminal run
     # whose current finish is only partially finalized repairs that finish first instead of creating
@@ -837,8 +815,8 @@ def approve(run_dir: Path = typer.Argument(..., help="Run dir awaiting approval.
                 None, help="Node to approve (default: exact pending subject).")):
     """Approve a paused run (human-in-the-loop): ratify whatever it's waiting on — an agent-proposed
     eval spec, or the final-best node — by appending the matching event so `resume` can finish."""
-    store = _require_run_dir(run_dir)
-    _require_healthy_log(store, run_dir)   # fail closed on a mid-file corruption before appending (P0-4)
+    # `healthy=True`: fail closed on a mid-file corruption before appending (P0-4).
+    store = _require_run_dir(run_dir, healthy=True)
     events = store.read_all()
     state = fold(events)
     expected_seq = events[-1].seq if events else -1
@@ -898,9 +876,9 @@ def repair_log_cmd(run_dir: Path = typer.Argument(..., help="Run dir whose event
     from looplab.cli import _engine_singleton
     from looplab.events.eventstore import repair_log
     log = run_dir / "events.jsonl"
-    if not log.exists():
-        typer.echo(f"no run found at {run_dir} (no events.jsonl)")
-        raise typer.Exit(2)
+    # The one caller that must NOT pass `healthy=True`: a mid-file corruption is this command's INPUT,
+    # so failing closed on it would make the repair unreachable exactly when it is needed.
+    _require_run_dir(run_dir, hint="`repair-log` repairs a run's event log; there is none here.")
     with _engine_singleton(run_dir) as offline:
         if not offline:
             typer.echo(f"refusing to repair {log}: an engine is still running on this run "

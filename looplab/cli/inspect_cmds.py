@@ -225,7 +225,7 @@ def _echo_cli_invocation(output: dict) -> None:
         f"(invocation {invocation['action_id']} @ revision {invocation['revision']}{suffix})")
 
 
-def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int, *,
+def _persist_node_concepts(store, raw_tags, mode: str, vocab_size: int, *,
                            expected_last_seq: int | None = None,
                            require_lock: bool = False,
                            node_modes: Optional[dict[int | str, str]] = None) -> int:
@@ -249,8 +249,11 @@ def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int, *
     tail = events[-1].seq if events else -1
     if expected_last_seq is not None and tail != expected_last_seq:
         raise EventStoreConcurrencyError(store.path, expected_last_seq, tail)
-    # re-fold inside the mutation transaction. The caller's pre-analysis state can be
-    # minutes old after an agentic build and must never choose provenance/idempotency on its own.
+    # Fold inside the mutation transaction, from the events this call just read under the lock. The
+    # caller's pre-analysis state can be minutes old after an agentic build and must never choose
+    # provenance/idempotency on its own — which is why this takes no `state` parameter at all
+    # (doc 25 CT-11): accepting one and then unconditionally discarding it invited a reader to
+    # believe the caller's fold mattered here.
     state = fold(events)
     known = dict(getattr(state, "node_concepts", {}) or {})
     provenance = dict(getattr(state, "node_concept_provenance", {}) or {})
@@ -510,6 +513,29 @@ def _make_llm_client(settings):
     return make_llm_client_for(settings, factory=late_bound("looplab.cli", "make_llm_client"))
 
 
+def _optional_client(run_dir, model, fallback: str, *, unavailable: str = "no LLM endpoint"):
+    """``(settings, client | None)`` for a diagnostic that DEGRADES without an endpoint (doc 25 CT-14).
+
+    Five commands wrote this block out, differing only in the fallback wording. Two things it keeps
+    doing, both easy to lose in a copy:
+
+    * the settings come from the RUN's pinned endpoint (`config.snapshot.json`) with ambient settings
+      as the fallback, so a diagnostic sends node code and logs where the run was pinned rather than
+      wherever the operator's shell happens to point;
+    * an unreachable endpoint is NOTED, not swallowed. A silent `client = None` makes a heuristic
+      result indistinguishable from an agentic one in the printed output.
+
+    `lesson-guard` deliberately does NOT use this: it is LLM-only and EXITS 1 rather than degrading,
+    which is a different contract, not a different message.
+    """
+    settings = _settings_for_run(run_dir, model)
+    try:
+        return settings, _make_llm_client(settings)
+    except Exception as e:  # noqa: BLE001 — no endpoint => degrade to the offline path, noted
+        typer.echo(f"({unavailable}: {e}; {fallback})")
+        return settings, None
+
+
 def _run_tools_for(state):
     """Read-only run tools bound to `state` for AGENTIC tagging/briefing.
     None on any failure -> the caller runs the plain (non-agentic) LLM path."""
@@ -552,14 +578,8 @@ def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None, ru
     # ("Agentic by default … sends node code/logs … pass --offline for the local heuristic"). `asset-brief`
     # keeps the inverse (--llm opt-in) because ITS agentic path is a much heavier full tool-loop.
     if not offline:
-        # Use the RUN's pinned endpoint (config.snapshot.json), not ambient Settings, so a diagnostic
-        # sends node code/logs where the run was pinned; ambient fallback + `model` override.
-        settings = _settings_for_run(run_dir, model)
-        try:
-            client = _make_llm_client(settings)
-        except Exception as e:  # noqa: BLE001 — no endpoint => heuristic fallback, noted
-            typer.echo(f"(no LLM endpoint: {e}; using the offline heuristic fallback)")
-            client = None
+        _settings, client = _optional_client(
+            run_dir, model, "using the offline heuristic fallback")
         if client is not None:
             brief = ""
             if repo is not None and Path(repo).exists():
@@ -662,7 +682,6 @@ def concept_coverage(
                     raise typer.Exit(code=2)
                 return _persist_node_concepts(
                     store,
-                    current,
                     raw_tags,
                     mode,
                     vocab_size,
@@ -681,11 +700,8 @@ def concept_coverage(
 
     client = None
     if not offline:
-        settings = _settings_for_run(run_dir, model)
-        try:
-            client = _make_llm_client(settings)
-        except Exception as e:  # noqa: BLE001 — no endpoint => fall back to the offline heuristic, note it
-            typer.echo(f"(no LLM endpoint: {e}; using the offline heuristic fallback)")
+        _settings, client = _optional_client(
+            run_dir, model, "using the offline heuristic fallback")
 
     if client is None:
         # Deterministic FALLBACK. Needs a curated seed to localize anything.
@@ -756,13 +772,10 @@ def asset_brief_cmd(
         raise typer.Exit(2)
     client = None
     if llm:
-        # asset-brief sweeps a repo, not a run directory, so there is no config snapshot to resolve here.
-        # Start from ambient settings and layer the explicit --model override on top.
-        settings = _settings_for_run(None, model)
-        try:
-            client = _make_llm_client(settings)
-        except Exception as e:  # noqa: BLE001 — degrade to the offline scan
-            typer.echo(f"(--llm unavailable: {e}; using the offline scan)")
+        # asset-brief sweeps a repo, not a run directory, so there is no config snapshot to resolve
+        # here: `run_dir=None` starts from ambient settings with the explicit --model override on top.
+        _settings, client = _optional_client(
+            None, model, "using the offline scan", unavailable="--llm unavailable")
     typer.echo(asset_brief(repo, client=client, task_type=task_type))
 
 
@@ -829,12 +842,8 @@ def board_dedup(
     elif board_cached:
         label = "recorded/agentic"                      # dedup_analysis reads the cache (per-item fallback)
     elif hyps:
-        client = None
-        try:
-            settings = _settings_for_run(run_dir, model)
-            client = _make_llm_client(settings)
-        except Exception as e:  # noqa: BLE001 — no endpoint => heuristic tags, noted
-            typer.echo(f"(no LLM endpoint: {e}; using the heuristic hypothesis tagger)")
+        _settings, client = _optional_client(
+            run_dir, model, "using the heuristic hypothesis tagger")
         if client is not None:
             tags = {h.id: tag_text_llm(h.statement, m["graph"], client, allow_plural=True) for h in hyps}
             label = "live-agentic"
@@ -893,12 +902,9 @@ def novelty_recall_cmd(
     # most-similar candidate pairs), each sending two truncated idea texts. `--offline` skips the LLM
     # entirely (candidate clusters only); docs/guide/cli-reference.md states the send-by-default contract.
     if not offline:
-        settings = _settings_for_run(run_dir, model)
-        try:
-            client = _make_llm_client(settings)
+        settings, client = _optional_client(run_dir, model, "showing candidate pairs only")
+        if client is not None:
             parser = settings.llm_parser
-        except Exception as e:  # noqa: BLE001 — no endpoint => candidates only, noted
-            typer.echo(f"(no LLM endpoint: {e}; showing candidate pairs only)")
     typer.echo(novelty_recall_report(state, client=client, parser=parser, max_pairs=max_pairs))
 
 

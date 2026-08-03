@@ -3821,6 +3821,12 @@ lenient.
 
 *Recommendation:* Drop the parameter (or rename the local) so the signature stops implying the caller's fold matters; removes the pointless pass (the caller's fold stays — `_retro_tag_finished` consumes it; ~15 direct test call sites also pass a fold).
 
+*Resolution (2026-08-03):* the parameter is gone, and the docstring now says why it will not come
+back: the helper re-folds INSIDE the mutation transaction because it needs the tail seq for the CAS
+anyway, so a caller-supplied state could only ever be the stale one. The caller's own fold stays —
+`_retro_tag_finished` consumes it — and all 15 test call sites were re-pointed rather than left
+passing a value into a signature that no longer has a slot for it.
+
 #### CT-12 · LOW · over-engineering · effort: small
 
 **Trust-package library surfaces with no production consumer across multiple review cycles**
@@ -3841,6 +3847,27 @@ lenient.
 
 *Recommendation:* Use _require_run_dir (optionally with a `hint:` message parameter for the resume-specific guidance) in all four; have it optionally run the health check too, since every mutating caller pairs the two.
 
+*Resolution (2026-08-03):* both parameters, as recommended. `_require_run_dir(run_dir, *, hint=…,
+healthy=False)` is the single prologue and `_require_healthy_log` moved next to it in
+`cli/__init__.py`. Five commands now call it: `resume` / `stop` / `finalize` / `approve` with
+`healthy=True`, `repair-log` without.
+
+The user-visible part was the drift that mattered: `stop` and `finalize` printed a bare
+`no run found at <dir>` — no `(no events.jsonl)`, no guidance — so the same operator mistake got a
+less actionable answer depending on which verb was typed. `hint:` is what let the check be shared
+without flattening that advice into one generic sentence.
+
+Two things stay deliberately outside the flag:
+
+* `run` still calls `_require_healthy_log` directly. It creates the run dir, so there is no run to
+  *require* yet — folding it in would mean a `healthy=` on a path that must not exist-check at all.
+* `repair-log` must NOT pass `healthy=True`. A mid-file corruption is its INPUT; failing closed on
+  one would make the only documented recovery path unreachable exactly when it is needed. The
+  opt-out is now a named decision with a test on it rather than an omission.
+
+`tests/test_cli_shared_prologues.py` covers it, including driven cases (a real corrupted log is
+refused with `healthy=True` and repaired without it) rather than source assertions alone.
+
 #### CT-14 · LOW · duplication · effort: small
 
 **Optional-LLM-client construction pattern repeated across six diagnostics**
@@ -3850,6 +3877,16 @@ lenient.
 *Evidence:* The block `settings = _settings_for_run(run_dir, model); try: client = _make_llm_client(settings) except Exception as e: typer.echo(f"(no LLM endpoint: {e}; …fallback…)")` appears in _concept_map_for, concept-coverage, asset-brief, board-dedup, novelty-recall and lesson-guard, differing only in the fallback message. board-dedup even runs it twice per invocation (once inside _concept_map_for, once for hypothesis tagging).
 
 *Recommendation:* One helper `_optional_client(run_dir, model, fallback_note) -> (settings, client|None)`; commands keep only their message.
+
+*Resolution (2026-08-03):* `_optional_client(run_dir, model, fallback, *, unavailable="no LLM
+endpoint")` with exactly that signature, used by the FIVE diagnostics that degrade — concept-map,
+concept-coverage, board-dedup's hypothesis tagging, novelty-recall and asset-brief. Each keeps only
+its fallback wording.
+
+`lesson-guard` is the sixth site in the finding and deliberately did NOT move: it is LLM-only and
+`raise typer.Exit(1)`s instead of degrading. That is a different CONTRACT, not a different message —
+folding it in would turn "I could not check this" into "checked, nothing found", which is the one
+answer a guard must never give. A test pins the exclusion so it reads as a decision.
 
 #### CT-15 · LOW · under-decomposition · effort: medium
 

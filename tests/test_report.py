@@ -465,6 +465,34 @@ def _refresh_report(client, run_id="demo", *, generation=None, key="test-report-
         json={"expected_generation": generation})
 
 
+# A job worker in these tests does trivial work (the report generator is monkeypatched to return a
+# dict), so reaching a terminal receipt takes milliseconds — but only once the anyio worker thread is
+# actually SCHEDULED. On a loaded runner (the full suite on 4 cores) that wait is unbounded in
+# iteration terms, and the fixed `for _ in range(500)` budget these polls used turned "the scheduler
+# was busy for six seconds" into a red test with a message that reads like a hung job. Poll on a WALL
+# CLOCK deadline instead: the property under test is that the job REACHES a terminal state, so a slow
+# scheduler must only cost more iterations. The ceiling stays finite (a genuinely stuck worker still
+# fails, ~a minute later) and the sleep backs off so a busy runner is not fought for the CPU.
+_POLL_DEADLINE_S = 60.0
+_POLL_SLEEP_MAX_S = 0.2
+
+
+def _poll_off_running(client, url: str, *, what: str) -> dict:
+    """Poll `url` until its receipt stops saying `running`, then return it verbatim."""
+    import time as _time
+    deadline = _time.monotonic() + _POLL_DEADLINE_S
+    sleep_s = 0.005
+    while True:
+        polled = client.get(url).json()
+        if polled.get("status") != "running":
+            return polled
+        if _time.monotonic() >= deadline:
+            raise AssertionError(
+                f"{what} never reached a terminal state within {_POLL_DEADLINE_S:.0f}s")
+        _time.sleep(sleep_s)
+        sleep_s = min(_POLL_SLEEP_MAX_S, sleep_s * 1.5)
+
+
 def _settled(client, result):
     """The TERMINAL payload of a report refresh, draining the job when the inline wait lost the race.
 
@@ -480,25 +508,20 @@ def _settled(client, result):
     a test that deliberately forces the queued path (`LOOPLAB_JOB_INLINE_WAIT=0`, or a worker blocked
     on an event) must keep reading the POST receipt directly rather than calling this.
     """
-    import time as _time
     if not isinstance(result, dict) or result.get("status") != "running":
         return result
     job_id = result.get("job_id")
     assert isinstance(job_id, str) and job_id, result
-    for _ in range(500):
-        polled = client.get(f"/api/jobs/{job_id}").json()
-        if polled.get("status") == "running":
-            _time.sleep(0.01)
-            continue
-        # `status` is the JOB receipt's envelope field; the inline path hands back the worker's
-        # payload without it. Strip it from a completed job so both sides of the race present the
-        # IDENTICAL report contract — a test may compare a fresh result against a later durable
-        # terminal replay, which never goes through a job at all. A non-`done` receipt (e.g. an
-        # already-consumed `{status: unknown}`) is returned untouched so it fails loudly.
-        if polled.get("status") == "done" and "ok" in polled:
-            return {key: value for key, value in polled.items() if key != "status"}
-        return polled
-    raise AssertionError(f"report refresh job {job_id} never reached a terminal state")
+    polled = _poll_off_running(client, f"/api/jobs/{job_id}",
+                               what=f"report refresh job {job_id}")
+    # `status` is the JOB receipt's envelope field; the inline path hands back the worker's
+    # payload without it. Strip it from a completed job so both sides of the race present the
+    # IDENTICAL report contract — a test may compare a fresh result against a later durable
+    # terminal replay, which never goes through a job at all. A non-`done` receipt (e.g. an
+    # already-consumed `{status: unknown}`) is returned untouched so it fails loudly.
+    if polled.get("status") == "done" and "ok" in polled:
+        return {key: value for key, value in polled.items() if key != "status"}
+    return polled
 
 
 def test_report_refresh_endpoint(tmp_path, monkeypatch):
@@ -567,12 +590,8 @@ def test_slow_report_terminal_polls_release_shared_job_capacity(tmp_path, monkey
         queued = _refresh_report(
             client, generation=generation, key=f"slow-refresh-{index}").json()
         assert queued.get("status") == "running", queued
-        terminal = None
-        for _ in range(500):
-            terminal = client.get(f"/api/jobs/{queued['job_id']}").json()
-            if terminal.get("status") == "done":
-                break
-            time.sleep(0.01)
+        terminal = _poll_off_running(client, f"/api/jobs/{queued['job_id']}",
+                                     what=f"polled report job {queued['job_id']}")
         assert terminal and terminal.get("ok") is True, terminal
         assert terminal["generation"] == generation
         assert client.get(f"/api/jobs/{queued['job_id']}").json() == {"status": "unknown"}
@@ -4478,13 +4497,9 @@ def test_scope_report_terminal_receipt_is_shared_by_concurrent_observers(
     assert second == first
     release.set()
 
-    terminal = None
-    for _ in range(200):
-        terminal = client.get(
-            _scope_report_action_url("task", task_id, action_id)).json()
-        if terminal.get("status") == "done":
-            break
-        time.sleep(0.01)
+    terminal = _poll_off_running(
+        client, _scope_report_action_url("task", task_id, action_id),
+        what=f"scope report action {action_id}")
     assert terminal is not None and terminal["status"] == "done"
     assert terminal["ok"] is True
     # CODEX AGENT: process-local /api/jobs receipts are deliberately consumable once the strict action
