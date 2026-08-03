@@ -544,7 +544,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     dev_factory = make_developer_factory(task, settings) if settings.backend == "llm" else None
     proxy_scorer = None
     if settings.proxy_scoring or settings.proxy_kill_fraction > 0:
-        from looplab.runtime.proxy import ProxyScorer
+        from looplab.search.proxy import ProxyScorer
         proxy_scorer = ProxyScorer(kill_fraction=settings.proxy_kill_fraction)
     # Every pure-config Settings→Engine knob travels as ONE bundle (BACKLOG §4); only the built
     # OBJECTS (roles, sandbox, policy, strategist, scorers, …) and genuinely CLI-specific values

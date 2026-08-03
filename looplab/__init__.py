@@ -129,7 +129,7 @@ _LAYOUT = {
     "http": "serve",             # the shared control-plane JSON body parser (doc 25 SR-05)
     "jobs": "serve",
     "jsonutil": "core",         # canonical JSON bytes for receipt preimages (doc 25 SE-08)
-    "jupyter": "runtime",
+    "jupyter": "serve",
     "kaggle_dl": "adapters",
     "knowledge_tools": "tools",
     "launch": "serve",
@@ -162,10 +162,11 @@ _LAYOUT = {
     "mlebench_real": "adapters",
     "mlflow_export": "events",
     "models": "core",
-    "notebook": "runtime",
+    "notebook": "events",
     "node_build": "engine",
     "node_evidence": "core",
     "novelty": "engine",
+    "numeric": "core",
     "operators": "search",
     "options": "engine",
     "orchestrator": "engine",
@@ -183,7 +184,7 @@ _LAYOUT = {
     "protocol": "serve",
     "prompts": "core",
     "proposal_cues": "engine",
-    "proxy": "runtime",
+    "proxy": "search",
     # keep the bounded Card DTO boundary canonical; an unregistered serve module fails
     # the package-layout audit and also breaks the supported ``looplab.public_cards`` legacy alias.
     "public_cards": "serve",

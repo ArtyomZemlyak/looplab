@@ -11,46 +11,14 @@ import math
 from typing import Optional
 
 from looplab.core.models import NodeStatus, RunState
-
-
-def numeric_params(params: dict, keys=None) -> dict:
-    """The NUMERIC (int/float — bools included, matching the historical isinstance check) subset of a
-    param dict, coerced to float. `keys` optionally restricts to a key set (e.g. the search bounds).
-    Shared by the novelty gate, the surrogate and the panel so "numeric params" means the same thing
-    everywhere. NOTE: runtime/proxy.py deliberately keeps its own try/float() variant — it also
-    accepts numeric STRINGS, which this helper must not start doing."""
-    return {k: float(v) for k, v in params.items()
-            if (keys is None or k in keys) and isinstance(v, (int, float))}
+# Both moved to `core/numeric.py` (doc 25 XP-12): neither reads an event log, and keeping them here
+# forced `runtime` to import `events` purely to reach a math function. Re-exported so the historical
+# import path — which several modules and tests still use — keeps resolving to the SAME objects.
+from looplab.core.numeric import knn_idw, numeric_params
 
 
 def _numeric(params: dict) -> dict:   # param_distance's pre-rename local shorthand
     return numeric_params(params)
-
-
-def knn_idw(pairs, k: int):
-    """Inverse-distance-weighted k-NN over pre-computed `(distance, value)` pairs — the shared CORE
-    of the three empirical predictors (search/surrogate, search/panel, runtime/proxy). The callers
-    keep their own (deliberately different) neighbour-eligibility and distance computations; only
-    the rank / zero-distance short-circuit / weighting steps are unified here, so those can't
-    silently drift apart again.
-
-    Returns `(prediction, nearest_distance)`, or None when `pairs` is empty (the caller's abstain
-    path). A zero-distance sample short-circuits to that sample's value with nearest=0.0 (ties keep
-    input order — `sorted` is stable, exactly like every pre-extraction copy)."""
-    if not pairs:
-        return None
-    nn = sorted(pairs, key=lambda t: t[0])[: max(1, k)]
-    # Exact-match short-circuit scans the WHOLE top-k, not just nn[0]: a NaN distance (reachable —
-    # the proxy coerces string params, and a float('nan') param value is isinstance-numeric
-    # everywhere) sorts unpredictably and can sit AHEAD of a genuine 0.0; checking only nn[0]
-    # would then fall through to the 1/d weighting and divide by that hidden zero. With no zero
-    # present, a NaN distance degrades to a NaN prediction exactly like every pre-extraction copy.
-    for d, v in nn:
-        if d == 0.0:
-            return v, 0.0
-    nearest = nn[0][0]
-    wsum = sum(1.0 / d for d, _ in nn)
-    return sum((1.0 / d) * v for d, v in nn) / wsum, nearest
 
 
 def param_distance(a: dict, b: dict) -> float:

@@ -17,7 +17,7 @@ import math
 from typing import Optional
 
 from looplab.core.models import Node, RunState
-from looplab.events.digest import knn_idw
+from looplab.core.numeric import knn_idw
 
 
 class ProxyScorer:

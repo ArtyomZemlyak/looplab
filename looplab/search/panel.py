@@ -81,7 +81,7 @@ class PanelResearcher:
         # `breedable_nodes()`, not `feasible_nodes()`: under `trust_gate=gate` a hard-flagged node
         # keeps its inflated metric and stays FEASIBLE, so fitting on it teaches the k-NN to propose
         # near the cheated params. Both sibling predictors already exclude it for this exact reason
-        # (search/surrogate.py, runtime/proxy.py); under `audit`/no flags the two pools are identical.
+        # (search/surrogate.py, search/proxy.py); under `audit`/no flags the two pools are identical.
         hist = [(numeric_params(n.idea.params), n.metric)
                 for n in state.breedable_nodes() if n.metric is not None]
         if len(hist) < self.warmup:

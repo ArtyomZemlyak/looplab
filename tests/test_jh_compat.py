@@ -127,7 +127,7 @@ def test_jupyter_serverproxy_spec_is_valid(monkeypatch):
     command that runs `looplab ui --no-build` with a pinned run-root, prefix-stripping (absolute_url
     False), and a Launcher tile."""
     monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
-    from looplab.runtime.jupyter import setup_looplab
+    from looplab.serve.jupyter import setup_looplab
     spec = setup_looplab()
     assert spec["command"][:2] == ["looplab", "ui"]
     assert "{port}" in spec["command"]
@@ -141,7 +141,7 @@ def test_jupyter_serverproxy_spec_is_valid(monkeypatch):
 def test_jupyter_protected_shell_opens_outside_frame(monkeypatch):
     """The protected shell denies framing, so its Launcher entry must not target an iframe."""
     monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
-    from looplab.runtime.jupyter import setup_looplab
+    from looplab.serve.jupyter import setup_looplab
 
     assert setup_looplab()["new_browser_tab"] is True
 
@@ -163,7 +163,7 @@ def test_compose_protected_ui_wires_host_allowlist_and_public_healthcheck():
 
 def test_run_root_honors_env(monkeypatch):
     monkeypatch.setenv("LOOPLAB_RUN_ROOT", "/data/looplab")
-    from looplab.runtime.jupyter import _run_root
+    from looplab.serve.jupyter import _run_root
     assert _run_root() == "/data/looplab"
 
 

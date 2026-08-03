@@ -3591,6 +3591,29 @@ the five copy-paste skeletons, which the finding itself rates lower priority.
 
 *Recommendation:* Move proxy.py to search/ (next to surrogate.py), notebook.py to the events/export or cli layer, and jupyter.py to serve/ — using the established _LAYOUT back-compat alias mechanism so old import paths keep resolving. Low urgency, but it makes the runtime package's contract ('process execution and sandboxing') true.
 
+*Resolution (2026-08-03):* all three moved, exactly as recommended — `proxy.py` to `search/` beside
+`surrogate.py`, `notebook.py` to `events/` beside the other exporters, `jupyter.py` to `serve/`. The
+`_LAYOUT` map was updated so the flat aliases (`looplab.proxy`, …) resolve to the new homes and still
+return the SAME module object, which is what keeps monkeypatching through either path working.
+
+The finding calls this low urgency, and the folder placement was. The IMPORT EDGE was not: with
+`proxy.py` gone, `runtime` no longer imports `events` at all — that single edge existed only to reach
+a k-NN function (XP-12, resolved with it) — so the package now imports nothing above `core`, and the
+docstring that already claimed "process execution" is true rather than aspirational.
+
+Two things worth naming because they fail silently rather than loudly:
+
+* `jupyter.py` is reached by NAME from installed metadata, not by import, so the
+  `jupyter_serverproxy_servers` entry point in `pyproject.toml` had to move with it. Left behind, the
+  only symptom would have been a missing Launcher tile in a JupyterHub deploy — nothing in the test
+  suite, which imports the module directly, would have noticed.
+* `proxy.py` keeps its own param coercion, which accepts numeric STRINGS where `numeric_params` must
+  not. Now that they are in the same package the temptation to "unify" them is closer, so a test
+  drives the disagreement instead of relying on the comment.
+
+`tests/test_package_contracts.py` pins the runtime membership, the no-imports-above-core rule, the
+`_LAYOUT` entries and the entry point.
+
 #### RA-09 · LOW · flat-code · effort: medium
 
 **bg_tasks task records are raw dicts with a hand-rolled lock protocol re-explained at five call sites**
@@ -4124,6 +4147,20 @@ entry, and a fresh upward import from `core/parse.py`.
 *Evidence:* events/ is documented as event-log projections ('files-as-truth'), yet digest.py exports knn_idw and numeric_params — pure numeric estimation helpers with no event-log dependency — consumed by runtime/proxy.py (the sole reason runtime imports events at all), search/surrogate.py and search/panel.py. The one legitimate runtime→events edge in the import graph exists only to reach a math function.
 
 *Recommendation:* Move knn_idw/numeric_params to core (e.g. core/fitness or a small core/numeric module) and re-export from events.digest for compatibility; runtime then imports nothing above core.
+
+*Resolution (2026-08-03):* `core/numeric.py`, re-exported from `events/digest.py` — the recommended
+shape, done together with RA-08 because they are the same defect seen from two sides: the estimator
+was in the wrong package, and `runtime/proxy.py`'s import of it was the wrong edge.
+
+`param_distance` deliberately did NOT move. It is the exact metric the novelty gate uses to say two
+experiments are "near", which is a statement about a run rather than arithmetic — a projection
+concern, and the reason `digest.py` still exists as more than a shim.
+
+The re-export is asserted to be the SAME object (`digest.knn_idw is numeric.knn_idw`), not a
+convenience wrapper: several modules and tests still import through `events.digest`, and a
+re-implementation there could drift from the one the predictors call. The zero-distance short-circuit
+that scans the whole top-k — the subtle part, and the one a "simplification" would lose — is driven
+by a test at its new home rather than left to the comment.
 
 
 ### 4.14 UI (React control plane)

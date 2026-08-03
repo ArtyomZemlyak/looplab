@@ -1482,7 +1482,7 @@ def _eval_node(i, x, m):
 
 
 def test_proxy_predicts_from_neighbours():
-    from looplab.runtime.proxy import ProxyScorer
+    from looplab.search.proxy import ProxyScorer
     st = RunState(direction="min")
     st.nodes[0] = _eval_node(0, 0.0, 10.0)
     st.nodes[1] = _eval_node(1, 10.0, 1.0)
@@ -1493,7 +1493,7 @@ def test_proxy_predicts_from_neighbours():
 
 
 def test_proxy_off_never_skips():
-    from looplab.runtime.proxy import ProxyScorer
+    from looplab.search.proxy import ProxyScorer
     st = RunState(direction="min")
     for i in range(6):
         st.nodes[i] = _eval_node(i, i, i)
@@ -1504,7 +1504,7 @@ def test_proxy_off_never_skips():
 
 
 def test_proxy_skips_doomed_after_warmup():
-    from looplab.runtime.proxy import ProxyScorer
+    from looplab.search.proxy import ProxyScorer
     st = RunState(direction="min")           # lower is better
     for i in range(6):
         st.nodes[i] = _eval_node(i, i, i)    # metrics 0..5
@@ -1515,7 +1515,7 @@ def test_proxy_skips_doomed_after_warmup():
 
 
 def test_proxy_end_to_end_records_and_can_skip(tmp_path):
-    from looplab.runtime.proxy import ProxyScorer
+    from looplab.search.proxy import ProxyScorer
     state = anyio.run(_engine(tmp_path / "px", proxy_scorer=ProxyScorer(kill_fraction=0.5, warmup=3),
                               proxy_kill_fraction=0.5).run)
     assert state.finished

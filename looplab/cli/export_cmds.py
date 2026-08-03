@@ -111,7 +111,7 @@ def export_notebook(
     out: Optional[Path] = typer.Option(None, help="Output .ipynb path (default: <run>/champion.ipynb)."),
 ):
     """Export the run's champion solution as a runnable Jupyter notebook (.ipynb)."""
-    from looplab.runtime.notebook import champion_notebook
+    from looplab.events.notebook import champion_notebook
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     champ = state.nodes.get(state.champion) if state.champion is not None else state.best()

@@ -157,7 +157,7 @@ Install the extra:
 pip install "looplab[jupyterhub]"      # fastapi + uvicorn + jupyter-server-proxy + psutil
 ```
 
-The `jupyter_serverproxy_servers` entry point (`looplab/runtime/jupyter.py`) registers the tile: clicking it
+The `jupyter_serverproxy_servers` entry point (`looplab/serve/jupyter.py`) registers the tile: clicking it
 runs `looplab ui` on a free port and proxies it at `/user/<name>/proxy/<port>/`. It selects the new-tab
 target automatically when `LOOPLAB_UI_TOKEN` is present. Five env knobs matter on a hub:
 
