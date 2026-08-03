@@ -1062,6 +1062,7 @@ button.ptree-row { width: 100%; border: 0; background: transparent; color: inher
 .compare-head > div:first-child { flex: 1; min-width: 220px; }
 .compare-head h2 { margin: 0; font-size: 18px; }
 .compare-head p, .compare-config > p { margin: 2px 0 0; color: var(--fg-mut); }
+.compare-head > .btn[aria-disabled="true"] { opacity: .4; cursor: wait; }
 .compare-columns { position: relative; }
 .compare-columns > summary, .compare-config > summary { color: var(--fg-dim); cursor: pointer; }
 .compare-columns fieldset { position: absolute; z-index: 25; right: 0; width: 230px; max-height: min(420px, 65vh);
