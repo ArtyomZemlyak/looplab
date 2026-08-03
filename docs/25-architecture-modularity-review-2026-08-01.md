@@ -3727,6 +3727,35 @@ Scope: `looplab/runtime/` and `looplab/adapters/`.
 
 *Recommendation:* Split the role/agent factory half into e.g. looplab/agents/factory.py (make_roles, build_unified_agent, build_strategist_tools, make_developer_factory, _shared_providers and helpers) and keep re-exports in adapters/tasks.py for the many existing importers (the module already does exactly this for make_llm_client at line 361, and the _LAYOUT meta-path shim shows the repo's established pattern for safe moves). Within make_roles, extract the three developer-backend branches (in-house repo dev, external CLI dev, best-of-N wrap) into named helpers.
 
+*Resolution (2026-08-03):* Split as recommended. `looplab/agents/factory.py` holds the composition
+root (`make_roles`, `build_unified_agent`, `build_strategist_tools`, `make_developer_factory`,
+`_shared_providers`, `_make_abstractor`, `_memora_cache_path`, `_set_role_client`, `_agent_model`);
+`adapters/tasks.py` (795 -> 361 lines) keeps the task schema/registry and re-exports every moved
+name, so `from looplab.adapters.tasks import make_roles` and any patch of that name keep working —
+they resolve to the SAME objects, which is the property that makes the move invisible.
+
+Two things the split had to get right, both now pinned:
+
+* the `make_llm_client` re-export block rode along with the agent half on the first cut and had to be
+  put back. It is `adapters/tasks.py`'s documented back-compat surface and `cli/__init__.py` imports
+  through it.
+* the layering asymmetry. Every `agents`/`search`/`tools` import in the moved code was already
+  FUNCTION-LOCAL, and must stay that way: `search` imports `agents` at module scope, so a
+  module-level `looplab.search` import in `agents/factory.py` closes the cycle into an ImportError at
+  startup. `TaskAdapter` is TYPE_CHECKING-only for the same reason in the other direction —
+  `adapters.tasks` re-exports FROM the factory. A subprocess test imports the factory FIRST, because
+  a cycle shows up in only one order.
+
+The split surfaced a pre-existing dead store: `shared = resolve_llm_target(settings)` in
+`build_unified_agent`, read by nothing — every comparison below it is stage-vs-ROLE. Removed, with
+the note kept so it is not re-added as if it were needed.
+
+The `make_roles` developer-backend extraction is NOT done. `make_roles` is 193 lines and its three
+branches are genuinely distinct wirings, but they interleave with the shared provider/prompt setup
+rather than sitting as three separable blocks; splitting them needs its own pass with room to verify
+each backend, and doing it badly would scatter the wiring instead of naming it. Recorded so the
+remaining half is visible rather than assumed done. Teeth-verified against 6 breakages.
+
 #### RA-02 · HIGH · under-decomposition · effort: medium
 
 **run_command_eval is a ~265-line god-function with 23 parameters (19 keyword) and two hand-mirrored eval branches**
