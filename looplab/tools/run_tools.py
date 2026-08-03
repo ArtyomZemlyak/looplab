@@ -58,12 +58,14 @@ class RunTools:
     def __init__(self, max_chars: int = 3500):
         self.max_chars = max_chars
         self.state: Optional[RunState] = None
-        self.parent = None
 
-    # The agent loop calls this each turn so the tools see the current run.
+    # The agent loop calls this each turn so the tools see the current run. `parent` is ACCEPTED and
+    # IGNORED, exactly as MachineRunsTools does: the second argument is part of the `bind_state`
+    # contract (`tools/_base.py` — a provider that implements the hook without it raises TypeError at
+    # dispatch), but this provider has no use for the parent. It used to be STORED on `self`, which
+    # nothing ever read (doc 25 TO-10) while implying a back-reference these tools do not have.
     def bind_state(self, state: RunState, parent=None) -> None:
         self.state = state
-        self.parent = parent
 
     def specs(self) -> list[dict]:
         return [

@@ -3138,6 +3138,21 @@ repo-wide grep confirms no other consumer, and a test asserts the alias stays ab
 
 *Recommendation:* Trim the re-export list to the names with verified external consumers (the four privates above plus the public API), noting in the comment that new tool_loop privates are NOT auto-forwarded.
 
+*Resolution (2026-08-03):* trimmed to exactly the four, with the rule written into the comment.
+`_force_emit` (tests/test_agentic_retrieval.py), `_cap_tool_result` (tests/test_deep_research_loop.py),
+`_flatten_transcript` and `_handoff_ctx` (tests/test_phase_handoff.py — and `_handoff_ctx` is read by
+`run_phase` in this module) stay; `_PLAN_TOOL_NAME`, `_REPEAT_NOTE`, `_TRUNC_NOTE`, `_plan_spec`,
+`_render_plan` and `_summarizer` are gone.
+
+The finding's parenthetical is the whole reason this is worth doing rather than cosmetic: for a
+module-level CONSTANT the re-import is a rebinding, not an alias, so `tool_loop._REPEAT_NOTE` and
+`agent._REPEAT_NOTE` are already two objects. Forwarding one by default hands a future caller that
+ambiguity for nothing — the failure mode is a monkeypatch that appears to take and changes nothing
+that runs.
+
+Note CO-10 went the other way for `llm.py`, and both are right: that barrel's re-exports have
+documented consumers and a test that patches THROUGH it, so the list is load-bearing there.
+
 #### AG-10 · LOW · duplication · effort: small
 
 **The 4-cue tuple for prompt cues is duplicated as a literal in both researchers and is not covered by the registry scan**
@@ -3415,6 +3430,29 @@ a public job.
 *Evidence:* Verified by whole-repo grep including tests/: (1) `perm_modes.decide(mode, tool_kind)` — the kind-only 'compatibility helper' — is called only from tests/test_perm_modes.py; every production site uses `decide_action`. It is labeled compatibility, but nothing is left to be compatible with. (2) `VectorStore.rebuild` (protocol + InMemoryVectorStore implementation, vectorstore.py:246-256) has zero callers anywhere in the repo; `VectorStore.delete` has zero production callers (one test exercises it: tests/test_vectorstore.py:29); the module docstring admits the persistent-backend seam is 'a documented FUTURE seam ... not a config change today', so two of the four protocol methods are speculative. (3) `RunTools.bind_state` stores `self.parent = parent` (run_tools.py:66) but no code in the repo reads a RunTools `.parent` attribute — the parent parameter exists only to satisfy the bind_state signature. Each item is small, but together they are API surface a reader must reason about for nothing.
 
 *Recommendation:* Delete `decide()` and retarget its test at `decide_action`; drop `delete`/`rebuild` from the Protocol (re-add with the first persistent backend) or mark them explicitly unused; stop storing `parent` in RunTools (accept-and-ignore, as MachineRunsTools does).
+
+*Resolution (2026-08-03):* all three, exactly as recommended. Each was small; each cost something
+more specific than its line count, which is what the replacement comments record.
+
+`perm_modes.decide` was labelled "compatibility" with nothing left to be compatible with, and it was
+not merely redundant — it answered the same question with a COARSER rule. All `write` was `inline`
+under `acceptEdits`, whereas `decide_action` first demotes a write with no recovery receipt to
+CONSEQUENTIAL, which asks. A future provider reaching for the shorter-looking name would have
+silently widened its own permissions. Its five tests moved onto `decide_action` over CONCRETE
+REGISTERED identities (grouped by risk, since a kind alone does not determine the answer — precisely
+why the shortcut had to go), and gained the case the old one could not express: `acceptEdits` asking
+for an edit it could not undo.
+
+`VectorStore.delete`/`rebuild` left the Protocol. On a Protocol, speculative methods are worse than
+dead code: the seam exists to state what a LanceDB/Qdrant backend must implement, so it was wrong in
+both directions — asking a real backend for machinery nothing calls, while the shapes a persistent
+store genuinely needs (durable open/close, index compaction) are absent because nobody has written
+one. `InMemoryVectorStore` keeps both as its own API.
+
+`RunTools.parent` is no longer stored. The parameter stays in the signature — it is contractual
+(`tools/_base.py`: a provider implementing `bind_state` without it raises TypeError at dispatch) —
+so this is accept-and-ignore, as MachineRunsTools already does. Storing a value nobody reads implied
+a back-reference these read-only tools do not have.
 
 #### TO-11 · LOW · excessive-logic · effort: small
 

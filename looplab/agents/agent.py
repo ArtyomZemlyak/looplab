@@ -26,15 +26,22 @@ from looplab.agents.roles import (
     _hypothesis_system_suffix,
     _researcher_capability_suffix, _state_brief, collect_hint_cues,
     RESEARCHER_PROMPT_CUES)
-# The tool-loop machinery was split into `agents.tool_loop`. Every moved name is RE-IMPORTED here
-# under its original name because callers and tests import AND monkeypatch them THROUGH this
+# The tool-loop machinery was split into `agents.tool_loop`. The moved names below are RE-IMPORTED
+# here under their original names because callers and tests import AND monkeypatch them THROUGH this
 # module — `looplab.agents.agent.agentic_struct` / `.drive_tool_loop` are documented patch seams
 # (novelty.py names the former; tests/test_repo_dev_plan.py & tests/test_report.py patch the
 # latter), and the flat `looplab.agent.X` alias resolves to this same module — so both paths must
 # keep resolving to the SAME objects.
+#
+# The PRIVATE names are the ones with a verified consumer through this module, and only those
+# (doc 25 AG-09): `_force_emit` (tests/test_agentic_retrieval.py), `_cap_tool_result`
+# (tests/test_deep_research_loop.py), `_flatten_transcript` + `_handoff_ctx`
+# (tests/test_phase_handoff.py — and `_handoff_ctx` is read by `run_phase` below). A new tool_loop
+# private is NOT auto-forwarded: for a module-level constant the two paths are separate rebindings
+# rather than aliases, so patching `tool_loop._X` and patching `agent._X` would already disagree —
+# forwarding one by default hands a caller that ambiguity for nothing.
 from looplab.agents.tool_loop import (  # noqa: F401
-    CompositeTools, _PLAN_TOOL_NAME, _REPEAT_NOTE, _TRUNC_NOTE, _cap_tool_result,
-    _flatten_transcript, _force_emit, _handoff_ctx, _plan_spec, _render_plan, _summarizer,
+    CompositeTools, _cap_tool_result, _flatten_transcript, _force_emit, _handoff_ctx,
     agentic_struct, agentic_text, drive_tool_loop, emit_loop, handoff_scope,
     loop_opts_from_settings, summarize_phase)
 

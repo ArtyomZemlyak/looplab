@@ -48,10 +48,19 @@ class Hit:
 
 
 class VectorStore(Protocol):
+    """The two methods the seam actually requires of a backend.
+
+    `delete` and `rebuild` were declared here too and had no production caller anywhere (doc 25
+    TO-10). On a Protocol that is not merely dead code: the point of the seam is to state what a
+    LanceDB/Qdrant backend must implement, and speculative methods make that contract wrong in both
+    directions — a real backend is asked for machinery nothing calls, while the shapes a persistent
+    store genuinely needs (a durable open/close, index-level compaction) are absent because nobody
+    has written one yet. `InMemoryVectorStore` keeps its own `delete`/`rebuild` below; they are that
+    class's API, not a promise every backend must keep.
+    """
+
     def upsert(self, index: str, items: list[Item]) -> None: ...
     def search(self, index: str, query: Vector, k: int) -> list[Hit]: ...
-    def delete(self, index: str, ids: list[str]) -> None: ...
-    def rebuild(self, index: str) -> None: ...
 
 
 def hash_embed(text: str, dim: int = 64) -> Vector:

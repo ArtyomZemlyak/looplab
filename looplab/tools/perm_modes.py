@@ -269,18 +269,13 @@ def authorize(mode, approver, action: object, *, denied: str, declined: str):
                        denied=denied, declined=declined)
 
 
-def decide(mode, tool_kind) -> str:
-    """Compatibility kind-only matrix; concrete providers must prefer :func:`decide_action`."""
-    if tool_kind in READONLY_KINDS:
-        return "inline"
-    mode = normalize_mode(mode)
-    if mode == "plan":
-        return "deny"
-    if mode == "acceptEdits" and tool_kind == "write":
-        return "inline"
-    if mode == "auto" and tool_kind in MUTATING_KINDS:
-        return "inline"
-    return "ask"
+# A kind-only `decide(mode, tool_kind)` used to live here as a "compatibility" matrix. It was
+# deleted (doc 25 TO-10) because nothing was left to be compatible with: every production site went
+# through `decide_action`, and only its own test still called it. Keeping it was worse than dead
+# code — it answered the same question with a COARSER rule (all `write` is inline under acceptEdits;
+# `decide_action` first demotes a write without a recovery receipt to CONSEQUENTIAL, which asks), so
+# a future provider that reached for the shorter-looking name would have silently widened its own
+# permissions. Its tests moved onto `decide_action` rather than being deleted with it.
 
 
 class RememberedGrantStore:

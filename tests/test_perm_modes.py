@@ -15,42 +15,76 @@ from looplab.tools.perm_modes import (
     RememberedGrantStore,
     approval_allows,
     classify_action,
-    decide,
     decide_action,
     normalize_mode,
 )
 
+# These tests used to call a kind-only `decide(mode, tool_kind)` that no production site consulted
+# (doc 25 TO-10). They now drive `decide_action` — the function every provider actually calls — over
+# CONCRETE REGISTERED identities, so the mode matrix they pin is the one that ships. Grouped by risk,
+# because that is what the matrix is keyed on; a kind is not enough to know the answer, which is
+# precisely why the kind-only shortcut had to go.
+_READS = ({"tool_kind": "read", "tool": "read_file"}, {"tool_kind": "git_ro", "tool": "git"})
+# A write WITH a recovery receipt is REVERSIBLE; without one it demotes to CONSEQUENTIAL.
+_RECOVERABLE_WRITE = {"tool_kind": "write", "tool": "write_file", "recovery_available": True}
+_REVERSIBLE = (_RECOVERABLE_WRITE, {"tool_kind": "git_mut", "tool": "git_add"})
+_CONSEQUENTIAL = ({"tool_kind": "git_mut", "tool": "git_commit"},
+                  {"tool_kind": "knowledge_write", "tool": "remember"},
+                  {"tool_kind": "run_control", "tool": "stop_run"})
+_HIGH = ({"tool_kind": "shell", "tool": "run_command"},
+         {"tool_kind": "write", "tool": "delete_file"},
+         {"tool_kind": "run_control", "tool": "delete_run"})
+_MUTATIONS = _REVERSIBLE + _CONSEQUENTIAL + _HIGH
+
 
 def test_reads_always_inline():
     for mode in ("plan", "default", "acceptEdits", "auto"):
-        assert decide(mode, "read") == "inline"
-        assert decide(mode, "git_ro") == "inline"
+        for action in _READS:
+            assert decide_action(mode, action) == "inline"
 
 
 def test_plan_denies_all_mutation():
-    for kind in ("write", "shell", "git_mut", "create_run"):
-        assert decide("plan", kind) == "deny"
+    for action in _MUTATIONS:
+        assert decide_action("plan", action) == "deny"
 
 
 def test_default_asks_every_mutation():
-    for kind in ("write", "shell", "git_mut", "create_run"):
-        assert decide("default", kind) == "ask"
+    for action in _MUTATIONS:
+        assert decide_action("default", action) == "ask"
 
 
-def test_accept_edits_applies_writes_but_asks_shell():
-    assert decide("acceptEdits", "write") == "inline"
-    for kind in ("shell", "git_mut", "create_run"):
-        assert decide("acceptEdits", kind) == "ask"
+def test_accept_edits_applies_only_the_reversible_ones():
+    for action in _REVERSIBLE:
+        assert decide_action("acceptEdits", action) == "inline"
+    for action in _CONSEQUENTIAL + _HIGH:
+        assert decide_action("acceptEdits", action) == "ask"
 
 
-def test_auto_runs_everything():
-    for kind in ("write", "shell", "git_mut", "create_run"):
-        assert decide("auto", kind) == "inline"
+def test_accept_edits_asks_for_a_write_it_could_not_undo():
+    """The distinction the deleted kind-only matrix could not make: it answered "inline" for every
+    `write`, so a provider with no recovery-receipt path would have had its edits applied silently."""
+    assert decide_action("acceptEdits", {"tool_kind": "write", "tool": "write_file"}) == "ask"
+
+
+def test_auto_runs_everything_except_the_high_risk_verbs():
+    for action in _REVERSIBLE + _CONSEQUENTIAL:
+        assert decide_action("auto", action) == "inline"
+    # Arbitrary argv, and every REMOVAL verb, stay HIGH: Auto still asks.
+    for action in _HIGH:
+        assert decide_action("auto", action) == "ask"
 
 
 def test_unknown_mode_falls_back_to_plan():
     assert normalize_mode("nonsense") == "plan"
-    assert decide("nonsense", "write") == "deny"
+    assert decide_action("nonsense", _RECOVERABLE_WRITE) == "deny"
+
+
+def test_an_unregistered_identity_is_unknown_and_never_inline():
+    """Deny-by-default: a provider cannot self-declare a kind to reach the inline path."""
+    invented = {"tool_kind": "read", "tool": "definitely_not_registered"}
+    assert classify_action(invented).risk == RISK_UNKNOWN
+    assert decide_action("auto", invented) == "ask"
+    assert decide_action("plan", invented) == "deny"
 
 
 @pytest.mark.parametrize("mode,expected", [
