@@ -772,6 +772,30 @@ worker-seam case.
 
 *Recommendation:* Extract `_reject_and_repropose(state, idea, dup, kind, hint, extra_payload, repropose, researcher, prospective_node_id)` that owns the digest/action/audit/budget-exceeded protocol; both gates pass their kind-specific hint and payload fields.
 
+*Resolution (2026-08-02):* extracted as recommended — `NoveltyGateMixin._reject_and_repropose`
+(`looplab/engine/novelty.py`) now owns the whole protocol, and both gates pass only what legitimately
+differs: their hint (a prompt string, so kept VERBATIM at the call sites), `kind=`, and one payload
+key (`reason` for llm, `similarity` for semantic). The audit dict is built ONCE, before the
+re-propose, so the budget-exceeded exit and the normal exit describe the same rejection — one of the
+two ways the copies had already drifted.
+
+The valuable half was never the ~25 duplicated lines; it was `novelty_rejected.action`, the only
+place the log records whether a paid re-proposal actually changed the idea (`reproposed`), whether
+the Researcher handed the same one back (`kept`), or whether the budget ran out mid-gate
+(`budget_exceeded`). A drifted copy keeps gating correctly and quietly stops recording why, and
+nothing downstream goes red. `tests/test_novelty_rejection_audit.py` (17 tests) pins that: each
+audited outcome, the conservative digest rule (a digest that degrades to `None` reads as `kept`, in
+BOTH orderings — a plain `!=` would call it a change), the binding describing the ORIGINAL proposal,
+the budget stop auditing exactly once with the same binding, and both gates still routing through the
+helper with their own kind/payload/hint. A grep guard pins `except BudgetExceeded:` at exactly two
+sites (the helper and `_repropose_with_feedback`) so a re-inlined copy is a red test.
+
+Teeth-tested against six deliberate breaks (drop the budget audit; loosen the digest guard; drop the
+payload merge; bind the replacement instead of the original; swap the semantic gate's `kind`; drop
+the llm gate's `reason`). The digest-guard break was SILENT on the first draft — the test patched the
+digest to `None` on both sides, where a plain `!=` still answers `kept`; it now drives the one-sided
+degradations that actually distinguish the two rules.
+
 #### EC-06 · MEDIUM · duplication · effort: medium
 
 **_ablate and _ablate_code share a verbatim ~55-line refine_block child-construction tail**

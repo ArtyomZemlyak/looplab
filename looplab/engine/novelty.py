@@ -440,29 +440,49 @@ class NoveltyGateMixin:
         dup = state.nodes[v.near_node_id]
         outcome = (f"it FAILED ({dup.error_reason})" if dup.status is NodeStatus.failed
                    else f"it scored {dup.metric}")
+        return self._reject_and_repropose(
+            state, idea, dup, kind="llm",
+            hint=(f"\nNOVELTY GATE (LLM): your proposal near-duplicates experiment #{dup.id} — "
+                  f"{outcome} ({str(v.reason)[:160]}). Propose something MEANINGFULLY DIFFERENT "
+                  "(another approach, component or direction), not a rewording."),
+            payload={"reason": str(v.reason)[:200]}, repropose=repropose,
+            researcher=researcher, prospective_node_id=prospective_node_id)
+
+    def _reject_and_repropose(self, state, idea, dup, *, kind: str, hint: str,
+                              payload: dict, repropose, researcher, prospective_node_id):
+        """Reject a near-duplicate, ask for one informed re-proposal, and audit exactly what happened.
+
+        The LLM gate and the semantic gate ran this protocol independently. It is not merely
+        repetitive — it is the audit trail that says whether a paid re-proposal actually CHANGED the
+        idea (`reproposed`) or the Researcher handed back the same thing (`kept`), and whether the
+        budget ran out mid-gate (`budget_exceeded`, appended BEFORE re-raising so the rejection is on
+        the log even though the run is ending). A gate whose copy of this drifted would keep gating
+        correctly and quietly stop recording why.
+
+        The digest comparison is deliberately conservative: `kept` unless BOTH digests exist and
+        differ, so an unhashable idea reads as "no evidence of change" rather than as a change.
+
+        `payload` carries the one key that legitimately differs — the LLM gate's `reason`, the
+        semantic gate's `similarity`.
+        """
         original = idea
         original_digest = idea_proposal_digest(original)
+        audit = {
+            **self._proposal_binding(state, original, prospective_node_id),
+            **self._near_binding(state, dup.id), "kind": kind, **payload,
+            "stance": self._novelty_stance,
+        }
         if callable(repropose):
-            hint = (f"\nNOVELTY GATE (LLM): your proposal near-duplicates experiment #{dup.id} — "
-                    f"{outcome} ({str(v.reason)[:160]}). Propose something MEANINGFULLY DIFFERENT "
-                    "(another approach, component or direction), not a rewording.")
             try:
                 idea = self._repropose_with_feedback(repropose, hint, idea, researcher=researcher)
             except BudgetExceeded:
-                self._append_proposal_event(EV_NOVELTY_REJECTED, {
-                    **self._proposal_binding(state, original, prospective_node_id),
-                    **self._near_binding(state, dup.id), "kind": "llm",
-                    "reason": str(v.reason)[:200], "stance": self._novelty_stance,
-                    "action": "budget_exceeded"})
+                self._append_proposal_event(
+                    EV_NOVELTY_REJECTED, {**audit, "action": "budget_exceeded"})
                 raise
         final_digest = idea_proposal_digest(idea)
         action = ("reproposed" if original_digest is not None and final_digest is not None
                   and original_digest != final_digest else "kept")
-        self._append_proposal_event(EV_NOVELTY_REJECTED, {
-            **self._proposal_binding(state, original, prospective_node_id),
-            **self._near_binding(state, dup.id), "kind": "llm",
-            "reason": str(v.reason)[:200], "stance": self._novelty_stance,
-            "action": action})
+        self._append_proposal_event(EV_NOVELTY_REJECTED, {**audit, "action": action})
         return idea
 
     def _repropose_with_feedback(self, repropose, hint: str, idea: Idea, researcher=None) -> Idea:
@@ -1225,31 +1245,14 @@ class NoveltyGateMixin:
                 outcome = (f"it FAILED ({dup.error_reason}: {(dup.error or '')[:80]})"
                            if dup.status is NodeStatus.failed
                            else f"it scored {dup.metric}")
-                original = idea
-                original_digest = idea_proposal_digest(original)
-                if callable(repropose):
-                    hint = (f"\nNOVELTY GATE: your proposal is a near-duplicate of experiment "
-                            f"#{dup.id} ('{self._idea_text(dup.idea)[:160]}') — {outcome}. "
-                            "Propose something MEANINGFULLY DIFFERENT (another approach, "
-                            "component or direction), not a rewording.")
-                    try:
-                        idea = self._repropose_with_feedback(
-                            repropose, hint, idea, researcher=researcher)
-                    except BudgetExceeded:
-                        self._append_proposal_event(EV_NOVELTY_REJECTED, {
-                            **self._proposal_binding(state, original, prospective_node_id),
-                            **self._near_binding(state, dup.id), "kind": "semantic",
-                            "similarity": round(sim, 4), "stance": self._novelty_stance,
-                            "action": "budget_exceeded"})
-                        raise
-                final_digest = idea_proposal_digest(idea)
-                action = ("reproposed" if original_digest is not None and final_digest is not None
-                          and original_digest != final_digest else "kept")
-                self._append_proposal_event(EV_NOVELTY_REJECTED, {
-                    **self._proposal_binding(state, original, prospective_node_id),
-                    **self._near_binding(state, dup.id), "kind": "semantic",
-                    "similarity": round(sim, 4), "stance": self._novelty_stance,
-                    "action": action})
+                idea = self._reject_and_repropose(
+                    state, idea, dup, kind="semantic",
+                    hint=(f"\nNOVELTY GATE: your proposal is a near-duplicate of experiment "
+                          f"#{dup.id} ('{self._idea_text(dup.idea)[:160]}') — {outcome}. "
+                          "Propose something MEANINGFULLY DIFFERENT (another approach, "
+                          "component or direction), not a rewording."),
+                    payload={"similarity": round(sim, 4)}, repropose=repropose,
+                    researcher=researcher, prospective_node_id=prospective_node_id)
 
         params = numeric_params(idea.params)
         if not params:
