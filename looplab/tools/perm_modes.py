@@ -229,6 +229,46 @@ def approval_allows(verdict: object) -> bool:
     return verdict in {APPROVAL_ALLOW_ONCE, APPROVAL_ALLOW_ALWAYS}
 
 
+def refusal_for(decision: str, approver, action: object, *,
+                denied: str, declined: str):
+    """The refusal string for an ALREADY-COMPUTED decision, or None to proceed.
+
+    Split out from :func:`authorize` for the one caller that must do work BETWEEN the deny check and
+    the approval round-trip (`machine_runs_tools._gate` captures the run generation there, so its
+    mutation fence reflects the state before the user was asked, not after).
+
+    `approver(action) or "deny"` is the idiom every site wrote: an approver that returns None/"" has
+    not authorized anything, and `approval_allows` accepts only the two exact wire values, so a
+    prefix lookalike fails closed. A provider with NO approver configured is `deny` too — being
+    unable to ask is not permission.
+    """
+    if decision == "deny":
+        return denied
+    if decision == "ask":
+        verdict = (approver(action) if callable(approver) else None) or "deny"
+        if not approval_allows(verdict):
+            return f"(declined by the user: {declined})"
+    return None
+
+
+def authorize(mode, approver, action: object, *, denied: str, declined: str):
+    """Run the whole permission ceremony for one action. None => PROCEED; a string => the message to
+    return to the model (doc 25 TO-04).
+
+    Six providers hand-rolled this three-step ritual — build the action, `decide_action`, map `deny`
+    to a plan-mode refusal, and on `ask` put `approver(action) or "deny"` through `approval_allows`.
+    The bodies differed only in wording, and one of them had already been found checking `deny` alone
+    and killing a background task in the DEFAULT ask mode with no approval at all (arch-review §3
+    P0-6). That is the failure mode this exists to make unrepeatable: plan-mode deny does not satisfy
+    ask-mode approval semantics, and a gate that forgets the second half still LOOKS gated.
+
+    `denied` and `declined` stay at the call sites because the model reads them: the refusal names
+    which capability is off and how to turn it on, and both are part of each tool's contract.
+    """
+    return refusal_for(decide_action(mode, action), approver, action,
+                       denied=denied, declined=declined)
+
+
 def decide(mode, tool_kind) -> str:
     """Compatibility kind-only matrix; concrete providers must prefer :func:`decide_action`."""
     if tool_kind in READONLY_KINDS:

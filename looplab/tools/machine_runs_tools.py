@@ -1155,21 +1155,22 @@ class RunControlTools:
     def _gate(self, name: str, rid: str, rd: Path, verb: str, *,
               scope: Optional[dict] = None) -> tuple[Optional[str], Optional[str]]:
         # Returns a "declined/disabled" string to short-circuit, or None to proceed.
-        from looplab.tools.perm_modes import approval_allows, decide_action
+        from looplab.tools.perm_modes import decide_action, refusal_for
         action = {"tool": name, "tool_kind": "run_control", "label": f"{name} {rid}",
                   "verb": verb, "preview": f"{name}({rid})", "run_id": rid,
                   "scope": dict(scope or {"run_id": rid})}
-        d = decide_action(self.mode, action)
-        if d == "deny":
-            return ("(run control is disabled in read-only plan mode — switch to "
-                    "default/acceptEdits/auto.)", None)
+        denied = ("(run control is disabled in read-only plan mode — switch to "
+                  "default/acceptEdits/auto.)")
+        # `refusal_for` rather than `authorize`: the generation must be captured BETWEEN the deny
+        # short-circuit and the approval round-trip, so the mutation fence describes the run as it was
+        # before the user was asked. A deny also returns NO generation — nothing was fenced.
+        decision = decide_action(self.mode, action)
+        if decision == "deny":
+            return denied, None
         generation = (None if self._mutation_fence is not None and self._mutation_fence.recovering
                       else self._commands.run_generation(rd))
-        if d == "ask":
-            verdict = self.approver(action) or "deny" if self.approver else "deny"
-            if not approval_allows(verdict):
-                return f"(declined by the user: {name} {rid})", generation
-        return None, generation
+        return refusal_for(decision, self.approver, action,
+                           denied=denied, declined=f"{name} {rid}"), generation
 
     def _live(self, rd: Path) -> bool:
         """Is a run's engine actively writing its log? The flock probe is primary, but on FUSE / NFS / S3

@@ -16,7 +16,7 @@ from looplab.core import _pathsafe
 from looplab.events.eventstore import read_jsonl_lenient
 from looplab.tools._base import fn_spec
 from looplab.tools.perm_modes import (
-    DEFAULT_MODE, approval_allows, decide_action, default_approver)
+    DEFAULT_MODE, authorize, default_approver)
 from looplab.tools.retrieval import glob_files, grep, read_file
 from looplab.tools.vectorstore import InMemoryVectorStore, Item, cosine, hash_embed
 
@@ -217,12 +217,13 @@ class KnowledgeWriteTools:
                         ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest(),
                 },
             }
-            decision = decide_action(self.mode, action)
-            if decision == "deny":
-                return ("(remember is disabled in read-only plan mode. Switch to "
-                        "default/acceptEdits/auto to save shared knowledge.)")
-            if decision == "ask" and not approval_allows(self.approver(action) or "deny"):
-                return f"(declined by the user: remember {title[:80]})"
+            refusal = authorize(
+                self.mode, self.approver, action,
+                denied=("(remember is disabled in read-only plan mode. Switch to "
+                        "default/acceptEdits/auto to save shared knowledge.)"),
+                declined=f"remember {title[:80]}")
+            if refusal:
+                return refusal
             self.dir.mkdir(parents=True, exist_ok=True)
             slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:48] or "note"
             # content-hash id: re-saving the same note overwrites (idempotent) instead of piling duplicates.

@@ -2656,7 +2656,37 @@ and three unrelated providers. That split is a separate change with its own veri
 
 *Evidence:* Six providers each hand-roll the identical three-step authorization ritual: build an action dict, call `decide_action(mode, action)`, map 'deny' to a plan-mode refusal string, and on 'ask' call `self.approver(action) or "deny"` through `approval_allows`, returning a '(declined by the user: ...)' string. Sites: WriteTools._authorize (215-228), ShellTools.exec_argv (213-220) plus a second inline copy for kill_background (162-171), ConceptGovernanceTools._gate (131-142), KnowledgeWriteTools.execute inline (220-225), RunControlTools._gate (1067-1084, with generation capture interleaved), GatedMcpTools.execute (186-191). The bodies differ only in refusal wording and tool_kind; the `approver(action) or "deny"` idiom and `approval_allows` call recur at all six sites in near-identical form (mcp_tools uses the private `_approver`/`_mode` names; machine_runs_tools adds a None-guard on the approver).
 
-*Recommendation:* Add `perm_modes.authorize(mode, approver, action, *, deny_msg=None) -> Optional[str]` (None = proceed, else the refusal string) and have all six sites delegate, keeping per-site wording via the parameter. Removes ~60 duplicated lines and guarantees future policy changes (e.g. remembered grants) apply everywhere at once.
+*Resolution (2026-08-02):* added as `perm_modes.authorize(mode, approver, action, *, denied,
+declined)` — None to proceed, a string to return to the model — plus `refusal_for(decision, …)` for
+the two sites that legitimately need the DECISION itself. All six providers now go through it.
+
+`denied` and `declined` stay at the call sites because the model reads them: each refusal names which
+capability is off and how to turn it on, and prompt-visible strings are contracts.
+
+This is not a tidiness finding, and the tests say so. One of the six copies had already been caught
+checking `deny` alone and killing a process-global background task in the DEFAULT `ask` mode with no
+approval at all (arch-review §3 P0-6) — plan-mode deny does not satisfy ask-mode approval semantics,
+and a gate that forgets the second half still LOOKS gated to every reader and to every test that only
+tries plan mode. So `tests/test_permission_ceremony.py` (34) runs the whole mode × decision × verdict
+matrix against the helper AND asserts, provider by provider, that each one refuses an UNAPPROVED ask
+— not just that it refuses in plan mode. It also pins that a provider with no approver at all
+declines (being unable to ask is not permission), that the approver is called exactly once with the
+exact action, and a grep guard that `approval_allows(` appears nowhere in `tools/` outside
+`perm_modes.py`.
+
+Two sites keep `decide_action` + `refusal_for` rather than the one-shot `authorize`, each for a real
+reason stated inline: `machine_runs_tools._gate` captures the run generation BETWEEN the deny
+short-circuit and the approval round-trip, so its mutation fence describes the run before the user
+was asked; and `shell_tools.exec_argv` reads the decision again afterwards, where an `inline`
+read-only git peek is deliberately not recorded in `self.applied`. The second was caught by the
+existing `test_shell_tools`/`test_git_tools` suites after a first pass dropped the variable — the
+kind of dependency a mechanical collapse loses silently if the consumers are not re-run.
+
+Teeth-tested against five breaks: a deny-only gate (the P0-6 regression itself, which reddens 23
+tests), a truthiness verdict check that authorizes `"allow_onc"`, a missing approver reading as
+permission, the generation captured after the approval, and one provider re-inlining the ceremony.
+
+*Original recommendation:* Add `perm_modes.authorize(mode, approver, action, *, deny_msg=None) -> Optional[str]` (None = proceed, else the refusal string) and have all six sites delegate, keeping per-site wording via the parameter. Removes ~60 duplicated lines and guarantees future policy changes (e.g. remembered grants) apply everywhere at once.
 
 #### TO-05 · MEDIUM · mergeable-entities · effort: medium
 

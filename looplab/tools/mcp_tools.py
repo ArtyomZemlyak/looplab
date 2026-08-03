@@ -171,7 +171,7 @@ class GatedMcpTools:
         return None
 
     def execute(self, name: str, args: dict) -> str:
-        from looplab.tools.perm_modes import approval_allows, decide_action
+        from looplab.tools.perm_modes import authorize
         try:
             args_json = json.dumps(args or {}, sort_keys=True, separators=(",", ":"),
                                    ensure_ascii=False, allow_nan=False)
@@ -183,12 +183,12 @@ class GatedMcpTools:
                   "verb": f"call MCP tool `{name}`",
                   "preview": redact_secrets(args_json)[:2000], "cwd": "",
                   "scope": {"tool": name, "arguments_digest": args_digest}}
-        d = decide_action(self._mode, action)
-        if d == "deny":
-            return f"(MCP tool {name} is disabled in plan mode. Switch to default/acceptEdits/auto.)"
-        if d == "ask":
-            if not approval_allows(self._approver(action) or "deny"):
-                return f"(declined by the user: MCP tool {name})"
+        refusal = authorize(
+            self._mode, self._approver, action,
+            denied=f"(MCP tool {name} is disabled in plan mode. Switch to default/acceptEdits/auto.)",
+            declined=f"MCP tool {name}")
+        if refusal:
+            return refusal
         return self._inner.execute(name, args)
 
 

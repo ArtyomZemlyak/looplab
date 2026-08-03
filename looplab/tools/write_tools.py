@@ -26,7 +26,7 @@ from looplab.core import _pathsafe
 from looplab.tools._base import fn_spec
 from looplab.tools.patch import SurfacePolicy, apply_patch as _apply_patch, gate as _gate
 from looplab.tools.perm_modes import (
-    DEFAULT_PROTECT, DEFAULT_PROTECT_EXCEPTIONS, approval_allows, decide_action, default_approver)
+    DEFAULT_PROTECT, DEFAULT_PROTECT_EXCEPTIONS, authorize, default_approver)
 
 _MAX_PREVIEW = 4000
 _BACKUP_STACK_LOCK = threading.RLock()
@@ -864,18 +864,14 @@ class WriteTools:
 
     def _authorize(self, tool_kind: str, action: dict) -> Optional[str]:
         """None => proceed; a string => the refusal/declined message to return to the model."""
-        d = decide_action(self.mode, action)
-        if d == "deny":
-            return (f"(plan mode is read-only — I can't {action.get('verb', 'do that')}. "
-                    "Switch the assistant to default/acceptEdits/auto to apply changes.)")
-        if d == "ask":
-            # The approver's verdict vocabulary ("allow_once"/"allow_always"/"deny") is the permission-
-            # decision wire protocol named in looplab/serve/protocol.py (PERM_*). It is string-matched
-            # here rather than imported because tools must never import serve (layering).
-            verdict = self.approver(action) or "deny"
-            if not approval_allows(verdict):
-                return f"(declined by the user: {action.get('label', 'change')})"
-        return None
+        # The approver's verdict vocabulary ("allow_once"/"allow_always"/"deny") is the permission-
+        # decision wire protocol named in looplab/serve/protocol.py (PERM_*). It is string-matched in
+        # `perm_modes` rather than imported because tools must never import serve (layering).
+        return authorize(
+            self.mode, self.approver, action,
+            denied=(f"(plan mode is read-only — I can't {action.get('verb', 'do that')}. "
+                    "Switch the assistant to default/acceptEdits/auto to apply changes.)"),
+            declined=str(action.get("label", "change")))
 
     # --- mutations ----------------------------------------------------------
     def _save_undo_receipt(self, path: Path, action: dict, expected_postimage: dict,

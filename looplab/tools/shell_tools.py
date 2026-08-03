@@ -25,7 +25,8 @@ from typing import Callable, Optional
 
 from looplab.core import _pathsafe
 from looplab.tools._base import RESULT_CAP, fn_spec
-from looplab.tools.perm_modes import approval_allows, decide_action, default_approver
+from looplab.tools.perm_modes import (authorize, decide_action, default_approver,
+                                      refusal_for)
 
 _MAX_OUTPUT = 64_000
 _MAX_TIMEOUT = 600.0
@@ -163,12 +164,13 @@ class ShellTools:
                 action = {"tool": "kill_background", "tool_kind": "shell",
                           "label": f"kill background task {tid}",
                           "verb": f"kill background task `{tid}`", "preview": tid, "cwd": ""}
-                d = decide_action(self.mode, action)
-                if d == "deny":
-                    return "(kill_background is disabled in plan mode. Switch to default/acceptEdits/auto.)"
-                if d == "ask":
-                    if not approval_allows(self.approver(action) or "deny"):
-                        return f"(declined by the user: kill background {tid})"
+                refusal = authorize(
+                    self.mode, self.approver, action,
+                    denied="(kill_background is disabled in plan mode. Switch to "
+                           "default/acceptEdits/auto.)",
+                    declined=f"kill background {tid}")
+                if refusal:
+                    return refusal
                 r = MANAGER.kill(tid)
                 return f"[{r['task_id']}] killed" if r.get("ok") else f"({r.get('error')})"
             return f"(unknown tool: {name})"
@@ -210,14 +212,16 @@ class ShellTools:
                   "verb": f"run `{pretty[:80]}`", "preview": structured_preview, "cwd": str(wd),
                   "scope": {"cwd": str(wd), "argv_digest": argv_digest,
                             "background": bool(background), "timeout_seconds": to}}
+        # `decide_action` + `refusal_for` rather than `authorize`: the DECISION itself is read again
+        # below, where an `inline` read-only git peek is deliberately not recorded in `self.applied`.
         d = decide_action(self.mode, action)
-        if d == "deny":
-            return ("(shell is disabled in plan mode. Switch to default/acceptEdits/auto to run "
-                    "commands.)")
-        if d == "ask":
-            verdict = self.approver(action) or "deny"
-            if not approval_allows(verdict):
-                return f"(declined by the user: {pretty[:80]})"
+        refusal = refusal_for(
+            d, self.approver, action,
+            denied=("(shell is disabled in plan mode. Switch to default/acceptEdits/auto to run "
+                    "commands.)"),
+            declined=pretty[:80])
+        if refusal:
+            return refusal
         # Under a non-trusted tier, run inside docker (--network none). Built once; loud if unavailable.
         if self.trust_mode and self.trust_mode != "trusted_local" and self._wrap is None:
             from looplab.runtime.command_eval import make_docker_wrap

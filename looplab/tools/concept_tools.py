@@ -23,7 +23,7 @@ from typing import Optional
 
 from looplab.tools._base import RESULT_CAP, fn_spec
 from looplab.tools.perm_modes import (
-    DEFAULT_MODE, approval_allows, decide_action, default_approver)
+    DEFAULT_MODE, authorize, default_approver)
 from looplab.trust.cross_run import cross_run_text
 
 
@@ -133,13 +133,11 @@ class ConceptGovernanceTools:
         action = {"tool": name, "tool_kind": "concept_edit", "label": label,
                   "verb": "edit the shared cross-run concept taxonomy", "path": str(self.dir),
                   "preview": preview[:_MAX_APPROVAL_PREVIEW_CHARS], "scope": scope}
-        decision = decide_action(self.mode, action)
-        if decision == "deny":
-            return (f"({name} is disabled in read-only plan mode. Switch to default/acceptEdits/auto to "
-                    "edit the shared concept taxonomy.)")
-        if decision == "ask" and not approval_allows(self.approver(action) or "deny"):
-            return f"(declined by the user: {label})"
-        return None
+        return authorize(
+            self.mode, self.approver, action,
+            denied=(f"({name} is disabled in read-only plan mode. Switch to default/acceptEdits/auto to "
+                    "edit the shared concept taxonomy.)"),
+            declined=label)
 
     @staticmethod
     def _approval_scope(operation: str, payload: dict, snapshot: dict,
