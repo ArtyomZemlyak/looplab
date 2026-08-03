@@ -3009,6 +3009,35 @@ Covered by `tests/test_json_and_metric_contracts.py` (30).avoid the name collisi
 
 *Recommendation:* Introduce a frozen SpeculativeSelectionContext dataclass (session-owned ids, envelope, scoring) passed once; the entry points keep only their distinguishing arguments.
 
+*NOT DONE (2026-08-03) — design decided, conversion pending.* Recorded here so the work starts from
+a measured plan rather than a re-read. This is a plan, not a resolution: nothing in `card_selection.py`
+has changed for SE-14.
+
+Measured: **44 call sites** across `engine/speculation.py`, `engine/orchestrator.py`,
+`search/speculation_quality.py`, `tests/test_card_speculation_engine.py` and
+`tests/test_card_speculative_selection.py`; **33** of them pass at least one bundled keyword. The
+other 11 pass none, so a context with defaults leaves them untouched — which is why the dataclass
+should be a keyword-only argument with a module-level default instance rather than a required one.
+
+The split the dataclass should make:
+
+* SESSION-owned, identical across every call in one producer/consumer session — `scoring`,
+  `excluded_card_ids`, `ignored_pending_node_ids`, `resource_envelope`, `consumed_inflight`.
+* PER-CALL subject, which stays an ordinary argument — `include_owned_card_id` /
+  `include_owned_node_id`, and the freshness predicate's `card_id` / `node_id`.
+
+The asymmetry the finding spotted must be preserved, not "fixed" on the way past:
+`consumed_inflight` is absent from `speculative_card_actions` and `speculative_raw_actions` because
+producer ELECTION runs before consumption, while the freshness gate runs after it. Giving the context
+a default of `()` reproduces today's behaviour exactly for those two — but it makes the asymmetry
+visible in ONE place (a caller that does not set the field) instead of invisible in a signature list,
+which is the whole point of the change. A test should pin that election and freshness see different
+populations, so a later "consistency" edit cannot quietly unify them.
+
+Deliberately deferred rather than started: this is the hot, replay-affecting selection path, and a
+33-site mechanical conversion done without room to verify each site is a worse outcome than the
+duplication it removes.
+
 #### SE-15 · LOW · inconsistency · effort: small
 
 **Duplicate k-NN prediction shims and colliding helper names across sibling modules**
