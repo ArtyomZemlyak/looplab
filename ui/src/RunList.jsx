@@ -250,6 +250,22 @@ function useMutation() {
 
 const focusSoon = target => requestAnimationFrame(() => target?.isConnected && target.focus({ preventScroll: true }))
 
+const transientActionOwnsFocus = owner => {
+  if (!owner || typeof document === 'undefined') return
+  const active = document.activeElement
+  return active === owner || !active || active === document.body
+    || active === document.documentElement || !active.isConnected
+}
+
+const focusAfterTransientAction = (owner, resolveTargets) => requestAnimationFrame(() => {
+  if (!transientActionOwnsFocus(owner)) return
+  const resolved = typeof resolveTargets === 'function' ? resolveTargets() : resolveTargets
+  const target = (Array.isArray(resolved) ? resolved : [resolved]).find(candidate =>
+    candidate?.isConnected && candidate.getClientRects?.().length
+      && !candidate.matches?.(':disabled'))
+  target?.focus({ preventScroll: true })
+})
+
 const listMutationMessage = (kind, error) => {
   // Same fence conflicts, same reflection rules — this was a second hand-maintained copy of both the
   // code list and the raw join, so a hardening applied to one silently missed the other.
@@ -782,6 +798,19 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   const projectsAllRef = useRef(null)
   const [dragRun, setDragRun] = useState(null)
   const compareDragGuardRef = useRef(null)
+  const compareViewButtonRef = useRef(null)
+  const compareHeadingRef = useRef(null)
+  const compareEntryFocusRef = useRef(null)
+  const compareSurfaceFocusRef = useRef(null)
+  const filterInputRef = useRef(null)
+  const setCompareHeadingRef = useCallback(node => {
+    compareHeadingRef.current = node
+    const owner = compareEntryFocusRef.current
+    if (!node || !owner) return
+    compareEntryFocusRef.current = null
+    focusAfterTransientAction(owner,
+      () => [node, compareViewButtonRef.current, runsMainRef.current])
+  }, [])
   const [view, setView] = useState(() => initialNavigation.view)
   const [mapCollapseOverrides, setMapCollapseOverrides] = useState(
     () => new Map(initialNavigation.mapCollapse))
@@ -1069,14 +1098,21 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
     return [...compareIds].filter(id => !deletionRecoveries.has(id))
       .map(id => byId.get(id)).filter(Boolean)
   }, [runs, compareIds, deletionRecoveries])
+  const visibleCompareControl = (attribute, runId) => [...(
+    runsMainRef.current?.querySelectorAll(`[${attribute}]`) || [])]
+    .find(control => control.getAttribute(attribute) === String(runId)
+      && control.getClientRects().length && !control.matches(':disabled'))
+  const compareCheckboxFor = runId => visibleCompareControl('data-compare-run-id', runId)
+  const compareRemoveFor = runId => visibleCompareControl('data-compare-remove-id', runId)
   const metricSortAvailable = taskFilter !== ALL && metricComparable(filtered)
   const hasActiveFilters = !!query.trim() || taskFilter !== ALL || statusFilter !== 'all' || stFilter !== ALL
   const listCriteriaKey = JSON.stringify([
     sel, query, taskFilter, statusFilter, stFilter, sortKey, sortDir,
   ])
   const previousListCriteriaKeyRef = useRef(listCriteriaKey)
-  const clearFilters = () => {
+  const clearFilters = focusOwner => {
     setQuery(''); setTaskFilter(ALL); setStatusFilter('all'); setStFilter(ALL)
+    focusAfterTransientAction(focusOwner, () => [filterInputRef.current, runsMainRef.current])
   }
   useEffect(() => {
     if (sortKey === 'metric' && filtered.length > 0 && !metricSortAvailable) setSortKey('time')
@@ -1091,8 +1127,22 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
     })
   }, [runs])
   useEffect(() => {
-    if (runs && view === 'compare' && compareRuns.length < 2) setView('list')
-  }, [runs, view, compareRuns.length])
+    if (view !== 'compare') {
+      compareEntryFocusRef.current = null
+      compareSurfaceFocusRef.current = null
+      return
+    }
+    if (!runs || (!projectScopeBlocked && compareRuns.length >= 2)) return
+    const owner = compareEntryFocusRef.current || compareSurfaceFocusRef.current
+    compareEntryFocusRef.current = null
+    compareSurfaceFocusRef.current = null
+    setView('list')
+    if (owner) {
+      const returnRunId = compareRuns[0]?.run_id || [...compareIds][0]
+      focusAfterTransientAction(owner,
+        () => [compareCheckboxFor(returnRunId), filterInputRef.current, runsMainRef.current])
+    }
+  }, [runs, view, projectScopeBlocked, compareRuns, compareIds])
   useEffect(() => {
     if (projectsState === 'ready' && sel !== ALL && sel !== UNASSIGNED
         && !proj.projects.some(project => project.id === sel)) {
@@ -1246,9 +1296,34 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
     }
     setSavedViews(next); setActiveSavedView(''); setViewMessage('')
   }
-  const toggleCompare = runId => {
+  const openComparison = focusOwner => {
+    compareEntryFocusRef.current = focusOwner
+    setView('compare')
+  }
+  const clearComparison = focusOwner => {
+    const returnRunId = compareRuns[0]?.run_id || [...compareIds][0]
+    setCompareIds(new Set())
+    focusAfterTransientAction(focusOwner,
+      () => [compareCheckboxFor(returnRunId), filterInputRef.current, runsMainRef.current])
+  }
+  const toggleCompare = (runId, focusOwner = null) => {
     const next = new Set(compareIds)
     if (next.delete(runId)) {
+      if (view === 'compare') {
+        const index = compareRuns.findIndex(run => run.run_id === runId)
+        const remaining = compareRuns.filter(run => run.run_id !== runId)
+        if (remaining.length < 2) {
+          setView('list')
+          focusAfterTransientAction(focusOwner,
+            () => [compareCheckboxFor(runId), filterInputRef.current, runsMainRef.current])
+        } else {
+          const neighborId = compareRuns[index + 1]?.run_id
+            || compareRuns[index - 1]?.run_id || remaining[0]?.run_id
+          focusAfterTransientAction(focusOwner,
+            () => [compareRemoveFor(neighborId), compareHeadingRef.current,
+              compareViewButtonRef.current, runsMainRef.current])
+        }
+      }
       setCompareIds(next); return
     }
     if (next.size >= 8) {
@@ -1590,11 +1665,11 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
         <div className="seg">
           <button aria-pressed={view === 'list'} className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}><OpIcon name="list" className="t-ic" /> List</button>
           <button aria-pressed={view === 'map'} className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}><OpIcon name="map" className="t-ic" /> Map</button>
-          <button aria-pressed={view === 'compare'} className={view === 'compare' ? 'on' : ''}
+          <button ref={compareViewButtonRef} aria-pressed={view === 'compare'} className={view === 'compare' ? 'on' : ''}
             disabled={projectScopeBlocked || compareRuns.length < 2}
             title={projectScopeBlocked ? 'Restore the saved project or use All runs first'
               : compareRuns.length < 2 ? 'Select at least two runs from List' : 'Compare selected runs'}
-            onClick={() => setView('compare')}>Compare · {compareRuns.length}</button>
+            onClick={event => openComparison(event.currentTarget)}>Compare · {compareRuns.length}</button>
         </div>
         {/* Slash remains a power-user shortcut; New run above is the first-use primary action. */}
         <span className="muted home-new-hint" style={{ fontSize: 11 }}>type <code className="cmd-hint">/new</code> in the bar below to start a run</span>
@@ -1726,7 +1801,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
           </div>}
           {runs && !!scoped.length && view !== 'compare' && <div className="runbar">
             <OpIcon name="search" className="t-ic" />
-            <input className="text runbar-q" aria-label="Filter runs" placeholder="filter runs…" value={query}
+            <input ref={filterInputRef} className="text runbar-q" aria-label="Filter runs" placeholder="filter runs…" value={query}
                    onChange={e => setQuery(e.target.value)} />
             <select className="sel" aria-label="Filter by status" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
               <option value="all">all status</option>
@@ -1778,8 +1853,9 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
             <span className="muted">{compareRuns.length < 2
               ? 'Select one more run to compare.' : 'Ready to compare run details.'}</span>
             <button className="btn sm primary" disabled={compareRuns.length < 2}
-              onClick={() => setView('compare')}>Compare runs</button>
-            <button className="btn sm ghost" onClick={() => setCompareIds(new Set())}>Clear</button>
+              onClick={event => openComparison(event.currentTarget)}>Compare runs</button>
+            <button className="btn sm ghost"
+              onClick={event => clearComparison(event.currentTarget)}>Clear</button>
           </div>}
           <ResourceNotice state={runsState} label="Runs" retry={loadRuns} />
           <ResourceNotice state={projectsState} label="Projects" retry={loadProjects} />
@@ -1804,7 +1880,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
               : <span>Drag a run onto this project, or use its <b>Move</b> menu.</span>}</div>}
           {runs && !!scoped.length && !visible.length && <div className="notice" role="status">
             {runsState === 'stale' ? 'No runs in the last loaded data match the filters.' : 'No runs match the filters.'}
-            {hasActiveFilters && <button type="button" className="btn sm" disabled={navigationBusy} onClick={clearFilters}>Clear filters</button>}
+            {hasActiveFilters && <button type="button" className="btn sm" disabled={navigationBusy}
+              onClick={event => clearFilters(event.currentTarget)}>Clear filters</button>}
           </div>}
           {view === 'map' && (!['ready', 'stale'].includes(projectsState) || projectScopeBlocked) && runs
             && <div className="notice resource-warning" role="status">
@@ -1830,6 +1907,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
             <RunCompare runs={compareRuns} columns={compareColumns}
               names={{ projects: projName, supertasks: stName }}
               onColumns={setCompareColumns} onRemove={toggleCompare}
+              headingRef={setCompareHeadingRef}
+              onFocusCapture={event => { compareSurfaceFocusRef.current = event.target }}
               onOpen={(id, href) => openRun(id, href)} />
           </LazyBoundary>}
           {view === 'list' && runs && displayedRuns.map(r => {
@@ -1894,6 +1973,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
               <label className="compare-toggle" draggable={false}
                 onPointerDown={() => { compareDragGuardRef.current = r.run_id }}>
                 <input type="checkbox" className="compare-check" draggable={false}
+                  data-compare-run-id={r.run_id}
                   checked={compareIds.has(r.run_id)}
                   aria-label={`Select ${r.label || r.run_id} for comparison`}
                   onChange={() => toggleCompare(r.run_id)} />

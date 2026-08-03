@@ -84,7 +84,10 @@ const openComparisonRoute = (onOpen, runId, href) => {
   else location.hash = href
 }
 
-export default function RunCompare({ runs, columns, names, onColumns, onRemove, onOpen = null }) {
+export default function RunCompare({
+  runs, columns, names, onColumns, onRemove, onOpen = null, headingRef = null,
+  onFocusCapture = null,
+}) {
   const [resource, setResource] = useState({ status: 'loading', details: [], loadedAt: 0 })
   const [retry, setRetry] = useState(0)
   const columnsDetailsRef = useRef(null)
@@ -117,10 +120,11 @@ export default function RunCompare({ runs, columns, names, onColumns, onRemove, 
   const toggleColumn = id => onColumns(columns.includes(id)
     ? columns.filter(column => column !== id) : [...columns, id])
 
-  return <section className="run-compare" aria-labelledby="run-compare-title">
+  return <section className="run-compare" aria-labelledby="run-compare-title"
+    onFocusCapture={onFocusCapture}>
     <div className="compare-head">
       <div>
-        <h2 id="run-compare-title">Run comparison</h2>
+        <h2 ref={headingRef} id="run-compare-title" tabIndex={-1}>Run comparison</h2>
         <p>{runs.length} runs · The Run column stays pinned; choose the evidence columns you need.</p>
       </div>
       <details ref={columnsDetailsRef} className="compare-columns" onKeyDown={event => {
@@ -177,7 +181,8 @@ export default function RunCompare({ runs, columns, names, onColumns, onRemove, 
                     aria-label={`Open champion experiment ${detail.state.best_node_id} in ${label}`}>
                     #{detail.state.best_node_id}</button>
                 : valueFor(id, run, detail, names)}</td>)}
-              <td><button className="btn xs ghost" onClick={() => onRemove(run.run_id)}
+              <td><button className="btn xs ghost" data-compare-remove-id={run.run_id}
+                onClick={event => onRemove(run.run_id, event.currentTarget)}
                 aria-label={`Remove ${label} from comparison`}>Remove</button></td>
             </tr>
           })}</tbody>
