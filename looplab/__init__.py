@@ -128,6 +128,7 @@ _LAYOUT = {
     "htmlview": "events",
     "http": "serve",             # the shared control-plane JSON body parser (doc 25 SR-05)
     "jobs": "serve",
+    "jsonutil": "core",         # canonical JSON bytes for receipt preimages (doc 25 SE-08)
     "jupyter": "runtime",
     "kaggle_dl": "adapters",
     "knowledge_tools": "tools",

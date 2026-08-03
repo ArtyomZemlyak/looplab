@@ -19,9 +19,10 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from looplab.core.jsonutil import canonical_json
 from looplab.core.atomicio import strict_atomic_write_text
 from looplab.core.config import RUN_START_PINNED_FIELDS
-from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
+from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT, finite_metric
 from looplab.core.hardware import effective_gpu_inventory
 from looplab.core.models import (
     CARD_ACTION_DIGEST_V2_FIELDS,
@@ -297,19 +298,6 @@ def _json_loads(data: bytes) -> Any:
         raise ValueError(f"invalid strict JSON: {exc}") from exc
 
 
-def _canonical_json(value: object) -> bytes:
-    try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError) as exc:
-        raise ValueError(f"value is not canonical JSON: {exc}") from exc
-
-
 def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
@@ -358,7 +346,7 @@ def _strict_events(path: Path) -> tuple[bytes, list[Event]]:
             raise ValueError(f"events.jsonl record {line_number} is not an object")
         # ``json.loads('1e999')`` produces infinity without invoking parse_constant.  Re-encoding with
         # allow_nan=False closes that less-obvious non-finite path before Pydantic sees the envelope.
-        _canonical_json(decoded)
+        canonical_json(decoded)
         try:
             members = decode_event_record(decoded, strict=True)
         except Exception as exc:  # Pydantic/batch decoder failures are all invalid gate evidence.
@@ -386,7 +374,7 @@ def _read_json_object(path: Path, *, limit: int, label: str) -> tuple[bytes, dic
     if not isinstance(value, dict):
         raise ValueError(f"{label} must contain one JSON object")
     # Re-encoding also rejects values outside the canonical JSON value domain.
-    _canonical_json(value)
+    canonical_json(value)
     return raw, value
 
 
@@ -419,14 +407,10 @@ def _comparable_config(config: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _finite_metric(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        number = float(value)
-    except (OverflowError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
+# Byte-equivalent to the rule it now delegates to: reject bool/non-numeric, coerce, require finite.
+# `is_usable_metric` additionally survives an arbitrary-precision JSON integer such as `10**400`,
+# which `float()` raises OverflowError on — the same outcome, reached without the local try/except.
+_finite_metric = finite_metric
 
 
 def _required_finite(value: object, *, label: str) -> float:
@@ -516,7 +500,7 @@ def _validate_calibration_setup(
     ):
         raise ValueError("calibration run_started task authority differs from the task snapshot")
     for field in RUN_START_PINNED_FIELDS:
-        if field not in config or _canonical_json(started_data.get(field)) != _canonical_json(
+        if field not in config or canonical_json(started_data.get(field)) != canonical_json(
             config[field]
         ):
             raise ValueError(
@@ -869,7 +853,7 @@ def _raw_node_lifecycle(events: Sequence[Event], state) -> None:
                 })
             if (
                 not isinstance(event.data, dict)
-                or _canonical_json(data) != _canonical_json(expected_building)
+                or canonical_json(data) != canonical_json(expected_building)
                 or type(event.seq) is not int
             ):
                 raise ValueError(
@@ -1222,8 +1206,8 @@ def _validate_calibration_card_owners(
                 card.scored_against_generation,
                 card.scored_against_empty,
             ) != expected_score
-            or _canonical_json(card.steering_context)
-            != _canonical_json(data["steering_context"])
+            or canonical_json(card.steering_context)
+            != canonical_json(data["steering_context"])
         ):
             raise ValueError("calibration card_added does not fold to one native Card identity")
 
@@ -1242,7 +1226,7 @@ def _validate_calibration_card_owners(
             )
             expected_parents = list(node.parent_ids)
             if (
-                _canonical_json(idea) != _canonical_json(expected_idea)
+                canonical_json(idea) != canonical_json(expected_idea)
                 or data.get("statement") != statement
                 or data.get("rationale") != (node.idea.rationale or "")[:400]
                 or data.get("at_node") != node.id
@@ -1251,8 +1235,8 @@ def _validate_calibration_card_owners(
                 or data.get("parent_ids") != expected_parents
                 or data.get("parent_generations")
                 != {str(parent): 0 for parent in expected_parents}
-                or _canonical_json(data.get("footprint"))
-                != _canonical_json(node_idea.get("footprint"))
+                or canonical_json(data.get("footprint"))
+                != canonical_json(node_idea.get("footprint"))
                 or proposal_ref != _calibration_staged_proposal_ref(data, node)
             ):
                 raise ValueError(
@@ -1306,7 +1290,7 @@ def _validate_calibration_card_owners(
             expected is None
             or card_id in enriched_cards
             or not isinstance(event.data, dict)
-            or _canonical_json(data) != _canonical_json(expected)
+            or canonical_json(data) != canonical_json(expected)
             or created_event is None
             or type(event.seq) is not int
             or type(created_event.seq) is not int
@@ -1366,7 +1350,7 @@ def _validate_calibration_card_owners(
 def _material_digest(value: object) -> str:
     """Bound a folded provenance object into the receipt without duplicating its raw contents."""
 
-    return _sha256(_canonical_json(value))
+    return _sha256(canonical_json(value))
 
 
 def speculation_task_profile_digest(task: object) -> str:
@@ -1374,7 +1358,7 @@ def speculation_task_profile_digest(task: object) -> str:
 
     canonical = canonical_speculation_toy_task(task)
     profile = {key: value for key, value in canonical.items() if key != "seed"}
-    return _sha256(_canonical_json({
+    return _sha256(canonical_json({
         "schema": "looplab.speculation-task-profile/v1",
         "task": profile,
     }))
@@ -1797,7 +1781,7 @@ def _analyze_speculation_run(run_dir: str | Path) -> tuple[dict[str, Any], dict[
             "config": {"sha256": _sha256(config_raw), "bytes": len(config_raw)},
             "task": {"sha256": _sha256(task_raw), "bytes": len(task_raw)},
             "task_profile_sha256": task_profile_sha256,
-            "comparable_config_sha256": _sha256(_canonical_json(comparable)),
+            "comparable_config_sha256": _sha256(canonical_json(comparable)),
             "semantic_trajectory_sha256": _semantic_execution_trajectory_digest(state),
             # The raw events remain the primary evidence. These explicit sub-digests make pair
             # comparability reviewable and bind the implementation, environment, workspace and
@@ -1844,7 +1828,7 @@ def _analyze_speculation_run(run_dir: str | Path) -> tuple[dict[str, Any], dict[
         },
     }
     # This public result must itself remain safe to embed in the bounded gate receipt.
-    if len(_canonical_json(report)) > _MAX_RECEIPT_BYTES:
+    if len(canonical_json(report)) > _MAX_RECEIPT_BYTES:
         raise ValueError("run analysis exceeds the receipt byte bound")
     return report, config, task_raw
 
@@ -1980,7 +1964,7 @@ def speculation_implementation_digest() -> str:
         manifest.append({"path": relative, "bytes": len(raw), "sha256": _sha256(raw)})
     if not 1 <= len(manifest) <= 1000:
         raise ValueError("implementation source manifest is empty or oversized")
-    return _sha256(_canonical_json({
+    return _sha256(canonical_json({
         "schema": "looplab.speculation-implementation/v1",
         "files": manifest,
     }))
@@ -2072,7 +2056,7 @@ def speculation_quality_gate(
         if not isinstance(raw_scorer, Mapping):
             raise ValueError("scorer fidelity report is not a mapping")
         scorer = dict(raw_scorer)
-        scorer_bytes = _canonical_json(scorer)
+        scorer_bytes = canonical_json(scorer)
         if len(scorer_bytes) > _MAX_SCORER_BYTES:
             raise ValueError("scorer fidelity report is oversized")
         # Receipt equality is a JSON contract, not a Python-key-type contract. Policy audit metadata
@@ -2424,7 +2408,7 @@ def speculation_quality_gate(
         "errors": list(dict.fromkeys(errors)),
         "passed": bool(not errors and all_pair_contracts and aggregate_passed),
     }
-    if len(_canonical_json(body)) > _MAX_RECEIPT_BYTES:
+    if len(canonical_json(body)) > _MAX_RECEIPT_BYTES:
         # Preserve a bounded fail-closed report rather than returning an attacker-sized object.
         body["pairs"] = []
         body["errors"] = ["gate report exceeds the receipt byte bound"]
@@ -2442,7 +2426,7 @@ def speculation_quality_gate(
 
 
 def _self_digest(body: Mapping[str, Any]) -> str:
-    return _sha256(_canonical_json({key: value for key, value in body.items() if key != "self_digest"}))
+    return _sha256(canonical_json({key: value for key, value in body.items() if key != "self_digest"}))
 
 
 def write_speculation_gate_receipt(
@@ -2466,7 +2450,7 @@ def write_speculation_gate_receipt(
     if body.get("passed") is not True:
         raise ValueError("speculation quality gate did not pass; refusing to publish a receipt")
     receipt = {**body, "self_digest": _self_digest(body)}
-    encoded = _canonical_json(receipt)
+    encoded = canonical_json(receipt)
     if len(encoded) + 1 > _MAX_RECEIPT_BYTES:
         raise ValueError("speculation gate receipt exceeds its byte bound")
     strict_atomic_write_text(path, encoded.decode("utf-8") + "\n")
@@ -2475,7 +2459,7 @@ def write_speculation_gate_receipt(
 
 def _receipt_mapping(path_or_mapping: str | Path | Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(path_or_mapping, Mapping):
-        encoded = _canonical_json(path_or_mapping)
+        encoded = canonical_json(path_or_mapping)
         if len(encoded) > _MAX_RECEIPT_BYTES:
             raise ValueError("receipt mapping is oversized")
         decoded = _json_loads(encoded)
@@ -2578,7 +2562,7 @@ def validated_speculation_gate_receipt(
         # recomputation has independently crossed all fixed constants.
         return dict(receipt) if (
             recomputed.get("passed") is True
-            and _canonical_json(stored_body) == _canonical_json(recomputed)
+            and canonical_json(stored_body) == canonical_json(recomputed)
         ) else None
     except Exception:
         return None

@@ -14,6 +14,7 @@ import math
 
 import orjson
 
+from looplab.core.jsonutil import canonical_json
 from looplab.core.config import Settings
 from collections.abc import Mapping
 from types import MappingProxyType
@@ -144,19 +145,6 @@ def _strict_json_value(value: object, *, path: str = "$") -> Any:
     raise ValueError(f"{path} contains a non-JSON value of type {type(value).__name__}")
 
 
-def _canonical_json(value: object) -> bytes:
-    try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError) as exc:
-        raise ValueError(f"value is not canonical JSON: {exc}") from exc
-
-
 def _task_mapping(task: object) -> Mapping[str, Any]:
     if isinstance(task, Mapping):
         return task
@@ -215,7 +203,7 @@ def canonical_speculation_toy_task(
             f"{SPECULATION_CALIBRATION_SEEDS}")
 
     expected = {**_CANONICAL_TOY_TASK_WITHOUT_SEED, "seed": seed}
-    if _canonical_json(normalized) != _canonical_json(expected):
+    if canonical_json(normalized) != canonical_json(expected):
         raise ValueError(
             "task must be the canonical deterministic quadratic ToyTask "
             "(only its integer seed may vary)")
@@ -258,7 +246,7 @@ def speculation_runtime_scope_digest(config: object) -> str:
         "roles": dict(SPECULATION_RUNTIME_ROLES_DESCRIPTOR),
         "sandbox": dict(SPECULATION_RUNTIME_SANDBOX_DESCRIPTOR),
     }
-    return "sha256:" + hashlib.sha256(_canonical_json(envelope)).hexdigest()
+    return "sha256:" + hashlib.sha256(canonical_json(envelope)).hexdigest()
 
 
 __all__ = [

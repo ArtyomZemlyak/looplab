@@ -47,13 +47,21 @@ def _reject(status: int, code: str, message: str, field: str | None = None, **ex
     raise HTTPException(status, _detail(code, message, errors, **extra))
 
 
-def _canonical_json(value: Any) -> bytes:
+def _lenient_json_bytes(value: Any) -> bytes:
+    """Stable bytes for a launch-payload hash — deliberately NOT `core.jsonutil.canonical_json`.
+
+    A launch payload is caller-shaped and may legitimately carry values with no JSON form (a Path, an
+    enum, a datetime), so this one coerces with `default=str` and never raises: the hash is an
+    identity for deduplicating launches, not a receipt preimage. It also omits `allow_nan=False`,
+    which the strict helper treats as decisive. Sharing one NAME with the strict version is what made
+    that difference invisible (doc 25 SE-08).
+    """
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
                       default=str).encode("utf-8")
 
 
 def _sha(value: Any) -> str:
-    return hashlib.sha256(_canonical_json(value)).hexdigest()
+    return hashlib.sha256(_lenient_json_bytes(value)).hexdigest()
 
 
 def safe_run_dir(root: Path, run_id: Any, *, check_conflict: bool = True) -> Path:

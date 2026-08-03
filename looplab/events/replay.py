@@ -25,7 +25,8 @@ from looplab.core.concepts import (
     normalized_concept_renames,
     resolve_concept_set_reasons,
 )
-from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, is_usable_metric,
+from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, finite_metric,
+                                  is_usable_metric,
                                   verifier_evidence_digest)
 from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGEST_V2_FIELDS,
                      NODE_CONCEPT_PROVENANCE_AUTHORED,
@@ -653,9 +654,8 @@ def _nonneg_seconds(v) -> float:
     return f if (math.isfinite(f) and f >= 0.0) else 0.0
 
 
-def _finite_metric(value):
-    """Normalize one selection-affecting persisted scalar without accepting strings or bools."""
-    return float(value) if is_usable_metric(value) else None
+# One selection-affecting scalar normalizer, shared with `search/speculation_quality` (doc 25 SE-08).
+_finite_metric = finite_metric
 
 
 def _normalize_resource_curve(raw):

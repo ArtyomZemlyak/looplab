@@ -522,7 +522,7 @@ def valid_case_record(case) -> bool:
     if direction not in ("min", "max"):
         return False
     metric = case.get("metric")
-    if not _finite_metric(metric):
+    if not _is_finite_metric(metric):
         return False
     params = case.get("params")
     return params is None or isinstance(params, dict)
@@ -679,7 +679,7 @@ def _filter_capsule_rows(rows, predicate) -> _CapsuleRows:
     return _capsule_rows((row for row in source if predicate(row)), source=source)
 
 
-def _finite_metric(value) -> bool:
+def _is_finite_metric(value) -> bool:
     if value is None:
         return True
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -853,7 +853,7 @@ def _valid_capsule_record(capsule) -> bool:
             # quarantine evidence instead of silently inventing ``min`` and potentially reversing the
             # meaning of retained outcomes/rank signs in unbound portfolio projections.
             or capsule.get("direction") not in ("min", "max")
-            or not _finite_metric(capsule.get("best_metric"))
+            or not _is_finite_metric(capsule.get("best_metric"))
             or not isinstance(fingerprint, list) or len(fingerprint) > _MAX_CAPSULE_FINGERPRINT
             or not isinstance(concepts, list) or len(concepts) > _MAX_CAPSULE_CONCEPTS
             or not isinstance(outcomes, dict) or len(outcomes) > _MAX_CAPSULE_OUTCOMES
@@ -875,7 +875,7 @@ def _valid_capsule_record(capsule) -> bool:
            or type(value) is not int or value not in (-1, 0, 1) for key, value in signs.items()):
         return False   # `type(value) is not int` rejects bool (int subclass) AND float 1.0 in one test
     if not all(isinstance(key, str) and key and len(key) <= _MAX_CAPSULE_TOKEN_CHARS
-               and _finite_metric(value) for key, value in outcomes.items()):
+               and _is_finite_metric(value) for key, value in outcomes.items()):
         return False
     evidence_meta = _capsule_concept_evidence_completeness(capsule)
     if (evidence_meta is not None and evidence_meta[0] is not None
@@ -1039,7 +1039,7 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
     raw_outcomes = concept_outcomes if outcomes_mapping else {}
     all_outcomes: dict[str, object] = {}
     for raw_key, value in sorted(raw_outcomes.items(), key=lambda item: str(item[0])):
-        if not valid_concept_id(raw_key) or raw_key not in concept_set or not _finite_metric(value):
+        if not valid_concept_id(raw_key) or raw_key not in concept_set or not _is_finite_metric(value):
             continue
         all_outcomes[raw_key] = value
     # compute the run-relative baseline over the COMPLETE valid source field. Truncating first
@@ -1099,7 +1099,7 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
         "concepts_total": concepts_total,
         "concepts_omitted": concepts_omitted,
         "concepts_complete": concepts_omitted == 0 and concept_evidence_complete,
-        "best_metric": best_metric if _finite_metric(best_metric) else None,
+        "best_metric": best_metric if _is_finite_metric(best_metric) else None,
         "concept_outcomes": bounded_outcomes,
         "concept_outcomes_total": outcomes_total,
         "concept_outcomes_omitted": outcomes_omitted,

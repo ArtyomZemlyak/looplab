@@ -41,6 +41,16 @@ def is_usable_metric(value) -> bool:
         return False
 
 
+def finite_metric(value) -> "float | None":
+    """The same rule as `is_usable_metric`, returning the coerced float instead of a verdict.
+
+    Two modules had written this out as their own `_finite_metric` (doc 25 SE-08), and a THIRD
+    function of that name in `engine/memory.py` returned a BOOL — so a reader grepping the name could
+    not assume a contract. That one is now `_is_finite_metric`; this is the only `finite_metric`.
+    """
+    return float(value) if is_usable_metric(value) else None
+
+
 def is_better(direction: str, a: float, b: float) -> bool:
     """Direction-aware strict improvement: lower wins when minimizing, higher when maximizing. THE
     comparator — `RunState.is_better` delegates here so there is exactly one spelling of "better"."""

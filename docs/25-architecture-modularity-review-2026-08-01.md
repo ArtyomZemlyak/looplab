@@ -2771,7 +2771,40 @@ anywhere but at the test.
 
 *Evidence:* _canonical_json (sort_keys, allow_nan=False, compact separators, same except-tuple) is defined identically in speculation_calibration.py:134 and speculation_quality.py:300; serve/launch.py:54 carries a looser sibling under the same name (no allow_nan=False, default=str, never raises). _strict_json_value (calibration :105) and _projection_value (coverage :33) are two strict-JSON normalizers with subtly different tolerances. _finite_metric exists three times under one name with two behaviors: events/replay.py:645 and speculation_quality.py:422 both return float|None, while engine/memory.py:673 returns bool — a reader grepping the name still cannot assume one contract.
 
-*Recommendation:* Move _canonical_json and a finite-float coercer into core (e.g. core/atomicio or a small core/jsonutil) and import them; rename the bool variant in engine/memory to avoid the name collision.
+*Recommendation:* Move _canonical_json and a finite-float coercer into core (e.g. core/atomicio or a small core/jsonutil) and import them; rename the bool variant in engine/memory to 
+
+*Resolution (2026-08-03):* New `core/jsonutil.py::canonical_json(value) -> bytes` replaces the two
+byte-identical STRICT copies (`speculation_calibration`, `speculation_quality`). Every option in it
+is load-bearing because both callers build a receipt PREIMAGE — the bytes a digest is taken over —
+and two spellings of "canonical" produce two digests for one logical value, so a receipt written by
+one reader stops verifying for the other with nothing to say why. `allow_nan=False` is the decisive
+one: `json.dumps` emits bare `NaN`/`Infinity` by default, which no strict JSON reader accepts, so a
+receipt could be minted over bytes nothing else can parse. It RAISES rather than falling back,
+because a caller minting a receipt must find out before the receipt exists.
+
+`serve/launch.py`'s copy is NOT merged — it is deliberately looser (`default=str`, no
+`allow_nan=False`, never raises) because a launch payload is caller-shaped and its hash is a dedup
+identity rather than a preimage. It is RENAMED to `_lenient_json_bytes`, which is the actual fix:
+sharing one name for two contracts is what made the difference invisible.
+
+`core/fitness.py::finite_metric(value) -> float | None` sits next to `is_usable_metric`, whose rules
+it reuses verbatim, and both float-valued readers (`events/replay.py`,
+`search/speculation_quality.py`) now alias it — so they are the SAME object, not equal twins that
+drift on the next edit. `speculation_quality`'s local version additionally gains correct handling of
+an arbitrary-precision JSON integer such as `10**400`, which its own `float()` call raised
+`OverflowError` on outside its `except`.
+
+`engine/memory.py::_finite_metric` — the BOOL variant — is renamed `_is_finite_metric`. That
+collision was the sharpest edge in the finding: `if _finite_metric(x):` is valid under both old
+spellings and means opposite things, since the float version is falsy for a legitimate metric of
+`0.0`.
+
+Two normalizers stay separate on purpose and a test records why:
+`speculation_calibration._strict_json_value` RAISES on a non-JSON value (a receipt preimage that must
+fail closed) while `coverage._projection_value` coerces to `str` (an analytics token that must never
+fail a run). Merging them would either brick analytics or weaken a receipt.
+
+Covered by `tests/test_json_and_metric_contracts.py` (30).avoid the name collision.
 
 #### SE-09 · MEDIUM · under-decomposition · effort: large
 
