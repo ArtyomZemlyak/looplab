@@ -20,8 +20,8 @@ export function assistantRecoveryPayload(turn) {
   return { instruction, display, mode }
 }
 
-export function assistantReplyCompletesTurn(messages, prior) {
-  if (!Array.isArray(messages) || !prior || prior.role !== 'user') return false
+export function assistantTurnIndex(messages, prior) {
+  if (!Array.isArray(messages) || !prior || prior.role !== 'user') return -1
   const payload = prior.retryPayload || {}
   let userIndex = -1
   if (typeof prior.turn_id === 'string' && prior.turn_id) {
@@ -31,11 +31,18 @@ export function assistantReplyCompletesTurn(messages, prior) {
     userIndex = payload.historyLength
   }
   const durableUser = messages[userIndex]
-  const durableReply = messages[userIndex + 1]
-  if (!durableUser || durableUser.role !== 'user' || durableReply?.role !== 'assistant') return false
-  if (typeof prior.turn_id === 'string' && prior.turn_id) return durableUser.turn_id === prior.turn_id
+  if (!durableUser || durableUser.role !== 'user') return -1
+  if (typeof prior.turn_id === 'string' && prior.turn_id) {
+    return durableUser.turn_id === prior.turn_id ? userIndex : -1
+  }
   const durableRaw = durableUser.raw || durableUser.content
   return durableUser.content === prior.content && durableRaw === payload.raw && durableUser.mode === payload.mode
+    ? userIndex : -1
+}
+
+export function assistantReplyCompletesTurn(messages, prior) {
+  const userIndex = assistantTurnIndex(messages, prior)
+  return userIndex >= 0 && messages[userIndex + 1]?.role === 'assistant'
 }
 
 export const unavailableAssistantRecovery = Object.freeze({

@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 
 import { assistantMessageStream } from '../src/api.js'
 import {
-  assistantRecoveryFailure, assistantRecoveryPayload, assistantReplyCompletesTurn,
+  assistantRecoveryFailure, assistantRecoveryPayload, assistantReplyCompletesTurn, assistantTurnIndex,
   danglingAssistantTurn,
 } from '../src/assistantRecovery.js'
 
@@ -122,11 +122,13 @@ test('retry distinguishes a late exact reply from an older reply when the POST w
     { role: 'assistant', content: 'old answer' },
   ]
   assert.equal(assistantReplyCompletesTurn(oldHistory, prior), false)
+  assert.equal(assistantTurnIndex(oldHistory, prior), -1)
   const completed = [...oldHistory,
     { role: 'user', content: 'new request', raw: '[context]\nnew request', mode: 'default', turn_id: 'new' },
     { role: 'assistant', content: 'late exact answer' },
   ]
   assert.equal(assistantReplyCompletesTurn(completed, prior), true)
+  assert.equal(assistantTurnIndex(completed, prior), 2)
   assert.equal(assistantReplyCompletesTurn(completed, {
     role: 'user', content: 'new request', turn_id: 'new',
   }), true)
@@ -151,7 +153,7 @@ test('Assistant reload/retry path reuses the dangling turn and never appends a s
     + 'retry into a public link whose state changed under the operator')
   assert.doesNotMatch(openSession, /role: 'user'/)
   assert.match(source, /failedTurn\?\.recoveryNeeded[\s\S]*?danglingAssistantTurn\(durableMessages\)[\s\S]*?openSession\(id, \{ recover: true \}\)/)
-  assert.match(source, /assistantReplyCompletesTurn\(durableMessages, prior\)/)
+  assert.match(source, /completedAssistantReply\(durableMessages, prior\)/)
   assert.match(source, /if \(prior\.turn_id\)[\s\S]*?assistantRecoveryPayload\(prior\)[\s\S]*?turnMode: persisted\.mode/)
   assert.match(source, /turnMode: payload\.mode \|\| null/)
   assert.match(source, /if \(msgs\[assistantIndex\]\?\.recoveryBlocked\) return null/)

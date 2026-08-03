@@ -19,7 +19,8 @@ import {
   presentAssistantCommandResult, restoreAssistantDirectEntry, submitAssistantDirect,
 } from './assistantCommand.js'
 import {
-  assistantRecoveryFailure, assistantRecoveryPayload, assistantReplyCompletesTurn, danglingAssistantTurn,
+  assistantRecoveryFailure, assistantRecoveryPayload, assistantReplyCompletesTurn, assistantTurnIndex,
+  danglingAssistantTurn,
   unavailableAssistantRecovery,
 } from './assistantRecovery.js'
 import './assistant-polish.css'
@@ -362,15 +363,29 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [launchDisclosures, setLaunchDisclosures] = useState({})
   const [launchRecoveries, setLaunchRecoveries] = useState(() => listLaunchTransports())
   const [busy, setBusy] = useState(false)
+  const [turnStarting, setTurnStarting] = useState(false)
+  const [openingSid, setOpeningSid] = useState(null)
+  const sessionOpening = openingSid != null
+  const [retryChecking, setRetryChecking] = useState(false)
+  const [directStarting, setDirectStarting] = useState(false)
   const [directPending, setDirectPending] = useState(null) // retained while an accepted direct command executes
   const [directFailure, setDirectFailure] = useState(null)
   const [runCommandLock, setRunCommandLock] = useState(() => loadRunCommandLock(runId))
   const externalCommandPending = runCommandLock?.source === 'dock' ? runCommandLock : null
   const ownStorageFailureLock = assistantStorageFailureOwnsLock(directFailure, runCommandLock)
-  const commandBusy = directPending != null || (runCommandLock != null && !ownStorageFailureLock)
+  const commandBusy = directStarting || directPending != null
+    || (runCommandLock != null && !ownStorageFailureLock)
   const [preview, setPreview] = useState('')      // beginning of the latest reply (collapsed bar)
   const [hasNew, setHasNew] = useState(false)     // highlight the bar until a view is opened
+  const [replyAnnouncement, setReplyAnnouncement] = useState('')
   const [view, setView] = useState('bar')         // 'bar' | 'side' | 'full'
+  const viewRef = useRef(view)
+  viewRef.current = view
+  const setAssistantView = React.useCallback(update => {
+    const next = typeof update === 'function' ? update(viewRef.current) : update
+    viewRef.current = next
+    setView(next)
+  }, [])
   const [mode, setMode] = useState('plan')
   const [toast, flash, clearToast] = useToast()   // shared timer discipline (doc 25 UI-13)
   const [commands, setCommands] = useState([])
@@ -455,17 +470,22 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     if (!newIds.length) return
     for (const id of newIds) autoRevealedPendingIdsRef.current.add(id)
     if (view === 'bar') {
-      setView('side'); setHasNew(false)
+      setAssistantView('side'); setHasNew(false)
     }
   }, [hidden, historical, pending, view])
 
   const mountedRef = useRef(true)
+  const historicalRef = useRef(historical)
+  historicalRef.current = historical
   const currentRunIdRef = useRef(runId)
   currentRunIdRef.current = runId
   const abortRef = useRef(null)
   const runningRef = useRef(false)   // a turn is live (stream OR reattach poll); stop clears it to halt both
+  const activeReplyAttemptRef = useRef(null)
   const turnCaptureRef = useRef(false) // closes session-create/send races before React can publish busy
   const openSessionSeqRef = useRef(0) // late reads must never replace a newer session choice
+  const openSessionPendingRef = useRef(null) // blocks mutations while a chosen transcript/progress read resolves
+  const deferredRecoverySessionRef = useRef(null) // read-only routes hydrate dangling turns without replaying them
   const directCaptureRef = useRef(false) // closes the pre-storage generation-read window to double clicks
   const cancelReqRef = useRef(null)  // in-flight server-cancel POST; the next send awaits it so a late
                                      // cancel can't land on (and instantly kill) the NEW turn's event
@@ -483,6 +503,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const revertingChangesRef = useRef(new Set())
   const revertedChangesRef = useRef(new Set())
   const atBottomRef = useRef(true)     // is the feed scrolled to (near) the bottom? gates autoscroll
+  const replyAnnouncementTimerRef = useRef(null)
+  const announcedReplyTurnsRef = useRef(new Set())
+  const announcedReplyAttemptsRef = useRef(new WeakSet())
   const fileRef = useRef(null)
   const commandStatusRef = useRef(null)
   const commandFocusRequestedRef = useRef(false)
@@ -494,6 +517,38 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const forkActionSessionRef = useRef(null)
   const forkRecoveryRef = useRef(new Map())
   const deletingSessionsRef = useRef(new Set())
+  const replyAttemptOwned = (attempt, id) => !!attempt
+    && activeReplyAttemptRef.current === attempt
+    && mountedRef.current && sidRef.current === id
+  const replyAttemptCurrent = (attempt, id) => replyAttemptOwned(attempt, id) && runningRef.current
+  const clearReplyAnnouncement = React.useCallback(() => {
+    if (replyAnnouncementTimerRef.current) clearTimeout(replyAnnouncementTimerRef.current)
+    replyAnnouncementTimerRef.current = null
+    setReplyAnnouncement('')
+  }, [])
+  const announceReplyReady = React.useCallback((content, { sessionId = null, turn = null,
+    attempt = null } = {}) => {
+    const text = String(content || '').trim()
+    if (!text || text === '(no reply)' || assistantErrorInfo(text)) {
+      clearReplyAnnouncement()
+      return false
+    }
+    if (sessionId != null && String(sidRef.current || '') !== String(sessionId)) return false
+    const turnId = typeof turn?.turn_id === 'string' ? turn.turn_id.trim() : ''
+    const turnKey = turnId ? `${String(sessionId || '')}:${turnId}` : ''
+    if (turnKey && announcedReplyTurnsRef.current.has(turnKey)) return false
+    if (!turnKey && attempt && typeof attempt === 'object'
+        && announcedReplyAttemptsRef.current.has(attempt)) return false
+    if (turnKey) rememberBoundedSetValue(announcedReplyTurnsRef.current, turnKey)
+    else if (attempt && typeof attempt === 'object') announcedReplyAttemptsRef.current.add(attempt)
+    if (replyAnnouncementTimerRef.current) clearTimeout(replyAnnouncementTimerRef.current)
+    setReplyAnnouncement('Assistant response ready.')
+    replyAnnouncementTimerRef.current = setTimeout(() => {
+      replyAnnouncementTimerRef.current = null
+      if (mountedRef.current) setReplyAnnouncement('')
+    }, 2500)
+    return true
+  }, [clearReplyAnnouncement])
   useEffect(() => {
     if (!sid) { setForkRecovery(null); return }
     const recovery = forkRecoveryRef.current.get(sid) || loadAssistantForkRecovery(sid)
@@ -692,7 +747,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      activeReplyAttemptRef.current = null
+      openSessionPendingRef.current = null
       if (abortRef.current) abortRef.current.abort()
+      if (replyAnnouncementTimerRef.current) clearTimeout(replyAnnouncementTimerRef.current)
     }
   }, [])
   useEffect(() => { storageSet('ll.asstW', sideW) }, [sideW])
@@ -804,7 +862,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     // The status element is replaced when the Assistant changes surface. Re-arm focus so pending and
     // failed command recovery remains announced/focused in the newly mounted side/full status node.
     if (commandBusy || directFailure) commandFocusRequestedRef.current = true
-    setView(next); setHasNew(false)
+    setAssistantView(next); setHasNew(false)
     if (next === 'side') requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }))
   }
   const openSide = () => openCommandView('side')   // openable any time (even empty)
@@ -849,9 +907,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const collapseToBar = () => {
     const returnSelector = view === 'side' ? '.cmdbar-drawer-btn' : '.cmdbar-ic'
     const la = lastAssistant()
-    if (la && la.content) { setPreview(previewText(la.content)); setHasNew(true) }
+    if (la && la.content) setPreview(previewText(la.content))
+    // Folding a reply the user was already reading may reveal its preview, but it is not a new reply.
+    setHasNew(false)
     if (commandBusy || directFailure) commandFocusRequestedRef.current = true
-    setView('bar')
+    setAssistantView('bar')
     requestAnimationFrame(() => document.querySelector(returnSelector)?.focus())
   }
   collapseForNavigationRef.current = () => {
@@ -861,7 +921,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     // or present a known Assistant reply as newly arrived merely because the route was revealed.
     commandFocusRequestedRef.current = false
     setHasNew(false)
-    setView('bar')
+    setAssistantView('bar')
   }
   useEffect(() => {
     if (hidden) return undefined
@@ -936,20 +996,50 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }, [compactAssistant])
 
   // ── sessions (full view) ──
-  const openSession = async (id, { recover = false, observeOnly = false } = {}) => {
+  const openSession = (id, options = {}) => {
+    if (turnCaptureRef.current && !sidRef.current) {
+      if (!options.observeOnly) flash('Wait for the new Assistant chat to finish starting')
+      return Promise.resolve({ ok: false, sessionId: id, reason: 'turn-starting' })
+    }
+    const matchingRead = openSessionPendingRef.current
+    const requestedAllowsRecovery = options.observeOnly !== true
+    if (matchingRead && String(matchingRead.id) === String(id)
+        && (matchingRead.allowsRecovery || !requestedAllowsRecovery)) return matchingRead.promise
+    let sessionRead = null
+    const operation = (async () => {
+    const { recover = false, observeOnly = false } = options
     // Re-opening the session that is ALREADY live-streaming would abort its own stream (and downgrade
     // to polling). An observational caller may still read a durable snapshot without replacing it.
     const observingLiveSession = observeOnly && id === sidRef.current && runningRef.current
-    if (id === sidRef.current && runningRef.current && !observingLiveSession) {
+    const currentNeedsRecovery = id === sidRef.current && !!danglingAssistantTurn(msgs)
+    if (id === sidRef.current && !observeOnly && (!recover || runningRef.current)
+        && !currentNeedsRecovery) {
+      // Re-selecting current A while a slow switch to B is pending means "stay on A". Supersede B
+      // without launching a redundant A GET that could later abort a new A send. Explicit idle
+      // recovery is the one path that deliberately reloads the current transcript.
+      if (openSessionPendingRef.current) {
+        ++openSessionSeqRef.current
+        openSessionPendingRef.current = null
+        setOpeningSid(null)
+      }
       return { ok: true, sessionId: id, messages: null, loaded: false }
     }
     const seq = observingLiveSession ? openSessionSeqRef.current : ++openSessionSeqRef.current
+    sessionRead = observingLiveSession ? null
+      : { seq, id, allowsRecovery: !observeOnly, promise: null }
+    if (sessionRead) {
+      clearReplyAnnouncement()
+      openSessionPendingRef.current = sessionRead
+      setOpeningSid(String(id))
+    }
     const shareMetaRead = beginShareMetaRead(id)
     try {
       // Keep the current transcript intact until the target is known to exist. The sequence fence
       // rejects a slow A response after the user has already selected B (or started a new chat).
       const s = await boundedRequest(signal => assistantGet(id, { signal }))
-      if (!mountedRef.current || seq !== openSessionSeqRef.current) {
+      if (!mountedRef.current || seq !== openSessionSeqRef.current
+          || sessionDeleteTombstonesRef.current.has(String(id))
+          || (sessionRead && openSessionPendingRef.current !== sessionRead)) {
         return { ok: false, sessionId: id, reason: 'superseded' }
       }
       const arr = s.messages == null ? [] : s.messages
@@ -961,10 +1051,19 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         if (sidRef.current !== id) return { ok: false, sessionId: id, reason: 'superseded' }
         return { ok: true, sessionId: id, messages: arr, loaded: true }
       }
+      // Accepting a different session invalidates every callback owned by the departed attempt. SID
+      // checks alone are insufficient for A -> B -> A or Stop -> Send races because the same id can
+      // become current again while an older GET/finally is still resolving.
+      activeReplyAttemptRef.current = null
+      turnCaptureRef.current = false
+      setTurnStarting(false)
+      setRetryChecking(false)
+      clearReplyAnnouncement()
       if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
       if (runningRef.current) { runningRef.current = false; setBusy(false); setPending([]) }
       activateComposer(id, { seedMode: s.meta?.mode })
       sidRef.current = id; setSid(id); setMsgs([]); setPreview('')
+      setHasNew(false)
       storageSet('ll.asstSid', id)
       setMsgs(arr)
       const la = [...arr].reverse().find(m => m.role === 'assistant' && m.content)
@@ -973,13 +1072,28 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       // in a staged user turn and this process has no worker, the guarded path below replays that exact
       // raw/display/mode identity once and polls until its reply lands. The placeholder is UI-only: it
       // never appends a second user turn or creates a fresh mutation namespace.
+      const dangling = danglingAssistantTurn(arr)
       let prog = { active: false, steps: [] }
       let progressKnown = false
-      try { prog = await assistantProgress(id); progressKnown = true } catch { /* offline: observe only */ }
-      const trailingUser = arr.length && arr[arr.length - 1].role === 'user'
-      const dangling = danglingAssistantTurn(arr)
-      const inFlight = prog.active || (!observeOnly && (!!dangling || (recover && trailingUser)))
+      if (dangling) {
+        try {
+          prog = await boundedRequest(signal => assistantProgress(id, { signal }), 8000)
+          progressKnown = true
+        } catch { /* offline: observe only */ }
+      }
+      if (!mountedRef.current || seq !== openSessionSeqRef.current || sidRef.current !== id
+          || sessionDeleteTombstonesRef.current.has(String(id))
+          || (sessionRead && openSessionPendingRef.current !== sessionRead)) {
+        return { ok: false, sessionId: id, reason: 'superseded' }
+      }
+      // Reattach only when the durable transcript identifies the exact pending user turn. Progress
+      // without that identity is observable server activity, not authority to bind an arbitrary reply.
+      deferredRecoverySessionRef.current = dangling && !observeOnly && historicalRef.current
+        ? String(id) : null
+      const inFlight = !!dangling && !historicalRef.current && (prog.active || !observeOnly)
       if (inFlight && mountedRef.current && sidRef.current === id) {
+        const reattachAttempt = {}
+        activeReplyAttemptRef.current = reattachAttempt
         setBusy(true); runningRef.current = true
         const act = (prog.steps || []).length ? [{ type: 'tools', labels: prog.steps }] : []
         setMsgs(m => (m[m.length - 1] && m[m.length - 1].role === 'assistant' && m[m.length - 1].streaming)
@@ -990,14 +1104,18 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         let recoveryCtrl = null
         let exactState = 'idle'
         const startExactRecovery = async () => {
-          if (observeOnly || !dangling || exactState !== 'idle') return
+          if (historicalRef.current || observeOnly || !dangling || exactState !== 'idle'
+              || !replyAttemptCurrent(reattachAttempt, id)) return
           exactState = 'checking'
           let latest
           const latestShareMetaRead = beginShareMetaRead(id)
           try {
             latest = await boundedRequest(signal => assistantGet(id, { signal }))
-          } catch { exactState = 'idle'; return }
-          if (!mountedRef.current || sidRef.current !== id || !runningRef.current) return
+          } catch {
+            if (replyAttemptCurrent(reattachAttempt, id)) exactState = 'idle'
+            return
+          }
+          if (historicalRef.current || !replyAttemptCurrent(reattachAttempt, id)) return
           const latestTurn = danglingAssistantTurn(latest.messages || [])
           if (!latestTurn) { exactState = 'settled'; return } // the original reply won the race
           if (latestTurn.turn_id !== dangling.turn_id) {
@@ -1024,10 +1142,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           // path observes it instead of accidentally appending a fresh duplicate turn.
           assistantMessageStream(id, recovery.instruction, recovery.mode, {},
             recoveryCtrl.signal, recovery.display, acknowledgedLiveShareIds).catch(error => {
+            if (!replyAttemptCurrent(reattachAttempt, id)) return
             if (assistantLiveShareAckRequired(error)) {
               exactState = 'settled'
               exactFailure = assistantLiveShareRecoveryFailure
-              if (mountedRef.current) {
+              if (replyAttemptCurrent(reattachAttempt, id)) {
                 setShareUnknown(id, true)
                 setShareAckNotice({ sid: id,
                   message: 'Saved turn not retried · live public-link state changed. Verify it, then retry.' })
@@ -1041,10 +1160,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         }
         if (progressKnown && !prog.active) startExactRecovery()
         ;(async () => {
-          while (polling && runningRef.current && mountedRef.current && sidRef.current === id) {
+          while (polling && replyAttemptCurrent(reattachAttempt, id)) {
             await sleep(1200)
+            if (!replyAttemptCurrent(reattachAttempt, id)) break
             try {
               const pp = await assistantProgress(id)
+              if (!replyAttemptCurrent(reattachAttempt, id)) break
               if (!pp.active) {
                 if (observeOnly) break
                 // The server may have been offline for the first progress read, or an attached worker
@@ -1053,21 +1174,23 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                 if (!dangling) break
                 continue
               }
-              if (mountedRef.current && sidRef.current === id && ((pp.steps || []).length || pp.text))
+              if (replyAttemptCurrent(reattachAttempt, id) && ((pp.steps || []).length || pp.text))
                 patchLast(prev => prev && prev.role === 'assistant' && prev.streaming   // only the live placeholder
                   ? { ...(pp.text ? { content: pp.text } : {}),
                       activity: (pp.steps || []).length ? [{ type: 'tools', labels: pp.steps }] : prev.activity } : prev)
               // A reattached turn may be PARKED on a HITL confirm — surface its card too (the send
               // path polls permissions; without this a reload hides the card until the 900s deny).
               const perms = await assistantPermissions(id)
-              if (mountedRef.current && sidRef.current === id) setPending(reconcilePendingPermissions(perms.pending, resolvedPermsRef.current))
+              if (replyAttemptCurrent(reattachAttempt, id)) {
+                setPending(reconcilePendingPermissions(perms.pending, resolvedPermsRef.current))
+              }
             } catch { /* transient */ }
           }
         })()
-        recoverReply(id, arr.length + 1, () => exactFailure).then(ok => {
+        recoverReply(id, arr.length + 1, dangling, reattachAttempt, () => exactFailure).then(ok => {
           // If recovery gives up (the worker died / no reply ever lands), end the placeholder — else it
           // renders a forever "thinking" spinner (the send path has the same fallback on failure).
-          if (!ok && mountedRef.current && sidRef.current === id) {
+          if (!ok && replyAttemptCurrent(reattachAttempt, id)) {
             if (exactFailure?.notice) flash(exactFailure.notice)
             patchLast(prev => prev && prev.role === 'assistant' && prev.streaming
               ? { streaming: false, recovering: false,
@@ -1079,15 +1202,20 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         }).finally(() => {   // only reset the SHARED busy/runningRef if we're still on this session —
           // else a departing session's late finally would clobber the one the user switched TO.
           polling = false
-          if (mountedRef.current && sidRef.current === id) {
-            runningRef.current = false; setBusy(false)
+          if (activeReplyAttemptRef.current === reattachAttempt) {
+            activeReplyAttemptRef.current = null
+            turnCaptureRef.current = false
+            runningRef.current = false
+            if (mountedRef.current && sidRef.current === id) { setBusy(false); setPending([]) }
             if (abortRef.current === recoveryCtrl) abortRef.current = null
           }
         })
       }
       return { ok: true, sessionId: id, messages: arr, loaded: true }
     } catch (e) {
-      if (!mountedRef.current || seq !== openSessionSeqRef.current) {
+      if (!mountedRef.current || seq !== openSessionSeqRef.current
+          || sessionDeleteTombstonesRef.current.has(String(id))
+          || (sessionRead && openSessionPendingRef.current !== sessionRead)) {
         return { ok: false, sessionId: id, reason: 'superseded' }
       }
       // The stored/opened session no longer exists (deleted here or in another tab, run-root reset).
@@ -1096,7 +1224,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       if (e?.status === 404 && (!sidRef.current || sidRef.current === id)) newChat()
       else flash(e?.status === 404 ? 'This Assistant chat no longer exists' : 'Could not open this Assistant chat')
       return { ok: false, sessionId: id, status: e?.status || null }
+    } finally {
+      if (sessionRead && openSessionPendingRef.current === sessionRead) {
+        openSessionPendingRef.current = null
+        if (mountedRef.current) setOpeningSid(null)
+      }
     }
+    })()
+    if (sessionRead) sessionRead.promise = operation
+    return operation
   }
   openSessionRef.current = openSession
   // The Attention Center can reveal an existing permission card, but opening attention must remain
@@ -1118,7 +1254,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         flash('Could not open the Assistant session that owns this approval')
         return
       }
-      setView('side'); setHasNew(false)
+      setAssistantView('side'); setHasNew(false)
       requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }))
     }
     window.addEventListener('ll:open-assistant-session', onOpenAttentionSession)
@@ -1195,15 +1331,27 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     last = storageGet('ll.asstSid')
     if (last) openSession(last, { recover: true })
   }, [])   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (historical) return
+    const deferred = deferredRecoverySessionRef.current
+    if (!deferred || String(sidRef.current || '') !== deferred
+        || runningRef.current || openSessionPendingRef.current) return
+    deferredRecoverySessionRef.current = null
+    openSession(deferred, { recover: true })
+  }, [historical, sessionOpening])   // eslint-disable-line react-hooks/exhaustive-deps
   // Attach a node to the chat context from anywhere (a node card / the Inspector dispatches
   // `ll:attach-node`): append `#<id>` to the composer (deduped), reveal the assistant, and focus.
   useEffect(() => {
     const onAttach = (e) => {
       const id = e?.detail?.id
       if (id == null) return
+      if (openSessionPendingRef.current) {
+        flash('Wait for the selected Assistant chat to finish opening before attaching context')
+        return
+      }
       setInput(prev => new RegExp(`#(?:node-)?${id}\\b`, 'i').test(prev) ? prev
         : (prev.trim() ? prev.replace(/\s*$/, ' ') : '') + `#${id} `)
-      setView(v => (v === 'bar' && hasChat) ? 'side' : v)
+      setAssistantView(v => (v === 'bar' && hasChat) ? 'side' : v)
       requestAnimationFrame(() => inputRef.current?.focus())
     }
     window.addEventListener('ll:attach-node', onAttach)
@@ -1213,11 +1361,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // submitting anything. The user still reviews and explicitly sends the exact command.
   useEffect(() => {
     const onFocusAssistant = event => {
+      if (openSessionPendingRef.current) {
+        flash('Wait for the selected Assistant chat to finish opening before changing the draft')
+        return
+      }
       const text = String(event?.detail?.text || '').trim()
       const draft = input.trim()
       if (text && (!draft || draft === text)) setInput(text)
       else if (text) flash(`Draft preserved — clear it before inserting ${text}`)
-      setView(value => value === 'bar' && hasChat ? 'side' : value)
+      setAssistantView(value => value === 'bar' && hasChat ? 'side' : value)
       requestAnimationFrame(() => inputRef.current?.focus())
     }
     window.addEventListener('ll:focus-assistant', onFocusAssistant)
@@ -1225,6 +1377,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }, [hasChat, input])
   const newChat = () => {
     ++openSessionSeqRef.current
+    openSessionPendingRef.current = null
+    deferredRecoverySessionRef.current = null
+    setOpeningSid(null)
+    activeReplyAttemptRef.current = null
+    turnCaptureRef.current = false
+    setTurnStarting(false)
+    setRetryChecking(false)
+    clearReplyAnnouncement()
     if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
     // the departing turn's finally is sid-guarded — reset the shared flags here (see openSession)
     runningRef.current = false; setBusy(false); setPending([])
@@ -1247,6 +1407,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     }
     if (forkActionSessionRef.current === id) {
       return { message: 'Wait for this chat to finish forking before deleting it' }
+    }
+    if (String(openSessionPendingRef.current?.id || '') === String(id)) {
+      return { message: 'Wait for this chat to finish opening before deleting it' }
+    }
+    if (id === sidRef.current && (turnCaptureRef.current || runningRef.current
+        || busy || pending.length > 0)) {
+      return { message: 'Stop or finish the current Assistant turn before deleting this chat' }
     }
     const listedSession = sessions.find(session => session.id === id)
     if (listedSession?.shared || shareUnknownSids.has(id) || shareCopyFallbacks[id]) {
@@ -1290,6 +1457,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     setDeleteConfirmError('')
     deletingSessionsRef.current.add(id)
     rememberBoundedMapValue(sessionDeleteTombstonesRef.current, String(id), 'pending')
+    const pendingOpen = openSessionPendingRef.current
+    if (pendingOpen && String(pendingOpen.id) === String(id)) {
+      ++openSessionSeqRef.current
+      openSessionPendingRef.current = null
+      setOpeningSid(null)
+    }
     const deletedIndex = sessions.findIndex(session => session.id === id)
     const deletedSession = deletedIndex >= 0 ? sessions[deletedIndex] : null
     mutateSessionsLocally(ss => ss.filter(s => s.id !== id)) // optimistic: drop it now (geesefs list can lag)
@@ -1652,22 +1825,33 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     }
   }
   const runDirect = async (d) => {
-    if (!runId) { flash(`/${d.name} needs an open run`); return }
-    if (historical) { flash(readOnlyAction); return }
+    const directRunId = runId
+    if (!directRunId) { flash(`/${d.name} needs an open run`); return }
+    if (historicalRef.current) { flash(readOnlyAction); return }
+    if (turnCaptureRef.current || runningRef.current) {
+      flash('Assistant is already starting or responding'); return
+    }
     // Read synchronously as well as using React state: two rapid clicks in one batch must not create
     // competing intents before the lock event has caused a render.
-    if (directCaptureRef.current || loadRunCommandLock(runId) || (loadAssistantRunTransport(runId) && !directFailure)) {
+    if (directCaptureRef.current || loadRunCommandLock(directRunId)
+        || (loadAssistantRunTransport(directRunId) && !directFailure)) {
       flash('Recover the stored run command before starting another'); return
     }
     if (directFailure) clearAssistantRunTransport(directFailure.runId, undefined, {
       idempotencyKey: directFailure.idempotencyKey,
     })
     directCaptureRef.current = true
+    setDirectStarting(true)
     try {
       let nodeGeneration = null
-      let expectedGeneration = getObservedRunGeneration(runId)
+      let expectedGeneration = getObservedRunGeneration(directRunId)
       if (d.name === 'approve') {
-        const payload = await get(runApiPath(runId, '/state'))
+        const payload = await get(runApiPath(directRunId, '/state'))
+        if (String(currentRunIdRef.current ?? '') !== String(directRunId)) {
+          flash(`/${d.name} not sent because the open run changed`)
+          return
+        }
+        if (historicalRef.current) { flash(readOnlyAction); return }
         const target = pendingApprovalTarget(payload?.state)
         if (!target) throw new Error('Approval target changed; inspect Events')
         if (target.nodeId !== d.arg) {
@@ -1677,7 +1861,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         if (!expectedGeneration) throw new Error('Run generation unverified; refresh before approving')
         nodeGeneration = target.nodeGeneration
       }
-      const entry = { ...d, runId, nodeGeneration,
+      const entry = { ...d, runId: directRunId, nodeGeneration,
         expectedGeneration,
         idempotencyKey: createIdempotencyKey(), record: { status: 'submitting' } }
       commandFocusRequestedRef.current = true
@@ -1686,11 +1870,22 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       await executeDirect(entry)
     } catch {
       flash(`/${d.name} could not start; refresh and retry`)
-    } finally { directCaptureRef.current = false }
+    } finally {
+      directCaptureRef.current = false
+      if (mountedRef.current) setDirectStarting(false)
+    }
   }
   const checkDirect = async () => {
     const entry = directPending
     if (!entry || entry.checking) return
+    if (historicalRef.current) { flash(readOnlyAction); return }
+    if (directCaptureRef.current || turnCaptureRef.current || runningRef.current
+        || openSessionPendingRef.current) {
+      flashDirect(entry, 'Wait for the current Assistant action before checking this command')
+      return
+    }
+    directCaptureRef.current = true
+    try {
     commandFocusRequestedRef.current = true
     const checking = { ...entry, checking: true }
     if (!entry.protocolInvalid) persistDirect(checking)
@@ -1718,10 +1913,17 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         unavailableDirect(entry, error, entry.record)
       } else failDirectObservation(entry, error)
     }
+    } finally { directCaptureRef.current = false }
   }
   const retryDirect = async () => {
     const failure = directFailure
     if (!failure || directPending || !commandCanRetry(failure.record)) return
+    if (historicalRef.current) { flash(readOnlyAction); return }
+    if (directCaptureRef.current || turnCaptureRef.current || runningRef.current
+        || openSessionPendingRef.current) {
+      flashDirect(failure, 'Wait for the current Assistant action before retrying this command')
+      return
+    }
     if (loadRunCommandLock(failure.runId)) {
       flashDirect(failure, 'Another run command is pending; retry later')
       return
@@ -1733,6 +1935,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     }
     commandFocusRequestedRef.current = true
     setCurrentFailure(failure, null); setDirectPending(retrying)
+    directCaptureRef.current = true
     try {
       const record = await retryRunCommand(failure.runId, failure.record.id, {
         waitMs: 0,
@@ -1758,6 +1961,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           ? ` Active command: ${String(error.existingCommandId).slice(0, 12)}…` : ''
         flashDirect(failure, `Retry failed.${conflict}`)
       }
+    } finally {
+      directCaptureRef.current = false
     }
   }
   const dismissDirectFailure = () => {
@@ -1777,6 +1982,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const dismissProtocolDirect = () => {
     const pending = directPending
     if (!pending?.protocolInvalid) return
+    if (directCaptureRef.current) {
+      flashDirect(pending, 'Wait for the current command check before dismissing recovery')
+      return
+    }
     clearAssistantRunTransport(pending.runId, undefined, { idempotencyKey: pending.idempotencyKey })
     const identity = pending.lockIdentity || {
       source: 'assistant', idempotencyKey: pending.idempotencyKey,
@@ -1881,6 +2090,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   // ── attached files ──
   const onFiles = async (list) => {
+    if (openSessionPendingRef.current) {
+      flash('Wait for the selected Assistant chat to finish opening before attaching files')
+      return
+    }
     const ownerDraft = composerDraftRef.current
     const ownerSession = sidRef.current
     if (ownerSession && forkActionSessionRef.current === ownerSession) {
@@ -1913,7 +2126,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       updatePendingFileReads(ownerDraft, current => current - 1)
     }
   }
-  const removeFile = (name) => setFiles(f => f.filter(x => x.name !== name))
+  const removeFile = (name) => {
+    if (openSessionPendingRef.current) return
+    setFiles(f => f.filter(x => x.name !== name))
+  }
   const filePreamble = (fs) => fs.length
     ? '\n\n[Attached files — use their content as context]\n' + fs.map(f =>
         `--- ${f.name}${f.truncated ? ' (truncated)' : ''} ---\n${f.content}`).join('\n\n') + '\n'
@@ -1922,19 +2138,27 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // Recover a turn whose SSE stream dropped (a buffering proxy can kill a long-lived stream): the
   // background worker keeps running and persists the reply, so poll the session until the assistant
   // message lands, then surface it — instead of stranding the user on "could not reach".
-  const recoverReply = async (id, priorLen, authoritativeFailure = null) => {
-    for (let i = 0; i < 180 && runningRef.current && mountedRef.current && sidRef.current === id; i++) {   // ~6min > the 300s turn budget
+  const completedAssistantReply = (messages, prior) => {
+    if (!assistantReplyCompletesTurn(messages, prior)) return null
+    const userIndex = assistantTurnIndex(messages, prior)
+    return userIndex >= 0 ? messages[userIndex + 1] || null : null
+  }
+  const recoverReply = async (id, priorLen, prior, attempt, authoritativeFailure = null) => {
+    if (!prior || !replyAttemptCurrent(attempt, id)) return false
+    for (let i = 0; i < 180 && replyAttemptCurrent(attempt, id); i++) {   // ~6min > the 300s turn budget
       await sleep(2000)
+      if (!replyAttemptCurrent(attempt, id)) return false
       if (authoritativeFailure?.()) return false
       try {
         const s = await boundedRequest(signal => assistantGet(id, { signal }), 8000)
+        if (!replyAttemptCurrent(attempt, id)) return false
         const arr = s.messages || []
-        const la = [...arr].reverse().find(m => m.role === 'assistant' && m.content)
-        if (arr.length >= priorLen && la) {
-          if (mountedRef.current && sidRef.current === id) {
-            setMsgs(arr)
-            setPreview(previewText(la.content)); setHasNew(view === 'bar')
-          }
+        const reply = arr.length >= priorLen ? completedAssistantReply(arr, prior) : null
+        if (reply?.content) {
+          setMsgs(arr)
+          const ready = announceReplyReady(reply.content, { sessionId: id, turn: prior, attempt })
+          setPreview(previewText(reply.content))
+          if (ready) setHasNew(viewRef.current === 'bar')
           return true
         }
       } catch { /* keep polling */ }
@@ -1946,6 +2170,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // model receives (run context + attached files appended, not shown in the bubble).
   const runLLM = async (instruction, { userText = null, ensureVisible = false, context = null,
     retryFiles = null, turnMode = null, clearComposer = false, acknowledgedShareMeta = null } = {}) => {
+    if (historicalRef.current) { flash(readOnlyAction); return }
+    if (openSessionPendingRef.current) {
+      flash('Wait for the selected Assistant chat to finish opening')
+      return
+    }
     const guardedSid = sidRef.current || sid
     if (guardedSid && forkActionSessionRef.current === guardedSid) {
       flash('Wait for this Assistant chat to finish forking before sending')
@@ -1965,7 +2194,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       verifyShareStatus(guardedSid)
       return
     }
-    if (turnCaptureRef.current || runningRef.current) { flash('Assistant is busy'); return }
+    if (turnCaptureRef.current || runningRef.current || directCaptureRef.current) {
+      flash('Assistant or a run command is already starting'); return
+    }
     let acknowledgedLiveShareIds = []
     if (guardedSid) {
       // A recovery check may have fetched newer metadata in this same event turn, before React can
@@ -1988,17 +2219,38 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       setShareAckNotice(current => current?.sid === guardedSid ? null : current)
     }
     turnCaptureRef.current = true
-    if (ensureVisible && view === 'bar') setView('side')
-    const wasBar = view === 'bar' && !ensureVisible
-    const previewAtSend = preview
-    const hasNewAtSend = hasNew
-    setPreview(''); setHasNew(false)
+    setTurnStarting(true)
+    const sessionSeq = ++openSessionSeqRef.current
+    const localAttempt = {}
+    activeReplyAttemptRef.current = localAttempt
     const draftAtSend = composerDraftRef.current
     const inputAtSend = draftAtSend.input
     const runScopeAtSend = draftAtSend.runScope
     const atts = retryFiles != null ? [...retryFiles] : [...draftAtSend.files]
     const effectiveMode = turnMode || normalizeComposerMode(draftAtSend.mode)
-    const sessionSeq = openSessionSeqRef.current
+    // A just-fired Stop's cancel POST may still be in flight. Wait before consuming the composer or
+    // publishing an optimistic turn, so a session choice made during this wait leaves the draft exact.
+    if (cancelReqRef.current) { try { await cancelReqRef.current } catch { /* done */ } }
+    const commandClaimedDuringCancel = !!runId && (!!loadRunCommandLock(runId)
+      || (!!loadAssistantRunTransport(runId) && !directFailure))
+    const accessBecameReadOnly = historicalRef.current
+    if (!mountedRef.current || activeReplyAttemptRef.current !== localAttempt
+        || sessionSeq !== openSessionSeqRef.current || openSessionPendingRef.current
+        || directCaptureRef.current || commandClaimedDuringCancel || accessBecameReadOnly) {
+      if (activeReplyAttemptRef.current === localAttempt) {
+        activeReplyAttemptRef.current = null
+        turnCaptureRef.current = false
+        setTurnStarting(false)
+      }
+      if (commandClaimedDuringCancel) flash('Draft not sent · a run command claimed this run first')
+      else if (accessBecameReadOnly) flash('Draft not sent · run access became read-only')
+      return
+    }
+    if (ensureVisible && view === 'bar') setAssistantView('side')
+    const previewAtSend = preview
+    const hasNewAtSend = hasNew
+    clearReplyAnnouncement()
+    setPreview(''); setHasNew(false)
     let id = guardedSid
     if (!id) {
       // Create the session FIRST; only then clear the attached-file chips — else a create failure
@@ -2006,12 +2258,34 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       try {
         const m = await boundedRequest(signal => assistantCreate(
           (userText || instruction).slice(0, 60), effectiveMode, { signal }))
-        if (!mountedRef.current || sessionSeq !== openSessionSeqRef.current) { turnCaptureRef.current = false; return }
+        if (!mountedRef.current || sessionSeq !== openSessionSeqRef.current
+            || activeReplyAttemptRef.current !== localAttempt) {
+          if (activeReplyAttemptRef.current === localAttempt) {
+            activeReplyAttemptRef.current = null
+            turnCaptureRef.current = false
+            setTurnStarting(false)
+          }
+          return
+        }
         id = m.id
         bindComposerToSession(id)
         sidRef.current = id; storageSet('ll.asstSid', id); setSid(id)
+        if (historicalRef.current) {
+          if (activeReplyAttemptRef.current === localAttempt) {
+            activeReplyAttemptRef.current = null
+            turnCaptureRef.current = false
+            setTurnStarting(false)
+          }
+          refreshSessions()
+          flash('Chat created, but the message was not sent because run access became read-only — your draft is preserved')
+          return
+        }
       } catch {
-        turnCaptureRef.current = false
+        if (activeReplyAttemptRef.current === localAttempt) {
+          activeReplyAttemptRef.current = null
+          turnCaptureRef.current = false
+          setTurnStarting(false)
+        }
         if (sessionSeq === openSessionSeqRef.current) flash('Could not start the chat — your draft is preserved')
         return
       }
@@ -2031,20 +2305,32 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const ctxInfo = { run: context?.run || null, refs: context?.refs || [], files: atts.map(a => a.name) }
     const hasCtx = ctxInfo.run || ctxInfo.refs.length || ctxInfo.files.length
     const fullInstruction = instruction + filePreamble(atts)
-    const localAttempt = {}
+    const localHistoryLength = msgs.length
+    const localUserTurn = { role: 'user', content: userText || instruction,
+      context: hasCtx ? ctxInfo : null,
+      retryPayload: { instruction, raw: fullInstruction.trim(), userText: userText || instruction,
+        context, files: atts, mode: effectiveMode, historyLength: localHistoryLength },
+      localAttempt }
     atBottomRef.current = true          // sending my own message: always scroll it into view
-    setMsgs(m => [...m, { role: 'user', content: userText || instruction, context: hasCtx ? ctxInfo : null,
-                          retryPayload: { instruction, raw: fullInstruction.trim(),
-                            userText: userText || instruction, context, files: atts,
-                            mode: effectiveMode, historyLength: m.length }, localAttempt },
-                        { role: 'assistant', content: '', streaming: true, localAttempt }])
-    const priorLen = msgs.length + 2
-    setBusy(true); runningRef.current = true
+    setMsgs(m => [...m, localUserTurn,
+      { role: 'assistant', content: '', streaming: true, localAttempt }])
+    const priorLen = localHistoryLength + 2
+    setTurnStarting(false); setBusy(true); runningRef.current = true
     const ctrl = new AbortController(); abortRef.current = ctrl
     let polling = true
     // sid-guarded like every other callback: after a mid-turn session switch, a late poll result
     // must not surface the DEPARTED session's confirm-cards over the one the user switched to.
-    ;(async () => { while (polling && mountedRef.current && sidRef.current === id) { try { const p = await assistantPermissions(id); if (mountedRef.current && sidRef.current === id) setPending(reconcilePendingPermissions(p.pending, resolvedPermsRef.current)) } catch { /* transient */ } await sleep(800) } })()
+    ;(async () => {
+      while (polling && replyAttemptCurrent(localAttempt, id)) {
+        try {
+          const p = await assistantPermissions(id)
+          if (replyAttemptCurrent(localAttempt, id)) {
+            setPending(reconcilePendingPermissions(p.pending, resolvedPermsRef.current))
+          }
+        } catch { /* transient */ }
+        await sleep(800)
+      }
+    })()
     let acc = ''
     let streamedFailure = ''
     // Concurrent PROGRESS poll — the SSE fallback. Behind a buffering proxy (jupyter-server-proxy /
@@ -2054,12 +2340,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     // Once tokens actually flow, acc overtakes it and the authoritative SSE content wins — this only
     // fills the buffered gap, never fights a working stream.
     ;(async () => {
-      while (polling && runningRef.current && mountedRef.current && sidRef.current === id) {
+      while (polling && replyAttemptCurrent(localAttempt, id)) {
         await sleep(1000)
+        if (!replyAttemptCurrent(localAttempt, id)) break
         try {
           const pp = await assistantProgress(id)
+          if (!replyAttemptCurrent(localAttempt, id)) break
           if (!pp || !pp.active) continue
-          if (mountedRef.current && sidRef.current === id && acc.length < (pp.text || '').length)
+          if (replyAttemptCurrent(localAttempt, id) && acc.length < (pp.text || '').length)
             patchLast(prev => (prev && prev.role === 'assistant' && prev.streaming)
               ? { content: assistantErrorInfo(pp.text) ? normalizedFailureText(pp.text) : (pp.text || prev.content),
                   activity: (pp.steps || []).length ? [{ type: 'tools', labels: pp.steps }] : prev.activity }
@@ -2067,35 +2355,32 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         } catch { /* transient */ }
       }
     })()
-    const safeSid = (fn) => (...a) => { if (mountedRef.current && sidRef.current === id) fn(...a) }
+    const safeAttempt = (fn) => (...a) => { if (replyAttemptCurrent(localAttempt, id)) fn(...a) }
     try {
-      // A just-fired Stop's cancel POST may still be in flight — wait it out so it can't register
-      // against (and instantly kill) THIS new turn's cancel event server-side.
-      if (cancelReqRef.current) { try { await cancelReqRef.current } catch { /* done */ } }
+      if (!replyAttemptCurrent(localAttempt, id)) return
       const res = await assistantMessageStream(id, fullInstruction, effectiveMode, {
-        onToken: safeSid((tok) => {
+        onToken: safeAttempt((tok) => {
           acc += tokText(tok)
           patchLast({ content: assistantErrorInfo(acc) ? normalizedFailureText(acc) : acc })
         }),
-        onText: safeSid((txt) => patchLast(prev => ({ activity: [...(prev.activity || []), { type: 'text', content: txt }] }))),
-        onStep: safeSid((s) => patchLast(prev => {
+        onText: safeAttempt((txt) => patchLast(prev => ({ activity: [...(prev.activity || []), { type: 'text', content: txt }] }))),
+        onStep: safeAttempt((s) => patchLast(prev => {
           const a = prev.activity || []; const last = a[a.length - 1]
           return last && last.type === 'tools'
             ? { activity: [...a.slice(0, -1), { ...last, labels: [...last.labels, s] }] }
             : { activity: [...a, { type: 'tools', labels: [s] }] }
         })),
-        onTodos: safeSid((items) => patchLast({ todos: items })),
-        onError: safeSid((e) => {
+        onTodos: safeAttempt((items) => patchLast({ todos: items })),
+        onError: safeAttempt((e) => {
           streamedFailure = normalizedFailureText(e)
           patchLast({ content: streamedFailure })
           flash(safeErrorNotice(e))
         }),
       }, ctrl.signal, userText || instruction,
       acknowledgedLiveShareIds)   // persist the CLEAN bubble, not the ctx-augmented instruction
-      if (!mountedRef.current || sidRef.current !== id) return
+      if (!replyAttemptCurrent(localAttempt, id)) return
       // Stop may race with a terminal frame. Even if the stream resolved first, the turn is cancelled:
       // do not overwrite the "(stopped)" bubble that stop() already wrote.
-      if (!runningRef.current) return
       if (res?.ok === false) {
         // A terminal SSE error is not a completed assistant turn. In particular, the backend's final
         // live-share fence can reject the assistant append after the user turn was durably staged.
@@ -2104,20 +2389,25 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         try {
           const terminalShareMetaRead = beginShareMetaRead(id)
           const session = await boundedRequest(signal => assistantGet(id, { signal }))
-          if (!mountedRef.current || sidRef.current !== id || !runningRef.current) return
+          if (!replyAttemptCurrent(localAttempt, id)) return
           const durableMessages = session.messages
           if (!Array.isArray(durableMessages)) throw new Error('Invalid Assistant session transcript')
           const shareMetaValid = applyAssistantShareMeta(id, session.meta, terminalShareMetaRead)
-          const latest = durableMessages[durableMessages.length - 1]
-          if (durableMessages.length >= priorLen && latest?.role === 'assistant' && latest.content) {
+          const exactTurnIndex = assistantTurnIndex(durableMessages, localUserTurn)
+          const exactReply = durableMessages.length >= priorLen
+            ? completedAssistantReply(durableMessages, localUserTurn) : null
+          if (exactReply?.content) {
             setMsgs(durableMessages)
-            setPreview(previewText(latest.content)); setHasNew(wasBar)
+            const ready = announceReplyReady(exactReply.content,
+              { sessionId: id, turn: localUserTurn, attempt: localAttempt })
+            setPreview(previewText(exactReply.content))
+            if (ready) setHasNew(viewRef.current === 'bar')
             return
           }
-          if (danglingAssistantTurn(durableMessages)) {
+          if (exactTurnIndex >= 0 && exactTurnIndex === durableMessages.length - 1) {
             setMsgs([...durableMessages, { role: 'assistant', content: failureText,
               streaming: false, recovering: false, recoveryNeeded: true }])
-            setPreview(previewText(failureText)); setHasNew(wasBar)
+            setPreview(previewText(failureText)); setHasNew(false)
             const acknowledged = new Set(acknowledgedLiveShareIds)
             const liveStateChanged = shareMetaValid
               && assistantLiveShareIds(session.meta).some(shareId => !acknowledged.has(shareId))
@@ -2138,14 +2428,18 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       patchLast({ content: reply, streaming: false, steps: res && res.steps, applied: res && res.applied,
                   proposals: res && res.proposals, todos: res && res.todos, tokens: res && res.tokens,
                   error_kind: res && res.error_kind })
-      setPreview(previewText(reply)); setHasNew(wasBar)
+      const ready = announceReplyReady(reply,
+        { sessionId: id, turn: localUserTurn, attempt: localAttempt })
+      setPreview(previewText(reply))
+      if (ready) setHasNew(viewRef.current === 'bar')
     } catch (e) {
+      if (!replyAttemptCurrent(localAttempt, id)) return
       const shareStateChanged = assistantLiveShareAckRequired(e)
       const forkTurnRejected = assistantForkTurnInProgress(e)
       if (shareStateChanged || forkTurnRejected) {
         // The backend rejected this before staging a turn. Remove only this optimistic pair, restore
         // what the send consumed, and never route the 409 through ambiguous-turn polling or auto-retry.
-        if (mountedRef.current) {
+        if (replyAttemptCurrent(localAttempt, id)) {
           if (shareStateChanged) setShareUnknown(id, true)
           if (inputCleared && inputAtSend) {
             const currentInput = draftAtSend.input
@@ -2168,7 +2462,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           if (composerDraftRef.current === draftAtSend) setDraftRunScope(runScopeAtSend)
           if (sidRef.current === id) {
             setMsgs(current => current.filter(message => message.localAttempt !== localAttempt))
-            setPreview(previewAtSend); setHasNew(hasNewAtSend)
+            setPreview(previewAtSend); setHasNew(hasNewAtSend && viewRef.current === 'bar')
           }
           const restored = inputCleared || (retryFiles == null && atts.length > 0)
           if (shareStateChanged) {
@@ -2188,7 +2482,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       }
       // Only our own AbortController proves a quiet local stop/unmount. A transport/runtime can also
       // label a remote reset AbortError; that ambiguous accepted turn still requires reconciliation.
-      if (!mountedRef.current || sidRef.current !== id || ctrl.signal.aborted) { /* handled in finally */ }
+      if (!replyAttemptCurrent(localAttempt, id) || ctrl.signal.aborted) { /* handled in finally */ }
       else if (streamedFailure) {
         patchLast({ content: streamedFailure, streaming: false })
       }
@@ -2201,17 +2495,23 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             streaming: true, recovering: true }
         })
         flash(acc ? 'stream interrupted — recovering final reply…' : 'reconnecting…')
-        const ok = await recoverReply(id, priorLen)
+        const ok = await recoverReply(id, priorLen, localUserTurn, localAttempt)
         // `runningRef` guard: if the user hit Stop during recovery, keep the "(stopped)" bubble.
-        if (mountedRef.current && sidRef.current === id && runningRef.current && !ok) patchLast({
+        if (replyAttemptCurrent(localAttempt, id) && !ok) patchLast({
           content: normalizedFailureText('connection unreachable'), streaming: false, recovering: false,
           recoveryNeeded: true,
         })
       }
-    } finally {   // guard shared-ref/state cleanup on still-current session (see reattach finally)
+    } finally {   // only the attempt that still owns this session may release its shared UI state
       polling = false
-      turnCaptureRef.current = false
-      if (mountedRef.current && sidRef.current === id) { runningRef.current = false; abortRef.current = null; setBusy(false); setPending([]) }
+      if (activeReplyAttemptRef.current === localAttempt) {
+        activeReplyAttemptRef.current = null
+        turnCaptureRef.current = false
+        setTurnStarting(false)
+        runningRef.current = false
+        if (abortRef.current === ctrl) abortRef.current = null
+        if (mountedRef.current && sidRef.current === id) { setBusy(false); setPending([]) }
+      }
     }
   }
 
@@ -2221,6 +2521,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     { userText: goal ? `/new ${goal}` : '/new', ensureVisible: true, ...options })
 
   const retryTurn = async (assistantIndex) => {
+    if (openSessionPendingRef.current) {
+      flash('Wait for the selected Assistant chat to finish opening')
+      return
+    }
     if (shareBusySid != null || shareActionSessionRef.current) {
       flash('Wait for the current public-link action before retrying this turn')
       return
@@ -2240,7 +2544,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       verifyShareStatus(guardedSid)
       return
     }
-    if (busy || commandBusy) { flash(commandBusy ? 'A run command is pending' : 'Assistant is busy'); return }
+    if (turnCaptureRef.current || directCaptureRef.current || busy || commandBusy) {
+      flash(commandBusy ? 'A run command is pending' : 'Assistant is busy'); return
+    }
     if (historical) { flash(readOnlyAction); return }
     const failedTurn = msgs[assistantIndex]
     const prior = [...msgs.slice(0, assistantIndex)].reverse().find(m => m.role === 'user')
@@ -2253,13 +2559,20 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     if (failedTurn?.recoveryNeeded) {
       const id = sidRef.current || sid
       if (!id) { flash('The saved Assistant session is no longer available'); return }
+      const retryCheckAttempt = {}
+      const retrySessionSeq = ++openSessionSeqRef.current
+      activeReplyAttemptRef.current = retryCheckAttempt
+      turnCaptureRef.current = true
+      clearReplyAnnouncement()
+      setRetryChecking(true)
       try {
         // Refresh first: if the original POST was staged, openSession performs exact raw/mode recovery;
         // if its reply landed late, simply surface it. Only a genuinely unstaged request falls through
         // to the ordinary new-turn retry below.
         const retryShareMetaRead = beginShareMetaRead(id)
         const session = await boundedRequest(signal => assistantGet(id, { signal }))
-        if (!mountedRef.current || sidRef.current !== id) return
+        if (historicalRef.current || !replyAttemptOwned(retryCheckAttempt, id)
+            || retrySessionSeq !== openSessionSeqRef.current || openSessionPendingRef.current) return
         const shareMetaOutcome = applyAssistantShareMeta(id, session.meta, retryShareMetaRead)
         if (shareMetaOutcome === undefined) {
           setShareUnknown(id, true)
@@ -2278,19 +2591,36 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         }
         acknowledgedShareMeta = session.meta
         const durableMessages = session.messages || []
-        if (danglingAssistantTurn(durableMessages)) {
+        const exactReply = completedAssistantReply(durableMessages, prior)
+        if (exactReply?.content) {
+          setMsgs(durableMessages)
+          const ready = announceReplyReady(exactReply.content,
+            { sessionId: id, turn: prior, attempt: retryCheckAttempt })
+          setPreview(previewText(exactReply.content))
+          if (ready) setHasNew(viewRef.current === 'bar')
+          return
+        }
+        const exactTurnIndex = assistantTurnIndex(durableMessages, prior)
+        if (exactTurnIndex === durableMessages.length - 1 && danglingAssistantTurn(durableMessages)) {
+          if (activeReplyAttemptRef.current === retryCheckAttempt) {
+            activeReplyAttemptRef.current = null
+            turnCaptureRef.current = false
+            setRetryChecking(false)
+          }
           await openSession(id, { recover: true })
           return
         }
-        if (assistantReplyCompletesTurn(durableMessages, prior)) {
-          setMsgs(durableMessages)
-          const latest = [...durableMessages].reverse().find(m => m.role === 'assistant' && m.content)
-          if (latest) { setPreview(previewText(latest.content)); setHasNew(view === 'bar') }
-          return
-        }
       } catch (error) {
+        if (!replyAttemptOwned(retryCheckAttempt, id)
+            || retrySessionSeq !== openSessionSeqRef.current || openSessionPendingRef.current) return
         flash(error?.status === 404 ? 'This Assistant session no longer exists' : 'Could not check the saved Assistant turn')
         return
+      } finally {
+        if (activeReplyAttemptRef.current === retryCheckAttempt) {
+          activeReplyAttemptRef.current = null
+          turnCaptureRef.current = false
+          setRetryChecking(false)
+        }
       }
     }
     if (prior.turn_id) {
@@ -2324,7 +2654,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
 
   const openAssistantSettings = () => {
-    setView('bar')
+    setAssistantView('bar')
     setHasNew(false)
     location.hash = '#/settings'
   }
@@ -2336,6 +2666,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const draftRunDestination = runId ? `run “${runId}”` : 'the Runs overview'
   const draftRunMismatchMessage = `Draft belongs to ${draftRunSource} and will not be sent in ${draftRunDestination}.`
   const useDraftHere = () => {
+    if (openSessionPendingRef.current) {
+      flash('Wait for the selected Assistant chat to finish opening before rebinding this draft')
+      return
+    }
     if (!composerUsesRun(input, files, pendingFileReads)) return
     const draft = composerDraftRef.current
     draft.runScope = currentComposerRunKey
@@ -2346,6 +2680,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   const send = () => {
     if (historical) { flash(readOnlyAction); return }
+    if (openSessionPendingRef.current) {
+      flash('Wait for the selected Assistant chat to finish opening')
+      return
+    }
     if (shareBusySid != null || shareActionSessionRef.current) {
       flash('Wait for the current public-link action before sending')
       return
@@ -2376,8 +2714,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const t = input.trim()
     const storedCommand = !!runId && (!!loadRunCommandLock(runId)
       || (!!loadAssistantRunTransport(runId) && !directFailure))
-    if ((!t && files.length === 0) || busy || commandBusy || storedCommand) {
+    if ((!t && files.length === 0) || turnCaptureRef.current || directCaptureRef.current
+        || busy || commandBusy || storedCommand) {
       if (storedCommand) flash('Recover the stored run command before continuing')
+      else if (turnCaptureRef.current || directCaptureRef.current) flash('Another action is already starting')
       return
     }
     const mNew = /^\/(new|genesis|run)\b\s*([\s\S]*)$/i.exec(t)
@@ -2399,13 +2739,17 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   useEffect(() => {
     const onNewRun = (event) => {
       event.preventDefault()
+      if (openSessionPendingRef.current) {
+        flash('Wait for the selected Assistant chat to finish opening before drafting a new run')
+        return
+      }
       if (busy || commandBusy || historical) { flash(historical ? readOnlyAction : commandBusy ? 'A run command is pending' : 'Assistant is busy'); return }
       const goal = String(event.detail?.goal || '').trim()
       const command = goal ? `/new ${goal}` : '/new '
       const existing = input.trim()
       if (!existing || existing === command.trim()) setInput(command)
       else flash('Draft preserved — choose Chat or clear the composer before drafting a new run')
-      setView(current => current === 'bar' ? 'side' : current)
+      setAssistantView(current => current === 'bar' ? 'side' : current)
       setHasNew(false)
       requestAnimationFrame(() => inputRef.current?.focus())
     }
@@ -2425,7 +2769,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }, [launchDrafts, launchRecoveries.length])
 
   const stop = () => {
+    activeReplyAttemptRef.current = null
+    turnCaptureRef.current = false
+    setTurnStarting(false)
+    setRetryChecking(false)
     runningRef.current = false                              // halt reattach/recover polling immediately
+    clearReplyAnnouncement()
     if (abortRef.current) { try { abortRef.current.abort() } catch { /* already gone */ } abortRef.current = null }
     const id = sidRef.current || sid                        // cancel server-side (works even post-reload)
     if (id) {
@@ -2441,18 +2790,34 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     flash('stopped')
   }
   useEffect(() => {
-    if (historical && runningRef.current) stop()
-  }, [historical])
+    if (!historical) return
+    clearReplyAnnouncement()
+    if (runningRef.current) { stop(); return }
+    // A first message may already be waiting for its session-create receipt. Let it bind that durable
+    // identity, then runLLM stops before consuming the draft or posting the turn; invalidating here
+    // would strand an empty server-side chat with no client receipt.
+    if (turnCaptureRef.current && !sidRef.current && !retryChecking) return
+    if (turnCaptureRef.current || retryChecking || turnStarting) {
+      ++openSessionSeqRef.current
+      activeReplyAttemptRef.current = null
+      turnCaptureRef.current = false
+      setTurnStarting(false)
+      setRetryChecking(false)
+    }
+  }, [historical, retryChecking, turnStarting, clearReplyAnnouncement])
 
   const activeMode = MODES.find(x => x.id === mode) || MODES[0]
   const changeInput = e => {
+    if (openSessionPendingRef.current) return
     setInput(e.target.value); setSuggestionsDismissed(false); setSuggestionIndex(0)
   }
-  const pendingCommandText = directPending
-    ? assistantDirectStatus(directPending)
+  const pendingCommandText = directStarting
+    ? 'Checking run command preconditions…'
+    : directPending ? assistantDirectStatus(directPending)
     : externalCommandPending ? `/${externalCommandPending.action} is pending in the run timeline` : ''
   const canCheckDirect = !!directPending?.statusUnavailable && !directPending?.checking
   const canRetryDirect = !commandBusy && commandCanRetry(directFailure?.record)
+  const directRecoveryPaused = historical || sessionOpening || turnStarting || retryChecking || busy
   const showDirectFailure = !!directFailure && !commandBusy
   const directFailureText = directFailure
     ? `/${directFailure.name} failed: ${commandErrorMessage(directFailure.record)}` : ''
@@ -2512,6 +2877,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const showSuggestions = !historical && !suggestionsDismissed && suggestions.length > 0
   const activeSuggestionIndex = showSuggestions ? Math.min(suggestionIndex, suggestions.length - 1) : -1
   const chooseSuggestion = (index = activeSuggestionIndex) => {
+    if (openSessionPendingRef.current) return
     const choice = suggestions[index]
     if (!choice) return
     setInput(`/${choice.name} `)
@@ -2557,16 +2923,16 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const shareVerifying = !!sid && shareVerifySid === sid
   const sharePaused = shareBusy || shareUnknown || shareVerifying
   const deletingCurrentSession = !!sid && deletingSessionsRef.current.has(sid)
-  const shareTurnIncomplete = busy || commandBusy || pending.length > 0
+  const shareTurnIncomplete = sessionOpening || busy || commandBusy || pending.length > 0
     || runningRef.current || turnCaptureRef.current || msgs[msgs.length - 1]?.role === 'user'
   const forkBusy = forkBusySid != null
   const forkingCurrentSession = !!sid && forkBusySid === sid
   const currentForkRecovery = forkRecovery?.sid === sid ? forkRecovery : null
-  const composerPaused = sharePaused || forkingCurrentSession
+  const composerPaused = sessionOpening || turnStarting || retryChecking || sharePaused || forkingCurrentSession
   // Unknown public-link truth blocks every server mutation, but it must not destroy a local draft or
   // native focus. Keep editing controls available; Send remains focusable and performs a fail-closed
   // verification without staging a turn.
-  const composerEditingPaused = shareBusy || forkingCurrentSession
+  const composerEditingPaused = sessionOpening || shareBusy || forkingCurrentSession
   const verifyShareStatus = (targetSid, retrySuperseded = true) => {
     const target = String(targetSid || '')
     if (!target) return Promise.resolve(null)
@@ -2861,7 +3227,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     if (shareUnknown || shareVerifying) {
       return () => verifyShareStatus(sidRef.current || sid)
     }
-    if (composerPaused || shareActionSessionRef.current
+    if ((composerPaused && !retryChecking) || shareActionSessionRef.current
         || forkActionSessionRef.current === (sidRef.current || sid)) return null
     return () => retryTurn(assistantIndex)
   }
@@ -2880,7 +3246,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       </div>
       {!input.trim() && <div className="asst-hints">
         {HINTS.map(h => <button key={h.label} className="asst-hint"
+          disabled={composerEditingPaused}
           onClick={() => {
+            if (openSessionPendingRef.current) return
             setInput(current => current.trim() ? current : h.text)
             inputRef.current?.focus()
           }}>{h.label}</button>)}
@@ -2896,7 +3264,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         onRetry={retryHandlerFor(i)}
         retryLabel={shareUnknown || shareVerifying
           ? shareVerifying ? 'Checking status…' : 'Verify status' : 'Retry'}
-        retryBusy={shareVerifying}
+        retryBusy={shareVerifying || retryChecking}
         onOpenSettings={openAssistantSettings} onRunOpen={openRunFromAssistant}
         launchChat={launchChatThrough(i)}
         revertState={revertState}
@@ -2924,11 +3292,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const fileChips = files.length > 0 && <div className="asst-files">
     {files.map(f => <span key={f.name} className="chip xs file" title={`${(f.size / 1024).toFixed(1)} KB${f.truncated ? ' · truncated' : ''}`}>
       <OpIcon name="doc" size={11} /> {f.name}
-      <button className="chip-x" onClick={() => removeFile(f.name)} aria-label={`Remove ${f.name}`}>✕</button></span>)}
+      <button className="chip-x" onClick={() => removeFile(f.name)}
+        disabled={composerEditingPaused} aria-label={`Remove ${f.name}`}>✕</button></span>)}
   </div>
 
   const attachBtn = (cls) => <button className={cls} aria-label="Attach text files"
-    title={historical ? readOnlyShort : shareUnknown ? 'Attach to this draft; sending is paused until public-link status is verified'
+    title={historical ? readOnlyShort : sessionOpening ? 'Wait for the selected Assistant chat to finish opening'
+      : shareUnknown ? 'Attach to this draft; sending is paused until public-link status is verified'
       : shareBusy ? 'Wait for the current public-link action'
         : forkingCurrentSession ? 'Wait for this chat to finish forking'
           : draftRunMismatch ? draftRunMismatchMessage
@@ -2943,9 +3313,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       {MODES.map(x => <button key={x.id} aria-pressed={x.id === mode}
         className={'asst-mode' + (x.id === mode ? ' on' : '')}
         disabled={historical || composerEditingPaused} title={historical ? readOnlyShort
-          : shareUnknown ? 'Choose a draft mode; sending is paused until public-link status is verified'
+          : sessionOpening ? 'Wait for the selected Assistant chat to finish opening'
+            : shareUnknown ? 'Choose a draft mode; sending is paused until public-link status is verified'
             : forkingCurrentSession ? 'Wait for this chat to finish forking' : x.hint}
-        onClick={() => setComposerMode(x.id)}>{x.label}</button>)}
+        onClick={() => { if (!openSessionPendingRef.current) setComposerMode(x.id) }}>{x.label}</button>)}
     </div>
     <span className="asst-modehint muted">{activeMode.hint}</span>
   </div>
@@ -2956,6 +3327,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       role="listbox" aria-label="Assistant commands">
     {suggestions.map((c, index) => <button key={c.name} id={`assistant-command-option-${index}`}
       className="cmdbar-pop-item" role="option" tabIndex={-1} aria-selected={index === activeSuggestionIndex}
+      disabled={composerEditingPaused}
       onMouseMove={() => setSuggestionIndex(index)}
       onMouseDown={(e) => { e.preventDefault(); chooseSuggestion(index) }}>
       <b>/{c.name}</b><span className="muted"> {c.desc}</span></button>)}
@@ -2997,19 +3369,28 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       <button type="button" className="btn sm ghost" onClick={revokeCurrentShares}
         disabled={shareBusy || forkingCurrentSession}>Unshare</button>
     </div>}
+    {sessionOpening && <div className="assistant-command-pending">
+      Opening the selected Assistant chat…
+    </div>}
+    {retryChecking && <div className="assistant-command-pending">
+      Checking the saved Assistant turn…
+    </div>}
     {(commandBusy || directFailure) && <div ref={commandStatusRef} tabIndex={-1}
       className={'assistant-command-pending' + (showDirectFailure ? ' error' : '')}
       role={directNeedsAlert ? 'alert' : 'status'} aria-live={directNeedsAlert ? 'assertive' : 'polite'} aria-atomic="true">
       <span>{showDirectFailure ? directFailureText : pendingCommandText}</span>
-      {canCheckDirect && <button className="btn sm" onClick={checkDirect}>Check same command</button>}
-      {directPending?.protocolInvalid && <button className="btn sm ghost" onClick={dismissProtocolDirect}>Dismiss</button>}
-      {canRetryDirect && <button className="btn sm" onClick={retryDirect}>Retry same command</button>}
+      {canCheckDirect && <button className="btn sm" disabled={directRecoveryPaused}
+        onClick={checkDirect}>Check same command</button>}
+      {directPending?.protocolInvalid && <button className="btn sm ghost"
+        disabled={!!directPending.checking} onClick={dismissProtocolDirect}>Dismiss</button>}
+      {canRetryDirect && <button className="btn sm" disabled={directRecoveryPaused}
+        onClick={retryDirect}>Retry same command</button>}
       {showDirectFailure && <button className="btn sm ghost" onClick={dismissDirectFailure}>Dismiss</button>}
     </div>}
     {draftRunMismatch && <div className="assistant-command-pending error" role="alert"
       aria-live="assertive" aria-atomic="true">
       <span>{draftRunMismatchMessage}</span>
-      <button type="button" className="btn sm ghost" onClick={useDraftHere}>
+      <button type="button" className="btn sm ghost" disabled={sessionOpening} onClick={useDraftHere}>
         {runId ? 'Use in this run' : 'Use without a run'}
       </button>
     </div>}
@@ -3019,7 +3400,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     </div>}
     {runId && refNodes(input).length > 0 && <div className="cmdbar-ctx">
       {refNodes(input).map(id => <span key={id} className="chip xs">#{id}
-        <button className="chip-x" aria-label={`Detach experiment ${id}`} onClick={() => setInput(input.replace(new RegExp(`#(?:node-)?${id}\\b`, 'gi'), '').replace(/\s{2,}/g, ' ').trim())}>✕</button></span>)}
+        <button className="chip-x" aria-label={`Detach experiment ${id}`} disabled={composerEditingPaused}
+          onClick={() => {
+            if (openSessionPendingRef.current) return
+            setInput(input.replace(new RegExp(`#(?:node-)?${id}\\b`, 'gi'), '').replace(/\s{2,}/g, ' ').trim())
+          }}>✕</button></span>)}
     </div>}
     {fileChips}
     <div className="asst-inrow">
@@ -3039,9 +3424,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       {busy
         ? <button className="btn sm" aria-label="Stop Assistant" title="stop" onClick={stop}>■</button>
         : <button className="btn sm primary"
-            disabled={historical || commandBusy || composerEditingPaused || draftRunMismatch || pendingFileReads > 0
+            disabled={sessionOpening || retryChecking || turnStarting || historical || commandBusy || composerEditingPaused || draftRunMismatch || pendingFileReads > 0
               || (!input.trim() && files.length === 0)}
-            onClick={send}>{shareUnknown || shareVerifying ? shareVerifying ? 'Checking…' : 'Verify to send'
+            onClick={send}>{sessionOpening ? 'Opening\u2026'
+              : retryChecking ? 'Checking\u2026'
+              : turnStarting ? 'Starting\u2026'
+              : shareUnknown || shareVerifying ? shareVerifying ? 'Checking…' : 'Verify to send'
               : commandBusy || shareBusy ? 'Waiting…'
               : forkingCurrentSession ? 'Forking…'
                 : pendingFileReads > 0 ? 'Reading…' : 'Send'}</button>}
@@ -3101,15 +3489,18 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }, [sid, shareCopy, clearShareCopy, setShareUnknown, refreshSessions])
   return <>
     {hiddenFileInput}
-    <output className="sr-only">
-      {busy ? 'Assistant is responding.' : preview ? 'Assistant response ready.' : ''}
+    <output className="sr-only" aria-live="polite" aria-atomic="true">
+      {sessionOpening ? 'Opening Assistant chat.'
+        : retryChecking ? 'Checking saved Assistant turn.'
+          : turnStarting ? 'Starting Assistant response.'
+            : busy ? 'Assistant is responding.' : replyAnnouncement}
     </output>
     <div id="assistant-share-status" className="sr-only" role="status" aria-live="polite" aria-atomic="true">
       {shareStatusMessage}
     </div>
 
     {/* ── bottom bar — ONLY in bar view (moves into the side panel otherwise) ── */}
-    {view === 'bar' && <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (busy || commandBusy || forkingCurrentSession ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
+    {view === 'bar' && <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (sessionOpening || retryChecking || turnStarting || busy || commandBusy || forkingCurrentSession ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
       <button className="cmdbar-ic" aria-label="Open full Assistant" title="open the full assistant" onClick={openFull}>✦</button>
       {launchRecoveryButton}
       <button type="button" className={`cmdbar-mode mode-${mode}`}
@@ -3121,7 +3512,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {(refNodes(input).length > 0 || files.length > 0) && <div className="cmdbar-ctx">
           {runId && refNodes(input).map(id => <span key={id} className="chip xs">#{id}</span>)}
           {files.map(f => <span key={f.name} className="chip xs file"><OpIcon name="doc" size={10} /> {f.name}
-            <button className="chip-x" aria-label={`Remove ${f.name}`} onClick={() => removeFile(f.name)}>✕</button></span>)}
+            <button className="chip-x" aria-label={`Remove ${f.name}`}
+              disabled={composerEditingPaused} onClick={() => removeFile(f.name)}>✕</button></span>)}
         </div>}
         {suggestionPop}
         <input className="cmdbar-in" ref={inputRef} value={input}
@@ -3151,6 +3543,18 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             <button type="button" className="btn sm ghost" onClick={revokeCurrentShares}
               disabled={shareBusy}>Unshare</button>
           </span>
+        : sessionOpening
+          ? <span className="cmdbar-status thinking">
+              <span className="cmdbar-pip" /> opening selected chat...
+            </span>
+        : retryChecking
+          ? <span className="cmdbar-status thinking">
+              <span className="cmdbar-pip" /> checking saved turn...
+            </span>
+        : turnStarting
+          ? <span className="cmdbar-status thinking">
+              <span className="cmdbar-pip" /> starting response...
+            </span>
         : busy
         ? <span className={'cmdbar-status thinking' + (liveShareActive ? ' assistant-live-share' : '')}>
             <span className="cmdbar-pip" />
@@ -3164,14 +3568,17 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               role={directNeedsAlert ? 'alert' : 'status'}
               aria-live={directNeedsAlert ? 'assertive' : 'polite'} aria-atomic="true">
               <span className="cmdbar-pip" /> {pendingCommandText || 'Waiting for command…'}
-              {canCheckDirect && <button className="btn sm" onClick={checkDirect}>Check</button>}
-              {directPending?.protocolInvalid && <button className="btn sm ghost" onClick={dismissProtocolDirect}>Dismiss</button>}
+              {canCheckDirect && <button className="btn sm" disabled={directRecoveryPaused}
+                onClick={checkDirect}>Check</button>}
+              {directPending?.protocolInvalid && <button className="btn sm ghost"
+                disabled={!!directPending.checking} onClick={dismissProtocolDirect}>Dismiss</button>}
             </span>
           : directFailure
             ? <span ref={commandStatusRef} tabIndex={-1} className="cmdbar-status thinking recovery error"
                 role="alert" aria-live="assertive" aria-atomic="true">
                 <span>{directFailureText}</span>
-                {canRetryDirect && <button className="btn sm" onClick={retryDirect}>Retry same command</button>}
+                {canRetryDirect && <button className="btn sm" disabled={directRecoveryPaused}
+                  onClick={retryDirect}>Retry same command</button>}
                 <button className="btn sm ghost" onClick={dismissDirectFailure}>Dismiss</button>
               </span>
           : currentShareAckNotice
@@ -3187,7 +3594,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             ? <span className="cmdbar-status thinking recovery error" role="alert"
                 aria-live="assertive" aria-atomic="true" title={draftRunMismatchMessage}>
                 <span><span className="cmdbar-who">draft held</span> · from {draftRunSource}</span>
-                <button type="button" className="btn sm ghost" onClick={useDraftHere}>Use here</button>
+                <button type="button" className="btn sm ghost" disabled={sessionOpening}
+                  onClick={useDraftHere}>Use here</button>
               </span>
           : forkingCurrentSession
             ? <span className="cmdbar-status thinking" role="status"
@@ -3215,17 +3623,22 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       {busy
         ? <button className="cmdbar-go stop" aria-label="Stop Assistant" title="stop the assistant" onClick={stop}>■</button>
         : <button className="cmdbar-go"
-            aria-label={shareUnknown || shareVerifying ? shareVerifying
+            aria-label={sessionOpening ? 'Opening selected Assistant chat'
+              : retryChecking ? 'Checking saved Assistant turn'
+                : turnStarting ? 'Starting Assistant response' : shareUnknown || shareVerifying ? shareVerifying
               ? 'Checking public-link status; nothing sent'
               : 'Verify public-link status before sending' : 'Send Assistant message'}
-            title={draftRunMismatch ? draftRunMismatchMessage
+            title={sessionOpening ? 'Wait for the selected Assistant chat to finish opening'
+              : retryChecking ? 'Wait for the saved Assistant turn check to finish'
+                : turnStarting ? 'Wait for the Assistant response to start'
+              : draftRunMismatch ? draftRunMismatchMessage
               : shareUnknown || shareVerifying ? shareVerifying
                 ? 'Checking public-link status; your draft remains editable'
                 : 'Messaging paused until public-link status is verified'
               : commandBusy ? 'Waiting for the current run command' : historical ? readOnlyShort
                 : forkingCurrentSession ? 'Wait for this chat to finish forking'
                   : pendingFileReads > 0 ? 'Wait for the selected attachment to finish reading' : 'send (Enter)'}
-            disabled={historical || commandBusy || composerEditingPaused || draftRunMismatch || pendingFileReads > 0
+            disabled={sessionOpening || retryChecking || turnStarting || historical || commandBusy || composerEditingPaused || draftRunMismatch || pendingFileReads > 0
               || (!input.trim() && files.length === 0)} onClick={send}>▶</button>}
       <button className="cmdbar-drawer-btn" aria-label="Open Assistant in side view"
         title="open chat on the right (side view)" onClick={openSide}><OpIcon name="chat" size={13} /></button>
@@ -3259,7 +3672,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {compactAssistant && attentionIndicator.active && <AttentionLauncher
           indicator={attentionIndicator} embedded onClick={openAttentionCenter} />}
         <button className="btn sm ghost" aria-label="Start a new Assistant chat"
-          title="new chat" onClick={newChat}>＋ Chat</button>
+          title={turnStarting ? 'Wait for the new Assistant chat to finish starting'
+            : retryChecking ? 'Wait for the saved turn check to finish' : 'new chat'}
+          disabled={turnStarting || retryChecking} onClick={newChat}>＋ Chat</button>
         <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
         <button className="btn sm ghost" title="collapse to the bar" onClick={collapseToBar}>▾ bar</button>
       </div>
@@ -3279,7 +3694,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           <button className="btn sm" title="fold back to the bar" onClick={collapseToBar}>▾ bar</button>
           <span className="ttl" style={{ flex: 1 }}>Assistant</span>
           <button className="btn sm primary" aria-label="Start a new Assistant chat"
-            onClick={newChat}>+ Chat</button>
+            title={turnStarting ? 'Wait for the new Assistant chat to finish starting'
+              : retryChecking ? 'Wait for the saved turn check to finish' : undefined}
+            disabled={turnStarting || retryChecking} onClick={newChat}>+ Chat</button>
         </div>
         <div ref={sessionsRef} className="asst-sessions"
           aria-busy={sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}>
@@ -3301,25 +3718,40 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           {sessionsStatus === 'ready' && sessions.length === 0
             && <div className="muted asst-session-empty">No chats yet.</div>}
           {sessions.map(s => <div key={s.id} className={'asst-sess'
-            + (s.id === sid ? ' active' : '') + (s.cleanup_required ? ' cleanup-required' : '')}>
+            + (s.id === sid ? ' active' : '') + (String(openingSid || '') === String(s.id) ? ' opening' : '')
+            + (s.cleanup_required ? ' cleanup-required' : '')}>
             <button type="button" className="asst-sess-open"
               aria-current={s.id === sid ? 'page' : undefined}
-              aria-label={s.cleanup_required
+              aria-busy={String(openingSid || '') === String(s.id) || undefined}
+              aria-label={String(openingSid || '') === String(s.id)
+                ? `Opening chat ${s.title || 'Chat'}` : s.cleanup_required
                 ? 'Incomplete chat deletion; use Delete to retry cleanup'
                 : undefined}
-              title={s.cleanup_required ? 'This partial chat cannot be opened. Delete it to retry cleanup.' : undefined}
-              disabled={s.cleanup_required === true}
+              title={String(openingSid || '') === String(s.id) ? 'Opening this Assistant chat…'
+                : turnStarting ? 'Wait for the new Assistant chat to finish starting'
+                  : retryChecking ? 'Wait for the saved turn check to finish'
+                    : s.cleanup_required ? 'This partial chat cannot be opened. Delete it to retry cleanup.' : undefined}
+              disabled={s.cleanup_required === true || turnStarting || retryChecking
+                || String(openingSid || '') === String(s.id)}
               onClick={() => openSession(s.id)}>
               <span className="asst-sess-t">{s.title || 'Chat'}</span>
-              <span className="asst-sess-m">{s.cleanup_required
+              <span className="asst-sess-m">{String(openingSid || '') === String(s.id)
+                ? 'Opening…' : s.cleanup_required
                 ? 'Cleanup required · delete to retry'
                 : s.shared
                   ? `${Number(s.share_count) > 1 ? `${s.share_count} public links` : 'Public link'} ${s.share_live ? 'LIVE · new replies public' : 'active'}${s.share_expires_at ? ` · until ${fmtDate(s.share_expires_at)}` : ''}`
                   : fmtAgo(s.updated)}</span>
             </button>
             <button type="button" className="asst-sess-x" onClick={(e) => requestDeleteSession(s, e)}
-              disabled={forkBusySid === s.id}
-              title={forkBusySid === s.id ? 'Wait for this chat to finish forking' : undefined}
+              disabled={forkBusySid === s.id || turnStarting
+                || String(openingSid || '') === String(s.id)
+                || (s.id === sid && (retryChecking || busy || pending.length > 0))}
+              title={forkBusySid === s.id ? 'Wait for this chat to finish forking'
+                : turnStarting ? 'Wait for the new Assistant chat to finish starting'
+                  : String(openingSid || '') === String(s.id) ? 'Wait for this chat to finish opening'
+                    : s.id === sid && retryChecking ? 'Wait for the saved Assistant turn check to finish'
+                      : s.id === sid && (busy || pending.length > 0)
+                        ? 'Stop or finish this Assistant turn before deleting the chat' : undefined}
               aria-label={s.cleanup_required
                 ? `Retry cleanup for ${s.title || 'incomplete chat deletion'}`
                 : `Delete chat ${s.title || 'Chat'}`}>✕</button>

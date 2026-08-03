@@ -209,8 +209,12 @@ test('compact Assistant blocks background pointers and traps focus in the side d
   assert.match(assistant, /role=\{compactAssistant \? 'dialog' : undefined\} aria-modal=\{compactAssistant \? 'true' : undefined\}/)
   assert.match(assistant, /\{!compactAssistant && <div className="asst-resize" role="separator"/,
     'the non-functional compact resize handle must not exist in the accessibility tree')
-  assert.match(assistant, /\{busy \? 'Assistant is responding\.' : preview \? 'Assistant response ready\.' : ''\}/)
-  assert.match(assistant, /<output className="sr-only">/)
+  assert.match(assistant, /\{sessionOpening \? 'Opening Assistant chat\.'[\s\S]*?retryChecking \? 'Checking saved Assistant turn\.'[\s\S]*?turnStarting \? 'Starting Assistant response\.'[\s\S]*?busy \? 'Assistant is responding\.' : replyAnnouncement\}/)
+  assert.match(assistant, /<output className="sr-only" aria-live="polite" aria-atomic="true">/)
+  assert.doesNotMatch(assistant, /<span className="cmdbar-status thinking" role="status" aria-live="polite" aria-atomic="true">\s*<span className="cmdbar-pip" \/> opening selected chat/,
+    'the visible opening indicator must not duplicate the stable live output')
+  assert.doesNotMatch(assistant, /busy \? 'Assistant is responding\.' : preview/,
+    'loading an existing preview must not announce it as a newly completed response')
   assert.match(assistant, /if \(next === 'side'\) requestAnimationFrame\(\(\) => inputRef\.current\?\.focus/)
   assert.match(css, /\.asst-side-backdrop \{ position: fixed; inset: 0; z-index: 190;/)
   assert.match(css, /\.asst-side-panel \{[^}]*z-index: 191;/)
@@ -400,7 +404,7 @@ test('moving pending or failed command UI to side/full re-arms status focus', as
 test('an unsent Assistant storage quarantine keeps failure and Dismiss visible in the same tab', async () => {
   const assistant = await source('AssistantBar.jsx')
   assert.match(assistant, /const ownStorageFailureLock = assistantStorageFailureOwnsLock\(directFailure, runCommandLock\)/)
-  assert.match(assistant, /const commandBusy = directPending != null \|\| \(runCommandLock != null && !ownStorageFailureLock\)/)
+  assert.match(assistant, /const commandBusy = directStarting \|\| directPending != null\s*\|\| \(runCommandLock != null && !ownStorageFailureLock\)/)
   assert.match(assistant, /const clearUnsentDirectRecovery = entry => \{[\s\S]*?clearAssistantRunTransport\(entry\.runId[\s\S]*?clearRunCommandLock\(entry\.runId, expected\)[\s\S]*?remainingTransport[\s\S]*?remainingLock/)
   assert.match(assistant, /const localStorageFailure = entry => \{[\s\S]*?clearUnsentDirectRecovery\(failure\)[\s\S]*?setCurrentFailure\(entry, failure\)/)
   assert.match(assistant, /failure\.record\?\.error\?\.code === 'command_storage_unavailable'[\s\S]*?!clearUnsentDirectRecovery\(failure\)[\s\S]*?remains quarantined/)

@@ -2814,7 +2814,8 @@ export const nodeConversation = (runId, nid, options) =>
 // stream). Also used to poll whether a turn is still running (reattach after switch/reload).
 export const assistantCancel = (sid, options) =>
   post(`/api/assistant/sessions/${encodeURIComponent(sid)}/cancel`, {}, options)
-export const assistantProgress = (sid) => get(`/api/assistant/progress?session=${encodeURIComponent(sid)}`)
+export const assistantProgress = (sid, options = {}) => get(
+  `/api/assistant/progress?session=${encodeURIComponent(sid)}`, options)
 
 export const assistantCommands = () => get('/api/assistant/commands')
 export const assistantRevert = (change, options) => {
