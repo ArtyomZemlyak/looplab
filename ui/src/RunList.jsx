@@ -1020,7 +1020,7 @@ function SuperTaskModal({ supertasks, state, onRetry, onCreate, onRename, onDele
 }
 
 export default function RunList({ onOpen, onSettings, onResearchAtlas,
-  initialNavigationState = null, restoreFocusRunId = null,
+  initialNavigationState = null, restoreFocusRunId = null, restoreFocusControl = null,
   onNavigationStateChange = null, onNavigationRestored = null }) {
   const initialNavigationRef = useRef()
   if (initialNavigationRef.current === undefined) {
@@ -1040,6 +1040,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   const [menuBusy, setMenuBusy] = useState(false)
   const projectRenameReturnRef = useRef(null)
   const runsMainRef = useRef(null)
+  const settingsButtonRef = useRef(null)
   const projectsAllRef = useRef(null)
   const [dragRun, setDragRun] = useState(null)
   const compareDragGuardRef = useRef(null)
@@ -1554,9 +1555,13 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
     if (!initialNavigationState) return
     const active = document.activeElement
     if (!active || active === document.body || active === document.documentElement) {
-      runsMainRef.current?.focus({ preventScroll: true })
+      const controlTarget = !restoreFocusRunId && restoreFocusControl === 'settings'
+        && settingsButtonRef.current?.isConnected && settingsButtonRef.current.getClientRects().length
+        && !settingsButtonRef.current.matches(':disabled')
+        ? settingsButtonRef.current : null
+      ;(controlTarget || runsMainRef.current)?.focus({ preventScroll: true })
     }
-  }, [initialNavigationState])
+  }, [initialNavigationState, restoreFocusControl, restoreFocusRunId])
 
   const navigationResourcesSettled = runsState !== 'loading'
     && projectsState !== 'loading' && superState !== 'loading'
@@ -1579,14 +1584,22 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
       const visibleExternalFocus = active && active !== document.body
         && active !== document.documentElement && !runsMainRef.current?.contains(active)
         && active.getClientRects?.().length
-      if (visibleExternalFocus) { finish(); return }
-      const target = restoreFocusRunId
+      const visibleRunsControlFocus = active && active !== runsMainRef.current
+        && runsMainRef.current?.contains(active) && active.getClientRects?.().length
+      if (visibleExternalFocus || visibleRunsControlFocus) { finish(); return }
+      const runTarget = restoreFocusRunId
         ? [...(runsMainRef.current?.querySelectorAll('[data-run-open-id]') || [])]
           .find(element => element.dataset.runOpenId === String(restoreFocusRunId)
             && element.getClientRects().length && element.getAttribute('aria-disabled') !== 'true'
             && !element.matches(':disabled'))
         : null
-      if (!target && restoreFocusRunId && attempts < 20) {
+      const controlTarget = !restoreFocusRunId && restoreFocusControl === 'settings'
+        && settingsButtonRef.current?.isConnected && settingsButtonRef.current.getClientRects().length
+        && !settingsButtonRef.current.matches(':disabled')
+        ? settingsButtonRef.current : null
+      const target = runTarget || controlTarget
+      const controlExpected = !restoreFocusRunId && restoreFocusControl === 'settings'
+      if (!target && (restoreFocusRunId || controlExpected) && attempts < 20) {
         attempts += 1
         frame = requestAnimationFrame(restoreFocus)
         return
@@ -1597,7 +1610,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
     frame = requestAnimationFrame(restoreFocus)
     return () => { if (frame != null) cancelAnimationFrame(frame) }
   }, [initialNavigationState, initialNavigation.scrollTop, navigationResourcesSettled,
-    restoreFocusRunId])
+    restoreFocusControl, restoreFocusRunId])
 
   const activeView = savedViews.find(item => item.name === activeSavedView)
   const activeViewDirty = !!activeView
@@ -2113,7 +2126,10 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
                   aria-label="Open Research Atlas preview" onClick={openResearchAtlas}>
             <OpIcon name="compass" className="t-ic" /> Atlas preview
           </button>
-          <button className="btn sm ghost" disabled={navigationBusy} title="settings" onClick={openSettings}><OpIcon name="gear" className="t-ic" /> Settings</button>
+          <button ref={settingsButtonRef} className="btn sm ghost" disabled={navigationBusy}
+            title="settings" onClick={openSettings}>
+            <OpIcon name="gear" className="t-ic" /> Settings
+          </button>
         </div>
       </div>
       {missingStartOverRecoveries.map(item => <div key={item.runId}

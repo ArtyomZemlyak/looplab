@@ -63,7 +63,7 @@ import { followClientRoute } from './accessibility.jsx'
 // session — the background worker persists the reply — so "could not reach" no longer strands a turn.
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
-const commitAssistantRunRoute = href => {
+const commitAssistantRoute = href => {
   if (location.hash === href) {
     requestAnimationFrame(() => document.querySelector('[data-route-main]')?.focus({ preventScroll: true }))
   } else location.hash = href
@@ -536,7 +536,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const commandStatusRef = useRef(null)
   const commandFocusRequestedRef = useRef(false)
   const collapseForNavigationRef = useRef(null)
-  const pendingRunHandoffRef = useRef(null)
+  const pendingRouteHandoffRef = useRef(null)
   const openSessionRef = useRef(null)
   const attentionPermissionHandoffRef = useRef(0)
   const attentionPermissionReceiptRef = useRef(0)
@@ -1020,18 +1020,26 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     return () => window.removeEventListener('ll:collapse-assistant-for-navigation', onCollapseForNavigation)
   }, [hidden])
   useEffect(() => {
-    if (view !== 'bar' || !pendingRunHandoffRef.current) return
-    const href = pendingRunHandoffRef.current
-    pendingRunHandoffRef.current = null
+    if (view !== 'bar' || !pendingRouteHandoffRef.current) return
+    const href = pendingRouteHandoffRef.current
+    pendingRouteHandoffRef.current = null
     // Commit the route only after React has removed aria-modal/inert ownership from the Assistant.
     // RouteFocus can then name and focus loading, ready, or error content without racing the old modal.
-    commitAssistantRunRoute(href)
+    commitAssistantRoute(href)
   }, [view])
-  const openRunFromAssistant = (event, href) => followClientRoute(event, () => {
-    const modalAssistant = view === 'full' || (view === 'side' && compactAssistant)
-    if (!modalAssistant) {
+  const handoffAssistantRoute = (href, { collapse = false } = {}) => {
+    cancelAttentionPermissionHandoff()
+    if (view === 'bar') {
+      pendingRouteHandoffRef.current = null
       clearDirectConfirmation()
-      commitAssistantRunRoute(href)
+      commitAssistantRoute(href)
+      return
+    }
+    const modalAssistant = view === 'full' || (view === 'side' && compactAssistant)
+    if (!collapse && !modalAssistant) {
+      pendingRouteHandoffRef.current = null
+      clearDirectConfirmation()
+      commitAssistantRoute(href)
       return
     }
     // A pending approval that was already present belongs to the surface the user just left. Mark it
@@ -1039,9 +1047,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     for (const request of pending) {
       if (request?.id) autoRevealedPendingIdsRef.current.add(request.id)
     }
-    pendingRunHandoffRef.current = href
+    pendingRouteHandoffRef.current = href
     collapseForNavigationRef.current?.()
-  })
+  }
+  const openRunFromAssistant = (event, href) => followClientRoute(event,
+    () => handoffAssistantRoute(href))
   const toggleSide = () => (view === 'side' ? collapseToBar() : openSide())
   useDialogFocus(fullDialogRef, collapseToBar, view === 'full' && !hidden,
     { priority: DIALOG_PRIORITY.ASSISTANT_FULL })
@@ -2906,11 +2916,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
 
   const openAssistantSettings = () => {
-    cancelAttentionPermissionHandoff()
-    clearDirectConfirmation()
-    setAssistantView('bar')
-    setHasNew(false)
-    location.hash = '#/settings'
+    handoffAssistantRoute('#/settings', { collapse: true })
   }
 
   const currentComposerRunKey = composerRunKey(runId)

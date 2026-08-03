@@ -151,6 +151,7 @@ export function Turn({
         return <LaunchCard key={draftKey} spec={sp} chat={launchChat} launchIdentity={draftKey}
           retainedDraft={launchDrafts?.[draftKey]}
           retainedConfigOpen={launchDisclosures?.[draftKey] === true}
+          onOpenSettings={onOpenSettings}
           onDraftChange={draft => onLaunchDraft?.(draftKey, draft)}
           onConfigOpenChange={open => onLaunchDisclosure?.(draftKey, open)}
           onStarted={() => onLaunchStarted?.(draftKey)} />

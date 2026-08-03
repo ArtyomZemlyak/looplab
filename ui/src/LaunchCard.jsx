@@ -152,7 +152,7 @@ const booleanChoice = (parsedSettings, key) => {
 
 export default function LaunchCard({
   spec, chat = [], onStarted, retainedDraft = null, onDraftChange, launchIdentity = '',
-  retainedConfigOpen = false, onConfigOpenChange,
+  retainedConfigOpen = false, onConfigOpenChange, onOpenSettings,
 }) {
   const original = useMemo(() => createLaunchDraft(spec), [spec])
   const transportIdentity = useMemo(() => String(
@@ -734,6 +734,9 @@ export default function LaunchCard({
       invalid: reviewSettingsInvalid || !!errors['settings.max_seconds'] || !!errors['settings.max_eval_seconds'] },
   ]
   const normalLaunchActions = !startedRunId && !damagedRecovery && !unknownStart
+  // On the first unblocked render, the effect below has not replaced the old blocking copy yet.
+  // Keep that stale text out of the live region until the reconciled notice is ready.
+  const settingsUnblockSettling = !settingsLaunchBlocked && settingsBlockedRef.current
   const costDisclosure = validatedCurrent && reviewedBackend === 'toy'
     ? 'The validated toy backend makes no model/provider call.'
     : validatedCurrent
@@ -945,9 +948,13 @@ export default function LaunchCard({
       <strong>Damaged startup recovery</strong>
       <span>Its outcome cannot be trusted. Inspect the run list and provider activity before releasing this exact local fence.</span>
     </div>}
-    {settingsLaunchBlocked && <div className="asst-launch-recovery" role="status">
-      <strong>Finish Settings first</strong>
-      <span>{settingsLaunchReason}</span>
+    {settingsLaunchBlocked && <div className="asst-launch-recovery">
+      <div className="asst-launch-recovery-message" role="status" aria-live="polite" aria-atomic="true">
+        <strong>Settings need attention</strong>
+        <span>{settingsLaunchReason}</span>
+      </div>
+      {onOpenSettings && <button type="button" className="btn sm"
+        onClick={onOpenSettings}>Go to Settings</button>}
     </div>}
     <section className="asst-launch-section asst-launch-review" aria-labelledby={`${titleId}-review`}>
       <h4 id={`${titleId}-review`}>Launch review</h4>
@@ -958,7 +965,9 @@ export default function LaunchCard({
         </div>)}
       </dl>
     </section>
-    <div className="asst-launch-progress" role="status" aria-live="polite" aria-atomic="true">{notice}</div>
+    {((!settingsLaunchBlocked && !settingsUnblockSettling)
+      || unknownStart || startedRunId || damagedRecovery) && <div className="asst-launch-progress"
+      role="status" aria-live="polite" aria-atomic="true">{notice}</div>}
     {normalLaunchActions && <>
       <p className="asst-launch-cost"><strong>Validate is free:</strong> it makes no model/provider call and
         resolves inherited values in the review above.</p>

@@ -2374,6 +2374,8 @@ pre.code.event-json { max-height: 220px; }
 .asst-launch-recovery { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 8px;
   border: 1px solid color-mix(in srgb, var(--working) 60%, var(--line)); border-radius: 8px;
   background: color-mix(in srgb, var(--working) 7%, var(--bg)); padding: 8px 10px; font-size: 11.5px; }
+.asst-launch-recovery-message { display: flex; flex: 1 1 100%; flex-wrap: wrap; align-items: baseline;
+  min-width: 0; gap: 5px 8px; }
 .asst-launch-recovery code { color: var(--fg); overflow-wrap: anywhere; }
 .asst-launch-recovery span { width: 100%; color: var(--fg-mut); }
 .asst-launch-progress { color: var(--fg-mut); min-height: 16px; font-size: 11px; }
@@ -2393,6 +2395,7 @@ pre.code.event-json { max-height: 220px; }
   .asst-launch { padding: 10px; }
   .asst-launch-runtime { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .asst-launch-section input.text, .asst-launch-section select.text { min-height: 44px; }
+  .asst-launch-recovery .btn { min-height: 44px; flex: 1 1 100%; justify-content: center; }
   .asst-launch-actions .btn { min-height: 44px; flex: 1 1 auto; }
   .asst-launch-cost, .asst-launch-field-error { font-size: 11.5px; }
 }

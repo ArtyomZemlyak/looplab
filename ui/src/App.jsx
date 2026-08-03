@@ -37,8 +37,11 @@ function parseHash() {
 
 const LIST_HISTORY_KEY = 'looplab.listNavigation'
 const LIST_HISTORY_CACHE_LIMIT = 128
+const LIST_ORIGIN_CONTROLS = new Set(['settings'])
 const listHistoryCache = new Map()
 let listHistorySequence = 0
+
+const normalizeListOriginControl = value => LIST_ORIGIN_CONTROLS.has(value) ? value : null
 
 function rawListHistory() {
   const state = history.state
@@ -69,10 +72,17 @@ function readListHistory() {
   const candidate = (entryId && listHistoryCache.get(entryId)) || saved.navigation
   const navigation = candidate && typeof candidate === 'object' && !Array.isArray(candidate)
     ? candidate : null
-  return { ...saved, entryId, navigation }
+  return {
+    ...saved,
+    entryId,
+    navigation,
+    originRunId: typeof saved.originRunId === 'string' && saved.originRunId
+      ? saved.originRunId : null,
+    originControl: normalizeListOriginControl(saved.originControl),
+  }
 }
 
-function writeListHistory(navigation, originRunId = null) {
+function writeListHistory(navigation, originRunId = null, originControl = null) {
   if (!navigation || typeof navigation !== 'object' || Array.isArray(navigation)) return
   try {
     const state = history.state && typeof history.state === 'object' && !Array.isArray(history.state)
@@ -86,13 +96,14 @@ function writeListHistory(navigation, originRunId = null) {
       [LIST_HISTORY_KEY]: {
         navigation,
         originRunId: typeof originRunId === 'string' && originRunId ? originRunId : null,
+        originControl: normalizeListOriginControl(originControl),
         entryId,
       },
     }, '', location.href)
   } catch { /* The in-memory snapshot remains authoritative if history state is unavailable. */ }
 }
 
-function cacheCurrentListHistory(navigation, originRunId = null) {
+function cacheCurrentListHistory(navigation, originRunId = null, originControl = null) {
   const current = rawListHistory()
   const entryId = typeof current?.entryId === 'string' && current.entryId && current.entryId.length <= 128
     ? current.entryId : null
@@ -100,7 +111,7 @@ function cacheCurrentListHistory(navigation, originRunId = null) {
     cacheListHistory(entryId, navigation)
     return
   }
-  writeListHistory(navigation, originRunId)
+  writeListHistory(navigation, originRunId, originControl)
 }
 
 function ReviewRoute({ token }) {
@@ -170,24 +181,31 @@ export default function App() {
   }
   const listNavigationRef = useRef(initialListHistoryRef.current?.navigation || null)
   const listOriginRunRef = useRef(initialListHistoryRef.current?.originRunId || null)
+  const listOriginControlRef = useRef(initialListHistoryRef.current?.originControl || null)
   const [route, setRoute] = useState(parseHash())
   useEffect(() => {
     const on = () => {
       const next = parseHash()
       const saved = readListHistory()
       if (saved?.navigation) {
+        const keepsListOrigin = next.view === 'list' || next.view === 'settings'
         const originRunId = next.view === 'run' ? next.id
-          : next.view === 'list' && typeof saved.originRunId === 'string' ? saved.originRunId : null
+          : keepsListOrigin ? saved.originRunId : null
+        const originControl = keepsListOrigin ? saved.originControl : null
         listNavigationRef.current = saved.navigation
         listOriginRunRef.current = originRunId
+        listOriginControlRef.current = originControl
         // Materialize any newer entry-cache snapshot into the destination entry too. This keeps a
         // subsequent reload exact and normalizes origins copied by direct hash navigation.
-        writeListHistory(saved.navigation, originRunId)
+        writeListHistory(saved.navigation, originRunId, originControl)
       } else if (listNavigationRef.current) {
+        const keepsListOrigin = next.view === 'list' || next.view === 'settings'
         const originRunId = next.view === 'run' ? next.id
-          : next.view === 'list' ? listOriginRunRef.current : null
+          : keepsListOrigin ? listOriginRunRef.current : null
+        const originControl = keepsListOrigin ? listOriginControlRef.current : null
         listOriginRunRef.current = originRunId
-        writeListHistory(listNavigationRef.current, originRunId)
+        listOriginControlRef.current = originControl
+        writeListHistory(listNavigationRef.current, originRunId, originControl)
       }
       setRoute(next)
     }
@@ -221,26 +239,32 @@ export default function App() {
         const current = readListHistory()
         const originRunId = current && Object.prototype.hasOwnProperty.call(current, 'originRunId')
           ? current.originRunId : listOriginRunRef.current
-        if (options?.persist === false) cacheCurrentListHistory(snapshot, originRunId)
-        else writeListHistory(snapshot, originRunId)
+        const originControl = current && Object.prototype.hasOwnProperty.call(current, 'originControl')
+          ? current.originControl : listOriginControlRef.current
+        if (options?.persist === false) cacheCurrentListHistory(snapshot, originRunId, originControl)
+        else writeListHistory(snapshot, originRunId, originControl)
       }
     }
   }, [route.view])
   const finishListRestore = useCallback(snapshot => {
-    const originRunId = listOriginRunRef.current
-    rememberListNavigation(snapshot)
-    writeListHistory(listNavigationRef.current, originRunId)
+    if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
+      listNavigationRef.current = snapshot
+    }
     listOriginRunRef.current = null
-  }, [rememberListNavigation])
-  const navigateWithListState = useCallback((hash, snapshot, originRunId = null) => {
+    listOriginControlRef.current = null
+    writeListHistory(listNavigationRef.current, null, null)
+  }, [])
+  const navigateWithListState = useCallback((hash, snapshot, originRunId = null,
+    originControl = null) => {
     const navigation = snapshot || listNavigationRef.current
     if (navigation) {
       listNavigationRef.current = navigation
       listOriginRunRef.current = originRunId
-      writeListHistory(navigation, originRunId)
+      listOriginControlRef.current = normalizeListOriginControl(originControl)
+      writeListHistory(navigation, originRunId, originControl)
     }
     location.hash = hash
-    if (navigation) writeListHistory(navigation, originRunId)
+    if (navigation) writeListHistory(navigation, originRunId, originControl)
   }, [])
   const open = useCallback((id, snapshot, href = null) => {
     const runId = String(id)
@@ -251,11 +275,12 @@ export default function App() {
   const back = useCallback(() => {
     location.hash = ''
     if (listNavigationRef.current) {
-      writeListHistory(listNavigationRef.current, listOriginRunRef.current)
+      writeListHistory(listNavigationRef.current, listOriginRunRef.current,
+        listOriginControlRef.current)
     }
   }, [])
   const settings = useCallback(snapshot => {
-    navigateWithListState('#/settings', snapshot, null)
+    navigateWithListState('#/settings', snapshot, null, 'settings')
   }, [navigateWithListState])
   const researchAtlas = useCallback(snapshot => {
     navigateWithListState('#/atlas', snapshot, null)
@@ -292,6 +317,7 @@ export default function App() {
   else content = <LazyBoundary label="runs" mode="route" focusOnReady={!restoreListNavigation} resetKey={routeKey}>
     <RunList initialNavigationState={listNavigationRef.current}
       restoreFocusRunId={listOriginRunRef.current}
+      restoreFocusControl={listOriginControlRef.current}
       onNavigationStateChange={rememberListNavigation}
       onNavigationRestored={finishListRestore}
       onOpen={open} onSettings={settings} onResearchAtlas={researchAtlas} />
