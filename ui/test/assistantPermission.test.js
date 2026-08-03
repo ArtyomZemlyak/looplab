@@ -16,6 +16,13 @@ test('legacy permission payload is visibly unknown and never offers persistent a
   assert.equal(view.consequence, 'Deletes the named file from disk.')
   assert.match(view.expiryLabel, /Exact expiry unavailable/)
   assert.equal(view.mode, 'unknown')
+  assert.equal(view.modeLabel, 'Unknown mode')
+})
+
+test('prototype-shaped permission modes render as unknown', () => {
+  for (const mode of ['__proto__', 'constructor', 'toString']) {
+    assert.equal(permissionPresentation({ mode, action: {} }).modeLabel, 'Unknown mode')
+  }
 })
 
 test('canonical reversible permission renders security scope, consequence, expiry, and mode', () => {
@@ -40,6 +47,7 @@ test('canonical reversible permission renders security scope, consequence, expir
   assert.equal(view.expiresMs, expires * 1000)
   assert.equal(view.expired, false)
   assert.equal(view.mode, 'default')
+  assert.equal(view.modeLabel, 'Ask')
   assert.equal(view.grantTtlSeconds, 600)
   assert.equal(view.grantDurationLabel, '10 min')
 })

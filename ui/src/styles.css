@@ -2237,6 +2237,15 @@ pre.code.event-json { max-height: 220px; }
 .asst-perm-state { margin-top: 7px; color: var(--fg-mut); font-size: 11.5px; }
 .asst-perm-state.warning { color: var(--fail); }
 .asst-perm-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-top: 10px; }
+.assistant-direct-confirm { width: 100%; max-height: min(60dvh, 480px); align-self: stretch;
+  margin-bottom: 8px; overflow-y: auto; overscroll-behavior: contain; scroll-padding-block: 8px; }
+.asst-in.direct-confirming { max-height: 70dvh; overflow-y: auto; overscroll-behavior: contain;
+  scroll-padding-block: 8px; }
+.assistant-direct-confirm .asst-perm-h { position: sticky; top: 0; z-index: 1;
+  padding-bottom: 6px; background: var(--bg-1); }
+.assistant-direct-confirm .asst-perm-actions { position: sticky; bottom: 0; z-index: 1;
+  padding-top: 8px; background: var(--bg-1); }
+.assistant-direct-identity { white-space: normal; overflow-wrap: anywhere; word-break: break-all; }
 @media (max-width: 900px) {
   .overlay > .panel .btn.sm,
   .overlay > .panel .conv-toggle .seg,

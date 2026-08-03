@@ -244,12 +244,12 @@ export function PermCard({
         ? <span className="asst-perm-digest" title={permission.scopeDigest}>
             {' · ID '}{permission.scopeDigest.slice(0, 12)}…</span> : null}</dd></div>
       <div><dt>Consequence</dt><dd>{permission.consequence}</dd></div>
-      <div><dt>Mode</dt><dd>{permission.mode}</dd></div>
+      <div><dt>Mode</dt><dd>{permission.modeLabel}</dd></div>
       <div><dt>Expiry</dt><dd>{permission.expiresIso
         ? <time dateTime={permission.expiresIso}>{permission.expiryLabel}</time>
         : permission.expiryLabel}</dd></div>
       {permission.canAlways && <div><dt>Remembered grant</dt><dd>
-        This exact action and scope · current turn · {permission.mode} mode · {permission.grantDurationLabel}
+        This exact action and scope · current turn · {permission.modeLabel} mode · {permission.grantDurationLabel}
       </dd></div>}
     </dl>
     {a.preview && <pre className={'asst-perm-pre' + (isDiff ? ' diff' : '')}
@@ -267,7 +267,7 @@ export function PermCard({
         onClick={() => onResolve(req.id, 'deny')}>Reject</button>
       {permission.canAlways && <button className="btn xs" disabled={busy || permission.expired}
         onClick={() => onResolve(req.id, 'allow_always')}
-        title={`Remember only this exact action and security scope for the current turn and ${permission.mode} mode (${permission.grantDurationLabel})`}>
+        title={`Remember only this exact action and security scope for the current turn and ${permission.modeLabel} mode (${permission.grantDurationLabel})`}>
         Allow exact scope · {permission.grantDurationLabel}</button>}
       <button className={'btn xs ' + (requiresCaution ? 'danger' : 'primary')}
         disabled={busy || permission.expired}

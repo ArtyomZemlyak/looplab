@@ -1,6 +1,9 @@
 const TEXT_LIMIT = 500
 const KNOWN_RISKS = new Set(['READ', 'REVERSIBLE', 'CONSEQUENTIAL', 'HIGH', 'UNKNOWN'])
 const REMEMBERED_GRANT_MODES = new Set(['default', 'acceptEdits', 'auto'])
+const MODE_LABELS = Object.freeze({
+  plan: 'Plan', default: 'Ask', acceptEdits: 'Auto-edit', auto: 'Auto',
+})
 // Digests participate in the exact server identity but are redundant beside the card's one canonical
 // scope ID. `verb` repeats the title/preview. Hiding both keeps the human review scope scannable.
 const HIDDEN_SCOPE_KEY = /token|secret|credential|password|content|preview|verb|_digest$/i
@@ -104,6 +107,7 @@ export function permissionPresentation(req, now = Date.now()) {
     actionId,
     risk,
     mode,
+    modeLabel: Object.hasOwn(MODE_LABELS, mode) ? MODE_LABELS[mode] : 'Unknown mode',
     scope: safeText(scopeText(action.scope) || scopeText(req?.scope) || inferredScope(action)),
     scopeDigest: /^[0-9a-f]{64}$/.test(scopeDigest) ? scopeDigest : '',
     consequence: firstText(action.consequence, req?.consequence) || inferredConsequence(action),

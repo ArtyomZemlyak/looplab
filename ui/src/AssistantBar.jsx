@@ -18,6 +18,7 @@ import {
   assistantStorageFailureOwnsLock, pollAssistantDirectOnce,
   presentAssistantCommandResult, restoreAssistantDirectEntry, submitAssistantDirect,
 } from './assistantCommand.js'
+import { assistantDirectDecision, assistantDirectPresentation } from './assistantDirectPolicy.js'
 import {
   assistantRecoveryFailure, assistantRecoveryPayload, assistantReplyCompletesTurn, assistantTurnIndex,
   danglingAssistantTurn,
@@ -40,7 +41,7 @@ import {
   subscribeLaunchTransports, subscribeRunCommandLock,
   storageGet, storageSet, storageRemove, runApiPath,
 } from './util.js'
-import { boundedRequest } from './requestDeadline.js'
+import { boundedRequest, deadlineRequest } from './requestDeadline.js'
 import { followClientRoute } from './accessibility.jsx'
 
 // ── ONE assistant, three flowing views: bar ⇄ side(right) ⇄ full ───────────────────────────────
@@ -130,6 +131,8 @@ const DIRECT = {
   approve:  { arg: true, success: (id) => `✓ approved #${id}`,
     noop: (id) => `✓ #${id} already approved`, executing: (id) => `Approval #${id} requested — awaiting confirmation` },
 }
+const directSpec = name => typeof name === 'string' && Object.hasOwn(DIRECT, name)
+  ? DIRECT[name] : null
 const UNKNOWN_DIRECT_SPEC = {
   success: 'Run command completed', noop: 'Run command was already satisfied',
   executing: 'Run command is pending',
@@ -140,7 +143,7 @@ function parseDirect(t) {
   const m = /^\/([a-z_]+)(?:\s+#?(\d+))?\s*$/i.exec(t)
   if (!m) return null
   const name = m[1].toLowerCase()
-  const spec = DIRECT[name]
+  const spec = directSpec(name)
   if (!spec) return null
   const arg = m[2] ? Number(m[2]) : null
   if (spec.arg && arg == null) return null
@@ -183,8 +186,9 @@ function preRoute(t) {
   const cleaned = t.toLowerCase().replace(/^(please\s+|can you\s+)/, '').replace(/[.!]+$/, '').trim()
   if (!/\brun\b/.test(cleaned)) return null
   const norm = cleaned.replace(/\b(the\s+|this\s+|current\s+)?run\b/g, '').trim()
-  const name = _NL_CONTROL[norm]
-  return name && DIRECT[name] ? { name, spec: DIRECT[name], arg: null } : null
+  const name = Object.hasOwn(_NL_CONTROL, norm) ? _NL_CONTROL[norm] : null
+  const spec = directSpec(name)
+  return name && spec ? { name, spec, arg: null } : null
 }
 // `#N` must start a token (not follow a word/# char) and end at a boundary — so `#3498db` (hex color),
 // URL fragments (`page#12`), and `x#5` don't fabricate an experiment reference.
@@ -367,6 +371,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const sessionOpening = openingSid != null
   const [retryChecking, setRetryChecking] = useState(false)
   const [directStarting, setDirectStarting] = useState(false)
+  const [directConfirm, setDirectConfirm] = useState(null)
   const [directPending, setDirectPending] = useState(null) // retained while an accepted direct command executes
   const [directFailure, setDirectFailure] = useState(null)
   const [runCommandLock, setRunCommandLock] = useState(() => loadRunCommandLock(runId))
@@ -505,10 +510,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const openSessionPendingRef = useRef(null) // blocks mutations while a chosen transcript/progress read resolves
   const deferredRecoverySessionRef = useRef(null) // read-only routes hydrate dangling turns without replaying them
   const directCaptureRef = useRef(false) // closes the pre-storage generation-read window to double clicks
+  const directConfirmRef = useRef(null) // closes double-submit races before the confirmation card renders
   const cancelReqRef = useRef(null)  // in-flight server-cancel POST; the next send awaits it so a late
                                      // cancel can't land on (and instantly kill) the NEW turn's event
   const sidRef = useRef(null)   // session the stream callbacks belong to (guards cross-session bleed)
   const inputRef = useRef(null)
+  const directConfirmStatusRef = useRef(null)
+  const directConfirmCancelRef = useRef(null)
   const feedRef = useRef(null)
   const sessionsRef = useRef(null)
   const fullDialogRef = useRef(null)
@@ -539,6 +547,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const forkActionSessionRef = useRef(null)
   const forkRecoveryRef = useRef(new Map())
   const deletingSessionsRef = useRef(new Set())
+  const clearDirectConfirmation = React.useCallback(({ focus = false } = {}) => {
+    try { directConfirmRef.current?.requestController?.abort() } catch { /* already settled */ }
+    directConfirmRef.current = null
+    setDirectConfirm(null)
+    if (focus) requestAnimationFrame(() => inputRef.current?.isConnected
+      && inputRef.current.focus({ preventScroll: true }))
+  }, [])
+  directConfirmRef.current = directConfirm
   const cancelAttentionPermissionHandoff = React.useCallback(() => {
     if (attentionPermissionFocusRef.current.phase === 'idle') return false
     const token = attentionPermissionHandoffRef.current + 1
@@ -972,6 +988,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     })
   }, [])
   const collapseToBar = () => {
+    if (directConfirmRef.current) {
+      clearDirectConfirmation({ focus: true })
+      return
+    }
     cancelAttentionPermissionHandoff()
     const returnSelector = view === 'side' ? '.cmdbar-drawer-btn' : '.cmdbar-ic'
     const la = lastAssistant()
@@ -984,6 +1004,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
   collapseForNavigationRef.current = () => {
     cancelAttentionPermissionHandoff()
+    clearDirectConfirmation()
     const la = lastAssistant()
     if (la && la.content) setPreview(previewText(la.content))
     // Route navigation owns the next focus target. Do not let the ordinary fold-to-bar RAF steal it
@@ -1008,7 +1029,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }, [view])
   const openRunFromAssistant = (event, href) => followClientRoute(event, () => {
     const modalAssistant = view === 'full' || (view === 'side' && compactAssistant)
-    if (!modalAssistant) { commitAssistantRunRoute(href); return }
+    if (!modalAssistant) {
+      clearDirectConfirmation()
+      commitAssistantRunRoute(href)
+      return
+    }
     // A pending approval that was already present belongs to the surface the user just left. Mark it
     // as revealed before folding so the auto-reveal effect cannot immediately cover the destination.
     for (const request of pending) {
@@ -1066,6 +1091,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   // ── sessions (full view) ──
   const openSession = (id, options = {}) => {
+    if (directConfirmRef.current) {
+      if (options.observeOnly === true) {
+        clearDirectConfirmation()
+        flash('Run-command confirmation canceled · draft kept')
+      } else {
+        flash('Cancel or confirm the current run command before switching chats')
+        return Promise.resolve({ ok: false, sessionId: id, reason: 'direct-confirmation' })
+      }
+    }
     if (options.attentionHandoff !== true) cancelAttentionPermissionHandoff()
     if (turnCaptureRef.current && !sidRef.current) {
       if (!options.observeOnly) flash('Wait for the new Assistant chat to finish starting')
@@ -1542,6 +1576,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     return () => window.removeEventListener('ll:focus-assistant', onFocusAssistant)
   }, [hasChat, input])
   const newChat = ({ preserveAttentionHandoff = false } = {}) => {
+    if (directConfirmRef.current) {
+      flash('Cancel or confirm the current run command before starting another chat')
+      return
+    }
     if (!preserveAttentionHandoff) cancelAttentionPermissionHandoff()
     ++openSessionSeqRef.current
     openSessionPendingRef.current = null
@@ -1867,9 +1905,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
   const verifiedDirectEntry = (entry, record) => {
     let name = entry.name
-    if (entry.protocolInvalid || !DIRECT[name]) name = commandActionForEvent(record?.event_type)
-    if (!name || !DIRECT[name] || !commandRecordMatchesAction(record, name, 'assistant')) return null
-    return { ...entry, name, spec: DIRECT[name], record, protocolInvalid: false,
+    if (entry.protocolInvalid || !directSpec(name)) name = commandActionForEvent(record?.event_type)
+    const spec = directSpec(name)
+    if (!name || !spec || !commandRecordMatchesAction(record, name, 'assistant')) return null
+    return { ...entry, name, spec, record, protocolInvalid: false,
       canResubmit: true, retrying: false }
   }
   const protocolDirect = (entry, record = entry.record, message = 'Invalid command response') => {
@@ -1934,7 +1973,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
   const unavailableDirect = (entry, error, record = entry.record) => {
     let recoveryRecord = record || { status: 'submitting' }
-    if (recoveryRecord.id && !recoveryRecord.event_type && DIRECT[entry.name]) {
+    if (recoveryRecord.id && !recoveryRecord.event_type && directSpec(entry.name)) {
       recoveryRecord = { ...recoveryRecord, event_type: commandEventForAction(entry.name, 'assistant') }
     }
     const next = { ...entry, record: recoveryRecord, statusUnavailable: true,
@@ -1959,7 +1998,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     }
     flashDirect(entry, commandFeedback(record, directLabels(entry)).message)
   }
-  const executeDirect = async (entry, { recovery = false } = {}) => {
+  const executeDirect = async (entry, { recovery = false, onCommitted = null } = {}) => {
     let bound = entry
     if (!bound.expectedGeneration) {
       const error = new Error('The displayed run generation is unavailable.')
@@ -1971,6 +2010,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const submitting = { ...bound, record: { status: 'submitting' }, statusUnavailable: false,
       observationKind: null, checking: false, retrying: false, lastError: '' }
     if (!persistDirect(submitting)) { localStorageFailure(bound); return }
+    try { onCommitted?.() } catch { /* durable intent still owns the action; presentation is best effort */ }
     if (mountedRef.current) { setCurrentDirect(bound, submitting); setCurrentFailure(bound, null) }
     try {
       const record = await submitAssistantDirect(bound.runId, bound.name, bound.arg,
@@ -2011,29 +2051,46 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       }
     }
   }
-  const runDirect = async (d) => {
-    const directRunId = runId
-    if (!directRunId) { flash(`/${d.name} needs an open run`); return }
-    if (historicalRef.current) { flash(readOnlyAction); return }
+  const runDirect = async (d, binding = {}) => {
+    const directRunId = binding.runId || runId
+    if (!directRunId) { flash(`/${d.name} needs an open run`); return false }
+    if (String(currentRunIdRef.current ?? '') !== String(directRunId)) {
+      flash(`/${d.name} not sent because the open run changed`); return false
+    }
+    if (historicalRef.current) { flash(readOnlyAction); return false }
+    if (openSessionPendingRef.current) {
+      flash('Wait for the selected Assistant chat to finish opening'); return false
+    }
     if (turnCaptureRef.current || runningRef.current) {
-      flash('Assistant is already starting or responding'); return
+      flash('Assistant is already starting or responding'); return false
     }
     // Read synchronously as well as using React state: two rapid clicks in one batch must not create
     // competing intents before the lock event has caused a render.
     if (directCaptureRef.current || loadRunCommandLock(directRunId)
         || (loadAssistantRunTransport(directRunId) && !directFailure)) {
-      flash('Recover the stored run command before starting another'); return
+      flash('Recover the stored run command before starting another'); return false
+    }
+    const observedGeneration = normalizeRunGeneration(getObservedRunGeneration(directRunId))
+    const expectedGeneration = binding.expectedGeneration || observedGeneration
+    if (!expectedGeneration) {
+      flash(`/${d.name} not sent because the run generation is not verified`); return false
+    }
+    if (binding.expectedGeneration && observedGeneration !== binding.expectedGeneration) {
+      flash(`/${d.name} not sent because the run generation changed`); return false
     }
     if (directFailure) clearAssistantRunTransport(directFailure.runId, undefined, {
       idempotencyKey: directFailure.idempotencyKey,
     })
     directCaptureRef.current = true
+    commandFocusRequestedRef.current = true
     setDirectStarting(true)
+    try { binding.onClaimed?.() } catch { /* UI callback cannot widen or duplicate the command */ }
     try {
-      let nodeGeneration = null
-      let expectedGeneration = getObservedRunGeneration(directRunId)
-      if (d.name === 'approve') {
-        const payload = await get(runApiPath(directRunId, '/state'))
+      let nodeGeneration = Number.isSafeInteger(binding.nodeGeneration)
+        ? binding.nodeGeneration : null
+      if (d.name === 'approve' && nodeGeneration == null) {
+        const payload = await boundedRequest(
+          signal => get(runApiPath(directRunId, '/state'), { signal }), 8000)
         if (String(currentRunIdRef.current ?? '') !== String(directRunId)) {
           flash(`/${d.name} not sent because the open run changed`)
           return
@@ -2044,8 +2101,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         if (target.nodeId !== d.arg) {
           throw new Error(`The active approval is for experiment #${target.nodeId}, not #${d.arg}`)
         }
-        expectedGeneration = normalizeRunGeneration(payload?.generation)
-        if (!expectedGeneration) throw new Error('Run generation unverified; refresh before approving')
+        const fetchedGeneration = normalizeRunGeneration(payload?.generation)
+        if (!fetchedGeneration) throw new Error('Run generation unverified; refresh before approving')
+        if (fetchedGeneration !== expectedGeneration) {
+          throw new Error('Run generation changed before approval; inspect Events and retry')
+        }
         nodeGeneration = target.nodeGeneration
       }
       const entry = { ...d, runId: directRunId, nodeGeneration,
@@ -2054,13 +2114,16 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       commandFocusRequestedRef.current = true
       setCurrentFailure(entry, null)
       setDirectPending(entry)
-      await executeDirect(entry)
+      await executeDirect(entry, { onCommitted: binding.onCommitted })
     } catch {
       flash(`/${d.name} could not start; refresh and retry`)
+      requestAnimationFrame(() => inputRef.current?.isConnected
+        && inputRef.current.focus({ preventScroll: true }))
     } finally {
       directCaptureRef.current = false
       if (mountedRef.current) setDirectStarting(false)
     }
+    return true
   }
   const checkDirect = async () => {
     const entry = directPending
@@ -2198,7 +2261,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       clearAssistantRunTransport(runId, undefined, { idempotencyKey: saved.idempotencyKey })
       return
     }
-    const spec = DIRECT[saved.action] || UNKNOWN_DIRECT_SPEC
+    const spec = directSpec(saved.action) || UNKNOWN_DIRECT_SPEC
     const lockMismatch = lock?.source === 'assistant' && (
       lock.idempotencyKey !== saved.idempotencyKey || lock.action !== saved.action
       || lock.expectedGeneration !== saved.expectedGeneration
@@ -2844,6 +2907,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   const openAssistantSettings = () => {
     cancelAttentionPermissionHandoff()
+    clearDirectConfirmation()
     setAssistantView('bar')
     setHasNew(false)
     location.hash = '#/settings'
@@ -2866,6 +2930,119 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     setDraftRunScope(currentComposerRunKey)
     flash(runId ? `Draft now targets run “${runId}”` : 'Draft detached from its previous run')
     requestAnimationFrame(() => inputRef.current?.focus())
+  }
+
+  const cancelDirectConfirmation = () => {
+    if (!directConfirmRef.current) return
+    clearDirectConfirmation({ focus: true })
+  }
+  const clearCommittedDirectDraft = (draft, sourceText) => {
+    if (draft.input.trim() !== sourceText.trim()) return
+    draft.input = ''
+    if (!composerUsesRun('', draft.files, draft.pendingFileReads)) draft.runScope = null
+    if (composerDraftRef.current === draft) {
+      setInputState('')
+      setDraftRunScope(draft.runScope)
+    }
+  }
+  const revealDirectConfirmation = confirmation => {
+    clearToast()
+    directConfirmRef.current = confirmation
+    setDirectConfirm(confirmation)
+    setSuggestionsDismissed(true)
+    setAssistantView(current => current === 'bar' ? 'side' : current)
+    setHasNew(false)
+  }
+  const requestDirectCommand = async (command, sourceText) => {
+    if (directConfirmRef.current) {
+      flash('Resolve the current run-command confirmation first')
+      return
+    }
+    const effectiveMode = normalizeComposerMode(composerDraftRef.current.mode)
+    const decision = assistantDirectDecision(effectiveMode)
+    if (decision === 'deny') {
+      flash('Plan is read-only · switch to Ask, Auto-edit, or Auto to run a control command')
+      return
+    }
+    if (decision === 'inline') {
+      const owningDraft = composerDraftRef.current
+      runDirect(command, {
+        onCommitted: () => clearCommittedDirectDraft(owningDraft, sourceText),
+      })
+      return
+    }
+    const directRunId = String(runId || '')
+    if (!directRunId) { flash(`/${command.name} needs an open run`); return }
+    if (historicalRef.current) { flash(readOnlyAction); return }
+    const expectedGeneration = normalizeRunGeneration(getObservedRunGeneration(directRunId))
+    if (!expectedGeneration) {
+      flash('Run generation is not verified · refresh the run before confirming a control command')
+      return
+    }
+    const confirmationBase = {
+      direct: command,
+      sourceText,
+      composerKey: composerKeyRef.current,
+      draft: composerDraftRef.current,
+      expectedGeneration,
+      mode: effectiveMode,
+      modeLabel: MODES.find(candidate => candidate.id === effectiveMode)?.label || effectiveMode,
+      ...assistantDirectPresentation(command.name, command.arg, directRunId),
+    }
+    if (command.name === 'approve') {
+      const approvalRead = deadlineRequest(
+        signal => get(runApiPath(directRunId, '/state'), { signal }), 8000)
+      const checking = {
+        ...confirmationBase, phase: 'checking', requestController: approvalRead.controller,
+      }
+      revealDirectConfirmation(checking)
+      try {
+        const payload = await approvalRead.promise
+        if (directConfirmRef.current !== checking) return
+        const fetchedGeneration = normalizeRunGeneration(payload?.generation)
+        const target = pendingApprovalTarget(payload?.state)
+        if (fetchedGeneration !== expectedGeneration || !target
+            || target.nodeId !== command.arg || !Number.isSafeInteger(target.nodeGeneration)) {
+          throw new Error('approval target changed')
+        }
+        const pendingConfirmation = {
+          ...confirmationBase,
+          phase: 'ready',
+          nodeGeneration: target.nodeGeneration,
+        }
+        directConfirmRef.current = pendingConfirmation
+        setDirectConfirm(pendingConfirmation)
+      } catch {
+        if (directConfirmRef.current !== checking) return
+        clearDirectConfirmation({ focus: true })
+        flash('Nothing sent · the exact approval target could not be verified; refresh and inspect Events')
+      }
+      return
+    }
+    revealDirectConfirmation({ ...confirmationBase, phase: 'ready' })
+  }
+  const confirmDirectCommand = () => {
+    const confirmation = directConfirmRef.current
+    if (!confirmation || confirmation.phase !== 'ready') return
+    const observedGeneration = normalizeRunGeneration(getObservedRunGeneration(confirmation.runId))
+    if (confirmation.composerKey !== composerKeyRef.current
+        || confirmation.draft !== composerDraftRef.current
+        || confirmation.sourceText.trim() !== composerDraftRef.current.input.trim()
+        || confirmation.mode !== normalizeComposerMode(composerDraftRef.current.mode)
+        || String(currentRunIdRef.current || '') !== confirmation.runId
+        || historicalRef.current || observedGeneration !== confirmation.expectedGeneration) {
+      clearDirectConfirmation({ focus: true })
+      flash('Nothing sent · the run, its version, or the Assistant draft changed')
+      return
+    }
+    runDirect(confirmation.direct, {
+      runId: confirmation.runId,
+      expectedGeneration: confirmation.expectedGeneration,
+      nodeGeneration: confirmation.nodeGeneration,
+      onClaimed: () => clearDirectConfirmation(),
+      onCommitted: () => clearCommittedDirectDraft(
+        confirmation.draft, confirmation.sourceText),
+    })
   }
 
   const send = () => {
@@ -2919,9 +3096,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     }
     const direct = parseDirect(t)
     if (direct?.invalid) { flash(direct.message); return }
-    if (direct) { setInput(''); runDirect(direct); return }
+    if (direct) { requestDirectCommand(direct, t); return }
     const pr = runId ? preRoute(t) : null
-    if (pr) { setInput(''); runDirect(pr); return }
+    if (pr) { requestDirectCommand(pr, t); return }
     const refs = runId ? refNodes(t) : []
     const ctx = uiRunContext(runId, refs)
     runLLM((t || 'See the attached file(s).') + ctx, { userText: t || '(attached files)',
@@ -2948,6 +3125,41 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     onReady?.()
     return () => window.removeEventListener('ll:new-run', onNewRun)
   }, [busy, commandBusy, historical, readOnlyAction, input, onReady])
+
+  useEffect(() => {
+    if (!directConfirm) return undefined
+    const frame = requestAnimationFrame(() => {
+      const target = directConfirmCancelRef.current || directConfirmStatusRef.current
+      target?.focus()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [directConfirm, view])
+  useEffect(() => {
+    if (!directConfirm) return
+    const contextChanged = hidden || historical || view === 'bar'
+      || directConfirm.runId !== String(runId || '')
+      || directConfirm.composerKey !== composerKeyRef.current
+      || directConfirm.draft !== composerDraftRef.current
+      || directConfirm.sourceText.trim() !== input.trim()
+      || directConfirm.mode !== mode
+    if (!contextChanged) return
+    clearDirectConfirmation()
+    if (!hidden) flash('Command confirmation closed because its run or Assistant draft changed')
+  }, [clearDirectConfirmation, directConfirm, hidden, historical, input, mode, runId, sid, view, flash])
+  useEffect(() => {
+    if (!directConfirm) return undefined
+    const invalidateStaleGeneration = () => {
+      if (directConfirmRef.current !== directConfirm) return
+      const observedGeneration = normalizeRunGeneration(
+        getObservedRunGeneration(directConfirm.runId))
+      if (observedGeneration === directConfirm.expectedGeneration) return
+      clearDirectConfirmation({ focus: true })
+      flash('Command confirmation closed because the run version changed · draft kept')
+    }
+    const timer = setInterval(invalidateStaleGeneration, 250)
+    invalidateStaleGeneration()
+    return () => clearInterval(timer)
+  }, [clearDirectConfirmation, directConfirm, flash])
 
   useEffect(() => {
     if (!Object.keys(launchDrafts).length && !launchRecoveries.length) return
@@ -3041,7 +3253,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     })
   }, [directPending?.record?.id, directPending?.record?.status, directPending?.statusUnavailable,
     directPending?.checking, directPending?.retrying,
-    directFailure?.record?.id, directFailure?.record?.status, busy, view])
+    directFailure?.record?.id, directFailure?.record?.status, directStarting, busy, view])
   // Context usage: the last turn's CONTEXT (its peak single prompt) ≈ how much the assistant is carrying
   // right now (grows as the chat gets longer) — NOT tokens.prompt, which SUMS the same context re-sent by
   // every tool-loop call in the turn (billed, O(calls²)). The sum of turn totals ≈ what the chat spent
@@ -3057,9 +3269,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   const slashMatch = /^\/(\w*)$/.exec(input)
   const draftingNewRun = /^\/(?:new|genesis|run)\b/i.test(input.trim())
+  const directModeDecision = assistantDirectDecision(mode)
+  const directModeHint = directModeDecision === 'deny'
+    ? 'run control · unavailable in Plan'
+    : directModeDecision === 'ask'
+      ? 'run control · confirmation required'
+      : 'run control · executes immediately'
   const directNames = [
     { name: 'new', desc: 'draft a launch card — review before start' },
-    ...(runId ? Object.keys(DIRECT).map(n => ({ name: n, desc: 'run control · no LLM' })) : []),
+    ...(runId ? Object.keys(DIRECT).map(n => ({ name: n, desc: directModeHint })) : []),
   ]
   const suggestions = slashMatch
     ? [...directNames, ...commands.map(c => ({ name: c.name, desc: c.desc }))]
@@ -3122,11 +3340,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const forkBusy = forkBusySid != null
   const forkingCurrentSession = !!sid && forkBusySid === sid
   const currentForkRecovery = forkRecovery?.sid === sid ? forkRecovery : null
-  const composerPaused = sessionOpening || turnStarting || retryChecking || sharePaused || forkingCurrentSession
+  const composerPaused = sessionOpening || turnStarting || retryChecking || sharePaused
+    || forkingCurrentSession || !!directConfirm
   // Unknown public-link truth blocks every server mutation, but it must not destroy a local draft or
   // native focus. Keep editing controls available; Send remains focusable and performs a fail-closed
   // verification without staging a turn.
-  const composerEditingPaused = sessionOpening || shareBusy || forkingCurrentSession
+  const composerEditingPaused = sessionOpening || shareBusy || forkingCurrentSession || !!directConfirm
   const verifyShareStatus = (targetSid, retrySuperseded = true) => {
     const target = String(targetSid || '')
     if (!target) return Promise.resolve(null)
@@ -3546,7 +3765,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
 
   // A full composer (textarea + attach + send/stop + mode row below) — reused by side + full views.
-  const composer = (placeholder) => <div className="chat-in asst-in">
+  const composer = (placeholder) => <div
+    className={'chat-in asst-in' + (directConfirm ? ' direct-confirming' : '')}>
     {historical && <div className="assistant-history-lock">{runLoadingLocked
       ? 'Verifying this run · Assistant actions are paused.'
       : runUnavailableLocked
@@ -3557,6 +3777,43 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         : staleDiagnostic
           ? 'Diagnostic link generation mismatch · Assistant paused. Open the current generation to continue.'
           : `History seq ${runAccess.seq} · Assistant paused. Return live to ask about or change this run.`}</div>}
+    {directConfirm?.phase === 'checking' && <div className="assistant-command-pending">
+      <span ref={directConfirmStatusRef} tabIndex={-1} role="status"
+        aria-live="polite" aria-atomic="true">
+        Verifying the exact approval target · nothing sent…
+      </span>
+      <button ref={directConfirmCancelRef} type="button" className="btn sm ghost"
+        onClick={cancelDirectConfirmation}>Cancel · keep draft</button>
+    </div>}
+    {directConfirm?.phase === 'ready' && <div
+      className="asst-perm risk-consequential assistant-direct-confirm"
+      role="alertdialog" aria-modal="false"
+      aria-labelledby="assistant-direct-confirm-title"
+      aria-describedby="assistant-direct-confirm-details">
+      <div className="asst-perm-h">
+        <span className="asst-perm-badge">confirmation required</span>
+        <b id="assistant-direct-confirm-title">{directConfirm.title}</b>
+        <span className="asst-perm-risk consequential">consequential</span>
+      </div>
+      <dl className="asst-perm-details" id="assistant-direct-confirm-details">
+        <div><dt>Run</dt><dd><code>{directConfirm.runId}</code></dd></div>
+        <div><dt>Version</dt><dd><code className="assistant-direct-identity">
+          {directConfirm.expectedGeneration}</code></dd></div>
+        {Number.isSafeInteger(directConfirm.nodeGeneration)
+          && <div><dt>Attempt</dt><dd>experiment #{directConfirm.direct.arg}
+            {' · generation '}{directConfirm.nodeGeneration}</dd></div>}
+        <div><dt>Command</dt><dd><code>{directConfirm.commandText}</code></dd></div>
+        <div><dt>Mode</dt><dd>{directConfirm.modeLabel}</dd></div>
+        <div><dt>Consequence</dt><dd>{directConfirm.consequence}</dd></div>
+      </dl>
+      <div className="asst-perm-actions">
+        <button ref={directConfirmCancelRef} type="button" className="btn sm ghost"
+          onClick={cancelDirectConfirmation}>Cancel · keep draft</button>
+        <button type="button"
+          className={`btn sm ${directConfirm.danger ? 'danger' : 'primary'}`}
+          onClick={confirmDirectCommand}>{directConfirm.actionLabel}</button>
+      </div>
+    </div>}
     {currentShareAckNotice && <div className="assistant-command-pending error" role="alert"
       aria-live="assertive" aria-atomic="true">
       <span>{currentShareAckNotice.message}</span>
@@ -3887,10 +4144,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           indicator={attentionIndicator} embedded onClick={openAttentionCenter} />}
         <button className="btn sm ghost" aria-label="Start a new Assistant chat"
           title={turnStarting ? 'Wait for the new Assistant chat to finish starting'
-            : retryChecking ? 'Wait for the saved turn check to finish' : 'new chat'}
-          disabled={turnStarting || retryChecking} onClick={newChat}>＋ Chat</button>
+            : retryChecking ? 'Wait for the saved turn check to finish'
+              : directConfirm ? 'Resolve the run-command confirmation first' : 'new chat'}
+          disabled={turnStarting || retryChecking || !!directConfirm} onClick={newChat}>＋ Chat</button>
         <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
-        <button className="btn sm ghost" title="collapse to the bar" onClick={collapseToBar}>▾ bar</button>
+        <button className="btn sm ghost"
+          title={directConfirm ? 'Cancel the run-command confirmation and keep the draft' : 'collapse to the bar'}
+          onClick={directConfirm ? cancelDirectConfirmation : collapseToBar}>
+          {directConfirm ? 'Cancel command' : '▾ bar'}</button>
       </div>
       <div className="asst-drawer-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
         aria-live="off" aria-busy={busy} tabIndex={0}
@@ -3905,12 +4166,16 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       inert={deleteConfirm ? '' : undefined} tabIndex={-1}>
       <div className="asst-side">
         <div className="asst-side-h">
-          <button className="btn sm" title="fold back to the bar" onClick={collapseToBar}>▾ bar</button>
+          <button className="btn sm"
+            title={directConfirm ? 'Cancel the run-command confirmation and keep the draft' : 'fold back to the bar'}
+            onClick={directConfirm ? cancelDirectConfirmation : collapseToBar}>
+            {directConfirm ? 'Cancel command' : '▾ bar'}</button>
           <span className="ttl" style={{ flex: 1 }}>Assistant</span>
           <button className="btn sm primary" aria-label="Start a new Assistant chat"
             title={turnStarting ? 'Wait for the new Assistant chat to finish starting'
-              : retryChecking ? 'Wait for the saved turn check to finish' : undefined}
-            disabled={turnStarting || retryChecking} onClick={newChat}>+ Chat</button>
+              : retryChecking ? 'Wait for the saved turn check to finish'
+                : directConfirm ? 'Resolve the run-command confirmation first' : undefined}
+            disabled={turnStarting || retryChecking || !!directConfirm} onClick={newChat}>+ Chat</button>
         </div>
         <div ref={sessionsRef} className="asst-sessions"
           aria-busy={sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}>
@@ -3945,7 +4210,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                 : turnStarting ? 'Wait for the new Assistant chat to finish starting'
                   : retryChecking ? 'Wait for the saved turn check to finish'
                     : s.cleanup_required ? 'This partial chat cannot be opened. Delete it to retry cleanup.' : undefined}
-              disabled={s.cleanup_required === true || turnStarting || retryChecking
+              disabled={s.cleanup_required === true || turnStarting || retryChecking || !!directConfirm
                 || String(openingSid || '') === String(s.id)}
               onClick={() => openSession(s.id)}>
               <span className="asst-sess-t">{s.title || 'Chat'}</span>
@@ -3957,7 +4222,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                   : fmtAgo(s.updated)}</span>
             </button>
             <button type="button" className="asst-sess-x" onClick={(e) => requestDeleteSession(s, e)}
-              disabled={forkBusySid === s.id || turnStarting
+              disabled={forkBusySid === s.id || turnStarting || !!directConfirm
                 || String(openingSid || '') === String(s.id)
                 || (s.id === sid && (retryChecking || busy || pending.length > 0))}
               title={forkBusySid === s.id ? 'Wait for this chat to finish forking'
@@ -3989,7 +4254,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                   ? 'Wait for the current Assistant reply to finish or recover it before forking'
                   : shareBusy ? 'Wait for the current share action before forking'
                     : 'Fork this complete chat into a new session'}
-            disabled={forkBusy || shareBusy || deletingCurrentSession
+            disabled={forkBusy || shareBusy || deletingCurrentSession || !!directConfirm
               || (shareTurnIncomplete && !currentForkRecovery)}
             onClick={forkCurrentSession}>{forkBusySid === sid ? 'forking…'
               : currentForkRecovery ? '⑂ check fork' : '⑂ fork'}</button>}
@@ -4024,7 +4289,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                 : shareTurnIncomplete
                 ? 'Wait for the current Assistant turn to finish before freezing a complete snapshot'
                 : 'Create and copy a frozen read-only snapshot'}
-              disabled={shareBusy || forkingCurrentSession || shareTurnIncomplete}
+              disabled={shareBusy || forkingCurrentSession || shareTurnIncomplete || !!directConfirm}
               onClick={async () => {
             const shareSid = sid
             if (shareActionSessionRef.current) { flash('Another share action is still in progress'); return }
@@ -4102,7 +4367,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               onClick={revokeCurrentShares}>{shareBusySid === sid ? 'working…'
                 : `⤫ ${shareUnknown ? 'revoke pending' : 'unshare'}`}</button>}
           <button className="btn sm ghost" title="dock to the right" onClick={openSide}>▧ side</button>
-          <button className="btn sm ghost" title="fold to the bar" onClick={collapseToBar}>▾ bar</button>
+          <button className="btn sm ghost"
+            title={directConfirm ? 'Cancel the run-command confirmation and keep the draft' : 'fold to the bar'}
+            onClick={directConfirm ? cancelDirectConfirmation : collapseToBar}>
+            {directConfirm ? 'Cancel command' : '▾ bar'}</button>
         </div>
         {shareCopy && <div className="copy-link-fallback" role="status">
           <label htmlFor={`assistant-share-fallback-${sid}`}>
