@@ -15,6 +15,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from _source_scan import iter_sources
+
 import pytest
 
 from looplab.core.models import DEVELOPER_ERROR_PREFIX, is_developer_error
@@ -36,10 +38,10 @@ def test_the_sentinel_text_itself_is_unchanged():
 
 def test_no_module_respells_the_sentinel_literally():
     offenders = []
-    for path in sorted(_PKG.rglob("*.py")):
+    for path, source in iter_sources(_PKG):
         if path.name == "models.py" and path.parent.name == "core":
             continue                      # the definition site
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        for number, line in enumerate(source.splitlines(), 1):
             code = line.split("#", 1)[0]  # a why-comment may quote the sentinel; only code counts
             if "(developer error:" in code:
                 offenders.append(f"{path.relative_to(_PKG.parent)}:{number}: {line.strip()}")

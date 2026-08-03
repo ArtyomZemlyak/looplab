@@ -19,6 +19,8 @@ from __future__ import annotations
 import errno
 import os
 
+from _source_scan import iter_sources
+
 import pytest
 
 from looplab.core.atomicio import durable_no_replace_rename
@@ -142,8 +144,8 @@ def test_both_callers_delegate_rather_than_keeping_their_own_ctypes():
 
     root = Path(__file__).resolve().parents[1] / "looplab"
     offenders = [f"{path.relative_to(root)}:{index}"
-                 for path in sorted(root.rglob("*.py")) if path.name != "atomicio.py"
-                 for index, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1)
+                 for path, source in iter_sources(root) if path.name != "atomicio.py"
+                 for index, line in enumerate(source.split("\n"), 1)
                  if "renameat2" in line or "renamex_np" in line]
     assert offenders == [], f"a private no-replace rename came back: {offenders}"
 

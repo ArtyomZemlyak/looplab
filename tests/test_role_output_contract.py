@@ -8,11 +8,10 @@ Mirrors test_hint_forwarding: source-scan both sides of the seam against the reg
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
+from _source_scan import iter_sources, scan
 from looplab.agents.roles import DEVELOPER_OUTPUT_ATTRS, RESEARCHER_ACTION_ATTRS
 
-_PKG = Path(__file__).resolve().parents[1] / "looplab"
 _ALL = set(DEVELOPER_OUTPUT_ATTRS) | set(RESEARCHER_ACTION_ATTRS)
 
 # Consumer probes: getattr(<expr>, "<attr>") over developer/researcher/wrapper handles.
@@ -23,14 +22,6 @@ _PRODUCER = re.compile(
     r'\.((?:last_files?|last_deleted|last_footprint|last_file|last_report|last_seed|last_run|last_patch|choose_action)[a-z_]*)\s*=[^=]')
 
 
-def _scan(pattern: re.Pattern) -> dict[str, set[str]]:
-    found: dict[str, set[str]] = {}
-    for f in list(_PKG.rglob("*.py")):
-        for name in pattern.findall(f.read_text(encoding="utf-8", errors="replace")):
-            found.setdefault(name, set()).add(str(f.relative_to(_PKG)))
-    return found
-
-
 def test_every_consumer_probe_is_registered():
     # Telemetry attrs (last_hyp_priority/last_foresight*) have their own explicit-property
     # discipline in surrogate.py — they are read via _emit_role_telemetry's registry, not here.
@@ -39,14 +30,14 @@ def test_every_consumer_probe_is_registered():
     # read at finalize for old/partial states) — NOT the duck-typed role-output seam. The `last_` prefix
     # heuristic over-matches them; they carry the RunState model contract, not the roles.py registry.
     run_state_fields = {"last_finish_seq"}
-    unknown = {n: fs for n, fs in _scan(_CONSUMER).items() if n not in _ALL | telemetry | run_state_fields}
+    unknown = {n: fs for n, fs in scan(_CONSUMER).items() if n not in _ALL | telemetry | run_state_fields}
     assert not unknown, (
         f"getattr probe(s) for unregistered role output attr(s): {unknown} — a typo'd read "
         "silently returns the default forever. Register in agents/roles.py or fix the probe.")
 
 
 def test_every_producer_write_is_registered():
-    unknown = {n: fs for n, fs in _scan(_PRODUCER).items()
+    unknown = {n: fs for n, fs in scan(_PRODUCER).items()
                if n not in _ALL and not n.startswith(("last_foresight", "last_hyp"))}
     assert not unknown, (
         f"assignment(s) to near-registry role output attr(s): {unknown} — a producer-side "
@@ -54,15 +45,14 @@ def test_every_producer_write_is_registered():
 
 
 def test_registry_attrs_still_have_producers_and_consumers():
-    consumers, producers = _scan(_CONSUMER), _scan(_PRODUCER)
+    consumers, producers = scan(_CONSUMER), scan(_PRODUCER)
     for attr in DEVELOPER_OUTPUT_ATTRS:
         assert attr in consumers, f"{attr}: no engine consumer left — registry rot"
         assert attr in producers, f"{attr}: no producer left — registry rot"
     for attr in RESEARCHER_ACTION_ATTRS:
         assert attr in consumers, f"{attr}: no engine consumer left — registry rot"
         # producers define it as a method (`def choose_action`), not an assignment — needle check:
-        text = "\n".join(f.read_text(encoding="utf-8", errors="replace")
-                          for f in _PKG.rglob("*.py"))
+        text = "\n".join(source for _path, source in iter_sources())
         assert f"def {attr}(" in text, f"{attr}: no role defines it — registry rot"
 
 

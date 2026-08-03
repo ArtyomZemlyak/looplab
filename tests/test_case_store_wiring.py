@@ -10,17 +10,15 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from _source_scan import iter_trees
+
 _PKG = Path(__file__).resolve().parents[1] / "looplab"
 
 
 def _constructor_sites(name: str) -> list[str]:
     """Every `name(...)` call under looplab/, excluding the class statement itself."""
     sites = []
-    for path in sorted(_PKG.rglob("*.py")):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:  # pragma: no cover - a broken file is a different test's problem
-            continue
+    for path, tree in iter_trees(_PKG):
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == name):

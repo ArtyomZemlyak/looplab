@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from _source_scan import iter_trees
+
 from looplab.agents.cli_agent import PRESETS
 from looplab.core.config import DEVELOPER_BACKENDS, Settings
 
@@ -69,8 +71,7 @@ def test_core_imports_nothing_above_itself():
     upward = {"adapters", "agents", "cli", "engine", "events", "runtime", "search", "serve",
               "tools", "trust"}
     offenders = []
-    for path in sorted((_PKG / "core").rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+    for path, tree in iter_trees(_PKG / "core"):
         for node in ast.walk(tree):
             module = getattr(node, "module", None) if isinstance(node, ast.ImportFrom) else None
             names = ([module] if module else

@@ -17,6 +17,8 @@ import re
 from pathlib import Path
 
 import orjson
+from _source_scan import iter_sources
+
 import pytest
 
 from looplab.events.eventstore import (
@@ -147,10 +149,9 @@ def test_no_reader_reimplements_the_line_rule():
     pkg = Path(__file__).resolve().parents[1] / "looplab"
     definition_site = pkg / "events" / "eventstore.py"
     offenders = []
-    for path in sorted(pkg.rglob("*.py")):
+    for path, source in iter_sources(pkg):
         if path == definition_site:
             continue
-        source = path.read_text(encoding="utf-8")
         if _INLINED_STOP.search(source):
             offenders.append(str(path.relative_to(pkg.parent)))
     assert not offenders, (

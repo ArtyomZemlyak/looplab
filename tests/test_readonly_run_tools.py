@@ -13,6 +13,8 @@ grep in five places.
 """
 from __future__ import annotations
 
+from _source_scan import iter_sources
+
 import pytest
 
 from looplab.core.models import RunState
@@ -107,8 +109,8 @@ def test_no_caller_hand_builds_a_lone_run_tools_composite():
     lone = re.compile(r"CompositeTools\(\s*\[\s*(rt|RunTools\(\))\s*\]")
     root = Path(__file__).resolve().parents[1] / "looplab"
     offenders = [f"{path.relative_to(root)}:{index}"
-                 for path in sorted(root.rglob("*.py"))
-                 for index, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1)
+                 for path, source in iter_sources(root)
+                 for index, line in enumerate(source.split("\n"), 1)
                  if lone.search(line) and path.name != "run_tools.py"]
     assert offenders == [], (
         f"read-only RunTools built by hand outside `readonly_run_tools`: {offenders}")

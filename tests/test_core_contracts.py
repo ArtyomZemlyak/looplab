@@ -12,6 +12,8 @@ import inspect
 import re
 from pathlib import Path
 
+from _source_scan import iter_sources
+
 import pytest
 
 from looplab.core import llm, llm_streaming, llm_toolcall, llm_transient
@@ -142,9 +144,9 @@ def test_the_zero_production_callers_claim_is_gone_because_it_is_false():
     root = CORE.parent
     callers = {
         path.relative_to(root).as_posix()
-        for path in root.rglob("*.py")
+        for path, source in iter_sources(root)
         if path.name != "atomicio.py"
-        and re.search(r"strict_atomic_write_(text|bytes)\(", path.read_text(encoding="utf-8"))
+        and re.search(r"strict_atomic_write_(text|bytes)\(", source)
     }
     assert len(callers) >= 5, f"only {sorted(callers)} — re-check the comment before widening it"
 

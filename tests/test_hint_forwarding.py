@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import inspect
 
+from _source_scan import iter_trees
 from looplab.agents.roles import RESEARCHER_HINT_ATTRS
 from looplab.agents.unified_agent import UnifiedAgent
 from looplab.core.models import Card, Idea, RunState, hypothesis_id
@@ -222,9 +223,7 @@ def test_every_researcher_wrapper_forwards_hints():
         return False
 
     offenders = []
-    for f in pkg.rglob("*.py"):
-        # utf-8-sig: several tracked files carry a BOM, which plain utf-8 turns into a SyntaxError
-        tree = ast.parse(f.read_text(encoding="utf-8-sig", errors="replace"))
+    for f, tree in iter_trees(pkg):
         for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
             methods = {m.name: m for m in cls.body
                        if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}

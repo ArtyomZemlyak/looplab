@@ -16,6 +16,8 @@ from __future__ import annotations
 import inspect
 import re
 
+from _source_scan import iter_sources
+
 import pytest
 
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED,
@@ -181,8 +183,8 @@ def test_no_module_re_compiles_the_pattern():
     root = Path(replay.__file__).resolve().parents[1]
     offenders = [
         f"{path.relative_to(root)}:{index}"
-        for path in sorted(root.rglob("*.py"))
-        for index, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1)
+        for path, source in iter_sources(root)
+        for index, line in enumerate(source.split("\n"), 1)
         if r'compile(r"[^\W_]+"' in line and path.name != "text.py"
     ]
     assert not offenders, f"the unicode tokenizer was re-declared at {offenders}"

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from _source_scan import iter_trees
 from looplab.events import types as event_types
 from looplab.events.types import ALL_EVENT_TYPES
 
@@ -80,9 +81,7 @@ def test_every_emitted_event_type_is_registered():
     no-oping in the fold."""
     unknown = []
     sources_with_appends = 0
-    for py in sorted(LOOPLAB.rglob("*.py")):
-        # utf-8-sig: at least one source file (adapters/repo_task.py) carries a BOM
-        tree = ast.parse(py.read_text(encoding="utf-8-sig"), filename=str(py))
+    for py, tree in iter_trees(LOOPLAB):
         found = _emitted_string_literals(tree)
         sources_with_appends += bool(found)
         for lineno, literal in found:

@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from _source_scan import iter_sources
+
 import pytest
 
 from looplab.core.config import Settings
@@ -232,8 +234,7 @@ def test_the_preflight_demands_exactly_the_keys_the_clients_will_ask_for(monkeyp
 # --------------------------------------------------------------------------- the registry
 def _role_literals() -> set[str]:
     return set(re.findall(r'role=["\']([a-z_]+)["\']',
-                          "\n".join(p.read_text(encoding="utf-8")
-                                    for p in (ROOT / "looplab").rglob("*.py"))))
+                          "\n".join(source for _p, source in iter_sources(ROOT / "looplab"))))
 
 
 def test_every_role_key_has_a_reader():

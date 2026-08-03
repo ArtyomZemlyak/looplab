@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 
+from _source_scan import iter_sources, iter_trees
+
 _PKG = Path(__file__).resolve().parents[1] / "looplab"
 
 # consumer package -> provider module -> the private names it imports.
@@ -93,12 +95,8 @@ _DECLARED = {(consumer, module, name)
 
 def _actual_edges() -> set[tuple[str, str, str]]:
     edges: set[tuple[str, str, str]] = set()
-    for path in sorted(_PKG.rglob("*.py")):
+    for path, tree in iter_trees(_PKG):
         consumer = path.relative_to(_PKG).as_posix().split("/")[0]
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8-sig"))
-        except SyntaxError:                       # not this guard's job to police
-            continue
         for node in ast.walk(tree):
             if not isinstance(node, ast.ImportFrom) or not node.module:
                 continue
@@ -219,8 +217,7 @@ def test_the_upward_import_is_confined_to_that_one_default():
     """The point of the inversion: `serve` may be named in the default provider and nowhere else in
     `tools/`, so the boundary is one reviewable site instead of scattered lazy imports."""
     offenders = []
-    for path in sorted((_PKG / "tools").rglob("*.py")):
-        source = path.read_text(encoding="utf-8-sig")
+    for path, source in iter_sources(_PKG / "tools"):
         tree = ast.parse(source)
         for node in ast.walk(tree):
             module = getattr(node, "module", None) if isinstance(node, ast.ImportFrom) else None

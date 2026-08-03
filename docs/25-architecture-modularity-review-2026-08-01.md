@@ -4189,6 +4189,29 @@ operator is already used to reading.
 
 *Recommendation:* Do NOT unify the registries themselves. Extract a small shared tests helper (e.g. tests/_source_scan.py with iter_sources() and scan(pattern)->dict) so the six guard tests share the file-walking/decoding logic while keeping their bespoke extraction heuristics.
 
+*Resolution (2026-08-03):* `tests/_source_scan.py` with exactly that API — `iter_sources()`,
+`iter_trees()` and `scan(pattern) -> {name: {file, …}}` — and the registries untouched, as the
+finding directs. The per-seam extraction heuristics stay in their own files; only the walk moved.
+
+The scope is wider than the six named, because the survey found **fifteen** tests rglob-ing the
+package, and the copies had already diverged on the detail that decides whether a scan runs at all:
+**four different decodings** were in use (`utf-8` and `utf-8-sig`, each with and without
+`errors="replace"`). That is not cosmetic. At least one tracked file carries a BOM, and `ast.parse`
+on a plain-`utf-8` read of it raises `SyntaxError: invalid non-printable character U+FEFF` — so a
+scanner written with the wrong spelling does not miss a finding quietly, it dies on an unrelated
+file. **Three of the fifteen still parsed with plain `utf-8`** and were one BOM away from that.
+`utf-8-sig` + `errors="replace"` is the one spelling that works for both scan kinds, and it is now
+the only one.
+
+Two smaller things the shared walk fixes rather than preserves: the results are SORTED (an unsorted
+rglob reports the same offenders in a different order per filesystem, which reads as a flapping
+test), and `iter_trees` sets `filename=` so a SyntaxError names the file it came from.
+
+Two of the finding's six were miscounted and are deliberately left alone:
+`tests/test_background_appendable.py` does no source walk at all, and `tests/test_signal_delivery.py`
+reads a handful of NAMED files — a different, correct shape, since its point is that one specific
+wiring line exists in one specific file. A test pins that exclusion so it reads as a decision.
+
 #### XP-11 · MEDIUM · duplication · effort: medium
 
 **Test suite mass-duplicates Engine construction and role stubs; conftest is only 30 lines**

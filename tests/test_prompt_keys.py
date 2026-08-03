@@ -10,31 +10,23 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from _source_scan import scan
 from looplab.core.prompts import PROMPT_KEYS
 
-_PKG = Path(__file__).resolve().parents[1] / "looplab"
 # \s* after the paren crosses newlines: best_of_n spells `render(\n    prompts, "key", …)` —
 # the original same-line-only pattern was blind to it (the P4 review's own HIGH finding).
 _CALL = re.compile(r'render\(\s*[\w.]+\s*,\s*"([a-z_]+)"')
 
 
-def _call_keys() -> dict[str, set[str]]:
-    found: dict[str, set[str]] = {}
-    for f in _PKG.rglob("*.py"):
-        for key in _CALL.findall(f.read_text(encoding="utf-8", errors="replace")):
-            found.setdefault(key, set()).add(str(f.relative_to(_PKG)))
-    return found
-
-
 def test_every_render_key_is_registered():
-    unknown = {k: fs for k, fs in _call_keys().items() if k not in PROMPT_KEYS}
+    unknown = {k: fs for k, fs in scan(_CALL).items() if k not in PROMPT_KEYS}
     assert not unknown, (
         f"render() call site(s) use unregistered prompt key(s) {unknown} — register in "
         "core/prompts.py::PROMPT_KEYS (and document the override file name) or fix the typo.")
 
 
 def test_every_registered_key_has_a_call_site():
-    calls = set(_call_keys())
+    calls = set(scan(_CALL))
     orphaned = [k for k in PROMPT_KEYS if k not in calls]
     assert not orphaned, (
         f"registered prompt key(s) {orphaned} have no render() call site — a rename left the "

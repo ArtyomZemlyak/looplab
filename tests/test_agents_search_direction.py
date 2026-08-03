@@ -16,14 +16,15 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from _source_scan import iter_trees
+
 _PKG = Path(__file__).resolve().parents[1] / "looplab"
 
 
 def _imports(package: str, target_prefix: str):
     """(path, lineno, module, is_module_level) for every import of `target_prefix` in `package`."""
     found = []
-    for path in sorted((_PKG / package).rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+    for path, tree in iter_trees(_PKG / package):
         for node in ast.walk(tree):
             module = getattr(node, "module", None) if isinstance(node, ast.ImportFrom) else None
             names = ([module] if module else
