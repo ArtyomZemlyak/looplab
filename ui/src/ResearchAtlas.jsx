@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   getCrossRunAtlas, getCrossRunClaims, getCrossRunCurationLog, getCrossRunClaimCurationLog,
   projectResearchAtlasSource,
@@ -42,15 +42,20 @@ export function AtlasRunReference({ run }) {
   </a>
 }
 
-function SourceWatermark({ sourceKey, label, source, retry, busy, pending, children }) {
+function SourceWatermark({ sourceKey, label, source, retry, busy, pending,
+  activeRetry = false, retryable = true, children }) {
   const state = source.state
-  return <p className={`atlas-source-note atlas-source-${pending ? 'loading' : state}`}>
+  return <p className={`atlas-source-note atlas-source-focus-target atlas-source-${pending ? 'loading' : state}`}
+    data-atlas-source={sourceKey} tabIndex={-1}>
     <strong>{label}</strong> · {pending ? 'loading'
       : state === 'retained-stale' ? 'stale' : state === 'failed' ? 'unavailable' : 'loaded'}
     {' · '}revision {source.revision || 'unknown'} · {children}
-    {state !== 'current' && <> · <button type="button" className="btn sm" disabled={busy}
-      onClick={() => retry(sourceKey)} aria-label={`Retry ${label}`}>
-      {busy ? 'Refreshing…' : 'Retry'}</button></>}
+    {retryable && state !== 'current' && <> · <button type="button" className="btn sm atlas-retry-action"
+      disabled={busy && !activeRetry} aria-disabled={activeRetry || undefined}
+      aria-busy={activeRetry || undefined}
+      onClick={event => retry(sourceKey, 'watermark', event.currentTarget)}
+      aria-label={`${activeRetry ? 'Retrying' : 'Retry'} ${label}`}>
+      {activeRetry ? 'Retrying…' : 'Retry'}</button></>}
   </p>
 }
 
@@ -66,25 +71,26 @@ export function EvidenceSourceNotice({ concept, claims }) {
 
 export function AtlasEmptyState({ sourceStates, conceptSource,
   claimSource = { status: 'unknown' },
-  pending = [], retry, busy, onBack }) {
+  pending = [], retry, busy, activeRetryKey = '', memorySettingsNeeded = false }) {
   const pendingSources = new Set(pending)
   const evidenceCurrent = ['atlas', 'claims'].every(key => sourceStates[key]?.state === 'current'
     && !pendingSources.has(key))
   const completeEmpty = evidenceCurrent && conceptSource.status === 'complete'
     && claimSource.status === 'complete'
-  return <section className="atlas-empty" aria-labelledby="atlas-empty-title" role="status">
+  return <section className="atlas-empty" aria-labelledby="atlas-empty-title">
     <div className="atlas-empty-copy">
-      <h2 id="atlas-empty-title">{completeEmpty
-        ? 'No cross-run evidence'
-        : evidenceCurrent ? 'No retained evidence' : 'Atlas evidence unavailable'}</h2>
-      <p>{completeEmpty
-        ? 'No evidence returned; runs may still exist.'
-        : evidenceCurrent ? 'Empty rows do not prove absence.'
-        : 'Retry unavailable or stale sources.'}</p>
-      <div className="atlas-empty-actions">
-        <button type="button" className="btn primary" onClick={onBack}>Back to runs</button>
-        <a className="btn" href="#/settings">Memory settings</a>
+      <div className="atlas-empty-message" role="status" aria-atomic="true">
+        <h2 id="atlas-empty-title">{completeEmpty
+          ? 'No cross-run evidence'
+          : evidenceCurrent ? 'No retained evidence' : 'Atlas evidence unavailable'}</h2>
+        <p>{completeEmpty
+          ? 'No evidence returned; runs may still exist.'
+          : evidenceCurrent ? 'Empty rows do not prove absence.'
+          : 'Retry unavailable or stale sources.'}</p>
       </div>
+      {memorySettingsNeeded && <div className="atlas-empty-actions">
+        <a className="btn" href="#/settings">Memory settings</a>
+      </div>}
     </div>
     <ul className="atlas-source-readiness" aria-label="Atlas source readiness">
       {SOURCES.map(([key, , label]) => {
@@ -93,16 +99,21 @@ export function AtlasEmptyState({ sourceStates, conceptSource,
         const status = loading ? 'loading' : state === 'current'
           ? key === 'atlas' ? conceptSource.status : key === 'claims' ? claimSource.status : 'complete'
           : state === 'retained-stale' ? 'stale' : 'unavailable'
-        const retryable = !loading && state !== 'current'
+        const retryable = state !== 'current'
+        const activeRetry = loading && activeRetryKey === key
         return <li key={key}
-        className={`atlas-empty-source atlas-empty-source-${loading ? 'loading' : state}`}>
+        className={`atlas-empty-source atlas-source-focus-target atlas-empty-source-${loading ? 'loading' : state}`}
+        data-atlas-source={key} tabIndex={-1}>
         <span className="atlas-readiness-dot" aria-hidden="true" />
         <span className="atlas-empty-source-head">
           <strong>{label}</strong><span className="atlas-readiness-state">{status}</span>
         </span>
-        {retryable && <button type="button" className="btn sm" disabled={busy}
-          onClick={() => retry(key)} aria-label={`Retry ${label}`}>
-          {busy ? 'Refreshing…' : 'Retry'}
+        {retryable && <button type="button" className="btn sm atlas-retry-action"
+          disabled={busy && !activeRetry} aria-disabled={activeRetry || undefined}
+          aria-busy={activeRetry || undefined}
+          onClick={event => retry(key, 'empty-source', event.currentTarget)}
+          aria-label={`${activeRetry ? 'Retrying' : 'Retry'} ${label}`}>
+          {activeRetry ? 'Retrying…' : 'Retry'}
         </button>}
       </li>})}
     </ul>
@@ -161,30 +172,47 @@ export function ClaimCard({ claim, compact = false }) {
   </article>
 }
 
-function RouteState({ kind, errors, onRetry }) {
+function RouteState({ kind, errors, errorKind, onRetry, busy }) {
   if (kind === 'loading') return <div className="run-resource-state" role="status">
     <span className="dag-empty-spinner" aria-hidden="true" />
-    <h1>Loading Atlas</h1>
+    <h1 id="atlas-route-state-title">Loading Atlas</h1>
   </div>
-  const memoryMissing = errors.length > 0 && errors.every(error => error.status === 400)
-  return <div className="run-resource-state" role={memoryMissing ? 'status' : 'alert'}>
-    <h1>{memoryMissing ? 'Atlas not configured' : 'Atlas unavailable'}</h1>
-    {memoryMissing && <p>Set Memory dir in Settings.</p>}
+  const memoryMissing = errorKind
+    ? errorKind === 'memory'
+    : errors.length > 0 && errors.every(error => error.status === 400)
+  return <div className="run-resource-state">
+    <div className="atlas-route-state-message" role={memoryMissing ? 'status' : 'alert'} aria-atomic="true">
+      <h1 id="atlas-route-state-title">{memoryMissing ? 'Atlas not configured' : 'Research Atlas couldn’t load'}</h1>
+      <p>{memoryMissing
+        ? 'Set Memory dir in Settings, then try again. Your runs were not changed.'
+        : 'None of the Atlas sources returned usable data. Your runs were not changed.'}</p>
+    </div>
     <div className="resource-state-actions">
       {memoryMissing && <a className="btn primary" href="#/settings">Open Settings</a>}
-      <button type="button" className={`btn ${memoryMissing ? '' : 'primary'}`} onClick={onRetry}>Refresh all</button>
+      <button type="button" className={`btn ${memoryMissing ? '' : 'primary'}`}
+        data-atlas-retry="route" aria-disabled={busy || undefined} aria-busy={busy || undefined}
+        onClick={onRetry}>{busy ? 'Trying again…' : 'Try again'}</button>
     </div>
   </div>
 }
 
 export default function ResearchAtlas({ onBack }) {
-  const [request, setRequest] = useState({ key: '' })
+  const [request, setRequest] = useState({ key: '', attempt: 0 })
   const requestId = useRef(0)
   const busyRef = useRef(true)
+  const focusAttemptRef = useRef(0)
+  const retryFocusRef = useRef(null)
+  const atlasMainRef = useRef(null)
   const [resource, setResource] = useState({
-    status: 'loading', view: null, payload: null, errors: [], pending: [],
+    status: 'loading', view: null, payload: null, errors: [], pending: [], attempt: 0,
+    routeErrorKind: '',
     sourceStates: reconcileAtlasSourceStatuses({}, {}, ''),
   })
+
+  const clearRetryFocus = () => {
+    retryFocusRef.current?.cleanup?.()
+    retryFocusRef.current = null
+  }
 
   useEffect(() => {
     let active = true
@@ -196,8 +224,14 @@ export default function ResearchAtlas({ onBack }) {
     let batchPortfolioId = ''
     let remaining = requestedSources.length
     busyRef.current = true
-    setResource(current => ({ ...current, status: current.view ? 'refreshing' : 'loading',
-      errors: current.errors.filter(error => !keys.includes(error.key)), pending: keys }))
+    setResource(current => ({ ...current,
+      status: current.view ? 'refreshing' : current.errors.length > 0 ? 'retrying' : 'loading',
+      errors: current.errors.filter(error => !keys.includes(error.key)),
+      routeErrorKind: !current.view && current.errors.length > 0
+        ? current.errors.every(error => error.status === 400) ? 'memory' : 'generic'
+        : current.routeErrorKind,
+      pending: keys, attempt: request.attempt,
+    }))
     const settle = (key, value, error) => {
       if (!active || id !== requestId.current) return
       let valid = isValidAtlasSourceEnvelope(key, value)
@@ -218,10 +252,16 @@ export default function ResearchAtlas({ onBack }) {
         const payload = accepted ? candidate : current.payload
         const view = accepted ? buildResearchAtlasView(payload.atlas, payload.claims,
           mergeCurationLogs(payload.conceptCuration, payload.claimCuration)) : current.view
+        const nextErrors = [...current.errors.filter(item => item.key !== key), ...failed]
         return {
           ...current, payload, view,
-          status: last ? (view ? 'ready' : 'error') : (view ? 'refreshing' : 'loading'),
-          errors: [...current.errors.filter(item => item.key !== key), ...failed],
+          status: last ? (view ? 'ready' : 'error')
+            : (view ? 'refreshing' : current.status === 'retrying' ? 'retrying' : 'loading'),
+          errors: nextErrors,
+          routeErrorKind: last && !view
+            ? nextErrors.length > 0 && nextErrors.every(item => item.status === 400)
+              ? 'memory' : 'generic'
+            : current.routeErrorKind,
           pending: current.pending.filter(item => item !== key),
           sourceStates: reconcileAtlasSourceStatuses(switched ? {} : current.sourceStates, successful,
             new Date().toISOString(), [key]),
@@ -239,10 +279,68 @@ export default function ResearchAtlas({ onBack }) {
     }
   }, [request])
 
-  const retry = (key = '') => {
+  useEffect(() => () => clearRetryFocus(), [])
+
+  useLayoutEffect(() => {
+    const intent = retryFocusRef.current
+    if (!intent || resource.attempt !== intent.attempt) return
+    const routeBecameUsable = intent.origin === 'route' && Boolean(resource.view)
+    if (!routeBecameUsable && resource.pending.length > 0) return
+    const active = document.activeElement
+    const focusStillOwned = active === intent.triggerNode || active === document.body
+      || active === document.documentElement || !active?.isConnected
+    if (intent.yielded || !focusStillOwned || !atlasMainRef.current?.isConnected
+      || document.querySelector('[aria-modal="true"]')) {
+      clearRetryFocus()
+      return
+    }
+    if (routeBecameUsable) {
+      clearRetryFocus()
+      atlasMainRef.current.focus({ preventScroll: true })
+      return
+    }
+    const failed = intent.keys.some(key => resource.errors.some(error => error.key === key))
+    let target = null
+    if (failed) {
+      target = intent.triggerNode?.isConnected ? intent.triggerNode
+        : document.querySelector(resource.view
+          ? '[data-atlas-retry="topbar"]' : '[data-atlas-retry="route"]')
+    } else if (intent.key) {
+      target = intent.surfaceNode?.isConnected ? intent.surfaceNode : atlasMainRef.current
+    } else if (intent.origin === 'topbar' && intent.triggerNode?.isConnected) {
+      target = intent.triggerNode
+    } else {
+      target = atlasMainRef.current
+    }
+    clearRetryFocus()
+    target?.focus({ preventScroll: true })
+  }, [resource.attempt, resource.pending, resource.errors, resource.view])
+
+  const retry = (key = '', origin = 'topbar', triggerNode = null) => {
     if (busyRef.current) return
+    const attempt = ++focusAttemptRef.current
+    clearRetryFocus()
+    const intent = {
+      attempt, key, origin, triggerNode,
+      keys: key ? [key] : SOURCES.map(([sourceKey]) => sourceKey),
+      surfaceNode: triggerNode?.closest('[data-atlas-source]') || null,
+      yielded: false,
+      cleanup: null,
+    }
+    const markYielded = event => {
+      if (event.type === 'focusin'
+        && (event.target === document.body || event.target === document.documentElement)) return
+      if (event.target !== triggerNode && !triggerNode?.contains(event.target)) intent.yielded = true
+    }
+    document.addEventListener('focusin', markYielded, true)
+    document.addEventListener('pointerdown', markYielded, true)
+    intent.cleanup = () => {
+      document.removeEventListener('focusin', markYielded, true)
+      document.removeEventListener('pointerdown', markYielded, true)
+    }
+    retryFocusRef.current = intent
     busyRef.current = true
-    setRequest({ key })
+    setRequest({ key, attempt })
   }
   const view = resource.view
   const sourceStates = resource.sourceStates
@@ -253,7 +351,11 @@ export default function ResearchAtlas({ onBack }) {
   const hasRetainedStale = Object.values(sourceStates).some(source => source.state === 'retained-stale')
   const hasMissing = SOURCES.some(([key]) => sourceStates[key].state === 'failed'
     && !resource.pending.includes(key))
+  const evidenceErrors = resource.errors.filter(error => error.key === 'atlas' || error.key === 'claims')
+  const memorySettingsNeeded = evidenceErrors.length > 0
+    && evidenceErrors.every(error => error.status === 400)
   const busy = busyRef.current
+  const topbarOwnsRefresh = busy && request.key === '' && retryFocusRef.current?.origin === 'topbar'
   return <div className="app atlas-route">
     <div className="topbar">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
@@ -261,19 +363,23 @@ export default function ResearchAtlas({ onBack }) {
       <span className="ttl">Research Atlas preview</span>
       <span className="chip xs warn">Experimental · bounded · read-only</span>
       <span className="spacer" />
-      <button type="button" className="btn sm" aria-label="Refresh all Research Atlas sources"
-              disabled={busy} onClick={() => retry()}>
+      {view && <button type="button" className="btn sm" data-atlas-retry="topbar"
+        aria-label="Refresh all Research Atlas sources" disabled={busy && !topbarOwnsRefresh}
+        aria-disabled={topbarOwnsRefresh || undefined} aria-busy={busy || undefined}
+        onClick={event => retry('', 'topbar', event.currentTarget)}>
         {busy ? 'Refreshing…' : 'Refresh all'}
-      </button>
+      </button>}
     </div>
 
-    <main className="research-atlas-page" data-route-main tabIndex={-1}
-      aria-busy={busy}>
+    <main ref={atlasMainRef} className="research-atlas-page" data-route-main tabIndex={-1}
+      aria-busy={busy} aria-labelledby={view ? 'atlas-title' : 'atlas-route-state-title'}>
       {!view
-        ? <RouteState kind={resource.status} errors={resource.errors} onRetry={() => retry()} />
+        ? <RouteState kind={resource.status} errors={resource.errors}
+          errorKind={resource.routeErrorKind} busy={busy}
+          onRetry={event => retry('', 'route', event.currentTarget)} />
         : <div className="atlas-content">
           <header className="atlas-intro">
-            <h1>Portfolio evidence</h1>
+            <h1 id="atlas-title">Portfolio evidence</h1>
             <p>Rows do not prove coverage. D8 receipts cover processed rows,
               not every run.</p>
           </header>
@@ -284,7 +390,6 @@ export default function ResearchAtlas({ onBack }) {
                 ? '; some sources unavailable' : ''}.`
               : 'Some sources unavailable.'}</b>
             <span>{countLabel(resource.errors.length, 'source refresh', 'source refreshes')} failed.</span>
-            <button type="button" className="btn sm" disabled={busy} onClick={() => retry()}>Refresh all</button>
           </div>}
 
           {view.invalidRows.total > 0 && <div className="notice resource-warning atlas-degraded" role="alert">
@@ -308,7 +413,8 @@ export default function ResearchAtlas({ onBack }) {
           {view.empty && <AtlasEmptyState sourceStates={sourceStates} conceptSource={view.conceptSource}
             claimSource={view.claimSource}
             pending={resource.pending}
-            retry={retry} busy={busy} onBack={onBack} />}
+            retry={retry} busy={busy} activeRetryKey={busy ? request.key : ''}
+            memorySettingsNeeded={memorySettingsNeeded} />}
 
           {!view.empty && <div className="atlas-grid">
             <section className="atlas-panel atlas-coverage" aria-labelledby="atlas-concepts">
@@ -347,7 +453,8 @@ export default function ResearchAtlas({ onBack }) {
               </>}
               <SourceWatermark sourceKey="atlas" label="Concept projection"
                 source={sourceStates.atlas} retry={retry} busy={busy}
-                pending={resource.pending.includes('atlas')}>
+                pending={resource.pending.includes('atlas')}
+                activeRetry={busy && request.key === 'atlas'}>
                 bounded observations, not coverage.
               </SourceWatermark>
             </section>
@@ -367,7 +474,7 @@ export default function ResearchAtlas({ onBack }) {
               </p>}
               <SourceWatermark sourceKey="atlas" label="Mixed claims"
                 source={sourceStates.atlas} retry={retry} busy={busy}
-                pending={resource.pending.includes('atlas')}>
+                pending={resource.pending.includes('atlas')} retryable={false}>
                 not a verdict or applicability decision.
               </SourceWatermark>
             </section>
@@ -388,7 +495,8 @@ export default function ResearchAtlas({ onBack }) {
               </p>}
               <SourceWatermark sourceKey="claims" label="Claim records"
                 source={sourceStates.claims} retry={retry} busy={busy}
-                pending={resource.pending.includes('claims')}>
+                pending={resource.pending.includes('claims')}
+                activeRetry={busy && request.key === 'claims'}>
                 maturity differs from evidence.
               </SourceWatermark>
             </section>
@@ -415,7 +523,8 @@ export default function ResearchAtlas({ onBack }) {
               {[['conceptCuration', 'Concept'], ['claimCuration', 'Claim']].map(([sourceKey, kind]) =>
                 <SourceWatermark key={sourceKey} sourceKey={sourceKey}
                   label={`${kind} steward log`} source={sourceStates[sourceKey]} retry={retry}
-                  busy={busy} pending={resource.pending.includes(sourceKey)}>
+                  busy={busy} pending={resource.pending.includes(sourceKey)}
+                  activeRetry={busy && request.key === sourceKey}>
                   history, not current governance.
                 </SourceWatermark>)}
             </section>
