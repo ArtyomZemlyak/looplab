@@ -19,6 +19,7 @@ model dependency in the default path — it works offline against the seed explo
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -122,7 +123,11 @@ def harden(suite: ExploitSuite, *,
             # fixer: derive a durable pattern. For seed probes we know it; for an LLM probe we
             # fall back to a literal escape of a salient token (the import/open/os.system head).
             seed = _SEED_EXPLOITS[i] if hacker is None and i < len(_SEED_EXPLOITS) else None
-            name = seed["name"] if seed else f"exploit_{abs(hash(code)) % 10**6}"
+            # A CONTENT digest, not `hash()` (doc 25 CT-12). Python salts `str.__hash__` per
+            # interpreter, so the same LLM-found exploit landed in the durable suite under a
+            # different name on every run — the suite would accumulate duplicate rules for one
+            # exploit and `suite.add`'s by-name idempotence could never fire.
+            name = seed["name"] if seed else f"exploit_{_exploit_digest(code)}"
             pattern = seed["pattern"] if seed else _derive_pattern(code)
             kind = seed["kind"] if seed else "grader_access"
             if pattern is None:
@@ -134,6 +139,15 @@ def harden(suite: ExploitSuite, *,
             if suite.add(name, pattern, kind):
                 added.append(name)
     return {"added": added, "blocked_legit": blocked, "caught": caught, "escaped": escaped}
+
+
+def _exploit_digest(code: str) -> str:
+    """A stable 12-hex name suffix for an LLM-found exploit, from its own text.
+
+    Process-stable is the whole requirement: this name goes into a DURABLE rule suite that later
+    runs read back, so a per-interpreter value makes the same exploit a new rule every time.
+    """
+    return hashlib.sha256((code or "").encode("utf-8", "replace")).hexdigest()[:12]
 
 
 def _derive_pattern(code: str) -> Optional[str]:

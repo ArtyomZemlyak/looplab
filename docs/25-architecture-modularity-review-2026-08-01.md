@@ -4063,6 +4063,31 @@ passing a value into a signature that no longer has a slot for it.
 
 *Recommendation:* Not deletion-on-sight (the seams are documented), but set a decision point: wire the cv splitters behind a temporal adapter or move them to a docs/example; if calibrate_detector is the operator's harness, expose it (a `looplab calibrate-detector` subcommand is ~15 lines); replace hash() with a content digest (hashlib) in _derive-pattern naming.
 
+*Resolution (2026-08-03):* the DEFECT is fixed and the decision point is now a test rather than a
+note.
+
+`harden`'s LLM-found rule naming used `abs(hash(code))`, and `str.__hash__` is SALTED per
+interpreter. That is not cosmetic: the name goes into a DURABLE rule suite later runs read back, so
+the same exploit landed under a new name on every process — the suite accumulated one rule per
+sighting and `ExploitSuite.add`'s idempotence could never fire. `_exploit_digest` is a sha256 prefix;
+a test drives the same exploit twice and asserts exactly one rule, and another runs the digest in two
+subprocesses with different `PYTHONHASHSEED`s, which is the failure the old code actually had.
+
+The seams themselves are KEPT, and the "decision point" is
+`tests/test_trust_seam_status.py::UNCONSUMED_TRUST_SEAMS` — a declared list with a reason per entry,
+guarded in both directions: a surface that gains a production caller fails the test and has to leave
+the list, and a NEW unconsumed surface has to be added to it deliberately. That is the part worth
+having. docs/17 had already recorded "tested, no live caller" for the cv splitters three weeks before
+this review restated it, which is what a note in a document does; a list the suite checks cannot go
+quietly stale the same way.
+
+Two of the finding's suggestions were NOT taken. Wiring the cv splitters "behind a temporal adapter"
+would mean inventing the adapter they are waiting for — the splitters are not the blocked part. And a
+`looplab calibrate-detector` subcommand is a new public CLI surface, offered on the finding's own
+conditional ("IF calibrate_detector is the operator's harness"), which nothing in the repo confirms;
+adding a command nobody asked for is a worse outcome than an unwired function that says why it is
+unwired.
+
 #### CT-13 · LOW · duplication · effort: small
 
 **Run-dir existence check re-implemented inline four times despite _require_run_dir**
