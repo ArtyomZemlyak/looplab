@@ -1,23 +1,26 @@
 """SSE/stream machinery for the LLM clients (split out of `core.llm`).
 
-The idle-guard watchdogs that interrupt a stalled stream (`_stream_with_idle_guard` for the
-openai-SDK path, `_socket_watchdog` + `_sse_chunks` for the urllib-era reassembly path), the
-raw-socket plumbing they need (`_raw_socket` / `_stream_raw_socket` / `_shutdown_pool_sockets` —
-only socket.shutdown() unblocks a recv() wedged in the kernel), and the non-SSE whole-body
-fallback parser (`_parse_chat_body`). `core.llm` re-imports every name under its original name, so
-`looplab.core.llm._stream_with_idle_guard` (and the flat `looplab.llm.…`) READ the same objects —
-tests and callers import and call through those paths.
+The idle-guard watchdog that interrupts a stalled stream (`_stream_with_idle_guard`) and the
+raw-socket plumbing it needs (`_stream_raw_socket` / `_shutdown_pool_sockets` — only
+socket.shutdown() unblocks a recv() wedged in the kernel). `core.llm` re-imports every name under
+its original name, so `looplab.core.llm._stream_with_idle_guard` (and the flat `looplab.llm.…`)
+READ the same objects — tests and callers import and call through those paths.
 
-MONKEYPATCH THROUGH THIS MODULE, not through `core.llm` (doc 25 CO-10). Several helpers here call
-each other by bare global name — `_stream_with_idle_guard` -> `_stream_raw_socket`, `_sse_chunks` ->
-`_chunk_has_content`/`_SSETail` — and those lookups resolve in THIS module's namespace. Rebinding
-the `core.llm` alias replaces only that alias and never reaches the live call.
+There used to be a SECOND, urllib-era reassembly path here (`_socket_watchdog` + `_sse_chunks` +
+`_SSETail` + `_raw_socket`, driven by `OpenAICompatibleClient._read_stream`) that no production
+code had called since the openai-SDK migration — only tests. It is gone (doc 25 CO-03), along with
+`_parse_chat_body`, whose sole caller it was. Its two contracts live on where they are actually
+exercised: the stall-kill in `_stream_with_idle_guard` (and its real-socketpair test), and the
+degenerate-body path in `_post`'s empty-response classification.
+
+MONKEYPATCH THROUGH THIS MODULE, not through `core.llm` (doc 25 CO-10). Helpers here call each
+other by bare global name — `_stream_with_idle_guard` -> `_stream_raw_socket`/`_chunk_has_content`
+— and those lookups resolve in THIS module's namespace. Rebinding the `core.llm` alias replaces
+only that alias and never reaches the live call.
 """
 from __future__ import annotations
 
-import json
 import time
-from typing import Optional
 
 # httpx/openai are declared runtime deps, but the import is GUARDED for the same reason as in
 # `core.llm`: an offline/replay/`--no-deps` install must still import the package without the live
@@ -29,13 +32,6 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - deps are declared; guard is for stripped/offline installs
     httpx = None   # type: ignore[assignment]
     openai = None  # type: ignore[assignment]
-
-
-def _raw_socket(resp):
-    """Best-effort grab of the raw socket behind a urllib response (http.client wraps it in a
-    BufferedReader over a SocketIO). None for a non-socket body (e.g. a test mock)."""
-    fp = getattr(resp, "fp", None)
-    return getattr(getattr(fp, "raw", None), "_sock", None) or getattr(fp, "_sock", None)
 
 
 def _shutdown_pool_sockets(http_client) -> int:
@@ -210,131 +206,3 @@ def _stream_with_idle_guard(stream, idle_limit: float, first_byte_limit: float =
         except Exception:  # noqa: BLE001 - the .request property raises RuntimeError when unset
             _req = None
         raise openai.APIConnectionError(message=str(e) or e.__class__.__name__, request=_req) from e
-
-
-def _parse_chat_body(raw: Optional[str]) -> Optional[dict]:
-    """Parse an OpenAI-compatible chat response body into its dict, or None when the body is
-    UNRECOVERABLE. A hosted gateway can return HTTP 200 with a body that is empty / whitespace /
-    truncated (it dropped the connection mid-response) or that interleaves SSE keep-alive COMMENT
-    lines (': OPENROUTER PROCESSING' — sent to hold the socket open while a model is queued) around
-    the JSON. A None return tells `_post` to retry the request like a transient network failure
-    instead of crashing the run on a single gateway hiccup. A parsed dict is always returned as-is
-    (including an `{"error": ...}` envelope), so the caller's no-`choices` check still fails fast on
-    a genuine bad-request — only an unparseable body is retried."""
-    if not raw or not raw.strip():
-        return None
-    try:
-        obj = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        # Recover the keepalive-interleaved case: drop blank + ':'-comment lines, re-parse the rest.
-        kept = "\n".join(ln for ln in raw.splitlines()
-                         if ln.strip() and not ln.lstrip().startswith(":"))
-        if not kept.strip():
-            return None
-        try:
-            obj = json.loads(kept)
-        except (json.JSONDecodeError, ValueError):
-            return None
-    return obj if isinstance(obj, dict) else None
-
-
-def _socket_watchdog(resp, idle_limit: float):
-    """Shared stream-stall watchdog. A stalled generation can hide from an in-loop wall-clock check
-    two ways: SSE keepalive heartbeats reset the per-socket read timeout forever, and a server that
-    trickles bytes WITHOUT completing a line blocks inside recv() so the loop's check never even runs
-    (both observed as multi-minute/hour hangs on glm-5.1). This starts a daemon thread that, once no
-    progress for `idle_limit`s, SHUTS DOWN the underlying socket — which is what actually interrupts a
-    recv() already blocked in the kernel (resp.close() alone does not: the blocked syscall keeps
-    waiting on the fd). shutdown() makes the recv raise OSError, retried on a fresh connection.
-
-    Returns (last_progress, killed, stop):
-      - last_progress[0]: set to time.monotonic() on every REAL token so a long-but-alive generation
-        is never cut off (no hard deadline — only true silence trips it).
-      - killed[0]: True once the watchdog fired (read the loop's EOF as a stall, not a clean end).
-      - stop(): end the watchdog thread — ALWAYS call it in a finally.
-    """
-    import socket as _socket
-    import threading
-    last_progress = [time.monotonic()]
-    killed = [False]
-    _stop = threading.Event()
-    # None for a non-socket body (e.g. a test mock) -> close() path.
-    _sock = _raw_socket(resp)
-
-    def _watchdog():
-        while not _stop.wait(min(5.0, idle_limit / 4)):
-            if time.monotonic() - last_progress[0] > idle_limit:
-                killed[0] = True            # so the loop's EOF is read as a stall, not a clean end
-                if _sock is not None:
-                    try:
-                        _sock.shutdown(_socket.SHUT_RDWR)   # unblocks a recv() stuck in the kernel
-                    except Exception:  # noqa: BLE001
-                        pass
-                try:
-                    resp.close()            # fallback (and mock-friendly for tests)
-                except Exception:  # noqa: BLE001
-                    pass
-                return
-
-    threading.Thread(target=_watchdog, daemon=True).start()
-    return last_progress, killed, _stop.set
-
-
-class _SSETail:
-    """Raw-line side channel of `_sse_chunks`, used by `_read_stream`'s non-SSE fallback: every line
-    as received (`raw_lines` — joined and parsed as one JSON body when the response turns out not to
-    be SSE at all) and whether any `data:` line was ever seen (`got_sse`)."""
-    __slots__ = ("raw_lines", "got_sse")
-
-    def __init__(self):
-        self.raw_lines: list[str] = []
-        self.got_sse = False
-
-
-def _sse_chunks(lines, last_progress, killed, idle_limit: float, stall_msg: str,
-                tail: Optional[_SSETail] = None):
-    """Shared SSE consumption for `_read_stream` and `complete_text_stream`: iterate the response's
-    lines and yield each parsed `data:` chunk as a dict, ending at EOF or the `[DONE]` sentinel.
-    The two callers MERGE chunks differently (full chat-response reassembly incl. tool_calls/usage
-    vs. yielded text deltas), so chunk interpretation — including bumping `last_progress[0]` on every
-    real token — stays with them; this generator owns only the transport concerns they duplicated:
-
-      - `last_progress`/`killed` are the `_socket_watchdog` cells for this response. No progress for
-        `idle_limit`s raises TimeoutError(stall_msg) (each caller passes its own exact message); a
-        ValueError from a watchdog-closed response ends the stream so the CALLER's post-`killed`
-        check decides what a watchdog kill means (always-raise vs. keep a partial stream).
-      - keepalive/comment lines (no `data:` prefix) and non-JSON heartbeat payloads are skipped.
-      - `tail` (passed by `_read_stream` only) records every raw line and the got-SSE flag, feeding
-        its whole-body fallback for a non-SSE (plain JSON) response.
-    """
-    while True:
-        try:
-            raw = next(lines)
-        except StopIteration:
-            return
-        except ValueError:
-            # The watchdog called resp.close() while lines buffered in the BufferedReader were
-            # still draining -> readline-of-closed-file. That IS the stall the watchdog fired
-            # on; fall through to the `_killed` check (a TimeoutError _post retries) instead of
-            # leaking a bare ValueError past _post's transient tuple and crashing the run.
-            if killed[0]:
-                return
-            raise
-        if time.monotonic() - last_progress[0] > idle_limit:
-            raise TimeoutError(stall_msg)
-        s = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
-        if tail is not None:
-            tail.raw_lines.append(s)
-        line = s.strip()
-        if not line or not line.startswith("data:"):
-            continue
-        if tail is not None:
-            tail.got_sse = True
-        chunk = line[5:].strip()
-        if chunk == "[DONE]":
-            return
-        try:
-            obj = json.loads(chunk)
-        except ValueError:
-            continue                    # keepalive / non-JSON heartbeat line
-        yield obj

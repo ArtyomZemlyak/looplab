@@ -38,12 +38,6 @@ except ModuleNotFoundError:  # pragma: no cover - deps are declared; guard is fo
     httpx = None   # type: ignore[assignment]
     openai = None  # type: ignore[assignment]
 
-# `urllib.request` is monkeypatched THROUGH this module by direct unit tests
-# (`llm.urllib.request.urlopen`); the LIVE path goes through the openai SDK
-# (see OpenAICompatibleClient._sdk_chat). (`ssl` moved to `llm_transient` alongside the
-# SDK-path error classifier that uses it.)
-import urllib.request  # noqa: F401
-
 from looplab.core import tracing
 from looplab.core.llm_broker import llm_request_permit
 # Re-exported for backward compatibility: dozens of importers (and tests) do
@@ -69,8 +63,7 @@ from looplab.core.llm_transient import (  # noqa: F401
     _is_reasoning_reject, _is_stream_options_reject, _is_throttle_403, _retry_after_of,
     _retry_after_seconds, _sdk_transient)
 from looplab.core.llm_streaming import (  # noqa: F401
-    _SSETail, _chunk_has_content, _parse_chat_body, _raw_socket, _shutdown_pool_sockets,
-    _socket_watchdog, _sse_chunks, _stream_raw_socket, _stream_with_idle_guard)
+    _chunk_has_content, _shutdown_pool_sockets, _stream_raw_socket, _stream_with_idle_guard)
 from looplab.core.llm_toolcall import (  # noqa: F401
     _ANSWER_FIELDS, _CODE_SPAN_RE, _FINAL_NAMES, _NATIVE_INVOKE_RE, _NATIVE_OPEN_RE,
     _NATIVE_PARAM_RE, _apply_native_tool_calls, _args_complete, _assistant_text, _clean_thinking,
@@ -709,93 +702,6 @@ class OpenAICompatibleClient:
                     slot["function"]["arguments"].append(fn["arguments"])
             if ch.finish_reason:
                 finish = ch.finish_reason
-        msg: dict = {"role": "assistant", "content": "".join(content)}
-        if reasoning:
-            msg["reasoning"] = "".join(reasoning)
-        if tcs:
-            msg["tool_calls"] = [
-                {"id": s["id"] or f"call_{i}", "type": "function",
-                 "function": {"name": s["function"]["name"], "arguments": "".join(s["function"]["arguments"])}}
-                for i, s in sorted(tcs.items())]
-        return {"choices": [{"message": msg, "finish_reason": finish}], "usage": usage}
-
-    def _read_stream(self, resp) -> dict:
-        """LEGACY (urllib-era) SSE reassembly. NOT the live streaming path: since the openai-SDK
-        migration `_sdk_chat` streams through `_accumulate_stream`, and nothing in production calls
-        this — only tests do, which is why it and the helpers it alone drives (`_sse_chunks`,
-        `_socket_watchdog`, `_SSETail`, `_raw_socket`) are still here rather than deleted. Read the
-        contract below as a description of the OLD transport, not of what runs today.
-
-        Reassembles an OpenAI SSE stream into the non-streaming response body shape
-        ({"choices":[{"message":{content,reasoning?,tool_calls?}, "finish_reason"}], "usage"}). Each
-        `for raw in resp` line is bounded by the socket `timeout`, so with streaming that timeout is an
-        INTER-TOKEN idle timeout: a stall (no line for `timeout` s) raises socket.timeout here and
-        propagates to `_post`'s transient-retry path; a steady stream is never cut off however long the
-        generation runs. tool_call deltas are merged by `index` (partial name/arguments concatenated)."""
-        content: list[str] = []
-        reasoning: list[str] = []
-        tcs: dict[int, dict] = {}
-        finish = None
-        usage: dict = {}
-        tail = _SSETail()                       # raw lines + got-SSE flag for the non-SSE fallback
-        # Idle timeout by PROGRESS: tracked as wall-clock since the last REAL token and enforced both
-        # by an in-loop check (in `_sse_chunks`) AND a socket-shutdown watchdog (`_socket_watchdog`)
-        # — a stall can hide from either alone (keepalive heartbeats reset the read timeout; a
-        # partial-line trickle blocks in recv() before the in-loop check runs). A long-but-alive
-        # generation keeps emitting content, resetting the clock — no hard deadline.
-        idle_limit = self.timeout
-        last_progress, _killed, _stop_wd = _socket_watchdog(resp, idle_limit)
-        stall_msg = (f"LLM stream stalled — no new tokens for {idle_limit:.0f}s; "
-                     f"retrying on a fresh connection")
-        try:
-            try:
-                lines = iter(resp)              # SSE responses iterate line-by-line
-            except TypeError:
-                lines = iter(())                # a non-iterable body (e.g. a test mock) -> read() below
-            for obj in _sse_chunks(lines, last_progress, _killed, idle_limit, stall_msg, tail=tail):
-                if obj.get("usage"):
-                    usage = obj["usage"]
-                    last_progress[0] = time.monotonic()
-                ch = (obj.get("choices") or [{}])[0] or {}
-                delta = ch.get("delta") or {}
-                if delta.get("content"):
-                    content.append(delta["content"])
-                    last_progress[0] = time.monotonic()   # real token => progress
-                r = delta.get("reasoning") or delta.get("reasoning_content")
-                if r:
-                    reasoning.append(r)
-                    last_progress[0] = time.monotonic()
-                for tc in (delta.get("tool_calls") or []):
-                    last_progress[0] = time.monotonic()
-                    idx = _tool_call_slot(tcs, tc)   # provider-omitted `index` must not collapse calls
-                    slot = tcs.setdefault(idx,
-                                          {"id": None, "type": "function",
-                                           "function": {"name": "", "arguments": []}})
-                    if tc.get("id"):
-                        slot["id"] = tc["id"]
-                    fn = tc.get("function") or {}
-                    if fn.get("name"):
-                        slot["function"]["name"] = fn["name"]
-                    if fn.get("arguments"):
-                        slot["function"]["arguments"].append(fn["arguments"])
-                if ch.get("finish_reason"):
-                    finish = ch["finish_reason"]
-        finally:
-            _stop_wd()                          # stop the watchdog before we return / propagate
-        if _killed[0]:                          # watchdog shut the socket -> a stall, not a real end;
-            raise TimeoutError(stall_msg)       # _post catches -> retry
-        # Not actually an SSE stream (a non-streaming endpoint, or a test mock that returns one JSON
-        # body): parse the whole body as a normal chat completion so streaming stays transparent.
-        if not tail.got_sse and not content and not tcs:
-            blob = "".join(tail.raw_lines)
-            if not blob and hasattr(resp, "read"):
-                try:
-                    blob = resp.read().decode("utf-8", "replace")
-                except Exception:  # noqa: BLE001
-                    blob = ""
-            whole = _parse_chat_body(blob)
-            if whole is not None:               # any parsed JSON body (incl. an {"error":…} envelope,
-                return whole                    # which the caller fails fast on at the no-choices check)
         msg: dict = {"role": "assistant", "content": "".join(content)}
         if reasoning:
             msg["reasoning"] = "".join(reasoning)

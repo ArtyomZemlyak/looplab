@@ -355,48 +355,6 @@ def test_post_drops_reasoning_on_unsupported_param_400(monkeypatch):
     assert c._reasoning_ok is False and calls["n"] == 2      # adapted — won't send reasoning again
 
 
-def test_read_stream_watchdog_breaks_a_stalled_connection():
-    """A streamed response that BLOCKS in recv() with no new tokens (a stalled generation, or a server
-    trickling keepalive bytes without completing a line) must not hang forever: a watchdog SHUTS DOWN
-    the underlying socket after `timeout` s — which actually interrupts the blocked recv (resp.close()
-    alone does not) — so the read ends and _post retries. Regression for a ~70-min / ~15-min live hang.
-    Uses a real socketpair so the socket.shutdown() path (not just the close() fallback) is exercised."""
-    import socket
-    import time as _t
-    import looplab.core.llm as llm
-
-    a, _b = socket.socketpair()                   # _b never sends -> a.recv blocks like a stalled server
-
-    class _SockResp:
-        def __init__(self, s):
-            self.fp = type("FP", (), {"raw": type("R", (), {"_sock": s})()})()
-            self._s = s
-
-        def __iter__(self):
-            return self
-
-        def __next__(self):
-            data = self._s.recv(100)              # blocks; watchdog shutdown() -> returns b'' (EOF)
-            if not data:
-                raise StopIteration
-            return data
-
-        def close(self):
-            try:
-                self._s.close()
-            except OSError:
-                pass
-
-        def read(self):
-            return b""
-
-    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", timeout=2)   # 2s idle limit
-    t0 = _t.monotonic()
-    with pytest.raises((OSError, TimeoutError)):
-        c._read_stream(_SockResp(a))
-    assert _t.monotonic() - t0 < 6                # fired near the 2s limit, did NOT hang
-
-
 def test_post_raises_after_exhausting_timeouts(monkeypatch):
     """A persistently dead endpoint still surfaces a clean LLMError once retries are exhausted."""
     import looplab.core.llm as llm
@@ -688,34 +646,6 @@ def test_h1_off_by_default_no_constraints():
         {"function": {"name": "emit", "arguments": "{}"}}]}}], "usage": {}})
     c.complete_tool([{"role": "user", "content": "x"}], {"type": "object"})
     assert "response_format" not in captured and "guided_json" not in captured
-
-
-def test_read_stream_falls_back_on_iterable_non_sse_body():
-    """A response that ITERATES line-by-line but never sends a `data:` line (a non-streaming endpoint
-    behind a streaming request) must be reassembled from its raw lines and parsed as one plain JSON
-    chat body — the `_sse_chunks` tail (raw_lines + got_sse) feeding `_read_stream`'s fallback."""
-    import looplab.core.llm as llm
-
-    class _IterResp:
-        """Iterable urllib-response stand-in with NO usable read() (forces the raw-lines path)."""
-        def __init__(self, lines):
-            self._lines = lines
-            self.fp = None
-
-        def __iter__(self):
-            return iter(self._lines)
-
-        def close(self):
-            pass
-
-    body = json.dumps({"choices": [{"message": {"role": "assistant", "content": "plain"}}],
-                       "usage": {"total_tokens": 3}}, indent=1)
-    # A multi-line JSON body (plus a leading ':' comment) — line iteration splits at real newlines.
-    lines = [b": PROCESSING\n"] + [(ln + "\n").encode() for ln in body.splitlines()]
-    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
-    out = c._read_stream(_IterResp(lines))
-    assert out["choices"][0]["message"]["content"] == "plain"
-    assert out["usage"] == {"total_tokens": 3}
 
 
 # ─────────────────────────────── native tool-call recovery + stream reassembly (mega review) ─────

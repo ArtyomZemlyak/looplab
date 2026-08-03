@@ -1799,6 +1799,32 @@ distinct error types. Teeth-verified against 13 separate breakages.
 
 *Recommendation:* Delete `_read_stream`, `_sse_chunks`, `_socket_watchdog`, `_SSETail`, `_raw_socket`, the `urllib.request` import, and their tests; port any behavior those tests uniquely cover (stall-kill, non-SSE fallback) onto `_accumulate_stream`/`_stream_with_idle_guard`, which already implement the same contracts.
 
+*Resolution (2026-08-03):* Deleted, along with one more the finding did not list: `_parse_chat_body`,
+whose only caller was `_read_stream`. Also gone are the `urllib.request` import that existed solely
+so those tests could monkeypatch `llm.urllib.request.urlopen`, the four dead re-exports through
+`llm.py`, and the two module docstrings' explanations of which of two SSE paths was real.
+
+Neither contract needed porting, which was checked rather than assumed:
+
+* **stall-kill** is already exercised on the live path by
+  `test_stream_idle_guard_kills_keepalive_trickle`, against a stream that blocks until the watchdog
+  shuts its socket — the same mechanism, on the transport that actually runs.
+* **non-SSE fallback** was a shape only the urllib transport could produce (a response that iterates
+  raw lines and never sends `data:`). On the SDK path a non-streaming endpoint behind a streaming
+  request yields nothing, and `_post`'s empty-body classification owns that case; the degenerate
+  reassembly is pinned directly.
+
+`tests/test_llm_streaming_surface.py` states both halves — the surface is gone AND the live path
+still owns what the surface carried — because a dead-code deletion whose contracts leave with it is
+a regression wearing a cleanup's clothes. It also cross-references the covering stall test by name,
+so renaming that test away is caught here rather than silently leaving the contract unexercised.
+Teeth-verified against 6 breakages.
+
+Two of the assertions had to be sharpened before they bit, and both failure modes are worth naming:
+a `_raw_socket` substring check flags the SURVIVING `_stream_raw_socket`, and `"shutdown" in source`
+stays green when `sock.shutdown(...)` becomes `sock.close()` — which is precisely the regression,
+since close() does not unblock a recv() wedged in the kernel.
+
 #### CO-04 · MEDIUM · duplication · effort: medium
 
 **Three parallel stream-reassembly loops in one client; fallback block triplicated**
