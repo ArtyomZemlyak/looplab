@@ -39,8 +39,15 @@ from looplab.agents.roles import LLMDeveloper, LLMResearcher
 # public dir is where we read train/test/sample-submission from.
 # --------------------------------------------------------------------------------------------------
 def _competition(competition_id: str, data_dir: Optional[str] = None):
-    """Resolve a mle-bench Competition under the given (or the default) data dir. The single place
-    the registry/data-dir resolution lives. Imports mlebench lazily."""
+    """Resolve a mle-bench Competition under the given (or the default) data dir.
+
+    The single place the registry/data-dir resolution lives — which was not true until doc 25 RA-10:
+    `mlebench_prep` and `mlebench_grade` each had their own copy. The `.resolve()` is the part worth
+    single-sourcing. `registry.set_data_dir` keys the whole competition layout off that path, so a
+    relative `--data-dir` resolved by one caller and left relative by another points at two different
+    trees whenever the process cwd differs — and the symptom is "not prepared" or a grade against the
+    wrong answers, not an error. Imports mlebench lazily.
+    """
     from mlebench.registry import registry
     reg = registry if not data_dir else registry.set_data_dir(Path(data_dir).resolve())
     return reg.get_competition(competition_id)

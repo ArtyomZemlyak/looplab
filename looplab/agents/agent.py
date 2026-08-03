@@ -24,7 +24,8 @@ from looplab.agents.roles import (
     _CONCEPT_AUTHORING_GUIDANCE, _OPERATOR_NOTE, _UNTRUSTED_MEMORY_RULE,
     _attention_points, _clamp_fill,
     _hypothesis_system_suffix,
-    _researcher_capability_suffix, _state_brief, collect_hint_cues)
+    _researcher_capability_suffix, _state_brief, collect_hint_cues,
+    RESEARCHER_PROMPT_CUES)
 # The tool-loop machinery was split into `agents.tool_loop`. Every moved name is RE-IMPORTED here
 # under its original name because callers and tests import AND monkeypatch them THROUGH this
 # module — `looplab.agents.agent.agentic_struct` / `.drive_tool_loop` are documented patch seams
@@ -235,8 +236,7 @@ class ToolUsingResearcher:
         # A0d breadth-keyed complexity cue + Strategist `prefer_sweep` bias + T5 novelty-gate
         # re-propose feedback (each empty=off). Matches LLMResearcher's cue set exactly, so the
         # agentic path now honors the strategist's sweep nudge just like the plain researcher.
-        cue = collect_hint_cues(self, ("_complexity_hint", "_sweep_hint", "_novelty_feedback",
-                                       "_novelty_hint"))
+        cue = collect_hint_cues(self, RESEARCHER_PROMPT_CUES)
         # Hypotheses ledger (P1): honor track_hypotheses on the agentic path too (default on, matching
         # config) — ask for the per-experiment `hypothesis` so the ledger of tested beliefs fills in.
         # Shared `_hypothesis_system_suffix` splices `_HYPOTHESIS_INSTRUCTION` identically to LLMResearcher.

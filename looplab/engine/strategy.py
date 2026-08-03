@@ -20,7 +20,8 @@ from typing import Optional
 
 from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext,
                                        canonicalize_strategy_parallelism, failure_rate,
-                                       improves_since_best, is_numeric_space, run_phase,
+                                       improves_since_best, is_numeric_space,
+                                       classify_run_phase,
                                        validate_card_scoring, validate_strategy)
 from looplab.core.config import parallelism_aliases
 from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
@@ -112,7 +113,7 @@ class StrategyCadenceMixin:
         llm_lane_limits = llm_broker["lane_limits"]
         return StrategyContext(
             node_count=len(state.nodes),
-            phase=run_phase(state, self.n_seeds),
+            phase=classify_run_phase(state, self.n_seeds),
             eval_budget_remaining=rem,
             failure_rate=failure_rate(state),
             improves_since_best=improves_since_best(state),

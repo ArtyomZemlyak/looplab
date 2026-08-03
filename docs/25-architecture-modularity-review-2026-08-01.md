@@ -3064,6 +3064,14 @@ belongs with the events-layer read-model work rather than with a layering guard.
 
 *Recommendation:* Rename the strategist one to classify_run_phase (or run_phase_of) with a back-compat alias; it has few importers (engine/strategy.py and tests) so the rename is cheap, unlike the seam-laden agent.run_phase which must keep its name.
 
+*Resolution (2026-08-03):* Renamed to `strategist.classify_run_phase`; `agents/agent.py::run_phase`,
+the tool-loop-with-handoff patch seam, keeps its name. `engine/strategy.py` is the only importer and
+follows it.
+
+The back-compat alias the recommendation offers is deliberately NOT added: it would preserve exactly
+the collision the rename exists to remove — a grep for `run_phase` would still return both. A
+repo-wide grep confirms no other consumer, and a test asserts the alias stays absent.
+
 #### AG-09 · LOW · over-engineering · effort: small
 
 **agent.py facade re-exports six private tool_loop names that nothing imports through it**
@@ -3083,6 +3091,20 @@ belongs with the events-layer read-model work rather than with a layering guard.
 *Evidence:* Both LLMResearcher.propose and ToolUsingResearcher.propose call collect_hint_cues with the identical inline tuple ("_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint") — a strict subset of RESEARCHER_HINT_ATTRS whose docstring promises 'both researchers honor the same cues'. tests/test_hint_forwarding.py scans setattr/forwarding sites, not these two read-side literals, so a new prompt cue added to the registry must be hand-added at both call sites and a one-sided edit silently desyncs the two prompts.
 
 *Recommendation:* Hoist the tuple to a named module constant next to RESEARCHER_HINT_ATTRS (e.g. RESEARCHER_PROMPT_CUES) referenced by both propose() methods, and have the registry docstring/test point at it.
+
+*Resolution (2026-08-03):* `roles.py::RESEARCHER_PROMPT_CUES` sits next to `RESEARCHER_HINT_ATTRS`
+and both `LLMResearcher.propose` and `ToolUsingResearcher.propose` reference it.
+
+The gap this closes is specific: `tests/test_hint_forwarding.py` scans the WRITE side (setattr and
+wrapper forwarding), so the two read-side literals were unguarded — a cue added to the registry and
+to only one `propose()` makes the agentic path and the plain path ask the model different questions,
+with no test to notice and no error at runtime. The constant's docstring also records why it is a
+strict SUBSET: `_digest_cap` is a numeric cap, `_hyp_order` orders the board inside `_state_brief`,
+and `_novelty_stance` / `_steering_context` / `_cross_run_advisory_receipt` are read structurally
+rather than concatenated as prose.
+
+Covered by `tests/test_agent_and_adapter_seams.py`, which pins the subset relation, the exact
+membership, and that neither `propose()` re-inlines the literal.
 
 
 ### 4.10 Tools
@@ -3531,7 +3553,21 @@ the five copy-paste skeletons, which the finding itself rates lower priority.
 
 *Evidence:* The idiom `registry if not data_dir else registry.set_data_dir(Path(data_dir).resolve())` appears three times (mlebench_real._competition, mlebench_prep._registry, inline in mlebench_grade.grade), and is_prepared(competition_id, data_dir) is defined twice with identical bodies (mlebench_real.py:66-69 and mlebench_prep.py:47-51). mlebench_real.py even claims _competition is 'The single place the registry/data-dir resolution lives' — untrue given the other two copies.
 
-*Recommendation:* Have mlebench_prep and mlebench_grade import _competition (and is_prepared) from mlebench_real, or move both helpers into a tiny shared _mlebench_registry helper module; then the 'single place' comment becomes true. Note mlebench_real.py already imports is_prepared-adjacent code lazily, so no import-weight concern.
+*Recommendation:* Have mlebench_prep and mlebench_grade import _competition (and is_prepared) from mlebench_real, or move both helpers into a tiny shared _mlebench_registry helper module; then the 'single place' comment becomes true.
+
+*Resolution (2026-08-03):* `mlebench_prep` and `mlebench_grade` now import `_competition` (and
+`is_prepared`) from `mlebench_real`, so its "the single place the registry/data-dir resolution lives"
+comment is true — and the comment now carries its own provenance so the claim is enforced rather than
+asserted.
+
+The `.resolve()` is the part that mattered. `registry.set_data_dir` keys the whole competition layout
+off that path, so a relative `--data-dir` resolved by one caller and left relative by another points
+at two different trees whenever the process cwd differs. The symptom is "not prepared", or a grade
+computed against the wrong answers — never an error.
+
+Covered by `tests/test_agent_and_adapter_seams.py`, which drives the resolver against a stub registry
+under a changed cwd rather than only scanning source, and asserts `prep.is_prepared is
+real.is_prepared` by identity. Note mlebench_real.py already imports is_prepared-adjacent code lazily, so no import-weight concern.
 
 
 ### 4.12 CLI, Trust, top-level modules

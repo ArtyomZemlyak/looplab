@@ -188,7 +188,15 @@ def is_numeric_space(state: RunState) -> bool:
     return all(isinstance(v, (int, float)) for v in best.idea.params.values())
 
 
-def run_phase(state: RunState, n_seeds: int) -> str:
+def classify_run_phase(state: RunState, n_seeds: int) -> str:
+    """Classify the run into seed / explore / exploit / confirm for the Strategist brief.
+
+    Renamed from `run_phase` (doc 25 AG-08): `agents/agent.py::run_phase` is an unrelated function in
+    the same package — the tool-loop-with-handoff wrapper, a documented patch seam — and sharing the
+    name made a grep for either return thirty mixed hits that a reader had to disambiguate by
+    signature. No back-compat alias: the only importer is `engine/strategy.py`, and keeping an alias
+    would preserve exactly the collision this rename exists to remove.
+    """
     if state.confirmed_done:
         return "confirm"
     n = len(state.nodes)

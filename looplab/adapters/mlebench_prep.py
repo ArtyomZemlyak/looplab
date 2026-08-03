@@ -39,16 +39,10 @@ SELECTED = (
 )
 
 
-def _registry(data_dir: Optional[str]):
-    from mlebench.registry import registry
-    return registry if not data_dir else registry.set_data_dir(Path(data_dir).resolve())
-
-
-def is_prepared(competition_id: str, data_dir: Optional[str] = None) -> bool:
-    """True if the competition's public+private split + answers already exist locally."""
-    from mlebench.data import is_dataset_prepared
-    comp = _registry(data_dir).get_competition(competition_id)
-    return is_dataset_prepared(comp)
+# Registry/data-dir resolution and the prepared check live in `mlebench_real` (doc 25 RA-10). Both
+# were duplicated here with identical bodies, so a fix to the data-dir handling had to be made twice
+# or the prep path and the task path would disagree about which tree "prepared" refers to.
+from looplab.adapters.mlebench_real import _competition, is_prepared  # noqa: F401,E402
 
 
 def prepare_competition(competition_id: str, *, data_dir: Optional[str] = None,
@@ -64,7 +58,7 @@ def prepare_competition(competition_id: str, *, data_dir: Optional[str] = None,
 
     import shutil
 
-    comp = _registry(data_dir).get_competition(competition_id)
+    comp = _competition(competition_id, data_dir)
     if is_dataset_prepared(comp) and not force:
         return comp
 

@@ -239,6 +239,19 @@ DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
     "last_report", "last_seed", "last_run", "last_patch")
 RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
 
+# The SUBSET of RESEARCHER_HINT_ATTRS that both researchers splice into their PROMPT (doc 25 AG-10).
+# Both `LLMResearcher.propose` and `ToolUsingResearcher.propose` had this as an inline literal, under
+# a docstring promising "both researchers honor the same cues" — a promise nothing checked.
+# `tests/test_hint_forwarding.py` scans the setattr/forwarding sites, not these read-side literals,
+# so a cue added to the registry and to only ONE call site desynchronises the two prompts silently:
+# the agentic path and the plain path would ask the model different questions and no test would care.
+#
+# A strict subset by design. `_digest_cap` is a numeric cap consumed separately, `_hyp_order` orders
+# the open-hypothesis board inside `_state_brief`, and `_novelty_stance` / `_steering_context` /
+# `_cross_run_advisory_receipt` are read structurally rather than concatenated as prose.
+RESEARCHER_PROMPT_CUES: tuple[str, ...] = (
+    "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint")
+
 RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
     "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint",
     "_novelty_stance", "_hyp_order", "_steering_context", "_cross_run_advisory_receipt")
@@ -728,8 +741,7 @@ class LLMResearcher:
         #   failed because Y — propose something meaningfully different". Empty in the normal path.
         # - _novelty_hint — slice 2/4: the Strategist's novelty stance directive + coverage gaps
         #   (EXPLORE a new theme / EXPLOIT the leader). Empty when stance is "balanced" (today).
-        cues = collect_hint_cues(self, ("_complexity_hint", "_sweep_hint", "_novelty_feedback",
-                                        "_novelty_hint"))
+        cues = collect_hint_cues(self, RESEARCHER_PROMPT_CUES)
         hyp_sys = _hypothesis_system_suffix(self.track_hypotheses)
         messages = [
             {"role": "system",

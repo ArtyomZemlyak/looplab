@@ -29,9 +29,12 @@ def grade(competition_id: str, submission_path, data_dir: Optional[str] = None) 
     """Grade a submission CSV with mle-bench's real grader; return ``CompetitionReport.to_dict()``
     (``score`` is None for a missing/invalid submission). Imports mlebench lazily."""
     from mlebench.grade import grade_csv
-    from mlebench.registry import registry
-    reg = registry if not data_dir else registry.set_data_dir(Path(data_dir).resolve())
-    comp = reg.get_competition(competition_id)
+
+    from looplab.adapters.mlebench_real import _competition
+
+    # One registry/data-dir resolution (doc 25 RA-10). Grading against a differently-resolved data
+    # dir than the one the task was prepared under scores a submission with the wrong answers.
+    comp = _competition(competition_id, data_dir)
     report = grade_csv(Path(submission_path), comp)
     return report.to_dict()
 
