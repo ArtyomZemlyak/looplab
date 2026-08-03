@@ -83,15 +83,18 @@ def test_evaluate_no_longer_mints_a_namespace():
 
 def test_no_module_outside_trust_builds_a_gate_namespace_by_concatenation():
     """A grep guard across the tree, because the defect is not specific to `evaluate.py`: any
-    consumer that string-builds a gate namespace has re-created the split this removed."""
-    from pathlib import Path
+    consumer that string-builds a gate namespace has re-created the split this removed.
 
-    root = Path(__file__).resolve().parents[1] / "looplab"
+    Through `_source_scan`, not a fresh `rglob` — at least one tracked file carries a UTF-8 BOM, and
+    a guard that walks the package itself decodes it differently from every other guard.
+    """
+    from _source_scan import PKG, iter_sources
+
     offenders = [
-        f"{path.relative_to(root)}:{index}"
-        for path in sorted(root.rglob("*.py"))
+        f"{path.relative_to(PKG)}:{index}"
+        for path, source in iter_sources()
         if path.parent.name != "trust"
-        for index, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1)
+        for index, line in enumerate(source.splitlines(), 1)
         if ('"data_leakage:" +' in line or '"critic:" +' in line
             or "'data_leakage:' +" in line or "'critic:' +" in line)
     ]
