@@ -22,6 +22,7 @@ import re
 import difflib
 from pathlib import Path
 
+from looplab.core.atomicio import file_identity
 from looplab.core.text import normalize_text, tokenize
 from looplab.tools._base import RESULT_CAP, fn_spec
 from looplab.trust.cross_run import cross_run_text, same_live_direction, valid_live_direction
@@ -197,6 +198,8 @@ class CrossRunTools:
         if self.audience not in self.AUDIENCES:
             self.audience = "run"          # an unrecognized audience fails CLOSED, never portfolio-wide
         self._bound = False
+        # (cache key, capsules, {id(capsule): canonical concept set}) — see `_capsule_snapshot`.
+        self._capsule_cache: tuple | None = None
         self._capsule_scope_receipt = {
             "scope_complete": True,
             "scope_unknown_capsules": 0,
@@ -453,10 +456,59 @@ class CrossRunTools:
         upserts by run_id so its own file is unique, but a memory dir assembled from CONCATENATED shards
         (multiple machines' portfolio memory — the reason cross-run memory exists) can carry the same run
         twice; the agent-facing tools must collapse those too, or they double-count a run in similar_runs /
-        find_concept_slugs / concept_card. Sharing one dedup helper keeps every capsule consumer consistent."""
+        find_concept_slugs / concept_card. Sharing one dedup helper keeps every capsule consumer consistent.
+
+        Memoized per capsule-file identity (doc 25 TO-11): one agent turn can call several tools, and
+        each re-read + re-deduped the whole portfolio. Returning the SAME row objects across calls is
+        also what lets `_capsule_snapshot` key its canonical map by object identity.
+
+        The key is fail-OPEN: an unreadable/absent file yields `None`, which never matches a real
+        identity tuple, so the read is simply redone. A stale read is the one wrong outcome, and it
+        cannot happen — `file_identity` carries dev/ino, so an `os.replace` of the file is visible
+        even at an identical size and mtime.
+        """
         from looplab.engine.memory import ConceptCapsuleStore, _dedup_valid_capsules
-        p = self.dir / "concept_capsules.jsonl"
-        return _dedup_valid_capsules(ConceptCapsuleStore(p).all()) if p.exists() else []
+        p = (self.dir / "concept_capsules.jsonl") if self.dir else None
+        try:
+            signature = file_identity(p.stat()) if p is not None else None
+        except OSError:
+            signature = None
+        cached = self._capsule_cache
+        if cached is not None and cached[0] == signature and signature is not None:
+            return cached[1]
+        rows = _dedup_valid_capsules(ConceptCapsuleStore(p).all()) if p and p.exists() else []
+        self._capsule_cache = (signature, rows, {})
+        return rows
+
+    def _capsule_snapshot(self, aliases, splits, revision) -> tuple[list[dict], dict[int, frozenset]]:
+        """``(capsules, {id(capsule): canonical concept set})``, memoized per (capsule file identity,
+        taxonomy revision) — doc 25 TO-11.
+
+        Three tools canonicalized every capsule's concepts independently, and the documented workflow
+        (`find_concept_slugs`, then `concept_card` on a slug it returned) re-did the WHOLE portfolio
+        twice inside one agent turn. That is not just wasted work: `canonicalize_concepts` resolves
+        aliases and splits, so re-running it is only harmless while the taxonomy is unchanged —
+        which is exactly the assumption the revision in the key makes explicit rather than implicit.
+
+        Both halves come back together on purpose. The map is keyed by object IDENTITY, so the caller
+        must filter the SAME list these keys were built from — deriving `prior_caps` from a second
+        `_all_capsules()` call would produce different objects and a KeyError on every lookup.
+        """
+        from looplab.engine.concept_registry import canonicalize_concepts
+
+        caps = self._all_capsules()                       # cached read; see its docstring
+        signature, rows, by_revision = self._capsule_cache
+        cached = by_revision.get(revision)
+        if cached is not None:
+            return caps, cached
+        canonical = {
+            id(cap): frozenset(canonicalize_concepts(
+                cap.get("concepts") or [], aliases=aliases, splits=splits))
+            for cap in caps
+        }
+        by_revision.clear()          # one taxonomy revision is live at a time; do not accumulate
+        by_revision[revision] = canonical
+        return caps, canonical
 
     def _scoped_capsules(self) -> list[dict]:
         caps = self._all_capsules()
@@ -847,6 +899,8 @@ class CrossRunTools:
         aliases, splits = taxonomy["aliases"], taxonomy["splits"]
         mine = set(canonicalize_concepts(
             sorted(self._concepts), aliases=aliases, splits=splits))
+        _all, canonical_sets = self._capsule_snapshot(
+            aliases, splits, taxonomy["concept_governance_revision"])
         caps = self._scoped_capsules()
         scope_receipt = self._capsule_scope_receipt
         from looplab.engine.memory import _capsule_source_summary, _filter_capsule_rows
@@ -883,8 +937,7 @@ class CrossRunTools:
             rid = str(cap.get("run_id") or "")
             if not rid:
                 continue
-            theirs = set(canonicalize_concepts(
-                cap.get("concepts") or [], aliases=aliases, splits=splits))
+            theirs = canonical_sets[id(cap)]
             shared = mine & theirs
             if not shared:
                 continue
@@ -964,11 +1017,8 @@ class CrossRunTools:
         scoped_caps, unknown_scope_caps, scope_receipt = self._partition_capsules(prior_caps)
         mine = set(canonicalize_concepts(
             sorted(self._concepts), aliases=aliases, splits=splits))
-        canonical_by_capsule: dict[int, set[str]] = {
-            id(cap): set(canonicalize_concepts(
-                cap.get("concepts") or [], aliases=aliases, splits=splits))
-            for cap in prior_caps
-        }
+        _all, canonical_by_capsule = self._capsule_snapshot(
+            aliases, splits, taxonomy["concept_governance_revision"])
         cross_run_ids: set[str] = set()
         for cap in scoped_caps:
             rid = str(cap.get("run_id") or "")
@@ -1145,11 +1195,9 @@ class CrossRunTools:
         # keep the per-capsule canonical set. Besides avoiding repeated governance work,
         # this lets a card compute the requested concept's counts from every matching run instead of
         # looking it up in portfolio_concept_overview's intentionally display-capped top 512 rows.
-        canonical_caps = [
-            (cap, set(canonicalize_concepts(
-                cap.get("concepts") or [], aliases=aliases, splits=splits)))
-            for cap in prior_caps
-        ]
+        _all, canonical_sets = self._capsule_snapshot(
+            aliases, splits, taxonomy["concept_governance_revision"])
+        canonical_caps = [(cap, canonical_sets[id(cap)]) for cap in prior_caps]
         global_vocab: set[str] = set(mine)
         for _cap, concepts in canonical_caps:
             global_vocab |= concepts

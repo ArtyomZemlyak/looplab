@@ -3509,6 +3509,26 @@ a back-reference these read-only tools do not have.
 
 *Recommendation:* Cache the (capsules, canonical-sets) pair keyed by (capsule file sig, taxonomy governance_revision) on the provider instance — the revision is already fetched per call — and share the canonicalization structure between the two branches once they are extracted into methods.
 
+*Resolution (2026-08-03):* exactly that pair, split across the two things that invalidate at
+different times. `_all_capsules` memoizes the READ on the capsule file's `file_identity` alone;
+`_capsule_snapshot` memoizes the canonical MAP on the taxonomy revision, over the rows that read
+returned. `similar_runs`, `find_concept_slugs` and `concept_card` all consume it, so the documented
+workflow — call one, then the other on a slug it returned — canonicalizes the portfolio once.
+
+`file_identity` rather than a hand-rolled (size, mtime): the portfolio store rewrites by
+`os.replace`, so a same-size same-second rewrite is invisible without dev/ino. That is the case the
+test drives, because it is the one a weaker key would silently get wrong — and the wrong outcome here
+is an agent answering a concept question from a superseded portfolio while saying nothing about it.
+
+Two shapes the implementation is committed to, both tested. The map is keyed by object IDENTITY, so
+the read must hand back the SAME row objects — a caller that filters rows from a second
+`_all_capsules()` call would get a KeyError on every lookup, which is how the first attempt failed.
+And the revision map holds ONE entry: a long-lived provider would otherwise grow a full copy of the
+portfolio's concept sets per governance edit.
+
+The finding's `_scoped_capsules` note is covered by the same change — it goes through
+`_all_capsules`, so it stops re-reading too.
+
 
 ### 4.11 Runtime + Adapters
 
