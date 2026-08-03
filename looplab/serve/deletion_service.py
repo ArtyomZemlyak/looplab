@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from looplab.core.atomicio import _windows_move_write_through, strict_fsync_parent
+from looplab.core.atomicio import durable_no_replace_rename, strict_fsync_parent
 from looplab.core.pathsafe import is_reparse, WINDOWS_RESERVED
 from looplab.core.run_deletion import (
     RUN_DELETION_OPERATION_RE, RunDeletionStorageError,
@@ -125,41 +125,14 @@ def _strict_quarantine(path: Path) -> bool:
 
 
 def _durable_no_replace_move(source: Path, destination: Path) -> None:
-    """Atomically move sibling directories without replacing a raced destination."""
+    """Atomically move sibling directories without replacing a raced destination.
+
+    The rename contract lives in `core/atomicio.py`; the quarantine-is-a-sibling rule is this
+    service's own, and its message names the run rather than the generic source.
+    """
     if source.parent != destination.parent:
         raise ValueError("deletion quarantine must be a sibling of the run")
-    if os.path.lexists(destination):
-        raise FileExistsError(errno.EEXIST, "deletion quarantine already exists", str(destination))
-    if os.name == "nt":
-        _windows_move_write_through(source, destination, replace=False)
-        return
-    import ctypes
-    import sys
-    old_name = os.fsencode(os.path.abspath(source))
-    new_name = os.fsencode(os.path.abspath(destination))
-    libc = ctypes.CDLL(None, use_errno=True)
-    if sys.platform.startswith("linux"):
-        rename_exclusive = getattr(libc, "renameat2", None)
-        if rename_exclusive is None:
-            raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
-        rename_exclusive.argtypes = [
-            ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-        rename_exclusive.restype = ctypes.c_int
-        result = rename_exclusive(-100, old_name, -100, new_name, 1)
-    elif sys.platform == "darwin":
-        rename_exclusive = getattr(libc, "renamex_np", None)
-        if rename_exclusive is None:
-            raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
-        rename_exclusive.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-        rename_exclusive.restype = ctypes.c_int
-        result = rename_exclusive(old_name, new_name, 0x00000004)
-    else:
-        raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
-    if result != 0:
-        code = ctypes.get_errno() or errno.EIO
-        raise OSError(code, "durable no-replace quarantine rename failed", str(destination))
-    strict_fsync_parent(destination)
-
+    durable_no_replace_rename(source, destination, label="deletion quarantine")
 
 def _same_receipt_identity(
         receipt: dict[str, Any], *, run_id: str, operation_id: str,

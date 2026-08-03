@@ -1648,6 +1648,35 @@ six full `validate_run_child`-shaped validators, which carry per-caller HTTP err
 
 *Recommendation:* Move one durable_no_replace_rename(source, destination, *, label) into core/atomicio.py next to _windows_move_write_through, which both already import.
 
+*Resolution (2026-08-02):* done exactly as recommended —
+`core/atomicio.py::durable_no_replace_rename(source, destination, *, label)`. Both wrappers stay,
+because each owns a DOMAIN rule with an operator-facing message the mechanics never had ("Replay
+archives must remain in the run directory" vs "deletion quarantine must be a sibling of the run");
+only the ~45 lines of ctypes moved, and `label` renders the two callers' differing error wording.
+
+`tests/test_durable_no_replace_rename.py` (11) pins the three properties the function exists for: an
+occupied destination is REFUSED rather than replaced (a plain `os.rename` would destroy whatever a
+concurrent operation just created there), the parent is fsynced before the call returns (so a receipt
+saying "moved" is never ahead of the filesystem), and a missing `renameat2` raises `ENOTSUP` rather
+than falling back to a replacing rename — a silently downgraded durability guarantee is worse than a
+failed operation.
+
+One teeth-test came back SILENT and changed the test's claim rather than the code: weakening
+`lexists` to `exists` is unobservable, because `RENAME_NOREPLACE` refuses a dangling symlink in the
+kernel anyway. The docstring and the test now say what is actually true — the flag is the guarantee,
+`lexists` is the early clean error — and the teeth case was replaced with one that drops BOTH (the
+flag AND the check), which reddens three tests.
+
+The consumer suites also caught a real miss: `deletion_service` uses `strict_fsync_parent` elsewhere,
+so collapsing its atomicio import list broke `begin_or_resume_run_deletion` with a `NameError` that
+the new unit tests could not see.
+
+Side effect worth recording: this RETIRES a cross-package private seam.
+`tests/test_cross_package_private_seams.py` went red because `serve/` no longer imports
+`core.atomicio._windows_move_write_through` — the two callers used to reach past the package boundary
+to assemble the primitive themselves, and now call one public function. The registry entry was
+dropped; the declared private-seam surface is one name smaller.
+
 #### SC-06 · MEDIUM · mergeable-entities · effort: large
 
 **Reset and deletion form two parallel durable-transaction frameworks with duplicated receipt/fence machinery**

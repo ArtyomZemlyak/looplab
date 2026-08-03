@@ -17,7 +17,7 @@ from fastapi import HTTPException, Request
 
 from looplab.adapters.tasks import load_task
 from looplab.core.atomicio import (
-    _windows_move_write_through, strict_atomic_write_bytes, strict_fsync_parent)
+    durable_no_replace_rename, strict_atomic_write_bytes, strict_fsync_parent)
 from looplab.core.config import settings_from_snapshot
 from looplab.core.run_reset import (
     RUN_RESET_OPERATION_ENV, RUN_RESET_OPERATION_RE, RunResetFenceError,
@@ -54,51 +54,12 @@ _CONFIG_MAX_BYTES = 8 * 1024 * 1024
 def _durable_archive_move(source: Path, destination: Path) -> None:
     """Move one sibling artifact durably without ever replacing an archive name.
 
-    Windows exposes the required no-replace + write-through contract through MoveFileExW. POSIX
-    needs a native exclusive rename (plain ``rename`` may replace a raced destination), followed by
-    an fsync of the containing directory so both the new archive name and source-name removal survive
-    a crash before the receipt advances.
+    The rename contract (no-replace, fsync'd parent, loud ENOTSUP rather than a silent downgrade)
+    lives in `core/atomicio.py`; the run-directory sibling rule is this route's own.
     """
     if source.parent != destination.parent:
         raise ValueError("Replay archives must remain in the run directory")
-    if os.path.lexists(destination):
-        raise FileExistsError(
-            errno.EEXIST, "Replay archive destination already exists", str(destination))
-    if os.name == "nt":
-        _windows_move_write_through(source, destination, replace=False)
-        return
-
-    import ctypes
-    import sys
-
-    old_name = os.fsencode(os.path.abspath(source))
-    new_name = os.fsencode(os.path.abspath(destination))
-    libc = ctypes.CDLL(None, use_errno=True)
-    if sys.platform.startswith("linux"):
-        rename_exclusive = getattr(libc, "renameat2", None)
-        if rename_exclusive is None:
-            raise OSError(
-                errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
-        rename_exclusive.argtypes = [
-            ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-        rename_exclusive.restype = ctypes.c_int
-        result = rename_exclusive(-100, old_name, -100, new_name, 1)  # AT_FDCWD, RENAME_NOREPLACE
-    elif sys.platform == "darwin":
-        rename_exclusive = getattr(libc, "renamex_np", None)
-        if rename_exclusive is None:
-            raise OSError(
-                errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
-        rename_exclusive.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-        rename_exclusive.restype = ctypes.c_int
-        result = rename_exclusive(old_name, new_name, 0x00000004)  # RENAME_EXCL
-    else:
-        raise OSError(
-            errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
-    if result != 0:
-        code = ctypes.get_errno() or errno.EIO
-        raise OSError(code, "durable no-replace archive rename failed", str(destination))
-    strict_fsync_parent(destination)
-
+    durable_no_replace_rename(source, destination, label="replay archive")
 
 def _receipt_http_error(operation_id: str, exc: BaseException) -> HTTPException:
     return HTTPException(503, {

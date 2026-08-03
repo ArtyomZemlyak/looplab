@@ -58,7 +58,10 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "serve": {
         "looplab.agents.roles": ("_CONCEPT_AUTHORING_GUIDANCE",),
-        "looplab.core.atomicio": ("_ensure_strict_parent", "_windows_move_write_through"),
+        # `_windows_move_write_through` left this list when doc 25 SC-05 moved the durable
+        # no-replace rename INTO atomicio as the public `durable_no_replace_rename` — the two serve
+        # callers no longer reach past the package boundary to assemble it themselves.
+        "looplab.core.atomicio": ("_ensure_strict_parent",),
         "looplab.engine.claims": ("_filter_claim_assessments", "_safe_claim_source_summary",
                                   "_safe_research_source_summary"),
         "looplab.events.eventstore": ("_interprocess_lock",),

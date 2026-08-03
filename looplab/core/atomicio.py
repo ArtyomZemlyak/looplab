@@ -10,6 +10,8 @@ truncate each other — so we fsync best-effort and give every write its OWN tem
 """
 from __future__ import annotations
 
+import errno
+import errno
 import math
 import os
 import tempfile
@@ -211,6 +213,134 @@ def _windows_move_write_through(
     if not move_file_ex(src, dst, flags):
         code = ctypes.get_last_error()
         raise OSError(code, "durable Windows rename failed", dst)
+
+
+def durable_no_replace_rename(source, destination, *, label: str) -> None:
+    """Rename one SIBLING path to a name that must not already exist, durably (doc 25 SC-05).
+
+    Both callers — the reset route archiving a replaced event log, and the deletion service moving a
+    run into quarantine — need the same three properties, and each had written the same ~45 lines of
+    ctypes to get them:
+
+    * **No replace.** A plain ``os.rename`` silently REPLACES a raced destination. For an archive name
+      or a quarantine directory that means destroying whatever a concurrent operation just put there,
+      which is the one outcome neither caller can recover from. `lexists` is a courtesy check that
+      gives a clean error; the kernel flag is the actual guarantee, because between the check and the
+      rename another worker can win.
+    * **Durability before the receipt advances.** `strict_fsync_parent` makes both the new name and
+      the source-name removal survive a crash, so a receipt that says "moved" is never ahead of the
+      filesystem.
+    * **Loud refusal where the primitive is missing.** An old kernel without ``renameat2``, or a
+      platform that is neither Linux, macOS nor Windows, raises `ENOTSUP` rather than falling back to
+      a replacing rename — silently downgrading the guarantee is worse than failing the operation.
+
+    `label` names the operation in the error ("replay archive", "deletion quarantine"): the two
+    callers' messages were the ONLY thing that differed between the copies.
+    """
+    source = Path(source)
+    destination = Path(destination)
+    if source.parent != destination.parent:
+        raise ValueError(f"{label} must be a sibling of its source")
+    if os.path.lexists(destination):
+        raise FileExistsError(errno.EEXIST, f"{label} destination already exists", str(destination))
+    if os.name == "nt":
+        _windows_move_write_through(source, destination, replace=False)
+        return
+
+    import ctypes
+    import sys
+
+    old_name = os.fsencode(os.path.abspath(source))
+    new_name = os.fsencode(os.path.abspath(destination))
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        rename_exclusive = getattr(libc, "renameat2", None)
+        if rename_exclusive is None:
+            raise OSError(
+                errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
+        rename_exclusive.argtypes = [
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename_exclusive.restype = ctypes.c_int
+        result = rename_exclusive(-100, old_name, -100, new_name, 1)  # AT_FDCWD, RENAME_NOREPLACE
+    elif sys.platform == "darwin":
+        rename_exclusive = getattr(libc, "renamex_np", None)
+        if rename_exclusive is None:
+            raise OSError(
+                errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
+        rename_exclusive.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename_exclusive.restype = ctypes.c_int
+        result = rename_exclusive(old_name, new_name, 0x00000004)  # RENAME_EXCL
+    else:
+        raise OSError(
+            errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
+    if result != 0:
+        code = ctypes.get_errno() or errno.EIO
+        raise OSError(code, f"durable no-replace {label} rename failed", str(destination))
+    strict_fsync_parent(destination)
+
+
+def durable_no_replace_rename(source, destination, *, label: str) -> None:
+    """Rename one SIBLING path to a name that must not already exist, durably (doc 25 SC-05).
+
+    Both callers — the reset route archiving a replaced event log, and the deletion service moving a
+    run into quarantine — need the same three properties, and each had written the same ~45 lines of
+    ctypes to get them:
+
+    * **No replace.** A plain ``os.rename`` silently REPLACES a raced destination. For an archive name
+      or a quarantine directory that means destroying whatever a concurrent operation just put there,
+      which is the one outcome neither caller can recover from. `lexists` is a courtesy check that
+      gives a clean error; the kernel flag is the actual guarantee, because between the check and the
+      rename another worker can win.
+    * **Durability before the receipt advances.** `strict_fsync_parent` makes both the new name and
+      the source-name removal survive a crash, so a receipt that says "moved" is never ahead of the
+      filesystem.
+    * **Loud refusal where the primitive is missing.** An old kernel without ``renameat2``, or a
+      platform that is neither Linux, macOS nor Windows, raises `ENOTSUP` rather than falling back to
+      a replacing rename — silently downgrading the guarantee is worse than failing the operation.
+
+    `label` names the operation in the error ("replay archive", "deletion quarantine"): the two
+    callers' messages were the ONLY thing that differed between the copies.
+    """
+    source = Path(source)
+    destination = Path(destination)
+    if source.parent != destination.parent:
+        raise ValueError(f"{label} must be a sibling of its source")
+    if os.path.lexists(destination):
+        raise FileExistsError(errno.EEXIST, f"{label} destination already exists", str(destination))
+    if os.name == "nt":
+        _windows_move_write_through(source, destination, replace=False)
+        return
+
+    import ctypes
+    import sys
+
+    old_name = os.fsencode(os.path.abspath(source))
+    new_name = os.fsencode(os.path.abspath(destination))
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        rename_exclusive = getattr(libc, "renameat2", None)
+        if rename_exclusive is None:
+            raise OSError(
+                errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
+        rename_exclusive.argtypes = [
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename_exclusive.restype = ctypes.c_int
+        result = rename_exclusive(-100, old_name, -100, new_name, 1)  # AT_FDCWD, RENAME_NOREPLACE
+    elif sys.platform == "darwin":
+        rename_exclusive = getattr(libc, "renamex_np", None)
+        if rename_exclusive is None:
+            raise OSError(
+                errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
+        rename_exclusive.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename_exclusive.restype = ctypes.c_int
+        result = rename_exclusive(old_name, new_name, 0x00000004)  # RENAME_EXCL
+    else:
+        raise OSError(
+            errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
+    if result != 0:
+        code = ctypes.get_errno() or errno.EIO
+        raise OSError(code, f"durable no-replace {label} rename failed", str(destination))
+    strict_fsync_parent(destination)
 
 
 def _strict_replace(source: str | os.PathLike, destination: str | os.PathLike) -> None:
