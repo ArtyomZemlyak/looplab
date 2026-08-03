@@ -632,6 +632,35 @@ now checks the decorators directly.
 
 *Recommendation:* One helper `_override_width(bo, keys, bound, current) -> int` called twice; the legacy-first/canonical-last ordering is preserved by the keys tuple.
 
+*Resolution (2026-08-03):* `engine/widths.py::settle_width(raw, upper)` is the one rule, with
+`EVAL_WIDTH_MAX` / `LLM_WIDTH_MAX` naming the two bounds so a call site reads as the axis it settles
+rather than as a magic number. All FOUR loops use it — both in `_apply_control_overrides` (ES-09,
+operator `budget_extend` controls) and both in `_apply_strategy` (EC-11, Strategist decisions). The
+legacy-first/canonical-last ordering is untouched: it lives in the key tuple, not in the validator.
+
+Each of the four rules inside is load-bearing and fails in a DIFFERENT direction if a copy drifts,
+and none fails loudly — a rejected width just leaves the running envelope alone, which looks exactly
+like a control that was never sent:
+
+* a bool is not a width (`True` is an `int` subclass, so a JSON `true` would serialize the run);
+* a non-integral float is refused rather than truncated (2.5 -> 2 is a guess about intent);
+* the bound is a REFUSAL, not a clamp (a clamped 100_000 would look accepted and reshape the run);
+* a LIVE zero settles to serial 1 and never means AUTO — AUTO belongs to launch-time `Settings`,
+  which can read the hardware and the settled eval width; a mid-run zero has no such context.
+
+One behaviour was tightened rather than moved: `_apply_strategy` reconfigured the LLM broker with the
+RAW value while assigning `_llm_parallel` the settled one. Those agree today (the broker applies the
+identical rule internally), but only because two spellings happened to match; it now passes the
+settled width.
+
+The per-lane allocation map in `_apply_strategy` deliberately keeps its OWN, stricter rule: strict
+`int` only, and all-or-nothing across the map (one bad lane rejects the whole allocation rather than
+silently allocating the rest). Folding it into `settle_width` would loosen a validator whose job is
+to be all-or-nothing; `tests/test_width_settling.py` pins that as a decision, not an oversight.
+
+The ops sub-dict block EC-11 also mentions, and the `_apply_strategy` if-chain's remaining
+governance-sensitive sections, are left explicit as the finding itself recommends.
+
 #### ES-10 · LOW · inconsistency · effort: medium
 
 **Four GPU-probe implementations with two different nvidia-smi parsers**
@@ -913,6 +942,35 @@ paid-retry exposure is the KNOWN GAP already documented on `_maybe_snapshot_conc
 *Evidence:* _apply_strategy (strategy.py:433-632) is a flat per-knob if-chain; its two concurrency loops (507-521 for max_parallel/eval_parallel, 526-544 for parallel_build/llm_parallel) are byte-near-identical: bool guard, non-integer-float guard, int() with bounds (0..1024 vs 0..64), max(1, value) assignment — differing only in the target attr, the bound, and the broker reconfigure call. The ops sub-dict block (479-489) repeats `if k in ops and may(k): self._attr = cast(ops[k])` five times.
 
 *Recommendation:* Extract a `_settle_width(raw, upper)` -> Optional[int] validator used by both loops, and a small table for the ops knobs ((key, attr, cast)). The governance-sensitive policy/developer sections can stay explicit.
+
+*Resolution (2026-08-03):* `engine/widths.py::settle_width(raw, upper)` is the one rule, with
+`EVAL_WIDTH_MAX` / `LLM_WIDTH_MAX` naming the two bounds so a call site reads as the axis it settles
+rather than as a magic number. All FOUR loops use it — both in `_apply_control_overrides` (ES-09,
+operator `budget_extend` controls) and both in `_apply_strategy` (EC-11, Strategist decisions). The
+legacy-first/canonical-last ordering is untouched: it lives in the key tuple, not in the validator.
+
+Each of the four rules inside is load-bearing and fails in a DIFFERENT direction if a copy drifts,
+and none fails loudly — a rejected width just leaves the running envelope alone, which looks exactly
+like a control that was never sent:
+
+* a bool is not a width (`True` is an `int` subclass, so a JSON `true` would serialize the run);
+* a non-integral float is refused rather than truncated (2.5 -> 2 is a guess about intent);
+* the bound is a REFUSAL, not a clamp (a clamped 100_000 would look accepted and reshape the run);
+* a LIVE zero settles to serial 1 and never means AUTO — AUTO belongs to launch-time `Settings`,
+  which can read the hardware and the settled eval width; a mid-run zero has no such context.
+
+One behaviour was tightened rather than moved: `_apply_strategy` reconfigured the LLM broker with the
+RAW value while assigning `_llm_parallel` the settled one. Those agree today (the broker applies the
+identical rule internally), but only because two spellings happened to match; it now passes the
+settled width.
+
+The per-lane allocation map in `_apply_strategy` deliberately keeps its OWN, stricter rule: strict
+`int` only, and all-or-nothing across the map (one bad lane rejects the whole allocation rather than
+silently allocating the rest). Folding it into `settle_width` would loosen a validator whose job is
+to be all-or-nothing; `tests/test_width_settling.py` pins that as a decision, not an oversight.
+
+The ops sub-dict block EC-11 also mentions, and the `_apply_strategy` if-chain's remaining
+governance-sensitive sections, are left explicit as the finding itself recommends.
 
 #### EC-12 · LOW · mergeable-entities · effort: small
 

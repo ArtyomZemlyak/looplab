@@ -48,6 +48,7 @@ from looplab.events.types import (
     EV_ENV_CHANGED, EV_WORKSPACE_CHANGED)
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.cadence import cadence_due
+from looplab.engine.widths import EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width
 from looplab.engine.audit import AuditMixin
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
 from looplab.engine.costs import bind_cost_accountants
@@ -2528,34 +2529,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # Live 0 settles to serial width 1; only launch-time Settings retain hardware/eval AUTO.
         for _key in ("max_parallel", "eval_parallel"):
             if _key in _bo:
-                try:
-                    _value = _bo[_key]
-                    if isinstance(_value, bool):
-                        continue
-                    if isinstance(_value, float) and (
-                            not math.isfinite(_value) or not _value.is_integer()):
-                        continue
-                    _value = int(_value)
-                    if not 0 <= _value <= 1024:
-                        continue
-                    self._eval_parallel = max(1, _value)
-                except (TypeError, ValueError, OverflowError):
-                    pass
+                _settled = settle_width(_bo[_key], EVAL_WIDTH_MAX)
+                if _settled is not None:
+                    self._eval_parallel = _settled
         for _key in ("parallel_build", "llm_parallel"):
             if _key in _bo:
-                try:
-                    _value = _bo[_key]
-                    if isinstance(_value, bool):
-                        continue
-                    if isinstance(_value, float) and (
-                            not math.isfinite(_value) or not _value.is_integer()):
-                        continue
-                    _value = int(_value)
-                    if not 0 <= _value <= 64:
-                        continue
-                    self._llm_parallel = max(1, _value)
-                except (TypeError, ValueError, OverflowError):
-                    pass
+                _settled = settle_width(_bo[_key], LLM_WIDTH_MAX)
+                if _settled is not None:
+                    self._llm_parallel = _settled
         # A canonical live control opts into the shared provider-call ceiling. Replay may also retain
         # the last canonical total beside a newer legacy build-only override so resume cannot silently
         # change broker behavior; legacy-only historical controls remain unbounded for compatibility.

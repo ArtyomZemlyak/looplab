@@ -31,6 +31,7 @@ from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, NODE_CONCEPT_
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, RunState,
                                   node_concept_event_provenance)
 from looplab.engine.cadence import cadence_due, cadence_marks
+from looplab.engine.widths import EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width
 from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
 from looplab.events.replay import fold
@@ -493,42 +494,24 @@ class StrategyCadenceMixin:
         # wins (last write) — matching __init__ ("a NEW name, when set, WINS over its legacy alias").
         for _k in ("max_parallel", "eval_parallel"):
             if _k in strat and may(_k):
-                try:
-                    _value = strat[_k]
-                    if isinstance(_value, bool):
-                        continue
-                    if isinstance(_value, float) and (
-                            not math.isfinite(_value) or not _value.is_integer()):
-                        continue
-                    _value = int(_value)
-                    if not 0 <= _value <= 1024:
-                        continue
-                    self._eval_parallel = max(1, _value)
-                except (TypeError, ValueError, OverflowError):
-                    pass
+                _settled = settle_width(strat[_k], EVAL_WIDTH_MAX)
+                if _settled is not None:
+                    self._eval_parallel = _settled
         # llm_parallel / parallel_build: concurrent node BUILDS. Rebuilt role pool is lazy
         # (_build_role_pairs), so a mid-run change takes effect on the next draft batch; clamps to 1
         # without a role_factory. Legacy-first / canonical-last, same precedence rule as the eval axis.
         # A live 0 means serial 1; only launch-time 0 couples AUTO build width to settled eval width.
         for _k in ("parallel_build", "llm_parallel"):
             if _k in strat and may(_k):
-                try:
-                    _value = strat[_k]
-                    if isinstance(_value, bool):
-                        continue
-                    if isinstance(_value, float) and (
-                            not math.isfinite(_value) or not _value.is_integer()):
-                        continue
-                    _value = int(_value)
-                    if not 0 <= _value <= 64:
-                        continue
-                    self._llm_parallel = max(1, _value)
+                _settled = settle_width(strat[_k], LLM_WIDTH_MAX)
+                if _settled is not None:
+                    self._llm_parallel = _settled
                     if _k == "llm_parallel":
-                        # mutate the broker active tasks already reference. Replacing
-                        # it here would split old/new borrowers across two independent totals.
-                        self._reconfigure_llm_broker(_value)
-                except (TypeError, ValueError, OverflowError):
-                    pass
+                        # The broker is reconfigured with the SETTLED width, matching what
+                        # `_llm_parallel` now holds. Mutate the broker active tasks already
+                        # reference: replacing it here would split old/new borrowers across two
+                        # independent totals.
+                        self._reconfigure_llm_broker(_settled)
         # Per-lane allocation is a distinct canonical Strategist knob. It is deliberately stored raw
         # in `strategy_decision` (including zero), while the live boundary settles every 0 to one
         # worker. Updating the existing broker in place keeps outstanding borrowers under one atomic
