@@ -64,8 +64,22 @@ test('permission cards expose an accessible pending decision and safe default fo
   assert.match(bar, /if \(hidden \|\| historical\) return/,
     'a historical transcript must not auto-open a decision the operator cannot make')
   const resolve = bar.slice(bar.indexOf('const resolvePerm = async'), bar.indexOf('const onRevert = async'))
-  assert.ok(resolve.indexOf('await assistantResolve') < resolve.indexOf('setPending(current =>'),
+  // A card whose request belongs to a DIFFERENT chat is now dropped before any POST — resolving it
+  // would answer the wrong session's question. That earlier `setPending` is what an
+  // index-of-FIRST-occurrence check started matching; the property is about the success path.
+  const posted = resolve.indexOf('await assistantResolve')
+  assert.ok(posted >= 0, 'the decision must reach the server')
+  // Scoped to the ATTEMPT — from committing to the POST until it returns — so an optimistic removal
+  // added there is caught. A first-occurrence index check could not see one once a legitimate
+  // pre-POST drop existed above it.
+  assert.ok(!resolve.slice(resolve.indexOf('try {'), posted).includes('setPending('),
     'the card must remain visible until the resolve POST succeeds')
+  assert.ok(resolve.indexOf('setPending(current =>', posted) > posted,
+    'and it must be removed once the server has accepted the decision')
+  assert.match(resolve, /if \(!requestSession \|\| requestSession !== sidRef\.current\) \{\s*setPending\(current => current\.filter\([\s\S]*?another Assistant chat[\s\S]*?return\s*\}/,
+    'a decision for another chat must be dropped without ever being POSTed')
+  assert.ok(resolve.indexOf('another Assistant chat') < posted,
+    'and that drop must happen before the POST, not after it')
 })
 
 test('timeline reveal exposes its state and a mobile touch-sized target', async () => {
@@ -212,7 +226,9 @@ test('compact Assistant blocks background pointers and traps focus in the side d
   assert.match(assistant, /role=\{compactAssistant \? 'dialog' : undefined\} aria-modal=\{compactAssistant \? 'true' : undefined\}/)
   assert.match(assistant, /\{!compactAssistant && <div className="asst-resize" role="separator"/,
     'the non-functional compact resize handle must not exist in the accessibility tree')
-  assert.match(assistant, /\{sessionOpening \? 'Opening Assistant chat\.'[\s\S]*?retryChecking \? 'Checking saved Assistant turn\.'[\s\S]*?turnStarting \? 'Starting Assistant response\.'[\s\S]*?busy \? 'Assistant is responding\.' : replyAnnouncement\}/)
+  // The opening arm became view-scoped (the side drawer this test is about renders its own pending
+  // live region, so announcing here too would say it twice). The priority ORDER is the property.
+  assert.match(assistant, /\{sessionOpening \?[\s\S]{0,80}?'Opening Assistant chat\.'[\s\S]*?retryChecking \? 'Checking saved Assistant turn\.'[\s\S]*?turnStarting \? 'Starting Assistant response\.'[\s\S]*?busy \? 'Assistant is responding\.' : replyAnnouncement\}/)
   assert.match(assistant, /<output className="sr-only" aria-live="polite" aria-atomic="true">/)
   assert.doesNotMatch(assistant, /<span className="cmdbar-status thinking" role="status" aria-live="polite" aria-atomic="true">\s*<span className="cmdbar-pip" \/> opening selected chat/,
     'the visible opening indicator must not duplicate the stable live output')

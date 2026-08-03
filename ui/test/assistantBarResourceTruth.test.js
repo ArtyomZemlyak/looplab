@@ -40,7 +40,11 @@ test('session selection commits only a current, bounded read and preserves the p
     'the target row must expose and gate its pending selection')
   assert.match(source, /rememberBoundedMapValue\(sessionDeleteTombstonesRef\.current, String\(id\), 'pending'\)[\s\S]*?pendingOpen && String\(pendingOpen\.id\) === String\(id\)[\s\S]*?\+\+openSessionSeqRef\.current/,
     'deleting a selected target must synchronously supersede its pending transcript read')
-  assert.match(source, /const newChat = \(\) => \{\s*\+\+openSessionSeqRef\.current/)
+  // `newChat` gained an options object (the attention hand-off opt-out), which a signature-exact
+  // anchor could not see. The property is the ordering inside it: claiming a newer epoch and then
+  // dropping the pending read is what stops an in-flight transcript GET from committing over the
+  // blank chat the user just asked for.
+  assert.match(source, /const newChat = \([^)]*\) => \{[\s\S]{0,200}?\+\+openSessionSeqRef\.current\s*\n\s*openSessionPendingRef\.current = null/)
 })
 
 test('session creation and send are single-flight while a failed create preserves the draft', async () => {
@@ -227,7 +231,15 @@ test('Assistant response announcements describe a new completion, never hydrated
   assert.match(source, /const announceReplyReady = React\.useCallback\(\(content, \{ sessionId = null, turn = null,/)
   assert.match(source, /announcedReplyTurnsRef\.current\.has\(turnKey\)[\s\S]*?announcedReplyAttemptsRef\.current\.has\(attempt\)/,
     'one exact turn completion must not be announced twice')
-  assert.match(source, /\{sessionOpening \? 'Opening Assistant chat\.'[\s\S]*?retryChecking \? 'Checking saved Assistant turn\.'[\s\S]*?turnStarting \? 'Starting Assistant response\.'[\s\S]*?busy \? 'Assistant is responding\.' : replyAnnouncement\}/)
+  // The opening arm became view-scoped, so an exact-string anchor stopped matching. The ORDER is the
+  // property — opening, then the saved-turn check, then turn start, then busy, with the reply
+  // announcement as the ONLY fallback — and it survives that arm gaining a condition.
+  assert.match(source, /\{sessionOpening \?[\s\S]{0,80}?'Opening Assistant chat\.'[\s\S]*?retryChecking \? 'Checking saved Assistant turn\.'[\s\S]*?turnStarting \? 'Starting Assistant response\.'[\s\S]*?busy \? 'Assistant is responding\.' : replyAnnouncement\}/)
+  // ...and no view may go silent as a result: the side/full views the sr-only output now skips
+  // render their own live region for the same state, which is why skipping it there is de-duplication
+  // rather than a dropped announcement.
+  assert.match(source, /\{sessionOpening && <div className="assistant-command-pending" role="status"\s*\n\s*aria-live="polite" aria-atomic="true">/,
+    'a view the sr-only output skips must announce the opening itself')
   assert.doesNotMatch(source, /<span className="cmdbar-status thinking" role="status" aria-live="polite" aria-atomic="true">\s*<span className="cmdbar-pip" \/> opening selected chat/,
     'the visible opening indicator must not duplicate the stable live output')
   assert.doesNotMatch(source, /busy \? 'Assistant is responding\.' : preview/)
