@@ -274,7 +274,7 @@ export default function App() {
   // like the review route. Falling through into <OwnerAuth> made a token-protected deployment show
   // recipients the "Unlock LoopLab controls" screen instead of the chat, defeating the share link.
   if (route.view === 'shared') return <RouteFocus label={routeLabel} routeKey={routeKey}>
-    <LazyBoundary label="shared Assistant chat" mode="route" focusOnReady resetKey={routeKey}>
+    <LazyBoundary key={routeKey} label="shared Assistant chat" mode="route" focusOnReady resetKey={routeKey}>
       <SharedAssistant sid={route.id} />
     </LazyBoundary>
   </RouteFocus>
