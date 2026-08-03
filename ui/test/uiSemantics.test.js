@@ -56,8 +56,11 @@ test('permission cards expose an accessible pending decision and safe default fo
   // Auto-reveal is now keyed on NEW request ids rather than "any pending exists": a card the
   // operator has already seen and collapsed must not keep re-opening the side panel, while a
   // genuinely new decision still must surface. Pin both halves plus the historical-transcript guard.
-  assert.match(bar, /const newIds = \[\.\.\.liveIds\]\.filter\(id => !autoRevealedPendingIdsRef\.current\.has\(id\)\)[\s\S]*?if \(!newIds\.length\) return[\s\S]*?if \(view === 'bar'\) \{\s*setView\('side'\)/,
+  assert.match(bar, /const newIds = \[\.\.\.liveIds\]\.filter\(id => !autoRevealedPendingIdsRef\.current\.has\(id\)\)[\s\S]*?if \(!newIds\.length\) return[\s\S]*?if \(view === 'bar'\) \{\s*setAssistantView\('side'\)/,
     'a NEW pending permission must reveal the side panel')
+  // The reveal goes through the wrapper, not raw `setView`: the wrapper updates `viewRef` in the
+  // same tick, so a reader later in this turn does not act on the surface the user just left.
+  assert.match(bar, /const setAssistantView = React\.useCallback\(update => \{[\s\S]*?viewRef\.current = next\s*\n\s*setView\(next\)/)
   assert.match(bar, /if \(hidden \|\| historical\) return/,
     'a historical transcript must not auto-open a decision the operator cannot make')
   const resolve = bar.slice(bar.indexOf('const resolvePerm = async'), bar.indexOf('const onRevert = async'))
@@ -394,10 +397,10 @@ test('Assistant clears stale run-scoped toast immediately when the route run cha
 
 test('moving pending or failed command UI to side/full re-arms status focus', async () => {
   const assistant = await source('AssistantBar.jsx')
-  assert.match(assistant, /const openCommandView = \(next\) => \{[\s\S]*?if \(commandBusy \|\| directFailure\) commandFocusRequestedRef\.current = true[\s\S]*?setView\(next\)/)
+  assert.match(assistant, /const openCommandView = \(next\) => \{[\s\S]*?if \(commandBusy \|\| directFailure\) commandFocusRequestedRef\.current = true[\s\S]*?setAssistantView\(next\)/)
   assert.match(assistant, /const openSide = \(\) => openCommandView\('side'\)/)
   assert.match(assistant, /const openFull = \(\) => openCommandView\('full'\)/)
-  assert.match(assistant, /const collapseToBar = \(\) => \{[\s\S]*?if \(commandBusy \|\| directFailure\) commandFocusRequestedRef\.current = true[\s\S]*?setView\('bar'\)/)
+  assert.match(assistant, /const collapseToBar = \(\) => \{[\s\S]*?if \(commandBusy \|\| directFailure\) commandFocusRequestedRef\.current = true[\s\S]*?setAssistantView\('bar'\)/)
   assert.match(assistant, /\[directPending\?\.record\?\.id,[\s\S]*?busy, view\]/)
 })
 

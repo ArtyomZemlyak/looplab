@@ -154,7 +154,7 @@ test('public-link verification fences authority while unknown truth preserves lo
     'durable recovery must retry after newer authority supersedes its exact share read')
   assert.match(source, /if \(shareUnknown \|\| shareVerifying\) \{\s*return \(\) => verifyShareStatus/,
     'a focused transcript Retry must remain mounted as a verification boundary')
-  assert.match(source, /retryBusy=\{shareVerifying\}/,
+  assert.match(source, /retryBusy=\{shareVerifying(?: \|\| \w+)*\}/,
     'the mounted transcript verification boundary must expose its busy state')
   assert.match(source, /id="assistant-share-status"[\s\S]*?role="status" aria-live="polite" aria-atomic="true">\s*\{shareStatusMessage\}/,
     'all Assistant surfaces need one stable announcement when passive verification pauses sending')

@@ -118,7 +118,7 @@ test('New Run CTA opens and prefills the composer without auto-submitting or rep
   // The wording gained the second escape hatch (Chat) the composer actually offers; the property —
   // an existing draft is never silently overwritten, and the user is told why — is unchanged.
   assert.match(effect, /Draft preserved — choose Chat or clear the composer before drafting a new run/)
-  assert.match(effect, /setView\(current => current === 'bar' \? 'side' : current\)/)
+  assert.match(effect, /setAssistantView\(current => current === 'bar' \? 'side' : current\)/)
   assert.match(effect, /inputRef\.current\?\.focus\(\)/)
   assert.doesNotMatch(effect, /requestNewRun\(/)
   assert.doesNotMatch(effect, /runLLM\(/)
@@ -145,8 +145,10 @@ test('proposal chat and in-memory draft ownership are passed into the card', asy
     'startup recovery must be session-scoped even when a fork copies proposal_id')
   assert.match(chat, /onDraftChange=\{draft => onLaunchDraft\?\.\(draftKey, draft\)\}/)
   assert.match(assistant, /sidRef\.current = id; setSid\(id\); setMsgs\(\[\]\); setPreview\(''\)/)
-  assert.match(assistant, /if \(!mountedRef\.current \|\| sidRef\.current !== id\) return/,
+  assert.match(assistant, /if \(!mountedRef\.current \|\| seq !== openSessionSeqRef\.current \|\| sidRef\.current !== id/,
     'a delayed session read must never render the previous session under a new draft key')
+  assert.match(assistant, /sessionDeleteTombstonesRef\.current\.has\(String\(id\)\)[\s\S]{0,200}?reason: 'superseded'/,
+    'a session deleted while its read was in flight must not be rendered either')
   assert.doesNotMatch(assistant, /setMsgs\(\[\]\); setLaunchDrafts\(\{\}\)/,
     'New chat must not erase drafts belonging to still-existing sessions')
   // The guard became a named predicate consulted BEFORE the request rather than inline ordering.
