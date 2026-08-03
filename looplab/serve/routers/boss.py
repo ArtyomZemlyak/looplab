@@ -98,6 +98,30 @@ def _sanitized_domain_http_exception(exc: HTTPException) -> Optional[HTTPExcepti
     return HTTPException(int(exc.status_code), {"code": code, **copy})
 
 
+def _boss_failure_response(exc: Exception) -> JSONResponse:
+    """The ONE epilogue for a request-path Boss LLM endpoint (doc 25 SR-15).
+
+    Three endpoints wrote out the same ten lines. Both halves are load-bearing and neither is obvious
+    from a call site, which is why one copy drifting would be hard to see:
+
+    * a DOMAIN HTTPException (a run-generation conflict) is re-RAISED, sanitized. It is the client's
+      to act on — the run moved under the request — so swallowing it into a 200 would tell the UI the
+      turn merely failed and invite a retry against the same stale generation.
+    * everything else soft-fails as HTTP 200 with `ok: false`. "No model configured" and "endpoint
+      unreachable" are the ordinary offline case here, not server errors, and `_safe_boss_failure` is
+      what keeps a provider's raw text (URLs, credentials) out of that body.
+
+    Deliberately NOT shared with `command`: that one computes on a background job thread and returns
+    a plain dict, so it CANNOT raise into a client. `_background_http_failure` is its named
+    counterpart, and the difference between them is the point rather than an oversight.
+    """
+    if isinstance(exc, HTTPException):
+        sanitized = _sanitized_domain_http_exception(exc)
+        if sanitized is not None:
+            raise sanitized from exc
+    return JSONResponse({"ok": False, **_safe_boss_failure(exc)}, status_code=200)
+
+
 def _background_http_failure(exc: HTTPException) -> dict:
     sanitized = _sanitized_domain_http_exception(exc)
     if sanitized is not None:
@@ -574,13 +598,8 @@ def build_router(srv) -> APIRouter:
                     [{"role": "system", "content": sys_prompt},
                      {"role": "user", "content": convo}]))
                 tokens = _client_tokens(client)
-        except HTTPException as exc:
-            sanitized = _sanitized_domain_http_exception(exc)
-            if sanitized is not None:
-                raise sanitized from exc
-            return JSONResponse({"ok": False, **_safe_boss_failure(exc)}, status_code=200)
-        except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail (chat stays uncompacted)
-            return JSONResponse({"ok": False, **_safe_boss_failure(e)}, status_code=200)
+        except Exception as exc:  # noqa: BLE001 - offline / no model -> soft fail (chat stays uncompacted)
+            return _boss_failure_response(exc)
         return {"ok": True, "summary": (summary or "").strip(), "tokens": tokens}
 
     @asynccontextmanager
@@ -647,13 +666,8 @@ def build_router(srv) -> APIRouter:
                         [{"role": "system", "content": sys_prompt}, *evidence, *msgs]))
                 model = getattr(client, "model", None)
                 tokens = _client_tokens(client)
-        except HTTPException as exc:
-            sanitized = _sanitized_domain_http_exception(exc)
-            if sanitized is not None:
-                raise sanitized from exc
-            return JSONResponse({"ok": False, **_safe_boss_failure(exc)}, status_code=200)
-        except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail
-            return JSONResponse({"ok": False, **_safe_boss_failure(e)}, status_code=200)
+        except Exception as exc:  # noqa: BLE001 - offline / no model -> soft fail
+            return _boss_failure_response(exc)
         # Return the LLM I/O so the chat row can expand into a langfuse-style trace. We include the
         # user's latest message + the system prompt (which carries the run/node context) so the trace
         # honestly shows the actual input, but omit the REST of the echoed conversation — the client
@@ -704,13 +718,8 @@ def build_router(srv) -> APIRouter:
                     fallback = Idea(operator="improve", params={}, rationale=text.strip()[:600])
                     return {"ok": True, "parsed": False,
                             "idea": durable_idea_payload(fallback)}
-        except HTTPException as exc:
-            sanitized = _sanitized_domain_http_exception(exc)
-            if sanitized is not None:
-                raise sanitized from exc
-            return JSONResponse({"ok": False, **_safe_boss_failure(exc)}, status_code=200)
-        except Exception as e:  # noqa: BLE001 - offline / no model
-            return JSONResponse({"ok": False, **_safe_boss_failure(e)}, status_code=200)
+        except Exception as exc:  # noqa: BLE001 - offline / no model
+            return _boss_failure_response(exc)
 
     @router.post("/api/runs/{run_id}/command")
     async def command(run_id: str, request: Request):

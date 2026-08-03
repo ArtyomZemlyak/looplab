@@ -2655,6 +2655,24 @@ folding them would have meant inventing a parameterization neither caller asked 
 
 *Status (post-baseline):* Partially addressed on `master` by commit `c92b89f`: chat/suggest/command now share an extracted `_boss_prologue` helper (run_generation fetch + fold + prompt assembly, off-thread), so the remaining duplication is chiefly the four-copy error-shaping epilogue.
 
+*Resolution (2026-08-03):* the epilogue is now `_boss_failure_response(exc)`, and the three
+request-path endpoints each close with two lines instead of ten. The two `except` arms collapsed into
+one, since both did the same thing once the shaping moved out.
+
+The extraction is worth having because neither half is visible from a call site. A DOMAIN
+HTTPException (a run-generation conflict) is re-RAISED sanitized — it is the client's to act on,
+since the run moved under the request, and swallowing it into a 200 would tell the UI the turn merely
+failed and invite a retry against the same stale generation. Everything else soft-fails as 200
+`ok:false`, because "no model configured" and "endpoint unreachable" are the ordinary offline case
+for these routes, with `_safe_boss_failure` keeping the provider's URLs and credentials out of the
+body.
+
+The finding counts FOUR copies; only three were the same thing. `command` computes on a background
+job thread and returns a plain dict, so it cannot raise into a client at all — its conflict has to
+come back as a DATA row the UI renders. `_background_http_failure` is its named counterpart, and
+folding the two would either lose the conflict there or make the request path swallow it. The test
+pins both behaviours and the fact that they are deliberately separate.
+
 ### 4.8 Search
 
 Scope: `looplab/search/`: policies, operators, concept analytics, card selection, speculation gate, wrappers.
