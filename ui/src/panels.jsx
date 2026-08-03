@@ -756,16 +756,18 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
 // I5 · non-dominated (Pareto-optimal) set over the primary metric (direction-aware) + every
 // extra_metric (treated as cost-like / minimize). A node is Pareto-optimal if no other node is
 // at-least-as-good on all objectives and strictly better on one.
+const paretoMetric = node => node.confirmed_mean ?? node.metric
+
 function paretoFront(nodes, direction) {
   const keys = [...new Set(nodes.flatMap(n => Object.keys(n.extra_metrics || {})))]
-  const vec = (n) => [direction === 'min' ? n.metric : -n.metric,
+  const vec = (n) => [direction === 'min' ? paretoMetric(n) : -paretoMetric(n),
     ...keys.map(k => { const v = n.extra_metrics?.[k]; return v == null ? Infinity : v })]
   const dominates = (a, b) => { let strict = false; for (let i = 0; i < a.length; i++) { if (a[i] > b[i]) return false; if (a[i] < b[i]) strict = true } return strict }
   const pts = nodes.map(n => ({ n, v: vec(n) }))
   return { keys, front: pts.filter(p => !pts.some(q => q !== p && dominates(q.v, p.v))).map(p => p.n) }
 }
 export function ParetoPanel({ state, onClose, onSelect }) {
-  const nodes = Object.values(state.nodes).filter(n => n.metric != null && n.feasible !== false)
+  const nodes = Object.values(state.nodes).filter(n => paretoMetric(n) != null && n.feasible !== false)
   // first constraint dimension, if any
   const withV = nodes.filter(n => (n.violations || []).length || Object.keys(n.extra_metrics || {}).length)
   let scatter = null
@@ -785,15 +787,22 @@ export function ParetoPanel({ state, onClose, onSelect }) {
     <Panel title="Pareto · Diversity · Operators" onClose={onClose} wide>
       {(() => {
         const { keys, front } = paretoFront(nodes, state.direction)
+        const sortedFront = [...front].sort((a, b) => (state.direction === 'min'
+          ? paretoMetric(a) - paretoMetric(b) : paretoMetric(b) - paretoMetric(a)))
         return <>
           <div className="section-h">Pareto-optimal set (I5) {keys.length ? <span className="pill">{keys.length + 1} objectives</span> : <span className="pill">metric only</span>}</div>
-          {keys.length
+          {sortedFront.length
             ? <DataTable caption="Pareto-optimal node metrics" card={false}><table className="tbl"><thead><tr><th>node</th><th>metric</th>{keys.map(k => <th key={k}>{k}</th>)}</tr></thead><tbody>
-                {front.sort((a, b) => (state.direction === 'min' ? a.metric - b.metric : b.metric - a.metric)).map(n =>
+                {sortedFront.map(n =>
                   <tr key={n.id}><td>#{n.id}{n.id === state.best_node_id ? <OpIcon name="crown" size={10} /> : ''}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td>
                     {keys.map(k => <td key={k} className="muted">{fmt(n.extra_metrics?.[k])}</td>)}</tr>)}
               </tbody></table></DataTable>
-            : <div className="muted">Single-objective task — the Pareto front is just the best node (#{state.best_node_id ?? '—'}). Add extra_metrics (e.g. latency, size) to trade off.</div>}
+            : <div className="muted">No feasible evaluated nodes yet.</div>}
+          {sortedFront.length > 0 && <div className="muted" style={{ marginTop: 8 }}>
+            Confirmed mean is used when available; otherwise the recorded metric is used.
+            {!keys.length && <> With one objective, every feasible node tied at the best displayed metric is
+              Pareto-optimal. Add extra_metrics (e.g. latency, size) to show trade-offs.</>}
+          </div>}
         </>
       })()}
       <div className="section-h">Pareto (metric vs constraint)</div>
