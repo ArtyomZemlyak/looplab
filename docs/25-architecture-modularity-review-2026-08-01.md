@@ -2915,6 +2915,31 @@ Scope: `looplab/cli/`, `looplab/trust/`, `looplab/__init__.py`, bench.py, sweep.
 
 *Recommendation:* Add one helper in looplab/tools (e.g. tools/run_tools.py::readonly_run_tools(state) -> Optional[CompositeTools]) and point all five callers at it. tools/ is importable from trust, engine, serve and cli without layering violations.
 
+*Resolution (2026-08-02):* done as recommended — `tools/run_tools.py::readonly_run_tools(state)`, with
+all five callers pointed at it. The four named wrappers (`trust.verify._verify_tools`,
+`inspect_cmds._run_tools_for`, `lessons_distill._reflect_tools`, `serve.report._report_tools`) keep
+their names and their per-site "why" docstrings — those are load-bearing, and `_reflect_tools` is
+called from `lessons_reconcile` too — but their bodies are now two-line delegates. The two "mirrors
+…" comments are gone: the kinship is expressed in code.
+
+The five lines were never the point. The contracts they each re-derived were: `bind_state(state,
+parent)` takes a SECOND argument (`tools/_base.py` — a provider that implements the hook and omits it
+raises `TypeError` at dispatch), and a build failure degrades to `None` rather than raising because
+every caller has a plain non-agentic path. `tests/test_readonly_run_tools.py` (11 tests) pins both,
+plus a narrow grep guard on lone-`RunTools` composites (multi-provider composites are a different
+thing and stay put) and a source check that each wrapper is still a delegate.
+
+The novelty gate's inline copy degraded differently — it keeps its proposal instead of making a plain
+call — and that stayed, now as an explicit `if tools is None: return idea`. Teeth-testing proved WHY
+it has to be explicit: deleting the guard was SILENT against a stub client, because the try/except
+below catches the failure either way. Against a real client `agentic_struct(client, None, …)` does
+not raise — it pays for a round-trip with no tools bound, i.e. exactly the blind, summary-only
+adjudication that `novelty_mode="llm"` exists to replace. The test now asserts `agentic_struct` is
+never REACHED.
+
+Four deliberate breaks in total (drop `parent` from `bind_state`; narrow the except so `MemoryError`
+escapes; delete the novelty guard; re-inline one wrapper's copy).
+
 #### CT-07 · MEDIUM · duplication · effort: small
 
 **Five hand-written late-binding monkeypatch shims with identical bodies**

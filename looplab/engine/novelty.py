@@ -383,8 +383,8 @@ class NoveltyGateMixin:
         if client is None:
             return idea
         from pydantic import BaseModel
-        from looplab.agents.agent import agentic_struct, CompositeTools
-        from looplab.tools.run_tools import RunTools
+        from looplab.agents.agent import agentic_struct
+        from looplab.tools.run_tools import readonly_run_tools
 
         class _NoveltyVerdict(BaseModel):
             is_duplicate: bool = False
@@ -427,11 +427,14 @@ class NoveltyGateMixin:
                              f"\n\nAlready tried:\n{brief}\n\n"
                              "Emit is_duplicate, near_node_id (the tried experiment it duplicates, or null), "
                              "and a one-line reason."}]
+        # Degrades to the ORIGINAL idea, not to a plain call: with no tools the adjudicator would be
+        # judging duplication blind, and admitting is the safe answer for a gate that must never
+        # block proposing.
+        tools = readonly_run_tools(state)
+        if tools is None:
+            return idea
         try:
-            rt = RunTools()
-            rt.bind_state(state, None)
-            v = agentic_struct(client, CompositeTools([rt]), msgs, _NoveltyVerdict,
-                               loop_opts={"max_turns": 12})
+            v = agentic_struct(client, tools, msgs, _NoveltyVerdict, loop_opts={"max_turns": 12})
         except Exception:  # noqa: BLE001
             return idea
         if not (v and getattr(v, "is_duplicate", False)

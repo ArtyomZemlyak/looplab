@@ -1077,3 +1077,30 @@ class DataTools:
         if name not in assets:
             return f"(no asset '{name}'; available: {', '.join(assets)})"
         return f"--- {name} (truncated) ---\n{str(assets[name])[:self.max_chars]}"
+
+
+def readonly_run_tools(state) -> Optional["object"]:
+    """Read-only run-introspection tools bound to `state`, or None when they cannot be built.
+
+    Five auxiliary LLM passes wanted exactly this and each wrote it out: let the model READ the run's
+    actual experiments (read_code / read_experiment / read_logs / list_experiments) before it judges,
+    tags, distills or reports, instead of deciding blind from the aggregate summary baked into its
+    prompt. The semantic verifier (`trust/verify.py`), the CLI's agentic tagging/briefing
+    diagnostics, engine reflection/distillation, the run report, and the LLM novelty gate.
+
+    Degrading to None rather than raising is the SHARED contract, and the reason this is one function:
+    grounding is best-effort and every caller has a plain non-agentic path to fall back to, so a
+    change to that contract — or to `bind_state(state, parent)`'s signature — must not have to be
+    found by grep in five places. A caller whose degradation differs (the novelty gate keeps its
+    proposal rather than making a plain call) tests for None itself.
+
+    `CompositeTools` is imported lazily because it lives in `agents`, which imports this module — a
+    module-level import here would close that cycle into an ImportError at startup.
+    """
+    try:
+        from looplab.agents.agent import CompositeTools
+        rt = RunTools()
+        rt.bind_state(state, None)
+        return CompositeTools([rt])
+    except Exception:  # noqa: BLE001 — grounding is best-effort; the caller degrades to a plain call
+        return None

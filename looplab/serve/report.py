@@ -111,14 +111,8 @@ def _report_tools(state: RunState):
     """Read-only run-introspection tools so the report is GROUNDED by reading the real experiments
     (read_experiment / read_code / read_logs / list_experiments) instead of synthesizing blind from the
     aggregate summary in the prompt. None on any failure => plain parse_structured (old behaviour)."""
-    try:
-        from looplab.tools.run_tools import RunTools
-        from looplab.agents.agent import CompositeTools
-        rt = RunTools()
-        rt.bind_state(state, None)
-        return CompositeTools([rt])
-    except Exception:  # noqa: BLE001 — grounding is best-effort; degrade to the non-agentic path
-        return None
+    from looplab.tools.run_tools import readonly_run_tools
+    return readonly_run_tools(state)
 
 
 def generate_report(state: RunState, client, *, parser: str = "tool_call", trigger: str = "",

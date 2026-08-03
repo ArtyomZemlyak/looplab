@@ -392,16 +392,10 @@ def _make_llm_client(settings):
 
 
 def _run_tools_for(state):
-    """Read-only run tools bound to `state` for AGENTIC tagging/briefing (mirrors trust.verify._verify_tools).
+    """Read-only run tools bound to `state` for AGENTIC tagging/briefing.
     None on any failure -> the caller runs the plain (non-agentic) LLM path."""
-    try:
-        from looplab.agents.agent import CompositeTools
-        from looplab.tools.run_tools import RunTools
-        rt = RunTools()
-        rt.bind_state(state, None)
-        return CompositeTools([rt])
-    except Exception:  # noqa: BLE001 — no tools => degrade to the plain structured call
-        return None
+    from looplab.tools.run_tools import readonly_run_tools
+    return readonly_run_tools(state)
 
 
 def _settings_for_run(run_dir=None, model=None):

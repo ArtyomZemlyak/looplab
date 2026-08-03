@@ -177,14 +177,8 @@ class LessonDistillMixin:
         """Read-only run-introspection tools so reflection / distillation READS the real experiments
         (read_experiment / read_code / read_logs / list_experiments) to ground its output, instead of
         distilling blind from the aggregate summary in the prompt. None on any failure => plain call."""
-        try:
-            from looplab.tools.run_tools import RunTools
-            from looplab.agents.agent import CompositeTools
-            rt = RunTools()
-            rt.bind_state(state, None)
-            return CompositeTools([rt])
-        except Exception:  # noqa: BLE001
-            return None
+        from looplab.tools.run_tools import readonly_run_tools
+        return readonly_run_tools(state)
 
     def _reflect_loop_opts(self) -> dict:
         """Bounded tool-loop opts for the auxiliary agentic passes (reflection/distillation) — the same

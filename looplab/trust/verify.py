@@ -390,15 +390,9 @@ def _verify_tools(state: RunState):
     """Read-only run-introspection tools so the semantic verifier READS the actual node it's judging
     (read_code / read_experiment / read_logs / list_experiments) before grading, instead of deciding
     blind from the EVIDENCE summary baked into the prompt. None on any failure => plain parse (the
-    exact legacy behavior). Mirrors engine.lessons._reflect_tools."""
-    try:
-        from looplab.tools.run_tools import RunTools
-        from looplab.agents.agent import CompositeTools
-        rt = RunTools()
-        rt.bind_state(state, None)
-        return CompositeTools([rt])
-    except Exception:  # noqa: BLE001 — no tools => degrade to the deterministic/plain path
-        return None
+    exact legacy behavior). The degrade-to-None contract is shared — see `readonly_run_tools`."""
+    from looplab.tools.run_tools import readonly_run_tools
+    return readonly_run_tools(state)
 
 
 def verify_memo(memo: dict, state: RunState, client=None,
