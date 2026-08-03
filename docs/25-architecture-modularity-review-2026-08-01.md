@@ -3731,6 +3731,31 @@ Scope: `ui/src/` + `ui/test/`.
 
 *Recommendation:* Add a small helper (e.g. submitCommand(promise, labels, onToast) returning the feedback) next to commandFeedback in api.js and replace the copies; label objects stay at call sites.
 
+*Resolution (2026-08-03):* `api.js::submitCommand(promise, labels, onToast)` is the other half of the
+presentation contract `commandFeedback` already owned: `commandFeedback` explains a RECORD,
+`submitCommand` explains an ATTEMPT — including the attempt that never produced a record because the
+transport threw. It toasts exactly once on every outcome and RETURNS the feedback, because the two
+things a call site still has to do are gate a success-only side effect (clearing an input draft) and
+roll an optimistic update back on anything else.
+
+The transport arm is deliberately an `error` feedback, never a success: a network failure that
+returned `success` would clear the operator's draft. `labels.transport` covers the surfaces that
+WITHHOLD the thrown message (the Inspector reset menu says only "… could not be submitted. Try
+again."); everything else keeps the `${failure}: ${message}` shape the panels already used.
+
+Converted: `TrustPanel.quarantine`, `QueuePanel.cancel`, `ResearchPanel.steer`, `_CardKanban.addCard`,
+`_HypothesisFallback.add`/`.abandon` (panels.jsx) and `ResetBtn.doReset` / `StagePipeline.rerun`
+(Inspector.jsx). Deliberately NOT converted: the sites that interleave a mount/generation check
+BETWEEN the await and the feedback (`ConfigPanel.restart`, `setEvalCeiling`, the card-board
+mutations) — a helper that takes the promise cannot run a staleness check in the middle, and
+threading one in would buy the de-duplication back at the price of the guard those sites exist for.
+`RunView.onNodeAction` is already de-duplicated behind its own `checkedCommand`, which has a
+different contract (it THROWS so one outer catch covers a whole switch).
+
+Covered by `ui/test/submitCommand.test.js` (14 tests): one toast per outcome including the throw, the
+transport arm never reporting success, `labels.transport` honoured on a throw and ignored when the
+server answered, no rethrow out of an event handler, plus source guards that the call sites use it.
+
 #### UI-08 · MEDIUM · flat-code · effort: medium
 
 **Dock.jsx carries ~300 lines of pure narration data as two hand-synced parallel registries (NARR + NARR_VALID)**

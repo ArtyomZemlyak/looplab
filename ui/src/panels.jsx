@@ -3,7 +3,7 @@ import { deadlineGet, get, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTR
   saveRunConfig, operatorMeta, commandFeedback, runApiPath, runNodeApiPath,
   createIdempotencyKey, getRunCommand, isTransientCommandReadError, retryRunCommand, runCommand,
   getAuthoringOperation, putAuthoringOperation, validAuthoringName, validAuthoringTargetRootId,
-  getRunArtifactContent, getRunArtifactInventory,
+  getRunArtifactContent, getRunArtifactInventory, submitCommand,
 } from './util.js'
 import { usePoll } from './hooks.js'
 import { Bars, ParallelCoords, Scatter } from './charts.jsx'
@@ -478,14 +478,10 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
   const memoProjection = useMemo(() => normalizeResearchMemos(state.research), [state.research])
   const memos = [...memoProjection.memos].reverse()   // newest retained first
   const steer = async (text) => {
-    try {
-      const feedback = commandFeedback(await CONTROL.hint(runId, 'try this research direction: ' + text), {
-        success: 'Steered the next proposal', noop: 'That direction was already queued',
-        executing: 'Steer request accepted — waiting for the run', failure: 'Could not steer',
-      }); onToast?.(feedback.message)
-    } catch (error) {
-      onToast?.(`Could not steer: ${error.message || error}`)
-    }
+    await submitCommand(CONTROL.hint(runId, 'try this research direction: ' + text), {
+      success: 'Steered the next proposal', noop: 'That direction was already queued',
+      executing: 'Steer request accepted — waiting for the run', failure: 'Could not steer',
+    }, onToast)
   }
   return (
     <Panel title="Deep research" sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose} wide>
@@ -576,12 +572,10 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
   }, [runId, configNonce])
   const cfg = configResource.data
   const quarantine = async (id) => {   // U6: act on a flagged node — remove it from the search
-    try {
-      const feedback = commandFeedback(await CONTROL.nodeAbort(runId, id, state.nodes?.[id]?.attempt), {
-        success: `Quarantined #${id}`, noop: `#${id} was already settled`,
-        executing: `Quarantine of #${id} requested — waiting for the run`, failure: `Could not quarantine #${id}`,
-      }); onToast?.(feedback.message)
-    } catch (error) { onToast?.(`Could not quarantine #${id}: ${error.message || error}`) }
+    await submitCommand(CONTROL.nodeAbort(runId, id, state.nodes?.[id]?.attempt), {
+      success: `Quarantined #${id}`, noop: `#${id} was already settled`,
+      executing: `Quarantine of #${id} requested — waiting for the run`, failure: `Could not quarantine #${id}`,
+    }, onToast)
   }
   const nodes = Object.values(state.nodes)
   const evald = nodes.filter(n => n.metric != null && n.feasible !== false)
@@ -713,12 +707,10 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
   const forks = (state.fork_requests || []).slice(state.forks_done || 0)
   const { confirms: confirmReq, ablates: ablateReq } = queuedGenerationControls(state)
   const cancel = async (id) => {
-    try {
-      const feedback = commandFeedback(await CONTROL.nodeAbort(runId, id, state.nodes?.[id]?.attempt), {
-        success: `Cancelled #${id}`, noop: `#${id} was already settled`,
-        executing: `Cancellation of #${id} requested — waiting for the run`, failure: `Could not cancel #${id}`,
-      }); onToast?.(feedback.message)
-    } catch (error) { onToast?.(`Could not cancel #${id}: ${error.message || error}`) }
+    await submitCommand(CONTROL.nodeAbort(runId, id, state.nodes?.[id]?.attempt), {
+      success: `Cancelled #${id}`, noop: `#${id} was already settled`,
+      executing: `Cancellation of #${id} requested — waiting for the run`, failure: `Could not cancel #${id}`,
+    }, onToast)
   }
   const queuedCount = pending.length + injects.length + forks.length + confirmReq.length + ablateReq.length
   return (
@@ -3362,14 +3354,11 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
   const addCard = async () => {
     const s = addDraft.trim()
     if (!s) return
-    try {
-      const feedback = commandFeedback(await CONTROL.addHypothesis(runId, s), {
-        success: 'Card added', noop: 'That hypothesis was already tracked',
-        executing: 'Card requested — waiting for the run', failure: 'Could not add Card',
-      })
-      if (feedback.kind === 'success') setAddDraft('')
-      onToast?.(feedback.message)
-    } catch (error) { onToast?.(`Could not add Card: ${error.message || error}`) }
+    const feedback = await submitCommand(CONTROL.addHypothesis(runId, s), {
+      success: 'Card added', noop: 'That hypothesis was already tracked',
+      executing: 'Card requested — waiting for the run', failure: 'Could not add Card',
+    }, onToast)
+    if (feedback.kind === 'success') setAddDraft('')
   }
   return <Panel title="Cards" sub={sub} onClose={onClose} wide>
     <_CardProjectionNotice projection={projection} cards={visibleCards} />
@@ -3654,14 +3643,11 @@ function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, o
   const add = async () => {
     const s = draft.trim()
     if (!s || deleteLocked) return
-    try {
-      const feedback = commandFeedback(await CONTROL.addHypothesis(runId, s), {
-        success: 'Hypothesis added', noop: 'That hypothesis was already tracked',
-        executing: 'Hypothesis requested — waiting for the run', failure: 'Could not add hypothesis',
-      })
-      if (feedback.kind === 'success') setDraft('')
-      onToast?.(feedback.message)
-    } catch (error) { onToast?.(`Could not add hypothesis: ${error.message || error}`) }
+    const feedback = await submitCommand(CONTROL.addHypothesis(runId, s), {
+      success: 'Hypothesis added', noop: 'That hypothesis was already tracked',
+      executing: 'Hypothesis requested — waiting for the run', failure: 'Could not add hypothesis',
+    }, onToast)
+    if (feedback.kind === 'success') setDraft('')
   }
   const _revert = (id) => setOptim(o => { const n = { ...o }; delete n[id]; return n })
   const abandon = async (h) => {
@@ -3670,14 +3656,13 @@ function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, o
       return
     }
     setOptim(o => ({ ...o, [h.id]: 'abandoned' }))          // reflect immediately (SSE lag)
-    try {
-      const feedback = commandFeedback(await CONTROL.abandonHypothesis(runId, h.id), {
-        success: 'Hypothesis abandoned', noop: 'Hypothesis was already abandoned',
-        executing: 'Abandon requested — waiting for the run', failure: 'Could not update hypothesis',
-      })
-      if (feedback.kind !== 'success') _revert(h.id)
-      onToast?.(feedback.message)
-    } catch (error) { _revert(h.id); onToast?.(`Could not update hypothesis: ${error.message || error}`) }
+    const feedback = await submitCommand(CONTROL.abandonHypothesis(runId, h.id), {
+      success: 'Hypothesis abandoned', noop: 'Hypothesis was already abandoned',
+      executing: 'Abandon requested — waiting for the run', failure: 'Could not update hypothesis',
+    }, onToast)
+    // NOT `kind === 'error'`: a still-`executing` command has not abandoned anything yet, so the
+    // optimistic strike-through would be showing an outcome the run may still refuse.
+    if (feedback.kind !== 'success') _revert(h.id)
   }
   const deleteFailure = (intent, message) => {
     dropDeleteIntent(intent)

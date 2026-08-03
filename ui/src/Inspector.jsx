@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { deadlineGet, get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL,
   clearNodeTrace, commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
-  retryRunCommand, runNodeApiPath } from './util.js'
+  retryRunCommand, runNodeApiPath, submitCommand } from './util.js'
 import { usePoll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { themeFilteredGroupAggregate } from './grouping.js'
@@ -70,12 +70,14 @@ function ResetBtn({ runId, id, generation, onToast }) {
     requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }))
     setBusy(true)
     try {
-      const feedback = commandFeedback(await CONTROL.resetNode(runId, id, stage, generation), {
+      // `transport` deliberately WITHHOLDS the thrown message here: a reset menu is a dense control
+      // surface and the actionable half is "it never reached the server, press it again".
+      await submitCommand(CONTROL.resetNode(runId, id, stage, generation), {
         success: `Reset #${id} from ${stage} applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
         executing: `Reset #${id} from ${stage} requested — waiting for the engine`, failure: `Reset #${id} failed`,
-      })
-      onToast?.(feedback.message)
-    } catch { onToast?.(`Reset #${id} could not be submitted. Try again.`) }
+        transport: `Reset #${id} could not be submitted. Try again.`,
+      }, onToast)
+    }
     finally { setBusy(false) }
   }
   useEffect(() => {
@@ -578,12 +580,12 @@ function StagePipeline({ stages, failed, runId, id, generation, onToast }) {
     if (!runId || pendingStage) return
     setPendingStage(name)
     try {
-      const feedback = commandFeedback(await CONTROL.resetNode(runId, id, name, generation), {
+      await submitCommand(CONTROL.resetNode(runId, id, name, generation), {
         success: `Reset #${id} from '${name}' applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
         executing: `Re-run of #${id} from '${name}' requested — waiting for the engine`, failure: 'Re-run failed',
-      })
-      onToast?.(feedback.message)
-    } catch { onToast?.('Re-run could not be submitted. Try again.') }
+        transport: 'Re-run could not be submitted. Try again.',
+      }, onToast)
+    }
     finally { setPendingStage(null) }
   }
   return <div className="eval-pipeline">

@@ -707,6 +707,33 @@ export function commandFeedback(record, labels = {}) {
     message: `${labels.failure || 'Command failed'}: unexpected command status ${status || 'missing'}` }
 }
 
+// The other half of the same presentation contract (doc 25 UI-07). `commandFeedback` explains a
+// RECORD; this explains an ATTEMPT — including the attempt that never produced a record because the
+// transport threw. A dozen panels wrote the same try/await/feedback/onToast/catch-onToast block, and
+// a copy that drifts is invisible: an operator sees no toast at all and reads the silence as "it
+// worked". The two things a call site must still be able to do are why this RETURNS the feedback
+// rather than owning the whole interaction:
+//
+// * gate a success-only side effect (clearing an input draft) on `kind === 'success'`, and
+// * roll an optimistic update back on anything else.
+//
+// The transport arm is therefore an `error` feedback, never a success — otherwise a network failure
+// would clear the operator's draft. `labels.transport` is for the surfaces that deliberately WITHHOLD
+// the thrown message ("… could not be submitted. Try again."); everything else keeps the
+// `${failure}: ${message}` shape the panels already used.
+export async function submitCommand(promise, labels = {}, onToast) {
+  let feedback
+  try {
+    feedback = commandFeedback(await promise, labels)
+  } catch (error) {
+    feedback = { kind: 'error', terminal: true, status: 'transport', transport: true,
+      message: labels.transport
+        || `${labels.failure || 'Command failed'}: ${error?.message || error}` }
+  }
+  onToast?.(feedback.message)
+  return feedback
+}
+
 const commandSleep = (ms, signal) => new Promise((resolve, reject) => {
   const abort = () => { clearTimeout(timer); reject(signal.reason) }
   const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve() }, ms)
