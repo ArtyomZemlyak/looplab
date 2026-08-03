@@ -4246,6 +4246,31 @@ lenient.
 
 *Recommendation:* Define one lightweight finding shape (signal, detail, method, confidence, plus optional detector-specific fields) in trust/, have each detector emit its already-namespaced signal (data_leakage:fit_on_test, critic:hardcoded_metric), and reduce evaluate.py to concatenation. The dict-based events stay wire-compatible.
 
+*Resolution (2026-08-03):* `looplab/trust/findings.py` owns the shape (`finding(...)`) and the two
+gate namespaces (`LEAKAGE_NS`, `CRITIC_NS`). `leakage.code_leakage_findings(src)` and
+`critic.critic_findings(idea, code, submission_file=...)` emit already-namespaced rows; `evaluate.py`
+concatenates. `code_leakage_scan`/`critique` keep their own richer shapes for callers that want the
+line numbers or the raw issues, so no existing test moved.
+
+The reason this is worth doing is narrower than "three vocabularies". Those namespaced strings are
+what `events/replay.py::is_hard_signal` keys GATING on — `critic:hardcoded_metric` excludes a node
+from selection, every other `critic:` issue stays advisory, and leakage names gate via the
+fail-closed default. So the prefix a detector's output landed in decided whether a run could be
+gated, and it was minted at the consumer, three files from the detector that knew what it found. A
+second consumer would have re-derived the mapping, and drift between the two would be a silent
+change to what gates.
+
+`tests/test_trust_finding_namespaces.py` therefore pins the JOIN in both directions — the detectors
+emit exactly the strings the gate recognises, AND the gate's classification of those strings is
+unchanged — rather than either side alone. It also carries a tree-wide grep guard, because the
+defect is not specific to `evaluate.py`: any consumer that string-builds a gate namespace has
+re-created the split. Teeth-verified against 10 breakages, including both directions of the gate
+drift (a broad critic warning starting to gate, and leakage evidence stopping).
+
+One fixture had to be corrected: `metric = 0.99` does not trip `critic:hardcoded_metric` — the rule
+requires a QUOTED literal (`{"metric": 0.99}`) with nothing computing it — so the first version of
+the gating test asserted against an empty signal set and would have proved nothing.
+
 #### CT-11 · LOW · dead-code · effort: small
 
 **Dead `state` parameter in _persist_node_concepts**

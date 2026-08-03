@@ -218,3 +218,17 @@ def temporal_leakage(train_timestamps: list[float], test_timestamps: list[float]
     overlap = sum(1 for t in train_finite if t >= cutoff)
     return {"detector": "temporal_leakage", "leak": overlap > 0,
             "cutoff": cutoff, "overlap": overlap}
+
+
+def code_leakage_findings(src: str) -> list[dict]:
+    """`code_leakage_scan`'s flags as gate-visible trust findings (doc 25 CT-10).
+
+    The `data_leakage:` namespace used to be minted by `engine/evaluate.py`, three files from the
+    detector that knows what it found — and that namespace is what `is_hard_signal` keys gating on.
+    Owned here now; `code_leakage_scan` keeps its own richer shape for callers that want the line
+    numbers and the raw flags.
+    """
+    from looplab.trust.findings import LEAKAGE_NS, namespaced
+
+    return namespaced(LEAKAGE_NS, code_leakage_scan(src)["flags"], signal_key="signal",
+                      detail=lambda flag: f"line {flag['line']}: {flag['code']}")

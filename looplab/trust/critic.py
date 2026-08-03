@@ -78,3 +78,17 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None) -> li
             issues.append({"issue": "params_ignored",
                            "detail": f"none of the proposed params {pnames} are referenced in the code"})
     return issues
+
+
+def critic_findings(idea, code: str, *, submission_file: str | None = None) -> list[dict]:
+    """`critique`'s issues as gate-visible trust findings (doc 25 CT-10).
+
+    The `critic:` namespace decides gating, not presentation: `critic:hardcoded_metric` EXCLUDES a
+    node from selection while every other `critic:` issue stays advisory (`is_hard_signal`). It was
+    assembled at the consumer; it belongs with the detector that produced the issue.
+    """
+    from looplab.trust.findings import CRITIC_NS, finding
+
+    return [finding(CRITIC_NS + str(row["issue"]), row["detail"])
+            for row in critique(idea, code, submission_file=submission_file)
+            if row.get("issue")]

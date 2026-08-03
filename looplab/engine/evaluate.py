@@ -780,19 +780,19 @@ class EvaluateMixin:
                         # workdir against the assets/protected set the engine placed there.
                         if self._workdir_audit:
                             sigs += self._audit_workdir_writes(workdir, protected)
+                    # Both detectors emit their OWN namespaced signals (doc 25 CT-10). This used to
+                    # mint `data_leakage:`/`critic:` here, which put the string `is_hard_signal`
+                    # gates on three files away from the detector that knows what it found.
                     if self._code_leakage_detect and scan_src:
-                        from looplab.trust.leakage import code_leakage_scan
-                        for f in code_leakage_scan(scan_src)["flags"]:
-                            sigs.append({"signal": "data_leakage:" + f["signal"],
-                                         "detail": f"line {f['line']}: {f['code']}"})
+                        from looplab.trust.leakage import code_leakage_findings
+                        sigs += code_leakage_findings(scan_src)
                     if self._critic_check and scan_src:
-                        from looplab.trust.critic import critique
+                        from looplab.trust.critic import critic_findings
                         # Host-graded tasks (MLE-bench &c.) score a submission file out-of-process,
                         # so the critic's in-code `metric` checks don't apply — hand it the expected
                         # submission filename so it checks the right output contract instead.
-                        sub_file = self._graded_output_name()
-                        for c in critique(node.idea, scan_src, submission_file=sub_file):
-                            sigs.append({"signal": "critic:" + c["issue"], "detail": c["detail"]})
+                        sigs += critic_findings(node.idea, scan_src,
+                                                submission_file=self._graded_output_name())
                     if sigs:
                         # P1-7 versioned TrustEvidence: bind the evidence to a schema version + a digest
                         # of the exact scanned surface (provenance — which bytes produced these signals),
