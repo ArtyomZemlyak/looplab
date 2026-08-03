@@ -1163,6 +1163,32 @@ would serve one task's paid overlay to another.
 
 *Recommendation:* Extract an _ingest_evidence(groups_lookup, lessons, research_claims) helper taking the group-resolver as a parameter; both paths differ only in that resolver and the structured path's extra _ev weight bookkeeping (passable as a callback or handled by the group dict shape).
 
+*Resolution (2026-08-02):* extracted as recommended —
+`claims_assessments._ingest_evidence(lessons, research_claims, resolve, *, weigh=None)`. `resolve(row)`
+is the group lookup (scope+polarity signature vs normalized statement) and `weigh` is the structured
+path's `_ev` bookkeeping, taken as the callback the recommendation offered. Both projections are now
+one call each.
+
+Three rules lived inside the duplicated walk, and all three fail SILENTLY:
+
+* **A neutral lesson still registers its run and scope.** "Noted" takes no stance but does prove the
+  claim was seen there; skipping the registration shrinks the breadth a reader judges by, and nothing
+  reports a smaller number as wrong.
+* **Unsupported research is `unverified`, never `oppose`.** "Not established" is not counter-evidence
+  — merging the two lets an uncited claim read as actively refuted.
+* **The verification receipt carries method AND verdict.** Two claims "supported" by replication and
+  by a web search are not the same evidence.
+
+`tests/test_evidence_ingestion.py` (19) drives the fold directly for each of those, plus junk/
+unresolvable rows, the non-indexable producer-receipt guard, the `weigh` hook's optionality, and an
+end-to-end cross-check that the structured and lean projections put the same rows in the same
+buckets. Teeth-tested against five breaks.
+
+The peer split of `claims.py` also means `claims.py` must RE-EXPORT every name the assessments module
+owns (`test_claims.py::test_the_assessments_barrel_re_exports_the_same_objects`) — the new helper
+needed adding there, which that guard caught immediately. Second time this session a guarded
+post-split barrel contract has caught an omission; it is doing its job.
+
 #### EM-08 · MEDIUM · duplication · effort: small — **PARTIALLY RESOLVED (2026-08-02)**
 
 **The '_governance is None → recurse via project_governed_sources' pattern and the scope-filter block are copy-pasted across four/three call sites**

@@ -796,6 +796,7 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
 from looplab.engine.claims_assessments import (  # noqa: F401,E402
     _fuzzy_merge_claims,
     _stmt_tokens,
+    _ingest_evidence,
     _structured_assessments,
     claim_assessments,
 )

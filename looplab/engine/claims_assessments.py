@@ -121,6 +121,66 @@ def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[d
     return out
 
 
+def _ingest_evidence(lessons, research_claims, resolve, *, weigh=None) -> None:
+    """Fold lesson + research rows into their claim groups (doc 25 EM-07).
+
+    The structured (scope+polarity) and lean (normalized-statement) projections differ ONLY in how a
+    row finds its group — `resolve(row)` — and in the structured path's evidence weighting, passed as
+    `weigh(group, row, refs)`. Everything else was duplicated verbatim, and it is the part where a
+    quiet mistake is unrecoverable:
+
+    * **Run/scope registration happens even for a NEUTRAL lesson.** A "noted" lesson takes no stance
+      but still proves the claim was seen in that run and scope. Skipping it because the stance is
+      neutral would silently shrink the run set a reader uses to judge breadth.
+    * **Unsupported research is `unverified`, never `oppose`.** "Not established" is not
+      counter-evidence, and merging the two would let an uncited claim read as refuted.
+    * **The refs stay drillable either way** — an unverified claim keeps its node references so a
+      reader can go look, which is the whole reason the third bucket exists.
+
+    A stance-mapping or receipt bug in one copy would have had to be found and fixed in the other.
+    """
+    for lesson in lessons or []:
+        group = resolve(lesson)
+        if group is None:
+            continue
+        if lesson.get("run_id"):
+            group["runs"].add(_identity_text(lesson["run_id"], 500))
+        if lesson.get("task_id"):
+            group["scopes"].add(_identity_text(lesson["task_id"], _MAX_DECISION_SCOPE))
+        refs = _qualify_refs(lesson.get("run_id"), _node_ids(lesson.get("evidence")))
+        stance = _lesson_claim_stance(lesson)
+        if stance == "support":
+            group["support"].update(refs)
+        elif stance == "oppose":
+            group["oppose"].update(refs)
+        # "noted"/unknown -> neutral: still registers the run/scope, but takes NO stance.
+        if weigh is not None:
+            weigh(group, lesson, refs)
+
+    for claim in research_claims or []:
+        if not _indexable_research_claim(claim):
+            continue
+        group = resolve(claim)
+        if group is None:
+            continue
+        if claim.get("run_id"):
+            group["runs"].add(_identity_text(claim["run_id"], 500))  # D8 registers run/scope now
+        if claim.get("task_id"):
+            group["scopes"].add(_identity_text(claim["task_id"], _MAX_DECISION_SCOPE))
+        refs = _qualify_refs(claim.get("run_id"), _node_ids(claim.get("node_ids")))
+        verdict, method, _note = _research_verification(claim)
+        group["verification"].add(f"{method}:{verdict}" if method else verdict)
+        if verdict == "supported":
+            group["support"].update(refs)
+        else:
+            # unsupported/unclear/cited/legacy-unverified evidence is not counter-evidence; it simply
+            # has not established the claim. Keep the refs drillable without promoting them to support.
+            group["unverified"].update(refs)
+        if weigh is not None:
+            weigh(group, claim, refs)
+        group["sources"].update(_string_list(claim.get("urls"), maximum=32, item_maximum=2000))
+
+
 def _structured_assessments(lessons, research_claims, decisions, *,
                             research_source: Optional[dict] = None,
                             claim_source: Optional[dict] = None) -> list[dict]:
@@ -163,43 +223,16 @@ def _structured_assessments(lessons, research_claims, decisions, *,
         g["_ev"][s] = g["_ev"].get(s, 0)             # candidate representative statements (evidence-weighted)
         return g
 
-    for lz in lessons or []:
-        g = _grp(lz.get("statement"), lz.get("task_id"), _metric_identity(lz))
-        if g is None:
-            continue
-        if lz.get("run_id"):
-            g["runs"].add(_identity_text(lz["run_id"], 500))
-        if lz.get("task_id"):
-            g["scopes"].add(_identity_text(lz["task_id"], _MAX_DECISION_SCOPE))
-        refs = _qualify_refs(lz.get("run_id"), _node_ids(lz.get("evidence")))
-        stance = _lesson_claim_stance(lz)
-        if stance == "support":
-            g["support"].update(refs)
-        elif stance == "oppose":
-            g["oppose"].update(refs)
-        g["_ev"][_claim_text(lz.get("statement"))] += len(refs)
+    def _weigh(group, row, refs):
+        # Evidence-weighted representative choice: the spelling backed by the most drillable refs wins
+        # the group's display statement. Only the structured projection does this — the lean one keys
+        # on the normalized statement, so it has no competing spellings to choose between.
+        group["_ev"][_claim_text(row.get("statement"))] += len(refs)
 
-    for rc in research_claims or []:
-        if not _indexable_research_claim(rc):
-            continue
-        g = _grp(rc.get("statement"), rc.get("task_id"), _metric_identity(rc))
-        if g is None:
-            continue
-        if rc.get("run_id"):
-            g["runs"].add(_identity_text(rc["run_id"], 500))  # D8 registers run/scope now
-        if rc.get("task_id"):
-            g["scopes"].add(_identity_text(rc["task_id"], _MAX_DECISION_SCOPE))
-        refs = _qualify_refs(rc.get("run_id"), _node_ids(rc.get("node_ids")))
-        verdict, method, _note = _research_verification(rc)
-        g["verification"].add(f"{method}:{verdict}" if method else verdict)
-        if verdict == "supported":
-            g["support"].update(refs)
-        else:
-            # unsupported/unclear/cited/legacy-unverified evidence is not counter-evidence; it simply has
-            # not established the claim.  Keep the refs drillable without promoting them to support.
-            g["unverified"].update(refs)
-        g["_ev"][_claim_text(rc.get("statement"))] += len(refs)
-        g["sources"].update(_string_list(rc.get("urls"), maximum=32, item_maximum=2000))
+    _ingest_evidence(
+        lessons, research_claims,
+        lambda row: _grp(row.get("statement"), row.get("task_id"), _metric_identity(row)),
+        weigh=_weigh)
 
     # Contradiction map: a contra_key seen with BOTH polarities means two opposite claims about one subject
     # in one scope — the portfolio disagrees with itself at the ASSERTION level (unreachable from a single
@@ -347,40 +380,7 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
             "unverified": set(), "runs": set(), "scopes": set(), "sources": set(),
             "verification": set()})
 
-    for lz in lessons or []:
-        g = _group(lz.get("statement"))
-        if g is None:
-            continue
-        if lz.get("run_id"):
-            g["runs"].add(_identity_text(lz["run_id"], 500))
-        if lz.get("task_id"):
-            g["scopes"].add(_identity_text(lz["task_id"], _MAX_DECISION_SCOPE))
-        refs = _qualify_refs(lz.get("run_id"), _node_ids(lz.get("evidence")))
-        stance = _lesson_claim_stance(lz)
-        if stance == "support":
-            g["support"].update(refs)
-        elif stance == "oppose":
-            g["oppose"].update(refs)
-        # "noted"/unknown -> neutral: still registers the run/scope, but takes NO stance.
-
-    for rc in research_claims or []:
-        if not _indexable_research_claim(rc):
-            continue
-        g = _group(rc.get("statement"))
-        if g is None:
-            continue
-        if rc.get("run_id"):
-            g["runs"].add(_identity_text(rc["run_id"], 500))
-        if rc.get("task_id"):
-            g["scopes"].add(_identity_text(rc["task_id"], _MAX_DECISION_SCOPE))
-        refs = _qualify_refs(rc.get("run_id"), _node_ids(rc.get("node_ids")))
-        verdict, method, _note = _research_verification(rc)
-        g["verification"].add(f"{method}:{verdict}" if method else verdict)
-        if verdict == "supported":
-            g["support"].update(refs)
-        else:
-            g["unverified"].update(refs)
-        g["sources"].update(_string_list(rc.get("urls"), maximum=32, item_maximum=2000))
+    _ingest_evidence(lessons, research_claims, lambda row: _group(row.get("statement")))
 
     _dec = {"ratified": "operator-ratified", "rejected": "operator-rejected", "pinned": "operator-pinned"}
     out = []
