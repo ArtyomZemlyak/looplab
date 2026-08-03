@@ -907,6 +907,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }
   const onHubKeyDown = event => {
     if (event.key === 'Escape') { event.preventDefault(); closeHub(true); return }
+    // Menu items are roving-focus targets rather than Tab stops. Shift+Tab therefore returns to the
+    // owning trigger; close first so the trigger never retains focus behind a stale open backdrop.
+    if (event.key === 'Tab' && event.shiftKey) { event.preventDefault(); closeHub(true); return }
     const items = [...(hubMenuRef.current?.querySelectorAll('[role="menuitem"]:not(:disabled)') || [])]
     const next = nextRovingIndex(event.key, Math.max(0, items.indexOf(document.activeElement)), items.length)
     if (next == null) return
