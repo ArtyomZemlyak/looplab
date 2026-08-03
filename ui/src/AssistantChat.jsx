@@ -25,15 +25,17 @@ const runMentions = value => {
 
 // A live inline card for a run referenced with @run:<id> — so a running run shows up right in the chat
 // (a direct ask). Links to the run view; the dot pulses while its engine is live.
-function RunChip({ id, run, interactive = true }) {
+function RunChip({ id, run, interactive = true, onOpen }) {
   const phase = run ? (run.phase || (run.finished ? 'finished' : 'running')) : '—'
+  const href = `#/run/${encodeURIComponent(id)}`
   const content = <>
     <span className={'asst-run-dot' + (run && run.engine_running ? ' live' : '')} />
     <b>{id}</b>
     {run && <span className="muted"> {phase}{run.best_metric != null ? ' · ' + fmt(run.best_metric) : ''}</span>}
   </>
   return interactive
-    ? <a className="asst-runchip" href={`#/run/${encodeURIComponent(id)}`}
+    ? <a className="asst-runchip" href={href}
+        onClick={onOpen ? event => onOpen(event, href) : undefined}
         title={run ? (run.goal || id) : id}>{content}</a>
     : <span className="asst-runchip inert" title="Run references are not links in a public transcript">
         {content}
@@ -77,7 +79,7 @@ function AssistantErrorCard({ error, onRetry, onOpenSettings }) {
   </div>
 }
 export function Turn({
-  m, runsById, onRevert, onRetry, onOpenSettings, launchChat, readOnly = false,
+  m, runsById, onRevert, onRetry, onOpenSettings, onRunOpen, launchChat, readOnly = false,
   audience = 'owner',
   launchSessionId, launchMessageId, launchMessageIndex, launchDrafts, launchDisclosures,
   onLaunchDraft, onLaunchDisclosure, onLaunchStarted,
@@ -136,7 +138,7 @@ export function Turn({
       </div>}
       {mentions.length > 0 && <div className="asst-runchips">
         {mentions.map(id => <RunChip key={id} id={id} run={runsById && runsById[id]}
-          interactive={!publicAudience} />)}
+          interactive={!publicAudience} onOpen={onRunOpen} />)}
       </div>}
       {!readOnly && Array.isArray(m.proposals) && m.proposals.map((sp, i) => {
         const draftKey = launchDraftKey({ sessionId: launchSessionId, messageId: launchMessageId,

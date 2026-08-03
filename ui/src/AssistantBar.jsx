@@ -39,6 +39,7 @@ import {
   storageGet, storageSet, storageRemove,
 } from './util.js'
 import { deadlineRequest } from './requestDeadline.js'
+import { followClientRoute } from './accessibility.jsx'
 
 // ── ONE assistant, three flowing views: bar ⇄ side(right) ⇄ full ───────────────────────────────
 //
@@ -60,6 +61,11 @@ import { deadlineRequest } from './requestDeadline.js'
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 const boundedRequest = (read, ms = 12000) => deadlineRequest(read, ms).promise
+const commitAssistantRunRoute = href => {
+  if (location.hash === href) {
+    requestAnimationFrame(() => document.querySelector('[data-route-main]')?.focus({ preventScroll: true }))
+  } else location.hash = href
+}
 const ASSISTANT_FORK_ACTION_RE = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/
 const ASSISTANT_SESSION_RE = /^[\da-f]{16}$/
 const assistantForkRecoveryKey = sid =>
@@ -410,14 +416,25 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [files, setFilesState] = useState([])     // attached text files [{name,size,content,truncated}]
   const [pendingFileReads, setPendingFileReads] = useState(0)
   const [sideW, setSideW] = useState(() => clampAssistantWidth(storageGet('ll.asstW', 440)))
+  const autoRevealedPendingIdsRef = useRef(new Set())
 
   // A permission card cannot render in the collapsed composer bar. Reveal the side thread as soon as
-  // one arrives so the safe Reject-first focus and assertive pending announcement are actually usable.
+  // a new one arrives so the safe Reject-first focus and assertive pending announcement are usable.
+  // Mark each live request once: an intentional fold or route handoff must not be immediately undone
+  // by the same still-pending card, while a genuinely new request can still reveal itself.
   useEffect(() => {
-    if (!hidden && !historical && pending.length > 0 && view === 'bar') {
+    const liveIds = new Set(pending.map(request => request?.id).filter(Boolean))
+    for (const id of autoRevealedPendingIdsRef.current) {
+      if (!liveIds.has(id)) autoRevealedPendingIdsRef.current.delete(id)
+    }
+    if (hidden || historical) return
+    const newIds = [...liveIds].filter(id => !autoRevealedPendingIdsRef.current.has(id))
+    if (!newIds.length) return
+    for (const id of newIds) autoRevealedPendingIdsRef.current.add(id)
+    if (view === 'bar') {
       setView('side'); setHasNew(false)
     }
-  }, [hidden, historical, pending.length, view])
+  }, [hidden, historical, pending, view])
 
   const mountedRef = useRef(true)
   const currentRunIdRef = useRef(runId)
@@ -448,6 +465,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const commandStatusRef = useRef(null)
   const commandFocusRequestedRef = useRef(false)
   const collapseForNavigationRef = useRef(null)
+  const pendingRunHandoffRef = useRef(null)
   const openSessionRef = useRef(null)
   const toastRunIdRef = useRef(runId)
   const shareActionSessionRef = useRef(null)
@@ -808,11 +826,30 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     window.addEventListener('ll:collapse-assistant-for-navigation', onCollapseForNavigation)
     return () => window.removeEventListener('ll:collapse-assistant-for-navigation', onCollapseForNavigation)
   }, [hidden])
+  useEffect(() => {
+    if (view !== 'bar' || !pendingRunHandoffRef.current) return
+    const href = pendingRunHandoffRef.current
+    pendingRunHandoffRef.current = null
+    // Commit the route only after React has removed aria-modal/inert ownership from the Assistant.
+    // RouteFocus can then name and focus loading, ready, or error content without racing the old modal.
+    commitAssistantRunRoute(href)
+  }, [view])
+  const openRunFromAssistant = (event, href) => followClientRoute(event, () => {
+    const modalAssistant = view === 'full' || (view === 'side' && compactAssistant)
+    if (!modalAssistant) { commitAssistantRunRoute(href); return }
+    // A pending approval that was already present belongs to the surface the user just left. Mark it
+    // as revealed before folding so the auto-reveal effect cannot immediately cover the destination.
+    for (const request of pending) {
+      if (request?.id) autoRevealedPendingIdsRef.current.add(request.id)
+    }
+    pendingRunHandoffRef.current = href
+    collapseForNavigationRef.current?.()
+  })
   const toggleSide = () => (view === 'side' ? collapseToBar() : openSide())
   useDialogFocus(fullDialogRef, collapseToBar, view === 'full' && !hidden,
     { priority: DIALOG_PRIORITY.ASSISTANT_FULL })
-  useDialogFocus(sideDialogRef, collapseToBar, view === 'side' && compactAssistant && !hidden,
-    { priority: DIALOG_PRIORITY.ASSISTANT_SIDE })
+  useDialogFocus(sideDialogRef, collapseToBar, view === 'side' && !hidden,
+    { modal: compactAssistant, priority: DIALOG_PRIORITY.ASSISTANT_SIDE })
   useDialogFocus(deleteDialogRef, deleteConfirmBusy ? null : closeDeleteConfirm,
     !!deleteConfirm && !hidden, { priority: DIALOG_PRIORITY.ASSISTANT_DELETE })
   useEffect(() => {
@@ -2733,7 +2770,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       </div>}
       <Turn m={m} runsById={runsById} readOnly={historical} onRevert={historical ? null : onRevert}
         onRetry={retryHandlerFor(i)}
-        onOpenSettings={openAssistantSettings} launchChat={launchChatThrough(i)}
+        onOpenSettings={openAssistantSettings} onRunOpen={openRunFromAssistant}
+        launchChat={launchChatThrough(i)}
         revertState={revertState}
         launchSessionId={sid} launchMessageId={m.turn_id || m.id} launchMessageIndex={i}
         launchDrafts={launchDrafts}

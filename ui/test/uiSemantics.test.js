@@ -191,7 +191,8 @@ test('compact Assistant blocks background pointers and traps focus in the side d
   // The call gained an explicit layer priority, which is what keeps the Assistant drawer from
   // trapping focus underneath a modal opened above it — exactly the property this test is named
   // for. A regex ending at the third argument could not see it.
-  assert.match(assistant, /useDialogFocus\(sideDialogRef, collapseToBar, view === 'side' && compactAssistant && !hidden,\s*\{ priority: DIALOG_PRIORITY\.ASSISTANT_SIDE \}\)/)
+  assert.match(assistant, /useDialogFocus\(sideDialogRef, collapseToBar, view === 'side' && !hidden,\s*\{ modal: compactAssistant, priority: DIALOG_PRIORITY\.ASSISTANT_SIDE \}\)/,
+    'wide side keeps nonmodal Escape ownership without trapping focus; compact side remains modal')
   assert.match(assistant, /className="asst-side-backdrop" aria-hidden="true"[\s\S]*?onPointerDown=\{collapseToBar\}/)
   assert.match(assistant, /role=\{compactAssistant \? 'dialog' : undefined\} aria-modal=\{compactAssistant \? 'true' : undefined\}/)
   assert.match(assistant, /\{!compactAssistant && <div className="asst-resize" role="separator"/,
@@ -218,6 +219,23 @@ test('compact Assistant blocks background pointers and traps focus in the side d
     `stacking inverted: backdrop ${backdrop}, side panel ${sidePanel}, modal overlay ${overlay} — a `
     + 'modal must cover the Assistant drawer, and the drawer must cover its own backdrop')
   assert.match(css, /@media \(max-width: 1439px\)[\s\S]*?body\.asst-side-open \.app-shell-main \{ margin-right: 0; \}/)
+})
+
+test('Assistant run links hand off modal routes without breaking native modified clicks', async () => {
+  const [assistant, chat] = await Promise.all([source('AssistantBar.jsx'), source('AssistantChat.jsx')])
+  assert.match(chat, /onClick=\{onOpen \? event => onOpen\(event, href\) : undefined\}/)
+  assert.match(chat, /interactive=\{!publicAudience\} onOpen=\{onRunOpen\}/,
+    'public transcripts keep run references inert while owner transcripts delegate navigation')
+  assert.match(assistant, /followClientRoute\(event, \(\) => \{/,
+    'ordinary clicks use the tested SPA helper while modified clicks retain native link behavior')
+  assert.match(assistant, /view === 'full' \|\| \(view === 'side' && compactAssistant\)/)
+  assert.match(assistant, /pendingRunHandoffRef\.current = href[\s\S]*?collapseForNavigationRef\.current\?\.\(\)/)
+  assert.match(assistant, /view !== 'bar' \|\| !pendingRunHandoffRef\.current[\s\S]*?commitAssistantRunRoute\(href\)/,
+    'modal navigation commits only after the Assistant has released aria-modal and inert ownership')
+  assert.match(assistant, /location\.hash === href[\s\S]*?\[data-route-main\][\s\S]*?location\.hash = href/,
+    'same-route activation still closes the modal and hands focus to the already mounted route')
+  assert.match(assistant, /autoRevealedPendingIdsRef[\s\S]*?newIds[\s\S]*?view === 'bar'/,
+    'a previously revealed approval cannot immediately reopen the drawer after route handoff')
 })
 
 test('DAG concept overflow is a keyboard and touch disclosure with the complete canonical set', async () => {
