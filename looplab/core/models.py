@@ -23,6 +23,10 @@ from looplab.core.concepts import (
     valid_concept_id,
 )
 from looplab.core.fitness import is_better as _is_better, is_usable_metric
+# Aliased so the shared digest tail does not become part of this module's public namespace: historical
+# consumers import domain contracts from here, and `canonical_json_digest` belongs to core.jsonutil.
+from looplab.core.jsonutil import (DIGEST_TEXT_CAP as _DIGEST_TEXT_CAP,
+                                   canonical_json_digest as _canonical_json_digest)
 
 # Compatibility/public import seam: receipt ownership lives in core.concepts, while historical consumers
 # import domain contracts from core.models. Explicit assignments keep that API stable without duplicate logic.
@@ -785,14 +789,12 @@ def idea_proposal_digest(idea: Idea) -> str | None:
 
     try:
         bounded = _complete(payload)
-        encoded = json.dumps(
-            bounded, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
-        ).encode("utf-8")
     except (TypeError, ValueError, OverflowError, RecursionError):
         return None
-    if len(encoded) > 131_072:
-        return None
-    return "idea:v1:" + hashlib.sha256(encoded).hexdigest()
+    # The BOUNDING walker above is this identity's frozen v1 preimage and stays here; only the
+    # dump/hash/cap tail is shared (doc 25 CO-08). Byte-identical: `canonical_json` passes the same
+    # four json.dumps options this call site spelled out.
+    return _canonical_json_digest(bounded, prefix="idea:v1:", cap=_DIGEST_TEXT_CAP)
 
 
 def idea_proposal_ref(idea: Idea) -> dict | None:
@@ -952,14 +954,12 @@ def _card_action_digest(
             "statement": statement,
             "action": action_payload,
         }
-        encoded = json.dumps(
-            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
-        ).encode("utf-8")
     except (TypeError, ValueError, OverflowError, UnicodeError):
         return None
-    if len(encoded) > 131_072:
-        return None
-    return f"card-action:v{version}:" + hashlib.sha256(encoded).hexdigest()
+    # As in `idea_proposal_digest`: the versioned preimage above is frozen and stays here; the
+    # dump/hash/cap tail is the shared one (doc 25 CO-08), byte-identical to the four options this
+    # call site used to spell out.
+    return _canonical_json_digest(payload, prefix=f"card-action:v{version}:", cap=_DIGEST_TEXT_CAP)
 
 
 def card_action_digest(card_id: str, statement: str, action: dict) -> str | None:
@@ -1192,7 +1192,12 @@ def hypothesis_id(statement: str) -> str:
     """Stable id for a hypothesis statement so the same claim (from different ideas / a human /
     a deep-research direction) links to ONE ledger entry that accumulates evidence. A normalized
     slug + short hash: readable in the log, collision-resistant across paraphrases-of-the-exact-same
-    wording (paraphrase *variation* is intentionally a new hypothesis — dedup is by exact intent)."""
+    wording (paraphrase *variation* is intentionally a new hypothesis — dedup is by exact intent).
+
+    md5, deliberately, and it stays (doc 25 CO-08): this is a 6-hex DISPLAY suffix that disambiguates
+    two slugs, not a security boundary — `hypothesis_statement_digest` above is the sha256 identity —
+    and it is a FROZEN key. Every hypothesis ledger entry and every capsule that joined on this id was
+    written with it, so a different hash function orphans them all."""
     import re
     norm = normalized_hypothesis_statement(statement)
     slug = re.sub(r"[^a-z0-9]+", "-", norm).strip("-")[:48] or "hypothesis"
@@ -1223,7 +1228,13 @@ def run_setup_key(command) -> str:
     """Stable identity for a run-level `run_setup` command, so a resume can tell "this exact setup
     already completed" from "not yet run" (arch-review §5 P2). A short hash of the canonical argv —
     single-sourced here (core) so the fold (`run_setup_finished` handler) and the engine's skip-check
-    compute it identically without a layering violation (events/engine both import core)."""
+    compute it identically without a layering violation (events/engine both import core).
+
+    md5, deliberately, and it stays (doc 25 CO-08): the key is compared against one already written
+    into a durable `run_setup_finished` event, so changing the hash makes every in-flight run re-run a
+    setup it already completed. It is a same-process equality key over a local argv, not an
+    authenticated digest — there is no attacker who both controls the argv and benefits from a
+    collision that would make their own setup step be SKIPPED."""
     import hashlib
     canon = "\x00".join(str(a) for a in (command or []))
     return hashlib.md5(canon.encode("utf-8")).hexdigest()[:12]

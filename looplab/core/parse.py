@@ -20,10 +20,30 @@ from pydantic import BaseModel, ValidationError
 from looplab.core.errors import LLMError
 
 
+# core carries several "is this a usable number" rules, and they are NOT interchangeable (doc 25
+# CO-09). The map, so a reader picks by contract instead of by whichever import was nearest:
+#
+# * `to_float` / `to_int` (here) — COERCING. `float("3.5")` succeeds. For text from outside the
+#   process (nvidia-smi CSV cells, env vars, CLI arguments) where a string IS the wire format.
+# * `fitness.is_usable_metric` / `fitness.finite_metric` — STRICT on type, coercing to float only to
+#   test finiteness. A JSON string is NOT a metric: it must not enter ordering. `core.profile` aliases
+#   the predicate for column typing.
+# * `comparison.finite_measurement` — strict on the EXACT type (`type(v) not in {int, float}`), so an
+#   int/float SUBCLASS is refused too. Comparison contracts are durable published claims, and a
+#   subclass can override `__eq__`/`__lt__`.
+# * `llm._safe_token_count` — strict `type(v) is int` plus an int64 ceiling. Feeds the durable cost
+#   ledger, where an integral float would be a provider bug rather than a value to round.
+# * `tracing._token_int` — deliberately the LAX twin of that one: it coerces and clamps at 0 and never
+#   raises, because tracing must not be able to perturb the operation it observes.
+# * `models._resource_int` / `models.safe_lesson_node_count` — bounded readers for untrusted persisted
+#   payloads; the latter also accepts decimal STRINGS, for old logs that wrote them.
+
+
 def to_float(v, *, finite: bool = False):
     """`float(v)` or None when unparseable. `finite=True` additionally rejects NaN/inf — the
     metric-reading rule (a diverged run must read as "no metric", never enter best-selection).
-    The one spelling of scalar coercion previously re-implemented per module."""
+    The one spelling of COERCING scalar parsing (see the contract map above — the strict readers are
+    deliberately separate, because accepting `"3.5"` where a durable number is required is a bug)."""
     try:
         f = float(v)
     except (TypeError, ValueError):

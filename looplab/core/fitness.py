@@ -22,8 +22,9 @@ a policy change; the regression is locked by `tests/test_events_replay.py` + the
 from __future__ import annotations
 
 import hashlib
-import json
 import math
+
+from looplab.core.jsonutil import canonical_json
 
 VERIFIER_SELECTION_CONTRACT = "selection-criteria:v1"
 
@@ -121,11 +122,15 @@ def verifier_evidence_snapshot(direction: str, node) -> dict:
 
 
 def verifier_evidence_digest(direction: str, node) -> str:
-    """Stable SHA-256 identity for :func:`verifier_evidence_snapshot`."""
+    """Stable SHA-256 identity for :func:`verifier_evidence_snapshot`.
 
-    raw = json.dumps(verifier_evidence_snapshot(direction, node), sort_keys=True,
-                     separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+    The only minter in the family that RAISES rather than failing closed, which is why it hashes
+    `canonical_json` directly instead of going through `canonical_json_digest` (doc 25 CO-08): the
+    snapshot above is assembled from already-validated scalars, so an unencodable value here is a bug
+    in this module, not untrusted input to reject. A silent `None` would hide it.
+    """
+    return hashlib.sha256(
+        canonical_json(verifier_evidence_snapshot(direction, node))).hexdigest()
 
 
 class SearchFitness:

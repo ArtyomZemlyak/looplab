@@ -1845,6 +1845,37 @@ whole `core/` package. Nothing further to do here; see XP-04 for the reasoning a
 
 *Recommendation:* Add one `canonical_json_digest(payload, *, prefix)` helper (dump+hash only, no bounding) and route the non-frozen call sites through it; leave the frozen v1/v2 preimage builders byte-identical but have them call the shared dump/hash tail. Document per-site why md5 remains where it does.
 
+*Resolution (2026-08-03):* `core/jsonutil.py::canonical_json_digest(value, *, prefix="", cap=None)`
+on top of the `canonical_json` extracted for SE-08, plus `DIGEST_TEXT_CAP` naming the 131_072-byte
+preimage budget that two of the minters had spelled as a literal.
+
+The split is exactly the one the finding asked for: the **preimages stay owned by their call sites**
+— each is a versioned, frozen wire contract, and merging the bounding walkers would be a wire change
+— while the **tail is shared**, because that is the part where two spellings of "canonical" produce
+two digests for one logical value and a receipt written by one reader silently stops verifying for
+the other. Byte-identity is pinned by a test that keeps the pre-extraction spelling and compares.
+
+Three sites route through it (`idea_proposal_digest`, `_card_action_digest`, `stable_advisory_ref`);
+`verifier_evidence_digest` hashes `canonical_json` directly instead, because it is the only one that
+must RAISE rather than fail closed — its snapshot is assembled from already-validated scalars, so an
+unencodable value there is a bug in that module, and a silent `None` would hide it.
+
+The cap is per-caller and stays that way: the two agent-output minters pass it, `stable_advisory_ref`
+deliberately does not (its callers pass an already-sanitized, deliberately small projection, so a
+size refusal could only drop a well-formed advisory). For `card_action_digest` the cap turns out to be
+a BACKSTOP — every field has its own bound, which refuses with the name of the wrong field long
+before a byte budget that can only say "too big" — and the test says so rather than implying the cap
+is the working limit.
+
+**md5, per site, all three kept.** `hypothesis_id` uses it for a 6-hex DISPLAY suffix that
+disambiguates two slugs, with the sha256 identity right above it — and it is a frozen join key, so
+changing it orphans every ledger entry and capsule that joined on it. `run_setup_key` compares against
+a key already written into a durable `run_setup_finished` event, so changing it makes every in-flight
+run re-run a completed setup; there is also no attacker who both controls the local argv and benefits
+from a collision that makes their OWN setup be skipped. `vectorstore.hash_embed` uses it as a
+token→bucket function that must be stable across processes, which Python's salted `hash()` is not.
+Each now says so in place.
+
 #### CO-09 · LOW · inconsistency · effort: small
 
 **Eight subtly different 'usable finite number' predicates across core**
@@ -1854,6 +1885,31 @@ whole `core/` package. Nothing further to do here; see XP-04 for the reasoning a
 *Evidence:* core carries at least eight scalar-coercion/finiteness predicates with slightly different contracts: `fitness.is_usable_metric` (isinstance int/float, not bool, finite), `comparison.finite_measurement` (`type(value) not in {int, float}` — rejects subclasses), `profile._is_number` (same intent, hand-rolled inf check), `parse.to_float/to_int` (which claims to be "The one spelling of scalar coercion previously re-implemented per module"), `llm._safe_token_count` (`type(value) is not int`, int64 bound), `tracing._token_int` (coercing, clamping), `models._resource_int` (int-or-integral-float, int31 bound) and `models.safe_lesson_node_count` (adds decimal-string parsing). Several differences are deliberate (strict durable readers vs lax telemetry) and individually documented, but there is no map of which contract applies where, and parse.py's "one spelling" claim is no longer true.
 
 *Recommendation:* Not a merge-everything item — the strict/lax split is real. Consolidate the genuinely identical ones (profile._is_number ≈ is_usable_metric; tracing._token_int ≈ a clamping variant of llm._safe_token_count) into parse.py or fitness.py, and fix parse.py's stale 'one spelling' docstring to enumerate the intentional strict variants.
+
+*Resolution (2026-08-03):* one merge, one map, one correction — and one of the two proposed merges
+was declined on inspection.
+
+`profile._is_number` was rule-identical to `fitness.is_usable_metric`, character-different only, so it
+is now an alias. The profiler-specific REASONS stay written down above it, because the shared
+predicate cannot carry them: the consequence of accepting `10**400` is that
+`profile_column`'s `sum(nonnull)/len(nonnull)` raises OverflowError and takes the leakage front-end
+down with it, which is a fact about the profiler, not about the rule.
+
+`tracing._token_int` and `llm._safe_token_count` were NOT merged, and the finding's "≈ a clamping
+variant" understates the gap. `_safe_token_count` refuses anything that is not exactly `int` — an
+integral float from a provider is a bug it must not round away, because the value lands in the
+durable cost ledger. `_token_int` coerces (`int(value or 0)`) and never raises, because tracing must
+not be able to perturb the operation it observes. On the input that distinguishes them — a provider
+reporting `3.7` — one answers 0 and the other 3, and both are right for their caller. A shared
+"clamping variant" would have to be parameterized on the very thing that differs.
+
+`parse.to_float`'s "the one spelling of scalar coercion previously re-implemented per module" is now
+scoped to what it actually owns (COERCING parse of wire TEXT), and a contract map above it names the
+six strict readers and what each refuses. That map is the deliverable: the danger here was never line
+count, it was a reader importing the nearest predicate and getting a durable bug — a metric that
+accepts `"3.5"`, or a comparison claim that trusts a subclass which overrides `__lt__`.
+`tests/test_digest_and_number_contracts.py` drives those two disagreements rather than asserting the
+prose.
 
 #### CO-10 · LOW · over-engineering · effort: small
 

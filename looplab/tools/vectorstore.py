@@ -57,6 +57,9 @@ class VectorStore(Protocol):
 def hash_embed(text: str, dim: int = 64) -> Vector:
     v = [0.0] * dim
     for tok in text.lower().split():
+        # md5 as a cheap token -> bucket function, not an identity (doc 25 CO-08). It must be stable
+        # ACROSS PROCESSES — Python's built-in `hash()` is salted per interpreter, so a persisted index
+        # built in one process would not match a query embedded in the next.
         h = int(hashlib.md5(tok.encode("utf-8")).hexdigest(), 16)
         v[h % dim] += 1.0
     return v

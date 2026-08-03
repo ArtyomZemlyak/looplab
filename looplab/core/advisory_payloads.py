@@ -11,6 +11,7 @@ import itertools
 import json
 import math
 
+from looplab.core.jsonutil import canonical_json_digest
 from looplab.core.redact import (bounded_redacted_tree, is_secret_key_name,
                                  redact_persisted_text)
 from looplab.core.source_identity import canonical_source_ref, valid_source_identity
@@ -256,14 +257,11 @@ def stable_advisory_ref(namespace: str, payload) -> str | None:
     prefix = _ADVISORY_REF_PREFIXES.get(namespace) if isinstance(namespace, str) else None
     if prefix is None:
         return None
-    try:
-        blob = json.dumps(
-            payload, ensure_ascii=False, allow_nan=False, sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8", "strict")
-    except (TypeError, ValueError, UnicodeError):
-        return None
-    return prefix + hashlib.sha256(blob).hexdigest()
+    # The strict namespace list above is this function's own contribution; the encode/hash tail is the
+    # shared one (doc 25 CO-08). Deliberately UNCAPPED, unlike the two agent-output minters: callers
+    # pass an already-sanitized, deliberately small identity projection, so a size refusal here could
+    # only drop a well-formed advisory.
+    return canonical_json_digest(payload, prefix=prefix)
 
 
 def research_memo_ref(payload) -> str | None:
