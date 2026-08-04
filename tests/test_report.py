@@ -18,6 +18,23 @@ ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
 
 
+
+def _patch_store(monkeypatch, name, value):
+    """Patch a scope-report seam on BOTH modules that read it (doc 25 SR-12).
+
+    The store moved to `serve/scope_report_store.py` and `routers/reports.py` re-exports it with a
+    star import — which BINDS BY VALUE, so patching one module no longer reaches the other's global
+    lookup. `strict_atomic_write_text` and `_read_scope_action_lease_marker` are genuinely read from
+    both (the store writes receipts/fences; the router writes the report record), so a test that
+    injects a write failure has to reach both or it silently exercises only half the path.
+    """
+    from looplab.serve import scope_report_store
+    from looplab.serve.routers import reports as _reports
+
+    for module in (scope_report_store, _reports):
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, value)
+
 def _hold_scope_report_leases_in_spawned_process(
         root_text: str, scope_type: str, scope_id: str, action_id: str,
         ready, release) -> None:
@@ -2746,7 +2763,7 @@ def test_scope_report_action_strictly_publishes_claim_report_and_terminal(
         writes.append((path.name, text))
         return real_write(path, text)
 
-    monkeypatch.setattr(reports, "strict_atomic_write_text", observe)
+    _patch_store(monkeypatch, "strict_atomic_write_text", observe)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     result = _generate_scope_report(
         TestClient(make_app(tmp_path)),
@@ -2830,7 +2847,7 @@ def test_scope_report_refuses_to_pay_when_its_attempt_row_cannot_be_written(
             raise OSError("attempt row sync unavailable")
         return real_write(path, text)
 
-    monkeypatch.setattr(reports, "strict_atomic_write_text", fail_the_attempt_stamp)
+    _patch_store(monkeypatch, "strict_atomic_write_text", fail_the_attempt_stamp)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
     result = _generate_scope_report(
         TestClient(make_app(tmp_path)),
@@ -2856,8 +2873,8 @@ def test_scope_report_action_claim_sync_failure_never_starts_provider(
         return object()
 
     monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
-    monkeypatch.setattr(
-        reports, "strict_atomic_write_text",
+    _patch_store(
+        monkeypatch, "strict_atomic_write_text",
         lambda _path, _text: (_ for _ in ()).throw(OSError("sync unavailable")))
     app = make_app(tmp_path)
     response = _generate_scope_report(
@@ -2893,7 +2910,7 @@ def test_scope_report_action_preworker_fence_failure_recovers_through_abandon(
         provider_calls += 1
         raise RuntimeError("test-only offline")
 
-    monkeypatch.setattr(reports, "strict_atomic_write_text", fail_first_fence)
+    _patch_store(monkeypatch, "strict_atomic_write_text", fail_first_fence)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", offline)
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
@@ -2937,7 +2954,7 @@ def test_scope_report_action_terminal_sync_failure_persists_indeterminate_and_re
                 raise OSError("terminal sync unavailable")
         return real_write(path, text)
 
-    monkeypatch.setattr(reports, "strict_atomic_write_text", fail_one_terminal)
+    _patch_store(monkeypatch, "strict_atomic_write_text", fail_one_terminal)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     app = make_app(tmp_path)
     client = TestClient(app)
@@ -2983,8 +3000,8 @@ def test_scope_report_action_double_terminal_failure_releases_retained_leases_on
                 raise OSError("parent sync confirmation unavailable")
         return result
 
-    monkeypatch.setattr(
-        reports, "strict_atomic_write_text", publish_then_fail_terminal_and_fallback)
+    _patch_store(
+        monkeypatch, "strict_atomic_write_text", publish_then_fail_terminal_and_fallback)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     app = make_app(tmp_path)
     client = TestClient(app)
@@ -3059,7 +3076,7 @@ def test_scope_report_mismatched_done_tombstone_failure_stays_quarantined(
             raise OSError("indeterminate tombstone sync unavailable")
         return real_write(path, text)
 
-    monkeypatch.setattr(reports, "strict_atomic_write_text", fail_first_indeterminate)
+    _patch_store(monkeypatch, "strict_atomic_write_text", fail_first_indeterminate)
     release.set()
     assert tombstone_attempted.wait(3), "worker did not attempt the strict tombstone"
     assert failed is True
@@ -3122,8 +3139,8 @@ def test_scope_report_retained_recovery_survives_deleted_action_marker(
                 raise OSError("tombstone confirmation unavailable")
         return real_write(path, text)
 
-    monkeypatch.setattr(
-        reports, "strict_atomic_write_text", fail_both_terminal_confirmations)
+    _patch_store(
+        monkeypatch, "strict_atomic_write_text", fail_both_terminal_confirmations)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     client = TestClient(make_app(tmp_path))
     initial = _generate_scope_report(
@@ -3149,7 +3166,7 @@ def test_scope_report_retained_recovery_survives_deleted_action_marker(
                 return None
             return real_read_marker(reports_dir, requested_action)
 
-        monkeypatch.setattr(reports, "_read_scope_action_lease_marker", miss_once)
+        _patch_store(monkeypatch, "_read_scope_action_lease_marker", miss_once)
 
     reconciled = client.get(_scope_report_action_url("task", task_id, action_id)).json()
     assert reconciled["status"] == "indeterminate"
@@ -3183,7 +3200,7 @@ def test_scope_report_retained_missing_receipt_can_be_directly_abandoned(
                 raise OSError("terminal storage unavailable")
         return real_write(path, text)
 
-    monkeypatch.setattr(reports, "strict_atomic_write_text", fail_terminal_before_visibility)
+    _patch_store(monkeypatch, "strict_atomic_write_text", fail_terminal_before_visibility)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     client = TestClient(make_app(tmp_path))
     initial = _generate_scope_report(
@@ -3275,7 +3292,7 @@ def test_scope_report_action_canonical_report_sync_failure_is_durable_failure(
             raise OSError("canonical sync unavailable")
         return real_write(path, text)
 
-    monkeypatch.setattr(reports, "strict_atomic_write_text", fail_report)
+    _patch_store(monkeypatch, "strict_atomic_write_text", fail_report)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
     client = TestClient(make_app(tmp_path))
     initial = _generate_scope_report(
@@ -3315,7 +3332,7 @@ def test_scope_report_visible_canonical_without_success_terminal_is_quarantined_
         provider_calls += 1
         raise RuntimeError("test-only offline")
 
-    monkeypatch.setattr(reports, "strict_atomic_write_text", publish_canonical_then_fail)
+    _patch_store(monkeypatch, "strict_atomic_write_text", publish_canonical_then_fail)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", offline)
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
@@ -3392,7 +3409,7 @@ def test_scope_report_action_visible_unconfirmed_terminal_is_quarantined_by_tomb
                 raise OSError("parent sync result was lost")
         return result
 
-    monkeypatch.setattr(reports, "strict_atomic_write_text", publish_then_fail_once)
+    _patch_store(monkeypatch, "strict_atomic_write_text", publish_then_fail_once)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     app = make_app(tmp_path)
     client = TestClient(app)
@@ -3588,8 +3605,8 @@ def test_scope_report_missing_action_marker_cannot_authorize_visible_terminal_wh
                 return None
             return real_read_marker(reports_dir, requested_action)
 
-        monkeypatch.setattr(
-            reports, "_read_scope_action_lease_marker", hide_action_marker)
+        _patch_store(
+            monkeypatch, "_read_scope_action_lease_marker", hide_action_marker)
         client = TestClient(make_app(tmp_path))
         status = client.get(_scope_report_action_url("task", task_id, action_id)).json()
         abandon = client.post(
@@ -4105,7 +4122,7 @@ def test_scope_report_persists_uncapturable_members_without_permanent_staleness(
             raise ScopeSourceCorruptError("test-only unavailable tail")
         return real_capture(root, run_id, **kwargs)
 
-    monkeypatch.setattr(reports, "capture_scope_source", partial_capture)
+    _patch_store(monkeypatch, "capture_scope_source", partial_capture)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
@@ -4145,7 +4162,7 @@ def test_scope_report_rechecks_transient_omission_even_when_probe_is_unchanged(
             repaired_captures += 1
         return real_capture(root, run_id, **kwargs)
 
-    monkeypatch.setattr(reports, "capture_scope_source", transient_capture)
+    _patch_store(monkeypatch, "capture_scope_source", transient_capture)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
@@ -4183,7 +4200,7 @@ def test_scope_report_get_reuses_stable_revision_but_rechecks_snapshot_identity(
         captures += 1
         return real_capture(*args, **kwargs)
 
-    monkeypatch.setattr(reports, "capture_scope_source", counted_capture)
+    _patch_store(monkeypatch, "capture_scope_source", counted_capture)
     assert client.get(url).json()["stale"] is False
     assert client.get(url).json()["stale"] is False
     assert captures == 0, "stable GETs must reuse the generation's full revision"
@@ -4425,7 +4442,7 @@ def test_scope_report_revalidates_frozen_sources_before_provider(tmp_path, monke
         provider_calls += 1
         return object()
 
-    monkeypatch.setattr(reports, "capture_scope_source", capture_then_mutate)
+    _patch_store(monkeypatch, "capture_scope_source", capture_then_mutate)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
     response = _generate_scope_report(
         TestClient(make_app(tmp_path)), f"/api/scope-report/task/{task_id}")
@@ -5056,7 +5073,7 @@ def test_prior_learnings_index_discards_full_records_under_aggregate_budget(
     _seed_scope_run(tmp_path, "prior-run", "seed-task")
     reports_dir = tmp_path / "reports"
     reports_dir.mkdir()
-    monkeypatch.setattr(reports, "_PRIOR_REPORT_PARSE_MAX_BYTES", 4_000)
+    _patch_store(monkeypatch, "_PRIOR_REPORT_PARSE_MAX_BYTES", 4_000)
     for index in range(3):
         task_id = f"budgeted-prior-{index}"
         record = _legacy_scope_record(

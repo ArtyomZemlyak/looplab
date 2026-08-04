@@ -208,10 +208,7 @@ def test_no_router_imports_another_router():
                 sibling = name.split(".")[3]
                 if sibling != path.stem:
                     offenders.append(f"{path.name}:{node.lineno} -> {name}")
-    assert offenders == ["genesis.py:26 -> looplab.serve.routers.reports"], offenders
-    # The one remaining edge is `_prior_learnings_index`, which cannot move without extracting the
-    # whole scope-report STORE out of routers/reports.py (~1400 lines, and ~16 tests monkeypatch that
-    # module's globals, which a move would turn into silent no-ops). Recorded in doc 25 under SR-12.
+    assert offenders == [], offenders
 
 
 def test_the_launch_predicate_lives_with_the_launch_boundary():
@@ -252,3 +249,51 @@ def test_the_predicate_is_named_where_its_readers_are_pointed():
              if "routers/control.py::_defaults_backend_llm" in line
              or "routers.control._defaults_backend_llm" in line]
     assert stale == [], stale
+
+def test_the_scope_report_store_is_not_a_router():
+    """`_prior_learnings_index` was the last router-to-router edge. It could not move alone: it reads
+    eleven private helpers and three constants of the scope-report STORE, which sat ahead of
+    `build_router` in the same file. The store is its own module now, and genesis imports THAT."""
+    from looplab.serve import scope_report_store
+    from looplab.serve.routers import genesis, reports
+
+    assert genesis._prior_learnings_index is scope_report_store._prior_learnings_index
+    assert inspect.getmodule(scope_report_store._prior_learnings_index) is scope_report_store
+    assert reports._prior_learnings_index is scope_report_store._prior_learnings_index, (
+        "the re-export must keep `reports.<name>` resolving for its own build_router and the tests")
+
+
+def test_the_store_module_holds_no_http_surface():
+    """The reason it could move at all: none of it is HTTP. A route decorator or an APIRouter
+    appearing here means the split is being undone from the other side."""
+    from looplab.serve import scope_report_store
+
+    source = inspect.getsource(scope_report_store)
+    assert "APIRouter" not in source and "@router." not in source
+
+
+def test_every_star_re_exported_name_is_declared():
+    """`routers/reports.py` star-imports the store, and a star import only carries what `__all__`
+    lists — a name added without declaring it stops resolving as `reports.<name>` and takes the
+    tests that spell it that way with it."""
+    from looplab.serve import scope_report_store
+
+    tree = next(t for path, t in iter_trees() if path.name == "scope_report_store.py")
+    defined = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+    defined |= {t.id for n in tree.body if isinstance(n, ast.Assign)
+                for t in n.targets if isinstance(t, ast.Name) and t.id != "__all__"}
+    assert set(scope_report_store.__all__) == defined, (
+        set(scope_report_store.__all__) ^ defined)
+
+
+def test_the_shared_write_seam_is_read_from_both_modules():
+    """The hazard this extraction carries: a star import BINDS BY VALUE, so a monkeypatch on one
+    module does not reach the other's lookup. `strict_atomic_write_text` is genuinely called from
+    both — the store writes receipts and fences, the router writes the report record — so a test
+    that injects a write failure has to patch both, which `test_report.py::_patch_store` does."""
+    from looplab.serve import scope_report_store
+    from looplab.serve.routers import reports
+
+    for module in (scope_report_store, reports):
+        source = inspect.getsource(module)
+        assert "strict_atomic_write_text(" in source, module.__name__
