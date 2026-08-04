@@ -17,7 +17,6 @@ import os
 import re
 import secrets
 import threading
-from contextlib import contextmanager
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +29,7 @@ from looplab.core.atomicio import same_file_entry
 from looplab.events.eventstore import (
     MAX_EVENT_BATCH_BYTES, decode_event_record, is_event_batch_record,
     prefix_anchor_from_handle)
+from looplab.serve._log_index import PathLocks, validated_index_bound
 from looplab.serve.run_commands import run_generation_token
 
 
@@ -368,62 +368,18 @@ def _bounded_around(rows: list[_Row], anchor_index: int, limit: int,
     return start, end
 
 
-class _PathLocks:
-    """Per-path mutual exclusion for the incremental byte indexes.
-
-    Both indexes used ONE process-global lock held across a whole request, so the first full scan of
-    a multi-MB log — or a cold network read — stalled every OTHER run's poll behind it. The work is
-    already per-path (each `_Index` is scanned and read independently), so the exclusion should be
-    too; only the registry map itself needs a shared lock, and that is held for dictionary
-    operations alone.
-
-    A lock is evicted only while UNREFERENCED. Handing a second lock object out for a path whose
-    first is still held would let two threads scan and mutate the same `_Index` concurrently, which
-    is exactly the corruption the lock exists to prevent — so the LRU bound yields to liveness.
-    """
-
-    __slots__ = ("_locks", "_registry", "_maximum")
-
-    def __init__(self, maximum: int):
-        self._locks: "OrderedDict[str, list]" = OrderedDict()   # key -> [RLock, waiters]
-        self._registry = threading.RLock()
-        self._maximum = max(1, int(maximum))
-
-    @contextmanager
-    def hold(self, key: str):
-        with self._registry:
-            entry = self._locks.get(key)
-            if entry is None:
-                entry = self._locks[key] = [threading.RLock(), 0]
-            entry[1] += 1
-            self._locks.move_to_end(key)
-        try:
-            with entry[0]:
-                yield
-        finally:
-            with self._registry:
-                entry[1] -= 1
-                excess = len(self._locks) - self._maximum
-                if excess > 0:
-                    for stale in [k for k, e in self._locks.items() if e[1] == 0][:excess]:
-                        self._locks.pop(stale, None)
-
-
 class EventLogPager:
     """Thread-safe incremental byte index, scoped to one UI server process."""
 
     def __init__(self, *, max_indexed_runs: int = MAX_INDEXED_RUNS):
-        if (not isinstance(max_indexed_runs, int) or isinstance(max_indexed_runs, bool)
-                or max_indexed_runs < 1):
-            raise ValueError("max_indexed_runs must be a positive integer")
-        self.max_indexed_runs = max_indexed_runs
+        self.max_indexed_runs = validated_index_bound(max_indexed_runs)
         # A dense boundary index makes page reads and anchor jumps fast. Keep only a small LRU of
         # active runs so browsing thousands of historical runs cannot retain every row forever.
         self._indexes: OrderedDict[str, _Index] = OrderedDict()
         # `_lock` now guards ONLY the registry dict; the expensive work (a cold full `_scan`,
         # `_materialize`'s disk reads) runs under `_paths.hold(key)` so it stalls one run, not all.
         self._lock = threading.RLock()
-        self._paths = _PathLocks(max_indexed_runs * 4)
+        self._paths = PathLocks(max_indexed_runs * 4)
 
     def _refresh(self, path: Path, handle: BinaryIO, snapshot_size: int,
                  identity: tuple[int, int], metadata: tuple[int, int]) -> _Index:

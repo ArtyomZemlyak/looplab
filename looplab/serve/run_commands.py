@@ -3671,6 +3671,127 @@ class RunCommandService:
             return observation.has_ack(command_id, event_seq)
         return False
 
+    def _try_restart_claim(self, rd: Path, path: Path, record: dict) -> bool:
+        """Claim the RESTART_AFTER_EXIT replacement launch. False = TERMINALIZED, caller returns.
+
+        `_execute` performed this identically at admission and again in the monitor loop after a
+        pre-existing engine died, so a change to the uncertain-boundary wording or the
+        `replacement_launch_claimed` bookkeeping reached only one of them (doc 25 SC-07).
+        """
+        try:
+            launched = self._claim_restart_spawn(rd)
+        except Exception as exc:  # noqa: BLE001 - durable intent remains startup-recoverable
+            uncertain = isinstance(exc, EngineSpawnOutcomeUnknown)
+            self._terminal(path, record, "failed", error=_error(
+                "resume_start_uncertain" if uncertain else "spawn_failed",
+                ("replacement run engine creation crossed an uncertain process boundary"
+                 if uncertain else f"could not start the replacement run engine: {exc}"),
+                ("observe the durable resume launch claim; startup recovery may finish the "
+                 "same intent, so do not submit another restart"
+                 if uncertain else
+                 "fix the cause; startup recovery or this command's retry can serve the same intent"),
+                retryable=not uncertain))
+            return False
+        if launched:
+            record["replacement_launch_claimed"] = True
+            record["updated_at"] = time.time()
+            self._save(path, record)
+        return True
+
+    def _spawn_under_claim(self, rd: Path, path: Path, record: dict, command_id: str,
+                           *, restarting: bool) -> tuple[bool, Optional[int]]:
+        """Lease → Popen → persist the PID. Returns ``(terminalized, pid)``; on True the caller returns.
+
+        Write the lease *before* Popen. If the server dies after process creation but before it can
+        persist the PID, another server still waits for engine.lock instead of launching a second
+        engine into the same run.
+
+        `_execute` spelled this out twice — once for the admission spawn and once for the monitor's
+        re-spawn after a pre-existing engine died — so the two copies drifted on wording alone
+        (doc 25 SC-07). `restarting` carries the only real difference: the operator-facing text says
+        "restart" rather than "start". The record bookkeeping that legitimately differs between the
+        two sites (`waiting_for_spawn`, whether a `None` pid may overwrite a known one) stays at the
+        call sites where a reader can see the divergence.
+        """
+        verb = "restart" if restarting else "start"
+        self._record_spawn_claim(rd, command_id, None)
+        try:
+            pid = self._spawn(rd)
+        except Exception as exc:  # noqa: BLE001 - Popen/task failures become records
+            uncertain = isinstance(exc, EngineSpawnOutcomeUnknown)
+            if not uncertain:
+                self._clear_spawn_claim(rd, command_id)
+            self._terminal(path, record, "failed", error=_error(
+                "engine_start_uncertain" if uncertain else "spawn_failed",
+                (f"run engine {'restart' if restarting else 'creation'} crossed an uncertain "
+                 "process boundary" if uncertain else
+                 f"could not {verb} the run engine: {exc}"),
+                ("observe the retained spawn claim; retry only after liveness or "
+                 "definitive PID death clears the duplicate-start hazard"
+                 if uncertain else
+                 "fix the cause, then POST this command id's /retry endpoint (same intent)"),
+                retryable=not uncertain))
+            return True, None
+        # Persist the resulting PID on the SAME lease the pre-Popen write reserved. Both call sites
+        # did this identically right after their own record bookkeeping; the durable order (claim
+        # before record) is unchanged, only the in-memory field assignment now follows it.
+        self._record_spawn_claim(rd, command_id, pid)
+        return False, pid
+
+    def _terminalize_expired(self, rd: Path, path: Path, record: dict, command_id: str,
+                             spec) -> None:
+        """The monitor loop's deadline exit: one last serialized look, then a terminal write.
+
+        Split out of `_execute` (doc 25 SC-07) — it is the only phase that runs after the loop, and
+        inlining it put four more early returns and a sixth lock scope inside an already 460-line
+        method. Reads the record fresh under the sequencer, so the caller's `record` is deliberately
+        NOT the one written here.
+
+        Serialize the final observation and terminal write with GET/retry. Without this last check, a
+        completion arriving at the deadline could be promoted to succeeded by GET and then
+        overwritten by this worker's stale timed_out write.
+        """
+        with self.sequence(rd):
+            current = self._load(path)
+            if current is not None:
+                record = current
+            if record.get("status") in TERMINAL_STATUSES:
+                return
+            final_observation = self._observe(rd)
+            if self._postcondition(rd, record, final_observation):
+                self._succeeded(rd, path, record)
+                return
+            domain_error = (self._domain_failure(rd, record, final_observation)
+                            if spec.engine_policy is not EnginePolicy.NO_SPAWN else None)
+            if domain_error is not None:
+                self._clear_spawn_claim(rd, command_id)
+                self._terminal(path, record, "failed", error=domain_error)
+                return
+
+            uncertain_start = False
+            if (record.get("spawned_by_command")
+                    and not record.get("spawn_claim_released")):
+                if self._engine_state(rd) is True:
+                    self._clear_spawn_claim(rd, command_id)
+                    record["spawn_claim_released"] = True
+                else:
+                    uncertain_start = self._quarantine_spawn_claim(
+                        rd, command_id, record.get("engine_pid"))
+            else:
+                self._clear_spawn_claim(rd, command_id)
+            if uncertain_start:
+                self._terminal(path, record, "timed_out", error=_error(
+                    "engine_start_uncertain",
+                    "the detached engine has not exposed engine.lock and is not known to have exited",
+                    "wait and GET this command; do not retry or launch another driver while quarantined",
+                    retryable=False))
+            else:
+                self._terminal(path, record, "timed_out", error=_error(
+                    "postcondition_timeout",
+                    f"command intent was recorded but {record.get('postcondition')} was not observed in time",
+                    "GET may reconcile late completion; otherwise POST this command id's /retry endpoint",
+                    retryable=True))
+
     def _execute(self, rd: Path, path: Path, initial: dict, *, claimed: bool) -> None:
         record = self._load(path) or dict(initial)
         command_id = str(record.get("id") or "")
@@ -3842,24 +3963,8 @@ class RunCommandService:
                         f"start a driver for {event_type}", retryable=True))
                 return
             if spec.engine_policy is EnginePolicy.RESTART_AFTER_EXIT and liveness is False:
-                try:
-                    launched = self._claim_restart_spawn(rd)
-                except Exception as exc:  # noqa: BLE001 - durable intent remains startup-recoverable
-                    uncertain = isinstance(exc, EngineSpawnOutcomeUnknown)
-                    self._terminal(path, record, "failed", error=_error(
-                        "resume_start_uncertain" if uncertain else "spawn_failed",
-                        ("replacement run engine creation crossed an uncertain process boundary"
-                         if uncertain else f"could not start the replacement run engine: {exc}"),
-                        ("observe the durable resume launch claim; startup recovery may finish the "
-                         "same intent, so do not submit another restart"
-                         if uncertain else
-                         "fix the cause; startup recovery or this command's retry can serve the same intent"),
-                        retryable=not uncertain))
+                if not self._try_restart_claim(rd, path, record):
                     return
-                if launched:
-                    record["replacement_launch_claimed"] = True
-                    record["updated_at"] = time.time()
-                    self._save(path, record)
             elif spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is False:
                 spawned_now = False
                 if self._recent_spawn_claim(rd):
@@ -3868,25 +3973,9 @@ class RunCommandService:
                         float(record["deadline_at"]), time.time() + self.startup_timeout * 2 + 1)
                     self._save(path, record)
                 else:
-                    # Write the lease *before* Popen. If the server dies after process creation but
-                    # before it can persist the PID, another server still waits for engine.lock
-                    # instead of launching a second engine into the same run.
-                    self._record_spawn_claim(rd, command_id, None)
-                    try:
-                        pid = self._spawn(rd)
-                    except Exception as exc:  # noqa: BLE001 - Popen/task failures become records
-                        uncertain = isinstance(exc, EngineSpawnOutcomeUnknown)
-                        if not uncertain:
-                            self._clear_spawn_claim(rd, command_id)
-                        self._terminal(path, record, "failed", error=_error(
-                            "engine_start_uncertain" if uncertain else "spawn_failed",
-                            ("run engine creation crossed an uncertain process boundary"
-                             if uncertain else f"could not start the run engine: {exc}"),
-                            ("observe the retained spawn claim; retry only after liveness or "
-                             "definitive PID death clears the duplicate-start hazard"
-                             if uncertain else
-                             "fix the cause, then POST this command id's /retry endpoint (same intent)"),
-                            retryable=not uncertain))
+                    terminalized, pid = self._spawn_under_claim(
+                        rd, path, record, command_id, restarting=False)
+                    if terminalized:
                         return
                     spawned_now = True
                     record["spawned_by_command"] = True
@@ -3894,7 +3983,6 @@ class RunCommandService:
                     if pid is not None:
                         record["engine_pid"] = pid
                     record["updated_at"] = time.time()
-                    self._record_spawn_claim(rd, command_id, pid)
                     self._save(path, record)
 
                 if spawned_now:
@@ -4031,26 +4119,8 @@ class RunCommandService:
                                     "start the replacement run driver", retryable=True))
                             return
                         if retry_liveness is False:
-                            try:
-                                launched = self._claim_restart_spawn(rd)
-                            except Exception as exc:  # noqa: BLE001
-                                uncertain = isinstance(exc, EngineSpawnOutcomeUnknown)
-                                self._terminal(path, record, "failed", error=_error(
-                                    "resume_start_uncertain" if uncertain else "spawn_failed",
-                                    ("replacement run engine creation crossed an uncertain process "
-                                     "boundary" if uncertain else
-                                     f"could not start the replacement run engine: {exc}"),
-                                    ("observe the durable resume launch claim; startup recovery may "
-                                     "finish the same intent, so do not submit another restart"
-                                     if uncertain else
-                                     "fix the cause; startup recovery or this command's retry can "
-                                     "serve the same intent"),
-                                    retryable=not uncertain))
+                            if not self._try_restart_claim(rd, path, record):
                                 return
-                            if launched:
-                                record["replacement_launch_claimed"] = True
-                                record["updated_at"] = time.time()
-                                self._save(path, record)
                 elif spec.engine_policy is not EnginePolicy.NO_SPAWN and not alive:
                     with self.sequence(rd):
                         retry_observation = self._observe(rd)
@@ -4065,27 +4135,13 @@ class RunCommandService:
                                     f"restart a driver for {event_type}", retryable=True))
                             return
                         if retry_liveness is False and not self._recent_spawn_claim(rd):
-                            self._record_spawn_claim(rd, command_id, None)
-                            try:
-                                pid = self._spawn(rd)
-                            except Exception as exc:  # noqa: BLE001
-                                uncertain = isinstance(exc, EngineSpawnOutcomeUnknown)
-                                if not uncertain:
-                                    self._clear_spawn_claim(rd, command_id)
-                                self._terminal(path, record, "failed", error=_error(
-                                    "engine_start_uncertain" if uncertain else "spawn_failed",
-                                    ("run engine restart crossed an uncertain process boundary"
-                                     if uncertain else f"could not restart the run engine: {exc}"),
-                                    ("observe the retained spawn claim; retry only after liveness or "
-                                     "definitive PID death clears the duplicate-start hazard"
-                                     if uncertain else
-                                     "fix the cause, then POST this command id's /retry endpoint"),
-                                    retryable=not uncertain))
+                            terminalized, pid = self._spawn_under_claim(
+                                rd, path, record, command_id, restarting=True)
+                            if terminalized:
                                 return
                             record["spawned_by_command"] = True
                             record["engine_pid"] = pid
                             record["updated_at"] = time.time()
-                            self._record_spawn_claim(rd, command_id, pid)
                             self._save(path, record)
                             startup_deadline = min(
                                 float(record.get("absolute_deadline_at") or time.time()),
@@ -4101,50 +4157,7 @@ class RunCommandService:
                                 time.sleep(self.poll_interval)
 
                 time.sleep(self.poll_interval)
-            # Serialize the final observation and terminal write with GET/retry.
-            # Without this last check, a completion arriving at the deadline
-            # could be promoted to succeeded by GET and then overwritten by
-            # this worker's stale timed_out write.
-            with self.sequence(rd):
-                current = self._load(path)
-                if current is not None:
-                    record = current
-                if record.get("status") in TERMINAL_STATUSES:
-                    return
-                final_observation = self._observe(rd)
-                if self._postcondition(rd, record, final_observation):
-                    self._succeeded(rd, path, record)
-                    return
-                domain_error = (self._domain_failure(rd, record, final_observation)
-                                if spec.engine_policy is not EnginePolicy.NO_SPAWN else None)
-                if domain_error is not None:
-                    self._clear_spawn_claim(rd, command_id)
-                    self._terminal(path, record, "failed", error=domain_error)
-                    return
-
-                uncertain_start = False
-                if (record.get("spawned_by_command")
-                        and not record.get("spawn_claim_released")):
-                    if self._engine_state(rd) is True:
-                        self._clear_spawn_claim(rd, command_id)
-                        record["spawn_claim_released"] = True
-                    else:
-                        uncertain_start = self._quarantine_spawn_claim(
-                            rd, command_id, record.get("engine_pid"))
-                else:
-                    self._clear_spawn_claim(rd, command_id)
-                if uncertain_start:
-                    self._terminal(path, record, "timed_out", error=_error(
-                        "engine_start_uncertain",
-                        "the detached engine has not exposed engine.lock and is not known to have exited",
-                        "wait and GET this command; do not retry or launch another driver while quarantined",
-                        retryable=False))
-                else:
-                    self._terminal(path, record, "timed_out", error=_error(
-                        "postcondition_timeout",
-                        f"command intent was recorded but {record.get('postcondition')} was not observed in time",
-                        "GET may reconcile late completion; otherwise POST this command id's /retry endpoint",
-                        retryable=True))
+            self._terminalize_expired(rd, path, record, command_id, spec)
         except Exception as exc:  # noqa: BLE001 - worker failures must become observable records
             try:
                 self._terminal(path, record, "failed", error=_error(

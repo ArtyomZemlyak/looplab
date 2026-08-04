@@ -141,59 +141,11 @@ def _spawn_engine(*args, **kwargs):
     return _engine_proc._spawn_engine(*args, **kwargs)
 
 
-def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
-                          settings: dict, ui_settings: dict) -> bool:
-    """True when a launch should default `backend="llm"`: the task normalizes to a GENERATIVE kind
-    (the agent writes/edits code) and nobody chose a backend. CLI parity (mega-review P10):
-    `looplab run --goal` already defaults backend=llm for these kinds (cli.py's `backend_chosen`
-    rule), but Settings.backend defaults to "toy" — a repo/dataset run launched over HTTP without
-    this got NoOpRepoDeveloper and every node silently re-evaluated the unchanged baseline (no
-    error, just a flat run). Shared by /api/start (authoritative — the one funnel every launch goes
-    through) and the genesis card (display-only, so the operator can see/override it pre-launch).
-    "Chosen" = a `backend` key already in the merged launch/card `settings`, or one the deployment
-    set — a UI-saved value, LOOPLAB_BACKEND env, or a `.env` line all land in
-    `Settings(**ui).model_fields_set`, the same test cli.py's `backend_chosen` uses (and
-    `_spawn_engine` overlays our env ON TOP of os.environ, so injecting would clobber it). Only that
-    surface-specific "chosen" detection lives here; the kind→backend rule itself is
-    `engine/genesis.py::default_backend`, shared with cli.py's genesis defaulting."""
-    if "backend" in settings:
-        return False
-    file_settings: dict = {}
-    if not (isinstance(task_spec, dict) and task_spec):
-        if not task_file:
-            return False
-        # A catalogue/snapshot launch: the task lives only in the file — read it with the SAME
-        # loader the spawned engine uses (cli.py `run` → appconfig.load_document): it handles a
-        # YAML catalogue entry, a unified config's `task:` block, and a BOM'd JSON, all of which a
-        # raw json.loads mis-reads — so this default can never disagree with the task the engine
-        # actually parses out of the very same file (read parity).
-        try:
-            from looplab.core.appconfig import load_document
-            task_spec, file_settings, _out = load_document(Path(task_file))
-        except (OSError, ValueError):
-            return False                # unreadable/foreign task file → no default; fails downstream
-        if not (isinstance(task_spec, dict) and task_spec):
-            return False
-    from looplab.adapters.tasks import normalize_task
-    from looplab.engine.genesis import default_backend
-    # Best-effort, NARROW: only the task normalization may soft-fail here — an unnormalizable spec
-    # is validate_task's 400 (or the engine's own startup error), never this default's concern.
-    try:
-        kind = normalize_task(dict(task_spec)).get("kind")
-    except (KeyError, TypeError, ValueError):
-        return False
-    # `chosen=False` probe first: a non-generative kind can never default, so skip the Settings
-    # construction (env + saved-UI validation) entirely for it.
-    if default_backend(kind, chosen=False) != "llm":
-        return False
-    try:
-        # A unified task file's settings outrank UI/env defaults in the CLI. Treat its backend as an
-        # explicit choice too, so the display-only Genesis hint cannot promise llm while the child
-        # would actually consume backend=toy from that file.
-        selected = {**(ui_settings or {}), **(file_settings or {})}
-        return "backend" not in getattr(Settings(**selected), "model_fields_set", set())
-    except ValueError:  # pydantic ValidationError ⊂ ValueError — bad saved/env settings fail later,
-        return False    # in the spawned engine's own Settings(); don't inject on top of them
+# `_defaults_backend_llm` used to live here and is now `serve/launch.py::_defaults_backend_llm`
+# (doc 25 SR-12). It is launch policy with no HTTP dependency, and keeping it in a ROUTER meant
+# `routers/genesis.py` imported a sibling router's private — route modules stopped being independent
+# leaves. No re-export: this router does not call it, so a shim here would only re-create the
+# coupling in the other direction. /api/start applies the rule through `launch.py::_resolve_settings`.
 
 
 def build_router(srv) -> APIRouter:

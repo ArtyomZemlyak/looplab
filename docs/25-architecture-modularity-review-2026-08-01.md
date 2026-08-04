@@ -2256,6 +2256,42 @@ six full `validate_run_child`-shaped validators, which carry per-caller HTTP err
 
 *Recommendation:* Extract _PathLocks (and ideally the shared _Index lifecycle: identity/metadata fences, resume-from-valid_end scanning, LRU registry) into one serve/_log_index.py used by both; the payload-specific _apply_delta/_row_from stay per-module.
 
+*Resolution (2026-08-04):* `serve/_log_index.py` exists and owns the copy-pasted halves —
+`PathLocks` (moved verbatim, docstring included; both copies deleted) and `validated_index_bound`,
+the LRU-bound guard both constructors spelled identically down to the message. Neither index carries
+its own definition any more, which `tests/test_serve_module_seams.py` asserts by scanning the
+package for a second `PathLocks` class.
+
+**The shared `_Index` lifecycle was NOT extracted, and the "~60% overlapping scaffolding" estimate
+does not survive a read.** Measured field by field, the two `_Index` dataclasses share five cursor
+fields (`identity`, `metadata`, `revision`, `observed_size`, `valid_end`) and diverge on everything
+else, including the fences the finding calls common:
+
+* the rewrite fence is a bounded content PROBE in `command_observation` (`probe_signature`, hashed
+  sentinel windows) and a prefix ANCHOR in `log_pages` (`anchor`, a two-part boundary fingerprint) —
+  different data, computed at different points, compared under different conditions;
+* `_metadata` deliberately differs and each carries its own why-comment: `(mtime_ns, 1)` because
+  Windows reports a transient ctime skew between `fstat` and `Path.stat` for the same open file, vs
+  `(mtime_ns, ctime_ns)` where that skew is not in play;
+* `log_pages._Index` additionally keys on a durable `generation` the other has no analogue for;
+* the two `_scan` bodies share only the readline skeleton. Beyond it they enforce different row
+  grammars (`event_sequence_continues` over decoded events vs strictly increasing `seq` over byte
+  rows), different limits (`log_pages` bounds a single row at `MAX_SOURCE_ROW_BYTES` and reports
+  `source_tail_limited`), and different accumulators.
+
+A parameterized scanner over that would take a per-row callback, a per-module state object and a
+per-module limit table — an abstraction with two implementations and no third caller, which is
+harder to read than either original. The LRU registry dict is likewise left alone: in
+`command_observation` its `_lock` also guards the short per-index memo sections
+(`materialized_revision`, `folded_revision`), so folding the dict into a registry object would
+either narrow that lock or drag the memos along with it.
+
+Pinned by `tests/test_serve_module_seams.py`: the single-definition scan, both indexes using the
+shared registry and bound, the identical rejection table (including `bool`, which is an `int`
+subclass and would otherwise build a one-entry cache), one-lock-per-path exclusion, an unrelated path
+NOT stalling behind a held one, and the liveness rule that a referenced lock is never evicted.
+Teeth-tested with SR-12 against 12 breaks, all biting.
+
 #### SC-05 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **ctypes no-replace durable rename duplicated between reset and deletion**
@@ -2314,6 +2350,53 @@ dropped; the declared private-seam surface is one name smaller.
 *Evidence:* RunCommandService._execute handles: terminal short-circuit, reset fencing, intent verification, decision/append (with three per-event CAS variants), initial spawn, a startup poll loop, the main monitor loop with deadline sliding, mid-loop re-spawn, and final terminalization — in one function. The record-spawn-claim → Popen → record pid → poll-until-lock-or-postcondition sequence appears twice nearly verbatim (3826-3887 and 4017-4044), and the RESTART_AFTER_EXIT claim block also appears twice (3813-3825 and 3976-4003). A fix to one spawn path (e.g. the heartbeat added only in the second copy at 4037) does not automatically reach the other.
 
 *Recommendation:* Extract _spawn_and_await_startup(rd, record, path) and _try_restart_claim(rd, record, path) helpers used by both occurrences, and split the monitor loop body from the admission phase.
+
+*Resolution (2026-08-04) — the duplication is gone; `_execute` is 487 → 381 lines.*
+
+Three phases now live outside `_execute` (`serve/run_commands.py`):
+
+* **`_try_restart_claim(rd, path, record) -> bool`** — the RESTART_AFTER_EXIT replacement claim. The
+  two copies were byte-identical after de-wrapping, so this one is a pure move. `False` means it
+  terminalized and the caller returns.
+* **`_spawn_under_claim(rd, path, record, command_id, *, restarting) -> (terminalized, pid)`** — the
+  lease → Popen → persist-the-PID sequence, including both failure taxonomies. Returns the pid so the
+  caller can do its own record bookkeeping.
+* **`_terminalize_expired(rd, path, record, command_id, spec)`** — the post-loop deadline exit, the
+  method's sixth lock scope and four more early returns.
+
+The copies had really drifted, and unifying them settled three points:
+
+1. The certain-failure remediation read `"…/retry endpoint (same intent)"` at admission and
+   `"…/retry endpoint"` in the monitor. Adopted the admission wording: the retry serves the same
+   durable intent on both paths, so dropping the clause was an accident, not a distinction.
+2. `self._record_spawn_claim(rd, command_id, pid)` — the post-Popen half of the lease — was written
+   identically at both call sites and moved INTO the helper. The durable order is unchanged (claim
+   before record); only the in-memory field assignment now follows it.
+3. The `record["engine_pid"]` divergence (admission guards `if pid is not None`, the monitor did not)
+   stays at the call sites deliberately, so a reader sees it. It is benign — `_quarantine_spawn_claim`
+   reads the pid off the CLAIM row, which `_record_spawn_claim` writes on both paths — and quietly
+   picking one semantics would have been a behaviour change the finding did not ask for.
+
+The heartbeat asymmetry the finding names (`_heartbeat_execution` present in the monitor's startup
+poll, absent from the admission one) was checked and is NOT a live defect: reclaim requires POSITIVE
+evidence that the owning process exited (`_claim_execution`'s `_execution_owner_definitely_gone`), and
+`_active_command_ids` says so explicitly — "age protects only ambiguous/live owners from heartbeat
+pauses". Nothing reads the claim file's mtime for a decision today. The two startup poll loops
+therefore stay separate: unlike the spawn sequence they are genuinely different (the admission one
+also checks `_domain_failure`, distinguishes ENSURE_RUNNING, and has a slow-start `else` branch that
+extends to the absolute deadline), and merging them would need three flags to reproduce both.
+
+Pinned by `tests/test_command_worker_spawn_phases.py` (16): the lease-before-Popen ordering as an
+observed call order, the certain-vs-uncertain claim rules in both directions (a certain failure
+releases the lease, an uncertain one keeps it and is non-retryable), the `restarting` wording, the
+restart-claim won/lost/uncertain outcomes, and structural guards that `_execute` calls neither
+`_spawn` nor `_claim_restart_spawn` directly and still routes BOTH sites of each through the helper.
+Teeth-tested against 12 breaks, all biting.
+
+**Still open:** `_execute` is 381 lines. The remaining bulk is the admission ladder and the monitor
+loop itself, which share `record`, `spec`, `command_id`, `last_progress_seq`, `sequence_ctx` and a
+dozen early returns; splitting them means a status enum threaded through both, which is a different
+change from removing duplication and belongs with SR-02's decomposition of this module.
 
 #### SC-08 · MEDIUM · other · effort: small — **RESOLVED (2026-08-02)**
 
@@ -2854,6 +2937,47 @@ disconnects the injection tests from the loops they guard is worse than the dupl
 *Evidence:* genesis.py imports `_defaults_backend_llm` from routers/control.py and `_prior_learnings_index` from routers/reports.py — private helpers of sibling routers, so router modules are no longer independent leaves. The other direction is handled by mutating srv inside build_router: misc.py sets `srv.list_tasks_fn = list_tasks`, runs.py sets `srv.list_runs_membership_fn` and `srv.list_runs_fn`, which reports.py's `_scope_run_ids` then reads (`srv.list_runs_membership_fn or srv.list_runs_fn`). These attributes exist only after the right build_router calls run, forming an implicit protocol on AppState that no type or registry guards. Both `_defaults_backend_llm` (a launch-policy predicate) and `_prior_learnings_index` (a prompt projection) are domain logic with no HTTP dependency living inside routers only for historical reasons.
 
 *Recommendation:* Move `_defaults_backend_llm` to serve/launch.py, `_prior_learnings_index` to serve/scope_report.py, and make the run-summary/membership/tasks projections real AppState methods instead of build_router side effects.
+
+*Resolution (2026-08-04) — one of the two router-to-router edges is closed; the other two items are
+measured and deferred with reasons.*
+
+**Done:** `_defaults_backend_llm` now lives in `serve/launch.py`, as recommended. No re-export in
+`routers/control.py` — that router does not call it, so a shim there would only re-create the
+coupling in the other direction. `tests/test_serve_module_seams.py` asserts that NO router imports a
+sibling router, with the one remaining edge named explicitly in the assertion so removing it is a
+one-line change to the expected list rather than a new test.
+
+The move surfaced a stale comment worth recording: the docstring claimed the predicate was "shared by
+/api/start (authoritative — the one funnel every launch goes through) and the genesis card", and
+`routers/genesis.py` claimed that "delegating to the SAME shared predicate means the card can never
+disagree with what /api/start actually spawns". Neither is true as written — /api/start stopped
+calling it and applies the rule itself in `launch.py::_resolve_settings` over its own already-layered
+settings. The two spellings still AGREE (both defer to `engine/genesis.py::default_backend` and to
+the same `model_fields_set` "chosen" test), so the guarantee holds; the comments now say why rather
+than asserting a call graph that no longer exists, and both spellings sit in one file where a reader
+can check them against each other. `cli/run_cmds.py`'s pointer at the old location is updated, and a
+guard test fails on any surviving `routers.control._defaults_backend_llm` reference.
+
+**`_prior_learnings_index` — deferred, and it is not a one-function move.** It depends on eleven
+private helpers and three constants of the scope-report STORE (`_validated_reports_dir`,
+`_confined_report_path`, `_read_json_record`, `_scope_report_path`, `_legacy_scope_report_path`,
+`_record_matches_scope`, `_record_payload_matches_scope`, `_scope_store_lock`,
+`_action_bound_scope_record_is_confirmed`, `_SCOPE_TYPES`, `_PRIOR_REPORT_MAX_FILES`,
+`_PRIOR_REPORT_PARSE_MAX_BYTES`). That store is ~1 400 lines of `routers/reports.py` (lines 147-1549,
+ahead of `build_router`) and its correct home is a new `serve/scope_report_store.py`, not
+`serve/scope_report.py` — which documents itself as free of run-root/store details so it stays
+unit-testable with plain dicts. The blocker is a live hazard, not size: ~16 tests monkeypatch
+`routers.reports` module globals that the store functions read (`strict_atomic_write_text`,
+`capture_scope_source`, `_read_scope_action_lease_marker`, `_PRIOR_REPORT_PARSE_MAX_BYTES`). Moving
+the functions turns every one of those patches into a silent no-op — the tests keep passing while
+testing nothing, the same failure mode CT-09 documents for `verify.py`. The extraction is worth doing
+with SR-02, and each patch target has to be re-pointed and re-verified individually.
+
+**The `srv.list_*_fn` late-binding — deferred.** `list_runs`, `list_runs_membership` and `list_tasks`
+are not standalone functions: they close over `srv` AND over `build_router`-local state
+(`_run_summaries` and its `_summary_cache`). Promoting them to AppState methods means moving the
+run-summary projection and its cache too, which is the same order of work as the store extraction
+above and belongs with it.
 
 #### SR-13 · LOW · dead-code · effort: small — **RESOLVED (2026-08-02)**
 

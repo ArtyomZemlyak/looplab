@@ -494,3 +494,71 @@ def preflight_response(plan: LaunchPreflight) -> dict:
         "preview": plan.preview(),
         "warnings": list(plan.warnings),
     }
+
+# Moved here from `routers/control.py` (doc 25 SR-12): launch policy with no HTTP dependency, which
+# `routers/genesis.py` was importing out of a SIBLING ROUTER's privates — route modules stopped being
+# independent leaves. Its home is now the module that owns the launch boundary, next to the funnel it
+# has to agree with.
+
+
+def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
+                          settings: dict, ui_settings: dict) -> bool:
+    """True when a launch should default `backend="llm"`: the task normalizes to a GENERATIVE kind
+    (the agent writes/edits code) and nobody chose a backend. CLI parity (mega-review P10):
+    `looplab run --goal` already defaults backend=llm for these kinds (cli.py's `backend_chosen`
+    rule), but Settings.backend defaults to "toy" — a repo/dataset run launched over HTTP without
+    this got NoOpRepoDeveloper and every node silently re-evaluated the unchanged baseline (no
+    error, just a flat run).
+
+    Caller: the GENESIS CARD only, and display-only — so the operator can see and override the
+    inferred backend before confirming. /api/start does NOT call this; it applies the same rule over
+    its own already-layered settings in `_resolve_settings` above (`"backend" not in merged` plus the
+    env check on `base.model_fields_set`). Two spellings of one rule, in one file so they can be read
+    against each other: this one starts from a card's loose `(task_spec | task_file, settings,
+    ui_settings)` and has to load the task file itself, which `_resolve_settings` has already done by
+    the time it runs. Both defer to the same authorities, which is what keeps the card honest — the
+    kind→backend rule is `engine/genesis.py::default_backend` (shared with cli.py's genesis
+    defaulting), and "chosen" is the same `model_fields_set` test cli.py's `backend_chosen` uses.
+
+    "Chosen" = a `backend` key already in the merged launch/card `settings`, or one the deployment
+    set — a UI-saved value, LOOPLAB_BACKEND env, or a `.env` line all land in
+    `Settings(**ui).model_fields_set` (and `_spawn_engine` overlays our env ON TOP of os.environ, so
+    injecting would clobber it)."""
+    if "backend" in settings:
+        return False
+    file_settings: dict = {}
+    if not (isinstance(task_spec, dict) and task_spec):
+        if not task_file:
+            return False
+        # A catalogue/snapshot launch: the task lives only in the file — read it with the SAME
+        # loader the spawned engine uses (cli.py `run` → appconfig.load_document): it handles a
+        # YAML catalogue entry, a unified config's `task:` block, and a BOM'd JSON, all of which a
+        # raw json.loads mis-reads — so this default can never disagree with the task the engine
+        # actually parses out of the very same file (read parity).
+        try:
+            from looplab.core.appconfig import load_document
+            task_spec, file_settings, _out = load_document(Path(task_file))
+        except (OSError, ValueError):
+            return False                # unreadable/foreign task file → no default; fails downstream
+        if not (isinstance(task_spec, dict) and task_spec):
+            return False
+    from looplab.adapters.tasks import normalize_task
+    from looplab.engine.genesis import default_backend
+    # Best-effort, NARROW: only the task normalization may soft-fail here — an unnormalizable spec
+    # is validate_task's 400 (or the engine's own startup error), never this default's concern.
+    try:
+        kind = normalize_task(dict(task_spec)).get("kind")
+    except (KeyError, TypeError, ValueError):
+        return False
+    # `chosen=False` probe first: a non-generative kind can never default, so skip the Settings
+    # construction (env + saved-UI validation) entirely for it.
+    if default_backend(kind, chosen=False) != "llm":
+        return False
+    try:
+        # A unified task file's settings outrank UI/env defaults in the CLI. Treat its backend as an
+        # explicit choice too, so the display-only Genesis hint cannot promise llm while the child
+        # would actually consume backend=toy from that file.
+        selected = {**(ui_settings or {}), **(file_settings or {})}
+        return "backend" not in getattr(Settings(**selected), "model_fields_set", set())
+    except ValueError:  # pydantic ValidationError ⊂ ValueError — bad saved/env settings fail later,
+        return False    # in the spawned engine's own Settings(); don't inject on top of them

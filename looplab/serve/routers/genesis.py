@@ -22,7 +22,7 @@ from looplab.serve.protocol import JOB_DONE, JOB_RUNNING, JOB_UNKNOWN
 from looplab.serve.schemas import _GenesisSpec
 from looplab.serve.serve_prompts import RESEARCH_BRIEF_SYSTEM, genesis_system
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
-from looplab.serve.routers.control import _defaults_backend_llm
+from looplab.serve.launch import _defaults_backend_llm
 from looplab.serve.routers.reports import _prior_learnings_index
 from looplab.core.redact import is_secret_key_name, redact_persisted_text
 
@@ -156,12 +156,14 @@ def build_router(srv) -> APIRouter:
         settings = {k: v for k, v in merged_settings.items()
                     if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS and v is not None}
         # CLI parity (mega-review P10): show the backend this run WILL launch with. The AUTHORITATIVE
-        # default now lives in /api/start (`routers/control.py::_defaults_backend_llm` — the one
-        # funnel every launch goes through), so this card-level injection is DISPLAY-ONLY sugar: the
+        # default is applied by /api/start (`serve/launch.py::_resolve_settings` — the one funnel
+        # every launch goes through), so this card-level injection is DISPLAY-ONLY sugar: the
         # operator sees the inferred `backend=llm` on the editable spec card and can override it
-        # BEFORE confirming, instead of the default appearing silently at launch. Delegating to the
-        # SAME shared predicate means the card can never disagree with what /api/start actually
-        # spawns, and task_file (catalogue) cards are covered too. Broad best-effort guard: the card
+        # BEFORE confirming, instead of the default appearing silently at launch. The predicate lives
+        # in the SAME module as that funnel (`launch.py::_defaults_backend_llm`, doc 25 SR-12) and
+        # both defer to `engine/genesis.py::default_backend` plus the same `model_fields_set`
+        # "chosen" test, so the card cannot disagree with what /api/start spawns, and task_file
+        # (catalogue) cards are covered too. Broad best-effort guard: the card
         # must RENDER even when this hint fails (the predicate's excepts are narrowed to the task
         # read/normalize — anything else, e.g. a broken settings store, would otherwise 500 the whole
         # plan); a missing hint just means the default appears at launch, where /api/start keeps the

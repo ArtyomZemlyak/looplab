@@ -18,7 +18,6 @@ import hashlib
 import os
 import secrets
 import threading
-from contextlib import contextmanager
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from itertools import chain
@@ -34,6 +33,7 @@ from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import decode_event_record, event_sequence_continues
 from looplab.events.replay import fold
 from looplab.events.types import EV_CARD_DROPPED, EV_COMMAND_ACK, EV_RUN_ABORT, EV_RUN_FINISHED
+from looplab.serve._log_index import PathLocks, validated_index_bound
 from looplab.serve.protocol import CONTROL_EVENTS
 
 
@@ -324,61 +324,17 @@ class CommandObservation:
         return self._owner._incomplete_finalize_scope(self)
 
 
-class _PathLocks:
-    """Per-path mutual exclusion for the incremental byte indexes.
-
-    Both indexes used ONE process-global lock held across a whole request, so the first full scan of
-    a multi-MB log — or a cold network read — stalled every OTHER run's poll behind it. The work is
-    already per-path (each `_Index` is scanned and read independently), so the exclusion should be
-    too; only the registry map itself needs a shared lock, and that is held for dictionary
-    operations alone.
-
-    A lock is evicted only while UNREFERENCED. Handing a second lock object out for a path whose
-    first is still held would let two threads scan and mutate the same `_Index` concurrently, which
-    is exactly the corruption the lock exists to prevent — so the LRU bound yields to liveness.
-    """
-
-    __slots__ = ("_locks", "_registry", "_maximum")
-
-    def __init__(self, maximum: int):
-        self._locks: "OrderedDict[str, list]" = OrderedDict()   # key -> [RLock, waiters]
-        self._registry = threading.RLock()
-        self._maximum = max(1, int(maximum))
-
-    @contextmanager
-    def hold(self, key: str):
-        with self._registry:
-            entry = self._locks.get(key)
-            if entry is None:
-                entry = self._locks[key] = [threading.RLock(), 0]
-            entry[1] += 1
-            self._locks.move_to_end(key)
-        try:
-            with entry[0]:
-                yield
-        finally:
-            with self._registry:
-                entry[1] -= 1
-                excess = len(self._locks) - self._maximum
-                if excess > 0:
-                    for stale in [k for k, e in self._locks.items() if e[1] == 0][:excess]:
-                        self._locks.pop(stale, None)
-
-
 class CommandObservationIndex:
     """Thread-safe incremental LRU over event logs used by command workers."""
 
     def __init__(self, *, max_indexed_runs: int = MAX_INDEXED_RUNS):
-        if (not isinstance(max_indexed_runs, int) or isinstance(max_indexed_runs, bool)
-                or max_indexed_runs < 1):
-            raise ValueError("max_indexed_runs must be a positive integer")
-        self.max_indexed_runs = max_indexed_runs
+        self.max_indexed_runs = validated_index_bound(max_indexed_runs)
         self._indexes: OrderedDict[str, _Index] = OrderedDict()
         # `_lock` guards the registry dict and the short per-index memo sections; the incremental
         # `_scan` of a big append burst runs under `_paths.hold(key)` so it stalls one run's command
         # monitor, not every other run's.
         self._lock = threading.RLock()
-        self._paths = _PathLocks(max_indexed_runs * 4)
+        self._paths = PathLocks(max_indexed_runs * 4)
         self.metrics = ObservationMetrics()
 
     @property

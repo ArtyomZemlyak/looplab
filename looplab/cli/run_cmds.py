@@ -574,8 +574,9 @@ def run(
         # A generative kind (the agent writes/edits code) implies an LLM-driven run; default the
         # backend to llm when the user didn't pick one. Offline-optimizable kinds keep their default.
         # The kind→backend rule lives in `engine/genesis.py::default_backend` (shared with the web
-        # UI's /api/start funnel, `serve/routers/control.py::_defaults_backend_llm`) — only the
-        # CLI-surface `backend_chosen` detection above stays here.
+        # UI's /api/start funnel, `serve/launch.py::_resolve_settings`, and the genesis card's
+        # display-only `launch.py::_defaults_backend_llm`) — only the CLI-surface `backend_chosen`
+        # detection above stays here.
         genesis_backend = _genesis.default_backend(result.kind, chosen=backend_chosen)
         if genesis_backend is not None:
             settings.backend = genesis_backend
