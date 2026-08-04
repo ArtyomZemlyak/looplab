@@ -751,8 +751,10 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             raise ValueError("invalid curation claim finish_seq")
         # The shared predicate also CLOSES a gap here (doc 25 EV-04): this copy tested `len` and
         # membership without an `isinstance`, so a 64-element list of hex characters satisfied both
-        # and was accepted as a digest.
-        if not valid_digest_ref(claim["input_digest"]):
+        # and was accepted as a digest. The binding stays — `_portfolio_curation_key` below rebuilds
+        # this claim's identity from it.
+        digest = claim["input_digest"]
+        if not valid_digest_ref(digest):
             raise ValueError("invalid curation claim input_digest")
         from looplab.core.redact import redact_persisted_text
         for field, maximum in (("input_schema", 200), ("model", 200), ("parser", 100)):
