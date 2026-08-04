@@ -843,6 +843,44 @@ worker-seam case.
 
 *Recommendation:* Add two tiny shared helpers in train_monitor.py (which asha_monitor already imports from): `last_diagnostic_row(events, event_type, node_id, generation)` for the resume scan, and optionally a `watchdog_tick_loop(cadence, cancel, tick_fn)` scaffold. Full merger of the two monitors is NOT recommended (one is LLM-judged health, the other metric-rank; the split is documented), but the mechanical scaffolding should be single-sourced.
 
+*Resolution (2026-08-04) — the resume scan is shared by THREE sites; the tick-loop scaffold is declined, and its one load-bearing line is guarded instead.*
+
+**`last_lifecycle_row(rows, event_type, node_id, generation)`** in `engine/train_monitor.py`. The
+finding names two copies; there was a third — `asha_monitor.latest_train_verdict`, which does the
+identical scan for `EV_TRAIN_MONITOR_ALERT` so the ASHA judge can see the health verdict. All three
+now call it and keep only their own interpretation of the row they get back (a status string, an
+endpoint/resource flag pair with a legacy fallback, a sanitized verdict dict).
+
+The copied idiom is worth single-sourcing because of what it defends against, not its length: rows
+are UNTRUSTED append-only data, and `isinstance(True, int)` is True in Python, so a payload carrying
+`node_id: true` matches a plain `== node_id` test against node 1 and hands a watchdog ANOTHER
+lifecycle's history as its own. The scan also deliberately returns the newest matching row even when
+its contents are unusable — walking further back would answer a resuming watchdog with a verdict it
+has already moved past.
+
+**The `watchdog_tick_loop(cadence, cancel, tick_fn)` scaffold is declined**, and the finding's own
+"optionally" is why it was worth re-deciding rather than mechanically applying. The shared skeleton
+is 7 lines wrapped around 60 and 160 lines of unrelated body, and three things fight the extraction:
+the training monitor's cadence MUTATES per tick (the observer self-paces via the LLM's
+`recheck_after_s` and a healthy run backs off) while ASHA's is fixed; both bodies `return` from the
+enclosing coroutine to stop watching after claiming a kill, which a `tick_fn` would have to signal
+back out of band; and both use `continue` throughout, which changes meaning inside a callback. The
+result would be two rewritten loop bodies to share seven lines — more risk than the duplication.
+
+What the scaffold WOULD have enforced is guarded directly instead:
+`test_every_watchdog_tick_loop_reraises_cancellation_before_swallowing` walks both loops' handlers
+and asserts each re-raises `anyio.get_cancelled_exc_class()` BEFORE its blanket
+`except Exception: continue`. That blanket clause exists so a transient disk/LLM/tracer hiccup skips
+one tick rather than disabling the watcher for the rest of a long eval — but anyio delivers
+cancellation as an exception, so without the earlier clause it swallows the cancel and the watchdog
+keeps looping against a finished node, holding its task group open. That is the real failure mode
+the shared scaffold was protecting against, and a guard catches it without rewriting either body.
+
+Pinned by five new tests in `tests/test_train_monitor.py` (34 → 39): the bool-`node_id` /
+bool-`generation` traps, newest-match-even-when-unusable, wrong type/node/generation and empty logs,
+a structural guard that all three sites use the helper and none contains `reversed(` any more, and
+the cancellation guard above. Teeth-tested against 6 breaks, all biting.
+
 #### EC-05 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **Novelty reject/repropose/audit block duplicated between LLM and semantic gates**

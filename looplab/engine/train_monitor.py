@@ -173,6 +173,40 @@ def claim_watchdog_kill(kill_signal: dict, cancel, *, reason: str, terminal_reas
     return True
 
 
+def last_lifecycle_row(rows, event_type: str, node_id: int, generation: int) -> Optional[dict]:
+    """The NEWEST row of `event_type` belonging to exactly this `(node_id, generation)`, as its data
+    dict — or None when the watchdog never spoke for this lifecycle.
+
+    Both watchdogs need this on re-entry: `resume` can restart an observer inside the same node
+    generation, and without recovering the last durable row the first healthy verdict looks like a
+    first observation, so a pre-crash warning is lost instead of being closed (doc 25 EC-04). Three
+    sites hand-rolled the scan — both resume recoveries and `asha_monitor.latest_train_verdict` — with
+    the bool-guarded field validation copied verbatim.
+
+    That guard is the point, and it is easy to get subtly wrong: rows are UNTRUSTED append-only data,
+    and `isinstance(True, int)` is True in Python, so a payload carrying `node_id: true` matches a
+    plain `== node_id` test against node 1 and hands a watchdog another lifecycle's history. The
+    generation half matters the same way.
+
+    Returns the newest MATCHING row even when its contents are unusable — callers decide what an
+    unreadable payload means, and every one of them treats it as "no history", never as a reason to
+    keep scanning backwards into an older row that would answer for a stale tick.
+
+    Pure; safe on an empty or None row list.
+    """
+    for event in reversed(list(rows or ())):
+        if getattr(event, "type", None) != event_type:
+            continue
+        data = getattr(event, "data", None) or {}
+        nid, gen = data.get("node_id"), data.get("generation")
+        if isinstance(nid, bool) or not isinstance(nid, int) or nid != node_id:
+            continue
+        if isinstance(gen, bool) or not isinstance(gen, int) or gen != generation:
+            continue
+        return data
+    return None
+
+
 def active_training_log(workdir) -> Optional[Path]:
     """The workdir's most-recently-written `*.log` — a proxy for the live log of whichever stage is running
     NOW (the sandbox writes one `<stage>.log` per stage; during training the train stage's file is the
@@ -439,18 +473,11 @@ class TrainingMonitorMixin:
         try:
             prior_rows = await anyio.to_thread.run_sync(
                 self.store.read_all, limiter=_watch_limiter())
-            for event in reversed(prior_rows):
-                data = getattr(event, "data", None) or {}
-                if (getattr(event, "type", None) == EV_TRAIN_MONITOR_ALERT
-                        and isinstance(data.get("node_id"), int)
-                        and not isinstance(data.get("node_id"), bool)
-                        and data.get("node_id") == node_id
-                        and isinstance(data.get("generation"), int)
-                        and not isinstance(data.get("generation"), bool)
-                        and data.get("generation") == generation):
-                    status = str(data.get("status") or "").strip().lower()
-                    last_event_status = status if status in ("healthy", "watch", "broken") else None
-                    break
+            prior = last_lifecycle_row(
+                prior_rows, EV_TRAIN_MONITOR_ALERT, node_id, generation)
+            if prior is not None:
+                status = str(prior.get("status") or "").strip().lower()
+                last_event_status = status if status in ("healthy", "watch", "broken") else None
         except Exception:  # noqa: BLE001 - advisory history lookup; the live monitor still proceeds
             pass
         llm_calls = 0
