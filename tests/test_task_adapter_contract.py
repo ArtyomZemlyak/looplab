@@ -90,3 +90,44 @@ def test_shipped_adapters_only_implement_registered_hooks():
                                      or name.replace("get_", "") == hook):
                     near_misses.setdefault(kind, []).append((name, hook))
     assert not near_misses, f"adapter member(s) one letter away from a registered hook: {near_misses}"
+
+
+# Files whose ONLY task loads are re-reads of a run's own `task.snapshot.json`: the CLI's three
+# re-entry paths (wrap-up recovery, `resume`, `finalize`) and boss's read-only DataTools. A file
+# that later grows a FRESH-submission load must exempt that call by name here rather than dropping
+# the rule — `run` deliberately keeps the strict path, and its task never comes through these.
+_SNAPSHOT_RELOAD_FILES = [_PKG / "cli" / "run_cmds.py", _PKG / "serve" / "routers" / "boss.py"]
+
+
+def test_every_snapshot_reload_is_grandfathered():
+    """A run that already has history must stay loadable by a validator added after it started.
+
+    `adapters/tasks.py::validate_task(..., existing_run=True)` sets the pydantic validation CONTEXT
+    that `repo_task.py::_grandfathered` reads, and dropping it at any reload site makes every
+    existing run carrying the now-refused spec permanently unresumable — it can neither finish nor
+    resume. That already happened once: a submit-time refusal shipped without the context and had to
+    be repaired in a follow-up.
+
+    A source guard rather than four behavioural tests, because the failure is invisible to a suite
+    that only ever builds tasks fresh: nothing the tests create predates the rule doing the
+    refusing, so the reload path looks fine right up until a real run dir hits it."""
+    import ast
+
+    seen, ungrandfathered = [], []
+    for path in _SNAPSHOT_RELOAD_FILES:
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id in {"load_task", "_load_task"}):
+                continue
+            where = f"{path.name}:{node.lineno}"
+            seen.append(where)
+            if not any(kw.arg == "existing_run" and getattr(kw.value, "value", None) is True
+                       for kw in node.keywords):
+                ungrandfathered.append(where)
+    # Guard the guard: if every reload is renamed or moved out from under this scan, the assertion
+    # below passes vacuously and the protection is gone with nothing red.
+    assert len(seen) >= 4, f"expected the four snapshot reloads, found {seen}"
+    assert not ungrandfathered, (
+        f"snapshot reload(s) at {ungrandfathered} load a run's own task WITHOUT existing_run=True — "
+        "a validation rule added since that run started will refuse it, and the run can then "
+        "neither resume nor finish.")
