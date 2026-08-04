@@ -13,7 +13,7 @@ from looplab.engine.claims import (
     record_research_claims,
 )
 from looplab.engine.lessons import LessonMemory
-from looplab.trust.verify import verify_memo
+from looplab.trust.memo_verify import verify_memo
 
 
 def _node(node_id: int, *, generation: int = 0, tombstoned: bool = False) -> Node:

@@ -16,7 +16,7 @@ import inspect
 
 import pytest
 
-from looplab.trust import judge, verifier, verify as memo_verify
+from looplab.trust import judge, memo_verify, verifier
 from looplab.trust.judge import JUDGE_MAX_TURNS, structured_judge
 
 
@@ -128,12 +128,69 @@ def test_the_two_evidence_text_helpers_no_longer_claim_to_mirror_each_other():
         "if these ever take the same first argument, revisit whether they should share code")
 
 
-@pytest.mark.parametrize("name", ["verify", "verifier"])
+@pytest.mark.parametrize("name", ["memo_verify", "verifier"])
 def test_both_modules_still_exist_under_their_documented_paths(name):
-    """The rename half of CT-09 is NOT done (see doc 25). Pinned so the deferral stays visible: a
-    later rename must keep both spellings resolving to ONE module object, because
-    `engine/research_cadence.py` documents monkeypatching `looplab.trust.verify.verify_memo`."""
     import importlib
 
     module = importlib.import_module(f"looplab.trust.{name}")
     assert module is not None
+
+
+@pytest.mark.parametrize("legacy", ["looplab.trust.verify", "looplab.verify"])
+def test_the_retired_verify_spellings_are_the_SAME_module_object(legacy):
+    """The rename half of CT-09, and the constraint it had to satisfy.
+
+    `verify.py` was two letters from `verifier.py` — a DIFFERENT verifier — so a grep for "verifier"
+    landed in both and a reader had to open them to find out which was which. It is now
+    `memo_verify.py`, and both retired spellings resolve through `looplab/__init__.py::_RENAMED`.
+
+    IDENTITY is the whole contract, not mere importability. These modules are patch seams —
+    `engine/research_cadence.py` documents monkeypatching `verify_memo` to intercept the live call,
+    and several tests do — so a shim that produced a SECOND module object would make every one of
+    those patches a silent no-op. Silent, because a `from x import *` re-export binds by VALUE: the
+    import succeeds, the patch appears to apply, and the original function still runs."""
+    import importlib
+
+    canonical = importlib.import_module("looplab.trust.memo_verify")
+    assert importlib.import_module(legacy) is canonical
+
+    # The property that actually matters, exercised rather than inferred from identity.
+    sentinel = object()
+    module = importlib.import_module(legacy)
+    original = module.verify_memo
+    try:
+        module.verify_memo = sentinel
+        assert canonical.verify_memo is sentinel, (
+            f"patching {legacy}.verify_memo does not reach the live module")
+    finally:
+        module.verify_memo = original
+
+
+def test_the_canonical_module_keeps_its_own_spec_identity():
+    """Importing a retired alias must not restamp the canonical module's `__spec__` — that is what
+    made `importlib.reload()` resolve back through the alias loader (whose `exec_module` is a no-op,
+    so the reload silently did nothing). Same hazard the flat `_LAYOUT` aliases already guard."""
+    import importlib
+
+    importlib.import_module("looplab.trust.verify")
+    importlib.import_module("looplab.verify")
+    canonical = importlib.import_module("looplab.trust.memo_verify")
+    assert canonical.__spec__.name == "looplab.trust.memo_verify"
+
+
+def test_no_source_file_still_points_at_the_retired_module_path():
+    """A comment or import naming `trust/verify.py` sends a reader to a file that is not there —
+    which is the navigation cost CT-09 was about, reintroduced from the other side."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for path in list((root / "looplab").rglob("*.py")) + list((root / "tests").rglob("*.py")):
+        if path.name == "__init__.py" and path.parent.name == "looplab":
+            continue                    # the alias map names the retired paths on purpose
+        if path.name in ("test_structured_judge.py", "test_package_layout.py"):
+            continue                    # these assert ABOUT the retired spellings
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if "trust/verify.py" in text or "trust.verify" in text or "trust import verify\n" in text:
+            offenders.append(str(path.relative_to(root)))
+    assert not offenders, f"still naming the retired module path: {offenders}"

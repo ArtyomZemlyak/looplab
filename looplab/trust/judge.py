@@ -1,6 +1,6 @@
 """One structured-judge invocation, shared by the two verifiers (doc 25 CT-09).
 
-`trust/verify.py` (the D8 memo-claim verifier) and `trust/verifier.py` (the advisory criteria
+`trust/memo_verify.py` (the D8 memo-claim verifier) and `trust/verifier.py` (the advisory criteria
 scorer) do different jobs, and a full merge would be wrong. But both reach the model the same way:
 
     agentic_struct(client, tools, msgs, Model, parser=parser, loop_opts={"max_turns": 15},

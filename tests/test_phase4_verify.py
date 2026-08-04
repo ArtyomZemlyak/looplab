@@ -8,7 +8,7 @@ import pytest
 
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.trust.harden import ExploitSuite, harden
-from looplab.trust.verify import _source_map, _source_ref, check_claims, verify_memo
+from looplab.trust.memo_verify import _source_map, _source_ref, check_claims, verify_memo
 
 
 def _node(nid, metric=None, op="draft", status=NodeStatus.evaluated, rationale=""):

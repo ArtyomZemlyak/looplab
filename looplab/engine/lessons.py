@@ -1258,7 +1258,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                                 else "verification alignment mismatch")
                         verified_evidence = None
                         if verdict == "supported":
-                            from looplab.trust.verify import finalize_verified_evidence
+                            from looplab.trust.memo_verify import finalize_verified_evidence
                             verified_evidence, stale_reason = finalize_verified_evidence(c, v, final)
                             if verified_evidence is None:
                                 # an old bare node id, a capped evidence set, or a lifecycle

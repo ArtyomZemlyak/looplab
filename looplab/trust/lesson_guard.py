@@ -71,7 +71,7 @@ def _evidence_text(rec: dict, state: RunState) -> str:
     """The checkable outcome of each cited node, as prose, so the verifier grades against what
     actually happened rather than the lesson's own wording.
 
-    NOT a copy of `trust/verify.py::_evidence_text` despite the shared name, and the comment that
+    NOT a copy of `trust/memo_verify.py::_evidence_text` despite the shared name, and the comment that
     said "mirrors" it was misleading (doc 25 CT-09): that one takes a CLAIM dict plus a frozen
     source map and emits bounded REDACTED JSON, because a memo claim can cite external URLs that
     must never reach the model unredacted. This one takes a distilled LESSON record and renders node

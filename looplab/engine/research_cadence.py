@@ -10,7 +10,7 @@ exactly as they did inside the class.
 `_op_span` / `_cadence_due` / `_reflect_client` stay on the Engine (generic helpers / lessons
 delegators); the moved methods call them as `self.…`, resolved on the Engine instance. The heavy
 deps (ResearchMemo, verify_memo, hybrid_merge.consolidate) stay method-local imports, so a test
-monkeypatching `looplab.trust.verify.verify_memo` etc. still intercepts them.
+monkeypatching `looplab.trust.memo_verify.verify_memo` etc. still intercepts them.
 
 Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never serve — only core,
 events and stdlib (the trust/search deps are lazy, method-local imports)."""
@@ -286,7 +286,7 @@ class ResearchCadenceMixin:
         # finalize later uses their aligned support as the gate for positive D8 evidence.
         if self._research_verify and memo_d.get("claims"):
             try:
-                from looplab.trust.verify import verify_memo
+                from looplab.trust.memo_verify import verify_memo
                 state = fold(self.store.read_all())
                 ver = verify_memo(memo_d, state,
                                   client=getattr(self.deep_researcher, "client", None),

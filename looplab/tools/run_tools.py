@@ -1107,7 +1107,7 @@ def readonly_run_tools(state) -> Optional["object"]:
     Five auxiliary LLM passes wanted exactly this and each wrote it out: let the model READ the run's
     actual experiments (read_code / read_experiment / read_logs / list_experiments) before it judges,
     tags, distills or reports, instead of deciding blind from the aggregate summary baked into its
-    prompt. The semantic verifier (`trust/verify.py`), the CLI's agentic tagging/briefing
+    prompt. The semantic verifier (`trust/memo_verify.py`), the CLI's agentic tagging/briefing
     diagnostics, engine reflection/distillation, the run report, and the LLM novelty gate.
 
     Degrading to None rather than raising is the SHARED contract, and the reason this is one function:

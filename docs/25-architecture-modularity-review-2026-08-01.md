@@ -4908,8 +4908,8 @@ lenient.
 
 *Recommendation:* Rename one module (e.g. verify.py -> memo_verify.py, keeping a _LAYOUT/back-compat alias as the repo already does for renames) and extract the shared judge-call helper (structured-judge invocation with agentic fallback) into one place both import.
 
-*Partially resolved (2026-08-03).* The duplicated plumbing — the substantive half — is done; the
-rename is not, and that is a decision with a stated reason rather than a gap.
+*Resolution (2026-08-03, completed 2026-08-04).* Both halves are done: the duplicated judge-call
+plumbing first, then the rename.
 
 `looplab/trust/judge.py::structured_judge(client, msgs, model, *, parser, tools=None)` is now the one
 judge-call contract: agentic through `agentic_struct` when tools are supplied with the plain parse as
@@ -4926,15 +4926,37 @@ for a judge prompt. Merging them would drag a redaction contract into a path tha
 comment claiming one "mirrors" the other was itself the defect — it sent readers looking for a
 duplication that is not there — and is corrected to say what actually differs.
 
-**Why the rename is deferred.** `engine/research_cadence.py` documents that monkeypatching
-`looplab.trust.verify.verify_memo` intercepts the live call, and tests rely on it. The repo's
-`_LAYOUT` meta-path shim maps FLAT paths (`looplab.verify` -> `looplab.trust.verify`); it does not
-alias one submodule path to another, so a rename needs an explicit
-`sys.modules["looplab.trust.verify"] = memo_verify` so both spellings resolve to ONE module object.
-That is a small change, but it is a change to a patch seam whose failure mode is silent — a second
-module object would make every existing patch a no-op — and it earns nothing beyond a better name.
-`tests/test_structured_judge.py` pins the deferral so it stays visible, and states the constraint any
-future rename has to satisfy. Teeth-verified against 7 breakages.
+**The rename (2026-08-04) — done, and the constraint the earlier deferral named is what it is built
+on.** `trust/verify.py` is now `trust/memo_verify.py`; `trust/verifier.py` keeps its name. A grep for
+"verifier" no longer lands in two files whose names differ by two letters and whose purposes a reader
+had to open them to distinguish.
+
+Both retired spellings — the dotted `looplab.trust.verify` and the flat pre-split
+`looplab.verify` — resolve through a new `_RENAMED` map in `looplab/__init__.py`, checked BEFORE the
+`_LAYOUT` lookup so a retired name can never fall through and rebuild the path it used to live at. It
+routes through the SAME `_CompatLoader` as every other alias, which is the entire point: old and new
+are ONE module object.
+
+That identity is the contract, not importability. These modules are patch seams —
+`engine/research_cadence.py` documents monkeypatching `verify_memo` to intercept the live call, and
+several tests do — so the obvious shim (a `verify.py` that re-exports with `from … import *`) is the
+one implementation that must not be used: a star-import binds by VALUE, so the import succeeds, the
+patch appears to apply, and the original function still runs. Nothing raises. The teeth harness
+includes exactly that wrong fix, and it is caught.
+
+`_LAYOUT` keeps its own contract — canonical module STEM -> package — so `verify` left it and
+`memo_verify` took its place; both of its two-way registry guards (`test_every_layout_entry_exists_at_
+its_canonical_path`, `test_no_module_missing_from_layout`) still hold. Six in-repo call sites, four
+test modules and seven comments were repointed, and a source scan now fails if any file names the
+retired path again — reintroducing the navigation cost from the other side, by sending a reader to a
+file that is not there.
+
+Pinned by four tests in `tests/test_structured_judge.py`: both retired spellings ARE the canonical
+module object (parametrized), a patch through a retired spelling actually reaches the live module
+(exercised, not inferred from identity), the canonical `__spec__.name` survives an alias import (the
+restamping hazard the flat aliases already guard, which silently no-ops `importlib.reload`), and the
+no-stale-path source scan. Teeth-tested against 5 breaks — the star-import shim, each alias dropped,
+the `_RENAMED` hook removed, and an alias pointed at the wrong module — all biting.
 
 #### CT-10 · LOW · inconsistency · effort: medium
 
