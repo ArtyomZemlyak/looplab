@@ -1642,6 +1642,38 @@ Scope: `looplab/events/`: eventstore.py, replay.py, types.py, projections, span_
 
 *Recommendation:* Make _card_added_snapshot consume the receipt shape _bounded_card_action produces (single shared decoder for the action block: one function returning the normalized action dict + owns_action flag), or at minimum extract shared helpers for the eval_timeout, space and parent_ids coercions so the two stages cannot drift (they already differ on top-K selection strategy).
 
+*Resolution (2026-08-04) — the "at minimum" path, deliberately; and the drift the finding suspected is REAL and measured.*
+
+Three coercions are now shared: `_bounded_card_action_space` (already existed — the snapshot simply
+was not calling it), plus new `_bounded_card_eval_timeout(value) -> (timeout, valid)` and
+`_bounded_card_parent_ids(value) -> list[int]`. Admission and the derive-time snapshot both go
+through all three.
+
+**The measured drift.** The snapshot sliced its top-64 window BEFORE filtering keys
+(`sorted(space.items(), key=str)[:64]`, then discard unusable ones), while admission filters first
+and then takes the 64 lexically smallest. On a space whose earliest-sorting keys are unusable, the
+snapshot's window is eaten by keys it then throws away: admission kept **64** usable keys, the
+snapshot decoded **14** of the same input. Not reachable today — only `st.cards_added` rows reach
+`_card_added_snapshot`, and those were bounded on the way in — but nothing enforced that, and a
+divergence inside the fold is silent by construction.
+
+**Why not the fuller refactor.** Making the snapshot consume the receipt shape wholesale would fold
+the `owns_action` derivation into the bounding pass, and `owns_action` is not a bounding fact: it
+decides whether a row CLAIMS an action, which drives card ownership and selection. It also has a
+deliberate asymmetry the bound does not share — an explicit `eval_timeout: null` CLEARS a timeout and
+so does not by itself make the row an owner, while admission records the same null as a legitimate
+value. Merging the two would have to reproduce that distinction inside a function whose job is
+"shrink untrusted data", which is how the two stages would end up coupled for a second time.
+
+`_card_replay_node_id` replaced the snapshot's inline `_coerce_node_id(...)` + range check; verified
+equivalent across bools, floats, strings, negatives and both `2**31` boundaries before substituting.
+
+`tests/test_events_replay.py` 170 → 175: both stages bound a space identically (the drift case),
+both reject an unusable timeout including the `isinstance(True, int)` trap, an explicit null survives
+both stages while staying distinguishable from absent and from invalid, parent ids bound/dedupe
+identically, and a structural guard that neither stage carries an inline `math.isfinite` ladder any
+more. Teeth-tested against 6 breaks, all biting.
+
 #### EV-03 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **The completion-certificate invalidation block is copy-pasted at 5 sites, and a comment records a real bug caused by one site drifting**
