@@ -529,9 +529,17 @@ class TrainingMonitorMixin:
                         # Phase 3 intervention (opt-in): a confident 'broken' run is tree-killed EARLY. Hand
                         # the reason to `_evaluate` via `kill_signal`, set `cancel` (same path as an operator
                         # abort), and stop watching — `_evaluate` writes the single terminal node_failed.
+                        # No `or`-coercion on the confidence bar. `x or 0.0` turns an unset/None/0.0
+                        # knob into a ZERO threshold — i.e. EVERY `broken` verdict kills — which is
+                        # the wrong direction to fail in, and it matters much more now that
+                        # `train_monitor_kill` defaults to True. Mirrors the identical rule in
+                        # `asha_monitor.py`; a non-numeric knob falls back to the schema default.
+                        _kc = getattr(self, "_train_monitor_kill_confidence", 0.8)
+                        threshold = (float(_kc) if isinstance(_kc, (int, float))
+                                     and not isinstance(_kc, bool) else 0.8)
                         if kill_signal is not None and should_monitor_kill(
                                 verdict, enabled=getattr(self, "_train_monitor_kill", False),
-                                threshold=float(getattr(self, "_train_monitor_kill_confidence", 0.8) or 0.0)):
+                                threshold=threshold):
                             claim_watchdog_kill(
                                 kill_signal, cancel, reason=reason, terminal_reason="monitor_broken",
                                 confidence=round(conf, 3))

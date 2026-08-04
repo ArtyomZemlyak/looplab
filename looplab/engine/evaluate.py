@@ -106,42 +106,41 @@ class EvaluateMixin:
     """The engine's eval-task cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
 
-    @staticmethod
-    def _assert_speculative_selection_confirmed(state, node) -> None:
+    def _assert_speculative_selection_confirmed(self, state, node) -> None:
         """INVARIANT: a speculative build must never consume an evaluation before its selection
         is confirmed.
 
         This is the load-bearing premise of admitting positive ``speculation_depth`` on real
         Dataset/Repo/Command workloads (see the admission block in `engine/orchestrator.py`): a
         prediction that misses is thrown away BEFORE it runs, so a miss costs one Developer call and
-        zero GPU seconds, and its node-budget slot is refunded
-        (`search/card_selection.py::is_unevaluated_speculative_discard`). Every part of that argument
-        collapses the moment a speculative node can reach the sandbox on an unconfirmed selection:
-        the miss would then be real GPU time on a real training run, which the argument does not
-        cover and which MUST NOT be admitted on it.
+        zero GPU seconds, and its node-budget slot is refunded. Every part of that argument collapses
+        the moment a speculative node can reach the sandbox on an unconfirmed selection: the miss
+        would then be real GPU time on a real training run, which the argument does not cover and
+        which MUST NOT be admitted on it. (The harm did not go to zero when the refund landed — a
+        measured A/B put `mean_normalized_regret` at 0.0026 rather than 0.0256 — so the cheap
+        regression signal stays too: `speculation_budget_observation` in the run's `budget` receipt.)
 
-        Confirmation is the durable ``card_build_done`` link (`state.speculative_nodes`) binding this
-        exact attempt-zero lifecycle to the Card it was built for. The producer appends it only after
-        the consumer claims the build as the selection it actually wanted; `_run_card_session`
-        additionally re-runs `speculative_card_is_fresh` immediately before dispatch, so the link is
-        the durable, replay-visible half of a confirmation the session has already re-checked in
-        memory. Asserted HERE because `_evaluate` is the single funnel every evaluation passes
-        through — the card session, the ordinary dispatcher, recovery and direct library callers all
-        arrive here — so no future path can reach a sandbox around it.
+        THE SAME PREDICATE, both sides of the lifecycle. Confirmation is the durable
+        ``card_build_done`` link (`state.speculative_nodes`) binding this exact attempt-zero lifecycle
+        to the Card it was built for — the pre-terminal half of the very fact
+        `search/card_selection.py::is_unevaluated_speculative_discard` proves post-terminal before it
+        refunds a slot (both go through `_durable_speculative_lifecycle`). This method deliberately
+        introduces NO third spelling: it calls `SpeculationMixin._speculative_link_matches`, the
+        engine's own one, already used by `_run_card_session`'s admission gate.
+
+        The producer appends the link only after the consumer claims the build as the selection it
+        actually wanted, and `_run_card_session` re-runs `speculative_card_is_fresh` immediately
+        before dispatch — so the link is the durable, replay-visible half of a confirmation the
+        session has already re-checked in memory. Asserted HERE because `_evaluate` is the single
+        funnel every evaluation passes through — the card session, the ordinary dispatcher, recovery
+        and direct library callers all arrive here — so no future path can reach a sandbox around it.
 
         Spelled as an explicit raise rather than `assert`: `python -O` strips assert statements, and
         an invariant whose whole purpose is to stop unbudgeted GPU spend must not be optimized out.
         """
         if getattr(node, "speculative", False) is not True or node.attempt != 0:
             return
-        link = getattr(state, "speculative_nodes", {}).get(node.id)
-        generation = getattr(node, "card_build_generation", None)
-        if not (
-            isinstance(link, Mapping)
-            and type(generation) is int
-            and link.get("card_id") == node.idea.card_id
-            and link.get("generation") == generation
-        ):
+        if not self._speculative_link_matches(state, node):
             raise SpeculativeEvaluationInvariantError(
                 f"speculative node {node.id} reached evaluation without a confirmed selection "
                 "(no matching card_build_done link); refusing to spend evaluation budget on an "

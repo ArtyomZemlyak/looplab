@@ -40,21 +40,42 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #
 # Field-set history:
 #   2026-08-04  + asha_live_kill_confidence  (ASHA live-kill LLM judge)
-_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST
-_EXPECTED_FIELDS = frozenset(SPECULATION_CALIBRATION_PROFILE_SETTINGS)
+# A LITERAL, measured on the tree. Both halves must stay literals: an earlier attempt at this guard
+# wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
+# ITSELF and can never fail — proven by changing only the derivation (the profile schema string
+# v1->v2), which moved the digest and still reported 12 passed.
+_EXPECTED_DIGEST = "sha256:e3fd5e1019c2fb93b0bbef4b80ffd32941505ccec084f8a6fdf04f1dc5643b77"
+# The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
+# of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
+# one. Re-pin both, together, when Settings legitimately gains or loses a knob.
+#   2026-08-04  + asha_live_kill_confidence   (ASHA live-kill LLM judge)
+_EXPECTED_FIELD_COUNT = 191
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():
     """A receipt gate. If the digest shifts for any reason OTHER than a real schema change, every
     calibration receipt issued earlier stops verifying and the gate refuses runs that were
-    legitimately calibrated — with no error that says why."""
+    legitimately calibrated — with no error that says why.
+
+    Pinning the digest AND the field set separates the two causes:
+      * field set unchanged, digest moved -> a refactor changed the DERIVATION. That is the bug this
+        test exists for, and no already-issued receipt would verify again.
+      * field set changed too              -> `Settings` legitimately grew or shrank; the calibration
+        envelope really is different, old receipts SHOULD be invalidated, and both pins get re-set
+        deliberately with a line in the history above.
+    """
     covered = frozenset(Settings.model_fields) - set(SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS)
     assert frozenset(SPECULATION_CALIBRATION_PROFILE_SETTINGS) == covered, (
-        "the profile no longer covers exactly the non-variant Settings fields — the derivation "
-        "changed, not the schema")
+        "the profile no longer covers exactly the non-variant Settings fields")
+    schema_changed = len(SPECULATION_CALIBRATION_PROFILE_SETTINGS) != _EXPECTED_FIELD_COUNT
     assert SPECULATION_CALIBRATION_PROFILE_DIGEST == _EXPECTED_DIGEST, (
-        "the calibration profile digest moved while its field set did not: a refactor changed the "
-        "DERIVATION, which silently invalidates every already-issued speculation receipt")
+        f"the calibration profile digest moved to {SPECULATION_CALIBRATION_PROFILE_DIGEST}. "
+        + (f"Settings also changed size ({_EXPECTED_FIELD_COUNT} -> "
+           f"{len(SPECULATION_CALIBRATION_PROFILE_SETTINGS)}), so this is real schema growth: re-pin "
+           "BOTH constants above and add a line to the field-set history."
+           if schema_changed else
+           "The field set is UNCHANGED, so a refactor changed the DERIVATION — that silently "
+           "invalidates every already-issued speculation receipt. Do not re-pin; find the change."))
 
 
 def test_the_engine_still_re_exports_the_identity_it_no_longer_derives():

@@ -39,23 +39,36 @@ def ui(run_root: Path = typer.Option(
     app, and turns UI actions into appended control events. Does not change the engine.
 
     On launch the React bundle is built automatically when it's missing or stale and Node/npm are on
-    PATH, so a fresh `pip install -e ".[ui]"` needs no manual `npm run build`. A failed requested
-    build refuses to serve existing or partial output; use --no-build to accept that risk explicitly,
-    or --rebuild to force a fresh build."""
+    PATH, so a fresh `pip install -e ".[ui]"` needs no manual `npm run build`. A failed build cannot
+    damage the bundle you already had — it is staged and published only once verified — but this
+    command still refuses to serve that older bundle under a requested build; use --no-build to
+    accept that risk explicitly, or --rebuild to force a fresh build."""
     if build or rebuild:
-        # Capture whether a previous bundle exists before Vite can empty dist. If refreshing that
-        # bundle fails, do not silently serve the stale UI under a successful `looplab ui` launch.
-        # Operators may still choose that exact risk explicitly with --no-build.
-        from looplab.serve.uibuild import (  # stdlib-only; fine before the [ui] dependency check
+        # Note whether a bundle existed before the build. A failed refresh must not silently serve
+        # the OLD UI under a successful `looplab ui` launch — that intent is unchanged. What changed
+        # is the fate of that old bundle: builds now stage their output and publish it only once
+        # verified (looplab/serve/uibuild.py), so a failure leaves the previous bundle byte-identical
+        # rather than destroyed by Vite's emptyOutDir. Say so, because "refusing to serve" otherwise
+        # reads as "your UI is gone" to an operator who just watched a build fail.
+        from looplab.serve.uibuild import (  # no third-party imports; fine before the [ui] check
             ensure_ui_built,
             is_built,
             ui_dist_dir,
         )
         had_bundle = is_built(ui_dist_dir())
         built = ensure_ui_built(force=rebuild, log=typer.echo)
-        if not built and (had_bundle or is_built(ui_dist_dir())):
-            typer.echo("UI build failed; refusing to serve a stale or partial bundle. "
-                       "Fix the build, or pass --no-build to serve it explicitly.")
+        if not built and had_bundle:
+            typer.echo("UI build failed; the previous bundle was left untouched and is still "
+                       "usable. Refusing to serve it under a requested build: fix the build, or "
+                       "run `looplab ui --no-build` to serve that last good bundle.")
+            raise typer.Exit(1)
+        if not built and is_built(ui_dist_dir()):
+            # No bundle existed when we started, yet something is there now: output no successful
+            # build produced. Staging makes this unreachable from uibuild itself; keep the branch
+            # fail-closed for anything else that writes into the dist directory.
+            typer.echo("UI build failed and left output in the dist directory that no successful "
+                       "build produced. Refusing to serve it: fix the build, or pass --no-build to "
+                       "serve it explicitly.")
             raise typer.Exit(1)
     try:
         from looplab.serve.server import serve  # lazy: keeps the core import-free of fastapi/uvicorn

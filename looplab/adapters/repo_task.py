@@ -27,7 +27,10 @@ from looplab.agents.roles import LLMResearcher
 class ReferenceSpec(BaseModel):
     name: str
     path: str
-    mount: bool = False        # copy into the eval workdir (runtime dep) vs context-only
+    # NOT a copy: a mounted reference is exposed as a read-only symlink in the local tier
+    # (`engine/workspace.py::_link_input`) and a read-only bind mount under Docker
+    # (`engine/eval_dispatch.py`). Solution code may READ it; a write is refused.
+    mount: bool = False        # expose read-only in the eval workdir (runtime dep) vs context-only
 
 
 class EditableSpec(BaseModel):

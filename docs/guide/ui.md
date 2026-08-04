@@ -23,15 +23,21 @@ looplab ui                      # serves http://127.0.0.1:8765 over ./runs
 On launch `looplab ui` checks a SHA-256 freshness stamp over the UI source/configuration and **builds the React
 bundle automatically** when the default bundle is missing, unstamped or stale and Node/npm are on your `PATH`.
 It also reinstalls dependencies when `package.json`/the lockfile no longer match the installed dependency stamp.
-A stable source-root interprocess lock serializes dependency installation and Vite's `emptyOutDir` build across
+A stable source-root interprocess lock serializes dependency installation and the staged build across
 concurrent `looplab ui` / `build-ui` processes. A waiter rechecks freshness after acquiring the lock, so it does
 not rebuild output another process just certified. A lock/open/build/stamp failure fails closed for a requested
 refresh. With a lockfile the installer uses `npm ci` first and falls back to `npm install` only after a visible
 failure; adding, removing, or changing either dependency manifest invalidates the dependency stamp.
-A failed requested refresh never silently serves an older bundle: if one existed, the command exits and tells
-you how to repair it. Pass `--no-build` only when you deliberately want to serve that prebuilt/stale output. If
-Node isn't installed and no previous bundle exists, the command prints manual build guidance and still starts
-the API with the not-built placeholder.
+
+**A build never writes into the bundle you are currently serving.** It emits into a sibling staging directory,
+and that is published over `ui/dist` only once the staged output has a valid `index.html` — by a single atomic
+directory exchange where the filesystem supports one, otherwise by a retire-then-publish rename pair that a
+process killed mid-swap can always recover from on its next run. A failed rebuild therefore leaves the previous
+bundle byte-identical, whatever stage of the build it died in.
+A failed requested refresh still never silently serves that older bundle: the command exits and tells you how
+to repair it, and `looplab ui --no-build` serves the last good bundle explicitly. If Node isn't installed and no
+previous bundle exists, the command prints manual build guidance and still starts the API with the not-built
+placeholder.
 
 | Option | Default | Description |
 |---|---|---|

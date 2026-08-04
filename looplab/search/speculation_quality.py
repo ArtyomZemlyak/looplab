@@ -84,6 +84,7 @@ from looplab.search.card_selection import (
     CardResourceEnvelope,
     SpeculativeSelectionContext,
     card_budget_used,
+    refunded_card_budget_node_ids,
     refunded_node_reservations,
     speculative_card_actions,
     speculative_raw_actions,
@@ -800,13 +801,17 @@ def _validate_calibration_terminal(events: Sequence[Event], state) -> None:
     if (
         not isinstance(suffix[2].data, dict)
         or set(budget) != {
-            "elapsed_s", "eval_s", "nodes", "finalize_scope", "finish_seq",
+            "elapsed_s", "eval_s", "nodes", "speculation", "finalize_scope", "finish_seq",
         }
         or _finite_metric(budget.get("elapsed_s")) is None
         or float(budget["elapsed_s"]) < 0.0
         or _finite_metric(budget.get("eval_s")) != expected_eval_s
         or type(budget.get("nodes")) is not int
         or budget["nodes"] != len(state.nodes)
+        # Recomputed from this run's own fold, exactly like every other number in the receipt: the
+        # observation that replaced the pre-run precondition is itself evidence, so a run may not
+        # advertise a `charged_discards: 0` its event log does not support.
+        or budget.get("speculation") != speculation_budget_observation(state)
         or budget.get("finalize_scope") != scope
         or budget.get("finish_seq") != finish.seq
     ):
@@ -1976,30 +1981,76 @@ def _normalize_gpu_inventory(value: object) -> list[dict[str, Any]]:
     return sorted(normalized, key=lambda row: row["index"])
 
 
-def speculation_product_authority_digest(
-    *,
-    policy_scope: str,
-    implementation_digest: str,
-    task_kind: str,
-) -> str:
-    """Identity token for a speculative run that carries no calibration receipt.
+def speculation_budget_observation(state) -> dict[str, int]:
+    """Per-run answer to "is speculation costing this run real experiment budget?".
 
-    Positive ``speculation_depth`` needs no receipt on a real workload (see the admission block in
-    `engine/orchestrator.py`), but a run that HAS speculated still has to be resumable only by an
-    engine that speaks the same code, the same selection policy and the same workload — the folded
-    log carries speculative links, discard receipts and a refunded node budget that only that engine
-    interprets identically. This is that pin, not an authorization: it is derived, never granted, and
-    the run-start value it produces is what `_require_pinned_speculation_receipt` re-derives and
-    compares on every re-entry.
+    Positive ``speculation_depth`` no longer needs a pre-run calibration receipt on a real workload,
+    because a discarded prediction is refunded its node-budget slot. That removed most of the harm
+    the receipt's regret bound was protecting, but NOT all of it: a clean H200 A/B over seeds 0/1/2
+    put `mean_normalized_regret` at 0.002590 after the refund versus 0.025643 before — ~10x smaller,
+    not zero. So the precondition became an observation: this projection is stamped into the run's
+    own `budget` finalization receipt (fold-ignored, one append per run), which is where "what did
+    this run spend" already lives.
 
-    It is deliberately DISJOINT from a gate receipt's ``self_digest`` (a different preimage schema),
-    so a receipt-authorized log and a product-lane log can never be resumed into each other's lane.
-    ``speculation_depth`` is intentionally NOT part of it: the depth is pinned and compared as its
-    own field, and AUTO may legitimately re-resolve on a different box.
+    ``charged_discards`` is the regression signal. It counts speculative builds that were thrown away
+    AND still consumed a node-budget slot — the exact quantity the calibration evidence measured as
+    ~2.6% worse final metric. It is zero while the refund holds, and becomes positive the moment a
+    change lets a discarded prediction spend budget again (most dangerously by letting it consume an
+    evaluation, since `is_unevaluated_speculative_discard` refuses to refund a build the log shows
+    actually ran). Nobody has to run six GPU calibration runs to see that.
+
+    Pure and total: derived from one fold, tolerant of partial/foreign state, never raises.
     """
 
-    if not _valid_digest(implementation_digest):
-        raise ValueError("product authority requires a valid implementation digest")
+    nodes = getattr(state, "nodes", None) or {}
+    speculative_ids = set(getattr(state, "speculative_nodes", None) or {})
+    outcomes = list(getattr(state, "card_build_outcomes", None) or [])
+    # The SAME predicate the budget itself uses (`card_budget_used` / the physical reservation
+    # ceiling both read it). A second definition of "this build never ran" is exactly the drift this
+    # observation exists to catch, so it must not introduce one.
+    refunded = refunded_card_budget_node_ids(state) & speculative_ids
+    discarded = {
+        node_id for node_id in speculative_ids
+        if getattr(nodes.get(node_id), "status", None) is NodeStatus.failed
+    }
+    evaluated = {
+        node_id for node_id in speculative_ids
+        if getattr(nodes.get(node_id), "status", None) is NodeStatus.evaluated
+    }
+    depth = getattr(state, "speculation_depth", 0)
+    return {
+        "depth": depth if type(depth) is int and 0 <= depth <= 64 else 0,
+        "requested": len(getattr(state, "card_build_requests", None) or []),
+        "committed": outcomes.count("committed"),
+        "stale": outcomes.count("stale"),
+        "producer_failed": outcomes.count("producer_failed"),
+        "evaluated": len(evaluated),
+        "discarded": len(discarded),
+        "refunded": len(refunded),
+        "charged_discards": len(discarded - refunded),
+    }
+
+
+def speculation_product_authority_digest(*, policy_scope: str, task_kind: str) -> str:
+    """Run-start LANE token for a speculative run that carries no calibration receipt.
+
+    Positive ``speculation_depth`` needs no receipt on a real workload (see the admission block in
+    `engine/orchestrator.py`). A run that HAS speculated still records which lane produced its
+    speculative prefix, so re-entry cannot reinterpret it as the other lane's: this token is what
+    `_require_pinned_speculation_receipt` re-derives and compares. It is derived, never granted — an
+    identity, not an authorization.
+
+    Deliberately DISJOINT from a gate receipt's ``self_digest`` (a different preimage schema), so a
+    receipt-authorized log and a product-lane log can never be resumed into each other's lane.
+
+    Deliberately NOT bound to `speculation_implementation_digest`. That digest hashes every shipped
+    Python file, so ANY source edit — a comment, a `pip install -U` — would revoke it, and a
+    long-running Repo/GPU run could never be resumed. It is an EVIDENCE identity and belongs to the
+    lanes that claim evidence; the product lane claims none. ``speculation_depth`` is likewise not
+    part of it: the depth is pinned and compared as its own field, and AUTO may legitimately
+    re-resolve on a differently sized box.
+    """
+
     if not policy_scope or len(policy_scope) > 64:
         raise ValueError("product authority requires a bounded policy scope")
     if len(task_kind) > 64:
@@ -2007,7 +2058,6 @@ def speculation_product_authority_digest(
     return _sha256(canonical_json({
         "schema": SPECULATION_PRODUCT_AUTHORITY_SCHEMA,
         "policy_scope": policy_scope,
-        "implementation_digest": implementation_digest,
         "task_kind": task_kind,
     }))
 
@@ -2689,6 +2739,7 @@ __all__ = [
     "SPECULATION_QUALITY_THRESHOLDS",
     "SPECULATION_RUN_ANALYSIS_SCHEMA",
     "analyze_speculation_run",
+    "speculation_budget_observation",
     "speculation_environment_fingerprint",
     "speculation_implementation_digest",
     "speculation_product_authority_digest",

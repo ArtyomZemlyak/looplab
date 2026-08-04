@@ -115,18 +115,41 @@ def test_a_real_repo_task_admits_positive_depth_without_any_receipt(tmp_path):
     assert pinned["speculation_depth"] == 2
     assert pinned["card_driven_selection"] is True
     assert pinned["speculation_policy_scope"] == "greedy"
-    # The product lane pins the run's IDENTITY (code + policy + workload), never a calibrated
-    # runtime-scope digest — none was measured for this workload, so minting one would be a lie.
+    # The product lane pins the run's search TREATMENT and its LANE — never an evidence identity.
+    # Neither a runtime-scope digest nor a whole-source implementation digest is minted: nothing was
+    # measured for this workload, and a source digest would make the run unresumable after any edit.
     assert pinned["speculation_gate_receipt_digest"] == (
-        quality.speculation_product_authority_digest(
-            policy_scope="greedy",
-            implementation_digest=pinned["speculation_implementation_digest"],
-            task_kind="repo",
-        ))
+        quality.speculation_product_authority_digest(policy_scope="greedy", task_kind="repo"))
     assert "speculation_runtime_scope_sha256" not in pinned
+    assert "speculation_implementation_digest" not in pinned
 
 
-def test_the_dataset_lane_is_admitted_the_same_way_and_replay_pins_survive(tmp_path):
+def test_a_real_run_stays_resumable_after_the_source_tree_changes(tmp_path, monkeypatch):
+    """The product lane must not pin a whole-source digest.
+
+    `speculation_implementation_digest` hashes every shipped .py file, so pinning it would make a
+    half-finished Repo/GPU run permanently unresumable after any edit or `pip install -U` — measured
+    on a real 12-node repo run, whose re-entry was refused minutes later because unrelated files had
+    changed. The calibrated lanes keep that pin (it IS their evidence identity); this one must not.
+    """
+    task = _repo_task(tmp_path)
+    run_dir = tmp_path / "upgrade"
+    first = _engine(run_dir, task, card_driven_selection=True, speculation_depth=2)
+    first.store.append("run_started", {
+        "run_id": run_dir.name,
+        "task_id": task.id,
+        "direction": "max",
+        **first._run_start_pinned_values(),
+    })
+
+    monkeypatch.setattr(
+        quality, "speculation_implementation_digest", lambda: "sha256:" + "f" * 64)
+    resumed = _engine(run_dir, task, card_driven_selection=True, speculation_depth=2)
+    resumed._require_pinned_speculation_receipt(fold(resumed.store.read_all()))  # no raise
+    assert resumed._speculation_enabled() is True
+
+
+def test_the_product_lane_pins_survive_re_entry_and_bind_the_exact_treatment(tmp_path):
     """Whole-lifecycle proof: admitted, pinned, and re-entrant on the same durable record."""
     task = _repo_task(tmp_path)
     run_dir = tmp_path / "reentry"
@@ -186,36 +209,74 @@ def test_speculation_still_requires_the_greedy_policy_scope(tmp_path):
 
 # ---------------------------------------------------------------- a supplied receipt still binds
 
-@pytest.mark.parametrize("receipt,match", [
-    (None, "stale, invalid"),                                   # revalidation failed outright
-    (_toy_receipt(require_gpu=False), "non-GPU"),               # measured without GPUs
-    (_toy_receipt(workload_scope="repo"), "policy-mismatched"),  # forged workload scope
+@pytest.mark.parametrize("receipt", [
+    None,                                          # revalidation failed outright
+    _toy_receipt(require_gpu=False),               # measured without GPUs
+    _toy_receipt(workload_scope="repo"),           # forged workload scope
+    {**_toy_receipt(), "implementation_digest": ""},   # forged implementation digest
 ])
-def test_a_stale_or_forged_receipt_is_still_refused_on_a_real_workload(
-        tmp_path, monkeypatch, receipt, match):
+def test_a_stale_or_forged_receipt_is_declined_not_honoured_on_a_real_workload(
+        tmp_path, monkeypatch, receipt):
+    """Refused means NOT HONOURED — and on a real workload that must not be a hard raise.
+
+    The receipt authorizes nothing here (the operator's setting is the authority), so raising at
+    `Engine.__init__` would take a whole Repo/GPU run down over an attestation the run does not
+    need — a trap now that `card_driven_selection` defaults True. The run proceeds in the product
+    lane and `run_started` records the product-lane token, so the log never claims the attestation.
+    """
     monkeypatch.setattr(
         quality, "validated_speculation_gate_receipt", lambda _path: receipt)
-    with pytest.raises(ValueError, match=match):
-        _engine(
-            tmp_path / "bad-receipt",
-            _repo_task(tmp_path),
-            card_driven_selection=True,
-            speculation_depth=1,
-            speculation_gate_receipt=str(tmp_path / "receipt.json"),
+    engine = _engine(
+        tmp_path / "bad-receipt",
+        _repo_task(tmp_path),
+        card_driven_selection=True,
+        speculation_depth=1,
+        speculation_gate_receipt=str(tmp_path / "receipt.json"),
+    )
+    assert engine._speculation_enabled() is True
+    pinned = engine._run_start_pinned_values()
+    assert pinned["speculation_gate_receipt_digest"] == (
+        quality.speculation_product_authority_digest(policy_scope="greedy", task_kind="repo"))
+    assert "speculation_implementation_digest" not in pinned    # no attestation was recorded
+
+
+@pytest.mark.parametrize("receipt,match", [
+    (None, "stale, invalid"),
+    (_toy_receipt(require_gpu=False), "non-GPU"),
+    (_toy_receipt(workload_scope="repo"), "policy-mismatched"),
+])
+def test_a_stale_or_forged_receipt_still_hard_refuses_the_calibrated_toy_lane(
+        tmp_path, monkeypatch, receipt, match):
+    """On the calibration toy the receipt IS the authority, so a bad one still raises."""
+    monkeypatch.setattr(
+        quality, "validated_speculation_gate_receipt", lambda _path: receipt)
+    task = ToyTask()
+    settings = Settings(**{
+        **SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+        "max_nodes": 3,
+        "speculation_depth": 1,
+        "speculation_gate_receipt": str(tmp_path / "receipt.json"),
+    })
+
+    def roles():
+        return (
+            ToyResearcher(task.bounds, seed=task.seed, step=task.step,
+                          calibration_concepts=True),
+            ToyObjectiveDeveloper(noise=0.0, calibration_gpu_probe=True),
         )
 
-
-def test_a_forged_implementation_digest_is_refused(tmp_path, monkeypatch):
-    forged = {**_toy_receipt(), "implementation_digest": ""}
-    monkeypatch.setattr(
-        quality, "validated_speculation_gate_receipt", lambda _path: forged)
-    with pytest.raises(ValueError, match="stale, invalid"):
-        _engine(
-            tmp_path / "forged-impl",
-            _repo_task(tmp_path),
-            card_driven_selection=True,
-            speculation_depth=1,
-            speculation_gate_receipt=str(tmp_path / "receipt.json"),
+    with pytest.raises(ValueError, match=match):
+        Engine(
+            tmp_path / "toy-bad-receipt",
+            task=task,
+            researcher=roles()[0],
+            developer=roles()[1],
+            sandbox=SubprocessSandbox(),
+            policy=GreedyTree(n_seeds=3, max_nodes=3, debug_depth=1),
+            options=EngineOptions.from_settings(settings),
+            role_factory=roles,
+            _speculation_runtime_scope_sha256=speculation_runtime_scope_digest(
+                settings.masked_snapshot()),
         )
 
 
@@ -397,6 +458,45 @@ def test_the_invariant_is_wired_at_the_single_dispatch_funnel():
     # `assert` statements vanish under `python -O`; this one must not.
     body = inspect.getsource(Engine._assert_speculative_selection_confirmed)
     assert "raise SpeculativeEvaluationInvariantError" in body
+
+
+def test_the_run_records_whether_speculation_cost_it_budget(tmp_path):
+    """The precondition became an OBSERVATION: `charged_discards` is the regression signal.
+
+    The refund shrank the measured harm ~10x (mean_normalized_regret 0.025643 -> 0.002590) but not
+    to zero, so the cheap way to notice a regression has to survive dropping the pre-run receipt.
+    """
+    task = _repo_task(tmp_path)
+    engine = _engine(tmp_path / "observed", task,
+                     card_driven_selection=True, speculation_depth=2)
+    node_id = _speculative_node_without_its_link(engine, task)
+    state = fold(engine.store.read_all())
+
+    empty = quality.speculation_budget_observation(state)
+    assert empty["charged_discards"] == 0 and empty["discarded"] == 0
+    assert empty["depth"] == 2
+
+    # A discarded speculative build that the log proves never ran is REFUNDED, not charged.
+    state.speculative_nodes[node_id] = {"card_id": "card-1", "generation": 0}
+    node = state.nodes[node_id]
+    state.nodes[node_id] = node.model_copy(update={
+        "status": node.status.__class__.failed,
+        "error_reason": "superseded",
+        "eval_seconds": 0.0,
+        "never_evaluated": True,
+    })
+    refunded = quality.speculation_budget_observation(state)
+    assert refunded["discarded"] == 1
+    assert refunded["refunded"] == 1
+    assert refunded["charged_discards"] == 0
+
+    # ...and one that DID consume an evaluation is charged — exactly the regression to notice.
+    state.nodes[node_id] = state.nodes[node_id].model_copy(update={
+        "eval_seconds": 12.5, "never_evaluated": False})
+    charged = quality.speculation_budget_observation(state)
+    assert charged["discarded"] == 1
+    assert charged["refunded"] == 0
+    assert charged["charged_discards"] == 1
 
 
 def test_an_ordinary_node_and_a_confirmed_speculative_node_are_unaffected(tmp_path):

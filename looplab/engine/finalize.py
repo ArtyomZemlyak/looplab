@@ -736,10 +736,18 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         events = engine.store.read_all()
         if not _finalize_step_done(events, scope, finish_seq, "budget", EV_BUDGET):
             try:
+                # `speculation` answers "did the Card prefetch cost this run real experiment
+                # budget?" — `charged_discards` is 0 while the L5 refund holds and positive the
+                # moment a discarded prediction spends a slot again. It replaces the pre-run
+                # calibration receipt that positive `speculation_depth` used to require on every
+                # workload: an observation of the harm, made every run for free, instead of a
+                # six-GPU-run ceremony before any run. See `speculation_budget_observation`.
+                from looplab.search.speculation_quality import speculation_budget_observation
                 engine.store.append(EV_BUDGET, {
                     "elapsed_s": round(time.time() - start_time, 3),
                     "eval_s": round(completed.total_eval_seconds, 3),
                     "nodes": len(completed.nodes),
+                    "speculation": speculation_budget_observation(completed),
                     "finalize_scope": scope,
                     "finish_seq": finish_seq,
                 })

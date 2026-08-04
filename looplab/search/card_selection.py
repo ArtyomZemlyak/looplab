@@ -270,22 +270,6 @@ def is_unevaluated_speculative_discard(state: RunState, node: Node) -> bool:
     )
 
 
-def is_freshness_dropped_speculative_node(state: RunState, node: Node) -> bool:
-    """The original narrow Layer-5 refund: a zero-cost Card-freshness drop.
-
-    Retained as the named special case (and the pre-marker log format) of the general
-    ``is_unevaluated_speculative_discard`` predicate above, which is what budget accounting uses.
-    """
-
-    return bool(
-        node.status is NodeStatus.failed
-        and node.error_reason == "superseded"
-        and node.error == CARD_FRESHNESS_SUPERSEDED_ERROR
-        and node.eval_seconds == 0
-        and _durable_speculative_lifecycle(state, node)
-    )
-
-
 def node_counts_toward_card_budget(state: RunState, node: Node) -> bool:
     """Whether a node consumes the L3 creation budget.
 

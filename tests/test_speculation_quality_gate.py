@@ -686,6 +686,10 @@ def _make_run(
                 "elapsed_s": 1.0,
                 "eval_s": round(terminal_state.total_eval_seconds, 3),
                 "nodes": len(terminal_state.nodes),
+                # The run's speculation-cost observation, recomputed by the reader from this same
+                # fold (`speculation_budget_observation`) — the signal that replaced the pre-run
+                # calibration precondition for positive `speculation_depth`.
+                "speculation": quality.speculation_budget_observation(terminal_state),
                 "finalize_scope": scope,
                 "finish_seq": finished.seq,
             })

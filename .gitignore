@@ -71,3 +71,7 @@ run.md
 
 # `looplab ui` build lock
 ui/.looplab-ui-build.lock
+# `looplab ui` staged bundle + the previous one it retires while publishing. Both are consumed by a
+# normal build; only a process killed mid-publish can leave either behind (see serve/uibuild.py).
+ui/.dist.looplab-stage/
+ui/.dist.looplab-previous/

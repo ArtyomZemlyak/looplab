@@ -1,10 +1,14 @@
-"""Build the live React UI bundle on demand (stdlib-only; the engine never imports this).
+"""Build the live React UI bundle on demand (no third-party imports; the engine never imports this).
 
 Python wheels have no post-install hook and `pip install -e` skips build-backend steps, so a fresh
 `pip install -e ".[ui]"` installs fastapi/uvicorn but leaves `ui/dist` unbuilt — and the server then
 serves a "not built yet" placeholder. Rather than ask the user to `cd ui && npm run build` by hand,
 `looplab ui` calls `ensure_ui_built()` on launch: if the bundle is missing or stale and Node/npm are
 on PATH, it builds it once. Missing Node degrades to a clear message + placeholder (never a crash).
+
+A build NEVER writes into the live bundle: it emits into a sibling staging directory and that is
+published over `dist` only once `is_built()` accepts the staged output, so a failed rebuild leaves
+the previous bundle byte-identical and still servable (see the staged-publish section below).
 
 Path resolution is the single source of truth for both this builder and `server._ui_dist`:
   - source tree : LOOPLAB_UI_SRC  or  <repo>/ui
@@ -24,10 +28,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, Callable, Iterator, Sequence
 
+# The one durability dependency: `core/atomicio` owns this codebase's atomic-write discipline and is
+# itself import-light (stdlib only), so it does not cost this module its "importable before the [ui]
+# extra is installed" property.
+from looplab.core.atomicio import best_effort_fsync
+
 
 _DEPS_STAMP = ".looplab-dependencies.sha256"
 _BUILD_STAMP = ".looplab-build.sha256"
 _BUILD_LOCK = ".looplab-ui-build.lock"
+_STAGE_SUFFIX = ".looplab-stage"
+_RETIRED_SUFFIX = ".looplab-previous"
 _BUILD_LOCK_TIMEOUT_S = 300.0
 _BUILD_LOCK_POLL_S = 0.1
 
@@ -285,6 +296,242 @@ def _write_build_stamp(dist: Path, digest: str) -> None:
             pass
 
 
+# --------------------------------------------------------------- staged build + publish
+#
+# Vite empties its output directory before it writes anything, and `npm run build` fires the
+# `prebuild` hook first — `ui/scripts/clean-dist.mjs`, an unconditional `rm -rf ui/dist`. Either one
+# destroys the WORKING bundle seconds before the toolchain gets its chance to fail, and `ui/dist` is
+# not tracked in git, so there is nothing to restore from. Whether a failed rebuild survived used to
+# depend on WHERE in the build it happened to die; observed failing for real on a JupyterHub geesefs
+# home (the `node_modules/.bin` shims cannot carry an exec bit there, and the Node on PATH predated
+# `node:util.styleText`), leaving an operator who ran `looplab ui` expecting a no-op with no servable
+# UI at all.
+#
+# So the build writes into a sibling staging directory and we publish that over `dist` only after
+# `is_built()` accepts the staged output. A failed build touches the previous bundle not at all.
+
+
+def _stage_dir(dist: Path) -> Path:
+    """Where a build writes before it has earned the ``dist`` name.
+
+    A SIBLING of ``dist``: publishing is a rename, and a rename cannot cross a filesystem.
+    """
+    return dist.parent / f".{dist.name}{_STAGE_SUFFIX}"
+
+
+def _retired_dir(dist: Path) -> Path:
+    """Where the previous bundle waits while the new one takes the ``dist`` name."""
+    return dist.parent / f".{dist.name}{_RETIRED_SUFFIX}"
+
+
+def _discard_dir(path: Path) -> None:
+    """Drop one of OUR scratch directories; a leftover is garbage, never a lost bundle."""
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _prepare_stage(stage: Path) -> None:
+    """Guarantee an EMPTY staging directory, or raise.
+
+    A stale ``index.html`` from an abandoned build would let a build that dies before emitting
+    anything publish the PREVIOUS attempt's output as if this run had produced it — the same
+    false-green the freshness stamp exists to prevent. `rmtree(ignore_errors=True)` followed by an
+    existence check, because a partially-deleted tree is the interesting failure and it is the one
+    rmtree's error callback would swallow.
+    """
+    shutil.rmtree(stage, ignore_errors=True)
+    if stage.exists():
+        raise OSError(errno.ENOTEMPTY, "could not clear the UI staging directory", str(stage))
+
+
+def _sync_directory_entry(directory: Path) -> None:
+    """Best-effort durability for a rename inside *directory* — `core/atomicio`'s discipline.
+
+    `atomicio.atomic_write_bytes` is the model this publish follows (unique temp -> best-effort
+    fsync -> rename), and its BEST-EFFORT sync is deliberate: that module's own docstring records
+    that fsync on a FUSE/S3 home (geesefs/s3fs/goofys — where this bug was hit) may raise or block.
+    `atomicio.strict_fsync_parent` is the fail-closed variant, reserved for paid-work claims whose
+    visibility must precede an external side effect; using it here would mean refusing to publish a
+    good bundle because a FUSE mount would not confirm a directory sync — the exact "no servable UI"
+    outcome the staged publish exists to remove. Windows exposes no portable directory-handle fsync;
+    `_windows_move_write_through` (its own rename) is where that platform's ordering comes from.
+    """
+    if os.name == "nt":
+        return
+    try:
+        descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        best_effort_fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _exchange_directories(staged: Path, published: Path) -> bool:
+    """Swap two sibling directory names in ONE atomic step; False where that is unsupported.
+
+    The only publish with no window at all: a reader sees either the old bundle or the new one under
+    ``dist``, never a missing directory. Linux `renameat2(RENAME_EXCHANGE)` / macOS
+    `renamex_np(RENAME_SWAP)` — the same ctypes shape `atomicio.durable_no_replace_rename` uses for
+    its no-replace flag, minus that helper's strict sync (see `_sync_directory_entry`).
+
+    Every failure is a soft "not available here", because a caller that can fall back to the ordered
+    two-rename publish loses nothing by it. That fallback is not hypothetical: measured on this
+    repo's own JupyterHub mount, ext4/tmpfs support the exchange and geesefs rejects *any* renameat2
+    flag with EINVAL, so the fallback is the path that actually runs where the bug was reported.
+    """
+    if os.name == "nt":
+        return False
+
+    import ctypes
+    import sys
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        first = os.fsencode(os.path.abspath(staged))
+        second = os.fsencode(os.path.abspath(published))
+        if sys.platform.startswith("linux"):
+            swap = getattr(libc, "renameat2", None)
+            if swap is None:
+                return False
+            swap.argtypes = [
+                ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+            swap.restype = ctypes.c_int
+            result = swap(-100, first, -100, second, 2)  # AT_FDCWD, RENAME_EXCHANGE
+        elif sys.platform == "darwin":
+            swap = getattr(libc, "renamex_np", None)
+            if swap is None:
+                return False
+            swap.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            swap.restype = ctypes.c_int
+            result = swap(first, second, 0x00000002)  # RENAME_SWAP
+        else:
+            return False
+    except (OSError, AttributeError, ValueError):
+        return False
+    return result == 0
+
+
+def _recover_interrupted_publish(dist: Path, *, log: Callable[[str], None]) -> None:
+    """Heal a publish that died between the two renames, and collect what a finished one left.
+
+    Called under the build lock at the start of every build, and directly when an in-process publish
+    raises. Whenever ``<dist>.looplab-previous`` exists, exactly two states are possible:
+
+      * ``dist`` is a complete bundle — the publish finished and the retired copy is garbage.
+      * ``dist`` is missing or incomplete — the process died mid-swap, and the retired copy is the
+        last bundle that was ever SERVED, so it goes back under the ``dist`` name.
+
+    Restoring the RETIRED bundle rather than the staged one is deliberate: it restores exactly the
+    state the interrupted command started from. Its freshness stamp no longer matches the source, so
+    the caller simply rebuilds — which is the correct outcome, not a lost UI.
+    """
+    retired = _retired_dir(dist)
+    stage = _stage_dir(dist)
+    if is_built(dist):
+        # The publish finished. Both scratch names can now hold only a SUPERSEDED bundle — the
+        # retired copy from an ordered publish, or the swapped-out one an atomic exchange leaves
+        # under the staging name — so neither is worth keeping.
+        _discard_dir(retired)
+        _discard_dir(stage)
+        return
+    if not is_built(retired):
+        return
+    if dist.exists():
+        # No index.html here, so nothing servable can be lost — and this only ever runs alongside a
+        # retired bundle WE created, never against a directory an operator put here themselves.
+        _discard_dir(dist)
+        if dist.exists():
+            log(f"[ui] the previous bundle is intact at {retired}, but {dist} could not be cleared "
+                "to restore it.")
+            return
+    try:
+        os.rename(retired, dist)
+    except OSError as exc:
+        log(f"[ui] the previous bundle is intact at {retired} but could not be restored "
+            f"to {dist}: {exc}")
+        return
+    _sync_directory_entry(dist.parent)
+    # The staged bundle lost, so it is scratch now: recovery deliberately restores the bundle that
+    # was being SERVED, and the restored stamp makes the caller rebuild from the current source
+    # anyway. Dropping it here matters because recovery can leave the caller with nothing to do —
+    # a restored bundle whose stamp still matches takes the freshness fast path and never reaches
+    # `_prepare_stage`, so this is the only place that leftover would ever be collected.
+    _discard_dir(stage)
+    log(f"[ui] restored the previous UI bundle to {dist} after an interrupted publish.")
+
+
+def _publish_staged_dist(stage: Path, dist: Path, *, log: Callable[[str], None]) -> None:
+    """Give a verified staged bundle the ``dist`` name without ever losing BOTH bundles.
+
+    Preferred: one atomic `RENAME_EXCHANGE` — zero window, and the previous bundle lands under the
+    staging name where the discard below collects it.
+
+    Fallback (geesefs, and every other filesystem without renameat2 flags): two renames, in the one
+    order that is recoverable. RETIRE FIRST (``dist`` -> ``<dist>.looplab-previous``), then PUBLISH
+    (``stage`` -> ``dist``). The intuitive order — delete ``dist``, then move the staged bundle in —
+    has an instant where the only copy of a working bundle has already been destroyed, which is the
+    original defect in miniature. This order has no such instant: between the two renames a complete
+    bundle exists under the retired name AND another under the staging name, so a crash anywhere in
+    the sequence leaves `_recover_interrupted_publish` something to put back. That is also why the
+    old bundle is RENAMED away rather than deleted, and why it is deleted only after the new bundle
+    already holds the ``dist`` name.
+    """
+    parent = dist.parent
+    retired = _retired_dir(dist)
+    if dist.exists() and _exchange_directories(stage, dist):
+        _sync_directory_entry(parent)
+        _discard_dir(stage)  # holds the PREVIOUS bundle now that the names are swapped
+        return
+
+    _discard_dir(retired)
+    retired_previous = False
+    if dist.exists():
+        os.rename(dist, retired)  # sibling rename onto a name just cleared, so it cannot replace
+        _sync_directory_entry(parent)
+        retired_previous = True
+    try:
+        os.rename(stage, dist)
+    except OSError:
+        if retired_previous:
+            _recover_interrupted_publish(dist, log=log)
+        raise
+    _sync_directory_entry(parent)
+    _discard_dir(retired)
+
+
+def _build_command(src: Path, stage: Path) -> list[str]:
+    """``npm run build``, redirected at the staging directory with the destructive hook disabled.
+
+    `--outDir`/`--emptyOutDir` are passed as FLAGS rather than changed in `ui/vite.config.js`: the
+    committed config is what a plain `npm run build` and every UI developer use, and it must keep
+    emitting `dist`. A flag redirects only the run this module drives.
+
+    `--ignore-scripts` is not optional. `npm run build` fires the `prebuild` hook first, and that
+    hook is `scripts/clean-dist.mjs` — an unconditional `rm -rf ui/dist`, i.e. precisely the
+    destruction the staging directory exists to prevent, executed before Vite even starts. Its own
+    guarantee (nothing from an earlier build survives into this one) is not lost: `_prepare_stage`
+    empties the staging directory, and publishing REPLACES the whole `dist` name rather than writing
+    into it, so no stale file can survive either step.
+    """
+    return ["npm", "run", "build", "--ignore-scripts", "--",
+            "--outDir", os.path.relpath(stage, src), "--emptyOutDir"]
+
+
+def _log_toolchain_hints(log: Callable[[str], None]) -> None:
+    """Name the two toolchain failures that actually happen on a JupyterHub/FUSE home.
+
+    Both are reported by `npm` as an ordinary non-zero exit, so without this an operator sees only
+    "build failed" and a wall of npm output.
+    """
+    log("[ui] if the output above showed EACCES executing a file under node_modules, the "
+        "filesystem is likely mounted `noexec` (common for JupyterHub / NFS data volumes). "
+        "Build on an exec filesystem and point LOOPLAB_UI_DIST at the result — see "
+        "docs/guide/ui.md (Troubleshooting).")
+    log("[ui] if it showed an unsupported-engine warning or a `node:util` TypeError, the Node on "
+        "PATH is older than ui/package.json's `engines` range — check `node -v`.")
+
+
 def _ensure_ui_built_locked(
     src: Path,
     dist: Path,
@@ -293,6 +540,8 @@ def _ensure_ui_built_locked(
     log: Callable[[str], None],
 ) -> bool:
     """Recheck freshness and perform one build while the source-root process lock is held."""
+    # Before judging freshness, finish or undo a publish a previous process died in the middle of.
+    _recover_interrupted_publish(dist, log=log)
     current_build_digest = _build_digest(src)
     if (is_built(dist) and not force
             and _installed_build_digest(dist) == current_build_digest):
@@ -322,34 +571,54 @@ def _ensure_ui_built_locked(
     # Installation may update package-lock.json, which is also a build input. Pin the exact digest
     # immediately before invoking Vite and refuse to certify a moving source tree.
     requested_build_digest = _build_digest(src)
+    stage = _stage_dir(dist)
+    try:
+        _prepare_stage(stage)
+    except OSError as exc:
+        log(f"[ui] could not prepare the UI staging directory: {exc}")
+        return False
+
     log("[ui] building the React bundle (npm run build)…")
-    if not _run(["npm", "run", "build"], cwd=src, log=log):
-        # A previous dist/index.html may still be present when the build command fails before Vite's
-        # emptyOutDir phase.  It remains available for an operator who deliberately serves it with
-        # --no-build, but it cannot satisfy this requested build/rebuild: reporting success here would
-        # silently keep the stale UI after a dependency or source upgrade.
-        log("[ui] build failed; the requested UI bundle was not produced.")
-        return False
+    try:
+        # Nothing below this line can damage an existing bundle: the build writes only into `stage`,
+        # and `dist` is not touched until a staged bundle has been verified AND stamped.
+        if not _run(_build_command(src, stage), cwd=src, log=log):
+            log("[ui] build failed; the requested UI bundle was not produced. The previous bundle "
+                "was not touched — `looplab ui --no-build` still serves it.")
+            _log_toolchain_hints(log)
+            return False
 
-    if _build_digest(src) != requested_build_digest:
-        log("[ui] UI build inputs changed while the bundle was building; refusing to stamp a mixed output.")
-        return False
+        if _build_digest(src) != requested_build_digest:
+            log("[ui] UI build inputs changed while the bundle was building; refusing to stamp a mixed output.")
+            return False
 
-    ok = is_built(dist)
-    if ok:
+        if not is_built(stage):
+            log(f"[ui] build did not produce {stage / 'index.html'}; the previous bundle was left "
+                "in place.")
+            _log_toolchain_hints(log)
+            return False
+
+        # Stamp the STAGED bundle, so the bundle and the freshness stamp that certifies it become
+        # visible under `dist` in the same rename. A stamp written after publication would leave a
+        # window where `dist` is fresh but reads as stale (harmless) — or, worse on a crash, the
+        # reverse.
         try:
-            _write_build_stamp(dist, requested_build_digest)
+            _write_build_stamp(stage, requested_build_digest)
         except OSError as exc:
             log(f"[ui] build output could not be freshness-stamped: {exc}")
             return False
-        log("[ui] build complete.")
-    else:
-        log(f"[ui] build did not produce {dist / 'index.html'}.")
-        log("[ui] if the output above showed EACCES executing a file under node_modules, the "
-            "filesystem is likely mounted `noexec` (common for JupyterHub / NFS data volumes). "
-            "Build on an exec filesystem and point LOOPLAB_UI_DIST at the result — see "
-            "docs/guide/ui.md (Troubleshooting).")
-    return ok
+
+        try:
+            _publish_staged_dist(stage, dist, log=log)
+        except OSError as exc:
+            log(f"[ui] could not publish the new bundle over {dist}: {exc}")
+            log("[ui] the previous bundle is still in place; nothing was lost.")
+            return False
+    finally:
+        # A failed build leaves no scratch behind; a published one has already consumed the name.
+        _discard_dir(stage)
+    log("[ui] build complete.")
+    return True
 
 
 def ensure_ui_built(*, force: bool = False, log: Callable[[str], None] = print) -> bool:
@@ -360,6 +629,10 @@ def ensure_ui_built(*, force: bool = False, log: Callable[[str], None] = print) 
     When the bundle is missing/stale and a build isn't possible (LOOPLAB_UI_DIST points elsewhere,
     no React sources, no npm, or the cross-process build lock cannot be used) it logs guidance and
     returns False. A caller may still serve an old bundle only by choosing ``--no-build`` explicitly.
+
+    Returning False never means the previous bundle was damaged: every build path emits into a
+    staging directory and publishes it only once verified, so an existing ``dist`` is either left
+    exactly as it was or wholly replaced by a bundle that passed `is_built`.
     """
     dist = ui_dist_dir()
 

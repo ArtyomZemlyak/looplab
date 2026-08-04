@@ -715,6 +715,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if speculation_gate_receipt is not None else None
         )
         self._speculation_gate_calibration = bool(_speculation_gate_calibration)
+        # True only on the receiptless positive-depth lane: the operator's setting is the authority,
+        # so no evidence identity (implementation digest / runtime scope) is minted or required.
+        self._speculation_product_lane = False
         self._speculation_gate_admitted = False
         self._speculation_gate_receipt_digest = ""
         self._speculation_implementation_digest = ""
@@ -926,16 +929,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     f"Card speculation requires policy={SPECULATION_POLICY_SCOPE!r}, "
                     f"got {self._policy_name!r}"
                 )
-            from looplab.search.speculation_quality import (
-                speculation_implementation_digest,
-                speculation_product_authority_digest,
-            )
+            from looplab.adapters.toytask import ToyTask
+            _calibrated_replay = bool(self.speculation_gate_receipt) and type(task) is ToyTask
             if self.speculation_gate_receipt:
-                # A receipt is OPTIONAL now, but supplying one is a claim that must hold: it is
-                # revalidated end-to-end (schema, thresholds, self-digest, current implementation and
-                # environment digests, and a full recomputation from its own raw paired run dirs), so
-                # a stale or forged receipt is still refused — loudly, rather than being ignored.
-                from looplab.adapters.toytask import ToyTask
+                # A receipt is OPTIONAL now, but it is still revalidated end-to-end whenever it is
+                # supplied (schema, thresholds, self-digest, current implementation and environment
+                # digests, and a full recomputation from its own raw paired run dirs) — a stale or
+                # forged one is never silently honoured.
+                #
+                # WHAT REFUSAL MEANS depends on what the receipt is authorizing. On the calibration
+                # toy it IS the authority, so a bad receipt is a hard `ValueError`. On a real
+                # workload it authorizes nothing (the operator's setting is the authority), so a hard
+                # raise at `Engine.__init__` would take a whole Repo/GPU run down over an attestation
+                # the run does not need — and with `card_driven_selection` defaulting True that is a
+                # trap, not a safety property. There the receipt is DECLINED instead: the run
+                # proceeds in the product lane, and `run_started` durably records the product lane
+                # token, so the log never claims an attestation that did not hold.
                 from looplab.search.speculation_quality import (
                     speculation_task_profile_digest,
                     validated_speculation_gate_receipt,
@@ -954,11 +963,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     or not isinstance(_gate_receipt.get("implementation_digest"), str)
                     or not _gate_receipt.get("implementation_digest")
                 ):
-                    raise ValueError(
-                        "speculation_gate_receipt is stale, invalid, non-GPU, policy-mismatched, "
-                        "or does not pass the current scorer/search-quality gates"
-                    )
-                if type(task) is ToyTask:
+                    if _calibrated_replay:
+                        raise ValueError(
+                            "speculation_gate_receipt is stale, invalid, non-GPU, "
+                            "policy-mismatched, or does not pass the current "
+                            "scorer/search-quality gates"
+                        )
+                    _gate_receipt = None
+            if _gate_receipt is not None:
+                if _calibrated_replay:
                     # CALIBRATED REPLAY LANE. Re-running the benchmark's own workload under its own
                     # receipt still gets the full narrow envelope: the exact Settings profile, roles,
                     # policy, sandbox, treatment depth, node budget and runtime-scope digest the
@@ -985,21 +998,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         )
                     _guard_calibrated_role_factory()
                     self._speculation_runtime_scope_sha256 = expected_runtime_scope
-                # ...on any other workload the receipt binds nothing to this run: it attests that the
-                # benchmark passes on this build, which is exactly what it measured. No runtime-scope
-                # pin is minted, because none was measured for this workload.
+                # ...on any other workload the receipt binds no ENVELOPE to this run: it attests that
+                # the benchmark passes on this build, which is exactly what it measured, so no
+                # runtime-scope pin is minted. Both lanes still carry the receipt's own identity into
+                # `run_started` — an attested run may only be resumed under the same attestation.
                 self._speculation_gate_receipt_digest = _gate_receipt["self_digest"]
                 self._speculation_implementation_digest = _gate_receipt["implementation_digest"]
             else:
-                # PRODUCT LANE — the operator's setting is the whole authority. What is still pinned
-                # durably is the run's own IDENTITY, so a resume cannot reinterpret a speculative
-                # prefix under different code: the implementation digest (same value the receipt lane
-                # pins), the policy scope, and a lane token that a receipt-authorized log can never
-                # match. `_require_pinned_speculation_receipt` compares all three on every re-entry.
-                self._speculation_implementation_digest = speculation_implementation_digest()
+                from looplab.search.speculation_quality import (
+                    speculation_product_authority_digest,
+                )
+                # PRODUCT LANE — the operator's setting is the whole authority. What stays pinned is
+                # the run's own search TREATMENT (selector, depth, policy scope) plus a lane token a
+                # receipt-authorized log can never match, so re-entry cannot reinterpret one lane's
+                # speculative prefix as the other's.
+                #
+                # It deliberately does NOT pin `speculation_implementation_digest`. That digest hashes
+                # every shipped Python file, so any source edit — a comment, a `pip install -U` —
+                # would make a half-finished Repo/GPU run permanently unresumable. It is an EVIDENCE
+                # identity for the lanes that claim evidence; this lane claims none, and the
+                # speculative prefix it writes is folded by the ordinary forward-compatible rules
+                # (invariant #5) like every other part of the log.
+                self._speculation_product_lane = True
                 self._speculation_gate_receipt_digest = speculation_product_authority_digest(
                     policy_scope=SPECULATION_POLICY_SCOPE,
-                    implementation_digest=self._speculation_implementation_digest,
                     task_kind=str(getattr(task, "kind", "") or ""),
                 )
             self._speculation_policy_scope = SPECULATION_POLICY_SCOPE
@@ -2186,14 +2208,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 "speculation_policy_scope": self._speculation_policy_scope,
             })
         elif self.card_driven_selection and self.speculation_depth:
-            # A runtime-scope pin is NOT required here: it only exists for the calibrated lane, whose
-            # evidence measured one exact Settings/policy/sandbox envelope. The product lane measured
-            # no such envelope, so minting a digest for it would be a pin that means nothing. The
-            # lane token below is what a resume compares, and it differs between the two lanes.
+            # Neither a runtime-scope pin nor an implementation digest is required here: both are
+            # EVIDENCE identities for the calibrated lane, which measured one exact
+            # Settings/policy/sandbox envelope under one exact source tree. The product lane measured
+            # no such envelope and claims no evidence, so minting either would be a pin that means
+            # nothing (and, for the source digest, one that any later edit would revoke). The lane
+            # token below is what a resume compares, and it differs between the two lanes.
             if (
                 not self._speculation_gate_admitted
                 or not self._speculation_gate_receipt_digest
-                or not self._speculation_implementation_digest
+                or not (self._speculation_implementation_digest
+                        or getattr(self, "_speculation_product_lane", False))
             ):
                 raise RuntimeError("positive Card speculation reached run start without gate evidence")
             values["speculation_gate_receipt_digest"] = (
@@ -2407,14 +2432,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             not isinstance(getattr(entry, "run_id", None), str)
             or not entry.run_id.strip()
             or entry.run_id != self.run_dir.name
-            or not recorded_impl
-            or not self._speculation_implementation_digest
-            or recorded_impl != self._speculation_implementation_digest
             or not self._speculation_gate_admitted
-            # EQUALITY, not "must be present": the calibrated lane pins a runtime scope and the
-            # product lane deliberately pins none, so an empty-vs-empty match is the product lane
-            # agreeing with itself, while either lane meeting the other's log still fails closed.
+            # EQUALITY, not "must be present", for BOTH evidence identities: the calibrated lanes pin
+            # an implementation digest and a runtime scope, the product lane deliberately pins
+            # neither (see `speculation_product_authority_digest` for why a whole-source digest must
+            # not gate a real run's resume). Empty-vs-empty is the product lane agreeing with itself;
+            # either lane meeting the other's log still fails closed, in both directions.
+            or recorded_impl != self._speculation_implementation_digest
             or recorded_runtime_scope != self._speculation_runtime_scope_sha256
+            or (not getattr(self, "_speculation_product_lane", False) and not recorded_impl)
             or getattr(entry, "card_driven_selection", False) is not True
             or type(recorded_depth) is not int
             or recorded_depth != self.speculation_depth

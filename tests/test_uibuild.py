@@ -35,6 +35,22 @@ def _mark_built(dist):
     (dist / "index.html").write_text("<!doctype html>", encoding="utf-8")
 
 
+def _staged_outdir(args, src):
+    """The directory a real build would emit into, read back off the argv it was given.
+
+    Builds no longer write into `dist`: uibuild passes Vite an `--outDir` under a sibling STAGING
+    directory and publishes that only after verifying it (tests/test_uibuild_staged_publish.py).
+    A fake `_run` that marks `dist` built directly would be exercising a path production no longer
+    takes, so every fake below emits where the real toolchain would."""
+    args = list(args)
+    return src / args[args.index("--outDir") + 1]
+
+
+def _is_build_argv(args):
+    """`npm run build` plus the staging flags — match the command, not its full flag list."""
+    return list(args)[:3] == ["npm", "run", "build"]
+
+
 # ----------------------------------------------------------------- path resolution
 
 
@@ -95,11 +111,16 @@ def test_existing_bundle_without_freshness_stamp_rebuilds_by_default(tmp_path, m
     monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
     monkeypatch.setattr(uibuild, "_has_npm", lambda: True)
     calls = []
-    monkeypatch.setattr(
-        uibuild, "_run", lambda args, *, cwd, log: calls.append(list(args)) or True)
+
+    def fake_run(args, *, cwd, log):
+        calls.append(list(args))
+        _mark_built(_staged_outdir(args, src))
+        return True
+
+    monkeypatch.setattr(uibuild, "_run", fake_run)
 
     assert uibuild.ensure_ui_built(log=lambda *_: None) is True
-    assert calls == [["npm", "run", "build"]]
+    assert [call[:3] for call in calls] == [["npm", "run", "build"]]
     assert uibuild._installed_build_digest(src / "dist") == uibuild._build_digest(src)
 
 
@@ -210,11 +231,16 @@ def test_source_change_invalidates_existing_bundle_stamp(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
     monkeypatch.setattr(uibuild, "_has_npm", lambda: True)
     calls = []
-    monkeypatch.setattr(
-        uibuild, "_run", lambda args, *, cwd, log: calls.append(list(args)) or True)
+
+    def fake_run(args, *, cwd, log):
+        calls.append(list(args))
+        _mark_built(_staged_outdir(args, src))
+        return True
+
+    monkeypatch.setattr(uibuild, "_run", fake_run)
 
     assert uibuild.ensure_ui_built(log=lambda *_: None) is True
-    assert calls == [["npm", "run", "build"]]
+    assert [call[:3] for call in calls] == [["npm", "run", "build"]]
     assert uibuild._installed_build_digest(src / "dist") == uibuild._build_digest(src)
 
 
@@ -248,16 +274,16 @@ def test_builds_when_missing(tmp_path, monkeypatch):
 
     def fake_run(args, *, cwd, log):
         calls.append(list(args))
-        if list(args) == ["npm", "run", "build"]:
-            _mark_built(src / "dist")  # simulate vite emitting the bundle
+        if _is_build_argv(args):
+            _mark_built(_staged_outdir(args, src))  # simulate vite emitting the staged bundle
         return True
 
     monkeypatch.setattr(uibuild, "_run", fake_run)
 
     assert uibuild.ensure_ui_built(log=lambda *_: None) is True
     assert ["npm", "ci"] in calls          # lockfile present -> reproducible install
-    assert ["npm", "run", "build"] in calls
-    assert uibuild.is_built(src / "dist")
+    assert any(_is_build_argv(call) for call in calls)
+    assert uibuild.is_built(src / "dist")  # the staged bundle was published onto the served name
 
 
 def test_no_lockfile_uses_npm_install(tmp_path, monkeypatch):
@@ -268,8 +294,8 @@ def test_no_lockfile_uses_npm_install(tmp_path, monkeypatch):
 
     def fake_run(args, *, cwd, log):
         calls.append(list(args))
-        if list(args) == ["npm", "run", "build"]:
-            _mark_built(src / "dist")
+        if _is_build_argv(args):
+            _mark_built(_staged_outdir(args, src))
         return True
 
     monkeypatch.setattr(uibuild, "_run", fake_run)
@@ -289,11 +315,16 @@ def test_force_rebuilds_even_when_present(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
     monkeypatch.setattr(uibuild, "_has_npm", lambda: True)
     calls = []
-    monkeypatch.setattr(uibuild, "_run",
-                        lambda args, *, cwd, log: calls.append(list(args)) or True)
+
+    def fake_run(args, *, cwd, log):
+        calls.append(list(args))
+        _mark_built(_staged_outdir(args, src))
+        return True
+
+    monkeypatch.setattr(uibuild, "_run", fake_run)
 
     assert uibuild.ensure_ui_built(force=True, log=lambda *_: None) is True
-    assert ["npm", "run", "build"] in calls
+    assert any(_is_build_argv(call) for call in calls)
     assert ["npm", "ci"] not in calls  # matching stamp -> no reinstall
 
 
@@ -306,11 +337,17 @@ def test_force_reinstalls_when_dependency_manifests_changed(tmp_path, monkeypatc
     monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
     monkeypatch.setattr(uibuild, "_has_npm", lambda: True)
     calls = []
-    monkeypatch.setattr(
-        uibuild, "_run", lambda args, *, cwd, log: calls.append(list(args)) or True)
+
+    def fake_run(args, *, cwd, log):
+        calls.append(list(args))
+        if _is_build_argv(args):
+            _mark_built(_staged_outdir(args, src))
+        return True
+
+    monkeypatch.setattr(uibuild, "_run", fake_run)
 
     assert uibuild.ensure_ui_built(force=True, log=lambda *_: None) is True
-    assert calls == [["npm", "ci"], ["npm", "run", "build"]]
+    assert [call[:3] for call in calls] == [["npm", "ci"], ["npm", "run", "build"]]
     assert uibuild._dependency_stamp_path(src).read_text(encoding="ascii").strip() == "deps-new"
 
 
@@ -349,13 +386,15 @@ def test_failed_forced_build_does_not_report_stale_dist_as_success(tmp_path, mon
 
     def failed_build(args, *, cwd, log):
         calls.append(list(args))
-        return list(args) != ["npm", "run", "build"]
+        return not _is_build_argv(args)
 
     monkeypatch.setattr(uibuild, "_run", failed_build)
 
     assert uibuild.ensure_ui_built(force=True, log=logs.append) is False
-    assert calls == [["npm", "run", "build"]]
-    assert (src / "dist" / "index.html").is_file(), "fixture keeps the previous bundle in place"
+    assert [call[:3] for call in calls] == [["npm", "run", "build"]]
+    # The build never wrote into `dist` at all — see tests/test_uibuild_staged_publish.py for the
+    # byte-identical guarantee this weaker presence check used to be a fixture artefact of.
+    assert (src / "dist" / "index.html").is_file()
     assert any("build failed" in message.lower() for message in logs)
 
 
@@ -370,7 +409,10 @@ def test_ui_command_refuses_stale_bundle_after_requested_build_failure(tmp_path,
     result = CliRunner().invoke(app, ["ui", "--run-root", str(tmp_path / "runs")])
 
     assert result.exit_code == 1
-    assert "refusing to serve a stale or partial bundle" in result.output
+    # The refusal is unchanged; what it says about the OLD bundle is not. A staged build cannot
+    # destroy it, so the message must send the operator to it instead of implying it is gone.
+    assert "refusing to serve it under a requested build" in result.output.lower()
+    assert "previous bundle was left untouched" in result.output
     assert "--no-build" in result.output
 
 
@@ -389,7 +431,10 @@ def test_ui_command_refuses_partial_bundle_left_by_failed_first_build(tmp_path, 
     result = CliRunner().invoke(app, ["ui", "--run-root", str(tmp_path / "runs")])
 
     assert result.exit_code == 1
-    assert "refusing to serve a stale or partial bundle" in result.output
+    # Nothing existed to preserve here, so this output was produced by no successful build. Staging
+    # makes it unreachable from uibuild itself; the branch stays fail-closed for anything else that
+    # writes into the dist directory.
+    assert "no successful build produced" in result.output
     assert "--no-build" in result.output
 
 

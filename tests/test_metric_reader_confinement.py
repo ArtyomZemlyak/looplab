@@ -22,7 +22,8 @@ import sys
 
 import pytest
 
-from looplab.runtime.command_eval import METRIC_READERS, _confined, read_metric
+from looplab.runtime.command_eval import (METRIC_READERS, READERS_REQUIRING_PATH, _confined,
+                                           read_metric)
 
 
 # ------------------------------------------------------------------ the guard itself
@@ -176,8 +177,15 @@ def test_the_submit_validator_reads_the_reader_table_not_a_local_copy():
     from looplab.adapters.repo_task import EvalSpec
 
     for kind in METRIC_READERS:
-        EvalSpec.model_validate({"command": ["python", "main.py"],
-                                 "metric": {"kind": kind}})
+        # A registered kind must be ACCEPTED — with its own required fields supplied. The `path`
+        # requirement is table-driven from the same module for the same reason the kind set is: a
+        # literal here would be a fourth parallel enumeration, which is the finding this file pins.
+        # (A `file_json` spec with no `path` reads no metric at all and is refused at submit; see
+        # tests/test_silent_misconfiguration.py.)
+        EvalSpec.model_validate(
+            {"command": ["python", "main.py"],
+             "metric": {"kind": kind,
+                        **({"path": "m.json"} if kind in READERS_REQUIRING_PATH else {})}})
     with pytest.raises(Exception) as exc:
         EvalSpec.model_validate({"command": ["python", "main.py"],
                                  "metric": {"kind": "max"}})
