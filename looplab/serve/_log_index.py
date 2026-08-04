@@ -12,9 +12,49 @@ one shared constructor guard, so a fix to either reaches both.
 """
 from __future__ import annotations
 
+import secrets
 import threading
 from collections import OrderedDict
 from contextlib import contextmanager
+from dataclasses import dataclass, field
+
+
+@dataclass
+class LogIndexCursor:
+    """Where an incremental index has read to, and the fences that decide whether it may resume.
+
+    Both indexes carried these five fields and both updated them the same way at the end of a scan
+    (doc 25 SC-04). The PAYLOAD each accumulates is genuinely different — decoded events with a
+    dense-seq rule vs byte-offset rows with a monotonic-seq rule, one probing content sentinels and
+    the other anchoring a prefix — so `_Index` and `_scan` stay per-module and subclass this.
+
+    `revision` must identify one concrete cached file revision, not merely the run's stable
+    first-event generation. Atomic repairs may deliberately preserve that first event while replacing
+    every later row. A random per-index epoch also fails old cursors closed after LRU eviction or a
+    server restart; the client recovers through an exact-generation tail read.
+    """
+
+    identity: tuple[int, int]
+    metadata: tuple[int, int]
+    revision: str = field(default_factory=lambda: secrets.token_hex(16))
+    observed_size: int = 0
+    valid_end: int = 0
+    torn_tail: bool = False
+
+    def mint_revision(self) -> None:
+        """Rotate the revision, failing every outstanding cursor closed."""
+        self.revision = secrets.token_hex(16)
+
+    def note_scanned(self, valid_end: int, snapshot_size: int, torn: bool) -> None:
+        """Record where the scan stopped and how far the file was read.
+
+        All three together: a `valid_end` advanced without its `observed_size` would let the next
+        poll skip the bytes between them, and a `torn_tail` left stale would stop the re-scan that a
+        writer filling reserved bytes in place depends on.
+        """
+        self.valid_end = valid_end
+        self.observed_size = snapshot_size
+        self.torn_tail = torn
 
 
 class PathLocks:

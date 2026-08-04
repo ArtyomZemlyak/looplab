@@ -15,7 +15,6 @@ import json
 import math
 import os
 import re
-import secrets
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -29,7 +28,7 @@ from looplab.core.atomicio import same_file_entry
 from looplab.events.eventstore import (
     MAX_EVENT_BATCH_BYTES, decode_event_record, is_event_batch_record,
     prefix_anchor_from_handle)
-from looplab.serve._log_index import PathLocks, validated_index_bound
+from looplab.serve._log_index import LogIndexCursor, PathLocks, validated_index_bound
 from looplab.serve.run_commands import run_generation_token
 
 
@@ -69,18 +68,14 @@ class _Row:
 
 
 @dataclass
-class _Index:
-    identity: tuple[int, int]
-    generation: Optional[str]
-    metadata: tuple[int, int]
-    # A cursor must identify this concrete cached file revision, not merely the run's stable
-    # first-event generation. Atomic repairs may deliberately preserve that first event while
-    # replacing every later row. A random per-index epoch also fails old cursors closed after LRU
-    # eviction or a server restart; the client recovers through an exact-generation tail read.
-    revision: str = field(default_factory=lambda: secrets.token_hex(16))
-    observed_size: int = 0
-    valid_end: int = 0
-    torn_tail: bool = False
+class _Index(LogIndexCursor):
+    """The timeline-pager payload over the shared byte cursor (doc 25 SC-04).
+
+    `generation` carries a default only because a dataclass cannot put a required field after the
+    base's defaulted ones; every construction site passes it explicitly.
+    """
+
+    generation: Optional[str] = None
     source_tail_limited: bool = False
     rows: list[_Row] = field(default_factory=list)
     # Cached separately from rows so an 11fps scrubber jump is O(log n), not an O(n) list rebuild.
@@ -235,8 +230,7 @@ def _scan(handle: BinaryIO, index: _Index, snapshot_size: int) -> None:
                 index.seq_row_indexes.append(row_index)
         else:
             index.valid_end = end
-    index.observed_size = snapshot_size
-    index.torn_tail = torn
+    index.note_scanned(index.valid_end, snapshot_size, torn)
     index.source_tail_limited = source_limited
 
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import secrets
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -33,7 +32,7 @@ from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import decode_event_record, event_sequence_continues
 from looplab.events.replay import fold
 from looplab.events.types import EV_CARD_DROPPED, EV_COMMAND_ACK, EV_RUN_ABORT, EV_RUN_FINISHED
-from looplab.serve._log_index import PathLocks, validated_index_bound
+from looplab.serve._log_index import LogIndexCursor, PathLocks, validated_index_bound
 from looplab.serve.protocol import CONTROL_EVENTS
 
 
@@ -62,14 +61,10 @@ class ObservationMetrics:
 
 
 @dataclass
-class _Index:
-    identity: tuple[int, int]
-    metadata: tuple[int, int]
+class _Index(LogIndexCursor):
+    """The command-observation payload over the shared byte cursor (doc 25 SC-04)."""
+
     probe_signature: bytes = b""
-    revision: str = field(default_factory=lambda: secrets.token_hex(16))
-    observed_size: int = 0
-    valid_end: int = 0
-    stopped_tail: bool = False
     event_chunks: tuple[tuple[Event, ...], ...] = ()
     event_count: int = 0
     latest_seq: int = -1
@@ -209,7 +204,7 @@ def _apply_delta(index: _Index, events: list[Event]) -> None:
     index.max_non_control_seq = max_non_control
     index.event_chunks = index.event_chunks + (tuple(events),)
     index.event_count += len(events)
-    index.revision = secrets.token_hex(16)
+    index.mint_revision()
     index.invalidate_materializations()
 
 
@@ -246,9 +241,7 @@ def _scan(handle: BinaryIO, index: _Index, snapshot_size: int,
             expected_seq = events[-1].seq + 1
         valid_end = end
 
-    index.valid_end = valid_end
-    index.observed_size = snapshot_size
-    index.stopped_tail = stopped
+    index.note_scanned(valid_end, snapshot_size, stopped)
     _apply_delta(index, delta)
     metrics.scan_calls += 1
     metrics.bytes_read += bytes_read
@@ -442,7 +435,7 @@ class CommandObservationIndex:
                     revision=index.revision,
                     observed_size=index.observed_size,
                     valid_end=index.valid_end,
-                    torn_tail=index.stopped_tail,
+                    torn_tail=index.torn_tail,
                     event_count=index.event_count,
                     latest_seq=index.latest_seq,
                     max_non_control_seq=index.max_non_control_seq,

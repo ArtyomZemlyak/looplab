@@ -2277,10 +2277,23 @@ the LRU-bound guard both constructors spelled identically down to the message. N
 its own definition any more, which `tests/test_serve_module_seams.py` asserts by scanning the
 package for a second `PathLocks` class.
 
-**The shared `_Index` lifecycle was NOT extracted, and the "~60% overlapping scaffolding" estimate
-does not survive a read.** Measured field by field, the two `_Index` dataclasses share five cursor
-fields (`identity`, `metadata`, `revision`, `observed_size`, `valid_end`) and diverge on everything
-else, including the fences the finding calls common:
+**The shared `_Index` lifecycle is extracted too** (2026-08-04): `LogIndexCursor` in the same module
+holds the six fields both dataclasses declared — `identity`, `metadata`, `revision`, `observed_size`,
+`valid_end`, `torn_tail` (`command_observation` spelled the last one `stopped_tail`) — plus the two
+operations both performed on them: `note_scanned(valid_end, snapshot_size, torn)` at the end of a
+scan and `mint_revision()` when a rewritten prefix must fail outstanding client cursors closed. Both
+`_Index` classes now subclass it and declare only their own payload. `generation` gains a `None`
+default purely because a dataclass cannot put a required field after the base's defaulted ones; every
+construction site passes it explicitly.
+
+`note_scanned` takes all three together on purpose: a `valid_end` advanced without its
+`observed_size` lets the next poll skip the bytes between them, and a stale `torn_tail` stops the
+re-scan a writer filling reserved bytes in place depends on. As three separate assignments that was
+three chances to update two of them.
+
+**What is still NOT merged is the SCAN, and the "~60% overlapping scaffolding" estimate does not
+survive a read.** Measured field by field, the two payloads diverge on everything the cursor does not
+cover, including the fences the finding calls common:
 
 * the rewrite fence is a bounded content PROBE in `command_observation` (`probe_signature`, hashed
   sentinel windows) and a prefix ANCHOR in `log_pages` (`anchor`, a two-part boundary fingerprint) —
@@ -2301,11 +2314,15 @@ harder to read than either original. The LRU registry dict is likewise left alon
 (`materialized_revision`, `folded_revision`), so folding the dict into a registry object would
 either narrow that lock or drag the memos along with it.
 
-Pinned by `tests/test_serve_module_seams.py`: the single-definition scan, both indexes using the
+Pinned by `tests/test_serve_module_seams.py` (29): the single-definition scan, both indexes using the
 shared registry and bound, the identical rejection table (including `bool`, which is an `int`
 subclass and would otherwise build a one-entry cache), one-lock-per-path exclusion, an unrelated path
-NOT stalling behind a held one, and the liveness rule that a referenced lock is never evicted.
-Teeth-tested with SR-12 against 12 breaks, all biting.
+NOT stalling behind a held one, the liveness rule that a referenced lock is never evicted, both
+payloads subclassing the cursor AND still owning a payload of their own (so the merge cannot quietly
+go too far), `note_scanned` moving all three fields, `mint_revision` rotating, and two fresh cursors
+not sharing a revision — a class-attribute default instead of `default_factory` would make every
+index in the process answer to the same client cursor. Teeth-tested with SR-12 against 17 breaks,
+all biting.
 
 #### SC-05 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
