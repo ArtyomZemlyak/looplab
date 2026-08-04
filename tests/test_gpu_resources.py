@@ -7,6 +7,7 @@ import types
 import anyio
 import pytest
 
+from looplab.engine.evaluate import EvaluateMixin
 from looplab.core.models import Idea, NodeStatus
 from looplab.engine.resources import (ResourceSchedulingMixin, cuda_visible_device_tokens,
                                       detect_gpu_inventory)
@@ -264,6 +265,13 @@ class _ReachedLaunch(Exception):
 
 class _EvalResetHost(_Pool):
     """Minimal host for the real `Engine._evaluate` up to the resource-pin guard."""
+
+    # `_evaluate` now asserts the speculative-selection invariant before anything can reach the
+    # sandbox (`engine/evaluate.py::_assert_speculative_selection_confirmed`). Borrow the REAL
+    # implementation rather than stubbing it: these tests drive the real `_evaluate`, so a no-op
+    # here would let the double diverge from production exactly where the invariant lives.
+    _assert_speculative_selection_confirmed = (
+        EvaluateMixin._assert_speculative_selection_confirmed)
 
     def __init__(self, *, parallel):
         super().__init__(ids=(0,), mem={0: 16_000}, parallel=parallel)

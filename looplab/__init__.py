@@ -113,6 +113,7 @@ _LAYOUT = {
     "fence": "core",           # the shared durable writer-fence protocol (doc 25 CO-01)
     "judge": "trust",         # one structured-judge invocation (doc 25 CT-09)
     "factory": "agents",      # the agent/role composition root (doc 25 RA-01)
+    "preflight": "agents",    # the pre-run LLM endpoint/credential reachability check
     "findings": "trust",      # one trust-finding shape + the gate namespaces (doc 25 CT-10)
     "fitness": "core",
     "eval_stages": "engine",
