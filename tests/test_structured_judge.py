@@ -180,17 +180,29 @@ def test_the_canonical_module_keeps_its_own_spec_identity():
 
 def test_no_source_file_still_points_at_the_retired_module_path():
     """A comment or import naming `trust/verify.py` sends a reader to a file that is not there —
-    which is the navigation cost CT-09 was about, reintroduced from the other side."""
+    the navigation cost CT-09 was about, reintroduced from the other side. It would keep WORKING
+    through the alias, so nothing else surfaces it.
+
+    Through `_source_scan.iter_sources` (doc 25 XP-10), not a hand-rolled `rglob`: the shared walk
+    is what keeps the decoding uniform (`utf-8-sig`, so a BOM'd file does not blow up the scan) and
+    skips `.ipynb_checkpoints`, whose stale autosaves would report the PAST as a present violation.
+    """
     from pathlib import Path
 
+    from tests._source_scan import iter_sources
+
     root = Path(__file__).resolve().parents[1]
-    offenders = []
-    for path in list((root / "looplab").rglob("*.py")) + list((root / "tests").rglob("*.py")):
-        if path.name == "__init__.py" and path.parent.name == "looplab":
-            continue                    # the alias map names the retired paths on purpose
-        if path.name in ("test_structured_judge.py", "test_package_layout.py"):
-            continue                    # these assert ABOUT the retired spellings
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if "trust/verify.py" in text or "trust.verify" in text or "trust import verify\n" in text:
-            offenders.append(str(path.relative_to(root)))
+    exempt = {
+        # the alias map names the retired paths on purpose — it is what makes them resolve
+        root / "looplab" / "__init__.py",
+        # these two assert ABOUT the retired spellings
+        root / "tests" / "test_structured_judge.py",
+        root / "tests" / "test_package_layout.py",
+    }
+    offenders = [
+        str(path.relative_to(root))
+        for path, text in [*iter_sources(), *iter_sources(root / "tests")]
+        if path not in exempt
+        and ("trust/verify.py" in text or "trust.verify" in text or "trust import verify\n" in text)
+    ]
     assert not offenders, f"still naming the retired module path: {offenders}"
