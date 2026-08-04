@@ -579,6 +579,41 @@ def _node_id_of(span: dict) -> Optional[int | str]:
     return attributes.get("node_id") if isinstance(attributes, dict) else None
 
 
+def trace_root_node_id(spans: list[dict], *, _normalized: bool = False) -> Optional[int | str]:
+    """The node a trace as a whole belongs to: the `node_id` of its ROOT span, or None.
+
+    ROOT means "parent not present in this trace" — a true `parent_id is None` span OR an ORPHAN
+    whose parent is missing. The orphan case is not exotic, it is the normal LIVE shape: an operation
+    span is written only on CLOSE and `create_node` closes at node END, so for the whole life of a
+    node its trace has no root on disk and every span in it is an orphan. `_tree` already defines
+    roots this way, which is why this delegates rather than re-deriving the rule.
+
+    The ONE definition, because two of them disagreed (doc 25 EV-10). `build_conversation` derived
+    attribution from its structural `root` (strictly `parent_id is None`) while `build_trace_view`
+    used `_tree`'s first root, and a comment asserted the two were "exactly" the same. On a trace
+    holding both an orphan and a later true root they pick DIFFERENT spans, so a span carrying no
+    node_id of its own was attributed to one node in the trace view and a different node in the
+    conversation — the same defect class the conversation comment already records once.
+
+    Never a full ancestor walk: that would bleed one node's id across a shared trace, which is the
+    thing per-span stamping exists to prevent.
+    """
+    forest = _tree(spans, _normalized=_normalized)
+    return _node_id_of(forest[0]) if forest else None
+
+
+def effective_node_id(span: dict, trace_root_nid: Optional[int | str]) -> Optional[int | str]:
+    """A span's own stamped node, else the node of its trace root. The attribution rule itself.
+
+    Per-span first, because `node_id` is stamped per span (`core/tracing._node_ctx`): one long-lived
+    Developer tool-loop trace serves several nodes in sequence, so keying the whole trace off its
+    root drops a node's turns from its own view and hands them to the root's node. The root fallback
+    is what keeps OLD root-only logs working, where children carry no id at all.
+    """
+    own = _node_id_of(span)
+    return own if own is not None else trace_root_nid
+
+
 def _rollup(spans: list[dict]) -> dict:
     """Aggregate generation/tool usage over a flat span list — the Langfuse-style trace totals
     (tokens + cost summed from every generation, plus observation counts). Returned per node and
@@ -912,19 +947,28 @@ def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spa
         # whose turns kept appending across role changes (the "Developer writes into the previous
         # Researcher block" bug). Grouping below never needs the root, only its ABSENCE handled.
         root = next((s for s in ss_sorted if s.get("parent_id") is None), None)
+        # `first` is this trace's STRUCTURAL representative — it names the stage below and stands in
+        # for a root that has not closed yet. It is deliberately NOT the attribution root: see the
+        # next comment.
         first = root or (ss_sorted[0] if ss_sorted else None)
-        trace_nid = _node_id_of(first) if first else None
-        # Attribute PER SPAN, exactly as `build_trace_view` does: a span's own stamped node_id, else
-        # its trace's root node (NOT a full ancestor walk, which would bleed one node's id over a
-        # shared trace). node_id is stamped per-span, so one long-lived Developer tool-loop trace can
-        # serve several nodes in sequence — keying the whole trace off its ROOT then dropped the
-        # target node's turns from its own conversation while handing them to the root's node, and
-        # the selection predicate (`_bounded_node_trace_tail` / `SpanIndex.node_tids`, both ANY-span)
-        # still counted them, so the loss surfaced as generic truncation rather than as the missing
-        # attribution it was. Root-only legacy logs are unaffected: their spans have no own id and
-        # all fall back to the same trace node.
+        # ATTRIBUTION comes from the shared rule, not from `root`. `root` is the STRUCTURAL container
+        # this function also uses below (`root_sid`, the band fallback), and it requires
+        # `parent_id is None`; the attribution root additionally accepts an ORPHAN, which is the
+        # normal live shape described above. Deriving attribution from `root` therefore selected a
+        # different span than `build_trace_view` did on any trace holding both — so the same span was
+        # attributed to two different nodes in the two views, under a comment asserting the two were
+        # "exactly" the same (doc 25 EV-10).
+        trace_nid = trace_root_node_id(ss_sorted, _normalized=True)
+        # Attribute PER SPAN: a span's own stamped node_id, else its trace's root node. node_id is
+        # stamped per-span, so one long-lived Developer tool-loop trace can serve several nodes in
+        # sequence — keying the whole trace off its ROOT then dropped the target node's turns from
+        # its own conversation while handing them to the root's node, and the selection predicate
+        # (`_bounded_node_trace_tail` / `SpanIndex.node_tids`, both ANY-span) still counted them, so
+        # the loss surfaced as generic truncation rather than as the missing attribution it was.
+        # Root-only legacy logs are unaffected: their spans have no own id and all fall back to the
+        # same trace node.
         mine = [s for s in ss_sorted
-                if (nid := (own if (own := _node_id_of(s)) is not None else trace_nid)) is not None
+                if (nid := effective_node_id(s, trace_nid)) is not None
                 and str(nid) == str(node_id)]
         if not mine:
             continue
@@ -1051,17 +1095,14 @@ def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False,
     # id. The root fallback (NOT a full ancestor walk, which would bleed one node's id onto the whole
     # of a shared trace) keeps OLD root-only logs working: a create_node trace whose children carry no
     # id attributes to its root's node. Spans with neither → `unscoped`.
-    root_nid: dict[str, Optional[int]] = {}
-    for tid, sps in by_trace.items():
-        f = _tree(sps, _normalized=True)
-        root_nid[tid] = _node_id_of(f[0]) if f else None
+    root_nid: dict[str, Optional[int]] = {
+        tid: trace_root_node_id(sps, _normalized=True) for tid, sps in by_trace.items()
+    }
 
     node_spans: dict[str, list[dict]] = defaultdict(list)
     unscoped_spans: list[dict] = []
     for s in spans:
-        nid = _node_id_of(s)
-        if nid is None:
-            nid = root_nid.get(s.get("trace_id"))
+        nid = effective_node_id(s, root_nid.get(s.get("trace_id")))
         (node_spans[str(nid)] if nid is not None else unscoped_spans).append(s)
     nodes: dict[str, list[dict]] = {
         nid: _tree(sps, _normalized=True) for nid, sps in node_spans.items()

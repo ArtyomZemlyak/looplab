@@ -1788,6 +1788,38 @@ legacy queued-before-create arm, and a source guard that the purge exists in exa
 
 *Recommendation:* Extract `effective_node_id(span, root_node_by_trace)` plus a shared `trace_root(spans)` helper into traceview and use them from build_trace_view, build_conversation, _bounded_node_trace_tail and span_index; add one equivalence test between the indexed and no-index selection paths.
 
+*Resolution (2026-08-04) — and the copies had ALREADY diverged. This was a live bug, not just duplication.*
+
+`trace_root_node_id(spans)` and `effective_node_id(span, trace_root_nid)` in `events/traceview.py`;
+`build_trace_view` and `build_conversation` both go through them.
+
+**The divergence, measured.** ROOT means "parent not present in this trace" — a true `parent_id is
+None` span OR an ORPHAN whose parent is missing. The orphan case is the normal LIVE shape, and
+`build_conversation`'s own comment says so: an operation span is written only on CLOSE and
+`create_node` closes at node END, so for the whole life of a node its trace has no root on disk and
+every span in it is an orphan. `build_trace_view` used `_tree(...)[0]`, whose root set INCLUDES
+orphans. `build_conversation` derived attribution from its structural `root`, which requires
+`parent_id is None` strictly. On a trace holding an orphan (node 7, earlier) and a later true root
+(node 9), those pick different spans — so a span carrying no `node_id` of its own was attributed to
+node 7 in the trace view and node 9 in the conversation. Same span, two nodes, depending on which
+view the operator opened. The comment above that line asserted the two behaved "exactly" the same.
+
+**What did NOT get merged, and why.** `build_conversation` keeps its structural `root`/`first`: they
+name the stage and stand in as a band container, and that role genuinely wants the strict
+`parent_id is None` span. Collapsing the two reintroduces the bug in one direction or breaks stage
+naming in the other — so the split is now explicit, with a comment at each, instead of one variable
+serving both meanings. `_bounded_node_trace_tail` and `SpanIndex.node_tids` are a different rule
+again (ANY span in the trace carrying the id — a deliberate selection SUPERSET, re-filtered per span
+afterwards) and are left alone; the finding's requested equivalence test covers them instead.
+
+Pinned by five tests in `tests/test_span_index.py` (35 → 40): the two views agree on an orphan-headed
+trace, per-span stamping still beats the trace root (asserted on the trace VIEW, because a lone tool
+span with no generation parent produces no conversation TURN and so cannot witness it there), the
+attribution root accepts an orphan while the structural root does not, an unstamped root leaves its
+node-idless spans `unscoped` rather than bleeding a later span's id onto them, a structural guard
+that neither view re-derives `_tree(...)[0]`, and the indexed-vs-unindexed equivalence the finding
+asked for — run on the orphan-headed shape that broke. Teeth-tested against 5 breaks, all biting.
+
 #### EV-11 · LOW · duplication · effort: small
 
 **Authoritative-provenance set spelled inline twice in _materialize_concept_deltas and again as a module constant**
