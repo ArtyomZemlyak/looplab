@@ -954,6 +954,46 @@ paid-retry exposure is the KNOWN GAP already documented on `_maybe_snapshot_conc
 
 *Recommendation:* Extract one `_commit_usage_delta(engine, usage_id, clean, persisted_cache, *, trust_success)` returning (durable, ack_ok) and have all three sites call it. The intentional verification differences become one explicit flag instead of three divergent code paths.
 
+*Resolution (2026-08-04) — one protocol, one flag; the three call sites are 60 lines of ladder shorter.*
+
+`_commit_usage_delta(engine, usage_id, clean, *, trust_success) -> (durable, acknowledged, error)`
+in `engine/costs.py`, over a small `_delta_is_durable(engine, usage_id, clean)`. All three sites —
+the accountant sink inside `bind_cost_accountants`, `_drain_outbox`, and the per-binding retry loop
+in `reconcile_cost_accountants` — now call it, and the per-site bookkeeping that legitimately
+differs (`_record` + `pending.pop` for the two binding-aware sites, `persisted[usage_id] = clean`
+for the two cache-carrying ones) stays at the call sites where a reader can see it.
+
+Three return values rather than the recommended two. `error` has to come back because the sink
+reports it to its caller and is the only site that can tell an append failure apart from the outbox
+failure it may have to report instead (`append_error = outbox_error or exc`); raising from the
+helper would have forced the other two sites into a try/except they do not otherwise need.
+
+The finding's real point was that "each copy makes slightly different verification choices, so the
+protocol's correctness argument must be re-derived per site". That difference is now ONE keyword,
+and it is stated at every call site — `trust_success` has no default, so a fourth caller cannot
+inherit a verification policy by omission. The argument for each value is local:
+
+* **the sink passes `True`** — it minted this id moments ago (`secrets.token_hex(16)`,
+  collision-guarded against `pending`), so no other telemetry can own the identity and a committed
+  append IS the durable winner. PERF-1: the rescan it skips was O(K²) across a run and ran for every
+  paid call while holding the engine cost lock.
+* **`_drain_outbox` passes `False`** — the record it is replaying was written by a PRIOR process, so
+  the first-writer argument is not the current process's to make.
+* **reconcile's retry passes `False`** — it is retrying an id whose first append already failed, so
+  a bare success is not the evidence it is in the sink.
+
+The half both branches share is the one that was easy to get wrong in triplicate: `EventStore.append`
+can COMMIT and then surface an error, so an exception is never evidence of absence — only a re-read
+is — and an unreadable log answers "not durable", because acknowledgement ERASES the outbox record a
+later process would retry from.
+
+Pinned by five tests in `tests/test_llm_cost_ledger.py` (23 → 27, one is a two-way parametrized
+case): a structural guard that exactly one call site trusts a bare success AND that it is the sink
+(both directions — the other two are asserted not to), commit-then-raise is durable under both flag
+values, a commit that never landed returns the append's own exception object, an unreadable log
+never acknowledges, and durable-but-unacknowledged stays distinguishable from a clean success.
+Teeth-tested against 6 breaks, all biting.
+
 #### EC-11 · LOW · flat-code · effort: small
 
 **Twin ~18-line parallelism validation loops and a 200-line knob if-chain in _apply_strategy**
