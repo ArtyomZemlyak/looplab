@@ -47,6 +47,18 @@ def _readable_repo_path(p: Path) -> bool:
     return ".git" not in p.parts and _pathsafe.readable(p)
 
 
+def _recursive_glob(pattern: str) -> str:
+    """Make a bare `*.py` recursive (doc 25 TO-06).
+
+    `repo_list` has always walked the whole tree (`retrieval.glob_files` is rglob-shaped), while
+    `RepoScoutTools._find_files` runs a pathlib glob where `*.py` matches ONE level. Handing the
+    pattern over unchanged would silently stop showing the Researcher every file in a subdirectory —
+    the loudest possible regression from a refactor that was supposed to change nothing.
+    """
+    pattern = pattern or "*"
+    return pattern if ("**" in pattern or "/" in pattern) else f"**/{pattern}"
+
+
 
 
 class RepoTools:
@@ -61,6 +73,17 @@ class RepoTools:
         self.roots = {(m["name"] or "."): Path(os.path.expanduser(os.path.expandvars(m["path"]))).resolve()
                       for m in mounts}
         self.max_bytes = max_bytes
+        # ONE walker, one secret gate, one budget (doc 25 TO-06). This class used to re-implement the
+        # walk, and its guards had drifted: no file budget at all, no skip-dirs, no per-file size
+        # skip, and a silent 40-hit cut where `_grep` clamps and says `(capped at N hits)`. The
+        # `<repo>/<path>` mount prefix stays OURS — `RepoScoutTools._resolve` knows `default_root`
+        # and CWD, not named mounts — so `_resolve` below still maps the model's path, and the scout
+        # is handed the ABSOLUTE result. `named_roots` makes its `_disp` render exactly the
+        # `<name>/<rel>` labels this tool has always emitted.
+        from looplab.tools.reposcout import RepoScoutTools
+        self._scout = RepoScoutTools(
+            list(self.roots.values()), default_root=self.roots.get("."),
+            named_roots=list(self.roots.items()))
 
     def specs(self) -> list[dict]:
         names = ", ".join(self.roots)
@@ -103,31 +126,24 @@ class RepoTools:
         try:
             if name == "repo_grep":
                 glob = args.get("glob") or "*"
-                out = []
-                for label, root in self.roots.items():
-                    pre = "" if label == "." else label + "/"
-                    for h in grep(args.get("pattern", ""), str(root), glob=glob, max_hits=20):
-                        hp = Path(h.path).resolve()
-                        if root != hp and root not in hp.parents:
-                            continue            # a hit outside the root (symlink) -> skip, not crash
-                        rp = hp.relative_to(root)
-                        if _pathsafe.looks_secret(rp):
-                            continue            # don't stream secret-file contents into the LLM prompt
-                        if not _readable_repo_path(rp):
-                            continue            # .git internals / binaries — see the helper's docstring
-                        out.append(f"{pre}{rp.as_posix()}:{h.lineno}: {h.line}")
-                return "\n".join(out[:40]) or "(no matches)"
+                # One block per mount, each carrying the scout's OWN receipt (`(capped at N hits)`,
+                # `(stopped after 4000 files…)`). Merging the hit lines into a single 40-line cut is
+                # what made an overflowing search read as an exhaustive one — a per-mount block keeps
+                # every partial answer labelled as partial. `skip_hidden=False`: `.github/*.yml` is
+                # ordinary repo source for a Researcher, and `.git` is pruned by `_SKIP_DIRS` anyway.
+                blocks = []
+                for root in self.roots.values():
+                    block = self._scout._grep(args.get("pattern", ""), str(root), glob, 40,
+                                              skip_hidden=False)
+                    if block and not block.startswith("(grep:"):
+                        blocks.append(block)
+                return "\n".join(blocks) or "(no matches)"
             if name == "repo_list":
                 repo = args.get("repo") or ("." if "." in self.roots else next(iter(self.roots)))
                 root = self.roots.get(repo)
                 if root is None:
                     return f"(no such repo: {repo}; have: {', '.join(self.roots)})"
-                glob = args.get("glob") or "*"
-                files = [Path(p).resolve().relative_to(root).as_posix()
-                         for p in glob_files(glob, str(root))
-                         if ".git" not in Path(p).parts
-                         and not _pathsafe.looks_secret(Path(p).resolve().relative_to(root))]
-                return "\n".join(sorted(files)[:100]) or "(empty)"
+                return self._scout._find_files(str(root), _recursive_glob(args.get("glob") or "*"))
             if name == "repo_read":
                 target = self._resolve(args.get("path", ""))
                 if target is None or not target.is_file():
@@ -140,23 +156,17 @@ class RepoTools:
                     except ValueError:
                         continue
                 if not _readable_repo_path(target):
+                    # KEPT here, not delegated: `_pathsafe.looks_secret` (and therefore the scout's
+                    # own gate) does not know `.git`, so a credentialed clone's `.git/config` would
+                    # pass every check the scout makes. See the module-level helper.
                     return (f"(refused: {target.name} is not a readable source file — "
                             "repository internals and binaries are not returned)")
-                # PAGINATE (reuse read_file's window logic) instead of a blind [:max_bytes] head — the
-                # same truncation that made the agent re-read the same file 8× on a >max_bytes file.
-                # Read the WHOLE file (bound = its own size) BEFORE paginating: read_file's default
-                # 200KB cap truncates silently, and _paginate derives its line count from the string it
-                # is handed — so for a >200KB file it would omit the '(more below)' marker and report
-                # EOF, telling the agent it read the whole file (a partial read misreported as complete,
-                # exactly the contract this pagination exists to keep). Mirrors RepoScoutTools._read_file
-                # (full-file read then paginate). (architecture-review M9)
-                from looplab.tools.reposcout import RepoScoutTools
-                try:
-                    full_bound = target.stat().st_size + 1
-                except OSError:
-                    full_bound = 200_000
-                return RepoScoutTools._paginate(read_file(str(target), max_bytes=full_bound),
-                                                args.get("start_line", 0), args.get("lines", 0))
+                # The scout owns the read: its size fence, its full-file-then-paginate contract (M9 —
+                # a blind [:max_bytes] head made the agent re-read the same file 8×, and a 200KB cut
+                # reported EOF for a larger file), and its `(more below — continue with start_line=N)`
+                # marker. It is handed the ABSOLUTE path `_resolve` already confined to a mount.
+                return self._scout._read_file(str(target), args.get("start_line", 0),
+                                              args.get("lines", 0))
         except Exception as e:  # noqa: BLE001 — tool errors are fed back to the model
             return f"(tool error: {e})"
         return f"(unknown tool: {name})"

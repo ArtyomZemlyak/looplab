@@ -489,7 +489,17 @@ class RepoScoutTools:
                          f"... ({'; '.join(notes)} — narrow `pattern`/`root` for the rest)"
                          if notes else "")
 
-    def _grep(self, pattern: str, root: str, glob: str, max_hits) -> str:
+    def _grep(self, pattern: str, root: str, glob: str, max_hits, *,
+              skip_hidden: bool = True) -> str:
+        """`skip_hidden=False` keeps DOTTED directories in the walk (doc 25 TO-06).
+
+        This tool's own audience wants them pruned — `~/` is one of its roots, where `.cache`/`.venv`
+        dwarf the repo. A repo Researcher grepping ONE mounted repo wants `.github/workflows/*.yml`,
+        which is ordinary source. `_SKIP_DIRS` (which holds `.git`) is pruned either way, so the
+        credential surface is closed in both modes. `_find_files` already yields hidden entries and
+        says so — this makes the divergence a parameter instead of a silent difference between the
+        two walkers.
+        """
         import os as _os
         import re as _re
         from fnmatch import fnmatch as _fnmatch
@@ -519,7 +529,8 @@ class RepoScoutTools:
                         return _fit_rows("", hits, f"(capped at {cap} hits)")
         scanned = 0
         for dp, dirs, files in _os.walk(base):
-            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
+            dirs[:] = [d for d in dirs
+                       if d not in _SKIP_DIRS and not (skip_hidden and d.startswith("."))]
             for fn in sorted(files):
                 if scanned >= 4000:                 # file budget so a huge repo can't stall the grep
                     return _fit_rows("", hits, "(stopped after 4000 files; narrow `root`/`glob`)")

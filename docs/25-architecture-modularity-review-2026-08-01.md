@@ -3878,9 +3878,12 @@ against 13 breaks, all biting.
 
 *Recommendation:* Make RepoTools a thin adapter over RepoScoutTools configured with named_roots (renaming the three tool names in specs and keeping its .git-internals filter), or delete it and expose RepoScoutTools with the repo_* aliases to the Researcher. One walker, one secret gate, one budget.
 
-*Evidence RE-VERIFIED (2026-08-04); measured, NOT started.* The gap the finding names is real and the
-drift is one-directional — `RepoScoutTools` is uniformly the stricter walker, so every difference is a
-guard `RepoTools` LACKS:
+*Resolution (2026-08-04):* Done — `RepoTools` composes a `RepoScoutTools` and no longer walks the
+tree itself. `repo_grep` → `_grep` per mount, `repo_list` → `_find_files`, `repo_read` →
+`_read_file`. One walker, one secret gate, one budget.
+
+The gap was real and the drift was one-directional — `RepoScoutTools` is uniformly the stricter
+walker, so every difference was a guard `RepoTools` LACKED:
 
 * `repo_grep` walks with no file budget at all, where `_grep` stops after 4 000 files and says so;
 * it descends `_SKIP_DIRS` and hidden directories that `_grep` prunes (`node_modules`, `.mypy_cache`,
@@ -3889,27 +3892,44 @@ guard `RepoTools` LACKS:
 * it caps at 40 hits with no receipt, where `_grep` clamps to ≤200 and emits `(capped at N hits)` —
   so an overflowing `repo_grep` reads as an exhaustive search.
 
-`repo_read` already delegates (`RepoScoutTools._paginate`), which is why the M9 full-file-then-paginate
-fix reached it.
+`repo_read` already delegated its pagination (`RepoScoutTools._paginate`), which is why the M9
+full-file-then-paginate fix reached it; it now delegates the whole read.
 
-Not started rather than half-applied, because the adapter is not the mechanical rename the
-recommendation implies and this is a path-restriction surface:
+This is a path-restriction surface, so three things had to survive the merge — each a place where
+"just delegate it" would have quietly changed what the Researcher can see, and each now pinned:
 
-1. **Glob semantics differ.** `RepoTools.repo_list` matches a bare `*.py` RECURSIVELY (its
-   `glob_files` walks); `RepoScoutTools._find_files` runs a pathlib glob, where `*.py` is one level.
-   An adapter has to rewrite the pattern (`*.py` → `**/*.py`) and get the "already recursive / already
-   has a separator" cases right, or the Researcher silently stops seeing subdirectory files.
-2. **Root selection differs.** `_grep` and `_find_files` each take ONE root; `repo_grep` searches
-   every mount, so the adapter loops and merges — including merging each root's own `(capped at N)`
-   receipt, or the merged answer claims completeness the parts did not.
-3. **`<repo>/<path>` resolution is RepoTools-only.** `RepoScoutTools._resolve` tries `default_root /
-   path` then CWD; it has no notion of a named-mount prefix, so `a/x.py` under mounts `a` and `b`
-   does not resolve through it. `RepoTools._resolve` has to survive the adapter, which is exactly the
-   piece a "thin adapter" was supposed to delete.
+1. **Glob semantics differ.** `repo_list` matches a bare `*.py` RECURSIVELY (`retrieval.glob_files`
+   is rglob-shaped); `_find_files` runs a pathlib glob where `*.py` is one level. `_recursive_glob`
+   rewrites `*.py` → `**/*.py` and leaves an already-recursive or path-scoped pattern alone —
+   handing the pattern over unchanged would silently stop showing every subdirectory file.
+2. **Root selection differs.** `_grep` takes ONE root; `repo_grep` searches every mount. It now
+   emits one BLOCK per mount, each carrying that mount's own `(capped at N hits)` /
+   `(stopped after 4000 files…)` receipt. Merging the hit lines into a single cut is precisely what
+   let a partial answer read as exhaustive, so a merged list would have re-created the defect while
+   removing the duplication.
+3. **`<repo>/<path>` resolution is RepoTools-only.** `RepoScoutTools._resolve` knows `default_root`
+   and CWD, not named mounts, so `a/x.py` under mounts `a` and `b` resolves only through
+   `RepoTools._resolve` — kept, and handed the scout an ABSOLUTE path it re-confines. `named_roots`
+   makes `_disp` render the same `<name>/<rel>` labels this tool always emitted.
 
-The existing tests pin the output SHAPE (`"model.py:1"`, `"a/x.py:1"`, `"pkg/util.py"`), and
-`_disp` with `named_roots=[(name, path), …]` does reproduce it — so the target design is sound; it is
-the three points above that make this a real change with its own verification rather than a rename.
+The `.git` filter is also deliberately NOT delegated: `_pathsafe.looks_secret` does not know `.git`,
+so the scout's own gate would hand back a credentialed clone's `.git/config`. `_readable_repo_path`
+still runs first, and the existing security regression test covers it.
+
+One difference became a PARAMETER rather than being swallowed. `_grep` pruned every dotted directory
+because one of the scout's roots is `~/`, where `.cache`/`.venv` dwarf the repo — but a Researcher
+grepping ONE mounted repo wants `.github/workflows`, which is ordinary source. `_grep` gained
+`skip_hidden=True` (default, so the scout's own contract is unchanged) and `RepoTools` passes
+`skip_hidden=False`. `.git` sits in `_SKIP_DIRS` and is pruned in both modes, so the credential
+surface is closed either way. This also makes the divergence `_find_files` already documented
+("HIDDEN entries are yielded") explicit instead of a silent difference between two walkers.
+
+Pinned by `tests/test_repo_reader_adapter.py` (17): no walker of its own, an overflowing grep
+carrying a receipt, noise dirs pruned, `.github` still visible, the scout still pruning dotted dirs
+BY DEFAULT, the glob-translation table, the named-mount round trip, per-mount receipts (one capped
+mount must not swallow another's complete answer), the `.git` refusal, escape refusal, and the M9
+page-marker contract. The seven pre-existing `test_repo_tools.py` tests are unchanged and still pass.
+Teeth-tested against 12 breaks, all biting.
 
 #### TO-07 · MEDIUM · inconsistency · effort: medium
 
