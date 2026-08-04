@@ -646,7 +646,64 @@ class RunTools:
         return "\n".join(parts)
 
 
-class SiblingRunTools:
+class ForeignRunReader:
+    """The plumbing every provider that reads ANOTHER run shares (doc 25 TO-05).
+
+    `SiblingRunTools`, `AllRunsTools` and `MachineRunsTools` each held the same composition (a
+    traversal-guarded, (size, mtime)-fingerprinted `RunStateCache` plus an inner `RunTools` bound
+    per read) and each spelled out the same delegation: resolve the run, refuse a miss, bind the
+    reader, fetch the source note, prefix it onto the inner tool's answer. The listing renderers
+    triplicated the PARTIAL-SOURCE receipt too, verbatim in two of them.
+
+    What is NOT here is what genuinely differs: each provider keeps its own `specs()`/`execute()`,
+    its own listing shape, and its own scope predicate (`_scope_denial`). Only the plumbing merges —
+    `SiblingRunTools`'s fail-closed same-task boundary is a policy decision and stays a policy hook.
+    """
+
+    def __init__(self, run_root, *, max_chars: int = 3500):
+        self.run_root = Path(run_root)
+        self.max_chars = max_chars
+        self._runs = RunStateCache(self.run_root)
+        self._reader = RunTools(max_chars=max_chars)
+
+    def _state(self, run_id: Optional[str]) -> Optional[RunState]:
+        return self._runs.state(run_id)
+
+    def _scope_denial(self, run_id: str, st: RunState) -> str:
+        """Non-empty = refuse this read, with the reason. Default: no scope filter at all.
+
+        A DIRECT read takes a model-supplied run_id, so the id itself is the authorization boundary —
+        never evidence that the listing tool was called first. A provider whose listing is scoped
+        must re-check that scope here, or a guessed id walks straight past it.
+        """
+        return ""
+
+    def _partial_suffix(self, run_id: str) -> str:
+        """The listing-row receipt. A truncated log folds into a state that LOOKS complete, so `best`
+        and the node count would silently describe a PREFIX of the run."""
+        return (" · PARTIAL SOURCE (read incomplete; later results unknown)"
+                if self._runs.partial(run_id) else "")
+
+    def _delegate(self, run_id, tool: str, args: dict, *, prefix: str = "",
+                  missing: str = "run") -> str:
+        """Bind the inner reader to `run_id`'s state and forward ONE `RunTools` tool.
+
+        Every per-node read carries the same source receipt the listing puts on its rows: without it
+        a node read from a truncated foreign log looks authoritative, which is exactly how a prefix
+        read becomes a "no later run beat this" absence claim.
+        """
+        st = self._state(run_id)
+        if st is None:
+            return f"(no such {missing}: {run_id!r})"
+        denial = self._scope_denial(str(run_id), st)
+        if denial:
+            return denial
+        self._reader.bind_state(st, None)
+        note = self._runs.source_note(run_id)
+        return (f"{note}\n" if note else "") + prefix + self._reader.execute(tool, args)
+
+
+class SiblingRunTools(ForeignRunReader):
     """Read-only view over SIBLING runs — other runs of the SAME task under the same run-root — so a
     run can build on what neighbouring runs already learned instead of rediscovering it. Same
     `.specs()`/`.execute()`/`bind_state()` shape as RunTools; every `execute` returns a string and
@@ -657,13 +714,20 @@ class SiblingRunTools:
     delegates to an internal `RunTools` bound to that sibling — the same reader the in-run agent uses."""
 
     def __init__(self, run_root, self_run_id: str = "", max_chars: int = 3500):
-        self.run_root = Path(run_root)
+        super().__init__(run_root, max_chars=max_chars)
         self.self_run_id = self_run_id
         self.task_id = ""
-        self.max_chars = max_chars
-        # Traversal-guarded, (size, mtime)-fingerprinted fold cache — shared with MachineRunsTools.
-        self._runs = RunStateCache(self.run_root)
-        self._reader = RunTools(max_chars=max_chars)
+
+    def _scope_denial(self, run_id: str, st: RunState) -> str:
+        """The same-task boundary, fail-CLOSED. Discovery is same-task scoped, but a DIRECT read takes
+        a model-supplied run_id, so a caller that guesses one must not read ANOTHER task through a
+        same-task tool. `not self.task_id` refuses for the same reason `_sibling_ids` does: with no
+        authoritative task id there is no boundary to check against, and `x and ...` skipped the guard
+        entirely in exactly that state. Cross-task reads are the deliberately-scoped MachineRunsTools.
+        """
+        if not self.task_id or getattr(st, "task_id", "") != self.task_id:
+            return f"(run {run_id!r} is not a sibling of task {self.task_id!r})"
+        return ""
 
     # The agent loop calls this each turn; we use it to learn our OWN run_id + task_id from the live
     # state (so we never list ourselves, and only surface same-task siblings) without extra wiring.
@@ -752,41 +816,17 @@ class SiblingRunTools:
             lines.append(f"{rid}: best={digest.fmt_num(best.metric) if best else '—'} "
                          f"({st.direction}) · {len(st.nodes)} nodes · {phase}"
                          + (f" · best=#{best.id}" if best else "")
-                         # A truncated log folds into a state that looks complete, so "best" and the
-                         # node count would silently describe a PREFIX of the run.
-                         + (" · PARTIAL SOURCE (read incomplete; later results unknown)"
-                            if self._runs.partial(rid) else ""))
+                         + self._partial_suffix(rid))
         head = f"{len(lines)} sibling run(s) of task {self.task_id or '?'}:"
         return head + "\n" + "\n".join(lines) if lines else "(no sibling runs of this task)"
 
     def _read(self, run_id, nid: int, trials_arg=None) -> str:
-        # Discovery is same-task scoped, but this DIRECT lookup takes a model-supplied run_id — so the id
-        # itself is the authorization boundary, not evidence that list_sibling_runs was used first. A caller
-        # that guesses a run_id must not read ANOTHER task through a same-task tool: enforce task_id equality
-        # here (and in `_code`). Cross-task reads are the separate, deliberately-scoped MachineRunsTools.
-        st = self._state(run_id)
-        if st is None:
-            return f"(no such sibling run: {run_id!r})"
-        # `not self.task_id` fails CLOSED for the same reason `_sibling_ids` does: with no authoritative
-        # task id there is no boundary to check the guessed run_id against, and `x and ...` skipped the
-        # guard entirely in exactly that state — the direct read is where a guessed id crosses tasks.
-        if not self.task_id or getattr(st, "task_id", "") != self.task_id:
-            return f"(run {run_id!r} is not a sibling of task {self.task_id!r})"
-        self._reader.bind_state(st, None)
-        note = self._runs.source_note(run_id)
-        return (f"{note}\n" if note else "") + f"run {run_id} · " + self._reader.execute(
-            "read_experiment", {"node_id": nid, "trials": trials_arg})
+        return self._delegate(run_id, "read_experiment", {"node_id": nid, "trials": trials_arg},
+                              prefix=f"run {run_id} · ", missing="sibling run")
 
     def _code(self, run_id, nid: int) -> str:
-        st = self._state(run_id)
-        if st is None:
-            return f"(no such sibling run: {run_id!r})"
-        if not self.task_id or getattr(st, "task_id", "") != self.task_id:  # same-task boundary (see `_read`)
-            return f"(run {run_id!r} is not a sibling of task {self.task_id!r})"
-        self._reader.bind_state(st, None)
-        note = self._runs.source_note(run_id)   # same receipt `_read` carries — see `source_note`
-        return ((f"{note}\n" if note else "") + f"# from run {run_id}\n"
-                + self._reader.execute("read_code", {"node_id": nid}))
+        return self._delegate(run_id, "read_code", {"node_id": nid},
+                              prefix=f"# from run {run_id}\n", missing="sibling run")
 
     def _analogous(self, args: dict) -> str:
         target = args.get("params")
@@ -818,7 +858,7 @@ class SiblingRunTools:
             for d, rid, n in scored[:k])
 
 
-class AllRunsTools:
+class AllRunsTools(ForeignRunReader):
     """Read-only view over EVERY run on this machine — ACROSS ALL TASKS, not just same-task siblings —
     so the Developer/Researcher can read the code + result of ANY past experiment anywhere when it
     wants to reuse or learn from an approach. Where `SiblingRunTools` restricts to the current task,
@@ -830,11 +870,8 @@ class AllRunsTools:
     it — the SAME reader the in-run agent uses, so the output format is identical."""
 
     def __init__(self, run_root, self_run_id: str = "", max_chars: int = 3500):
-        self.run_root = Path(run_root)
+        super().__init__(run_root, max_chars=max_chars)
         self.self_run_id = self_run_id
-        self.max_chars = max_chars
-        self._runs = RunStateCache(self.run_root)   # traversal-guarded, (size,mtime)-fingerprinted
-        self._reader = RunTools(max_chars=max_chars)
 
     def bind_state(self, state: Optional[RunState] = None, parent=None) -> None:
         # Learn our OWN run_id so we never list/read ourselves (own experiments already come via RunTools).
@@ -874,9 +911,6 @@ class AllRunsTools:
             return f"(tool error: {e})"
 
     # --- internals -----------------------------------------------------------
-    def _state(self, run_id: Optional[str]) -> Optional[RunState]:
-        return self._runs.state(run_id)
-
     def _all_ids(self) -> list[str]:
         """Every run id under run_root EXCEPT self (own experiments already reachable via RunTools)."""
         return [rid for rid in self._runs.run_ids() if rid != self.self_run_id]
@@ -892,31 +926,19 @@ class AllRunsTools:
             lines.append(f"{rid} [{st.task_id or '?'}]: best={digest.fmt_num(best.metric) if best else '—'} "
                          f"({st.direction}) · {len(st.nodes)} nodes · {phase}"
                          + (f" · best=#{best.id}" if best else "")
-                         + (" · PARTIAL SOURCE (read incomplete; later results unknown)"
-                            if self._runs.partial(rid) else ""))
+                         + self._partial_suffix(rid))
         return (f"{len(lines)} run(s) on this machine (across all tasks):\n" + "\n".join(lines)
                 ) if lines else "(no other runs on this machine)"
 
-    # Every per-node read here carries the same PARTIAL-SOURCE receipt `_list_runs` puts on the
-    # listing: without it a node read from a truncated foreign log looks authoritative, which is
-    # exactly how a prefix read becomes an "no later run beat this" absence claim.
+    # No `_scope_denial` override: this provider deliberately does NOT filter by task — it gives the
+    # agent the capability and lets the agent decide when a foreign run is relevant.
     def _code(self, run_id, nid: int) -> str:
-        st = self._state(run_id)
-        if st is None:
-            return f"(no such run: {run_id!r})"
-        self._reader.bind_state(st, None)
-        note = self._runs.source_note(run_id)
-        return ((f"{note}\n" if note else "") + f"# from run {run_id}\n"
-                + self._reader.execute("read_code", {"node_id": nid}))
+        return self._delegate(run_id, "read_code", {"node_id": nid},
+                              prefix=f"# from run {run_id}\n")
 
     def _read(self, run_id, nid: int, trials_arg=None) -> str:
-        st = self._state(run_id)
-        if st is None:
-            return f"(no such run: {run_id!r})"
-        self._reader.bind_state(st, None)
-        note = self._runs.source_note(run_id)
-        return ((f"{note}\n" if note else "") + f"run {run_id} · " + self._reader.execute(
-            "read_experiment", {"node_id": nid, "trials": trials_arg}))
+        return self._delegate(run_id, "read_experiment", {"node_id": nid, "trials": trials_arg},
+                              prefix=f"run {run_id} · ")
 
 
 class DataTools:

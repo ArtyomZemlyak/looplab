@@ -3840,6 +3840,34 @@ permission, the generation captured after the approval, and one provider re-inli
 
 *Recommendation:* Extract a small base/mixin (e.g. `_ForeignRunReader` holding the cache+reader, `_delegate(run_id, tool, args, prefix)` and one `_run_line(...)` renderer with optional live/task columns); each class keeps only its scope predicate and specs. The task-boundary semantics stay where they are — only the plumbing merges.
 
+*Resolution (2026-08-04):* `run_tools.py::ForeignRunReader` is the base; all three providers inherit
+it. It owns the composition (`RunStateCache` + the inner `RunTools`), `_state`, `_delegate(run_id,
+tool, args, *, prefix, missing)` and `_partial_suffix(run_id)`. Six methods across the three classes
+(`SiblingRunTools._read/_code`, `AllRunsTools._read/_code`,
+`MachineRunsTools._read_experiment/_read_logs`) are now two lines each, and the PARTIAL-SOURCE receipt
+has exactly one spelling in the tree.
+
+The task boundary stayed where it is, as a policy hook: `_scope_denial(run_id, st)` defaults to no
+filter and `SiblingRunTools` overrides it with the fail-closed same-task rule. `_delegate` consults it
+BEFORE binding the reader, which matters — a denial issued after the delegate would already have read
+the foreign run's text.
+
+**The `_list_runs` renderers were NOT merged**, and the finding's "identical receipt string" is the
+only part of them that actually was identical. The three listings answer different questions and carry
+different columns: siblings render task-scoped rows with a `best=#id` pointer, `AllRunsTools` adds the
+`[task]` column its cross-task audience needs, and `MachineRunsTools` renders from its `summaries()`
+projection (shared with the assistant's @run-mention expansion) with a LIVE column and a goal excerpt.
+A single renderer with optional live/task/goal columns and three header strings would be a
+three-branch function serving three callers — so only the receipt moved.
+
+Pinned by `tests/test_foreign_run_reader.py` (21): the shared composition, the miss wording per
+surface, the source receipt present on a truncated read and ABSENT on a complete one (a receipt on
+every read trains the model to ignore it), one spelling of the listing receipt across all three,
+the sibling boundary on the DIRECT read, the unbound reader failing closed, the two cross-task readers
+deliberately applying none, the scope hook running before any content is read, and structural guards
+that no provider re-spells the bind-and-receipt dance or re-declares its own cache. Teeth-tested
+against 13 breaks, all biting.
+
 #### TO-06 · MEDIUM · mergeable-entities · effort: medium
 
 **Two parallel read-only repo-browsing providers: RepoTools (knowledge_tools) vs RepoScoutTools**

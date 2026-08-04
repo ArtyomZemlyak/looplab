@@ -23,9 +23,8 @@ from typing import Callable, Optional
 
 from looplab.events import digest
 from looplab.core.models import RunState
-from looplab.tools.run_tools import RunTools
+from looplab.tools.run_tools import ForeignRunReader
 from looplab.tools._base import RESULT_CAP, fn_spec
-from looplab.tools._runcache import RunStateCache
 
 # A trace is a whole conversation, but the shared tool loop HEAD-truncates every tool result to
 # RESULT_CAP chars (agent.drive_tool_loop), so a larger budget would be silently cut there (losing
@@ -650,17 +649,17 @@ class RunLifecycleFns:
     run_config_write_lock: Callable
 
 
-class MachineRunsTools:
-    """Read-only view over ALL runs under the run-root (for the assistant)."""
+class MachineRunsTools(ForeignRunReader):
+    """Read-only view over ALL runs under the run-root (for the assistant).
+
+    Cache/reader composition and the delegate-with-receipt shape come from `ForeignRunReader`
+    (doc 25 TO-05); this provider adds the LIVENESS column and the trace projection, and — like
+    `AllRunsTools` — deliberately applies no task scope."""
 
     def __init__(self, run_root, alive_fn: Optional[Callable[[Path], bool]] = None,
                  max_chars: int = 3500):
-        self.run_root = Path(run_root)
+        super().__init__(run_root, max_chars=max_chars)
         self.alive_fn = alive_fn
-        self.max_chars = max_chars
-        # Traversal-guarded, (size, mtime)-fingerprinted fold cache — shared with SiblingRunTools.
-        self._runs = RunStateCache(self.run_root)
-        self._reader = RunTools(max_chars=max_chars)
 
     # MachineRunsTools is not bound to a single run; accept bind_state for CompositeTools symmetry (no-op).
     def bind_state(self, state=None, parent=None) -> None:
@@ -763,9 +762,6 @@ class MachineRunsTools:
     def _safe_dir(self, run_id: Optional[str]) -> Optional[Path]:
         return self._runs.safe_dir(run_id)
 
-    def _state(self, run_id: Optional[str]) -> Optional[RunState]:
-        return self._runs.state(run_id)
-
     def _alive(self, run_id: str) -> bool:
         if self.alive_fn is None:
             return False
@@ -785,10 +781,7 @@ class MachineRunsTools:
             best = digest.fmt_num(r["best_metric"]) if r["best_metric"] is not None else "—"
             lines.append(f"{r['run_id']}: {str(r['goal'])[:70]} · best={best} ({r['direction']}) · "
                          f"{r['nodes']} nodes · {r['phase']}{live}"
-                         # A truncated log folds into a state that looks complete, so `best` and the
-                         # node count would silently describe a PREFIX of the run.
-                         + (" · PARTIAL SOURCE (read incomplete; later results unknown)"
-                            if self._runs.partial(r["run_id"]) else ""))
+                         + self._partial_suffix(r["run_id"]))
         return f"{len(lines)} run(s):\n" + "\n".join(lines)
 
     def _read_run(self, run_id, sort, limit) -> str:
@@ -808,22 +801,11 @@ class MachineRunsTools:
         return (f"{note}\n" if note else "") + head + "\n" + listing
 
     def _read_experiment(self, run_id, nid: int, trials_arg=None) -> str:
-        st = self._state(run_id)
-        if st is None:
-            return f"(no such run: {run_id!r})"
-        note = self._runs.source_note(run_id)
-        self._reader.bind_state(st, None)
-        return (f"{note}\n" if note else "") + f"run {run_id} · " + self._reader.execute(
-            "read_experiment", {"node_id": nid, "trials": trials_arg})
+        return self._delegate(run_id, "read_experiment", {"node_id": nid, "trials": trials_arg},
+                              prefix=f"run {run_id} · ")
 
     def _read_logs(self, run_id, nid: int) -> str:
-        st = self._state(run_id)
-        if st is None:
-            return f"(no such run: {run_id!r})"
-        note = self._runs.source_note(run_id)   # a truncated log must not read as complete
-        self._reader.bind_state(st, None)
-        return ((f"{note}\n" if note else "") + f"run {run_id} · "
-                + self._reader.execute("read_logs", {"node_id": nid}))
+        return self._delegate(run_id, "read_logs", {"node_id": nid}, prefix=f"run {run_id} · ")
 
     def _read_trace(self, run_id, nid: int, stage: Optional[str] = None) -> str:
         """The node's agent trace as a linear, de-duplicated conversation. Reuses the SAME
