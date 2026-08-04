@@ -103,11 +103,18 @@ def test_the_quality_reader_no_longer_reaches_UP_into_the_engine_for_the_profile
         "speculation_quality imports the orchestrator again")
 
 
-def test_the_search_to_engine_edge_is_down_to_the_one_named_exception():
-    """Kept explicit rather than assumed: the last `search` → `engine` import is
-    `engine.finalize.incomplete_finalize_scope`, which is a different move (a cluster of event-log
-    helpers with five serve consumers) and is recorded as still open under SE-07. When it goes, this
-    test is what says the layer is finally clean."""
+def test_the_search_to_engine_edge_is_gone():
+    """This asserted exactly ONE remaining `search` → `engine` import and named it: the cluster of
+    event-log helpers behind `engine.finalize.incomplete_finalize_scope`, recorded as still open
+    under SE-07. Its own note said "when it goes, this test is what says the layer is finally
+    clean". It has gone (doc 25 XP-07) — the five helpers moved DOWN to `events/finalize_scope.py`,
+    which `search` may import, with `engine/finalize.py` keeping re-exports for its serve consumers.
+
+    So this now asserts ZERO, and is kept rather than deleted: a count of one was the thing worth
+    watching while the edge existed, and a count of zero is the thing worth watching now. Nothing
+    else in the suite fails if a NEW upward import appears in a `search` module — the sibling guard
+    in `test_speculation_quality_gate` covers only `speculation_quality.py`, and
+    `test_agents_search_direction` covers the other direction."""
     from pathlib import Path
 
     search = Path(__file__).resolve().parents[1] / "looplab" / "search"
@@ -116,8 +123,7 @@ def test_the_search_to_engine_edge_is_down_to_the_one_named_exception():
         for path in search.glob("*.py")
         for index, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1)
         if "looplab.engine" in line and line.lstrip().startswith(("from ", "import ")))
-    assert len(edges) == 1, f"search -> engine imports changed: {edges}"
-    assert edges[0].startswith("speculation_quality.py:")
+    assert not edges, f"search reaches up into the engine again: {edges}"
 
 
 # ------------------------------------------------------------------ the profile stays derivable
