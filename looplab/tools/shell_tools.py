@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from looplab.core import _pathsafe
-from looplab.tools._base import RESULT_CAP, fn_spec
+from looplab.tools._base import RESULT_CAP, clip, fn_spec
 from looplab.tools.perm_modes import (authorize, decide_action, default_approver,
                                       refusal_for)
 
@@ -60,8 +60,8 @@ from looplab.core.gitenv import (_GIT_CRED_KEY_MARKERS, _GIT_IDENTITY,  # noqa: 
 
 
 def _tail(s: str, n: int) -> str:
-    s = s or ""
-    return s if len(s) <= n else "…(truncated)…\n" + s[-n:]
+    """Keep the END of a command stream — that is where the failure is (doc 25 TO-08)."""
+    return clip(s or "", n, keep="tail", note="…(truncated)…\n")
 
 
 class ShellTools:

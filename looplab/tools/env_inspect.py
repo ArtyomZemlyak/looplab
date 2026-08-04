@@ -18,7 +18,7 @@ import inspect
 import io
 from contextlib import redirect_stderr, redirect_stdout
 
-from looplab.tools._base import RESULT_CAP, fn_spec
+from looplab.tools._base import RESULT_CAP, clip, fn_spec
 
 # Per-result char cap. The agent loop hard-caps every tool result at RESULT_CAP chars
 # (agents/agent.py drive_tool_loop) and drops the TAIL past it — so a bigger provider-side cap isn't
@@ -348,11 +348,7 @@ class EnvInspectTools:
         half-line shows. The -400 headroom keeps clamped-text + marker under the loop cap. `note`
         parameterizes the marker text so py_api reuses the same line-boundary cut with its own
         advice (the grep wording is the default — its callers stay byte-identical)."""
-        if len(text) <= budget:
-            return text
-        cut = text[:budget]
-        cut = cut[: cut.rfind("\n")] if "\n" in cut else cut
-        return cut + "\n" + note
+        return clip(text, budget, keep="head", line_boundary=True, note="\n" + note)
 
 
 def _resolve(dotted: str):

@@ -3911,6 +3911,46 @@ matches its own explanation. Teeth-tested against 15 breaks, all biting.
 
 *Recommendation:* Add two shared helpers next to RESULT_CAP in core/context_budget or _base.py — `fit_rows(header, rows, receipt, cap)` (already exists as reposcout._fit_rows; promote it) and `clip(text, cap, *, keep='head'|'tail', note)` — and migrate the row-dropping and single-string sites onto them, keeping per-site marker wording as a parameter.
 
+*Resolution (2026-08-04):* Done as recommended. `tools/_base.py` (beside the `RESULT_CAP` re-export)
+now holds `fit_rows(header, rows, *, receipt, cap, omitted)` and
+`clip(text, cap, *, keep, note, reserve, line_boundary)`. Migrated: `reposcout._fit_rows`,
+`memory_tools._bounded_result`, `run_tools._clip`, `shell_tools._tail`, `mcp_tools._clip`,
+`env_inspect._clamp` — each keeps its own thin named wrapper, so its call sites and its per-site
+comment trail are untouched and the marker wording stays where the reader expects it.
+
+`header` accepts a string (`reposcout` owns its trailing newline) or a sequence of lines
+(`memory_tools` builds a header list), which was the only structural difference between the two
+row-droppers.
+
+`clip`'s four options are four REAL differences, not knobs added to force a merge, and the docstring
+says which caller each is for:
+
+* `keep` — a log or command stream is read tail-first (the end holds the error and the final metric
+  line), so its marker goes in FRONT; a reply or listing is head-kept.
+* `line_boundary` — `env_inspect` cuts back to the last newline, because a half-hit reads as a
+  complete one.
+* `reserve` — whether the marker is charged AGAINST the cap. Most callers pass a cap that already
+  carries headroom; `mcp_tools` is handed the loop's RAW `RESULT_CAP` and must reserve, since a reply
+  landing EXACTLY on the cap is one the loop's own marker also skips — a cut answer
+  byte-indistinguishable from a complete one.
+* `note` — the per-site receipt, formatted with `{n}` = characters dropped.
+
+One behaviour was made uniform rather than preserved: the dropped-character count now describes the
+RESULT, not the intended budget. A line-boundary cut gives back more than `cap - budget`, and
+`env_inspect`'s marker carried no count at all, so nothing regressed — but a future caller that asks
+for `{n}` on a boundary cut now gets the true number.
+
+Pinned by `tests/test_bounded_tool_results.py` (26): the fit/overflow/receipt-survival table, the
+marker being SIZED before the fit is decided (a marker appended after is exactly what pushes a
+receipt past the cap), a cap too small for any row still answering honestly, both clip directions,
+the line-boundary rule in both directions, `reserve` on and off, the dropped-count semantics, and
+per-provider guards that each wrapper delegates and has no fitting loop of its own. `memory_tools`
+gets a BEHAVIOURAL guard instead of a structural one — it keeps a `[RESULT_TRUNCATED]` backstop, so a
+reader that stopped fitting rows would fall through to a blunt mid-row cut while a structural check
+still saw the shared call on the way past. A separate guard re-derives that every provider's budget
+is still `RESULT_CAP - <headroom>` rather than a free-standing constant, which is the other half of
+the finding. Teeth-tested against 18 breaks, all biting.
+
 #### TO-09 · MEDIUM · layering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
 **cross_run_tools/concept_tools depend on ~10 underscore-private engine helpers via lazy imports, so an engine rename fails silently at runtime**

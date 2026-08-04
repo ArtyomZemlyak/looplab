@@ -16,7 +16,7 @@ from typing import Optional
 
 from looplab.events import digest
 from looplab.core.models import NodeStatus, RunState
-from looplab.tools._base import RESULT_CAP, fn_spec
+from looplab.tools._base import RESULT_CAP, clip, fn_spec
 from looplab.tools._runcache import RunStateCache
 
 
@@ -33,10 +33,8 @@ def _is_number(v: str) -> bool:
 
 def _clip(text: str, n: int) -> str:
     """Return the LAST `n` chars of `text` (logs are read tail-first — the end is where the error and
-    the final metric line live), flagging how much was dropped off the front."""
-    if len(text) <= n:
-        return text
-    return f"…[+{len(text) - n} earlier chars truncated]\n" + text[-n:]
+    the final metric line live), flagging how much was dropped off the front (doc 25 TO-08)."""
+    return clip(text, n, keep="tail", note="…[+{n} earlier chars truncated]\n")
 
 
 

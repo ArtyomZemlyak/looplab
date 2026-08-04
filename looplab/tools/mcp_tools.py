@@ -48,10 +48,10 @@ def _clip(reply: str, cap: int) -> str:
     `_cap_tool_result` — which only marks results LONGER than the cap — added none either: a cut
     reply was byte-indistinguishable from a complete one, and the model acted on a silently
     amputated answer."""
-    if len(reply) <= cap:
-        return reply
-    keep = max(0, cap - _TRUNC_HEADROOM)
-    return reply[:keep] + _TRUNC_NOTE.format(n=len(reply) - keep)
+    from looplab.tools._base import clip
+    # `reserve` (unlike the log/stream clippers) because `cap` here is the loop's RAW RESULT_CAP with
+    # no headroom of its own — see `_base.clip` (doc 25 TO-08).
+    return clip(reply, cap, keep="head", note=_TRUNC_NOTE, reserve=_TRUNC_HEADROOM)
 
 
 def load_config() -> dict:

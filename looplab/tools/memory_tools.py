@@ -11,7 +11,7 @@ import logging
 import math
 from pathlib import Path
 
-from looplab.tools._base import RESULT_CAP, fn_spec
+from looplab.tools._base import RESULT_CAP, fit_rows, fn_spec
 from looplab.core.redact import redact_persisted_text
 from looplab.trust.cross_run import LessonScope, scope_terms
 _LOG = logging.getLogger(__name__)
@@ -49,26 +49,15 @@ def _safe_text(value, max_chars: int) -> str:
 
 
 def _bounded_result(header: list[str], lines: list[str]) -> str:
-    """Fit complete rows under the shared tool cap and report every result-row omission."""
-    rendered = list(header)
-    reserve = 100
-    used = sum(len(part) for part in rendered) + max(0, len(rendered) - 1)
-    included = 0
-    for line in lines:
-        if used + 1 + len(line) > RESULT_CAP - reserve:
-            break
-        rendered.append(line)
-        used += 1 + len(line)
-        included += 1
-    omitted = len(lines) - included
-    if omitted:
-        rendered.append(
-            f"[RESULT_WINDOW: {omitted} additional matching row(s) omitted by the "
-            f"{RESULT_CAP}-character tool budget.]"
-        )
-    result = "\n".join(rendered)
-    # Constants above leave ample marker room.  Keep the never-oversize invariant defensive if a
-    # future header changes without updating the reservation.
+    """Fit complete rows under the shared tool cap and report every result-row omission.
+
+    `_base.fit_rows` with this module's own receipt wording (doc 25 TO-08); the never-oversize
+    invariant stays defensive here because a future header change must not be able to push one of
+    these results past the loop cap without a visible marker.
+    """
+    result = fit_rows(header, lines, cap=RESULT_CAP,
+                      omitted="[RESULT_WINDOW: {n} additional matching row(s) omitted by the "
+                              f"{RESULT_CAP}-character tool budget.]")
     return result if len(result) <= RESULT_CAP else result[:RESULT_CAP - 21] + "\n[RESULT_TRUNCATED]"
 
 

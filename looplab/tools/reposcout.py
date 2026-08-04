@@ -23,7 +23,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from looplab.core import _pathsafe
-from looplab.tools._base import RESULT_CAP, fn_spec   # shared schema builder + the loop's result cap
+from looplab.tools._base import (   # shared schema builder, bounded renderers, the loop's cap
+    RESULT_CAP, fit_rows, fn_spec)
 
 # Path/secret guards now live in _pathsafe (shared with the write/shell/git providers so every tool
 # enforces the same rules). Bound under the historical private names because this module's own call
@@ -52,29 +53,12 @@ REFUSAL_PREFIXES = (
 
 
 def _fit_rows(header: str, rows: list[str], receipt: str = "") -> str:
-    """Assemble `header` + `rows` + a trailing `receipt` so the whole result fits under RESULT_CAP.
+    """`_base.fit_rows` with this module's header shape (doc 25 TO-08).
 
-    The agent loop cuts an over-cap tool result from the HEAD, which silently eats whatever is at the
-    END — and for these listings the end is exactly the receipt that says the result is partial
-    ("… (+K more)", "capped at N hits"). `read_file` already sizes its page to avoid that; list_dir,
-    find_files and grep did not, so a long listing arrived looking complete. Drop ROWS instead, and
-    say in the receipt how many the cap itself removed.
+    `read_file` already sizes its page so the loop's head-cut cannot eat the trailing receipt;
+    list_dir, find_files and grep did not, so a long listing arrived looking complete.
     """
-    receipt_line = f"\n{receipt}" if receipt else ""
-    body = "\n".join(rows)
-    if len(header) + len(body) + len(receipt_line) <= RESULT_CAP:
-        return header + body + receipt_line
-    # Reserve room for the amended receipt before deciding how many rows survive.
-    dropped, kept = 0, list(rows)
-    while kept:
-        note = f"{receipt}; " if receipt else ""
-        amended = f"\n... ({note}{dropped} more omitted to fit the result cap)"
-        body = "\n".join(kept)
-        if len(header) + len(body) + len(amended) <= RESULT_CAP:
-            return header + body + amended
-        kept.pop()
-        dropped += 1
-    return header + (f"({receipt})" if receipt else "(nothing fits the result cap)")
+    return fit_rows(header, rows, receipt=receipt)
 
 
 # Directories that are never worth walking for a content grep — model weights / checkpoints / caches

@@ -26,6 +26,72 @@ from typing import Optional, Protocol
 from looplab.core.context_budget import RESULT_CAP  # noqa: F401  (re-export, see comment above)
 
 
+def fit_rows(header, rows, *, receipt: str = "", cap: int = RESULT_CAP,
+             omitted: str = "... ({receipt}{n} more omitted to fit the result cap)") -> str:
+    """Assemble `header` + `rows` (+ a trailing `receipt`) so the whole result fits under `cap`.
+
+    Drop whole ROWS from the end, and say in the receipt how many the cap itself removed. The agent
+    loop cuts an over-cap tool result from the HEAD, which silently eats whatever is at the END — and
+    for a listing the end is exactly the receipt that says the result is partial ("… (+K more)",
+    "capped at N hits"). A long listing therefore arrived looking complete.
+
+    `reposcout._fit_rows` and `memory_tools._bounded_result` were this function written twice with
+    different marker wording and different header types (doc 25 TO-08). `header` accepts either a
+    string (used verbatim — the caller owns its trailing newline) or a sequence of lines (joined, and
+    the omission marker is appended as one more line). `omitted` keeps the per-site wording as a
+    parameter: `{n}` is the dropped-row count and `{receipt}` the caller's own receipt with a
+    separator, empty when there is none.
+    """
+    lines = header if isinstance(header, str) else "\n".join(header)
+    joiner = "" if isinstance(header, str) else "\n"
+    tail = f"\n{receipt}" if receipt else ""
+    body = "\n".join(rows)
+    if len(lines) + len(joiner if rows else "") + len(body) + len(tail) <= cap:
+        return lines + (joiner if rows else "") + body + tail
+    # Reserve room for the AMENDED marker before deciding how many rows survive: a marker added after
+    # the fit decision is exactly what pushes the receipt back past the cap.
+    dropped, kept = 0, list(rows)
+    while kept:
+        marker = "\n" + omitted.format(n=dropped, receipt=f"{receipt}; " if receipt else "")
+        body = "\n".join(kept)
+        if len(lines) + len(joiner) + len(body) + len(marker) <= cap:
+            return lines + joiner + body + marker
+        kept.pop()
+        dropped += 1
+    return lines + (f"\n({receipt})" if receipt else "\n(nothing fits the result cap)")
+
+
+def clip(text: str, cap: int, *, keep: str = "head", note: str = "", reserve: int = 0,
+         line_boundary: bool = False) -> str:
+    """Bound one STRING under `cap`, saying so when it actually cuts (doc 25 TO-08).
+
+    Five providers wrote this separately, each with its own marker, so a model had to learn five
+    receipts for one event. The differences that survive are parameters because they are real:
+
+    * `keep` — `"tail"` for a log or command output (the end is where the error and the final metric
+      line are; the marker then goes in FRONT), `"head"` for a reply or a listing.
+    * `line_boundary` — cut back to the last newline so no half-line/half-hit shows.
+    * `reserve` — whether the marker is charged AGAINST `cap`. Most callers pass a cap that already
+      carries headroom and let the marker sit on top; a caller handed the loop's raw `RESULT_CAP` has
+      no headroom, and a result landing EXACTLY on the cap is one the loop's own marker also skips —
+      a cut answer byte-indistinguishable from a complete one.
+    * `note` — the marker itself, formatted with `{n}` = characters dropped. Empty means no marker,
+      which is only honest when the caller adds its own.
+    """
+    if len(text) <= cap:
+        return text
+    budget = max(0, cap - reserve)
+    if keep == "tail":
+        cut = text[len(text) - budget:]
+        if line_boundary and "\n" in cut:
+            cut = cut[cut.index("\n") + 1:]
+        return note.format(n=len(text) - len(cut)) + cut
+    cut = text[:budget]
+    if line_boundary and "\n" in cut:
+        cut = cut[:cut.rfind("\n")]
+    return cut + note.format(n=len(text) - len(cut))
+
+
 def fn_spec(name: str, description: str, props: dict, required: Optional[list] = None) -> dict:
     """Build one OpenAI-format function/tool schema. Shared by every tool provider so the
     schema shape lives in one place."""
