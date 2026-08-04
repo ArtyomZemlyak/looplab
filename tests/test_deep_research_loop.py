@@ -290,7 +290,7 @@ def test_durable_memo_writer_sanitizes_before_verify_and_resanitizes_output(monk
              "note": f"password={secret}\x1b[31m"},
         ]}
 
-    import looplab.trust.verify as verify_mod
+    import looplab.trust.memo_verify as verify_mod
     monkeypatch.setattr(verify_mod, "verify_memo", _verify)
 
     eng._record_deep_research(memo, trigger="cadence", manual=False)

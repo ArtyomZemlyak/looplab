@@ -1532,7 +1532,7 @@ class ResearchMemo(BaseModel):
     # D8 evidence ledger: findings as CLAIMS with per-claim provenance — {statement,
     # node_ids: [int], urls: [str]}. Kosmos's failure data says cross-evidence SYNTHESIS is the
     # weakest link (57.9% accurate vs ~85% for analysis), so every synthesis claim must be
-    # traceable to the experiments/sources it rests on; the Verifier (trust/verify.py) then
+    # traceable to the experiments/sources it rests on; the Verifier (trust/memo_verify.py) then
     # checks each claim against its cited evidence and flags the unsupported ones.
     claims: list[dict] = Field(default_factory=list)
     # Sanitizer cardinality receipt for the pre-cap claims list. Excluded from generic model dumps so old

@@ -260,7 +260,10 @@ _LAYOUT = {
     "validate": "core",
     "vectorstore": "tools",
     "verifier": "trust",   # PART IV keystone-B §12 advisory verifier (offline/library)
-    "verify": "trust",
+    # The D8 memo-claim verifier. It was `trust/verify.py` — two letters from `trust/verifier.py`,
+    # which is a DIFFERENT verifier (doc 25 CT-09). Both legacy spellings live in `_RENAMED` below,
+    # because this map's contract is canonical-stem -> package and `verify` is no longer a stem.
+    "memo_verify": "trust",
     "web": "tools",
     "workspace": "engine",
     "write_tools": "tools",
@@ -292,8 +295,30 @@ class _CompatLoader(importlib.abc.Loader):
             module.__spec__ = self._canonical_spec
 
 
+# RETIRED module paths, old FULL path -> canonical full path. `_LAYOUT` maps a canonical module STEM
+# to its package and is what generates the flat pre-split aliases; this map is for a module that was
+# RENAMED, where the old name is no longer a stem anywhere and both its old spellings have to keep
+# resolving. Checked FIRST, so a retired name never falls through to a `_LAYOUT` lookup that would
+# rebuild the path it used to live at.
+#
+# It routes through the same `_CompatLoader` as everything else, which is the whole point: old and
+# new names are ONE module object. These modules are PATCH SEAMS — `engine/research_cadence.py`
+# documents monkeypatching `looplab.trust.memo_verify.verify_memo` to intercept the live call — and a
+# second module object would make every existing patch a silent no-op rather than an error.
+_RENAMED = {
+    # doc 25 CT-09: two verifiers whose names differed by two letters. `verify.py` was the D8
+    # MEMO-claim verifier; `verifier.py` is the advisory criteria scorer and keeps its name. Both the
+    # dotted path and the flat pre-split alias are retained.
+    "looplab.trust.verify": "looplab.trust.memo_verify",
+    "looplab.verify": "looplab.trust.memo_verify",
+}
+
+
 class _CompatFinder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
+        renamed = _RENAMED.get(fullname)
+        if renamed is not None:
+            return importlib.util.spec_from_loader(fullname, _CompatLoader(renamed))
         prefix, _, name = fullname.partition(".")
         if prefix != "looplab" or not name or "." in name:
             return None

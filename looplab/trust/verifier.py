@@ -20,7 +20,7 @@ steers must be **grounded + repeated + criteria-decomposed**, never a single bli
     the measured single-shot variance;
   * **grounded** — the caller passes the checkable `evidence` (node outcomes, the D1 prior-art brief,
     §17 distance-from-seed); the optional tool-reading variant additionally lets the judge READ the run
-    it is scoring (mirrors `trust/verify.py::verify_memo`).
+    it is scoring (mirrors `trust/memo_verify.py::verify_memo`).
 
 **Discipline (normative, §21.7).** A `VerdictReport` never overrides a strictly better fixed-metric
 result. Best-effort: no client, or any model failure, degrades to an unavailable/abstaining result

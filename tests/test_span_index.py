@@ -893,3 +893,138 @@ def test_an_unknown_span_id_does_not_re_walk_the_whole_spans_file(tmp_path, monk
         read_bytes[0], (rd / "spans.jsonl").stat().st_size)
     # …and a span that IS in the file is still served.
     assert client.get("/api/runs/demo/spans/g0_1").json()["span_id"] == "g0_1"
+
+
+# --- one span-to-node attribution rule (doc 25 EV-10) -------------------------------------------
+#
+# "A span's effective node is its own stamped node_id, else its trace ROOT's node_id" was written
+# out three times, kept equivalent only by comments — one of which asserted the equivalence
+# "exactly" while the two derivations actually disagreed.
+
+def _live_trace():
+    """The LIVE shape `build_conversation`'s own comment describes: an operation span is written only
+    on CLOSE and `create_node` closes at node END, so a running node's trace has NO root on disk and
+    its spans are ORPHANS — their parent_id names a span that is not there yet. Here that orphan
+    (node 7) starts before a later true root (node 9), which is what made the two derivations pick
+    different spans."""
+    return [
+        {"name": "implement", "kind": "generation", "trace_id": "T", "span_id": "orphan",
+         "parent_id": "not-yet-closed-root", "start": 1.0, "attributes": {"node_id": 7, "input": []}},
+        {"name": "later", "kind": "tool", "trace_id": "T", "span_id": "true-root",
+         "parent_id": None, "start": 5.0, "attributes": {"node_id": 9}},
+        # The span under test: no node_id of its own, so it can only be attributed via the trace root.
+        {"name": "child", "kind": "tool", "trace_id": "T", "span_id": "child",
+         "parent_id": "orphan", "start": 2.0, "attributes": {}},
+    ]
+
+
+def test_an_orphan_headed_trace_attributes_the_same_way_in_both_views():
+    """The divergence itself. A node-idless span in a live trace was placed under node 7 by
+    `build_trace_view` and under node 9 by `build_conversation` — the same span, two different nodes,
+    depending on which view the operator opened."""
+    spans = _live_trace()
+
+    view = build_trace_view(ST, spans)
+    owner = next(nid for nid, tree in view["nodes"].items() if "child" in _names(tree))
+
+    # And the conversation must agree: the child belongs to the SAME node, not the other one.
+    mine = build_conversation(ST, spans, int(owner))
+    other = build_conversation(ST, spans, 9 if int(owner) == 7 else 7)
+    assert _turn_names(mine) >= {"child"}, (owner, _turn_names(mine))
+    assert "child" not in _turn_names(other), (owner, _turn_names(other))
+
+    # ...and per-span stamping still WINS over the trace root. `later` carries its own node 9 inside
+    # a trace whose root is node 7 — the long-lived Developer tool-loop shape that per-span stamping
+    # exists for, where keying off the root hands one node's spans to another. Asserted on the trace
+    # VIEW, where attribution is directly observable: a lone tool span with no generation parent
+    # produces no conversation TURN, so the conversation cannot witness this half.
+    assert "later" in _names(view["nodes"]["9"]), view["nodes"].keys()
+    assert "later" not in _names(view["nodes"]["7"])
+
+
+def _names(tree):
+    out = set()
+    stack = list(tree)
+    while stack:
+        node = stack.pop()
+        out.add(node.get("name"))
+        stack.extend(node.get("children") or ())
+    return out
+
+
+def _turn_names(projection):
+    return {turn.get("name") for stage in projection["stages"] for turn in stage["turns"]}
+
+
+def test_the_attribution_root_accepts_an_orphan_but_the_structural_root_does_not():
+    """Why the two disagreed, pinned as a property rather than as a story: attribution must accept an
+    orphan (the live case), while `build_conversation`'s structural `root` — which names the stage and
+    stands in as a band container — deliberately requires `parent_id is None`. Collapsing them in
+    either direction reintroduces the bug or breaks stage naming."""
+    from looplab.events.traceview import _normalize_spans, trace_root_node_id
+
+    spans = _normalize_spans(_live_trace())
+    assert trace_root_node_id(spans, _normalized=True) == 7      # the earliest orphan, not the root
+
+    structural = next((s for s in sorted(spans, key=lambda x: x.get("start", 0.0))
+                       if s.get("parent_id") is None), None)
+    assert structural is not None and structural["span_id"] == "true-root"
+
+
+def test_no_view_re_derives_the_attribution_rule():
+    """Both projections must go through the shared helpers. A site that re-derives `_node_id_of(...)
+    or trace-root` gets its own copy of the rule, which is how these two drifted apart under a
+    comment claiming they had not."""
+    import ast
+    import inspect
+    import textwrap
+
+    from looplab.events import traceview
+
+    for name in ("build_trace_view", "build_conversation"):
+        source = textwrap.dedent(inspect.getsource(getattr(traceview, name)))
+        assert "trace_root_node_id(" in source, f"{name} no longer uses the shared root rule"
+        assert "effective_node_id(" in source, f"{name} no longer uses the shared attribution"
+        # `_tree(...)[0]` is the old hand-rolled root derivation.
+        tree_roots = [node for node in ast.walk(ast.parse(source))
+                      if isinstance(node, ast.Subscript)
+                      and isinstance(node.value, ast.Call)
+                      and isinstance(node.value.func, ast.Name) and node.value.func.id == "_tree"]
+        assert not tree_roots, f"{name} re-derives the trace root from _tree(...)[...]"
+
+
+def test_indexed_and_unindexed_conversations_agree_on_an_orphan_headed_trace(tmp_path):
+    """The equivalence the finding asks for, on the shape that broke. `SpanIndex` selects by TRACE
+    (any span carrying the node id), the no-index path re-filters per span — so a disagreement about
+    the trace root shows up as a node's turns appearing in one path and not the other."""
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    sp = _write_spans(rd, _live_trace())
+
+    index = get_index(sp)
+    for node_id in (7, 9):
+        unindexed = build_conversation(ST, load_spans(sp), node_id)
+        indexed = build_conversation(ST, index.full_spans_for_node(node_id), node_id)
+        assert _turn_names(indexed) == _turn_names(unindexed), node_id
+
+
+def test_an_unstamped_root_leaves_its_node_idless_spans_unscoped():
+    """The rule is the trace ROOT's id, never "the first id found anywhere in the trace".
+
+    A full ancestor walk (or any first-stamped-span scan) bleeds one node's id across a SHARED trace:
+    a Developer tool-loop trace serves several nodes in sequence, so a span belonging to none of them
+    would inherit whichever node happened to be stamped first. Here the root carries no node_id at
+    all, so a node-idless sibling has no attribution and must land in `unscoped` — not under node 4
+    merely because node 4's span sits later in the same trace."""
+    spans = [
+        {"name": "loop", "kind": "operation", "trace_id": "S", "span_id": "root",
+         "parent_id": None, "start": 0.0, "attributes": {}},
+        {"name": "stamped", "kind": "generation", "trace_id": "S", "span_id": "stamped",
+         "parent_id": "root", "start": 1.0, "attributes": {"node_id": 4, "input": []}},
+        {"name": "drifter", "kind": "tool", "trace_id": "S", "span_id": "drifter",
+         "parent_id": "root", "start": 2.0, "attributes": {}},
+    ]
+    view = build_trace_view(ST, spans)
+    assert "drifter" in _names(view["unscoped"]), sorted(view["nodes"])
+    assert "drifter" not in _names(view["nodes"].get("4", []))
+    assert "stamped" in _names(view["nodes"]["4"])       # its OWN stamp still places it

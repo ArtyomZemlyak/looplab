@@ -1,9 +1,9 @@
 """The one read-only RunTools builder five auxiliary LLM passes share (doc 25 CT-06).
 
-`trust/verify.py`, the CLI's agentic tagging/briefing diagnostics, engine reflection/distillation,
+`trust/memo_verify.py`, the CLI's agentic tagging/briefing diagnostics, engine reflection/distillation,
 the run report and the LLM novelty gate each wrote out `rt = RunTools(); rt.bind_state(state, None);
 CompositeTools([rt])` inside a try/except that degraded to None. Two of the copies documented their
-kinship in a comment ("mirrors trust.verify._verify_tools") instead of sharing the code.
+kinship in a comment ("mirrors trust.memo_verify._verify_tools") instead of sharing the code.
 
 What matters is not the five lines. It is that `bind_state(state, parent)` takes a SECOND argument
 (`tools/_base.py`: a provider that implements the hook and omits it raises TypeError at dispatch) and
@@ -117,7 +117,7 @@ def test_no_caller_hand_builds_a_lone_run_tools_composite():
 
 
 @pytest.mark.parametrize("module,wrapper", [
-    ("looplab.trust.verify", "_verify_tools"),
+    ("looplab.trust.memo_verify", "_verify_tools"),
     ("looplab.cli.concept_cmds", "_run_tools_for"),
     ("looplab.serve.report", "_report_tools"),
 ])

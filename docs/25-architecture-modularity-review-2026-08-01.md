@@ -1788,6 +1788,38 @@ legacy queued-before-create arm, and a source guard that the purge exists in exa
 
 *Recommendation:* Extract `effective_node_id(span, root_node_by_trace)` plus a shared `trace_root(spans)` helper into traceview and use them from build_trace_view, build_conversation, _bounded_node_trace_tail and span_index; add one equivalence test between the indexed and no-index selection paths.
 
+*Resolution (2026-08-04) — and the copies had ALREADY diverged. This was a live bug, not just duplication.*
+
+`trace_root_node_id(spans)` and `effective_node_id(span, trace_root_nid)` in `events/traceview.py`;
+`build_trace_view` and `build_conversation` both go through them.
+
+**The divergence, measured.** ROOT means "parent not present in this trace" — a true `parent_id is
+None` span OR an ORPHAN whose parent is missing. The orphan case is the normal LIVE shape, and
+`build_conversation`'s own comment says so: an operation span is written only on CLOSE and
+`create_node` closes at node END, so for the whole life of a node its trace has no root on disk and
+every span in it is an orphan. `build_trace_view` used `_tree(...)[0]`, whose root set INCLUDES
+orphans. `build_conversation` derived attribution from its structural `root`, which requires
+`parent_id is None` strictly. On a trace holding an orphan (node 7, earlier) and a later true root
+(node 9), those pick different spans — so a span carrying no `node_id` of its own was attributed to
+node 7 in the trace view and node 9 in the conversation. Same span, two nodes, depending on which
+view the operator opened. The comment above that line asserted the two behaved "exactly" the same.
+
+**What did NOT get merged, and why.** `build_conversation` keeps its structural `root`/`first`: they
+name the stage and stand in as a band container, and that role genuinely wants the strict
+`parent_id is None` span. Collapsing the two reintroduces the bug in one direction or breaks stage
+naming in the other — so the split is now explicit, with a comment at each, instead of one variable
+serving both meanings. `_bounded_node_trace_tail` and `SpanIndex.node_tids` are a different rule
+again (ANY span in the trace carrying the id — a deliberate selection SUPERSET, re-filtered per span
+afterwards) and are left alone; the finding's requested equivalence test covers them instead.
+
+Pinned by five tests in `tests/test_span_index.py` (35 → 40): the two views agree on an orphan-headed
+trace, per-span stamping still beats the trace root (asserted on the trace VIEW, because a lone tool
+span with no generation parent produces no conversation TURN and so cannot witness it there), the
+attribution root accepts an orphan while the structural root does not, an unstamped root leaves its
+node-idless spans `unscoped` rather than bleeding a later span's id onto them, a structural guard
+that neither view re-derives `_tree(...)[0]`, and the indexed-vs-unindexed equivalence the finding
+asked for — run on the orphan-headed shape that broke. Teeth-tested against 5 breaks, all biting.
+
 #### EV-11 · LOW · duplication · effort: small
 
 **Authoritative-provenance set spelled inline twice in _materialize_concept_deltas and again as a module constant**
@@ -2963,6 +2995,44 @@ path, the same reason `serve/engine_proc.py` imports it inside its functions.
 *Evidence:* genesis.py `_bounded_evidence_value` and misc.py `_bounded_json_value` are near-identical ~40-line recursive walkers (shared budget list, depth cap, 32-item fanout, sorted keys, string cap + truncation flag) differing only in constants (budget 128 vs 96, depth 3 vs 2) and misc's secret-key masking; reviews.py `_scrub_json` is a third recursive scrubber (key-aware masking, collision suffixes, depth 40); assistant.py `_public_scope` and `_shared_message` are two more allow-list/redact projectors. The misc.py comment even names further siblings: `core/advisory_payloads._tree` and trust/cross_run's walk. Each copy independently re-derives the same redact-before-truncate and secret-key rules, so a fix in one (e.g. the 8d1bcda secret-key-classification fix noted in misc.py) does not propagate.
 
 *Recommendation:* One configurable bounded-projection walker in core/redact.py (budget, depth, fanout, secret-key policy, truncation receipts as parameters); migrate the two near-identical copies first.
+
+*Resolution (2026-08-04) — the walker the finding asks for ALREADY existed; the two copies just were not on it.*
+
+`core/redact.py::bounded_redacted_tree` was built for CO-06 and is used by `core/tracing.py` and
+`core/advisory_payloads.py`. It already carries the stricter union of those two prior copies. What it
+lacked was the one thing the serve routers needed — a truncation receipt — so both had kept a walker
+of their own. It now takes an optional `truncated` out-cell, and `genesis._bounded_evidence_value`
+and `misc._bounded_json_value` are thin wrappers that keep only their own CONSTANTS (nodes 128/96,
+depth 3/2, fanout 32, string cap 500, key cap 80).
+
+**The copies had already drifted, on exactly the rule that matters at a redaction boundary.** Given
+`{"api_key": "tok-abcd"}`, genesis DROPPED the key and reported `truncated=True`; misc MASKED it as
+`"***"` and reported `truncated=False`. Same payload, two endpoints, two answers — and the dropping
+one told the operator nothing about why a field had vanished. Masking wins: "this field exists and is
+a secret" is strictly more useful than a silently absent key, it is what every other projector in the
+codebase already did, and it is not truncation because nothing was dropped for SIZE.
+
+Two further behaviours the routers gain by sharing:
+
+* **A hostile mapping degrades instead of raising.** Both called `.items()` unguarded, so a `dict`
+  subclass whose iteration throws took the response down as a 500. The shared walker answers
+  `<mapping unavailable>`.
+* **A key that redacts to a colliding or empty name is dropped AND reported**, rather than silently
+  overwriting the earlier member.
+
+The character budget is DERIVED (`nodes x string cap`) rather than chosen, so it stays non-binding
+and the original node-only bound is preserved exactly.
+
+**Not migrated, deliberately.** `reviews._scrub_json` is a different job: an UNBOUNDED key-aware
+scrubber with deterministic collision suffixes, whose contract is "copy everything, mask secrets" —
+bounding it would silently truncate a reviewer's evidence. `assistant._public_scope` and
+`_shared_message` are allow-list projectors, not recursive walkers. The finding's own advice was to
+migrate the two near-identical copies first, and those are the two.
+
+`tests/test_bounded_redacted_tree.py` 38 → 45: the receipt reports each omission/shortening kind
+(parametrized), masking a secret is NOT a cut, an exhausted budget is reported, neither router walks
+itself any more, both agree on a credential-named key, and a hostile mapping no longer reaches either
+endpoint as a 500. Teeth-tested against 7 breaks, all biting.
 
 #### SR-07 · MEDIUM · mergeable-entities · effort: small — **RESOLVED (2026-08-02)**
 
@@ -4908,8 +4978,8 @@ lenient.
 
 *Recommendation:* Rename one module (e.g. verify.py -> memo_verify.py, keeping a _LAYOUT/back-compat alias as the repo already does for renames) and extract the shared judge-call helper (structured-judge invocation with agentic fallback) into one place both import.
 
-*Partially resolved (2026-08-03).* The duplicated plumbing — the substantive half — is done; the
-rename is not, and that is a decision with a stated reason rather than a gap.
+*Resolution (2026-08-03, completed 2026-08-04).* Both halves are done: the duplicated judge-call
+plumbing first, then the rename.
 
 `looplab/trust/judge.py::structured_judge(client, msgs, model, *, parser, tools=None)` is now the one
 judge-call contract: agentic through `agentic_struct` when tools are supplied with the plain parse as
@@ -4926,15 +4996,37 @@ for a judge prompt. Merging them would drag a redaction contract into a path tha
 comment claiming one "mirrors" the other was itself the defect — it sent readers looking for a
 duplication that is not there — and is corrected to say what actually differs.
 
-**Why the rename is deferred.** `engine/research_cadence.py` documents that monkeypatching
-`looplab.trust.verify.verify_memo` intercepts the live call, and tests rely on it. The repo's
-`_LAYOUT` meta-path shim maps FLAT paths (`looplab.verify` -> `looplab.trust.verify`); it does not
-alias one submodule path to another, so a rename needs an explicit
-`sys.modules["looplab.trust.verify"] = memo_verify` so both spellings resolve to ONE module object.
-That is a small change, but it is a change to a patch seam whose failure mode is silent — a second
-module object would make every existing patch a no-op — and it earns nothing beyond a better name.
-`tests/test_structured_judge.py` pins the deferral so it stays visible, and states the constraint any
-future rename has to satisfy. Teeth-verified against 7 breakages.
+**The rename (2026-08-04) — done, and the constraint the earlier deferral named is what it is built
+on.** `trust/verify.py` is now `trust/memo_verify.py`; `trust/verifier.py` keeps its name. A grep for
+"verifier" no longer lands in two files whose names differ by two letters and whose purposes a reader
+had to open them to distinguish.
+
+Both retired spellings — the dotted `looplab.trust.verify` and the flat pre-split
+`looplab.verify` — resolve through a new `_RENAMED` map in `looplab/__init__.py`, checked BEFORE the
+`_LAYOUT` lookup so a retired name can never fall through and rebuild the path it used to live at. It
+routes through the SAME `_CompatLoader` as every other alias, which is the entire point: old and new
+are ONE module object.
+
+That identity is the contract, not importability. These modules are patch seams —
+`engine/research_cadence.py` documents monkeypatching `verify_memo` to intercept the live call, and
+several tests do — so the obvious shim (a `verify.py` that re-exports with `from … import *`) is the
+one implementation that must not be used: a star-import binds by VALUE, so the import succeeds, the
+patch appears to apply, and the original function still runs. Nothing raises. The teeth harness
+includes exactly that wrong fix, and it is caught.
+
+`_LAYOUT` keeps its own contract — canonical module STEM -> package — so `verify` left it and
+`memo_verify` took its place; both of its two-way registry guards (`test_every_layout_entry_exists_at_
+its_canonical_path`, `test_no_module_missing_from_layout`) still hold. Six in-repo call sites, four
+test modules and seven comments were repointed, and a source scan now fails if any file names the
+retired path again — reintroducing the navigation cost from the other side, by sending a reader to a
+file that is not there.
+
+Pinned by four tests in `tests/test_structured_judge.py`: both retired spellings ARE the canonical
+module object (parametrized), a patch through a retired spelling actually reaches the live module
+(exercised, not inferred from identity), the canonical `__spec__.name` survives an alias import (the
+restamping hazard the flat aliases already guard, which silently no-ops `importlib.reload`), and the
+no-stale-path source scan. Teeth-tested against 5 breaks — the star-import shim, each alias dropped,
+the `_RENAMED` hook removed, and an alias pointed at the wrong module — all biting.
 
 #### CT-10 · LOW · inconsistency · effort: medium
 

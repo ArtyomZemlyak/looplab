@@ -179,3 +179,81 @@ def test_the_two_boundaries_now_agree_on_everything_but_their_declared_caps(valu
     """The whole point of the collapse. They may differ on how much TEXT they keep — that is a
     declared constant — but never on what a value BECOMES."""
     assert sanitize_trace_value(value) == _tree(value, [65_536], [256])
+
+
+# ------------------------------------------------------------------ the truncation receipt (SR-06)
+#
+# Two serve routers each grew their own walker to compute a "this was cut" receipt, and the copies
+# drifted on the one rule that matters at a redaction boundary. They now share this walker; the
+# receipt is an out-cell so they no longer need a walk of their own to produce it.
+
+def _walk_cut(value, **kwargs):
+    cut = [False]
+    out = _walk(value, truncated=cut, **kwargs)
+    return out, cut[0]
+
+
+@pytest.mark.parametrize("value,expected,why", [
+    ({"a": 1, "b": "short"}, False, "nothing was omitted or shortened"),
+    ({f"k{i}": i for i in range(40)}, True, "fanout sliced"),
+    ({"a": {"b": {"c": {"d": {"e": {"f": 1}}}}}}, True, "depth cut"),
+    ({"note": "x" * 900}, True, "string shortened by the cap"),
+    ({"": "blank", "ok": 1}, True, "a key that redacts to empty loses its value"),
+    (_HostileMapping({"a": 1}), True, "a mapping that refused to iterate degraded"),
+])
+def test_the_receipt_reports_omission_and_shortening(value, expected, why):
+    _out, cut = _walk_cut(value, str_cap=500, max_items=32, max_depth=3)
+    assert cut is expected, why
+
+
+def test_masking_a_secret_is_not_truncation():
+    """Nothing was dropped for SIZE. Telling an operator their config was truncated because a
+    credential was hidden is a misleading receipt — and it is the difference that made the two
+    router copies disagree about the same payload."""
+    out, cut = _walk_cut({"api_key": "tok-abcd", "epochs": 3})
+    assert out == {"api_key": "***", "epochs": 3}
+    assert cut is False
+
+
+def test_an_exhausted_budget_is_reported_not_silently_swallowed():
+    out, cut = _walk_cut({"a": "x" * 40, "b": "y" * 40}, chars=20)
+    assert cut is True and out is not None
+
+
+def test_the_two_serve_projectors_delegate_rather_than_walking_themselves():
+    """The SR-06 collapse. A private recursive walk in either router is the second implementation
+    coming back, and the drift it produces is invisible: both outputs still look redacted, they just
+    disagree about what happens to a credential-named key."""
+    import inspect
+
+    from looplab.serve.routers import genesis, misc
+
+    for module, name in ((genesis, "_bounded_evidence_value"), (misc, "_bounded_json_value")):
+        source = inspect.getsource(getattr(module, name))
+        assert "bounded_redacted_tree(" in source, f"{name} no longer shares the walker"
+        assert "is_secret_key_name(" not in source, f"{name} re-implements the secret-key masking"
+        assert "depth=depth + 1" not in source, f"{name} still recurses into itself"
+
+
+def test_both_serve_projectors_agree_on_a_credential_named_key():
+    """The measured divergence: genesis DROPPED a secret-named key (and called that truncation),
+    misc MASKED it (and did not). Same payload, two endpoints, two answers — and the dropping one
+    told the operator nothing about why a field had vanished."""
+    from looplab.serve.routers.genesis import _bounded_evidence_value
+    from looplab.serve.routers.misc import _bounded_json_value
+
+    payload = {"api_key": "tok-abcd", "lr": 0.01}
+    assert _bounded_evidence_value(payload) == _bounded_json_value(payload)
+    assert _bounded_evidence_value(payload) == ({"api_key": "***", "lr": 0.01}, False)
+
+
+def test_a_hostile_mapping_no_longer_reaches_the_endpoint_as_a_500():
+    """Both routers' own walkers called `.items()` unguarded, so a dict subclass that raises took the
+    response down. The shared walker degrades to a marker — a redaction boundary that can raise is a
+    boundary that can drop a whole payload."""
+    from looplab.serve.routers.genesis import _bounded_evidence_value
+    from looplab.serve.routers.misc import _bounded_json_value
+
+    for project in (_bounded_evidence_value, _bounded_json_value):
+        out, cut = project(_HostileMapping({"a": 1}))
+        assert out == "<mapping unavailable>" and cut is True
