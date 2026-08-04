@@ -27,6 +27,18 @@ from typing import Iterator
 
 PKG = Path(__file__).resolve().parents[1] / "looplab"
 
+# Directories that live INSIDE the package tree but are not the package. `.ipynb_checkpoints` is
+# Jupyter's autosave sidecar: it is gitignored (`.gitignore`: `**/.ipynb_checkpoints/`) and untracked,
+# so it holds a STALE copy of whatever a file looked like when someone last opened it in a notebook
+# server. Scanning it makes every guard here report the PAST as a present violation — e.g.
+# `serve/.ipynb_checkpoints/assistant-checkpoint.py` still carries an
+# `from looplab.tools.knowledge_tools import _fn_spec` that the real `serve/assistant.py` dropped,
+# which fails `test_cross_package_private_seams` on a tree whose production source is clean. That is
+# not hypothetical here: LoopLab is developed on JupyterHub, where these dirs appear routinely (three
+# exist under `looplab/` right now). A guard that fires on a gitignored autosave is unactionable —
+# there is no source change that would make it pass.
+EXCLUDED_DIRS = frozenset({".ipynb_checkpoints", "__pycache__"})
+
 
 def iter_sources(pkg: Path = PKG) -> Iterator[tuple[Path, str]]:
     """Every `.py` under *pkg*, sorted, with its decoded text.
@@ -35,6 +47,8 @@ def iter_sources(pkg: Path = PKG) -> Iterator[tuple[Path, str]]:
     same set in a different order per filesystem, which reads as a flapping test.
     """
     for path in sorted(pkg.rglob("*.py")):
+        if EXCLUDED_DIRS.intersection(path.parts):
+            continue
         yield path, path.read_text(encoding="utf-8-sig", errors="replace")
 
 

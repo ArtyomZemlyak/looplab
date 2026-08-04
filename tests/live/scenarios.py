@@ -162,7 +162,15 @@ def build(sc: Scenario) -> None:
     # Generate the config snapshot from Settings (self-contained — no dependency on a prior run dir).
     # For a SEEDED run, `resume` takes no -s overrides, so the model + agentic backend must live here.
     from looplab.core.config import Settings
+    # `backend="llm"` is as load-bearing as `strategist_backend`: without it the DEVELOPER stays on
+    # the offline `DatasetBaselineDeveloper`, whose solution is the row-count placeholder in
+    # `adapters/dataset_task.py::_BASELINE_TEMPLATE`. Every agent-created node then scores the
+    # dataset's ROW COUNT (400) instead of an AUC, which silently satisfies every scenario whose
+    # check asks for a HIGH metric (`stagnation` > 0.72, `redundancy`, `periodic`, …) and fails only
+    # `nosignal`, the one check that asks for a LOW one. Measured 2026-08-04: seeded nodes carried
+    # honest AUCs (0.49-0.70) while all three agent nodes in EVERY seeded scenario were exactly 400.0.
     cfg = Settings(llm_model=os.environ.get("LOOPLAB_LIVE_MODEL", "glm-5.1"),
+                   backend="llm",
                    strategist_backend="llm").model_dump(mode="json")
     cfg.pop("llm_api_key", None)                        # re-read from env/.env at resume (never persisted)
     (sc.run_dir / "config.snapshot.json").write_text(json.dumps(cfg, indent=2))

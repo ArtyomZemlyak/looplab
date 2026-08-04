@@ -64,3 +64,10 @@ site/
 **/.ipynb_checkpoints/
 run.md
 *.log
+
+# Local speculation rollout receipt (`looplab speculation-gate --output`). It is bound to THIS
+# machine's implementation digest and GPU identity, so it is never portable and never shared.
+.looplab/
+
+# `looplab ui` build lock
+ui/.looplab-ui-build.lock
