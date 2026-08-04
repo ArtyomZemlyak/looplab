@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from looplab.core.atomicio import atomic_write_text, best_effort_fsync, strict_atomic_write_text
+from looplab.core.jsonutil import valid_digest_ref
 from looplab.events.eventstore import iter_jsonl
 
 # Permission modes mirror Claude Code. `plan` is the safe read-only default; mutating modes are
@@ -1131,8 +1132,7 @@ class ShareStore:
         if (not isinstance(link_id, str) or path.stem != link_id
                 or len(link_id) != 32 or any(c not in "0123456789abcdef" for c in link_id)
                 or not isinstance(session, str) or _SESSION_ID_RE.fullmatch(session) is None
-                or not isinstance(token_hash, str) or len(token_hash) != 64
-                or any(c not in "0123456789abcdef" for c in token_hash)
+                or not valid_digest_ref(token_hash)
                 or not isinstance(title, str) or not title.strip()
                 or len(title) > SHARE_TITLE_MAX_CHARS):
             return None

@@ -42,6 +42,7 @@ from looplab.trust.cross_run import (
     cross_run_text,
     sanitize_cross_run_projection,
 )
+from looplab.core.jsonutil import valid_digest_ref
 
 _MAX_SOURCE_STATEMENT = 4000
 # Shared with the governance ledger and the assessment projections: one bound on the metric
@@ -769,8 +770,7 @@ def _safe_research_source_summary(raw) -> Optional[dict]:
     if type(raw.get("read_complete")) is not bool:
         return None
     snapshot_digest = raw.get("snapshot_digest")
-    if (not isinstance(snapshot_digest, str) or len(snapshot_digest) != 64
-            or any(ch not in "0123456789abcdef" for ch in snapshot_digest)):
+    if not valid_digest_ref(snapshot_digest):
         return None
     read_int_keys = ("rows_total", "rows_retained", "rows_quarantined", "malformed_rows", "invalid_rows")
     if any(type(raw.get(key)) is not int or not 0 <= raw[key] <= _MAX_RESEARCH_SOURCE_ITEMS
@@ -834,10 +834,10 @@ def _safe_claim_source_summary(raw) -> Optional[dict]:
             or type(raw.get("research_source_complete")) is not bool):
         return None
     snapshot_digest = raw.get("snapshot_digest")
-    digest_valid = (isinstance(snapshot_digest, str)
-                    and ((raw["receipt_known"] is False and snapshot_digest == "")
-                         or (len(snapshot_digest) == 64
-                             and all(ch in "0123456789abcdef" for ch in snapshot_digest))))
+    # The empty-string alternative stays: a KNOWN-absent receipt records "" rather than a digest,
+    # and that is a different statement from a malformed one.
+    digest_valid = ((raw["receipt_known"] is False and snapshot_digest == "")
+                    or valid_digest_ref(snapshot_digest))
     if not digest_valid:
         return None
     lessons = _safe_claim_read_segment(raw.get("lessons"))

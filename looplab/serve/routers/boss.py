@@ -61,6 +61,7 @@ def _safe_boss_failure(exc: Exception) -> dict:
 # (boss mode auto-applies them in order, then reopens/resumes the run ONCE if any step needs the
 # engine). An empty actions list = pure conversation (only the reply is shown).
 from pydantic import BaseModel  # noqa: E402
+from looplab.core.jsonutil import valid_digest_ref
 
 
 # Per-run bound on the durable UI chat sidecar (`chat.jsonl`). It is a single-writer UI-only file that
@@ -147,9 +148,7 @@ def _report_refresh_ledger(events, generation: str) -> tuple[dict[str, object], 
     for event in events:
         data = event.data if isinstance(event.data, dict) else {}
         identity = data.get("refresh_id")
-        if (not isinstance(identity, str) or len(identity) != 64
-                or any(char not in "0123456789abcdef" for char in identity)
-                or data.get("generation") != generation):
+        if not valid_digest_ref(identity) or data.get("generation") != generation:
             continue
         if event.type == EV_REPORT_REFRESH_STARTED:
             starts.add(identity)
@@ -159,6 +158,10 @@ def _report_refresh_ledger(events, generation: str) -> tuple[dict[str, object], 
 
 
 def _normalize_report_generation(value: object) -> str:
+    # Deliberately NOT `valid_digest_ref` (doc 25 EV-04): this normalizes a generation a human or a
+    # client typed into an HTTP request and therefore accepts either case, then lowercases below.
+    # The shared predicate is lowercase-only because it answers a different question — whether a
+    # string is exactly what `canonical_json_digest` minted.
     if (not isinstance(value, str) or len(value) != 64
             or any(char not in "0123456789abcdefABCDEF" for char in value)):
         raise HTTPException(400, {

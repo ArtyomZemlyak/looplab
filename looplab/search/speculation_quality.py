@@ -28,7 +28,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from looplab.core.jsonutil import canonical_json
+from looplab.core.jsonutil import canonical_json, valid_digest_ref
 from looplab.core.atomicio import strict_atomic_write_text
 from looplab.core.config import RUN_START_PINNED_FIELDS
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT, finite_metric
@@ -347,12 +347,7 @@ def _sha256(data: bytes) -> str:
 
 
 def _valid_digest(value: object) -> bool:
-    return bool(
-        isinstance(value, str)
-        and value.startswith("sha256:")
-        and len(value) == 71
-        and all(ch in "0123456789abcdef" for ch in value[7:])
-    )
+    return valid_digest_ref(value, prefix="sha256:")
 
 
 def _read_bounded(path: Path, *, limit: int, label: str) -> bytes:

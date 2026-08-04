@@ -21,7 +21,8 @@ import math
 import pytest
 
 from looplab.core import advisory_payloads, fitness, models, parse, profile
-from looplab.core.jsonutil import DIGEST_TEXT_CAP, canonical_json, canonical_json_digest
+from looplab.core.jsonutil import (DIGEST_TEXT_CAP, canonical_json, canonical_json_digest,
+                                   valid_digest_ref)
 
 
 # ------------------------------------------------------------------ CO-08: one dump/hash tail
@@ -202,3 +203,80 @@ def test_the_mapped_contracts_really_do_differ():
     assert fitness.is_usable_metric(_Real(1.5)) is True, "a subclass is still a real scalar"
     assert finite_measurement(_Real(1.5)) is None, (
         "a durable comparison claim refuses a subclass that could override __lt__")
+
+
+# --- EV-04: one READER for the format the minter above writes ------------------------------------
+#
+# The same predicate — "is this a str of prefix + exactly 64 lowercase hex?" — was hand-rolled at ~20
+# sites, four times inside `_on_run_started` alone. These pin the clauses that a re-derived copy is
+# most likely to drop, because each drop admits something that is not a digest this repo ever minted.
+
+_H = "a" * 64
+
+
+@pytest.mark.parametrize("value,prefix,why", [
+    (None, "", "a hand-edited log can put any JSON type here"),
+    (5, "", "an int has no .startswith, and raising inside the fold kills every replay"),
+    (True, "", "bools are ints, and `isinstance(True, int)` is the trap next door"),
+    ([], "", "a list is len()-able and iterable, so len/membership alone would not reject it"),
+    (list(_H), "", "a 64-element list of hex chars passes a len+membership check without isinstance"),
+])
+def test_a_non_string_is_refused_rather_than_raising(value, prefix, why):
+    assert valid_digest_ref(value, prefix=prefix) is False, why
+
+
+@pytest.mark.parametrize("value,prefix,why", [
+    ("a" * 63, "", "a short body is a DIFFERENT identity, not a near match"),
+    ("a" * 65, "", "a long body likewise"),
+    ("sha256:" + "a" * 63, "sha256:", "prefix match alone would accept a truncated digest"),
+    ("sha256:" + "a" * 65, "sha256:", "and a padded one"),
+    ("A" * 64, "", "hexdigest() emits lowercase; two spellings of one digest break identity"),
+    ("sha256:" + "A" * 64, "sha256:", "same, under a prefix"),
+    ("g" * 64, "", "non-hex characters of the right length"),
+    ("SHA256:" + _H, "sha256:", "the prefix itself is case-sensitive"),
+    (" sha256:" + _H, "sha256:", "leading whitespace is not stripped for us"),
+    ("sha256:" + _H + " ", "sha256:", "nor trailing"),
+    ("memo:sha256:" + _H, "sha256:", "a different namespace is a different ref"),
+    (_H, "sha256:", "a bare digest is not a prefixed one"),
+    ("sha256:" + _H, "", "and a prefixed one is not bare"),
+])
+def test_the_exact_shape_is_required(value, prefix, why):
+    assert valid_digest_ref(value, prefix=prefix) is False, why
+
+
+@pytest.mark.parametrize("prefix", ["", "sha256:", "memo:sha256:", "idea:v1:", "card-action:v2:"])
+def test_what_the_minter_produces_is_what_the_reader_accepts(prefix):
+    """The property that makes sharing these two worth it: round-trip, not two independent rules."""
+    minted = canonical_json_digest({"any": ["payload", 1, None]}, prefix=prefix)
+    assert isinstance(minted, str)
+    assert valid_digest_ref(minted, prefix=prefix) is True
+
+
+def test_every_prefixed_call_site_reads_through_the_shared_predicate():
+    """The regression that matters is a re-derived copy, not a wrong answer here. Two spellings are
+    deliberately EXEMPT and must stay that way, so they are named rather than merely absent."""
+    from _source_scan import iter_sources
+
+    # Exemptions are matched on the REASON, not the filename. Exempting whole files would let a
+    # genuinely re-derived 64-hex predicate slip in beside an unrelated random-id check — which is
+    # exactly what happened to the first draft of this test.
+    non_digest_lengths = ("== 32", "!= 32", "{12, 32}")
+
+    offenders = []
+    for path, text in iter_sources():
+        if path.name == "jsonutil.py":
+            continue                                   # the canonical definition
+        lines = text.split("\n")
+        for index, line in enumerate(lines, 1):
+            if "0123456789abcdef" not in line:
+                continue
+            # A length check may sit on the line above the character-set check, so read the pair.
+            window = (lines[index - 2] if index >= 2 else "") + line
+            if "ABCDEF" in window:
+                continue        # HTTP input normalizer: accepts either case, then lowercases
+            if any(marker in window for marker in non_digest_lengths):
+                continue        # 12/32-hex RANDOM ids (review link ids, uuid4().hex) — not digests
+            offenders.append(f"{path.as_posix()}:{index}")
+    assert not offenders, (
+        "these re-derive the digest predicate instead of calling `valid_digest_ref`; if the site is "
+        f"genuinely not a 64-hex digest, exempt it here with the reason: {offenders}")

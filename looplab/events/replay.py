@@ -28,6 +28,7 @@ from looplab.core.concepts import (
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, finite_metric,
                                   is_usable_metric,
                                   verifier_evidence_digest)
+from looplab.core.jsonutil import valid_digest_ref
 from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGEST_V2_FIELDS,
                      NODE_CONCEPT_PROVENANCE_AUTHORED,
                      NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR,
@@ -293,42 +294,21 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # speculative execution. Absent on old logs -> 0 -> historical alternating build/eval behavior.
     _spec_depth = d.get("speculation_depth", 0)
     st.speculation_depth = (_spec_depth if type(_spec_depth) is int and 0 <= _spec_depth <= 64 else 0)
-    _spec_receipt = d.get("speculation_gate_receipt_digest", "")
-    st.speculation_gate_receipt_digest = (
-        _spec_receipt
-        if isinstance(_spec_receipt, str)
-        and len(_spec_receipt) == 71
-        and _spec_receipt.startswith("sha256:")
-        and all(ch in "0123456789abcdef" for ch in _spec_receipt[7:])
-        else ""
-    )
-    _runtime_scope = d.get("speculation_runtime_scope_sha256", "")
-    st.speculation_runtime_scope_sha256 = (
-        _runtime_scope
-        if isinstance(_runtime_scope, str)
-        and len(_runtime_scope) == 71
-        and _runtime_scope.startswith("sha256:")
-        and all(ch in "0123456789abcdef" for ch in _runtime_scope[7:])
-        else ""
-    )
-    _spec_implementation = d.get("speculation_implementation_digest", "")
-    st.speculation_implementation_digest = (
-        _spec_implementation
-        if isinstance(_spec_implementation, str)
-        and len(_spec_implementation) == 71
-        and _spec_implementation.startswith("sha256:")
-        and all(ch in "0123456789abcdef" for ch in _spec_implementation[7:])
-        else ""
-    )
-    _calibration_profile = d.get("speculation_calibration_profile_digest", "")
+    # Four sha256-prefixed receipt digests admitted by ONE predicate (doc 25 EV-04); they were four
+    # copies of the same six-line conjunction. The assignments stay written out rather than a
+    # `setattr` loop over field-name strings: a typo in such a loop would silently set the wrong
+    # attribute AND leave the real one at its default — the silent-no-op class this fold exists to
+    # avoid. The fail-closed "" per field is what makes a malformed digest read as "no receipt"
+    # rather than as a receipt nothing can verify.
+    _rd = d.get("speculation_gate_receipt_digest", "")
+    st.speculation_gate_receipt_digest = _rd if valid_digest_ref(_rd, prefix="sha256:") else ""
+    _rd = d.get("speculation_runtime_scope_sha256", "")
+    st.speculation_runtime_scope_sha256 = _rd if valid_digest_ref(_rd, prefix="sha256:") else ""
+    _rd = d.get("speculation_implementation_digest", "")
+    st.speculation_implementation_digest = _rd if valid_digest_ref(_rd, prefix="sha256:") else ""
+    _rd = d.get("speculation_calibration_profile_digest", "")
     st.speculation_calibration_profile_digest = (
-        _calibration_profile
-        if isinstance(_calibration_profile, str)
-        and len(_calibration_profile) == 71
-        and _calibration_profile.startswith("sha256:")
-        and all(ch in "0123456789abcdef" for ch in _calibration_profile[7:])
-        else ""
-    )
+        _rd if valid_digest_ref(_rd, prefix="sha256:") else "")
     # Bound the row CONTENTS, not just the row count: `dict(row)` copied each row whole, so a
     # hand-edited/foreign run_started could park megabytes in RunState — which FoldCursor then
     # deep-copies on EVERY snapshot. That is the amplification the card handlers' bounding comments
@@ -2887,9 +2867,7 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                     or type(generation) is not int or not 0 <= generation <= (1 << 31) - 1
                     or not isinstance(proposal_ref, dict)
                     or set(proposal_ref) != {"v", "digest"} or proposal_ref.get("v") != 1
-                    or not isinstance(digest, str) or not digest.startswith("idea:v1:")
-                    or len(digest) != len("idea:v1:") + 64
-                    or any(ch not in "0123456789abcdef" for ch in digest[len("idea:v1:"):])):
+                    or not valid_digest_ref(digest, prefix="idea:v1:")):
                 return
             rec.update({
                 "node_id": node_id,
@@ -4186,9 +4164,11 @@ def _bounded_card_ref(value) -> str | None:
 
 
 def _digest_ref(value: str, namespace: str) -> bool:
-    prefix = f"{namespace}:sha256:"
-    return (value.startswith(prefix) and len(value) == len(prefix) + 64
-            and all(ch in "0123456789abcdef" for ch in value[len(prefix):]))
+    # Delegating also FIXES this copy (doc 25 EV-04): it lacked the `isinstance` guard its siblings
+    # had, so a non-string reached `.startswith` and raised `AttributeError` inside the fold — which
+    # takes down every replay of the run, not just this field. Both call sites happen to pass an
+    # already-bounded `str` today, so it was latent rather than live.
+    return valid_digest_ref(value, prefix=f"{namespace}:sha256:")
 
 
 def _bounded_card_footprint_enrichment(value) -> dict | None:

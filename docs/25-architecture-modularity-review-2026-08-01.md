@@ -1737,6 +1737,43 @@ new-candidate site: each fails exactly its own case with `assert 2 == 1`.
 
 *Recommendation:* Add a tiny validators module (e.g. core: valid_hex_digest(value, prefix), bounded_int(value, lo, hi), bounded_str(value, max_len)) and use the existing table-driven style (_coverage_snapshot_row) as the canonical pattern for new handlers. Collapse the four _on_run_started digest blocks into one loop over field names first — that alone removes ~30 lines with zero semantic risk.
 
+*Resolution (2026-08-04):* The hex-digest half is done. `core/jsonutil.valid_digest_ref(value, *,
+prefix="")` now answers it once, at 16 call sites across `events`, `core`, `engine`, `search`, `tools`
+and `serve`.
+
+It lives in `jsonutil.py` rather than a new validators module because it is the READER of the format
+`canonical_json_digest` in that same file WRITES. The two are one contract: a verifier that drifts
+from its minter accepts refs nothing issued, or rejects refs that were. Splitting them across modules
+is what let ~20 copies exist in the first place.
+
+Two of the copies were not merely duplicated, they were WEAKER, and the shared predicate fixes both:
+
+* `replay._digest_ref` had no `isinstance` guard, so a non-string reached `.startswith` and raised
+  `AttributeError` inside the fold — which takes down every replay of the run, not one field. Both
+  call sites pass an already-bounded `str` today, so it was latent rather than live.
+* `lessons.py`'s curation-claim check tested `len` and character membership with no type guard at
+  all, so a 64-element LIST of hex characters satisfied both and was accepted as a digest.
+
+Three deliberate NON-conversions, which is the part a blind sweep would have got wrong:
+
+* `serve/routers/boss._normalize_report_generation` accepts `A-F` as well as `a-f`. It normalizes a
+  generation a client typed into an HTTP request and lowercases it afterwards — input normalization,
+  not identity checking. Its sibling twelve lines up is fold-side and lowercase-only. Merging the two
+  would have silently made the fold accept two spellings of one digest.
+* `serve/reviews.py` and `serve/assistant.py` validate 12- and 32-hex REVIEW LINK IDS, and
+  `engine/costs.py` a 32-hex `usage_id` (`uuid4().hex`). Random identifiers, not digests.
+
+The guard is a source scan, and its first draft had the same bug the finding describes: it exempted
+those files WHOLESALE, so a genuinely re-derived 64-hex predicate added beside an unrelated random-id
+check would have passed. Exemptions now match on the reason (an uppercase alphabet, or a non-64
+length in the two-line window) rather than the filename; a teeth-test that injects a re-derived copy
+into `costs.py` confirms it is caught.
+
+The finding's OTHER two halves — the scalar guards (`type(x) is int and 0 <= x <= (1 << 31) - 1`,
+`isinstance(v, bool) or not isinstance(v, int)`) and adopting the `_coverage_snapshot_row` table style
+for new handlers — are NOT done here and stay open. They are a larger change with real semantic risk
+per site, unlike the digest predicate, which is one exact shape with a differential check available.
+
 #### EV-05 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-02)**
 
 **Four hand-synchronized implementations of the tolerant-JSONL-prefix scan (stop at first torn/corrupt line)**

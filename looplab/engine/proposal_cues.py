@@ -14,6 +14,7 @@ from looplab.engine.governance_health import GovernanceLedgerUnavailable
 from looplab.search.coverage import latest_live_snapshot
 from looplab.trust.cross_run import (cross_run_text, same_live_direction,
                                      sanitize_cross_run_projection, valid_live_direction)
+from looplab.core.jsonutil import valid_digest_ref
 
 # PART IV Phase 2b: the streak length at which the capability-expansion directive treats the run as
 # action-space LOCKED-IN. Matches `search/lock_in.py::lock_in_signal`'s default `streak_threshold` (the
@@ -230,8 +231,7 @@ class ProposalCuesMixin:
             pass
         if isinstance(_receipt, dict) and _receipt:
             digest = _receipt.get("corpus_digest")
-            if (isinstance(digest, str) and len(digest) == 64
-                    and all(ch in "0123456789abcdef" for ch in digest)):
+            if valid_digest_ref(digest):
                 steering.append({"kind": "cross_run_advisory", "ref": f"sha256:{digest}",
                                  "status": "available"})
             elif _receipt.get("status") == "unavailable":
