@@ -249,7 +249,8 @@ class NodeBuildMixin:
                            source=_OMIT, origin=_OMIT, generation=_OMIT,
                            parent_generations=_OMIT, cross_run_receipt=_OMIT,
                            footprint_finalized=_OMIT, speculative=_OMIT,
-                           card_build_generation=_OMIT, materialize_aborted_intent=_OMIT,
+                           card_build_generation=_OMIT, eval_start_boundary=_OMIT,
+                           materialize_aborted_intent=_OMIT,
                            expected_last_seq=_OMIT) -> None:
         """The single `node_created` emitter for all four creation sites (`_create_node`,
         `_create_injected_node`, `_ablate`, `_ablate_code`). Optional keys default to the
@@ -268,6 +269,7 @@ class NodeBuildMixin:
                      ("footprint_finalized", footprint_finalized),
                      ("speculative", speculative),
                      ("card_build_generation", card_build_generation),
+                     ("eval_start_boundary", eval_start_boundary),
                      ("materialize_aborted_intent", materialize_aborted_intent)):
             if v is not _OMIT:
                 data[k] = v

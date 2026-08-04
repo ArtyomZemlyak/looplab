@@ -759,12 +759,22 @@ def test_budget_refunds_only_proven_zero_cost_freshness_drop_not_ordinary_supers
     speculative.eval_seconds = 0
     speculative.speculative = True
     speculative.card_build_generation = 7
+    # The writer's promise that this lifecycle gets a durable eval-START row before any sandbox work.
+    # Without it the absence of one proves nothing (a log written before the boundary existed says
+    # exactly the same nothing about a node killed mid-training), so the refund fails closed.
+    speculative.eval_start_boundary = True
     state = RunState(
         nodes={0: ordinary, 1: speculative},
         speculative_nodes={1: {"card_id": "spec-card", "generation": 7}},
     )
 
     assert card_budget_used(state) == 1
+    unpromised = state.model_copy(deep=True)
+    unpromised.nodes[1].eval_start_boundary = False
+    assert card_budget_used(unpromised) == 2
+    interrupted = state.model_copy(deep=True)
+    interrupted.nodes[1].eval_started = True
+    assert card_budget_used(interrupted) == 2
     mismatched = state.model_copy(deep=True, update={
         "speculative_nodes": {1: {"card_id": "spec-card", "generation": 8}},
     })

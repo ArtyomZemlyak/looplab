@@ -240,15 +240,25 @@ def is_unevaluated_speculative_discard(state: RunState, node: Node) -> bool:
     is refunded.  A speculative node that DID consume an evaluation is a real experiment and keeps
     its slot, whatever its outcome.
 
-    "Never ran" is proven, never inferred.  Three independent durable facts must agree:
+    "Never ran" is proven, never inferred.  Four independent durable facts must agree:
 
     * both speculative receipts bind this attempt-zero lifecycle to one committed producer result
       (``_durable_speculative_lifecycle``) — an ordinary node can therefore never be refunded;
+    * the node's creator PROMISED a durable eval-start boundary (``Node.eval_start_boundary``, from
+      ``node_created``) and no such boundary was ever appended (``Node.eval_started`` is False).
+      This pair is the load-bearing one, and it is why the promise exists at all: without it the
+      absence of a boundary is not evidence, merely silence — a log written before the boundary
+      existed says exactly the same nothing about a node whose sandbox ran for forty minutes before
+      the process was killed.  FAIL CLOSED: no promise, no refund;
     * the terminal itself carries the writer's pre-dispatch marker ``Node.never_evaluated`` (the
-      additive ``node_failed`` field), OR — for logs written before that marker existed — the exact
-      zero-cost freshness receipt that was the original narrow refund;
+      additive ``node_failed`` field), OR the exact zero-cost freshness receipt that was the original
+      narrow refund;
     * the folded execution evidence CORROBORATES it: zero charged eval seconds and no
       ``stage_finished`` row.  Any evidence that the sandbox actually started outvotes the marker.
+      (Kept, though it is now the WEAK half of the proof: a killed evaluation charges no seconds and
+      appends no stage row — ``stage_finished`` is written inside the terminal's own write-lock block
+      and cost is charged only by a terminal — so this pair alone can never see an interrupted eval.
+      It still catches a writer that stamps the marker on a node the log shows really ran.)
 
     Deliberately NOT keyed on ``reason='superseded'`` alone: ordinary build/reset races use the same
     reason and remain charged.  Absence of a node workdir on disk is not evidence at all — replay
@@ -258,6 +268,8 @@ def is_unevaluated_speculative_discard(state: RunState, node: Node) -> bool:
     return bool(
         node.status is NodeStatus.failed
         and _durable_speculative_lifecycle(state, node)
+        and getattr(node, "eval_start_boundary", False) is True
+        and getattr(node, "eval_started", False) is not True
         and node.eval_seconds == 0
         and not getattr(node, "stages", None)
         and (

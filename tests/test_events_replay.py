@@ -234,6 +234,76 @@ def test_node_speculative_marker_is_strict_and_generation_is_marker_scoped(
     assert state.nodes[0].card_build_generation == expected_generation
 
 
+def _spec_prefix(*, boundary: bool = True) -> list:
+    idea = {"operator": "draft", "params": {}, "card_id": "card-0"}
+    created = {
+        "node_id": 0, "parent_ids": [], "operator": "draft", "idea": idea,
+        "speculative": True, "card_build_generation": 0,
+    }
+    if boundary:
+        created["eval_start_boundary"] = True
+    return [
+        Event(type="run_started", data={"run_id": "r", "task_id": "t"}),
+        Event(type="node_created", data=created),
+    ]
+
+
+def test_eval_start_boundary_folds_set_only_and_generation_keyed():
+    """The durable eval-START boundary: order-tolerant by construction, cleared by a reset.
+
+    It is the ONLY thing in the log that distinguishes a prefetch discarded before dispatch from one
+    whose sandbox was killed mid-training — eval seconds are charged only by a terminal, and
+    `stage_finished` rows are appended inside the terminal's own write-lock block.
+    """
+
+    started = fold(_spec_prefix() + [
+        Event(type="node_eval_started", data={"node_id": 0, "generation": 0}),
+        Event(type="node_eval_started", data={"node_id": 0, "generation": 0}),   # duplicate: no-op
+    ])
+    assert started.nodes[0].eval_start_boundary is True
+    assert started.nodes[0].eval_started is True
+
+    # A row for an abandoned attempt is ignored, and a reset clears the flag with its lifecycle.
+    wrong_generation = fold(_spec_prefix() + [
+        Event(type="node_eval_started", data={"node_id": 0, "generation": 7}),
+    ])
+    assert wrong_generation.nodes[0].eval_started is False
+
+    after_reset = fold(_spec_prefix() + [
+        Event(type="node_eval_started", data={"node_id": 0, "generation": 0}),
+        Event(type="node_reset", data={"node_id": 0, "generation": 0}),
+    ])
+    assert after_reset.nodes[0].attempt == 1
+    assert after_reset.nodes[0].eval_started is False
+    assert after_reset.nodes[0].eval_start_boundary is True   # a creation fact, not a lifecycle one
+
+
+@pytest.mark.parametrize(("recorded", "expected"), [
+    (True, True),
+    ("true", False),
+    (1, False),
+    (None, False),
+])
+def test_eval_start_boundary_promise_is_strict_and_absent_on_old_logs(recorded, expected):
+    """Additive + reader-defaulted: an old `node_created` carries no promise, so it gets no refund."""
+    created = {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "card_id": "card-0"},
+        "speculative": True, "card_build_generation": 0,
+    }
+    if recorded is not None:
+        created["eval_start_boundary"] = recorded
+    state = fold([
+        Event(type="run_started", data={"run_id": "r", "task_id": "t"}),
+        Event(type="node_created", data=created),
+    ])
+    assert state.nodes[0].eval_start_boundary is expected
+    # Fold-internal on both halves: neither reaches a serialized payload, so an old log's snapshots
+    # and digests are byte-identical.
+    dumped = state.nodes[0].model_dump()
+    assert "eval_start_boundary" not in dumped and "eval_started" not in dumped
+
+
 def test_torn_final_line_is_ignored(tmp_path):
     """A crash mid-append leaves a partial last line; read_all must drop it and the
     surviving prefix must replay to a consistent state."""

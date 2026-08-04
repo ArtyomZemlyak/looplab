@@ -720,6 +720,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._speculation_product_lane = False
         self._speculation_gate_admitted = False
         self._speculation_gate_receipt_digest = ""
+        # Every spelling of THIS run's product-lane identity that re-entry accepts (the mintable one
+        # plus superseded schema ids). Empty off the product lane: no other lane has an alternative.
+        self._speculation_product_authority_tokens: frozenset[str] = frozenset()
         self._speculation_implementation_digest = ""
         self._speculation_policy_scope = ""
         self._speculation_calibration_profile_digest = ""
@@ -901,8 +904,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # Card speculation pre-builds the code for the experiment PREDICTED to be selected next.
             # A build whose prediction misses is DISCARDED BEFORE IT EVER RUNS — the discard is a
             # `superseded` terminal appended from `_drop_stale_speculation`, which only reaches a node
-            # that is still `pending` on a fresh fold and not in `eval_inflight`, so no sandbox, no
-            # workdir and no GPU second was ever spent on it. Its whole cost is one Developer call.
+            # that is still `pending` on a fresh fold, is not in `eval_inflight`, and carries no
+            # durable eval-start boundary — so no sandbox, no workdir and no GPU second was ever spent
+            # on it. (The first two are IN-MEMORY facts and a resumed process has neither; the
+            # boundary, `events/types.py::EV_NODE_EVAL_STARTED`, is the durable one that survives a
+            # kill, and without it the refund is refused.) Its whole cost is one Developer call.
             # The toy-only fence was never about that cost. It existed because a discarded build still
             # consumed a slot of the run's NODE budget, so the same budget bought fewer real
             # experiments: measured at equal task/seed/budget with speculation the only variable, the
@@ -945,6 +951,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # trap, not a safety property. There the receipt is DECLINED instead: the run
                 # proceeds in the product lane, and `run_started` durably records the product lane
                 # token, so the log never claims an attestation that did not hold.
+                #
+                # ...AND A HONOURED ONE BINDS NOTHING THERE EITHER. This block used to carry the
+                # receipt's identity into `run_started` on ANY workload, which meant a receipt that
+                # was valid at run start pinned `speculation_implementation_digest` — the whole-source
+                # digest — on a real Repo/GPU run. The next `pip install -U` (or any source edit)
+                # revoked the receipt, the resume fell into the product lane with an empty digest, and
+                # the re-entry equality check refused the run FOREVER; dropping the receipt from the
+                # resume command did not help, because that lands in the same product lane. That is
+                # precisely the trap the product lane below exists to avoid, so a receipt supplied on
+                # a workload it did not measure is now inert in BOTH directions: it never authorizes
+                # (it already did not) and it never pins.
                 from looplab.search.speculation_quality import (
                     speculation_task_profile_digest,
                     validated_speculation_gate_receipt,
@@ -970,48 +987,48 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             "scorer/search-quality gates"
                         )
                     _gate_receipt = None
-            if _gate_receipt is not None:
-                if _calibrated_replay:
-                    # CALIBRATED REPLAY LANE. Re-running the benchmark's own workload under its own
-                    # receipt still gets the full narrow envelope: the exact Settings profile, roles,
-                    # policy, sandbox, treatment depth, node budget and runtime-scope digest the
-                    # evidence was measured under. Weakening this lane would let a receipt earned on
-                    # one measured runtime authorize a different one under the same name.
-                    runtime_errors, expected_runtime_scope = _narrow_runtime_envelope_errors()
-                    if (
-                        runtime_errors
-                        or type(_gate_receipt.get("admitted_depth")) is not int
-                        or _gate_receipt.get("admitted_depth") != self.speculation_depth
-                        or type(_gate_receipt.get("admitted_max_nodes")) is not int
-                        or _gate_receipt.get("admitted_max_nodes") != max_nodes
-                        or _gate_receipt.get("runtime_scope_sha256") != expected_runtime_scope
-                        # The receipt is scoped to the shipped quadratic adapter, not merely to an
-                        # arbitrary TaskAdapter/subclass that can spoof the same model_dump while
-                        # executing a different workload.
-                        or _gate_receipt.get("task_profile_sha256")
-                        != speculation_task_profile_digest(task)
-                    ):
-                        raise ValueError(
-                            "speculation_gate_receipt is stale, invalid, non-GPU, "
-                            "policy/depth-mismatched, runtime-scope/max-nodes-mismatched, or does "
-                            "not pass the current scorer/search-quality gates"
-                        )
-                    _guard_calibrated_role_factory()
-                    self._speculation_runtime_scope_sha256 = expected_runtime_scope
-                # ...on any other workload the receipt binds no ENVELOPE to this run: it attests that
-                # the benchmark passes on this build, which is exactly what it measured, so no
-                # runtime-scope pin is minted. Both lanes still carry the receipt's own identity into
-                # `run_started` — an attested run may only be resumed under the same attestation.
+            if _calibrated_replay and _gate_receipt is not None:
+                # CALIBRATED REPLAY LANE — the ONLY lane a receipt binds anything to, because it is
+                # the only one whose workload the receipt actually measured. Re-running the
+                # benchmark's own workload under its own receipt gets the full narrow envelope: the
+                # exact Settings profile, roles, policy, sandbox, treatment depth, node budget and
+                # runtime-scope digest the evidence was measured under. Weakening this lane would let
+                # a receipt earned on one measured runtime authorize a different one under the same
+                # name — and this lane's own workload is the toy the receipt measured, so pinning the
+                # source digest here costs nothing: a re-measurement is minutes, not a lost GPU run.
+                runtime_errors, expected_runtime_scope = _narrow_runtime_envelope_errors()
+                if (
+                    runtime_errors
+                    or type(_gate_receipt.get("admitted_depth")) is not int
+                    or _gate_receipt.get("admitted_depth") != self.speculation_depth
+                    or type(_gate_receipt.get("admitted_max_nodes")) is not int
+                    or _gate_receipt.get("admitted_max_nodes") != max_nodes
+                    or _gate_receipt.get("runtime_scope_sha256") != expected_runtime_scope
+                    # The receipt is scoped to the shipped quadratic adapter, not merely to an
+                    # arbitrary TaskAdapter/subclass that can spoof the same model_dump while
+                    # executing a different workload.
+                    or _gate_receipt.get("task_profile_sha256")
+                    != speculation_task_profile_digest(task)
+                ):
+                    raise ValueError(
+                        "speculation_gate_receipt is stale, invalid, non-GPU, "
+                        "policy/depth-mismatched, runtime-scope/max-nodes-mismatched, or does "
+                        "not pass the current scorer/search-quality gates"
+                    )
+                _guard_calibrated_role_factory()
+                self._speculation_runtime_scope_sha256 = expected_runtime_scope
                 self._speculation_gate_receipt_digest = _gate_receipt["self_digest"]
                 self._speculation_implementation_digest = _gate_receipt["implementation_digest"]
             else:
                 from looplab.search.speculation_quality import (
-                    speculation_product_authority_digest,
+                    speculation_product_authority_digests,
                 )
                 # PRODUCT LANE — the operator's setting is the whole authority. What stays pinned is
                 # the run's own search TREATMENT (selector, depth, policy scope) plus a lane token a
                 # receipt-authorized log can never match, so re-entry cannot reinterpret one lane's
-                # speculative prefix as the other's.
+                # speculative prefix as the other's. A receipt supplied on a workload it did not
+                # measure lands HERE, valid or not: it authorized nothing, so it pins nothing, and the
+                # run stays resumable with or without it on the command line.
                 #
                 # It deliberately does NOT pin `speculation_implementation_digest`. That digest hashes
                 # every shipped Python file, so any source edit — a comment, a `pip install -U` —
@@ -1020,10 +1037,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # speculative prefix it writes is folded by the ordinary forward-compatible rules
                 # (invariant #5) like every other part of the log.
                 self._speculation_product_lane = True
-                self._speculation_gate_receipt_digest = speculation_product_authority_digest(
+                # Head = the token this run MINTS; the tail is superseded spellings of the same
+                # identity that re-entry still accepts, so a schema bump cannot strand a run that is
+                # already underway (see `speculation_product_authority_digests`).
+                _product_tokens = speculation_product_authority_digests(
                     policy_scope=SPECULATION_POLICY_SCOPE,
                     task_kind=str(getattr(task, "kind", "") or ""),
                 )
+                self._speculation_gate_receipt_digest = _product_tokens[0]
+                self._speculation_product_authority_tokens = frozenset(_product_tokens)
             self._speculation_policy_scope = SPECULATION_POLICY_SCOPE
             self._speculation_gate_admitted = True
         self._strategy_fidelity: Optional[str] = None   # None => use the Idea's own profile
@@ -1666,6 +1688,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if self._speculation_enabled():
                 # Layer 5 freshness is live engine policy, never fold semantics. Drain one stale Node
                 # and restart the turn; only a fully-clean fresh prefix may reach Card scoring.
+                # No `eval_inflight` to pass: this site runs between batches, with every eval task
+                # already joined. That used to be the whole argument, and it was wrong across a
+                # CRASH — a node this process never dispatched may have been mid-training when the
+                # PREVIOUS process died. `_drop_stale_speculation` now reads the durable eval-start
+                # boundary as well, so the empty default is safe by evidence rather than by timing.
                 if await self._drop_stale_speculation():
                     continue
                 fresh_events = self.store.read_all()
@@ -2410,10 +2437,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         if not recorded_marker:
             return
 
-        def reject() -> None:
+        def reject(*causes: str) -> None:
+            # NAME THE CAUSE. This message used to list every pin the check knows about and let the
+            # operator guess which one moved — and the one that actually fired most often (a
+            # whole-source implementation digest revoked by an unrelated edit) was not even in the
+            # list, so the text pointed at a receipt/profile/seed/GPU mismatch that had not happened.
+            detail = "; ".join(causes) if causes else "a run-start speculation pin does not match"
             raise SpeculationAuthorizationError(
-                "cannot resume Card speculation/calibration without the exact validated "
-                "run-start receipt/profile, implementation, policy, depth, seed and GPU pins"
+                f"cannot resume this run's Card speculation/calibration: {detail}. The run-start "
+                "record owns these values (engine invariant #6) — re-run with the launch settings "
+                "the log pinned rather than editing them on the resume command."
             )
 
         # AUTO depth is a STARTUP resolution off the live box (`_resolve_speculation_depth`), exactly
@@ -2428,26 +2461,76 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         ):
             self.speculation_depth = recorded_depth
 
+        # LEGACY PRODUCT-LANE ADOPTION (invariant #6 again). A build before the receipt-lane fix
+        # carried a supplied receipt's identity into `run_started` even on a workload the receipt
+        # never measured, so those logs pin a whole-source `speculation_implementation_digest` that no
+        # later process can reproduce once anything is edited or upgraded. They are the exact runs the
+        # product lane exists to keep resumable, and refusing them forever punishes the operator for a
+        # bug in the writer. Adopt what the log recorded — but ONLY for that precise legacy shape:
+        # this process must itself be in the product lane, and the log must carry no calibration
+        # fields and no runtime-scope pin, so a calibrated lane's envelope can never be adopted away.
+        if (
+            getattr(self, "_speculation_product_lane", False)
+            and not self._speculation_gate_calibration
+            and not recorded_calibration
+            and not recorded_runtime_scope
+            and recorded_impl
+            and recorded_receipt
+            and recorded_scope == SPECULATION_POLICY_SCOPE
+            and getattr(entry, "card_driven_selection", False) is True
+            and type(recorded_depth) is int
+            and recorded_depth == self.speculation_depth
+        ):
+            self._speculation_implementation_digest = recorded_impl
+            self._speculation_gate_receipt_digest = recorded_receipt
+
+        causes: list[str] = []
         if (
             not isinstance(getattr(entry, "run_id", None), str)
             or not entry.run_id.strip()
             or entry.run_id != self.run_dir.name
-            or not self._speculation_gate_admitted
-            # EQUALITY, not "must be present", for BOTH evidence identities: the calibrated lanes pin
-            # an implementation digest and a runtime scope, the product lane deliberately pins
-            # neither (see `speculation_product_authority_digest` for why a whole-source digest must
-            # not gate a real run's resume). Empty-vs-empty is the product lane agreeing with itself;
-            # either lane meeting the other's log still fails closed, in both directions.
-            or recorded_impl != self._speculation_implementation_digest
-            or recorded_runtime_scope != self._speculation_runtime_scope_sha256
-            or (not getattr(self, "_speculation_product_lane", False) and not recorded_impl)
-            or getattr(entry, "card_driven_selection", False) is not True
-            or type(recorded_depth) is not int
-            or recorded_depth != self.speculation_depth
-            or recorded_scope != SPECULATION_POLICY_SCOPE
-            or self._speculation_policy_scope != SPECULATION_POLICY_SCOPE
         ):
-            reject()
+            causes.append(
+                f"the log was written for run id {getattr(entry, 'run_id', None)!r}, "
+                f"not {self.run_dir.name!r}")
+        if not self._speculation_gate_admitted:
+            causes.append(
+                "this process did not admit Card speculation at all (card_driven_selection off, "
+                "depth 0, or a policy other than "
+                f"{SPECULATION_POLICY_SCOPE!r}), but the log records a speculative prefix")
+        # EQUALITY, not "must be present", for BOTH evidence identities: the calibrated lane pins an
+        # implementation digest and a runtime scope, the product lane deliberately pins neither (see
+        # `speculation_product_authority_digest` for why a whole-source digest must not gate a real
+        # run's resume). Empty-vs-empty is the product lane agreeing with itself; either lane meeting
+        # the other's log still fails closed, in both directions.
+        if recorded_impl != self._speculation_implementation_digest:
+            causes.append(
+                "the run started in the "
+                f"{'calibrated' if recorded_impl else 'product'} lane but is being resumed in the "
+                f"{'calibrated' if self._speculation_implementation_digest else 'product'} one "
+                "(speculation_implementation_digest differs)")
+        if recorded_runtime_scope != self._speculation_runtime_scope_sha256:
+            causes.append(
+                "the calibrated runtime-scope pin differs — the Settings/roles/sandbox envelope the "
+                "receipt was measured under is not the one this process is launching")
+        if not getattr(self, "_speculation_product_lane", False) and not recorded_impl:
+            causes.append(
+                "the log carries no evidence identity, so it cannot be resumed under a receipt")
+        if getattr(entry, "card_driven_selection", False) is not True:
+            causes.append("the log did not pin card_driven_selection=true")
+        if type(recorded_depth) is not int or recorded_depth != self.speculation_depth:
+            causes.append(
+                f"speculation_depth was pinned at {recorded_depth!r} and this process resolved "
+                f"{self.speculation_depth!r}")
+        if recorded_scope != SPECULATION_POLICY_SCOPE:
+            causes.append(
+                f"the log pinned policy scope {recorded_scope!r}, not {SPECULATION_POLICY_SCOPE!r}")
+        if self._speculation_policy_scope != SPECULATION_POLICY_SCOPE:
+            causes.append(
+                f"this process resolved policy scope {self._speculation_policy_scope!r}, "
+                f"not {SPECULATION_POLICY_SCOPE!r}")
+        if causes:
+            reject(*causes)
 
         # The hidden evidence bootstrap is immutable: any control would invalidate the paired
         # measurement.  A public receipt, by contrast, admits the measured launch envelope and keeps
@@ -2459,7 +2542,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             or getattr(entry, "pending_strategy", None) is not None
             or bool(getattr(entry, "active_strategy", None))
         ):
-            reject()
+            reject(
+                "this is the hidden calibration bootstrap, whose paired measurement admits no "
+                "policy swap, budget override or Strategy — and the log records one")
 
         if recorded_calibration:
             if (
@@ -2473,15 +2558,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # Calibration never serializes its internal admission token as a public receipt.
                 or bool(getattr(entry, "speculation_gate_receipt_digest", ""))
             ):
-                reject()
+                reject(
+                    "the log is a calibration bootstrap and its exact profile digest, GPU inventory "
+                    "and seed are not the ones this process resolved")
             return
 
-        if (
-            self._speculation_gate_calibration
-            or not recorded_receipt
-            or recorded_receipt != self._speculation_gate_receipt_digest
+        if self._speculation_gate_calibration:
+            reject("this process is a calibration bootstrap but the log is not one")
+        if not recorded_receipt:
+            causes.append("the log records no speculation lane token")
+        elif recorded_receipt != self._speculation_gate_receipt_digest and (
+            recorded_receipt not in getattr(
+                self, "_speculation_product_authority_tokens", frozenset())
         ):
-            reject()
+            causes.append(
+                "the speculation lane token differs — on the product lane it is derived from the "
+                "policy scope and the TASK KIND, so a resume that names a different task kind (or a "
+                "receipt-authorized log met by a receiptless process) lands here")
+        if causes:
+            reject(*causes)
 
     def _request_create_pause(self, node_id: int, reason: str) -> None:
         """Ask the MAIN task to append the run-global auto-pause gate.

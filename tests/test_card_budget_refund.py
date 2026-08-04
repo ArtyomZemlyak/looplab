@@ -9,7 +9,15 @@ folded event log so replay reaches it again.
 """
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
 import anyio
+import pytest
 
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.events.eventstore import EventStore
@@ -46,6 +54,8 @@ def _spec_node(
     stages: list | None = None,
     status: NodeStatus = NodeStatus.failed,
     attempt: int = 0,
+    eval_start_boundary: bool = True,
+    eval_started: bool = False,
 ) -> Node:
     node = Node(
         id=node_id,
@@ -58,6 +68,8 @@ def _spec_node(
     node.speculative = speculative
     node.card_build_generation = generation
     node.never_evaluated = never_evaluated
+    node.eval_start_boundary = eval_start_boundary
+    node.eval_started = eval_started
     node.error = error
     node.error_reason = reason
     node.eval_seconds = eval_seconds
@@ -93,19 +105,42 @@ def test_speculative_discard_that_never_evaluated_does_not_spend_budget():
     assert refunded_card_budget_node_ids(state) == frozenset({0})
 
 
-def test_legacy_freshness_receipt_refunds_logs_written_before_the_marker():
-    """Old logs carry no `never_evaluated` field; their exact freshness receipt still proves it."""
+def test_freshness_receipt_alone_still_proves_it_when_the_boundary_promise_is_there():
+    """The exact zero-cost freshness receipt substitutes for `never_evaluated`, not for the boundary."""
 
-    legacy = _spec_node(
+    legacy_marker = _spec_node(
         0,
         never_evaluated=False,
         error=CARD_FRESHNESS_SUPERSEDED_ERROR,
         reason="superseded",
     )
-    state = _state(legacy)
+    state = _state(legacy_marker)
 
-    assert is_unevaluated_speculative_discard(state, legacy) is True
+    assert is_unevaluated_speculative_discard(state, legacy_marker) is True
     assert card_budget_used(state) == 0
+
+
+def test_a_log_that_promised_no_eval_start_boundary_is_never_refunded():
+    """FAIL CLOSED on a log written before the boundary existed.
+
+    Such a log cannot distinguish a build discarded before dispatch from one whose sandbox ran for
+    forty minutes before the process was killed: eval seconds are charged only by a terminal and
+    `stage_finished` rows are appended inside the terminal's own write-lock block, so BOTH look like
+    `eval_seconds=0, stages=[]`. Silence is not evidence, so the slot stays charged — the refund is
+    the thing that gets given up, never the compute accounting.
+    """
+
+    unpromised = _spec_node(0, eval_start_boundary=False)
+    state = _state(unpromised)
+
+    assert is_unevaluated_speculative_discard(state, unpromised) is False
+    assert card_budget_used(state) == 1
+    assert refunded_card_budget_node_ids(state) == frozenset()
+
+    # Same node, same terminal, but written by an engine that promised the boundary and never had to
+    # append one: now the absence IS evidence and the slot comes back.
+    promised = _spec_node(1, eval_start_boundary=True)
+    assert card_budget_used(_state(promised)) == 0
 
 
 def test_refund_still_requires_both_durable_speculative_receipts():
@@ -152,10 +187,17 @@ def test_speculative_node_that_consumed_an_evaluation_still_spends_budget():
     evaluated.metric = 0.5
     assert card_budget_used(_state(evaluated)) == 1
 
-    # A speculative failure with NEITHER the marker nor the legacy freshness receipt is charged: a
+    # A speculative failure with NEITHER the marker nor the exact freshness receipt is charged: a
     # bare reason="superseded" is also what an ordinary build/reset race writes.
     unproven = _spec_node(3, never_evaluated=False, error="superseded by node reset")
     assert card_budget_used(_state(unproven)) == 1
+
+    # The durable eval-START boundary outvotes the marker even when NOTHING else does: this is the
+    # crash-interrupted prefetch, whose terminal is written by a resumed process with an empty
+    # in-memory `eval_inflight` set and whose forty GPU-minutes left no other trace in the log.
+    interrupted = _spec_node(4, eval_started=True)
+    assert is_unevaluated_speculative_discard(_state(interrupted), interrupted) is False
+    assert card_budget_used(_state(interrupted)) == 1
 
 
 # ------------------------------------------------- (3) ordinary (non-speculative) nodes are untouched
@@ -244,3 +286,89 @@ def test_discarded_speculative_build_refunds_its_slot_and_survives_replay(
     assert refunded_card_budget_node_ids(replayed) == frozenset({dropped_node})
     assert resumed._hard_node_reservation_limit(replayed) == live_limit
     assert resumed._node_reservation_slots_remaining(replayed) == live_remaining
+
+
+# ------------------------------------------------- (5) a build that BURNED compute survives a crash
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _crash_a_speculative_evaluation(tmp_path) -> tuple[Path, int]:
+    """SIGKILL a real process while a speculative node's sandbox is genuinely executing.
+
+    The interrupted node is left exactly as a crash leaves it: `pending`, no terminal, no charged
+    eval seconds and no `stage_finished` row — byte-indistinguishable, before this test existed,
+    from a build that was never dispatched at all.  Returns the run dir and the node id.
+    """
+
+    run_dir = tmp_path / "crash-run"
+    sentinel = tmp_path / "sandbox-running"
+    env = dict(os.environ)
+    env["LOOPLAB_MEMORY_DIR"] = str(tmp_path / "_mem")
+    env["LOOPLAB_KNOWLEDGE_DIR"] = str(tmp_path / "_knowledge")
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(_REPO_ROOT), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "tests._speculation_crash_driver", str(run_dir), str(sentinel)],
+        cwd=str(tmp_path), env=env, start_new_session=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.time() + 180
+        while not sentinel.exists() and time.time() < deadline:
+            if proc.poll() is not None:
+                out, err = proc.communicate()
+                pytest.fail(f"crash driver exited early: {out}\n{err}")
+            time.sleep(0.05)
+        assert sentinel.exists(), "the speculative node's sandbox never started"
+        # The whole session: the engine process AND the sandbox subprocess it is waiting on. This is
+        # the 40-GPU-minute kill from the review, compressed.
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        out, _err = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:                     # never leave a blocked sandbox behind
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.communicate(timeout=60)
+    node_id = int(
+        next(line for line in out.splitlines() if line.startswith("speculative_node="))
+        .split("=", 1)[1]
+    )
+    return run_dir, node_id
+
+
+def test_crash_interrupted_speculative_eval_is_never_refunded(tmp_path, monkeypatch):
+    """A killed-mid-evaluation prefetch must keep its slot — the compute is already spent.
+
+    Before the durable eval-start boundary this was unprovable: `eval_inflight` is in-memory and a
+    resumed process starts with an empty one, so the stale-drop wrote `never_evaluated: true` over a
+    node whose sandbox had really run and the slot came back for free.
+    """
+
+    run_dir, node_id = _crash_a_speculative_evaluation(tmp_path)
+
+    crashed = fold(EventStore(str(run_dir / "events.jsonl")).read_all())
+    interrupted = crashed.nodes[node_id]
+    # Exactly the prefix the reviewer described: nothing in the log looks like an evaluation...
+    assert interrupted.status is NodeStatus.pending
+    assert not interrupted.stages
+    assert not interrupted.eval_seconds
+    # ...except the durable start boundary, which is the whole point.
+    assert interrupted.eval_started is True
+
+    resumed, _producer = _engine(run_dir)
+    monkeypatch.setattr(
+        speculation_module, "speculative_card_is_fresh", lambda *_a, **_k: False,
+    )
+    # A resumed process has an EMPTY in-memory in-flight set — the default the main loop passes.
+    assert anyio.run(resumed._drop_stale_speculation) is True
+
+    after = fold(resumed.store.read_all())
+    dropped = after.nodes[node_id]
+    assert dropped.status is NodeStatus.failed
+    assert dropped.error_reason == "superseded"
+    # The terminal must NOT claim the build never ran, and the slot must NOT come back.
+    assert dropped.never_evaluated is False
+    assert is_unevaluated_speculative_discard(after, dropped) is False
+    assert refunded_card_budget_node_ids(after) == frozenset()
+    assert card_budget_used(after) == 1
+    assert resumed._hard_node_reservation_limit(after) == resumed._base_max_nodes

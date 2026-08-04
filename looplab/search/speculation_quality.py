@@ -58,6 +58,7 @@ from looplab.events.types import (
     EV_NODE_ABORT,
     EV_NODE_BUILDING,
     EV_NODE_CREATED,
+    EV_NODE_EVAL_STARTED,
     EV_NODE_EVALUATED,
     EV_NODE_FAILED,
     EV_NODE_REPAIRED,
@@ -84,7 +85,8 @@ from looplab.search.card_selection import (
     CardResourceEnvelope,
     SpeculativeSelectionContext,
     card_budget_used,
-    refunded_card_budget_node_ids,
+    is_unevaluated_speculative_discard,
+    node_counts_toward_card_budget,
     refunded_node_reservations,
     speculative_card_actions,
     speculative_raw_actions,
@@ -117,7 +119,19 @@ SPECULATION_RUN_ANALYSIS_SCHEMA = "looplab.speculation-run-analysis/v1"
 SPECULATION_QUALITY_GATE_SCHEMA = "looplab.speculation-quality-gate/v1"
 # The run-start identity token for the receiptless (product) speculation lane. Its own schema string
 # keeps its preimage disjoint from a gate receipt's, so the two lanes can never validate each other.
-SPECULATION_PRODUCT_AUTHORITY_SCHEMA = "looplab.speculation-product-authority/v1"
+# v2 BECAUSE THE PREIMAGE CHANGED: v1 hashed `implementation_digest` alongside the policy scope and
+# task kind, and that field was later removed (a whole-source digest must not gate a real run's
+# resume) without bumping the id — leaving two different preimages claiming one schema name, which is
+# exactly the collision a schema id exists to prevent.
+SPECULATION_PRODUCT_AUTHORITY_SCHEMA = "looplab.speculation-product-authority/v2"
+# Read-only. A run started between the field's removal and the bump recorded a v1 token over the v2
+# preimage; those logs are still resumable because re-entry accepts this alternative derivation. The
+# ORIGINAL v1 preimage is deliberately not reproducible here — it needs the source digest as of that
+# run, which no later process has — so a log from before the removal is refused with a named cause
+# rather than guessed at.
+SPECULATION_PRODUCT_AUTHORITY_LEGACY_SCHEMAS: tuple[str, ...] = (
+    "looplab.speculation-product-authority/v1",
+)
 
 # These values are source-owned.  There is deliberately no thresholds argument on any public API.
 SPECULATION_QUALITY_THRESHOLDS: Mapping[str, int | float] = MappingProxyType({
@@ -232,6 +246,14 @@ _CALIBRATION_TREATMENT_EVENT_TYPES = frozenset({
     # protocol" — the second of the two reasons no receipt could be minted.
     EV_CARD_BUILD_ATTEMPTED,
     EV_CARD_BUILD_DONE,
+    # The durable eval-START boundary, appended by the MAIN task at the dispatch decision and ONLY
+    # for a speculative attempt-zero lifecycle — so it appears in the treatment lane and never in a
+    # baseline. SOURCE REVIEW, as this allow-list demands: it is set-only and generation-keyed
+    # (`replay._on_node_eval_started`), so its splice position cannot change selection; it carries no
+    # cost and no metric; and the one thing that DOES read it is the node-budget refund, which is the
+    # quantity this A/B measures. Admitting it is what keeps that measurement honest — without the
+    # boundary, a treatment run killed mid-evaluation refunds a slot the GPU already spent.
+    EV_NODE_EVAL_STARTED,
     EV_NODE_FAILED,
 })
 
@@ -1981,6 +2003,24 @@ def _normalize_gpu_inventory(value: object) -> list[dict[str, Any]]:
     return sorted(normalized, key=lambda row: row["index"])
 
 
+def _total_predicate(predicate, state, node, *, on_error: bool) -> bool:
+    """Evaluate one shared budget predicate without letting a foreign state break finalization.
+
+    `speculation_budget_observation` promises never to raise, and its caller in `finalize_run` makes
+    that promise load-bearing: a raise there is swallowed and takes the run's `finalize_step` marker
+    with it.  The predicates themselves stay the single definition — this only bounds what a state
+    they cannot read is allowed to do, and both call sites pass the fail-closed answer (an unreadable
+    node is assumed to have SPENT its slot and to NOT have been refunded).
+    """
+
+    if node is None:
+        return False
+    try:
+        return bool(predicate(state, node))
+    except Exception:  # noqa: BLE001 - see the docstring: the fallback is the caller's choice
+        return on_error
+
+
 def speculation_budget_observation(state) -> dict[str, int]:
     """Per-run answer to "is speculation costing this run real experiment budget?".
 
@@ -1992,42 +2032,82 @@ def speculation_budget_observation(state) -> dict[str, int]:
     own `budget` finalization receipt (fold-ignored, one append per run), which is where "what did
     this run spend" already lives.
 
-    ``charged_discards`` is the regression signal. It counts speculative builds that were thrown away
-    AND still consumed a node-budget slot — the exact quantity the calibration evidence measured as
-    ~2.6% worse final metric. It is zero while the refund holds, and becomes positive the moment a
-    change lets a discarded prediction spend budget again (most dangerously by letting it consume an
+    ``charged_discards`` is the regression signal. It counts every speculative build that produced no
+    experiment AND still consumed a node-budget slot — the exact quantity the calibration evidence
+    measured as ~2.6% worse final metric. It is zero while the refund holds, and becomes positive the
+    moment a prefetch spends budget the run got nothing for (most dangerously by consuming an
     evaluation, since `is_unevaluated_speculative_discard` refuses to refund a build the log shows
     actually ran). Nobody has to run six GPU calibration runs to see that.
 
-    Pure and total: derived from one fold, tolerant of partial/foreign state, never raises.
+    TWO CLASSES OF HARM WERE INVISIBLE while this keyed only on linked nodes in ``failed``:
+
+    * ABANDONED, not discarded. A committed prefetch that is still ``pending`` when the run finishes
+      is charged by `node_counts_toward_card_budget` and never terminalized by
+      `_drop_stale_speculation` (which only terminalizes STALE ones), so the whole depth's worth of
+      slots — up to `speculation_depth`, which AUTO can resolve to one per GPU — went unreported
+      whenever the consumer stopped admitting fresh prefetches: eval-seconds budget crossed, wall
+      deadline reached, operator stop.
+    * UNLINKED. A speculative node whose `card_build_done` link never landed (the "creation was
+      rejected during replay" path) is charged by `card_budget_used` but is in neither
+      ``state.speculative_nodes`` nor the refunded set — it was counted as no kind of outcome at all.
+
+    So the universe is every speculative Node row plus every committed link, and the charged count is
+    decided by the SAME predicate the budget itself uses (`node_counts_toward_card_budget`, which
+    already excludes the refunded, the tombstoned and the gate-excluded). A second definition of
+    "this build spent a slot" is exactly the drift this observation exists to catch.
+
+    TOTAL, and it has to be: this is called from `finalize_run` inside a block whose failure silently
+    skips BOTH the `budget` append and its `finalize_step` marker, which leaves `requirements_complete`
+    false and a run that never acknowledges its own finalization. Every attribute read is defensive and
+    every predicate is evaluated through `_total_predicate`, whose fallbacks all point the same way:
+    an unreadable state may over-report `charged_discards`, never hand out a false all-clear.
     """
 
-    nodes = getattr(state, "nodes", None) or {}
-    speculative_ids = set(getattr(state, "speculative_nodes", None) or {})
-    outcomes = list(getattr(state, "card_build_outcomes", None) or [])
-    # The SAME predicate the budget itself uses (`card_budget_used` / the physical reservation
-    # ceiling both read it). A second definition of "this build never ran" is exactly the drift this
-    # observation exists to catch, so it must not introduce one.
-    refunded = refunded_card_budget_node_ids(state) & speculative_ids
-    discarded = {
-        node_id for node_id in speculative_ids
-        if getattr(nodes.get(node_id), "status", None) is NodeStatus.failed
+    raw_nodes = getattr(state, "nodes", None)
+    nodes: Mapping = raw_nodes if isinstance(raw_nodes, Mapping) else {}
+    raw_links = getattr(state, "speculative_nodes", None)
+    linked_ids = set(raw_links) if isinstance(raw_links, (Mapping, set, frozenset)) else set()
+    raw_outcomes = getattr(state, "card_build_outcomes", None)
+    outcomes = list(raw_outcomes) if isinstance(raw_outcomes, (list, tuple)) else []
+    speculative_ids = linked_ids | {
+        node_id for node_id, node in nodes.items()
+        if getattr(node, "speculative", False) is True
     }
-    evaluated = {
+
+    def _with_status(status) -> set:
+        return {
+            node_id for node_id in speculative_ids
+            if getattr(nodes.get(node_id), "status", None) is status
+        }
+
+    discarded = _with_status(NodeStatus.failed)
+    abandoned = _with_status(NodeStatus.pending)
+    evaluated = _with_status(NodeStatus.evaluated)
+    refunded = {
         node_id for node_id in speculative_ids
-        if getattr(nodes.get(node_id), "status", None) is NodeStatus.evaluated
+        if _total_predicate(is_unevaluated_speculative_discard, state, nodes.get(node_id),
+                            on_error=False)
     }
+    charged = {
+        node_id for node_id in (discarded | abandoned)
+        if _total_predicate(node_counts_toward_card_budget, state, nodes.get(node_id),
+                            on_error=True)
+    }
+    raw_requests = getattr(state, "card_build_requests", None)
     depth = getattr(state, "speculation_depth", 0)
     return {
         "depth": depth if type(depth) is int and 0 <= depth <= 64 else 0,
-        "requested": len(getattr(state, "card_build_requests", None) or []),
+        "requested": len(raw_requests) if isinstance(raw_requests, (list, tuple)) else 0,
         "committed": outcomes.count("committed"),
         "stale": outcomes.count("stale"),
         "producer_failed": outcomes.count("producer_failed"),
         "evaluated": len(evaluated),
         "discarded": len(discarded),
+        # Committed/created but never terminalized: at finalize this is a slot the run paid a
+        # Developer call for and got nothing back from. Additive key; `charged_discards` covers it.
+        "abandoned": len(abandoned),
         "refunded": len(refunded),
-        "charged_discards": len(discarded - refunded),
+        "charged_discards": len(charged),
     }
 
 
@@ -2051,15 +2131,39 @@ def speculation_product_authority_digest(*, policy_scope: str, task_kind: str) -
     re-resolve on a differently sized box.
     """
 
+    return speculation_product_authority_digests(
+        policy_scope=policy_scope, task_kind=task_kind,
+    )[0]
+
+
+def speculation_product_authority_digests(
+    *, policy_scope: str, task_kind: str,
+) -> tuple[str, ...]:
+    """The mintable product-lane token first, then the tokens re-entry still ACCEPTS.
+
+    Only the head is ever written into a `run_started`.  The tail exists because the schema id had to
+    be bumped for a preimage change that had already shipped (see
+    `SPECULATION_PRODUCT_AUTHORITY_SCHEMA`): a run already underway recorded the old id over the
+    current preimage, and refusing it would strand exactly the long-running real-workload runs the
+    product lane exists to keep resumable.  Accepting a superseded IDENTITY is not accepting a
+    superseded authorization — this token grants nothing.
+    """
+
     if not policy_scope or len(policy_scope) > 64:
         raise ValueError("product authority requires a bounded policy scope")
     if len(task_kind) > 64:
         raise ValueError("product authority requires a bounded task kind")
-    return _sha256(canonical_json({
-        "schema": SPECULATION_PRODUCT_AUTHORITY_SCHEMA,
-        "policy_scope": policy_scope,
-        "task_kind": task_kind,
-    }))
+    return tuple(
+        _sha256(canonical_json({
+            "schema": schema,
+            "policy_scope": policy_scope,
+            "task_kind": task_kind,
+        }))
+        for schema in (
+            SPECULATION_PRODUCT_AUTHORITY_SCHEMA,
+            *SPECULATION_PRODUCT_AUTHORITY_LEGACY_SCHEMAS,
+        )
+    )
 
 
 def _implementation_digest(
@@ -2734,6 +2838,7 @@ def validate_speculation_gate_receipt(
 
 
 __all__ = [
+    "SPECULATION_PRODUCT_AUTHORITY_LEGACY_SCHEMAS",
     "SPECULATION_PRODUCT_AUTHORITY_SCHEMA",
     "SPECULATION_QUALITY_GATE_SCHEMA",
     "SPECULATION_QUALITY_THRESHOLDS",
@@ -2743,6 +2848,7 @@ __all__ = [
     "speculation_environment_fingerprint",
     "speculation_implementation_digest",
     "speculation_product_authority_digest",
+    "speculation_product_authority_digests",
     "speculation_quality_gate",
     "speculation_task_profile_digest",
     "validate_speculation_gate_receipt",

@@ -1174,6 +1174,17 @@ class Node(BaseModel):
     # build from any other failed node. It rides the terminal itself, so "first terminal wins" already
     # makes it order-tolerant — no second event has to be correlated with this one.
     never_evaluated: bool = Field(default=False, exclude=True)
+    # The two halves of the DURABLE eval-start boundary (events/types.py::EV_NODE_EVAL_STARTED).
+    # `eval_start_boundary` is stamped on `node_created` and says the writer of THIS node promises to
+    # append a `node_eval_started` row before any sandbox work — so for such a node the ABSENCE of one
+    # is evidence, not an assumption. `eval_started` is that row, folded. Together they are what makes
+    # "this build never ran" survive a crash: the log used to charge evaluation cost only at the
+    # terminal, and `stage_finished` rows are appended inside the terminal's own write-lock block, so a
+    # process killed mid-training left a node byte-identical to one that was never dispatched. Both are
+    # fold-internal (`exclude=True`) and reader-defaulted, so an old log folds byte-identically — and,
+    # carrying no boundary promise, is refused a refund rather than granted one on no evidence.
+    eval_start_boundary: bool = Field(default=False, exclude=True)
+    eval_started: bool = Field(default=False, exclude=True)
 
     @property
     def robust_metric(self) -> Optional[float]:

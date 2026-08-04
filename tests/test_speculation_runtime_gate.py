@@ -281,7 +281,7 @@ def test_resume_rejects_missing_or_different_recorded_receipt(tmp_path, monkeypa
         "card_driven_selection": True,
         "speculation_depth": 1,
     })
-    with pytest.raises(RuntimeError, match="exact validated"):
+    with pytest.raises(RuntimeError, match="no evidence identity"):
         missing._reentry_repin()
 
     changed_dir = tmp_path / "changed-record"
@@ -305,7 +305,7 @@ def test_resume_rejects_missing_or_different_recorded_receipt(tmp_path, monkeypa
         speculation_depth=1,
         speculation_gate_receipt=str(receipt_path),
     )
-    with pytest.raises(RuntimeError, match="exact validated"):
+    with pytest.raises(RuntimeError, match="lane token differs"):
         resumed._reentry_repin()
 
 
@@ -350,7 +350,7 @@ def test_run_rejects_receipt_mismatch_before_recovery_ack_setup_or_log_write(
             ),
         )
 
-    with pytest.raises(RuntimeError, match="exact validated"):
+    with pytest.raises(RuntimeError, match="lane token differs"):
         anyio.run(resumed.run)
     assert (run_dir / "events.jsonl").read_bytes() == before
 
@@ -470,7 +470,8 @@ def test_positive_prefix_missing_identity_fails_before_any_write(
     engine.store.append("run_started", payload)
     before = (run_dir / "events.jsonl").read_bytes()
     # The CLI guard must not translate an authorization refusal into run_finished(error).
-    with pytest.raises(SpeculationAuthorizationError, match="exact validated"):
+    with pytest.raises(SpeculationAuthorizationError,
+                       match="run id|no evidence identity"):
         _run_engine_guarded(engine)
     assert (run_dir / "events.jsonl").read_bytes() == before
 
@@ -497,7 +498,7 @@ def test_any_speculation_marker_with_card_false_fails_before_mutation(
         **marker,
     })
     before = (run_dir / "events.jsonl").read_bytes()
-    with pytest.raises(RuntimeError, match="exact validated"):
+    with pytest.raises(RuntimeError, match="did not admit Card speculation at all"):
         anyio.run(engine.run)
     assert (run_dir / "events.jsonl").read_bytes() == before
 

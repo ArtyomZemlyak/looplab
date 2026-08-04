@@ -164,35 +164,171 @@ def test_the_product_lane_pins_survive_re_entry_and_bind_the_exact_treatment(tmp
     resumed = _engine(run_dir, task, card_driven_selection=True, speculation_depth=3)
     resumed._require_pinned_speculation_receipt(fold(resumed.store.read_all()))  # no raise
 
-    # ...and a DIFFERENT treatment on the same durable prefix still fails closed.
+    # ...and a DIFFERENT treatment on the same durable prefix still fails closed, NAMING the pin that
+    # moved. The old message listed every pin the check knows about and left the operator to guess.
     changed = _engine(run_dir, task, card_driven_selection=True, speculation_depth=2)
-    with pytest.raises(SpeculationAuthorizationError, match="exact validated"):
+    with pytest.raises(SpeculationAuthorizationError,
+                       match=r"speculation_depth was pinned at 3 and this process resolved 2"):
         changed._require_pinned_speculation_receipt(fold(changed.store.read_all()))
 
 
-def test_a_receipt_authorized_log_cannot_be_resumed_into_the_product_lane(
-        tmp_path, monkeypatch):
-    """The two lanes are disjoint: neither may reinterpret the other's speculative prefix."""
+def test_a_calibrated_log_cannot_be_resumed_into_the_product_lane(tmp_path, monkeypatch):
+    """The two lanes are disjoint: neither may reinterpret the other's speculative prefix.
+
+    The receipt-authorized lane is the CALIBRATED one — the benchmark's own workload under its own
+    receipt. That is the only place a receipt measured anything, so it is the only place a lane
+    crossing is possible at all (see the test below for what a receipt does on a real workload).
+    """
     monkeypatch.setattr(
         quality, "validated_speculation_gate_receipt", lambda _path: _toy_receipt())
     run_dir = tmp_path / "lane-crossing"
+    task = ToyTask()
+    settings = Settings(**{
+        **SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+        "max_nodes": 3,
+        "speculation_depth": 1,
+        "speculation_gate_receipt": str(tmp_path / "receipt.json"),
+    })
+
+    def roles():
+        return (
+            ToyResearcher(task.bounds, seed=task.seed, step=task.step,
+                          calibration_concepts=True),
+            ToyObjectiveDeveloper(noise=0.0, calibration_gpu_probe=True),
+        )
+
+    attested = Engine(
+        run_dir, task=task, researcher=roles()[0], developer=roles()[1],
+        sandbox=SubprocessSandbox(),
+        policy=GreedyTree(n_seeds=3, max_nodes=3, debug_depth=1),
+        options=EngineOptions.from_settings(settings),
+        role_factory=roles,
+        _speculation_runtime_scope_sha256=speculation_runtime_scope_digest(
+            settings.masked_snapshot()),
+    )
+    attested.store.append("run_started", {
+        "run_id": run_dir.name,
+        "task_id": task.id,
+        "direction": "min",
+        **attested._run_start_pinned_values(),
+    })
+
+    receiptless = _engine(run_dir, ToyTask(), card_driven_selection=True, speculation_depth=1)
+    with pytest.raises(SpeculationAuthorizationError, match=r"calibrated lane .* product"):
+        receiptless._require_pinned_speculation_receipt(fold(receiptless.store.read_all()))
+
+
+def test_a_receipt_supplied_on_a_real_workload_binds_nothing_and_stays_resumable(
+        tmp_path, monkeypatch):
+    """A receipt that measured the toy benchmark must not decide a Repo/GPU run's re-entry.
+
+    It used to: a receipt that was VALID at run start pinned `speculation_implementation_digest` —
+    the whole-source digest — into `run_started` on any workload. The next source edit or
+    `pip install -U` revoked the receipt, the resume declined it into the product lane with an empty
+    digest, and the equality check refused the run FOREVER. Dropping the receipt from the resume
+    command did not help, because that lands in the same product lane. So on a workload the receipt
+    did not measure it now binds nothing in either direction, and the run resumes with or without it.
+    """
+    valid = _toy_receipt()
+    monkeypatch.setattr(
+        quality, "validated_speculation_gate_receipt", lambda _path: valid)
+    run_dir = tmp_path / "receipt-on-a-real-workload"
     task = _repo_task(tmp_path)
-    attested = _engine(
+    started = _engine(
         run_dir, task,
         card_driven_selection=True,
         speculation_depth=1,
         speculation_gate_receipt=str(tmp_path / "receipt.json"),
     )
-    attested.store.append("run_started", {
-        "run_id": run_dir.name,
-        "task_id": task.id,
-        "direction": "max",
-        **attested._run_start_pinned_values(),
+    pinned = started._run_start_pinned_values()
+    # The log records the PRODUCT lane, so it never claims an attestation that did not hold here.
+    assert "speculation_implementation_digest" not in pinned
+    assert "speculation_runtime_scope_sha256" not in pinned
+    assert pinned["speculation_gate_receipt_digest"] == (
+        quality.speculation_product_authority_digest(policy_scope="greedy", task_kind="repo"))
+    started.store.append("run_started", {
+        "run_id": run_dir.name, "task_id": task.id, "direction": "max", **pinned})
+    entry = fold(started.store.read_all())
+
+    # The source moved on, so the receipt is now DECLINED — the exact trap that used to strand a run.
+    monkeypatch.setattr(quality, "validated_speculation_gate_receipt", lambda _path: None)
+    with_receipt = _engine(
+        run_dir, task, card_driven_selection=True, speculation_depth=1,
+        speculation_gate_receipt=str(tmp_path / "receipt.json"))
+    with_receipt._require_pinned_speculation_receipt(entry)          # no raise
+
+    # ...and so does dropping the receipt from the resume command.
+    without_receipt = _engine(run_dir, task, card_driven_selection=True, speculation_depth=1)
+    without_receipt._require_pinned_speculation_receipt(entry)       # no raise
+
+
+def test_a_legacy_receipt_pinned_log_is_adopted_instead_of_stranded(tmp_path):
+    """The runs already stuck by the bug above are unstuck, and only that exact shape is.
+
+    Invariant #6: the run_start record owns these values. A log with an implementation digest AND a
+    receipt digest but NO runtime-scope pin and no calibration fields is precisely the old
+    "receipt on a real workload" shape, whose whole-source digest no later process can reproduce.
+    """
+    task = _repo_task(tmp_path)
+    run_dir = tmp_path / "legacy-adoption"
+    engine = _engine(run_dir, task, card_driven_selection=True, speculation_depth=1)
+    engine.store.append("run_started", {
+        "run_id": run_dir.name, "task_id": task.id, "direction": "max",
+        **engine._run_start_pinned_values(),
+    })
+    entry = fold(engine.store.read_all())
+    legacy = entry.model_copy(update={
+        "speculation_implementation_digest": _IMPLEMENTATION,
+        "speculation_gate_receipt_digest": "sha256:" + "a" * 64,
     })
 
-    receiptless = _engine(run_dir, task, card_driven_selection=True, speculation_depth=1)
-    with pytest.raises(SpeculationAuthorizationError, match="exact validated"):
-        receiptless._require_pinned_speculation_receipt(fold(receiptless.store.read_all()))
+    resumed = _engine(run_dir, task, card_driven_selection=True, speculation_depth=1)
+    resumed._require_pinned_speculation_receipt(legacy)              # no raise
+
+    # A CALIBRATED log (it carries a runtime-scope pin) is never adopted away by a product-lane
+    # process — the envelope its evidence was measured under still has to be re-established.
+    calibrated = legacy.model_copy(update={
+        "speculation_runtime_scope_sha256": "sha256:" + "d" * 64})
+    refuser = _engine(run_dir, task, card_driven_selection=True, speculation_depth=1)
+    with pytest.raises(SpeculationAuthorizationError, match="runtime-scope pin differs"):
+        refuser._require_pinned_speculation_receipt(calibrated)
+
+
+def test_the_product_lane_token_bumped_its_schema_without_stranding_a_live_run(tmp_path):
+    """B3: `implementation_digest` left the hashed preimage; the schema id had to follow.
+
+    Two different preimages under one schema id is the collision a schema id exists to prevent. The
+    bump is real (the token changes), and re-entry accepts the superseded spelling so a run that was
+    already underway when the bump landed is not refused.
+    """
+    tokens = quality.speculation_product_authority_digests(
+        policy_scope="greedy", task_kind="repo")
+    assert tokens[0] == quality.speculation_product_authority_digest(
+        policy_scope="greedy", task_kind="repo")
+    assert quality.SPECULATION_PRODUCT_AUTHORITY_SCHEMA.endswith("/v2")
+    assert quality.SPECULATION_PRODUCT_AUTHORITY_LEGACY_SCHEMAS == (
+        "looplab.speculation-product-authority/v1",)
+    assert len(set(tokens)) == len(tokens) == 2      # the bump actually changed the token
+
+    task = _repo_task(tmp_path)
+    run_dir = tmp_path / "schema-bump"
+    engine = _engine(run_dir, task, card_driven_selection=True, speculation_depth=1)
+    engine.store.append("run_started", {
+        "run_id": run_dir.name, "task_id": task.id, "direction": "max",
+        **engine._run_start_pinned_values(),
+    })
+    entry = fold(engine.store.read_all())
+    assert entry.speculation_gate_receipt_digest == tokens[0]        # only v2 is ever MINTED
+
+    superseded = entry.model_copy(update={"speculation_gate_receipt_digest": tokens[1]})
+    resumed = _engine(run_dir, task, card_driven_selection=True, speculation_depth=1)
+    resumed._require_pinned_speculation_receipt(superseded)          # no raise
+
+    # An unrelated token is still refused, with the cause named.
+    foreign = entry.model_copy(update={
+        "speculation_gate_receipt_digest": "sha256:" + "e" * 64})
+    with pytest.raises(SpeculationAuthorizationError, match="lane token differs"):
+        resumed._require_pinned_speculation_receipt(foreign)
 
 
 def test_speculation_still_requires_the_greedy_policy_scope(tmp_path):
@@ -388,7 +524,8 @@ def test_auto_depth_adopts_the_pinned_depth_on_a_differently_sized_box(tmp_path)
     # An EXPLICIT depth is never adopted: a changed explicit treatment still fails closed.
     explicit = _engine(run_dir, task, card_driven_selection=True,
                        speculation_depth=2, eval_parallel=2)
-    with pytest.raises(SpeculationAuthorizationError, match="exact validated"):
+    with pytest.raises(SpeculationAuthorizationError,
+                       match=r"speculation_depth was pinned at 4 and this process resolved 2"):
         explicit._require_pinned_speculation_receipt(fold(explicit.store.read_all()))
 
 
@@ -472,19 +609,37 @@ def test_the_run_records_whether_speculation_cost_it_budget(tmp_path):
     node_id = _speculative_node_without_its_link(engine, task)
     state = fold(engine.store.read_all())
 
-    empty = quality.speculation_budget_observation(state)
-    assert empty["charged_discards"] == 0 and empty["discarded"] == 0
-    assert empty["depth"] == 2
+    # A prefetch that is still `pending` when the run finishes is ABANDONED, not discarded — and it
+    # is charged by `card_budget_used` all the same. Reporting 0 here was the harm going unmeasured:
+    # `_drop_stale_speculation` only terminalizes STALE prefetches, so every committed one the
+    # consumer never admitted (eval-seconds budget crossed, wall deadline, operator stop) sat in this
+    # blind spot — up to `speculation_depth` slots, one per GPU under AUTO.
+    abandoned = quality.speculation_budget_observation(state)
+    assert abandoned["abandoned"] == 1
+    assert abandoned["discarded"] == 0
+    assert abandoned["charged_discards"] == 1
+    assert abandoned["depth"] == 2
 
-    # A discarded speculative build that the log proves never ran is REFUNDED, not charged.
-    state.speculative_nodes[node_id] = {"card_id": "card-1", "generation": 0}
+    # An UNLINKED speculative node that failed is charged too, and used to be counted as neither
+    # discarded nor refunded because the universe was keyed on the committed link alone.
     node = state.nodes[node_id]
     state.nodes[node_id] = node.model_copy(update={
         "status": node.status.__class__.failed,
+        "error": "speculative node creation was rejected during replay",
         "error_reason": "superseded",
         "eval_seconds": 0.0,
         "never_evaluated": True,
     })
+    assert node_id not in state.speculative_nodes
+    unlinked = quality.speculation_budget_observation(state)
+    assert unlinked["discarded"] == 1
+    assert unlinked["refunded"] == 0            # no committed link => no refund
+    assert unlinked["charged_discards"] == 1
+
+    # A discarded speculative build that the log proves never ran is REFUNDED, not charged.
+    state.speculative_nodes[node_id] = {"card_id": "card-1", "generation": 0}
+    state.nodes[node_id] = state.nodes[node_id].model_copy(update={
+        "eval_start_boundary": True})
     refunded = quality.speculation_budget_observation(state)
     assert refunded["discarded"] == 1
     assert refunded["refunded"] == 1
@@ -497,6 +652,51 @@ def test_the_run_records_whether_speculation_cost_it_budget(tmp_path):
     assert charged["discarded"] == 1
     assert charged["refunded"] == 0
     assert charged["charged_discards"] == 1
+
+    # ...including the one the log can only see through the eval-START boundary: a prefetch killed
+    # mid-training, terminalized `superseded` by a resumed process whose in-memory in-flight set was
+    # empty. Zero charged seconds, no stage row — and still not free.
+    state.nodes[node_id] = state.nodes[node_id].model_copy(update={
+        "eval_seconds": 0.0, "never_evaluated": True, "eval_started": True})
+    interrupted = quality.speculation_budget_observation(state)
+    assert interrupted["refunded"] == 0
+    assert interrupted["charged_discards"] == 1
+
+
+def test_the_budget_observation_never_raises_on_a_partial_state(tmp_path):
+    """`finalize_run` swallows a raise here, taking the `finalize_step` marker with it.
+
+    That leaves `requirements_complete` false and a run that never acknowledges its own
+    finalization — from a PURE projection, which would fail identically on every retry. The
+    docstring claimed totality; `refunded_card_budget_node_ids(state)` reached into `state.nodes`
+    unguarded and did not deliver it.
+    """
+
+    class _Foreign:                     # no `.nodes` at all
+        speculative_nodes: dict = {}
+        card_build_outcomes: list = []
+        card_build_requests: list = []
+        speculation_depth = 1
+
+    observation = quality.speculation_budget_observation(_Foreign())
+    assert observation["depth"] == 1
+    assert observation["charged_discards"] == 0
+    # A state whose predicate blows up over-reports rather than handing out a false all-clear.
+    task = _repo_task(tmp_path)
+    engine = _engine(tmp_path / "hostile", task,
+                     card_driven_selection=True, speculation_depth=1)
+    node_id = _speculative_node_without_its_link(engine, task)
+    hostile = fold(engine.store.read_all())
+    object.__setattr__(hostile, "breed_excluded", _Unreadable())
+    assert quality.speculation_budget_observation(hostile)["charged_discards"] == 1
+    assert node_id == 0
+
+
+class _Unreadable:
+    """Every membership test raises — a stand-in for any partial/foreign state field."""
+
+    def __contains__(self, _item):
+        raise RuntimeError("unreadable")
 
 
 def test_an_ordinary_node_and_a_confirmed_speculative_node_are_unaffected(tmp_path):

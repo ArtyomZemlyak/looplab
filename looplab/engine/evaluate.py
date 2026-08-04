@@ -48,6 +48,7 @@ from looplab.engine.triage import _MAX_DEP_ROUNDS, _failure_reason, _normalize_e
 from looplab.events.replay import fold
 from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.events.types import (EV_CARD_DROPPED, EV_DEPS_INSTALLED, EV_NODE_ABORT,
+                                  EV_NODE_EVAL_STARTED,
                                   EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
                                   EV_NODE_RESET, EV_PROXY_SCORED, EV_REWARD_HACK_SUSPECTED,
                                   EV_SPEC_DRIFT, EV_STAGE_FINISHED)
@@ -147,6 +148,42 @@ class EvaluateMixin:
                 "unconfirmed prediction"
             )
 
+    def _record_eval_start_boundary(self, node) -> bool:
+        """Append the durable eval-START boundary for one lifecycle, at most once.
+
+        THE ONE SPELLING, called from two places on purpose. The dispatch decision belongs to the
+        MAIN task (`_run_card_session`'s admission), and writing it there is what keeps it out of the
+        speculative election's compare-and-swap window: `_request_card_build` reads the log, consults
+        the Card scorer, then appends with `expected_last_seq`, and a row appended by a WORKER inside
+        that window makes the election lose its CAS. Doing that once per eval defeated the prefetch
+        request every single turn — a depth-1 treatment run silently became serial (measured: 17
+        nodes built / 5 discarded became 12 / 0, with zero producer/consumer overlap left).
+        `_evaluate` still calls it, because `_evaluate` is the single funnel every evaluation passes
+        through and the boundary must exist before ANY caller reaches a sandbox — recovery and direct
+        library callers included. In a card session that call is already satisfied by the folded flag
+        and appends nothing.
+
+        Unlocked, like `_record_card_build_attempt`: it is ONE independent per-node row that the fold
+        keys by (node, generation) and applies set-only, so it pairs with nothing and its splice
+        position cannot change any other event's meaning.
+
+        COST, for whoever re-runs `looplab speculation-gate`: one append is one flush+fsync, which on
+        a network/FUSE run dir is not free — measured on this box at ~200 ms against ~1 ms on local
+        disk. Against a real evaluation that is noise (a training run is minutes), but it is the same
+        order as the calibration harness's ~300 ms toy eval, and there it can flip the
+        producer/consumer race the benchmark measures: on a FUSE run dir seed 2 closes prefetches as
+        `stale` at commit instead of creating and discarding them, which the clean-protocol validator
+        refuses to score. On a local-disk run dir the A/B reproduces its published aggregates exactly
+        (`mean_normalized_regret` 0.002590, `mean_hit_rate` 0.751961). Put the calibration run dirs on
+        local disk.
+        """
+        if (getattr(node, "eval_start_boundary", False) is not True
+                or getattr(node, "eval_started", False) is True):
+            return False
+        self.store.append(EV_NODE_EVAL_STARTED, {
+            "node_id": node.id, "generation": node.attempt})
+        return True
+
     @property
     def _probe_developer(self):
         """Developer used for ablation *probes* (I7): the raw inner developer, bypassing
@@ -245,6 +282,33 @@ class EvaluateMixin:
                             self._maybe_crash()
                     if skip:
                         return
+            # DURABLE EVAL-START BOUNDARY (events/types.py::EV_NODE_EVAL_STARTED). This is the LAST
+            # instant at which "this build never ran" is still true: every line below writes a node
+            # workdir and then executes the node's own code. Both zero-compute exits above (an
+            # unenforceable GPU pin, a proxy skip) have already terminalized, so the boundary is never
+            # stamped on a lifecycle that really did cost nothing.
+            #
+            # WHY AN EVENT, weighed against the alternatives. The log records evaluation cost only at
+            # the TERMINAL (`events/replay.py::_charge_terminal_cost`) and appends `stage_finished`
+            # rows inside that terminal's own write-lock block, so a process killed mid-training left
+            # a node byte-identical to one that was never dispatched. The only thing that told them
+            # apart was the IN-MEMORY `eval_inflight` set, which a resumed process starts empty — so
+            # after a crash the refund fired on 40 GPU-minutes of real work. Persisting that set needs
+            # a durable write anyway; a sidecar file is not a function of the log (invariant #4/#5);
+            # and no existing durable fact is written between dispatch and the sandbox. Refusing every
+            # refund whose lifecycle is unprovable is the remaining option and IS what happens for a
+            # node without `eval_start_boundary` — this event is what lets a node that CAN prove it
+            # keep the refund the calibration numbers depend on.
+            #
+            # Scoped to the lifecycles that can ever be refunded (`eval_start_boundary`, stamped on a
+            # speculative attempt-zero `node_created`), so this is not a new per-eval append on the
+            # ordinary hot path: a run without speculation writes byte-identical logs. Normally
+            # already satisfied here — the card session's admission wrote it in the MAIN task, which
+            # is what keeps it out of the speculative election's CAS window (see
+            # `_record_eval_start_boundary`). This call is the funnel guarantee for every OTHER way
+            # into a sandbox: recovery, the legacy dispatcher, a direct library caller.
+            async with self._write_lock:
+                self._record_eval_start_boundary(node)
             workdir = self.run_dir / "nodes" / f"node_{node_id}"
             # Phase 2 stage-scoped re-run: REUSE the existing workdir (earlier stages' artifacts — the
             # checkpoint `train` wrote) instead of re-seeding it, which would wipe them.

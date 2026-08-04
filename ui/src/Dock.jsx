@@ -48,6 +48,7 @@ const NARR = {
   node_building: (d) => `building node #${d.node_id} via ${d.operator || 'improve'}…`,
   node_created: (d) => `node #${d.node_id} via ${d.operator}${d.idea?.rationale ? ' — ' + stripMd(d.idea.rationale).slice(0, 80) : ''}`,
   node_evaluated: (d) => `node #${d.node_id} → ${fmt(d.metric)}`,
+  node_eval_started: (d) => `node #${d.node_id} started evaluating`,
   node_failed: (d) => `node #${d.node_id} failed (${d.reason})${d.triage_action === 'reject_idea' ? ' — idea rejected' + (d.triage_rationale ? ': ' + String(d.triage_rationale).slice(0, 70) : '') : ''}`,
   node_repaired: (d) => `node #${d.node_id} repaired (attempt ${d.attempt})${note(d.rationale)}`,
   node_confirmed: (d) => `node #${d.node_id} confirmed: ${fmt(d.mean)} ±${fmt(d.std)} (${d.seeds}×)`,
@@ -286,7 +287,7 @@ function verifiableCreatedAttempt(e, currentAttempt) {
 // [key, label] — the icon is a monochrome glyph (GROUP_GLYPH), not an emoji (round-7 readability pass).
 const GROUPS = [
   ['proposal', 'proposals', 'node_building node_created'],
-  ['eval', 'results', 'node_evaluated node_failed node_repaired node_confirmed best_confirmed proxy_scored ablate deps_installed confirm_done confirm_eval agent_validated holdout_evaluated stage_finished'],
+  ['eval', 'results', 'node_eval_started node_evaluated node_failed node_repaired node_confirmed best_confirmed proxy_scored ablate deps_installed confirm_done confirm_eval agent_validated holdout_evaluated stage_finished'],
   ['decision', 'decisions', 'policy_decision strategy_decision rung_promoted agent_decision set_strategy hypothesis_ranked foresight_selected coverage_snapshot'],
   ['research', 'research', 'research_completed deep_research hypothesis_added hypothesis_merged lessons_refreshed lessons_distilled cross_run_prior hypothesis_updated lessons_reconciled'],
   ['report', 'report', 'report_generated reflection_note report_refresh_failed'],

@@ -55,6 +55,20 @@ EV_RUN_STARTED = "run_started"
 # never affects node-id allocation or resume: node_created clears it and adds the real node.
 EV_NODE_BUILDING = "node_building"
 EV_NODE_CREATED = "node_created"
+# The DURABLE eval-START boundary for one exact node lifecycle, appended at the dispatch decision by
+# the MAIN task (`engine/speculation.py::_run_card_session`'s admission, with `_evaluate` as the
+# funnel backstop for recovery/direct callers) and only for the lifecycles whose budget slot can
+# later be REFUNDED (a speculative attempt-zero prefetch — see `search/card_selection.py`) — every
+# other run's log bytes are unchanged. It exists because the log
+# otherwise records evaluation cost only at the TERMINAL (`events/replay.py::_charge_terminal_cost`)
+# and stage rows are appended inside the terminal's own write-lock block: a process killed 40 minutes
+# into a training run therefore left a node byte-indistinguishable from one that was never dispatched,
+# and the resumed process — whose in-memory `eval_inflight` set is empty — refunded its slot. Presence
+# of this row is proof the sandbox was entered; ABSENCE is only evidence for a lifecycle whose
+# node_created carries `eval_start_boundary`, which is the writer's own promise that it would have
+# appended one. Data: {"node_id", "generation"}. Folded to `Node.eval_started`; a duplicate is a
+# no-op and a node_reset clears it with the rest of the abandoned lifecycle.
+EV_NODE_EVAL_STARTED = "node_eval_started"
 EV_NODE_EVALUATED = "node_evaluated"
 EV_NODE_FAILED = "node_failed"
 EV_NODE_REPAIRED = "node_repaired"

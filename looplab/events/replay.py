@@ -62,7 +62,8 @@ from looplab.events.types import (
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_LLM_USAGE, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
     EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_EDGE, EV_CONCEPT_TAG_EDITED,
     EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS, EV_RUN_CONCEPTS,
-    EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
+    EV_NODE_CREATED, EV_NODE_EVAL_STARTED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
+    EV_NODE_RESET,
     EV_CROSS_RUN_PRIOR,
     EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
@@ -512,6 +513,11 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             footprint_finalized=d.get("footprint_finalized") is True,
             speculative=speculative,
             card_build_generation=card_build_generation,
+            # The writer's promise that this lifecycle gets a durable eval-START row before any
+            # sandbox work (events/types.py::EV_NODE_EVAL_STARTED). Only a node whose creator made
+            # that promise may later be REFUNDED on the absence of one; an old log carries no promise
+            # and is charged. Additive + reader-defaulted -> old logs fold byte-identically.
+            eval_start_boundary=d.get("eval_start_boundary") is True,
         )
     except (MemoryError, RecursionError):
         # A RESOURCE glitch is NOT a corrupt-data error: it must fail LOUD, not be swallowed.
@@ -1032,6 +1038,19 @@ def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             _charge_terminal_cost(st, n, d, ctx)
             _add_current_failure(st, n, e)
 
+def _on_node_eval_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """The durable eval-START boundary: this exact lifecycle entered the sandbox.
+
+    Set-only and generation-keyed, so it is order-tolerant by construction: a duplicate (a resumed
+    process re-dispatching the same still-pending node) is a no-op, a row for an abandoned attempt is
+    ignored by `_generation_matches`, and a `node_reset` clears the flag with the rest of the
+    lifecycle it abandons.  Carries no cost — `_charge_terminal_cost` still owns eval seconds; this
+    only answers "did anything run at all", which nothing else in the log could answer after a kill.
+    """
+    n = _node_for_event(st, d)
+    if n is not None and _generation_matches(n, d):
+        n.eval_started = True
+
 def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # In-node inline repair (hybrid crash repair): a NON-terminal event that replaces the
     # node's code with the LLM-repaired version BEFORE the eval that follows it. Idempotent
@@ -1083,6 +1102,7 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.resource_curve = None            # #7: the prior attempt's curve no longer describes this node
         n.eval_seconds = None
         n.never_evaluated = False          # the discard receipt described the prior attempt
+        n.eval_started = False             # ...and so did the eval-start boundary
         n.extra_metrics = {}
         n.violations = []
         n.feasible = True
@@ -1264,6 +1284,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         n.triage_rationale = ""   # the crash-triage verdict describes the NOW-abandoned lifecycle
         n.eval_seconds = None
         n.never_evaluated = False   # the discard receipt described the NOW-abandoned lifecycle
+        n.eval_started = False      # ...and so did the eval-start boundary
         n.stdout_tail = ""
         n.resource_curve = None            # #7: the abandoned attempt's curve no longer describes this node
         n.extra_metrics = {}
@@ -3738,6 +3759,7 @@ _HANDLERS = {
     EV_TRUST_GATE_CHANGED: _on_trust_gate_changed,
     EV_NODE_BUILDING: _on_node_building,
     EV_NODE_CREATED: _on_node_created,
+    EV_NODE_EVAL_STARTED: _on_node_eval_started,
     EV_NODE_EVALUATED: _on_node_evaluated,
     EV_NODE_FAILED: _on_node_failed,
     EV_NODE_REPAIRED: _on_node_repaired,

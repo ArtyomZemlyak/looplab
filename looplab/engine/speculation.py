@@ -623,6 +623,14 @@ class SpeculationMixin:
                        if result.footprint_finalized else {}),
                     speculative=True,
                     card_build_generation=result.generation,
+                    # This lifecycle is the ONE kind whose node-budget slot can later be refunded, so
+                    # it is the one kind that must be able to PROVE it never ran across a crash.
+                    # Stamping the promise here (rather than run-wide) keeps every non-speculative
+                    # run's `node_created` bytes untouched while making the refund's evidence
+                    # per-node: the admission below appends `node_eval_started` before any sandbox
+                    # work, and `is_unevaluated_speculative_discard` refuses to refund a node that
+                    # carries no promise at all. See `events/types.py::EV_NODE_EVAL_STARTED`.
+                    eval_start_boundary=True,
                     expected_last_seq=tail,
                 )
                 return "created"
@@ -1415,7 +1423,13 @@ class SpeculationMixin:
         *,
         eval_inflight: set[tuple[int, int]] | frozenset[tuple[int, int]] = frozenset(),
     ) -> bool:
-        """Drop at most one stale, not-yet-running speculative node from a fresh fold."""
+        """Drop at most one stale speculative node from a fresh fold.
+
+        "Stale" and "never ran" are two different questions and only the first decides the DROP. A
+        prefetch whose sandbox already started is still stale when selection moves, and is still
+        terminalized here; what it does not get is the `never_evaluated` receipt that refunds its
+        node-budget slot. See the append below.
+        """
 
         if not self._speculation_enabled():
             return False
@@ -1455,24 +1469,29 @@ class SpeculationMixin:
             ):
                 continue
             tail = events[-1].seq if events else -1
+            # Durable proof for the L5 node-budget refund, and it is READ here, not assumed. This
+            # loop only reaches a node still `pending` on a FRESH fold and not in `eval_inflight` —
+            # but `eval_inflight` is IN-MEMORY, so a process that resumed after a kill starts with an
+            # empty one and this node may be a prefetch whose sandbox burned real GPU minutes before
+            # its process died. `Node.eval_started` is the durable half of that same question
+            # (`events/types.py::EV_NODE_EVAL_STARTED`), so it survives the crash the in-memory set
+            # cannot. A node that entered the sandbox is still stale and is still terminalized here —
+            # it just does NOT get the marker, so it keeps the slot its compute already spent.
+            never_evaluated = getattr(node, "eval_started", False) is not True
+            payload = {
+                "node_id": node.id,
+                "generation": node.attempt,
+                "error": CARD_FRESHNESS_SUPERSEDED_ERROR,
+                "reason": "superseded",
+                "eval_seconds": 0.0,
+            }
+            if never_evaluated:
+                payload["never_evaluated"] = True
             try:
                 async with self._write_lock:
                     self.store.append(
                         EV_NODE_FAILED,
-                        {
-                            "node_id": node.id,
-                            "generation": node.attempt,
-                            "error": CARD_FRESHNESS_SUPERSEDED_ERROR,
-                            "reason": "superseded",
-                            "eval_seconds": 0.0,
-                            # Durable proof for the L5 node-budget refund. This loop only reaches a
-                            # node that is still `pending` on a FRESH fold and is NOT in
-                            # `eval_inflight` (GPU dispatch burns to terminal above), so no sandbox
-                            # ever ran for this lifecycle: the prediction cost one Developer call and
-                            # nothing else. Stamping it here is what lets replay reach the same
-                            # budget number without consulting the filesystem.
-                            "never_evaluated": True,
-                        },
+                        payload,
                         expected_last_seq=tail,
                     )
                 return True
@@ -1815,6 +1834,15 @@ class SpeculationMixin:
                                 self._register_eval_resource_reservation(
                                     chosen.id, chosen.attempt, reservation,
                                 )
+                                # The DURABLE half of `eval_inflight`, written by the MAIN task at the
+                                # dispatch decision itself. `eval_inflight` is in-memory, so a process
+                                # that resumed after a kill starts with an empty one and cannot tell a
+                                # prefetch that never ran from one whose sandbox burned GPU minutes;
+                                # this row can. It belongs HERE and not in the worker because
+                                # `_request_card_build` elects under a tail CAS, and a worker-written
+                                # row inside that window makes every election lose it (see
+                                # `_record_eval_start_boundary`).
+                                self._record_eval_start_boundary(chosen)
                                 eval_inflight.add((chosen.id, chosen.attempt))
                                 try:
                                     task_group.start_soon(

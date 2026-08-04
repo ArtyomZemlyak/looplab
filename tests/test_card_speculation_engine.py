@@ -46,6 +46,7 @@ from looplab.events.types import (
     EV_NODE_BUILDING,
     EV_NODE_CREATED,
     EV_NODE_EVALUATED,
+    EV_NODE_EVAL_STARTED,
     EV_NODE_FAILED,
     EV_PAUSE,
     EV_POLICY_DECISION,
@@ -1722,6 +1723,58 @@ def test_session_quiescence_waits_for_surviving_build_marker(tmp_path, monkeypat
 
     assert calls == 2
     assert not fold(engine.store.read_all()).buildings
+
+
+def test_admission_records_the_eval_start_boundary_before_it_starts_the_worker():
+    """The durable half of `eval_inflight` is written at the dispatch decision, by the MAIN task."""
+    source = inspect.getsource(Engine._run_card_session)
+    boundary = source.index("self._record_eval_start_boundary(chosen)")
+    admitted = source.index("eval_inflight.add((chosen.id, chosen.attempt))")
+    started = source.index("_eval_one, chosen.id, chosen.attempt, reservation")
+    assert boundary < admitted < started
+
+
+def test_a_worker_written_eval_start_boundary_would_defeat_the_election(tmp_path, monkeypatch):
+    """Why the boundary is not appended from the eval worker.
+
+    `_request_card_build` reads the log, consults the Card scorer, then appends the request with
+    `expected_last_seq`. ANY row appended inside that window makes the election lose its CAS — and
+    since the session then has nothing to report as progress, it just waits for the eval to finish.
+    Appending the boundary from `_evaluate` did exactly that once per eval and silently turned
+    depth-1 speculation SERIAL: measured on the calibration workload, the treatment lane went from
+    17 builds / 5 discards with real producer/consumer overlap to 12 / 0 with none.
+    """
+    engine, _producer = _engine(tmp_path / "cas-window")
+    _start(engine)
+    _add_ready_draft(engine, "card-1", x=0.2)
+    _add_ready_draft(engine, "card-2", x=0.8)
+    node_id = _commit_speculative_node(engine)
+    node = fold(engine.store.read_all()).nodes[node_id]
+
+    # PRODUCTION ORDER: main task, at admission, strictly before the election. The overlap survives.
+    assert engine._record_eval_start_boundary(node) is True
+    assert fold(engine.store.read_all()).nodes[node_id].eval_started is True
+    assert engine._request_card_build(consumed_inflight={(node_id, 0)}) is True
+    # ...and it is written at most once, so a re-dispatched still-pending node appends nothing.
+    assert engine._record_eval_start_boundary(
+        fold(engine.store.read_all()).nodes[node_id]) is False
+
+    # THE HAZARD, reproduced exactly: the same row landing inside the election window.
+    racing, _unused = _engine(tmp_path / "cas-window-racing")
+    _start(racing)
+    _add_ready_draft(racing, "card-1", x=0.2)
+    _add_ready_draft(racing, "card-2", x=0.8)
+    racing_node = _commit_speculative_node(racing)
+    original = speculation_module.speculative_card_actions
+
+    def _scorer_with_a_concurrent_worker(*args, **kwargs):
+        racing.store.append(
+            EV_NODE_EVAL_STARTED, {"node_id": racing_node, "generation": 0})
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        speculation_module, "speculative_card_actions", _scorer_with_a_concurrent_worker)
+    assert racing._request_card_build(consumed_inflight={(racing_node, 0)}) is False
 
 
 def test_outer_spine_runs_freshness_gate_before_policy_scorer():
