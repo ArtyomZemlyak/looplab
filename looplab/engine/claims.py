@@ -109,9 +109,10 @@ from looplab.engine.claims_health import (  # noqa: F401
     _valid_research_node_refs,
     _valid_research_url_identities,
     claim_evidence_digest,
-    # A core utility that `claims_health` imports, re-exported for the same reason `_CLAIM_WORD`
+    # Core utilities that `claims_health` imports, re-exported for the same reason `_CLAIM_WORD`
     # above is: the barrel's contract is that BOTH spellings name the same object, and it is checked
     # over every name the leaf module carries, not only the ones it defines.
+    bounded_receipt_count,
     valid_digest_ref,
 )
 

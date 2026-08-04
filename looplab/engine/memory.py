@@ -17,6 +17,7 @@ from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER
 from looplab.events.eventstore import (read_jsonl_lenient, read_jsonl_lenient_with_health,
                                        replace_jsonl_rows_atomic_preserving_quarantine)
 from looplab.tools.vectorstore import Hit, Item, VectorStore, hash_embed
+from looplab.core.receipts import bounded_receipt_count
 
 _STOP = {"the", "a", "an", "to", "of", "and", "or", "for", "on", "in", "with", "from", "predict",
          "using", "use", "data", "dataset", "model", "target", "column", "columns", "features",
@@ -709,9 +710,11 @@ def _capsule_concept_evidence_completeness(
     if not all(present):
         return None
     total, incomplete, complete = (capsule[key] for key in keys)
-    if (type(total) is not int or type(incomplete) is not int or type(complete) is not bool
-            or not 0 <= total <= _MAX_CAPSULE_SOURCE_ITEMS
-            or not 0 <= incomplete <= total):
+    # `incomplete` is bounded by `total`, not by the collection cap — a subset denominator, so its
+    # own ceiling is the total it is a subset of.
+    if (not bounded_receipt_count(total, _MAX_CAPSULE_SOURCE_ITEMS)
+            or not bounded_receipt_count(incomplete, total)
+            or type(complete) is not bool):
         return None
     observed = capsule.get("concept_evidence_observed")
     if "concept_evidence_observed" not in capsule:
@@ -745,9 +748,9 @@ def _capsule_completeness(
     if not all(present):
         return None
     total, omitted, complete = capsule[total_key], capsule[omitted_key], capsule[complete_key]
-    if (type(total) is not int or type(omitted) is not int or type(complete) is not bool
-            or not 0 <= total <= _MAX_CAPSULE_SOURCE_ITEMS
-            or not 0 <= omitted <= _MAX_CAPSULE_SOURCE_ITEMS
+    if (not bounded_receipt_count(total, _MAX_CAPSULE_SOURCE_ITEMS)
+            or not bounded_receipt_count(omitted, _MAX_CAPSULE_SOURCE_ITEMS)
+            or type(complete) is not bool
             or total < included or omitted != total - included):
         return None
     if stem in ("concepts", "concept_outcomes"):

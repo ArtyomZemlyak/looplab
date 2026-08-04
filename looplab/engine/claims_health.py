@@ -43,6 +43,7 @@ from looplab.trust.cross_run import (
     sanitize_cross_run_projection,
 )
 from looplab.core.jsonutil import valid_digest_ref
+from looplab.core.receipts import bounded_receipt_count
 
 _MAX_SOURCE_STATEMENT = 4000
 # Shared with the governance ledger and the assessment projections: one bound on the metric
@@ -114,8 +115,7 @@ def _safe_claim_read_segment(raw) -> Optional[dict]:
     if not isinstance(raw, dict) or type(raw.get("read_complete")) is not bool:
         return None
     keys = ("rows_total", "rows_retained", "rows_quarantined", "malformed_rows", "invalid_rows")
-    if any(type(raw.get(key)) is not int or not 0 <= raw[key] <= _MAX_RESEARCH_SOURCE_ITEMS
-           for key in keys):
+    if any(not bounded_receipt_count(raw.get(key), _MAX_RESEARCH_SOURCE_ITEMS) for key in keys):
         return None
     out = {"read_complete": raw["read_complete"], **{key: raw[key] for key in keys}}
     consistent = (

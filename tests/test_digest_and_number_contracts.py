@@ -23,6 +23,7 @@ import pytest
 from looplab.core import advisory_payloads, fitness, models, parse, profile
 from looplab.core.jsonutil import (DIGEST_TEXT_CAP, canonical_json, canonical_json_digest,
                                    valid_digest_ref)
+from looplab.core.receipts import bounded_receipt_count
 
 
 # ------------------------------------------------------------------ CO-08: one dump/hash tail
@@ -280,3 +281,82 @@ def test_every_prefixed_call_site_reads_through_the_shared_predicate():
     assert not offenders, (
         "these re-derive the digest predicate instead of calling `valid_digest_ref`; if the site is "
         f"genuinely not a 64-hex digest, exempt it here with the reason: {offenders}")
+
+
+# --- EM-12: one bounded-receipt-count rule, where there had been two -----------------------------
+#
+# The ~8 receipt validators share a leaf guard on a single count field, and it had DIVERGED:
+# `claims_health`/`memory` spelled it `type(v) is int`, `concept_steward` spelled it
+# `isinstance(v, int) and not isinstance(v, bool)`. Same concept, two rules. These pin the survivor.
+
+def test_a_bool_is_never_a_receipt_count():
+    """The trap next door: `isinstance(True, int)` is True, so a receipt reading
+    `{"rows_total": true}` passes any isinstance-built guard and then arithmetics as 1."""
+    assert bounded_receipt_count(True, 10) is False
+    assert bounded_receipt_count(False, 10) is False
+
+
+def test_an_int_subclass_is_never_a_receipt_count():
+    """The divergence itself. The two spellings agreed on everything JSON can produce and disagreed
+    ONLY here, so no shipped receipt distinguished them — which is exactly why it went unnoticed."""
+
+    class Count(int):
+        pass
+
+    assert isinstance(Count(5), int) and not isinstance(Count(5), bool), (
+        "the retired spelling would have accepted this")
+    assert bounded_receipt_count(Count(5), 10) is False, "the strict spelling refuses it"
+
+
+@pytest.mark.parametrize("value", [None, "5", 5.0, [], {}, object()])
+def test_a_non_integer_is_never_a_receipt_count(value):
+    assert bounded_receipt_count(value, 10) is False
+
+
+@pytest.mark.parametrize("value,maximum,expected", [
+    (0, 10, True), (10, 10, True), (5, 10, True),
+    (-1, 10, False), (11, 10, False), (0, 0, True), (1, 0, False),
+])
+def test_the_bound_is_inclusive_and_non_negative(value, maximum, expected):
+    assert bounded_receipt_count(value, maximum) is expected
+
+
+_RECEIPT_VALIDATORS = {
+    "claims_health.py": ("_safe_claim_read_segment",),
+    "memory.py": ("_capsule_concept_evidence_completeness", "_capsule_completeness"),
+    "concept_steward.py": ("_concept_source_receipt",),
+}
+
+
+def test_the_receipt_validators_do_not_re_derive_the_count_guard():
+    """Scoped to the named validator FUNCTIONS, not their files.
+
+    A file-wide scan was the first attempt and it was wrong three ways: it flagged unbounded
+    coercions that are not receipt counts, matched `int)` inside `fingerprint)`, and reported its own
+    explanatory comment. A guard that cries wolf gets exemptions bolted on until it guards nothing.
+
+    Only the LEAF is shared. `_concept_source_receipt`'s consistency predicate is deliberately left
+    alone — it is domain logic carrying a ten-line comment about reading both source axes, and
+    folding that into a generic spec table would hide the part a reader needs."""
+    import ast
+    from pathlib import Path
+
+    pkg = Path(__file__).resolve().parents[1] / "looplab" / "engine"
+    offenders = []
+    for filename, functions in _RECEIPT_VALIDATORS.items():
+        text = (pkg / filename).read_text(encoding="utf-8-sig")
+        tree = ast.parse(text)
+        wanted = {name: node for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef) and node.name in functions
+                  for name in [node.name]}
+        assert set(wanted) == set(functions), (
+            f"{filename} no longer defines {set(functions) - set(wanted)} — this registry and the "
+            "receipt validators have drifted apart")
+        for name, node in wanted.items():
+            # Comments are not in the AST, so unparsing compares CODE only.
+            body = ast.unparse(node)
+            if "not isinstance" in body and ", int)" in body:
+                offenders.append(f"{filename}::{name}")
+    assert not offenders, (
+        "a receipt validator re-derives the bounded-count guard instead of calling "
+        f"`bounded_receipt_count`: {offenders}")

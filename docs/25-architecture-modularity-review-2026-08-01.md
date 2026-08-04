@@ -1559,6 +1559,43 @@ a real construction.
 
 *Recommendation:* Keep the fail-closed semantics but extract a tiny declarative helper (field specs: bounded-int/bool + a consistency predicate list) that each receipt defines once and both builder and validator consume; the invariants are all expressible as (field types, bounds, equalities). This shrinks each validator to a spec table and makes builder/validator drift structurally impossible.
 
+*Resolution (2026-08-04):* The LEAF is shared; the spec table is deliberately NOT built, and the
+reason is worth recording because the finding's premise is half right.
+
+What reading the eight validators shows is that the repeated part is one line, not the validator. The
+consistency predicates the recommendation proposes to tabulate are the actual content: they are
+domain logic with load-bearing comments, and `_concept_source_receipt`'s carries ten lines explaining
+why it must read BOTH source axes — a bug someone already fixed once, where comparing against
+`partial_capsules == 0` alone reported a readable-but-incomplete receipt as unreadable. Expressing
+that as a row in a spec table would hide precisely the part a reader needs. "Field types, bounds,
+equalities" describes the shape of these predicates but not their meaning.
+
+What IS shared is the guard on a single count field, and it had DIVERGED — which is a real defect the
+finding did not name:
+
+* `claims_health` and `memory` spelled it `type(value) is int` — rejecting every `int` subclass.
+* `concept_steward` spelled it `isinstance(value, int) and not isinstance(value, bool)` — rejecting
+  `bool` specifically and ACCEPTING any other `int` subclass.
+
+One concept, two rules. They agree on everything JSON can produce and disagree only on an in-process
+`int` subclass, so no shipped receipt ever distinguished them — which is exactly why it survived.
+`core/receipts.bounded_receipt_count(value, maximum)` is now the single answer, and the STRICT
+spelling wins for the reason the fold uses it on untrusted data: a receipt is durable evidence, an
+`int` subclass can override the comparisons the bound is expressed in, and a bound a value can talk
+its way past is not a bound. Nothing constructs receipt counts as a subclass, so `concept_steward`
+tightens without any reachable behaviour change.
+
+The guard test is scoped to the named validator FUNCTIONS via AST, not to their files. A file-wide
+scan was the first attempt and was wrong three ways: it flagged unbounded coercions that are not
+receipt counts, matched `int)` inside `fingerprint)`, and reported its own explanatory comment. A
+guard that cries wolf collects exemptions until it guards nothing — the same trap EV-04's first draft
+fell into one finding earlier.
+
+Still open under this finding: the builder/validator drift the recommendation's last sentence is
+really about. Nothing yet forces a receipt's WRITER and its READER to agree on the field set; that is
+a registry problem (the shape CLAUDE.md's other duck-typed seams solve) rather than a helper problem,
+and it is not addressed here.
+
 #### EM-13 · LOW · duplication · effort: small
 
 **_valid_node_source and _node_ids duplicate the same numeric-string node-id parsing rules**
