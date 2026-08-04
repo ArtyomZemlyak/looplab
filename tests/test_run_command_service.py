@@ -3081,8 +3081,9 @@ def test_operator_collaboration_appends_do_not_extend_a_stalled_finalize(tmp_pat
     store.append("node_evaluated", {"node_id": 0, "metric": 1.0})
     assert srv.commands._observe(rd).has_domain_progress(domain_cursor) is True
 
-    # The slide itself asks that question rather than comparing raw sequence numbers.
-    slide = inspect.getsource(run_commands_module.RunCommandService._execute)
+    # The slide itself asks that question rather than comparing raw sequence numbers. It lives in
+    # `_monitor` since the admission/observation split (doc 25 SC-07).
+    slide = inspect.getsource(run_commands_module.RunCommandService._monitor)
     condition = slide.split("or spec.engine_policy is not EnginePolicy.NO_SPAWN)", 1)[1][:300]
     assert "has_domain_progress(last_progress_seq)" in condition, condition
     assert "latest_seq > last_progress_seq" not in condition, condition
