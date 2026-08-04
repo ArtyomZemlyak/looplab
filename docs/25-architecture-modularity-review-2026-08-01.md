@@ -671,6 +671,29 @@ governance-sensitive sections, are left explicit as the finding itself recommend
 
 *Recommendation:* Make core/hardware the single probe owner: _detect_gpu_ids's count should derive from detect_gpus() (falling back to torch), eliminating the `-L` parser and the cross-probe mismatch failure mode that detect_gpu_inventory currently guards against.
 
+*Resolution (2026-08-04) — the second parser is gone; the fail-closed guard stays, because it defends something else.*
+
+`orchestrator._detect_gpu_ids` keeps its ladder (CUDA_VISIBLE_DEVICES → torch → inventory) but its
+last step now reads `len(core.hardware.detect_gpus())` instead of counting `nvidia-smi -L` output
+lines. `core/hardware` is the sole owner: `query_nvidia_smi` is documented as the one
+launcher+CSV-splitter, and `detect_gpus` adds the comma-in-a-GPU-name repair — a GPU whose model name
+contains a comma makes a fixed-position CSV read grab a name fragment instead of a memory figure. The
+`-L` counter never needed that repair, which is exactly why it was able to sit beside the real probe
+looking correct.
+
+**The cross-check in `detect_gpu_inventory` is NOT removed.** The finding reads it as a symptom of
+the duplication, and its comment did say "_detect_gpu_ids derives the same count" — but what it
+actually guards is the `logical_ids` list arriving from a CALLER, which may be stale or forged.
+Nothing about single-sourcing the nvidia-smi parse makes that argument go away, and an empty mapping
+is what stops an independently forged reservation escaping the operator's visibility fence through
+logical-id fallback. Both branches derive from `cuda_visible_device_tokens`, so the case the comment
+literally describes was already impossible; the guard earns its place on the other one.
+
+Pinned by three tests in `tests/test_gpu_resources.py` (40 → 43): the ordinal probe's count tracks
+the shared inventory (both a populated box and an empty one), a probe that raises degrades to "no
+GPUs" rather than out of `Engine.__init__`, and a source scan that no module outside `core/hardware`
+invokes the binary itself. Teeth-tested against 2 breaks, both biting.
+
 #### ES-11 · LOW · inconsistency · effort: small — **RESOLVED (2026-08-02)**
 
 **"(developer error:" is a magic-string protocol checked by startswith at six consumer sites across three modules**

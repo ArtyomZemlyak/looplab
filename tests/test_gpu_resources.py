@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import types
 
@@ -1005,3 +1006,55 @@ def test_solution_docker_sandbox_uses_same_device_remap(monkeypatch, tmp_path):
     assert not any("NVIDIA_VISIBLE_DEVICES=" in part for part in argv)
     assert "LOOPLAB_EVAL_SEED=2" in argv
     assert result.metric == 1.0
+
+
+# --- one nvidia-smi parser (doc 25 ES-10) -------------------------------------------------------
+
+def test_the_ordinal_probe_derives_its_count_from_the_shared_inventory(monkeypatch):
+    """`_detect_gpu_ids` used to count `nvidia-smi -L` lines itself, making it the SECOND parser of
+    the same binary. Two parsers for one fact is how a box comes to report different GPU COUNTS to
+    the pinning code and to the admission envelope."""
+    from looplab.core import hardware
+    from looplab.engine import orchestrator
+
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setitem(sys.modules, "torch", None)      # force the fall-through past torch
+    monkeypatch.setattr(
+        hardware, "detect_gpus",
+        lambda: [{"index": i, "name": f"g{i}", "mem_total_mib": 1, "mem_free_mib": 1}
+                 for i in range(3)])
+    assert orchestrator._detect_gpu_ids() == [0, 1, 2]
+
+    monkeypatch.setattr(hardware, "detect_gpus", lambda: [])
+    assert orchestrator._detect_gpu_ids() == []
+
+
+def test_a_failing_inventory_probe_degrades_to_no_gpus(monkeypatch):
+    """Capability detection is best-effort by contract: an unusable probe means "do not pin", never
+    an exception out of `Engine.__init__`."""
+    from looplab.core import hardware
+    from looplab.engine import orchestrator
+
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setitem(sys.modules, "torch", None)
+
+    def _boom():
+        raise OSError("nvidia-smi exploded")
+
+    monkeypatch.setattr(hardware, "detect_gpus", _boom)
+    assert orchestrator._detect_gpu_ids() == []
+
+
+def test_no_second_nvidia_smi_parser_outside_core_hardware():
+    """`core/hardware.query_nvidia_smi` is documented as the ONE launcher+CSV-splitter. A module that
+    shells out to the binary itself is a second parser, and the divergence it creates is invisible —
+    both answers look like plausible GPU counts."""
+    from tests._source_scan import iter_sources
+
+    offenders = [
+        str(path)
+        for path, text in iter_sources()
+        if path.name != "hardware.py"
+        and any(needle in text for needle in ('"nvidia-smi"', "'nvidia-smi'", '[exe, f"--query-gpu'))
+    ]
+    assert not offenders, f"a second nvidia-smi invocation lives outside core/hardware: {offenders}"
