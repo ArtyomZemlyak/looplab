@@ -29,7 +29,7 @@ Your five concerns map to distinct file classes. Labels used throughout:
 | Your concern | Class | Format | Why (evidence) |
 |--------------|-------|--------|----------------|
 | **User clicks / commands** | [MA] | append-only **JSONL** (`commands.jsonl`) | Machine record of *intent*, not a doc — replayable/auditable; corrections are new lines, never edits. **Explicitly NOT human-curated** (your requirement). |
-| **Event/flow trace** | [MA] | append-only **JSONL** (`events.jsonl`) | Source of truth for the run timeline; streamable (`tail -f`/`jq`) and git-diffable. Ordinary writes are one physical line per logical event; a bounded crash-atomic `append_many` transaction is one reserved physical envelope line whose members are expanded by event-aware readers. Its guarded type is intentionally invalid to pre-batch `Event` readers, so rollback to an older binary fails closed instead of discarding nested actions. Event-aware readers reject the first duplicate or backward logical sequence while preserving monotonic gaps left by repair/compatibility workflows; members inside one atomic batch are dense. Raw `jq` sees storage envelopes, while the CLI/API/replay surfaces expose logical events. Add a SQLite/WAL projection only when `grep` stops scaling. |
+| **Event/flow trace** | [MA] | append-only **JSONL** (`events.jsonl`) | Source of truth for the run timeline; streamable (`tail -f`/`jq`) and git-diffable. Ordinary writes are one physical line per logical event; a bounded crash-atomic `append_many` transaction is one reserved physical envelope line whose members are expanded by event-aware readers. Its guarded type is intentionally invalid to pre-batch `Event` readers, so rollback to an older binary fails closed instead of discarding nested actions. Event-aware readers require a DENSE logical prefix and fail closed on any gap: `events/eventstore.py:157-176::event_sequence_continues` rejects a duplicate, a backward sequence *and* a forward jump, because the engine only ever appends densely and `repair-log` truncates a corrupt TAIL, so no legitimate workflow produces a monotonic gap (the earlier gap tolerance "covered a repair workflow that does not exist in this codebase"). Members inside one atomic batch are dense. Raw `jq` sees storage envelopes, while the CLI/API/replay surfaces expose logical events. Add a SQLite/WAL projection only when `grep` stops scaling. |
 | **Training logs (stdout/stderr)** | [MA] | **structured JSONL** (pretty console in dev) | Typed per-line fields (`step`,`loss`,`lr`,`ts`) let the UI filter/plot instead of regex-scraping. Same stream, two renderers (structlog). |
 | **Metrics — per-step time series** | [MA] | **CSV** (fixed cols) or **JSONL** (sparse); derive **Parquet+DuckDB** | Text canonical stays diffable + crash-safe on the append hot-path; columnar derived store gives ~5× size / ~7–10× query speed for the UI. This is exactly what Lightning/Keras (text) + MLflow/W&B (binary under UI) do. |
 | **Metrics — final/summary scalars** | [HC] | **JSON** (`summary.json`) | A few scalars: strict, universal, zero-ambiguity. *Avoid YAML here* — its type coercion corrupts numeric results (`1.70`→`1.7`, the "Norway problem"). |
@@ -126,6 +126,37 @@ project/
 ---
 
 ## 6. Hard rules (invariants for the file layer)
+
+> **Partly not shipped as designed (added 2026-08-04) — extends the banner at the top of this file to
+> this section, which previously carried no marker and reads as normative.** Rules 2, 3, 4 and 6 hold in
+> spirit (append-only canonical streams, `DO NOT EDIT` markers, control intents as machine data, big
+> bytes by reference — though there is no CAS, see the §4 banner). **Rules 1, 5 and 7 were each changed
+> by a later, deliberate engineering decision:**
+>
+> - **Rule 1 — `fsync` is not on the default path.** `core/atomicio.py:421::atomic_write_bytes` is the
+>   ordinary temp→`os.replace` writer; the `fsync`-temp-then-fsync-parent-dir guarantee described here
+>   lives only in the OPT-IN `core/atomicio.py:465::strict_atomic_write_bytes` (and its text sibling).
+>   Torn-file safety for readers is preserved by the rename; durability across power loss is the part
+>   that is opt-in.
+> - **Rule 5 — the UI does NOT upcast old versions on read; the store fails closed.**
+>   `events/eventstore.py:70` pins `SUPPORTED_EVENT_ENVELOPE_VERSIONS = frozenset({1})` and `:150-153`
+>   raises `UnsupportedEventVersionError` for anything else. The in-code note names upcasting as the
+>   REJECTED design: accepting an unknown row "and folding with today's semantics is the dangerous
+>   reading … a future v2 row would silently acquire v1 run and command authority." The shipped contract
+>   — fail closed, then upgrade the binary or run `looplab repair-log` — is documented in
+>   [guide/concepts.md:54-57](guide/concepts.md). ([02 §11](02-architecture.md) rule 12 carries the same
+>   correction.) Note [16-architecture-code-review-2026-07-11.md:610](16-architecture-code-review-2026-07-11.md)
+>   flags the absent migration chain as pre-migration debt to settle before the first schema bump.
+> - **Rule 7 — there is no `rebuild` script, and "from canonical files alone" is false.** No
+>   project-level `rebuild` exists; the CLI surface is `replay` / `repair-log` / `export-*`
+>   (`guide/cli-reference.md`). And the derived views are NOT all regenerable from the event log:
+>   `trace.json` and `tree.html` derive from the `spans.jsonl` trace SIDECAR, which
+>   [08-tracing-architecture.md:145-146,160](08-tracing-architecture.md) and
+>   [guide/concepts.md:101-103](guide/concepts.md) both state is recorded diagnostic telemetry, not
+>   regenerable from events. `readmodel.sqlite` *is* rebuildable from events.
+>
+> The accurate, shipped file contract is [guide/concepts.md](guide/concepts.md) (run-dir layout at
+> :105-126, envelope/version rule at :54-57, derived-vs-recorded at :101-103).
 
 1. **Atomic writes (the Maildir guarantee).** Write to `.tmp/` then `rename()` into place; `fsync` temp before rename and the parent dir after; keep temp + final on one filesystem. The concurrently-reading UI must **never** see a torn file.
 2. **Canonical files are append-only or human-authored; never machine-mutated in place.** Corrections are new appended lines/events.

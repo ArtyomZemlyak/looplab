@@ -41,14 +41,25 @@ the equivalent task file.
 |---|---|---|
 | You bring | a goal + data + a metric | an existing repo + a way to run/score it |
 | Who writes the train/test code | the **Developer writes the whole script** every iteration | the agent **edits/creates files** inside `edit_surface`; everything else is yours |
-| Metric source | a held-out grader the engine owns | **your own `eval.command`** (a trust boundary — the agent never authors it) |
+| Metric source | a held-out grader the engine owns (`mlebench`, `mlebench_real`) — **but not every from-scratch kind: see the trust note below** | **your own `eval.command`** (a trust boundary — the agent never authors it) |
 | Kinds | `code_regression`, `mlebench`, `mlebench_real` | `repo` (+ its onboarding / framework variants) |
 | Use when | there is no code yet — a Kaggle-style "data in, predictions out" problem | you already have a project and want it improved/completed in place |
 
 > `classification`, `regression`, and `timeseries` also run with an LLM, but they **tune knobs in a
-> fixed template** rather than writing free-form code. The held-out-grader "writes the whole script"
-> kinds are `code_regression`, `mlebench`, and `mlebench_real`; `dataset` also writes the whole
-> solution from scratch, but self-reports its metric rather than using a held-out grader the engine owns.
+> fixed template** rather than writing free-form code. The "writes the whole script" kinds are
+> `code_regression`, `mlebench`, `mlebench_real` and `dataset`.
+
+!!! warning "Which kinds actually have a held-out grader"
+
+    Only **`mlebench`** (private grader holding the answer key) and **`mlebench_real`** (the official
+    competition grader) give the *"the agent never authors its own metric"* guarantee. **`code_regression`
+    does not**, despite being a from-scratch kind: it is a **demo** task in which the solution computes
+    **and self-reports** its own K-fold CV MSE, with no private grader — so a reward-hacking model could
+    print a fake number (`adapters/regression.py:195-199`). `dataset` self-reports too
+    ([tasks.md](tasks.md#dataset)). If you are choosing a kind **for the anti-cheat guarantee**, use
+    `mlebench` / `mlebench_real`, or `repo` (your own protected `eval.command` + protected metric
+    reader). The code-leakage / reward-hack monitors still *audit* the self-reporting kinds, but auditing
+    is not a grader.
 
 ---
 
@@ -144,9 +155,11 @@ operator fixes crashes. You provide a goal, the data, and a metric — no code.
 - **Real Kaggle problem** → [`mlebench_real`](tasks.md#mlebench_real): the official split + grader.
   Just `{"competition":"<slug>"}` (or `kaggle`); see the
   [MLE-bench runbook](../MLEBENCH.md) for data prep.
-- **A held-out metric you control** → [`code_regression`](tasks.md#code_regression) (LLM writes a
-  numpy script that reads a materialized data asset, fits, cross-validates, prints the metric) or
-  [`mlebench`](tasks.md#mlebench) (train/test split + a private grader the agent can't overwrite).
+- **A held-out metric the agent cannot author** → [`mlebench`](tasks.md#mlebench) (train/test split +
+  a private grader the agent can't overwrite).
+- **A self-contained coding demo, self-reported metric** → [`code_regression`](tasks.md#code_regression)
+  (LLM writes a numpy script that reads a materialized data asset, fits, cross-validates, prints the
+  metric). It has **no private grader** — see the trust warning above before picking it for rigor.
 
 *Genesis:* describe the goal and where the data is — for *"here's my data, find the best metric"* it
 authors a `dataset` task; for a Kaggle competition it sets the `mlebench_real` slug.

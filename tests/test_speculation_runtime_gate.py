@@ -187,13 +187,21 @@ def _calibration_engine(run_dir, monkeypatch, *, depth: int) -> Engine:
     )
 
 
-def test_public_positive_depth_requires_a_current_gpu_quality_receipt(tmp_path, monkeypatch):
-    with pytest.raises(ValueError, match="requires speculation_gate_receipt"):
-        _engine(
-            tmp_path / "missing",
-            card_driven_selection=True,
-            speculation_depth=1,
-        )
+def test_public_positive_depth_needs_no_receipt_but_a_supplied_one_must_be_current(
+        tmp_path, monkeypatch):
+    """The receipt is the BENCHMARK's result, not a licence (2026-08-04 operator decision).
+
+    Positive depth is admitted with no receipt at all — the node-budget refund removed the cost the
+    receipt's regret bound was protecting. Supplying one is still a claim that must hold: an
+    unvalidatable or non-GPU receipt is refused loudly rather than ignored.
+    """
+    admitted = _engine(
+        tmp_path / "no-receipt",
+        card_driven_selection=True,
+        speculation_depth=1,
+    )
+    assert admitted._speculation_enabled() is True
+    assert admitted.speculation_gate_receipt is None
 
     monkeypatch.setattr(quality, "validated_speculation_gate_receipt", lambda _path: None)
     with pytest.raises(ValueError, match="stale, invalid"):

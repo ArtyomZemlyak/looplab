@@ -414,8 +414,14 @@ class Settings(BaseSettings):
     #     parallel_build semantics without a shared total; 0 = startup AUTO (= resolved eval_parallel
     #     for build fan-out, historical research overlap unbounded). A positive canonical value enables
     #     the named-lane broker the Strategist can reallocate at cadence.
-    eval_parallel: int | None = Field(default=None, ge=0, le=1024)
-    llm_parallel: int | None = Field(default=None, ge=0, le=64)
+    # Defaults changed 2026-08-04 (operator decision): `None` was not a neutral default — it fell back
+    # to the LEGACY `max_parallel`/`parallel_build` (both 1), i.e. strictly serial, and for
+    # `llm_parallel` it additionally left the shared named-lane broker DISABLED (the broker opts in
+    # only on an explicitly-spelled positive canonical value). `0` is the AUTO setting the two axes
+    # were built for: one experiment per detected GPU (at least one) and an LLM width derived the same
+    # way, with the broker live so the Strategist can reallocate lanes at cadence.
+    eval_parallel: int | None = Field(default=0, ge=0, le=1024)
+    llm_parallel: int | None = Field(default=0, ge=0, le=64)
     # Training-log monitor (I-series watchdog family): a per-eval background observer that tails the live
     # training log while a (often multi-hour) declared stage runs in a worker thread. ON in the product
     # surface (Settings). Its alert event is fold-ignored and cannot directly change lifecycle/champion;
@@ -430,7 +436,10 @@ class Settings(BaseSettings):
     # whole budget. Off by default — the observer only WATCHES unless this is on. A kill only fires on a
     # 'broken' verdict (a plateau is 'watch', never killed) with confidence >= the threshold; the node then
     # fails normally (reason='monitor_broken'), so replay reconstructs it from that one terminal event.
-    train_monitor_kill: bool = False
+    # Default flipped 2026-08-04 (operator decision): the monitor's verdict is now allowed to act.
+    # It only fires on a 'broken' verdict at confidence >= train_monitor_kill_confidence (0.8);
+    # a plateau is 'watch' and is never killed.
+    train_monitor_kill: bool = True
     train_monitor_kill_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
     # ASHA live-curve watchdog (sibling of the training monitor): reads the latest INTERMEDIATE value of
     # the objective metric off the live log (reusing the eval's OWN metric reader). Finished-endpoint rank
@@ -441,7 +450,10 @@ class Settings(BaseSettings):
     # Opt-in INTERVENTION (separate from the advisory signal): let the watchdog tree-kill a node whose
     # intermediate metric stays below the SAME-RESOURCE bar past a short grace window. Off by default —
     # it only surfaces endpoint rank unless this is on. A kill fails normally (asha_underperforming).
-    asha_live_kill: bool = False
+    # Default flipped 2026-08-04 (operator decision). Still narrowly scoped by construction: it acts
+    # ONLY for stdout_json metrics that declare an explicit `resource_key`, only past the grace
+    # window, and only with `asha_live_min_siblings` finished peers at the SAME resource value.
+    asha_live_kill: bool = True
     # The bar sits at `asha_live_quantile` along a WORST->BEST ordering of the finished siblings' finals:
     # 0.5 = the median (a node worse than the median peer flags); a SMALLER value is more conservative —
     # it lowers the bar toward the WORST finished peer, so only a node worse than nearly all peers flags
@@ -449,6 +461,13 @@ class Settings(BaseSettings):
     # at all, so it never acts on too little evidence.
     asha_live_quantile: float = Field(default=0.5, ge=0.0, le=1.0)
     asha_live_min_siblings: int = Field(default=3, ge=1)
+    # The rank test above is EVIDENCE, not the decision: once it fires past the grace window an LLM judge
+    # sees the live curve, the same-resource sibling distribution + bar, the run's other live metrics and
+    # the training monitor's latest health verdict, and answers continue|watch|stop. Only a 'stop' at
+    # confidence >= this threshold actually kills — the judge is consulted INSIDE the rank gate, so it can
+    # only ever stop FEWER nodes than the bare quantile comparison, never more. No judge (no LLM client, an
+    # endpoint failure, an unparseable answer) => no kill, so the watchdog degrades to advisory.
+    asha_live_kill_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
     timeout: float = Field(default=30.0, gt=0)
     # Hard ceiling for the Researcher's governed per-node `Idea.eval_timeout`. One hour preserves the
     # existing heavy/neural-net authoring example while staying well below the sandbox's defensive
@@ -902,7 +921,10 @@ class Settings(BaseSettings):
     # exactly (cli/__init__.py, adapters/tasks.py), so an untyped `--set`/file/env typo (or a mis-cased
     # "LLM") used to fall through to the OFFLINE toy roles and quietly produce a run that never called
     # the model. Left as `str`, not `Literal`, so old snapshots still validate through the same path.
-    backend: str = "toy"
+    # Default flipped 2026-08-04 (operator decision): "llm" is what a real run wants, and the old
+    # "toy" default is exactly how a run could silently never call the model (see the live-scenario
+    # harness, which forgot backend="llm" and scored a row-count placeholder for three nodes).
+    backend: str = "llm"
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external
     # CLI coding agent: "opencode" | "aider" | "goose" | "continue". A CLOSED enum ("default" +
     # cli_agent.PRESETS keys), validated loudly in `_check_enum_fields` — an unknown value used to reach
@@ -1054,15 +1076,27 @@ class Settings(BaseSettings):
     # Layer 3 Card queue ownership. False preserves the existing policy/unified-pilot action path.
     # True is pinned in run_started because changing the selector on resume would mix two search
     # treatments in one run. When both this and agent_drives_actions are true, Card selection wins.
-    card_driven_selection: bool = False
+    # Default flipped 2026-08-04 (operator decision): the Card lane is the intended selector now.
+    card_driven_selection: bool = True
     # Layer 5 bounded speculative Card buffer. Zero is a hard OFF switch and preserves the
     # historical alternating build/eval spine; positive values are pinned by run_started so a
     # resume cannot silently mix search treatments after a snapshot/default edit.
-    speculation_depth: int = Field(default=0, ge=0, le=64)
-    # Local evidence receipt produced by ``looplab speculation-gate``.  This is deliberately absent
-    # from the curated Settings UI: positive-depth execution is a calibrated rollout decision, not a
-    # casual tuning knob.  The Engine validates the receipt against the current scorer,
-    # implementation, GPU inventory and raw paired-run evidence before it enables speculation.
+    #   -1 = AUTO, resolved at startup from the SETTLED concurrency width: one speculative prefetch
+    #        per concurrent evaluation lane, i.e. the resolved `eval_parallel` (which is itself
+    #        `0` = AUTO = one experiment per detected GPU, at least one), clamped to 1..64. It is the
+    #        same shape of knob as `eval_parallel`/`llm_parallel`, but it needs its OWN sentinel
+    #        because `0` here already means a hard off-switch and is a run_started-pinned search
+    #        treatment — repurposing it would silently turn speculation on for every old snapshot.
+    #        The resolution happens once, in `Engine.__init__`, and it is the RESOLVED integer that is
+    #        pinned by run_started, so replay/resume never re-derive a treatment from a different box.
+    #    0 = off.  1..64 = that exact backlog cap (an explicit value always overrides AUTO).
+    speculation_depth: int = Field(default=0, ge=-1, le=64)
+    # Local evidence receipt produced by ``looplab speculation-gate``.  OPTIONAL, and deliberately
+    # absent from the curated Settings UI.  It is the calibration BENCHMARK's receipt (scorer
+    # fidelity, hit rate, divergence and normalized regret measured on the shipped quadratic toy),
+    # not a licence: positive `speculation_depth` runs on any TaskAdapter without one.  When a
+    # receipt IS supplied the Engine still revalidates it against the current scorer, implementation,
+    # environment, GPU inventory and raw paired-run evidence, and refuses a stale or forged one.
     speculation_gate_receipt: str | None = Field(default=None, max_length=4096)
     # Per-stage model/endpoint overrides for the unified agent. Recognized keys (see
     # tasks.build_unified_agent): `propose` (researcher), `implement`/`repair` (developer),

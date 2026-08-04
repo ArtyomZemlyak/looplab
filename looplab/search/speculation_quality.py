@@ -1,9 +1,17 @@
-"""Receipt-backed paired quality gate for speculative Card execution.
+"""Paired quality BENCHMARK for speculative Card execution, and its receipt.
 
 It consumes completed run directories as immutable evidence, reconstructs speculative ownership through
 replay, and emits a bounded receipt whose source and implementation digests can be revalidated later.
-The CLI produces paired gate evidence, and the Engine validates positive ``speculation_depth`` against
-the task, runtime, GPU and implementation receipts. Counts supplied by a caller are never accepted as evidence.
+It measures scorer fidelity, prediction hit rate, selection divergence and normalized regret on the
+shipped quadratic toy, at three fixed seeds, on real GPUs.
+
+WHAT THE RECEIPT MEANS (changed 2026-08-04): it is the benchmark's result, NOT a licence to speculate.
+Positive ``speculation_depth`` runs on any TaskAdapter without one — the node-budget refund removed the
+cost the receipt's `normalized_regret` bound was protecting (see the admission block in
+`engine/orchestrator.py`). What a receipt still does: attest that this build passes the gate, and — on
+the toy itself — bind a replay to the exact measured runtime envelope. It is revalidated whenever it is
+supplied, so a stale or forged receipt is refused rather than ignored. Counts supplied by a caller are
+never accepted as evidence.
 """
 from __future__ import annotations
 
@@ -39,6 +47,7 @@ from looplab.events.types import (
     EV_BUDGET,
     EV_BUDGET_EXTEND,
     EV_CARD_ADDED,
+    EV_CARD_BUILD_ATTEMPTED,
     EV_CARD_BUILD_DONE,
     EV_CARD_BUILD_REQUESTED,
     EV_CARD_ENRICHED,
@@ -75,6 +84,7 @@ from looplab.search.card_selection import (
     CardResourceEnvelope,
     SpeculativeSelectionContext,
     card_budget_used,
+    refunded_node_reservations,
     speculative_card_actions,
     speculative_raw_actions,
 )
@@ -104,6 +114,9 @@ from looplab.agents.roles import (
 
 SPECULATION_RUN_ANALYSIS_SCHEMA = "looplab.speculation-run-analysis/v1"
 SPECULATION_QUALITY_GATE_SCHEMA = "looplab.speculation-quality-gate/v1"
+# The run-start identity token for the receiptless (product) speculation lane. Its own schema string
+# keeps its preimage disjoint from a gate receipt's, so the two lanes can never validate each other.
+SPECULATION_PRODUCT_AUTHORITY_SCHEMA = "looplab.speculation-product-authority/v1"
 
 # These values are source-owned.  There is deliberately no thresholds argument on any public API.
 SPECULATION_QUALITY_THRESHOLDS: Mapping[str, int | float] = MappingProxyType({
@@ -211,6 +224,12 @@ _CALIBRATION_COMMON_EVENT_TYPES = frozenset({
 })
 _CALIBRATION_TREATMENT_EVENT_TYPES = frozenset({
     EV_CARD_BUILD_REQUESTED,
+    # The paid-attempt receipt a speculative Card producer writes BEFORE it can reach a provider
+    # (`feat(durability) 7a2a2ff4`). It is emitted on exactly the path this allow-list exists to
+    # admit, but that commit landed five days after this set was last touched (`8d9952a1`), so every
+    # positive-depth treatment run carried a row the gate rejected as "outside the clean calibration
+    # protocol" — the second of the two reasons no receipt could be minted.
+    EV_CARD_BUILD_ATTEMPTED,
     EV_CARD_BUILD_DONE,
     EV_NODE_FAILED,
 })
@@ -941,6 +960,28 @@ def _raw_node_ceiling(events: Sequence[Event], state) -> int:
     return max(max(state.nodes, default=-1), building_max) + 1
 
 
+def _live_selection_denominator(events: Sequence[Event], state, *, max_nodes: int) -> int:
+    """Mirror ``Engine._refresh_speculation_budget``'s translated Card denominator on one prefix.
+
+    Two terms, exactly as the engine computes them: the refund-aware L3 count (``card_budget_used``)
+    plus whatever is left of the physical ceiling.  That ceiling is the operator's ``max_nodes``
+    EXTENDED by the reservations the refund gave back — see
+    ``Engine._hard_node_reservation_limit`` / ``card_selection.refunded_node_reservations``.  A
+    speculative build discarded before it ran spends no slot, so the engine may mint a replacement
+    reservation and this authority recomputation must expect exactly the same one.
+
+    The engine's third term (unmaterialized request reservations) is structurally zero here: both
+    call sites below have already proven ``card_builds_done == len(card_build_requests)``.
+    """
+
+    return card_budget_used(state) + max(
+        0,
+        max_nodes
+        + refunded_node_reservations(state, max_nodes)
+        - _raw_node_ceiling(events, state),
+    )
+
+
 def _validate_calibration_greedy_authority(
     events: Sequence[Event],
     state,
@@ -1020,8 +1061,8 @@ def _validate_calibration_greedy_authority(
                     node.idea.card_id for node in pending
                     if isinstance(node.idea.card_id, str)
                 }
-                live_max = card_budget_used(prefix) + max(
-                    0, max_nodes - raw_ceiling,
+                live_max = _live_selection_denominator(
+                    prefix_events, prefix, max_nodes=max_nodes,
                 )
                 try:
                     actions = speculative_raw_actions(
@@ -1058,8 +1099,9 @@ def _validate_calibration_greedy_authority(
             }
             if prefix.card_builds_done != len(prefix.card_build_requests):
                 raise ValueError("treatment requested a Card while another request was open")
-            raw_ceiling = _raw_node_ceiling(prefix_events, prefix)
-            live_max = card_budget_used(prefix) + max(0, max_nodes - raw_ceiling)
+            live_max = _live_selection_denominator(
+                prefix_events, prefix, max_nodes=max_nodes,
+            )
             try:
                 actions = speculative_card_actions(
                     prefix,
@@ -1580,8 +1622,13 @@ def _analyze_speculation_run(run_dir: str | Path) -> tuple[dict[str, Any], dict[
         SPECULATION_CALIBRATION_PROFILE_DIGEST,
         SPECULATION_CALIBRATION_PROFILE_SETTINGS,
     )
+    # Compare against the DOCUMENT the snapshot writer actually emits, not the raw Settings field
+    # set: `masked_snapshot()` pops credential bindings and stamps `config_snapshot_schema`, so the
+    # two sets are structurally different and an exact equality against the profile can never hold.
+    # (See `calibration_snapshot_document_fields` for the two commits that each closed this gate.)
+    from looplab.search.speculation_calibration import SPECULATION_CALIBRATION_SNAPSHOT_FIELDS
     expected_config_fields = (
-        set(SPECULATION_CALIBRATION_PROFILE_SETTINGS)
+        set(SPECULATION_CALIBRATION_SNAPSHOT_FIELDS)
         | set(SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS)
     )
     if set(config) != expected_config_fields:
@@ -1638,9 +1685,19 @@ def _analyze_speculation_run(run_dir: str | Path) -> tuple[dict[str, Any], dict[
     if getattr(state, "finished", None) is not True:
         raise ValueError("quality evidence must be terminal")
     _validate_calibration_terminal(events, state)
-    if len(state.nodes) != max_nodes:
+    # The property is "the run did not stop before spending its whole node budget", and the exact
+    # equality below expressed it only while every physical reservation was charged. A speculative
+    # build discarded before it ever ran is refunded (`card_selection.node_counts_toward_card_budget`),
+    # so a treatment lane legitimately re-spends that slot and ends with `max_nodes + <refunds>`
+    # physical reservations while consuming exactly `max_nodes` of BUDGET. Widen by exactly the
+    # refunds and no further: the lower bound still rejects a lane that stopped early, and the upper
+    # bound still rejects any reservation the log cannot account for. With no refunds — every
+    # baseline lane, and every log written before the refund existed — this is byte-identical to the
+    # original equality.
+    refunded = refunded_node_reservations(state, max_nodes)
+    if not max_nodes <= len(state.nodes) <= max_nodes + refunded:
         raise ValueError("quality evidence did not consume its complete physical node budget")
-    if sorted(state.nodes) != list(range(max_nodes)):
+    if sorted(state.nodes) != list(range(len(state.nodes))):
         raise ValueError("quality evidence node ids must be the exact contiguous calibration range")
     if state.pending_nodes() or getattr(state, "building", None) is not None or state.buildings:
         raise ValueError("quality evidence is not quiescent")
@@ -1917,6 +1974,42 @@ def _normalize_gpu_inventory(value: object) -> list[dict[str, Any]]:
             "cuda_driver_version": cuda_driver_version,
         })
     return sorted(normalized, key=lambda row: row["index"])
+
+
+def speculation_product_authority_digest(
+    *,
+    policy_scope: str,
+    implementation_digest: str,
+    task_kind: str,
+) -> str:
+    """Identity token for a speculative run that carries no calibration receipt.
+
+    Positive ``speculation_depth`` needs no receipt on a real workload (see the admission block in
+    `engine/orchestrator.py`), but a run that HAS speculated still has to be resumable only by an
+    engine that speaks the same code, the same selection policy and the same workload — the folded
+    log carries speculative links, discard receipts and a refunded node budget that only that engine
+    interprets identically. This is that pin, not an authorization: it is derived, never granted, and
+    the run-start value it produces is what `_require_pinned_speculation_receipt` re-derives and
+    compares on every re-entry.
+
+    It is deliberately DISJOINT from a gate receipt's ``self_digest`` (a different preimage schema),
+    so a receipt-authorized log and a product-lane log can never be resumed into each other's lane.
+    ``speculation_depth`` is intentionally NOT part of it: the depth is pinned and compared as its
+    own field, and AUTO may legitimately re-resolve on a different box.
+    """
+
+    if not _valid_digest(implementation_digest):
+        raise ValueError("product authority requires a valid implementation digest")
+    if not policy_scope or len(policy_scope) > 64:
+        raise ValueError("product authority requires a bounded policy scope")
+    if len(task_kind) > 64:
+        raise ValueError("product authority requires a bounded task kind")
+    return _sha256(canonical_json({
+        "schema": SPECULATION_PRODUCT_AUTHORITY_SCHEMA,
+        "policy_scope": policy_scope,
+        "implementation_digest": implementation_digest,
+        "task_kind": task_kind,
+    }))
 
 
 def _implementation_digest(
@@ -2591,12 +2684,14 @@ def validate_speculation_gate_receipt(
 
 
 __all__ = [
+    "SPECULATION_PRODUCT_AUTHORITY_SCHEMA",
     "SPECULATION_QUALITY_GATE_SCHEMA",
     "SPECULATION_QUALITY_THRESHOLDS",
     "SPECULATION_RUN_ANALYSIS_SCHEMA",
     "analyze_speculation_run",
     "speculation_environment_fingerprint",
     "speculation_implementation_digest",
+    "speculation_product_authority_digest",
     "speculation_quality_gate",
     "speculation_task_profile_digest",
     "validate_speculation_gate_receipt",

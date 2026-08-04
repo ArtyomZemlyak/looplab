@@ -130,13 +130,28 @@ def test_background_task_appends_only_via_the_gated_method():
     # CODEX AGENT: this immediate-source scan misses writes in callees. The overlap loop reaches
     # `_maybe_merge_hypotheses`, which appends from the background worker, so the stated gated-method
     # guarantee is already false; assert behavioral event types/order across the transitive call path.
-    # The background research coroutines must reach the store ONLY through _record_deep_research
-    # (whose appends carry the BACKGROUND_APPENDABLE assertions). A direct store.append added to the
-    # one-shot spawn OR the repeating overlap loop would bypass the gate silently — this source scan
-    # turns that into a red test. Both the one-shot (_spawn_research::_bg) and the repeating
-    # (_research_overlap_loop) background writers are covered.
+    # The background research coroutines must reach the store ONLY through the gated writers
+    # `_record_research_attempt` / `_record_deep_research` (whose appends carry the
+    # BACKGROUND_APPENDABLE assertions). A direct store.append added to the one-shot spawn OR the
+    # repeating overlap loop would bypass the gate silently — this source scan turns that into a red
+    # test. Both the one-shot (_spawn_research::_bg) and the repeating (_research_overlap_loop)
+    # background writers are covered, plus the ONE hop they now reach them through.
     import looplab.engine.orchestrator as orch
+    import looplab.engine.research_cadence as research_cadence
     for meth in ("_spawn_research", "_research_overlap_loop"):
         src = inspect.getsource(getattr(orch.Engine, meth))
         assert "store.append" not in src, f"{meth} must not append directly — see BACKGROUND_APPENDABLE"
-        assert "_record_deep_research" in src, f"{meth} must write only via _record_deep_research"
+        # ONE gated hop, and ONLY that hop (`self.<name>` matches a call, not the prose that
+        # explains it). The receipt/compute/record trio must not reappear as separate awaits in a
+        # background coroutine: a cancellation checkpoint between them spends the durable gate and
+        # then discards the memo the provider was already paid for — see
+        # test_research_attempt_settlement.py for the measured 4-attempts/0-memos failure.
+        assert "self._research_attempt_step" in src, (
+            f"{meth} must run its paid pass via the indivisible _research_attempt_step")
+        for split in ("_record_research_attempt", "_compute_deep_research", "_record_deep_research"):
+            assert f"self.{split}" not in src, (
+                f"{meth} must not call {split} itself — the paid pass is indivisible, see "
+                "research_cadence._research_attempt_step")
+    step_src = inspect.getsource(research_cadence.ResearchCadenceMixin._research_attempt_step)
+    assert "store.append" not in step_src, "the paid step must write only via the gated recorders"
+    assert "self._record_research_attempt" in step_src and "self._record_deep_research" in step_src

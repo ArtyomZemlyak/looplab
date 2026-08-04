@@ -39,11 +39,34 @@ EXPECTED = {
     "watchdog_reflection": (True, False),
     # Training-log monitor: ON in the product surface (advisory observer of the live training log; never
     # touches node selection or replay, no-ops without an LLM client / on the solution.py path), OFF in the
-    # bare-library EngineOptions so a direct `Engine(...)` in a test does no unasked LLM work. The early
-    # KILL (`train_monitor_kill`) stays OFF on BOTH sides — it is an opt-in intervention, not a default.
+    # bare-library EngineOptions so a direct `Engine(...)` in a test does no unasked LLM work.
     "train_monitor": (True, False),
     "asha_live": (True, False),
+    # The two watchdog KILLS became product defaults on 2026-08-04 (operator decision): the observers
+    # are now allowed to act on what they already saw, so a diverged training / a hopeless curve stops
+    # burning a multi-hour budget. They stay OFF in bare-library `EngineOptions`, because a direct
+    # `Engine(...)` must never gain the power to terminate a caller's eval that a plain construction
+    # did not ask for. Both remain narrow BY CONSTRUCTION, not by their default: the train monitor acts
+    # only on a 'broken' verdict at confidence >= train_monitor_kill_confidence (a plateau is 'watch'
+    # and is never killed), and ASHA acts only for stdout_json metrics declaring an explicit
+    # `resource_key`, past the grace window, with `asha_live_min_siblings` finished same-resource peers.
+    "train_monitor_kill": (True, False),
+    "asha_live_kill": (True, False),
     "unified_agent": (True, False),
+    # Layer 3 Card queue owns macro-action selection in the product surface (2026-08-04): the Card lane
+    # is the intended selector, and it wins over `agent_drives_actions` when both are on. The bare
+    # library keeps the legacy policy/unified-pilot action path, so a toy `Engine(...)` still runs the
+    # historical spine. The value is pinned in `run_started`, so a resume cannot mix two treatments.
+    "card_driven_selection": (True, False),
+    # Layer-2 parallelism (2026-08-04): the product surface ships startup AUTO (`0` = one experiment per
+    # detected GPU, and an LLM/build width derived from that settled eval width); the bare library keeps
+    # `None`, which falls back to the legacy `max_parallel`/`parallel_build` (both 1) and is therefore
+    # byte-identical serial behaviour for a direct `Engine(...)`. Product-more-aggressive, same as every
+    # bool row above — these are ints, so the direction rule below cannot check them mechanically.
+    # `0` deliberately does NOT enable the finite shared LLM broker: that opt-in stays tied to an
+    # explicitly-spelled POSITIVE canonical `llm_parallel` (tests/test_llm_broker.py).
+    "eval_parallel": (0, None),
+    "llm_parallel": (0, None),
     # Part IV/V machinery ships ON in the product surface (Settings) while bare-library
     # EngineOptions stays lean, so a toy `Engine(...)` does not fire concept/cross-run LLM work
     # unasked. The flags have heterogeneous effects — prompt steering, proposal admission,

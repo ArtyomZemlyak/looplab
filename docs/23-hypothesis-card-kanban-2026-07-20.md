@@ -1,10 +1,54 @@
 # Hypothesis-Card Kanban re-architecture — design and implementation ledger (2026-07-20)
 
 Status: **Layers 1–6 are implemented and validated in implementation commit `8d9952a1`, which is
-pushed to `master`. Card-driven selection remains a default-off, run-start-pinned opt-in. Positive-
+pushed to `master`. ~~Card-driven selection remains a default-off, run-start-pinned opt-in.~~
+(**Correction 2026-08-04 — operator decision: `card_driven_selection` now defaults to `True`,
+`core/config.py:1080`. It is still run-start-pinned.**) Positive-
 depth speculation is admitted only by the current scope-bound receipt for the exact measured Greedy /
 quadratic-Toy / depth-1 / max-nodes-12 runtime; every broader workload, policy, depth and budget remains
 default-off and fail-closed.**
+
+> **⚠ "Layers 1–6 implemented and validated" overstates what is reachable (noted 2026-08-04).** Verified
+> reachable today: Layer 1's durable Card capture, a read-only board, and five operator controls.
+> **Layer 3's Card scorer never sees a candidate** — Cards are minted after the Idea in the same atomic
+> batch as the `node_building` claim that consumes them, so they instantly carry an owner and can never
+> satisfy `_strictly_selection_ready`; `card_ranked` is structurally unreachable from both ends. Confirmed
+> on a real 12-node run with `card_driven_selection=true`: 18 cards, `selection_ready=0`,
+> `eligible_cards()==0`, every `policy_decision` plain Greedy. A product decision is pending; the full
+> annotation with the open question is in this file's source immediately below.
+
+<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — "Layers 1-6 implemented and validated" overstates what a reader
+can reach. No later document revises this ledger, so this is a live divergence, not stale text.
+REACHABLE TODAY: Layer 1's durable Card capture, a READ-ONLY board, and five operator controls.
+NOT REACHABLE: Layer 3's Card scorer never sees a candidate, and `card_ranked` is structurally
+unreachable from BOTH ends.
+WHY (mechanism, not opinion). (1) Cards are minted AFTER the Idea and in the SAME atomic batch as the
+`node_building` claim that consumes them: `engine/orchestrator.py::_reserve_node_build` documents
+this as its contract — "The final Idea must already exist … A new `card_added` and its
+`node_building{card_id}` claim are one bounded EventStore batch, so another process can land before or
+after them, never between." The mint path runs through `engine/orchestrator.py::_plan_native_card` and its
+`_CardReservationPlan` reservation helper. A Card therefore exists only in a state
+where it ALREADY carries an owner (and, once the node terminates, evidence). (2)
+`search/card_selection.py::_strictly_selection_ready` requires simultaneously
+`provenance.owner_state == "none"`, `not card.evidence`, `status == "proposed"` and
+`verdict == "open"` — conditions the mint path can never leave a Card in. `search/card_selection.py::eligible_cards`
+filters on exactly that predicate, so it returns []. (3) The ONLY
+path that mints a Card WITHOUT a simultaneous node claim is
+`engine/orchestrator.py::_stage_card_creates`, whose single call site in the run spine sits under
+`if self._speculation_enabled():` — i.e. it is reachable only under speculation, which the status line
+above keeps scope-bound and default-off.
+MEASURED: a real 12-node run with `card_driven_selection=true` produced 18 cards, `selection_ready=0`,
+`eligible_cards() == 0`, and all 9 `policy_decision` rows plain Greedy ("exploit best" / "merge top-2").
+The Card selector is on by default now and has never chosen a node.
+NEEDS A BUSINESS DECISION: is Card-driven selection meant to be a real selector — in which case Cards
+must be mintable BEFORE (and independently of) the node claim that consumes them, which is a change to
+the Layer 1 mint contract quoted above, not a bug fix — or is the Card board a durable AUDIT/steering
+surface whose ranking terms are advisory only, in which case Layer 3, `card_ranked`,
+`card_driven_selection` and the "Selection / UX" row of §0.0.1 must be restated as such and the default-on
+switch reconsidered? -->
+<!-- CLAUDE REVIEW 2026-08-04: the two "Complete"-label CODEX annotations below were written against
+`60e9a5f3`; this Layer-3 finding is independent of them and is NOT one of their sixteen blockers. -->
+
 Grounded in four exhaustive code maps (idea-pipeline ·
 strategist/policy · execution/GPU · replay/UI) and an 18-agent per-layer mega-review consolidated in
 **§12 — the historical target contract**. The ledger below is the validated current implementation
@@ -674,6 +718,24 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
   footprint unspecified. `_spawn_research` overlap (orchestrator.py:1585) is preserved inside the
   structured session.
 
+  > **Defaults changed — operator decision, 2026-08-04.** Decision F30's byte-for-byte-reproduction
+  > premise no longer describes a stock install. Verified against `looplab/core/config.py` at HEAD:
+  >
+  > | Setting | F30 (2026-07-20) | Today | Where |
+  > |---|---|---|---|
+  > | `card_driven_selection` | `False` | **`True`** | `config.py:1080` |
+  > | `llm_parallel` | `None` (→1) | **`0`** (AUTO) | `config.py:424` |
+  > | `eval_parallel` | `None` (→`max_parallel`) | **`0`** (AUTO) | `config.py:423` |
+  > | `backend` | `toy` | **`llm`** | `config.py:927` |
+  > | `train_monitor_kill` | `False` | **`True`** | `config.py:442` |
+  > | `asha_live_kill` | `False` | **`True`** | `config.py:456` |
+  >
+  > `speculation_depth=0` is unchanged, so the speculative Card producer is still off by default — which
+  > is why `card_driven_selection=True` does not by itself make Layer 3 reachable (see the annotation at
+  > the top of this file). The `backend` toy→llm change also means a stock `looplab run` now REQUIRES a
+  > reachable LLM endpoint; with none, roles fall back and a run can finish with identical nodes and a
+  > flat metric rather than failing.
+
 ### 12.2 Finalized decisions (30), grouped
 
 **A — Concurrency, sole-writer, resume:**
@@ -715,6 +777,24 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
     distinct reservation still consumes `max_nodes + budget_extend.add_nodes`. This preserves selection
     quality inside the capacity the operator actually granted without allowing repeated drop/retry cycles
     to bypass the hard limit. **Landed across L3/L5 and shared by every Node-creation path.**
+    **AMENDED 2026-08-04 — the "never refunds them" half was measured wrong and is reversed for one
+    exact case.** Same task/seed/budget, only `speculation_depth` toggled (`--max-nodes 12`): the
+    depth-1 lane created 12 nodes but EVALUATED only 9 — three were speculative builds the freshness
+    gate discarded with `reason='superseded'` and no node workdir at all, i.e. one Developer call and
+    zero GPU. `card_budget_used` already excluded them, but `_node_id_ceiling` (a monotonic id
+    ALLOCATOR that cannot reuse an id) kept their slots spent, so the refund was inert and the
+    treatment ran three fewer real experiments than its baseline. That is exactly the budget theft the
+    calibration gate's `normalized_regret` bound measures: `mean_normalized_regret` 0.0256 with
+    hit_rate 0.778. `Engine._hard_node_reservation_limit` now EXTENDS itself by
+    `card_selection.refunded_node_reservations` — the same predicate `node_counts_toward_card_budget`
+    uses, so there is still exactly one accounting — and the refund is proven from the log by the
+    durable `never_evaluated` receipt on the node's single `node_failed` terminal (plus corroborating
+    zero eval seconds / no `stage_finished`), never from the absence of a directory on disk. Measured
+    after: the depth-1 lanes evaluate 12/12/12 and `mean_normalized_regret` falls to 0.0026.
+    Everything else in this decision stands: a speculative build that DID consume an evaluation, an
+    ordinary failed/aborted attempt, a tombstoned or gated node, a bare failed `node_building` id and
+    an unmaterialized request all still spend their reservation, and the refund itself is capped at
+    one whole `max_nodes + add_nodes` so a drop/retry cycle still cannot run away.
 14. Developer-crash sentinel eval race closed structurally: the consumer readiness predicate **excludes**
     nodes whose code is the `'(developer error:'` sentinel (a pure fold-readable `node.code`/`status`
     check); never rely on `node_failed`-wins timing.

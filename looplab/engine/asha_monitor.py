@@ -13,6 +13,17 @@ diagnostic may still advise a later Researcher prompt when `watchdog_reflection`
 reusing the training monitor's `kill_signal` + the single `_evaluate` terminal (reason
 `asha_underperforming`), so replay reads that terminal and never re-invokes this watchdog.
 
+**The rank comparison is EVIDENCE, not the decision.** A bare quantile test sees exactly one number and
+ignores everything else the run is saying — the SHAPE of its curve, the spread of the peers it is being
+compared against, the other metrics it prints, and whether the training-health monitor already has an
+opinion about it. So when the deterministic gate fires, an LLM judge (`AshaVerdict`, schema-validated
+like `train_monitor.py`'s own verdict) receives that whole picture and answers continue|watch|stop; only a
+confident `stop` kills. The judge is consulted INSIDE the existing gate — after the grace window, the
+min-siblings floor, the explicit `resource_key` and `asha_live_kill` have ALL held — so by construction it
+can only ever stop FEWER nodes than the rank test alone, never a node the rank test would have spared. No
+judge (no LLM client, an endpoint failure, an unparseable answer) means NO kill: the watchdog degrades to
+the advisory observation it was before, never to a blind quantile stop.
+
 Fragility is contained by construction:
  - metric extraction REUSES the eval's own metric contract (`command_eval.read_metric` — the same
    stdout_json/regex/file reader that scores the final result), so there is no bespoke log parsing;
@@ -21,14 +32,26 @@ Fragility is contained by construction:
  - a grace period (`_ASHA_GRACE_TICKS`) protects a slow start — a kill never fires on the first acting
    ticks, only after the underperformance persists;
  - endpoint comparison remains useful diagnostics but cannot kill; missing same-resource evidence
-   degrades safely to advisory-only observation.
+   degrades safely to advisory-only observation;
+ - the judge's verdict is a DIAGNOSTIC (fold-ignored) `EV_ASHA_VERDICT` row, like the training monitor's
+   alert: its position in the log is thread-dependent, so it must never reach folded state. The stop
+   itself is recorded by the node's single ordinary terminal, which is what replay reads — replay NEVER
+   re-invokes the judge.
 """
 from __future__ import annotations
 
 import json
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field
+
+from looplab.core.llm_broker import in_llm_lane
+# The confidence normalizer is the training monitor's, deliberately not a second spelling: both watchdogs
+# must treat a NaN/absent/non-numeric model confidence the same way (observable at 0.0, never authority
+# for a kill). train_monitor imports nothing from this module, so the module-level import is cycle-free.
+from looplab.engine.train_monitor import _normalize_monitor_confidence
 
 # A kill never fires until the node has been flagged underperforming for MORE than this many
 # CONSECUTIVE acting ticks (a metric and enough same-resource sibling observations exist): the gate is
@@ -36,6 +59,47 @@ from typing import Optional
 # than the next one (with 2, the 3rd consecutive underperforming tick). Protects a recovering start:
 # a transient dip below the bar that recovers within the grace window never stops the run.
 _ASHA_GRACE_TICKS = 2
+
+# Per-node backstop on judge calls. The judge is only reached once the rank gate has fired for
+# `_ASHA_GRACE_TICKS + 1` consecutive ticks, and a non-stop verdict re-arms that whole window (see the
+# loop), so a realistic eval consults it a handful of times at most; this only bounds a pathological
+# flapping curve. Past the cap the watchdog keeps OBSERVING (trace + advisory rank rows) but stops
+# spending on the LLM — and therefore stops being able to kill, which is the safe direction.
+_MAX_ASHA_JUDGE_CALLS = 20
+
+
+# The stop-decision schema the judge returns — the ASHA sibling of `train_monitor.TrainingVerdict`, and
+# schema-validated the same way. Field descriptions are part of what the model sees: they ARE the
+# decision contract. Only `stop` (at sufficient confidence) may end a run; `continue`/`watch` differ
+# only in what the diagnostic row tells a human, never in what happens to the node this tick.
+class AshaVerdict(BaseModel):
+    status: Literal["continue", "watch", "stop"] = Field(
+        description="continue = this run deserves its remaining compute (it is improving, or the gap to "
+                    "its peers is small/noisy, or the peers themselves are widely spread); "
+                    "watch = it looks behind but the evidence is not yet conclusive — keep training and "
+                    "re-examine later; "
+                    "stop = the run is clearly and durably worse than peers that had the SAME amount of "
+                    "training and shows no sign of catching up, so its remaining budget is better spent "
+                    "on another idea.")
+    reason: str = Field(description="One short sentence naming the SPECIFIC evidence for the status "
+                                    "(curve shape, gap size vs peer spread, other metrics, log health).")
+    confidence: float = Field(default=0.5, description="Confidence in the status, 0.0 to 1.0.")
+
+
+# The judge's framing. A contract, like `_MONITOR_SYSTEM`: it fixes the role (the engineer running the
+# sweep), what the deterministic flag actually means (evidence, already spent — not an instruction), and
+# the bias (stopping frees compute, but a wrong stop destroys a good experiment that is merely behind).
+_ASHA_JUDGE_SYSTEM = (
+    "You are the ML engineer running this experiment sweep, deciding whether a STILL-RUNNING training is "
+    "worth the compute it has left. A deterministic rank test has already flagged this run as behind its "
+    "finished siblings at the SAME amount of training, and has held that flag past a grace window — that "
+    "is the evidence you are given, not the decision. Read the whole picture: a run that is behind but "
+    "still improving, one whose gap is small against how widely the peers themselves are spread, or one "
+    "whose other metrics look healthy, deserves to keep going. Reserve 'stop' for a run that is clearly "
+    "and durably worse with no sign of catching up. Stopping frees a slot for a better idea, but a wrong "
+    "stop throws away an experiment that was only slow to start — when in doubt choose 'watch', which "
+    "keeps the run alive and re-examines it later. Judge only from the evidence given; the final metric "
+    "is not known yet, so do not guess it. Be concise and specific about what you saw.")
 
 
 def latest_intermediate(log_tail: str, workdir, metric_spec: dict) -> Optional[float]:
@@ -262,6 +326,28 @@ def sibling_metrics_at_resource(state, node_id: int, metric_spec: dict,
     return out
 
 
+def rank_bar(population: list[float], direction: str, *, quantile: float = 0.5) -> Optional[float]:
+    """The BAR a live value is compared against: the member of `population` sitting at fraction
+    `quantile` along a WORST->BEST ordering. None when there is nothing to compare against or the
+    quantile is out of range/unparseable, so the caller treats "unknown" as "do not act".
+
+    Extracted from `asha_underperforming` so the LLM judge can be TOLD the bar it is being asked about
+    without a second (drifting) spelling of the ordering. Behaviour-identical to the inline version."""
+    if not population:
+        return None
+    try:
+        q = float(quantile)
+    except (TypeError, ValueError):
+        return None
+    if not (0.0 <= q <= 1.0):
+        return None
+    # Order WORST -> BEST so q places the bar at fraction q along that axis (q=0 -> worst peer, most
+    # conservative; q=1 -> best peer, most aggressive). For min the worst final is the largest.
+    ordered = sorted(population, reverse=(str(direction) == "min"))   # min: descending (worst first)
+    idx = min(len(ordered) - 1, max(0, int(round(q * (len(ordered) - 1)))))
+    return ordered[idx]
+
+
 def asha_underperforming(value: Optional[float], population: list[float], direction: str, *,
                          quantile: float = 0.5) -> Optional[bool]:
     """Is `value` already WORSE than the `quantile` of `population`, given `direction`?
@@ -274,22 +360,169 @@ def asha_underperforming(value: Optional[float], population: list[float], direct
     `quantile` along that axis; `value` underperforms if it is strictly worse than the bar. So
     quantile=0.5 = the median, quantile=0.0 = the WORST finished peer (only a value worse than the worst
     is flagged — most conservative), quantile=1.0 = the BEST peer (almost everything below top flags —
-    most aggressive). SMALLER quantile => more conservative (fewer stops)."""
-    if value is None or not population:
+    most aggressive). SMALLER quantile => more conservative (fewer stops).
+
+    This remains the whole deterministic decision surface, but it is now the EVIDENCE handed to the LLM
+    judge rather than the kill decision itself (see the module docstring)."""
+    if value is None:
         return None
-    try:
-        q = float(quantile)
-    except (TypeError, ValueError):
+    bar = rank_bar(population, direction, quantile=quantile)
+    if bar is None:
         return None
-    if not (0.0 <= q <= 1.0):
-        return None
+    return (value > bar) if str(direction) == "min" else (value < bar)
+
+
+def latest_extra_metrics(log_tail: str, metric_spec: dict, *, max_items: int = 8) -> dict[str, float]:
+    """The OTHER numeric fields the run printed alongside its newest objective-metric record — loss, lr,
+    val_*, throughput, whatever the Developer's training loop logs. The quantile test throws all of this
+    away; the judge gets it, because "behind on the objective but the loss is still falling" and "behind
+    and the loss is flat" are different runs.
+
+    Same contract as the eval's own `extra_metrics` (`core.models.normalize_extra_metrics`: finite scalar
+    numbers only, bounded), mined from the same `stdout_json` records `latest_intermediate_sample` reads.
+    `{}` for any other metric kind or when nothing parses — the judge simply gets LESS context, never
+    wrong context. Pure; never raises."""
+    if not log_tail or not isinstance(metric_spec, dict):
+        return {}
+    if metric_spec.get("kind", "stdout_json") != "stdout_json":
+        return {}
+    from looplab.core.models import normalize_extra_metrics
+
+    metric_key = metric_spec.get("key", "metric")
+    resource_key = _declared_resource_key(metric_spec)
+    for obj in _json_objects_newest_first(log_tail):
+        if metric_key not in obj:
+            continue
+        extras = {k: v for k, v in obj.items() if k != metric_key and k != resource_key}
+        return normalize_extra_metrics(extras, max_items=max_items)
+    return {}
+
+
+def latest_train_verdict(rows, node_id: int, generation: int) -> Optional[dict]:
+    """The training-health monitor's most recent verdict for exactly THIS node lifecycle, as a small
+    sanitized `{"status", "reason", "confidence"}` — or None when it never spoke (monitor off, no client,
+    still healthy-and-quiet) or its newest row is unusable.
+
+    Read off the RAW event rows, never from `RunState`: `EV_TRAIN_MONITOR_ALERT` is a DIAGNOSTIC
+    (fold-ignored) event, so the fold cannot supply it. Rows are untrusted append-only data — a bool
+    `node_id`, a string generation or an unknown status must degrade to "no verdict", never mislead the
+    judge about which lifecycle it is looking at. The reason text was already redacted at its source
+    (`_monitor_training` redacts before appending). Pure; safe on an empty/None row list."""
+    from looplab.events.types import EV_TRAIN_MONITOR_ALERT
+
+    for event in reversed(list(rows or ())):
+        if getattr(event, "type", None) != EV_TRAIN_MONITOR_ALERT:
+            continue
+        data = getattr(event, "data", None) or {}
+        nid, gen = data.get("node_id"), data.get("generation")
+        if isinstance(nid, bool) or not isinstance(nid, int) or nid != node_id:
+            continue
+        if isinstance(gen, bool) or not isinstance(gen, int) or gen != generation:
+            continue
+        status = str(data.get("status") or "").strip().lower()
+        if status not in ("healthy", "watch", "broken"):
+            return None            # newest row for this lifecycle is unusable -> no verdict, not a guess
+        confidence, confidence_valid = _normalize_monitor_confidence(data.get("confidence"))
+        out: dict = {"status": status, "reason": str(data.get("reason") or "")[:300]}
+        if confidence_valid:
+            out["confidence"] = confidence
+        return out
+    return None
+
+
+def _fmt(value) -> str:
+    """Compact fixed-significance rendering for prompt text (no numpy repr, no 17-digit float noise)."""
+    number = _finite_number(value)
+    return "?" if number is None else f"{number:.6g}"
+
+
+def asha_judge_context(*, node_id: int, generation: int, direction: str, metric_key: str,
+                       sample: IntermediateSample, live_curve, comparable_population: list[float],
+                       quantile: float, under_streak: int, endpoint_population: list[float],
+                       extra_metrics: Optional[dict] = None,
+                       train_verdict: Optional[dict] = None,
+                       grace_ticks: int = _ASHA_GRACE_TICKS, max_shown: int = 12) -> str:
+    """Render the complete stop-decision EVIDENCE as the judge's prompt context. Pure/deterministic and
+    unit-testable — no I/O, no state access, no LLM — so what the model is told can be asserted directly.
+
+    Everything the deterministic test used, plus everything it discarded: the direction of the objective,
+    the node's own live curve (per-rung, so its SHAPE is visible), the latest sample, the other metrics
+    printed with it, the same-resource sibling values WITH the computed bar and how spread out they are,
+    the finished endpoints as background, how long the flag has held against the grace window, and the
+    training monitor's latest health verdict when one exists. Every population is rendered sorted and
+    bounded to `max_shown` values so a 500-node run cannot blow up the prompt."""
     is_min = str(direction) == "min"
-    # Order WORST -> BEST so q places the bar at fraction q along that axis (q=0 -> worst peer, most
-    # conservative; q=1 -> best peer, most aggressive). For min the worst final is the largest.
-    ordered = sorted(population, reverse=is_min)      # min: descending (worst first); max: ascending
-    idx = min(len(ordered) - 1, max(0, int(round(q * (len(ordered) - 1)))))
-    bar = ordered[idx]
-    return (value > bar) if is_min else (value < bar)
+    goal = "MINIMIZE" if is_min else "MAXIMIZE"
+    lines = [f"Experiment #{node_id} (attempt {generation}) is still training.",
+             f"Objective: {goal} `{metric_key}` ({'lower' if is_min else 'higher'} is better)."]
+    points = [entry for entry in (live_curve or [])
+              if isinstance(entry, (list, tuple)) and len(entry) == 2]
+    if points:
+        resource_name = sample.resource_key or "resource"
+        shown = points[-max_shown:]
+        lines.append("This run's live curve so far ({} -> {}): {}{}.".format(
+            resource_name, metric_key,
+            "" if len(shown) == len(points) else f"... ({len(points)} points, last {len(shown)}) ",
+            ", ".join(f"{_fmt(r)} -> {_fmt(m)}" for r, m in shown)))
+    if sample.resource_key is not None and sample.resource is not None:
+        lines.append(f"Latest sample: {metric_key}={_fmt(sample.value)} "
+                     f"at {sample.resource_key}={_fmt(sample.resource)}.")
+    else:
+        lines.append(f"Latest sample: {metric_key}={_fmt(sample.value)}.")
+    extras = {k: v for k, v in (extra_metrics or {}).items()}
+    if extras:
+        lines.append("Other metrics reported alongside it: "
+                     + ", ".join(f"{k}={_fmt(v)}" for k, v in list(extras.items())[:max_shown]) + ".")
+    bar = rank_bar(comparable_population, direction, quantile=quantile)
+    if comparable_population:
+        ordered = sorted(comparable_population, reverse=is_min)      # WORST -> BEST, as the bar is placed
+        head = ordered[:max_shown]
+        lines.append(
+            "Finished siblings observed at the SAME amount of training (n={}, worst to best{}): {}. "
+            "The {:.0%} bar is {}, and this run's latest sample is on the WORSE side of it.".format(
+                len(ordered), "" if len(head) == len(ordered) else f", first {len(head)} shown",
+                ", ".join(_fmt(v) for v in head), quantile, _fmt(bar)))
+    if endpoint_population:
+        finals = sorted(endpoint_population, reverse=is_min)
+        lines.append(
+            "For background only, those siblings' FINAL metrics (n={}, worst to best): {}. A run this "
+            "early is naturally below a finished endpoint — do not treat that gap as evidence.".format(
+                len(finals), ", ".join(_fmt(v) for v in finals[:max_shown])))
+    lines.append(
+        f"The deterministic rank test has flagged this run for {under_streak} consecutive checks "
+        f"(it only acts after more than {grace_ticks}).")
+    if train_verdict:
+        confidence = train_verdict.get("confidence")
+        reason = str(train_verdict.get("reason") or "").strip()
+        lines.append("The training-log health monitor's latest verdict for this run: {}{}{}.".format(
+            train_verdict.get("status"),
+            f" (confidence {_fmt(confidence)})" if confidence is not None else "",
+            f' — "{reason[:300]}"' if reason else ""))
+    return "\n".join(lines)
+
+
+def should_asha_kill(verdict: Optional["AshaVerdict"], *, enabled: bool, threshold: float,
+                     rank_underperforming: Optional[bool]) -> bool:
+    """Whether the watchdog may tree-kill this node. Pure/deterministic, the ASHA sibling of
+    `train_monitor.should_monitor_kill`.
+
+    `rank_underperforming` is the DETERMINISTIC evidence bit (the same-resource quantile test). It is a
+    required conjunct, so this predicate can never authorize a stop the old rank test would not have:
+    the LLM narrows the stop set, it cannot widen it. On top of that the intervention must be `enabled`
+    and the judge must have answered `stop` with a finite confidence >= `threshold` — a missing verdict
+    (no client / endpoint failure / unparseable answer) is NOT a kill."""
+    if not enabled or rank_underperforming is not True or verdict is None:
+        return False
+    if getattr(verdict, "status", None) != "stop":
+        return False
+    confidence, confidence_valid = _normalize_monitor_confidence(getattr(verdict, "confidence", None))
+    try:
+        bar = float(threshold)
+    except (TypeError, ValueError):
+        return False
+    if not (bar == bar):               # a NaN threshold must fail CLOSED, not compare False and kill
+        return False
+    return confidence_valid and confidence >= bar
 
 
 class AshaMonitorMixin:
@@ -312,20 +545,48 @@ class AshaMonitorMixin:
                 pass
         return 600.0
 
+    def _asha_verdict(self, context: str) -> Optional[AshaVerdict]:
+        """One-shot LLM stop decision over the rank evidence (SYNC — the caller runs it in a worker
+        thread), mirroring `train_monitor._training_verdict`. Uses the Developer's client (it wrote the
+        training loop, so it knows what this curve should look like) through the SHARED judge-call
+        contract (`trust/judge.py::structured_judge`, the same one both trust verifiers use) with a
+        fresh, STATELESS structured call — it never mutates the shared role object, so it is safe to fire
+        while the eval thread runs. The client records its own usage/cost.
+
+        Returns None when there is no client (offline / toy path) or the model output cannot be parsed.
+        Unlike the training monitor's advisory verdict, None here is LOAD-BEARING: `should_asha_kill`
+        treats it as "do not stop", so a broken/absent judge can only ever spare a node."""
+        client = getattr(getattr(self, "developer", None), "client", None)
+        if client is None:
+            return None
+        messages = [
+            {"role": "system", "content": _ASHA_JUDGE_SYSTEM},
+            {"role": "user", "content": context
+             + "\n\nShould this still-running experiment continue, be watched, or be stopped?"},
+        ]
+        try:
+            from looplab.trust.judge import structured_judge
+            return structured_judge(client, messages, AshaVerdict, parser="tool_call")
+        except Exception:  # noqa: BLE001 — a parser/endpoint failure means "no verdict", not a crash
+            return None
+
+    @in_llm_lane("enrichment")
     async def _monitor_asha(self, node_id: int, generation: int, workdir, cancel,
                             metric_spec: dict, direction: str,
                             kill_signal: Optional[dict] = None, log_snapshot=None) -> None:
         """Tail the live log on a timer, extract the intermediate objective metric, rank it against the
         completed sibling endpoints for diagnostics, and record advisory `EV_ASHA_RANK` transitions.
         Opt-in tree-kill requires persistent underperformance against enough sibling observations at the
-        same declared resource. Exits with the eval; a per-tick hiccup skips only that tick."""
+        same declared resource AND a confident `stop` from the LLM judge, which sees that evidence plus
+        the live curve, the run's other metrics and the training monitor's latest health verdict. Exits
+        with the eval; a per-tick hiccup skips only that tick."""
         # Local: `evaluate` imports this module, so a module-level import would be a cycle.
         from looplab.engine.evaluate import _watch_limiter
         import anyio
 
         from looplab.engine.train_monitor import claim_watchdog_kill, read_training_tail_raw
         from looplab.events.replay import fold
-        from looplab.events.types import DIAGNOSTIC_EVENTS, EV_ASHA_RANK
+        from looplab.events.types import DIAGNOSTIC_EVENTS, EV_ASHA_RANK, EV_ASHA_VERDICT
 
         base = self._asha_cadence()
         # Read the configured values WITHOUT `or`-coercion, so a legitimate quantile=0.0 (most
@@ -334,6 +595,10 @@ class AshaMonitorMixin:
         quantile = float(_q) if isinstance(_q, (int, float)) and not isinstance(_q, bool) else 0.5
         _ms = getattr(self, "_asha_live_min_siblings", 3)
         min_siblings = max(1, int(_ms)) if isinstance(_ms, (int, float)) and not isinstance(_ms, bool) else 3
+        # Same no-`or`-coercion rule for the judge's confidence bar: `x or 0.0` would turn an unset/None
+        # knob into a ZERO threshold — i.e. every 'stop' acts — which is the wrong direction to fail in.
+        _kc = getattr(self, "_asha_live_kill_confidence", 0.8)
+        kill_confidence = float(_kc) if isinstance(_kc, (int, float)) and not isinstance(_kc, bool) else 0.8
         last_flag: Optional[tuple[bool, Optional[bool]]] = None
         # preserve an open episode across process re-entry; otherwise an initially healthy
         # resumed curve looks like a first observation and never emits the recovery edge. Modern rows
@@ -361,7 +626,18 @@ class AshaMonitorMixin:
                     break
         except Exception:  # noqa: BLE001 - advisory history lookup; the live monitor still proceeds
             pass
+
+        def _observe():
+            """ONE read of the log per tick, in the worker thread: the folded state the rank test needs
+            plus the training monitor's latest verdict for this lifecycle (a DIAGNOSTIC row the fold
+            cannot carry). Reading both from the SAME rows keeps the judge's health context consistent
+            with the population it is judging, and costs one extra reverse scan over a list the fold
+            already walks — cheaper than a second read_all at decision time."""
+            rows = self.store.read_all()
+            return fold(rows), latest_train_verdict(rows, node_id, generation)
+
         under_streak = 0
+        judge_calls = 0
         while True:
             await anyio.sleep(base)
             if cancel.is_set():
@@ -374,8 +650,8 @@ class AshaMonitorMixin:
                 if sample is None:
                     continue
                 value = sample.value
-                state = await anyio.to_thread.run_sync(
-                    lambda: fold(self.store.read_all()), limiter=_watch_limiter())
+                state, train_verdict = await anyio.to_thread.run_sync(
+                    _observe, limiter=_watch_limiter())
                 population = sibling_final_metrics(state, node_id)
                 if len(population) < min_siblings:
                     continue                    # not enough finished peers to rank against yet
@@ -433,25 +709,106 @@ class AshaMonitorMixin:
                     # transition away: the warning/recovery edge this block exists to publish was lost
                     # until the NEXT verdict change, leaving projections and Attention on a stale flag.
                     last_flag = diagnostic_key
-                # OPT-IN kill — independent of the advisory dedup: fires once the underperformance has
+                # OPT-IN kill — independent of the advisory dedup: reached once the underperformance has
                 # PERSISTED past the grace window (a transient early dip that recovers resets the streak
-                # to 0 and is never stopped). Reuses the monitor's kill_signal + cancel; `_evaluate`
+                # to 0 and is never considered). Reuses the monitor's kill_signal + cancel; `_evaluate`
                 # writes the single terminal (reason=asha_underperforming).
                 if (kill_signal is not None and comparable_under is True
                         and under_streak > _ASHA_GRACE_TICKS
                         and getattr(self, "_asha_live_kill", False)):
                     # never promote a finished endpoint into a fake peer at the live
                     # resource. Without explicit same-resource curve evidence this is unreachable.
-                    claim_watchdog_kill(
-                        kill_signal, cancel,
-                        reason=(
-                            f"intermediate metric {value:.4g} at "
-                            f"{sample.resource_key}={sample.resource:g} is worse than the "
-                            f"{quantile:.0%} bar of {len(comparable_population)} sibling "
-                            "observations at the same resource"
-                        ),
-                        terminal_reason="asha_underperforming")
-                    return
+                    #
+                    # THE RANK TEST HAS FIRED — and that is where its authority ends. The whole safety
+                    # envelope (grace window, min_siblings, explicit resource_key, asha_live_kill) has
+                    # already held, so everything below can only ever DECLINE to stop a node the old code
+                    # would have stopped; it can never reach a node the rank test spared. The judge sees
+                    # what the quantile comparison threw away — the curve's shape, the peer spread, the
+                    # other metrics, the training monitor's health verdict — and decides.
+                    verdict, kill = None, False
+                    with self.tracer.span("asha_judge", node_id=node_id) as sp:
+                        sp.set_many(generation=generation, intermediate=round(value, 6),
+                                    quantile=round(quantile, 3), under_streak=under_streak,
+                                    comparable_population=len(comparable_population),
+                                    train_status=str((train_verdict or {}).get("status") or ""))
+                        if judge_calls >= _MAX_ASHA_JUDGE_CALLS:
+                            # Backstop only (see _MAX_ASHA_JUDGE_CALLS). Surfaced on the span because a
+                            # silent cap would read as "the judge keeps sparing this node" when in fact
+                            # nobody is asking any more.
+                            sp.set("llm_capped", True)
+                        else:
+                            context = asha_judge_context(
+                                node_id=node_id, generation=generation, direction=direction,
+                                metric_key=str(metric_spec.get("key", "metric")), sample=sample,
+                                live_curve=extract_resource_curve(tail, metric_spec),
+                                comparable_population=comparable_population, quantile=quantile,
+                                under_streak=under_streak, endpoint_population=population,
+                                extra_metrics=latest_extra_metrics(tail, metric_spec),
+                                train_verdict=train_verdict)
+                            # the verdict decides whether to spend the rest of a possibly
+                            # multi-hour budget, and its client usage is billable against shared run
+                            # state. Join an in-flight call on eval cancellation (abandon_on_cancel=False)
+                            # so no detached worker can emit cost after the node/run has finalized.
+                            verdict = await anyio.to_thread.run_sync(
+                                self._asha_verdict, context, abandon_on_cancel=False)
+                            judge_calls += 1
+                        conf, confidence_valid = _normalize_monitor_confidence(
+                            getattr(verdict, "confidence", None))
+                        # LLM text derived from the run's own log — redact it before it lands in the
+                        # trace / event log, exactly as the training monitor's reason is redacted.
+                        _redact = getattr(self, "_redact", None)
+                        reason = (getattr(verdict, "reason", "") or "")
+                        reason = (_redact(reason) if callable(_redact) else reason)[:300]
+                        # "unavailable" is NOT one of the model's three statuses: it records that nobody
+                        # answered (no client / endpoint failure / cap), which is why the node lives on.
+                        status = getattr(verdict, "status", None) or "unavailable"
+                        kill = should_asha_kill(
+                            verdict, enabled=getattr(self, "_asha_live_kill", False),
+                            threshold=kill_confidence, rank_underperforming=comparable_under)
+                        sp.set_many(status=status, confidence=round(conf, 3), kill=kill,
+                                    reason=reason[:200])
+                        if not confidence_valid:
+                            sp.set("confidence_valid", False)
+                        # DURABLE record of the decision (fold-IGNORED, like EV_ASHA_RANK): the rank rows
+                        # say a node was behind, this says what was decided about it and why — including
+                        # the far more common "the rank test fired and the judge kept the run alive",
+                        # which otherwise leaves no trace at all.
+                        assert EV_ASHA_VERDICT in DIAGNOSTIC_EVENTS
+                        decision = {
+                            "node_id": node_id, "generation": generation, "status": status,
+                            "reason": reason, "confidence": round(conf, 3), "kill": kill,
+                            "intermediate": round(value, 6), "quantile": round(quantile, 3),
+                            "direction": str(direction), "under_streak": under_streak,
+                            "comparable_population": len(comparable_population),
+                        }
+                        if not confidence_valid:
+                            decision["confidence_valid"] = False
+                        if sample.resource_key is not None and sample.resource is not None:
+                            decision.update({"resource_key": sample.resource_key,
+                                             "resource": sample.resource})
+                        if train_verdict:
+                            decision["train_monitor_status"] = train_verdict.get("status")
+                        async with self._write_lock:
+                            self.store.append(EV_ASHA_VERDICT, decision)
+                    if kill:
+                        claim_watchdog_kill(
+                            kill_signal, cancel,
+                            reason=(
+                                (reason + " — " if reason else "")
+                                + f"intermediate metric {value:.4g} at "
+                                f"{sample.resource_key}={sample.resource:g} is worse than the "
+                                f"{quantile:.0%} bar of {len(comparable_population)} sibling "
+                                "observations at the same resource"
+                            )[:400],
+                            terminal_reason="asha_underperforming",
+                            confidence=round(conf, 3))
+                        return
+                    # SPARED: re-arm the whole grace window instead of re-judging on the very next tick.
+                    # The rank flag persists for as long as the node is behind, so without this the judge
+                    # would be asked again every cadence — paying for the same question and pressing a
+                    # 'stop' out of a borderline curve by sheer repetition. A node the judge kept alive
+                    # must earn the next consult with another full streak of underperforming ticks.
+                    under_streak = 0
             except anyio.get_cancelled_exc_class():
                 raise                           # cooperative cancellation — must propagate
             except Exception:  # noqa: BLE001 — a transient per-tick hiccup skips this tick, never disables

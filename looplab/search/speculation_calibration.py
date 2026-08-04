@@ -437,6 +437,32 @@ except (TypeError, ValueError, orjson.JSONEncodeError) as exc:
     raise RuntimeError("calibration Settings profile must remain JSON-safe") from exc
 if _profile_json != SPECULATION_CALIBRATION_PROFILE_SETTINGS:
     raise RuntimeError("calibration Settings profile is not canonical snapshot JSON")
+
+
+def calibration_snapshot_document_fields() -> frozenset[str]:
+    """The exact key set a written `config.snapshot.json` carries for a calibration run.
+
+    The profile above is the set of *Settings fields*. A snapshot on disk is NOT that set: it is
+    whatever `Settings.masked_snapshot()` emits, and that method deliberately differs in two ways —
+    it POPS credential bindings (`llm_api_key_base_url`) and STAMPS the document's own format marker
+    (`config_snapshot_schema`, which is not a Settings field at all).
+
+    Comparing evidence against the raw field set therefore fails on every snapshot this build writes,
+    which is exactly what happened: `feat(durability) 3721e47c` added the marker and
+    `feat(llm) 3837953b` added the popped binding, and each independently made
+    `looplab speculation-gate` unpassable — no receipt, so positive `speculation_depth` was
+    unreachable. Deriving the expectation FROM `masked_snapshot()` keeps the two in lockstep, so the
+    next field the snapshot writer adds or drops cannot silently close the gate again.
+
+    Built with `model_construct` on declared defaults for the same reason `_declared_settings_json_defaults`
+    is: `Settings()` would consult env/.env and make a source-owned constant depend on the launcher.
+    """
+    declared = {name: field.get_default(call_default_factory=True)
+                for name, field in Settings.model_fields.items()}
+    return frozenset(Settings.model_construct(**declared).masked_snapshot())
+
+
+SPECULATION_CALIBRATION_SNAPSHOT_FIELDS = calibration_snapshot_document_fields()
 _SPECULATION_CALIBRATION_PROFILE_SCHEMA = "looplab.speculation-calibration-profile/v1"
 SPECULATION_CALIBRATION_PROFILE_DIGEST = "sha256:" + hashlib.sha256(orjson.dumps(
     {

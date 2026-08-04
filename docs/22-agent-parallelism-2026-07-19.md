@@ -4,9 +4,17 @@
 llm_parallel build fan-out complete; CLAUDE.md documents the concurrent-build seam; Settings has
 parallel_build/llm_parallel with these semantics). Mirror the A7 doc's treatment: "implemented /
 historical design record — superseded by docs/23 Layer 2", so §1's "builds nodes one at a time"
-reads as the 2026-07-19 snapshot it is. -->
-**Status:** design / proposal — 2026-07-19
-**Motivation:** on a multi-GPU box LoopLab runs at ~1/N utilisation. Per-GPU pinning + `max_parallel>1`
+reads as the 2026-07-19 snapshot it is.
+RESOLVED 2026-08-04 — the status line requested above is now in place; see it and §5's per-phase
+status table directly below. -->
+**Status:** **implemented / historical design record — superseded by
+[docs/23 Layer 2](23-hypothesis-card-kanban-2026-07-20.md) (2026-07-20).** Phases 0–3 of §5 shipped;
+Phase 4 is partly outstanding (see §5). The canonical settings are `llm_parallel` (build width) and
+`eval_parallel` (eval width); `parallel_build`/`max_parallel` survive as resume/config aliases.
+Original status: design / proposal — 2026-07-19.
+
+**Motivation (as of 2026-07-19 — this paragraph is the pre-implementation snapshot, kept verbatim):** on
+a multi-GPU box LoopLab runs at ~1/N utilisation. Per-GPU pinning + `max_parallel>1`
 (shipped) let concurrent *evals* land on distinct GPUs, but the engine still **builds nodes one at a
 time** and sits **idle for the whole ~30–40 min of a training eval**, so the extra GPUs stay empty. This
 doc works through *how* to build (research + code) several nodes in parallel, the two failure modes the
@@ -16,6 +24,11 @@ concrete implementation plan for the recommended option (Variant 1).
 ---
 
 ## 1. Verified current architecture (as of 2026-07-19)
+
+> **Historical snapshot — read every present-tense statement below as "on 2026-07-19".** The serial build
+> loop this section describes is gone: `llm_parallel > 1` now fans the `creates` batch out across a role
+> pool in worker threads (the `parallel_build_batch` span + `anyio.create_task_group()` block in
+> `engine/orchestrator.py::run`), with ids reserved serially up front under `_id_lock`. See the §5 status table for what shipped per phase.
 
 The run spine (`engine/orchestrator.py::run`) each iteration:
 
@@ -157,6 +170,24 @@ concerns, (c) the only genuinely hard piece — atomic id reservation under repl
 ---
 
 ## 5. Variant 1 — implementation plan
+
+> **Per-phase status (verified against HEAD, 2026-08-04).**
+>
+> | Phase | Status | Notes |
+> |---|---|---|
+> | 0 — atomic id reservation | **shipped** | ids reserved serially under `_id_lock` before the fan-out |
+> | 1 — parallel build of a `creates` batch | **shipped** | the `parallel_build_batch` task group in `engine/orchestrator.py::run`; per-build `(researcher, developer)` pair from the role pool, as the Risks section below required |
+> | 2 — batch proposal with enforced diversity | **shipped** | batch novelty gate present (`_pending_batch_novelty_gated`) |
+> | 3 — settings, governance, autonomy | **shipped** | canonical `llm_parallel`/`eval_parallel`; `parallel_build`/`max_parallel` are aliases |
+> | 4 — verification | **partial** | the serial golden replay exists (`tests/test_golden_replay.py`); the **"new golden for a 2-wide parallel-build run"** this phase specifies was never added — no golden pins id monotonicity / one-terminal-per-node / deterministic replay under a 2-wide fan-out. The cost guardrail DID ship (the `parallel_build_batch` tracer span). |
+>
+> **Shape correction:** what shipped is a **bulk-synchronous build barrier**, not the continuous,
+> adaptive fan-out §1's contrast with eval dispatch implies. The source says so itself, in the `CODEX AGENT:` comment immediately above the
+> `parallel_build_batch` span in `engine/orchestrator.py::run`: "this join is a bulk-synchronous build barrier, not independent
+> adaptive research threads. Fast workers cannot select/propose from completed sibling evidence until the
+> slowest build and later eval batch finish." That is Variant 3 territory (§3, "ENDGAME, not now"), and
+> [02 §12](02-architecture.md) carries the same open annotation. Eval dispatch remains genuinely
+> continuous (`Semaphore(max_parallel)`), as §1 describes.
 
 Phased so each step ships behind a flag, keeps the default (serial) path byte-identical, and preserves
 every fold invariant. Default OFF → `parallel_build=1` (or `0`=auto by GPU) opts in.

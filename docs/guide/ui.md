@@ -143,10 +143,15 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   action narrated in a durable feed (`chat.jsonl`). That feed is capped at **32 MiB** per run; past the
   cap further turns are refused with HTTP 413 so one long-lived conversation cannot fill the disk or
   make every `GET /chat-log` re-read a huge file. The transcript stays fully readable — only appends
-  stop — and a run reset archives it and starts a fresh one.
+  stop. **The documented recovery is `chat-compact`, not a reset:** the 413 body says so, and a **1 MiB
+  grace** above the cap is reserved specifically for `summary` turns so the compaction recap can still be
+  appended once the cap is reached (`serve/routers/boss.py`: `_CHAT_LOG_MAX_BYTES` :72,
+  `_CHAT_SUMMARY_GRACE_BYTES` :76, and the 413 branch at :560-570). Compact, append the returned
+  recap as a `summary` turn, and carry on. Resetting the run also archives the transcript and starts a
+  fresh one, but it is the destructive option, not the first one.
 - **Reports** — an agent-authored, conclusion-first run report plus deterministic metric-improvement
   charts.
-- **Read-only review links** — with `LOOPLAB_UI_TOKEN` configured, **Lab → Collaboration** creates a
+- **Read-only review links** — with `LOOPLAB_UI_TOKEN` configured, **Lab → Comments & sharing** creates a
   revocable, expiring capability for one run. Summary links expose the DAG/report and derived metrics;
   an explicit evidence option adds redacted node source/results. Assistant, actions, raw
   logs/prompts/traces, artifacts, and owner settings are never available to the recipient. A review
@@ -156,7 +161,7 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   them as omitted rather than certifying data the response no longer carries. Within-run provenance
   such as `research_origin` is unaffected, so a reviewer still sees an imported experiment — just not
   which run it came from.
-- **Read-only chat share links** — the Assistant's **⤴ share** mints a link with its own secret (not
+- **Read-only chat share links** — the Assistant's **⤴ create snapshot** button mints a link with its own secret (not
   the chat's id), an expiry, and a **⤫ unshare** that revokes every link for that chat while keeping
   the conversation. A link is **frozen** at the messages that existed when it was created, so
   continuing the chat never retroactively publishes what you say next; pass `live: true` to the share
@@ -211,8 +216,12 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   Read/compare/merge/write is covered by its own equivalent local/interprocess locking contract (separate from
   global Settings), and a stale editor receives a
   structured `run_config_revision_conflict` instead of overwriting a newer snapshot.
-- **Settings page** — a versioned, server-owned editor catalogue with 156 of the 187 direct
-  `Settings` fields in 10 groups. The default **Essential** view contains 18 high-frequency keys, while
+- **Settings page** — a versioned, server-owned editor catalogue with 158 of the 194 direct
+  `Settings` fields in 10 groups (the live counts are
+  `serve/settings_ui_schema.py::SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT` /
+  `…_SETTINGS_FIELD_COUNT`; note the docs↔code parity test `tests/test_config_docs_sync.py` pins
+  [configuration.md](configuration.md), **not** this page, so re-read those constants before quoting
+  them). The default **Essential** view contains 18 high-frequency keys, while
   search spans the complete catalogue. It is intentionally curated, not an exhaustive mirror: fields outside
   the catalogue remain configurable through environment/config inputs and are preserved by sparse writes.
   The packaged catalogue is v1 and its HTTP/editor contract is v2; the schema's weak ETag is a semantic cache

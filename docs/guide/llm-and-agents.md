@@ -9,7 +9,7 @@ unchanged.
 
 | | Offline | Live LLM | External agent |
 |---|---|---|---|
-| **Set** | `--backend toy` (default) | `--backend llm` | `--developer-backend opencode` |
+| **Set** | `--backend toy` (explicit) | `--backend llm` (**default** since 2026-08-04) | `--developer-backend opencode` |
 | **Researcher** | deterministic optimizer | the model | the model |
 | **Developer** | templated | the model writes code | the agent edits a worktree |
 | **Network** | none | LLM endpoint only | LLM endpoint only |

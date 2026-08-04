@@ -13,12 +13,15 @@ runner = CliRunner()
 
 
 def test_run_mlebench_offline_with_agent_flags(tmp_path):
-    # Default backend=toy -> mlebench's templated k-NN runs offline. The agent flags must
-    # be accepted and assigned to real Settings fields (regression: --agent-cmd used to
-    # crash by assigning to a non-existent `aider_cmd`).
+    # backend=toy -> mlebench's templated k-NN runs offline. The agent flags must be accepted and
+    # assigned to real Settings fields (regression: --agent-cmd used to crash by assigning to a
+    # non-existent `aider_cmd`). `--backend toy` is now spelled EXPLICITLY: the product default
+    # flipped to `llm` on 2026-08-04, and this test is about the flag plumbing, not about which
+    # backend a bare run picks — leaving it implicit turned it into a live-LLM test that fails on
+    # an unreachable endpoint instead of exercising the assignment it was written for.
     result = runner.invoke(app, [
         "run", str(ROOT / "examples" / "mlebench_task.json"),
-        "--out", str(tmp_path / "run"), "--max-nodes", "2",
+        "--out", str(tmp_path / "run"), "--max-nodes", "2", "--backend", "toy",
         "--agent-cmd", "dummy", "--agent-surface", "*.py,*.txt",
         "--no-validate-agent", "--no-agent-patch-gate",
     ])
@@ -26,10 +29,17 @@ def test_run_mlebench_offline_with_agent_flags(tmp_path):
     assert "BEST" in result.output
 
 
+# Every OFFLINE `run`/`resume` invocation below spells its backend EXPLICITLY, for the reason given
+# on the mlebench test above: the product default flipped to `llm` on 2026-08-04, and these tests are
+# about CLI plumbing (precedence, --out, run-dir identity, resume guards), not about which backend a
+# bare run picks. Left implicit they became live-LLM runs against an unreachable endpoint — which
+# passed only because the roles degraded to empty fallback proposals and still reported
+# finished=True. `agents/preflight.py` now refuses that run, so an implicit backend here would be
+# asserting exit_code == 0 on a run LoopLab deliberately no longer starts.
 def test_run_toy_task_offline(tmp_path):
     result = runner.invoke(app, [
         "run", str(ROOT / "examples" / "toy_task.json"),
-        "--out", str(tmp_path / "run"), "--max-nodes", "3",
+        "--out", str(tmp_path / "run"), "--max-nodes", "3", "--backend", "toy",
     ])
     assert result.exit_code == 0, result.output
     assert "finished=True" in result.output
@@ -42,7 +52,7 @@ def test_resume_rejects_a_nonpositive_max_nodes_override(tmp_path):
     out = tmp_path / "r"
     assert runner.invoke(app, [
         "run", "--no-genesis", "--kind", "quadratic", "--goal", "min x^2", "--direction", "min",
-        "--set", "max_nodes=2", "--out", str(out),
+        "--set", "max_nodes=2", "--backend", "toy", "--out", str(out),
     ]).exit_code == 0
     for bad in ("0", "-3"):
         result = runner.invoke(app, ["resume", str(out), "--max-nodes", bad])
@@ -68,12 +78,17 @@ def test_run_refuses_a_different_task_in_an_existing_run_dir(tmp_path):
                              "bounds": {"x": [-5, 5]}, "seed": 1, "step": 1.0}))
     b.write_text(json.dumps({"id": "exp_b", "kind": "quadratic", "goal": "min", "direction": "min",
                              "bounds": {"x": [-5, 5]}, "seed": 1, "step": 1.0}))
-    assert runner.invoke(app, ["run", str(a), "--out", str(out), "--max-nodes", "2"]).exit_code == 0
-    res = runner.invoke(app, ["run", str(b), "--out", str(out), "--max-nodes", "2"])
+    assert runner.invoke(
+        app, ["run", str(a), "--out", str(out), "--max-nodes", "2", "--backend", "toy"]
+    ).exit_code == 0
+    res = runner.invoke(app, ["run", str(b), "--out", str(out), "--max-nodes", "2",
+                              "--backend", "toy"])
     assert res.exit_code == 2
     assert "refusing to mix" in res.output and "exp_a" in res.output
     # re-running the SAME task in the dir is allowed (continuation)
-    assert runner.invoke(app, ["run", str(a), "--out", str(out), "--max-nodes", "3"]).exit_code == 0
+    assert runner.invoke(
+        app, ["run", str(a), "--out", str(out), "--max-nodes", "3", "--backend", "toy"]
+    ).exit_code == 0
 
 
 def test_version_flag():
@@ -214,7 +229,7 @@ def test_run_unified_yaml_applies_task_and_settings(tmp_path):
     cfg.write_text(
         "out: %s\n"
         "task:\n  kind: quadratic\n  goal: min\n  direction: min\n"
-        "settings:\n  max_nodes: 2\n" % (tmp_path / "r"))
+        "settings:\n  max_nodes: 2\n  backend: toy\n" % (tmp_path / "r"))
     result = runner.invoke(app, ["run", str(cfg)])
     assert result.exit_code == 0, result.output
     assert "finished=True" in result.output
@@ -226,7 +241,7 @@ def test_run_no_file_from_flags(tmp_path):
     # --no-genesis builds the task purely from flags, offline (no model needed).
     result = runner.invoke(app, [
         "run", "--no-genesis", "--kind", "quadratic", "--goal", "min x^2", "--direction", "min",
-        "--set", "max_nodes=2", "--out", str(tmp_path / "r"),
+        "--set", "max_nodes=2", "--backend", "toy", "--out", str(tmp_path / "r"),
     ])
     assert result.exit_code == 0, result.output
     assert "finished=True" in result.output
@@ -476,7 +491,7 @@ def test_run_set_unknown_key_errors(tmp_path):
 def test_run_set_overrides_file(tmp_path):
     cfg = tmp_path / "run.yaml"
     cfg.write_text("task:\n  kind: quadratic\n  goal: g\n  direction: min\n"
-                   "settings:\n  max_nodes: 5\n")
+                   "settings:\n  max_nodes: 5\n  backend: toy\n")
     result = runner.invoke(app, ["run", str(cfg), "--out", str(tmp_path / "r"), "-s", "max_nodes=1"])
     assert result.exit_code == 0, result.output
     assert "nodes=1" in result.output                       # --set wins over the file
@@ -503,7 +518,8 @@ def test_run_goal_only_infers_kind_and_runs(tmp_path, monkeypatch):
     _patch_genesis(monkeypatch, {"kind": "quadratic", "goal": "g", "direction": "min",
                                  "bounds": {"x": [-10.0, 10.0], "y": [-10.0, 10.0]}})
     result = runner.invoke(app, [
-        "run", "--goal", "minimize (x-3)^2", "-s", "max_nodes=2", "--out", str(tmp_path / "g"),
+        "run", "--goal", "minimize (x-3)^2", "-s", "max_nodes=2", "-s", "backend=toy",
+        "--out", str(tmp_path / "g"),
     ])
     assert result.exit_code == 0, result.output
     assert "Genesis -> kind=quadratic" in result.output       # it inferred + announced the kind
@@ -584,7 +600,8 @@ def test_file_settings_override_env(tmp_path, monkeypatch):
     # The documented precedence: a file's settings: block wins over a LOOPLAB_* env var.
     monkeypatch.setenv("LOOPLAB_MAX_NODES", "99")
     cfg = tmp_path / "r.yaml"
-    cfg.write_text("task:\n  kind: quadratic\n  goal: g\n  direction: min\nsettings:\n  max_nodes: 2\n")
+    cfg.write_text("task:\n  kind: quadratic\n  goal: g\n  direction: min\n"
+                   "settings:\n  max_nodes: 2\n  backend: toy\n")
     result = runner.invoke(app, ["run", str(cfg), "--out", str(tmp_path / "r")])
     assert result.exit_code == 0, result.output
     assert "nodes=2" in result.output          # file beat env (99)
@@ -626,7 +643,8 @@ def test_explicit_null_parallelism_survives_legacy_aliases(monkeypatch):
 def test_out_flag_overrides_file_out(tmp_path):
     cfg = tmp_path / "r.yaml"
     cfg.write_text(f"out: {tmp_path / 'fromfile'}\n"
-                   "task:\n  kind: quadratic\n  goal: g\n  direction: min\nsettings:\n  max_nodes: 1\n")
+                   "task:\n  kind: quadratic\n  goal: g\n  direction: min\n"
+                   "settings:\n  max_nodes: 1\n  backend: toy\n")
     result = runner.invoke(app, ["run", str(cfg), "--out", str(tmp_path / "fromflag")])
     assert result.exit_code == 0, result.output
     assert (tmp_path / "fromflag" / "events.jsonl").exists()     # --out won
@@ -673,7 +691,7 @@ def test_run_kind_pins_genesis(tmp_path, monkeypatch):
     monkeypatch.setattr(genesis, "author_task", _author)
     result = runner.invoke(app, [
         "run", "--kind", "quadratic", "--goal", "minimize x^2", "-s", "max_nodes=1",
-        "--out", str(tmp_path / "k"),
+        "-s", "backend=toy", "--out", str(tmp_path / "k"),
     ])
     assert result.exit_code == 0, result.output
     assert seen["kind"] == "quadratic"                        # the pin reached genesis
@@ -785,7 +803,7 @@ def test_resume_reports_a_wedged_engine_lock_instead_of_hanging_forever(tmp_path
     out = tmp_path / "r"
     assert runner.invoke(app, [
         "run", "--no-genesis", "--kind", "quadratic", "--goal", "min x^2", "--direction", "min",
-        "--set", "max_nodes=2", "--out", str(out),
+        "--set", "max_nodes=2", "--backend", "toy", "--out", str(out),
     ]).exit_code == 0
 
     @contextmanager

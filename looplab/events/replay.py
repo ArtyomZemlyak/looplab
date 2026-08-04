@@ -1019,6 +1019,12 @@ def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             if d.get("triage_rationale"):
                 n.triage_rationale = str(d.get("triage_rationale"))
             n.eval_seconds = d.get("eval_seconds")
+            # Durable "no evaluation was ever dispatched for this lifecycle" receipt (Node.
+            # never_evaluated). Additive + reader-defaulted: absent on old logs -> False -> the budget
+            # accounting folds byte-identically. Only the writers that terminalize a build BEFORE
+            # dispatch stamp it, and it rides this single terminal, so "first terminal wins" above is
+            # the whole of its order-tolerance argument.
+            n.never_evaluated = d.get("never_evaluated") is True
             n.rerun_from = None
             n.rerun_stage = None                # any stage-scoped re-run has now landed
             if d.get("failed_stage"):
@@ -1076,6 +1082,7 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.stdout_tail = ""
         n.resource_curve = None            # #7: the prior attempt's curve no longer describes this node
         n.eval_seconds = None
+        n.never_evaluated = False          # the discard receipt described the prior attempt
         n.extra_metrics = {}
         n.violations = []
         n.feasible = True
@@ -1256,6 +1263,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         n.error_reason = ""
         n.triage_rationale = ""   # the crash-triage verdict describes the NOW-abandoned lifecycle
         n.eval_seconds = None
+        n.never_evaluated = False   # the discard receipt described the NOW-abandoned lifecycle
         n.stdout_tail = ""
         n.resource_curve = None            # #7: the abandoned attempt's curve no longer describes this node
         n.extra_metrics = {}

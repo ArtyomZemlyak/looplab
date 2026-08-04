@@ -142,11 +142,24 @@ def test_a_higher_priority_legacy_parallel_build_is_not_shadowed_by_a_file_llm_p
 
 def test_env_legacy_parallel_build_does_not_enable_the_shared_llm_broker(monkeypatch):
     """The exact bug surface: `LOOPLAB_PARALLEL_BUILD` alone must set the legacy build width WITHOUT
-    promoting to canonical `llm_parallel` (which the orchestrator reads as the broker opt-in switch)."""
+    promoting to canonical `llm_parallel` (which the orchestrator reads as the broker opt-in switch).
+
+    The canonical default moved `None` -> `0` (AUTO) on 2026-08-04, so "not promoted" can no longer be
+    spelled `is None` — that assertion was reading the DEFAULT, not the property. The property is
+    unchanged and is about the BROKER: only an explicitly-spelled POSITIVE canonical value activates a
+    finite shared provider-call total, and AUTO is not positive. The broker's own `total` is asserted
+    end-to-end through a live engine in
+    `tests/test_llm_broker.py::test_env_legacy_parallel_build_does_not_enable_shared_broker_end_to_end`
+    (verified: it still resolves to None with the new default).
+    """
     monkeypatch.setenv("LOOPLAB_PARALLEL_BUILD", "3")
     settings = Settings()
     assert settings.parallel_build == 3
-    assert settings.llm_parallel is None          # NOT promoted -> orchestrator leaves the broker off
+    # NOT promoted: the legacy width never reaches the canonical field, which stays at AUTO...
+    assert settings.llm_parallel != settings.parallel_build
+    assert settings.llm_parallel == 0
+    # ...and AUTO is not the positive value the shared broker opts in on.
+    assert not (settings.llm_parallel and settings.llm_parallel > 0)
 
     # An explicit canonical llm_parallel still loads (and is the broker opt-in).
     monkeypatch.setenv("LOOPLAB_LLM_PARALLEL", "5")
@@ -232,6 +245,11 @@ def test_an_unknown_backend_is_rejected_instead_of_downgrading_to_toy():
     an untyped `--set`/file/env value — including a mis-cased "LLM" — fell through to the OFFLINE toy
     optimizer. The user got a complete run that never called the model and no diagnostic anywhere.
     Same fail-loud contract the neighbouring enum-ish fields already have.
+
+    The DEFAULT flipped to "llm" on 2026-08-04, which does not soften the hazard this guards: an
+    accepted typo is still a value that is not exactly "llm", so it still lands on the offline toy
+    roles — only now the downgrade would be FROM the default rather than TO it. Both members of the
+    closed set must still construct, and the shipped default must itself be a member.
     """
     import pytest as _pytest
     from looplab.core.config import Settings
@@ -240,7 +258,8 @@ def test_an_unknown_backend_is_rejected_instead_of_downgrading_to_toy():
         with _pytest.raises(Exception) as exc:
             Settings(backend=bad)
         assert "backend must be toy|llm" in str(exc.value), bad
-    assert Settings(backend="llm").backend == "llm" and Settings().backend == "toy"
+    assert Settings(backend="llm").backend == "llm" and Settings(backend="toy").backend == "toy"
+    assert Settings().backend == "llm"       # the shipped default is itself a member of the set
 # --------------------------------------------------------------------------- snapshot format version
 def test_a_snapshot_from_a_newer_build_is_refused_rather_than_silently_downgraded():
     """`Settings` is extra="ignore", so a snapshot written by a newer LoopLab used to load with every

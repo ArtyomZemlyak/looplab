@@ -167,6 +167,23 @@ Pipeline per candidate:
 4. **Variance gate (cheap default, strict only at the frontier)** — use **robust CV** for the validation metric everywhere; reserve **multi-seed confirmation for the top-k promotion frontier** (k≈3) before final selection. See §8.
 - **Optional (open-ended mode only):** the co-evolving adversarial evaluator + growing reward-hack `ExploitRule` suite — load-bearing *only* when LoopLab defines its own success metric, not for fixed-harness tasks like MLE-bench. *(See §7.)*
 
+> **⚠ Step 2 is not a per-candidate step today (2026-08-04).** The leakage check runs **once per run**,
+> during setup, and only for a task that defines `leakage_inputs()` — which only the synthetic MLE-bench
+> adapter does. There is no `LeakageChecker` class, and `CoEvolvingEvaluator`/`ExploitRule` were never
+> built. Full annotation + the open product question: [01 §5.E](01-product-design.md).
+
+<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — step 2 of this per-candidate pipeline is not what runs.
+`engine/audit.py::_leakage_blocks` is called from exactly ONE site — `self._leakage_blocks()` inside the
+once-per-run setup block of `engine/orchestrator.py::run` — so it is a RUN-SETUP GATE, not a
+per-candidate step, and it returns False immediately unless the task defines `leakage_inputs()`. The only
+adapter that defines it is the synthetic `adapters/mlebench.py::leakage_inputs`, so `trust/leakage.py::target_leakage`
+and `::temporal_leakage` are never reached by a shipped real task. There is no `LeakageChecker` class and
+no `check(solution, run) -> LeakageReport`. `ExploitRule`/`add_exploit_rule`/`CoEvolvingEvaluator` were
+demoted by ADR-6 to open-ended mode only and never built (zero hits).
+Full annotation + the business question: [01 §5.E](01-product-design.md). Do not re-litigate the
+audit-only DEFAULT (`trust_gate="audit"`, `code_leakage_detect=False`) — that was deliberately decided by
+doc 10 (2026-07-02) and doc 16/17 (2026-07-11). -->
+
 A `Verdict` is `{accepted, metric, ci, validity, leakage, reason}`.
 
 ### 3.6b Operators (first-class — the real performance levers; [ADR-6](03-decisions.md))
@@ -191,6 +208,18 @@ class SearchPolicy(Protocol):
     def should_merge(self, archive: Archive) -> tuple[Node, ...] | None: ...   # branch-and-combine trigger
     def stop(self, state: RunState) -> bool: ...                               # custom stop condition
 ```
+
+> **Superseded (shipped shape, recorded 2026-06-22 → 2026-07-11).** The shipped protocol is **one
+> method**: `search/policy.py:60-61` — `class SearchPolicy(Protocol): def next_actions(self, state:
+> RunState) -> list[dict]: ...`. One call per loop iteration returns a *batch* of typed actions
+> (`draft`/`improve`/`debug`/`merge`/`ablate`/`evaluate`); merging and stopping are expressed as actions
+> and as budget/quiescence state, not as separate protocol methods. Recorded in
+> [07-architecture-review.md:43](07-architecture-review.md),
+> [A7-strategist-design.md:129](A7-strategist-design.md) and
+> [16-architecture-code-review-2026-07-11.md:617](16-architecture-code-review-2026-07-11.md). The
+> registry/injection half of [ADR-2](03-decisions.md) shipped as designed
+> (`search/policy.py::_REGISTRY` + `make_policy`; `available_policies()`).
+
 Built-ins:
 - `GreedyTree` (AIDE-style: expand best node, rich operators →children). **Default — validated as a strong, overfit-resistant choice at long budgets (AIRA).**
 - `Evolutionary` (diversity archive, fitness+novelty selection, merge) — **ablation-gated experiment**, not core (unproven on MLE-bench).
@@ -227,6 +256,21 @@ Per-role model assignment is a first-class config concept. Failover + retry + co
 - **Agent Skills** (`SKILL.md` + progressive disclosure) carry ML *recipes* (K-fold CV, Muon, time-series leakage) — the **procedural** memory tier (§3.10). Skills orchestrate; MCP tools execute. The old seed-knowledge library migrates to this format.
 - **Per-role tool allow-lists** are a security boundary; dangerous actions are typed tools (not raw bash); MCP servers are pinned/audited like dependencies.
 
+> **⚠ Not true today (2026-08-04).** None of the five MCP servers exists; `tools/mcp_tools.py` is an MCP
+> *client*, wired only into the owner chat assistant, and `mcp` is not a declared dependency. No in-loop
+> role consumes an MCP tool. Full annotation + the open question: [ADR-9](03-decisions.md).
+
+<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — none of the five servers exists. LoopLab ships an MCP *client*
+only (`tools/mcp_tools.py:1-3`, "MCP client tool provider: expose tools from configured Model Context
+Protocol servers"); `FastMCP`, `stdio_server` and `mcp.server` have ZERO hits in `looplab/`, as do all four
+ADR-9 tool names (`query_archive`, `profile_data`, `check_leakage`, `run_code`). The client is wired at
+exactly one site — `serve/assistant.py:1665-1675`, the OWNER CHAT ASSISTANT — and `agents/factory.py` has
+zero MCP references, so "our roles consume them via function-calling" does not happen. `mcp` is not a
+declared dependency in `pyproject.toml`, so on a stock install the provider degrades to contributing no
+tools at all. Full annotation + the business question: [ADR-9](03-decisions.md). -->
+
+
+
 ### 3.15 Prompt & instruction store ([ADR-8](03-decisions.md))
 **Responsibility:** versioned, UI-editable prompts; per-run instructions for external agents.
 - **Prompts = Markdown + YAML frontmatter files in git**, one per role×operator (`prompts/<role>/<operator>.md`); engine hot-reloads on change; an optional Langfuse-style cache (TTL + fallback-to-file) lets UI edits take effect without redeploy. **One canonical store** (files by default; UI commits via PR) — no two-way sync. structured output defaults to **standard tool calling** (LiteLLM→pydantic), with **BAML (SAP) as the secondary fallback** for weak local models + the Evaluator `Verdict` (per-role `parser` strategy, [ADR-14](05-build-decisions.md)). Optimize Evaluator/Developer prompts later with `dspy.GEPA`.
@@ -244,6 +288,22 @@ Per-role model assignment is a first-class config concept. Failover + retry + co
 - File contract + event/command schema: see [ADR-1](03-decisions.md) and §4. **Full on-disk file-layer spec (data classes, formats, run/project layout, content-addressed artifact store, atomic-write rules): [04-file-layout.md](04-file-layout.md).**
 
 ### 3.12 Ingestion / Knowledge pre-phase (new; [ADR-3](03-decisions.md))
+
+> **Superseded (2026-06-21, [ADR-6](03-decisions.md) row "ADR-3 ingestion pre-phase"; shipped scope
+> recorded 2026-06-22).** Everything in this section is the ORIGINAL heavy design and is **not what
+> shipped** — the section is retained as the design record. ADR-6 lightened it to "≈4 retrieve-and-seed
+> candidates + schema/leakage profiling, not a heavy RAG pipeline";
+> [05-build-decisions.md:175,275](05-build-decisions.md) additionally records GraphRAG as
+> **deferred/cut** (replaced by a lightweight `[[wikilinks]]`→networkx graph); and
+> [06-implementation-plan.md I16](06-implementation-plan.md) records what was actually built: a data
+> profiler (`core/profile.py`) whose output the orchestrator emits as `data_profiled` (§17 P3.5 below
+> already carries the lightened scope). None of `Ingestion`, `GoalConfig`, `goal_anchor`,
+> `retrieve_more`, `Backlog`, the Elo tournament, Docling, GROBID, trafilatura or repomix exists in the
+> code or in `pyproject.toml`. Web/literature grounding ships as a separate, **off-by-default** path
+> ([doc 16:659](16-architecture-code-review-2026-07-11.md),
+> [doc 17:195,1046](17-project-review-and-directions-2026-07-11.md)); the `GoalConfig`/`Backlog` rows in
+> §4 below inherit this supersession.
+
 **Responsibility:** given pre-existing artifacts, analyze them against the goal *before* the search loop, and emit a ranked experiment backlog.
 ```python
 class Ingestion:
@@ -368,6 +428,21 @@ A single good run is *a hypothesis, not a result* — but **p<0.01 on every prom
 
 ## 9. LLM backend abstraction
 
+> **⚠ Not true today (2026-08-04).** LiteLLM is not a dependency and is on no shipped code path;
+> `core/llm.py::make_llm_client` always returns `OpenAICompatibleClient`. The shipped promise is "any
+> OpenAI-compatible `/v1` endpoint", not "100+ providers". Same correction applies to principle 4 (§1),
+> the tech-stack row (§14), the provenance row (§16) and ADR-11's gateway secrets model (§18). Full
+> annotation + the open question: [01 §5.K](01-product-design.md).
+
+<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — "one layer over LiteLLM -> 100+ providers" is not what ships,
+and no later doc revised it (doc 17:2067 still asserts it as fact; doc 25's line-by-line review of
+core/llm.py never mentions LiteLLM). `litellm` is in neither `dependencies` nor any extra;
+`core/llm.py::make_llm_client` returns `OpenAICompatibleClient` UNCONDITIONALLY;
+`core/llm.py::LiteLLMClient` is constructed only in two tests. What ships is "any
+OpenAI-compatible /v1 endpoint" — the promise the user guide already makes. This also applies to
+principle 4 in §1, the tech-stack row in §14, the provenance row in §16, and ADR-11's LiteLLM-gateway
+secrets model in §18. Full annotation + the business question: [01 §5.K](01-product-design.md). -->
+
 - **One layer over LiteLLM** → 100+ providers incl. local (vLLM/Ollama) and all major APIs.
 - **Per-role routing AND per-role backend** is config, not code ([ADR-7](03-decisions.md)):
   ```yaml
@@ -412,6 +487,65 @@ A single good run is *a hypothesis, not a result* — but **p<0.01 on every prom
 12. **Version every file** — embed `apiVersion`/`kind`/`v` + a JSON Schema per kind; UI upcasts on read.
 13. **Big bytes by reference** — weights/data live in a content-addressed `store/` and are referenced by hash+path; never inlined into docs/manifests/git.
 
+> **Reconciliation of rules 4, 5, 8 and 12 with what shipped (added 2026-08-04; each was changed by a
+> LATER decision — these are not open gaps).**
+>
+> - **Rule 4 ("every accepted node is a git commit") — superseded 2026-06-22.**
+>   [06-implementation-plan.md:53](06-implementation-plan.md): "solutions are still **whole-file** by
+>   default (no diff-emitting backend yet); lineage stays in the event log (`parent_ids`), **not git
+>   commits** — a deliberate deviation that works", and
+>   [07-architecture-review.md:32](07-architecture-review.md) records the same as "I4 git/patch path not
+>   built". The engine makes no commits; `Node` has no `code_ref`; lineage is `parent_ids` in
+>   `events.jsonl`. Git is used only for the external-agent diff gate (`agent_patch_gate`, default on),
+>   never per accepted node.
+> - **Rule 5 ("sandboxed, network-off — no exceptions") — superseded 2026-06-22.**
+>   [05-build-decisions.md:80-87](05-build-decisions.md) (ADR-13, corrected in place): "the sandbox tier
+>   is a function of the TRUST MODEL … not a blanket 'Docker everywhere' mandate"; the default
+>   `trusted_local` tier is explicitly "**No security boundary required — and none claimed**"
+>   (`SubprocessSandbox`, no Docker). That is why `agents/cli_agent.py:342-344` launches an external
+>   coding agent with a plain `subprocess.Popen` in a temp dir — with a tree-killing timeout and
+>   secret-env filtering, but no isolation. The residual gap (no memory cap, network on under
+>   `trusted_local`) is already tracked as T9 in
+>   [10-autoresearch-improvement-research.md:146](10-autoresearch-improvement-research.md).
+> - **Rule 8 ("metrics reported with variance") — superseded 2026-06-21 → 2026-07-02.**
+>   [ADR-6](03-decisions.md) re-specified it ("reserve multi-seed confirmation for the top-k promotion
+>   frontier only"; ">1 SE instead of p<0.01"), and
+>   [10-autoresearch-improvement-research.md:44,54-59](10-autoresearch-improvement-research.md)
+>   deliberately shipped `confirm_top_k=0` / `confirm_seeds=0` (multi-seed confirmation OFF by default)
+>   with the `thorough` profile as the one-word opt-in (`confirm_top_k=3`, `confirm_seeds=3`;
+>   `core/config.py:232-233,767-768`). Robust CV remains the always-on selection signal.
+> - **Rule 12 ("UI upcasts on read") — superseded; the code chose the opposite, deliberately.**
+>   `events/eventstore.py:70` pins `SUPPORTED_EVENT_ENVELOPE_VERSIONS = frozenset({1})` and `:150-153`
+>   RAISES `UnsupportedEventVersionError` on anything else, with an in-code note that accepting the row
+>   "is the dangerous reading". The shipped rule is **fail closed, then upgrade or `repair-log`** and is
+>   documented in [guide/concepts.md:54-57](guide/concepts.md). See
+>   [04-file-layout.md §6](04-file-layout.md) rule 5 for the same correction.
+
+> **⚠ Rule 6 does not hold today (2026-08-04).** There is no dollar-budget field in `Settings` at all, so
+> the 80%-warn / `BudgetExceeded` machinery in `core/llm.py::CostAccountant` is unreachable on every
+> shipped path, and `max_eval_seconds` is not atomic under parallel evals. Cost is metered and reported
+> (`engine/costs.py`), not enforced. A product decision is pending — see the annotation in this file's
+> source immediately below.
+
+<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — rule 6, "Budget is hard".
+WHAT THIS DOC PROMISES: "when tokens/compute hit the cap, the loop stops; no overruns", plus ADR-11 §9 /
+§18 "accountant gates at 80%, hard-kills at 100%" and the per-role `limits: {usd: 4.0}` in §9/§3.4b.
+WHAT THE CODE DOES: the machinery exists but is unreachable. `core/llm.py::CostAccountant.__init__`
+takes `limit: Optional[float] = None`; inside `::CostAccountant.add` both the 80%-warn branch and the
+`raise BudgetExceeded` are guarded on `self.limit is not None`. There is NO dollar-budget field anywhere
+in `Settings` (`core/config.py`), and all three `CostAccountant(...)` construction sites in `core/llm.py`
+pass no limit — so both branches are dead code on every shipped path. `max_eval_seconds` is a separate, non-atomic ceiling that
+[16-architecture-code-review-2026-07-11.md:362-378](16-architecture-code-review-2026-07-11.md) already
+proved is not hard under `max_parallel>1` ("`max_parallel=4`, cap `.05` launched four evaluations and
+spent `.20`"), and [doc 17:108](17-project-review-and-directions-2026-07-11.md) records "hard budget
+reservation … remains missing". No later doc retired the invariant; it is an open, unowned blocker.
+NEEDS A BUSINESS DECISION: do we add a run-level dollar budget to `Settings` and thread it into every
+`CostAccountant` (making rule 6 and ADR-11 §9's 80%/100% gates real), or do we withdraw "budget is hard"
+and restate the product promise as "cost is METERED and reported, and only node/eval-seconds counts are
+enforced"? Note the UI already exposes no configured run-dollar limit
+([18-ui-ux-review-2026-07-11.md:1716](18-ui-ux-review-2026-07-11.md)), so today's answer is the second one
+in practice but the first one in every design doc. -->
+
 ---
 
 ## 12. Concurrency, persistence, reproducibility
@@ -431,12 +565,12 @@ to a completion-fed central scheduler or narrow this architecture claim to batch
 | Want to change | Implement | No core edit because |
 |----------------|-----------|----------------------|
 | New task/benchmark | `TaskAdapter` | Orchestrator depends on the protocol, not the impl |
-| **New research algorithm** | **`SearchPolicy`** (`config.search.policy`) | **`select`/`expand`/`should_merge`/`stop` are injected ([ADR-2](03-decisions.md))** |
-| New anti-hack check | `ExploitRule` → `add_exploit_rule` | Evaluator iterates a registry |
-| New model/provider | config (`roles.*.model`) | LiteLLM layer is generic |
+| **New research algorithm** | **`SearchPolicy`** (`config.search.policy`) | **`next_actions(state) -> list[dict]` is injected ([ADR-2](03-decisions.md)); registered in `search/policy.py::_REGISTRY` via `make_policy`. (Shipped correction: the four-method `select`/`expand`/`should_merge`/`stop` protocol was never built — see §3.7.)** |
+| New anti-hack check | ~~`ExploitRule` → `add_exploit_rule`~~ — **never built** | Superseded by [ADR-6](03-decisions.md) (co-evolving evaluator demoted to open-ended mode only). The shipped seam is the static detector set in `trust/reward_hack.py` + `reward_hack_detect` (default off), which is a config switch, not a plugin protocol. |
+| New model/provider | config (`roles.*.model`) | Any OpenAI-compatible `/v1` endpoint via `core/llm.py::make_llm_client` (**shipped correction**: not LiteLLM — see §9) |
 | **Raw-LLM ↔ external coding-agent for a role** | config (`roles.*.backend`/`agent`) + a `RoleBackend` adapter | role calls `RoleBackend`, not `LLM` directly ([ADR-7](03-decisions.md)) |
 | New variance test | `VarianceGate` strategy | gate is a strategy object |
-| New artifact type / parser | `Ingestion` parser plugin | Ingestion dispatches by `Artifact.kind` ([ADR-3](03-decisions.md)) |
+| New artifact type / parser | ~~`Ingestion` parser plugin~~ — **never built** | Superseded by [ADR-6](03-decisions.md) (ADR-3 lightened to profiling + retrieve-and-seed); there is no `Ingestion` class and no `Artifact.kind` dispatch — see §3.12 |
 | New UI / renderer | read the file contract (§3.11) | files are the contract; engine is unaware of renderers ([ADR-1](03-decisions.md)) |
 | Different tracker | `Tracker` impl | MLflow is wrapped behind the protocol ([ADR-4](03-decisions.md)) |
 | New tool / capability | add an **MCP server** (or tool) | roles + external agents consume MCP uniformly ([ADR-9](03-decisions.md)) |

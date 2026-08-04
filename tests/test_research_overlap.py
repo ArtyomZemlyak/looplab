@@ -9,7 +9,7 @@ import types
 import anyio
 
 from looplab.engine.orchestrator import Engine
-from looplab.engine.research_cadence import research_memo_sig
+from looplab.engine.research_cadence import ResearchCadenceMixin, research_memo_sig
 
 
 def _memo(summary, directions=()):
@@ -73,9 +73,14 @@ def test_repeat_cadence_takes_the_larger_of_floor_and_derived():
 
 # ------------------------------------------------------------------------ the loop (stub-driven)
 
-class _LoopStub:
+class _LoopStub(ResearchCadenceMixin):
     """Minimal host for `Engine._research_overlap_loop` (called as an unbound method with this as
-    `self`). Serves a fixed memo sequence, records via a list, and uses a tiny cadence."""
+    `self`). Serves a fixed memo sequence, records via a list, and uses a tiny cadence.
+
+    Inherits the mixin for ONE member: `_research_attempt_step`, the indivisible receipt→provider→
+    record unit the loop now runs in a single thread hop (see `test_research_attempt_settlement.py`
+    for why the split version burned the gate). The three methods it drives are all overridden
+    below, so the real engine's paid sequencing is exercised over these fakes."""
     def __init__(self, memos, *, cap=0, cadence=0.01):
         self._memos = list(memos)
         self._concurrent_research_max_calls = cap

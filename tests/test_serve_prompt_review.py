@@ -95,8 +95,17 @@ def test_genesis_card_renders_when_backend_hint_raises(tmp_path, monkeypatch):
 
 # ---- F4: /api/start owns the generative backend=llm launch default ------------------------------
 def _start_env(tmp_path, monkeypatch):
-    """TestClient + the fake-spawned engine's env: /api/start passes per-run settings to the spawned
-    engine as LOOPLAB_* env, so the backend default is observable on the captured Popen kwargs."""
+    """TestClient + the fake-spawned engine's env, captured from the Popen kwargs.
+
+    NOTE on which channel carries a setting to the child (verified 2026-08-04). /api/start spawns
+    `looplab run <run_dir>/task.input.json --out <run_dir>`, and that canonical unified document
+    holds EVERY resolved setting. The CLI feeds a document's `settings:` block to
+    `appconfig.build_settings`, which passes it as pydantic `__init__` kwargs — those OUTRANK env and
+    `.env` — so the document, not the environment, is what actually decides the child's config. The
+    LOOPLAB_* env deliberately carries only DEVIATIONS from this server's own `Settings()` baseline
+    (`routers/control.py`: "Keep the process environment to actual deviations ... so profile/default
+    provenance ... are not turned into explicit overrides accidentally"). Assert the backend on
+    `_launch_doc` below; assert it on the env only for a value that really is a deviation."""
     spawned = {}
 
     def fake_popen(cmd, **kw):
@@ -105,6 +114,11 @@ def _start_env(tmp_path, monkeypatch):
         return type("P", (), {})()
     monkeypatch.setattr("looplab.serve.engine_proc.subprocess.Popen", fake_popen)
     return TestClient(make_app(tmp_path)), spawned
+
+
+def _launch_doc(tmp_path, run_id: str) -> dict:
+    """The canonical unified launch document the spawned `looplab run` actually consumes."""
+    return json.loads((tmp_path / run_id / "task.input.json").read_text(encoding="utf-8"))
 
 
 def _repo_task(tmp_path) -> dict:
@@ -119,31 +133,51 @@ def _repo_task(tmp_path) -> dict:
 
 
 def test_start_defaults_backend_llm_for_inline_generative_task(tmp_path, monkeypatch):
-    """An inline generative task launched with NO backend anywhere must spawn with LOOPLAB_BACKEND=llm
+    """An inline generative task launched with NO backend anywhere must spawn with backend=llm
     (F4: the default lives in the /api/start funnel, so assistant/direct launches — which never pass
-    through the genesis card — get it too, instead of NoOpRepoDeveloper silently no-oping)."""
+    through the genesis card — get it too, instead of NoOpRepoDeveloper silently no-oping).
+
+    `Settings.backend` itself defaults to "llm" since 2026-08-04, so the launch-time inference no
+    longer has to CHANGE the value — which is why the resolved `llm` stopped appearing in the child's
+    env (it is no longer a deviation from this server's baseline; see `_start_env`). The property is
+    unchanged: the spawned run's effective backend is `llm`, asserted on the document the child
+    reads. The inference itself is still exercised — it is what the preflight reports as a warning,
+    so deleting `launch.py::_resolved_settings`' backend block still goes red here."""
     client, spawned = _start_env(tmp_path, monkeypatch)
-    r = client.post("/api/start", json={"run_id": "gen", "task": _repo_task(tmp_path)})
+    task = _repo_task(tmp_path)
+    pre = client.post("/api/start/preflight", json={"run_id": "gen", "task": task})
+    assert pre.status_code == 200
+    assert pre.json()["warnings"] == ["backend=llm was inferred for this generative task"]
+    assert pre.json()["preview"]["settings"]["backend"] == "llm"
+
+    r = client.post("/api/start", json={"run_id": "gen", "task": task})
     assert r.status_code == 200
-    assert spawned["env"]["LOOPLAB_BACKEND"] == "llm"
+    assert _launch_doc(tmp_path, "gen")["settings"]["backend"] == "llm"
 
 
 def test_start_respects_explicit_backend(tmp_path, monkeypatch):
     """An explicit backend in the launch settings wins verbatim — the default only fills the gap,
     mirroring cli.py's `backend_chosen` guard.
 
-    A NON-generative task is the counterfactual: the default never fires for one
-    (test_start_non_generative_task_gets_no_backend pins that it spawns with NO backend env), so an
-    explicit `llm` surviving into the environment can only have come from the operator. An UNKNOWN
-    backend is a 422 here — every consumer tests `== "llm"` exactly, so an accepted typo would leave
-    the run silently on the OFFLINE toy roles; external CLI agents use `developer_backend` instead.
+    The explicit value is now `toy` on a GENERATIVE task, which is what carries the property since
+    the defaults flipped on 2026-08-04: the generative inference would have resolved `llm` here, so a
+    surviving `toy` can only have come from the operator — and, being a real deviation from this
+    server's `Settings()` baseline, it is observable in BOTH channels (the canonical launch document
+    the child reads AND the child's env). It must also SUPPRESS the inference, so the preflight
+    reports no inferred-backend warning. An UNKNOWN backend is a 422 here — every consumer tests
+    `== "llm"` exactly, so an accepted typo would leave the run silently on the OFFLINE toy roles;
+    external CLI agents use `developer_backend` instead.
     """
     client, spawned = _start_env(tmp_path, monkeypatch)
-    toy_task = {"benchmark": "quadratic", "goal": "min (x-3)^2", "direction": "min"}
-    r = client.post("/api/start", json={"run_id": "toy", "task": toy_task,
-                                        "settings": {"backend": "llm"}})
+    task = _repo_task(tmp_path)
+    pre = client.post("/api/start/preflight", json={"run_id": "gen", "task": task,
+                                                    "settings": {"backend": "toy"}})
+    assert pre.status_code == 200 and pre.json()["warnings"] == []   # chosen, so nothing is inferred
+    r = client.post("/api/start", json={"run_id": "gen", "task": task,
+                                        "settings": {"backend": "toy"}})
     assert r.status_code == 200
-    assert spawned["env"]["LOOPLAB_BACKEND"] == "llm"
+    assert _launch_doc(tmp_path, "gen")["settings"]["backend"] == "toy"
+    assert spawned["env"]["LOOPLAB_BACKEND"] == "toy"
 
     bad = client.post("/api/start", json={"run_id": "gen2", "task": _repo_task(tmp_path),
                                           "settings": {"backend": "cli_agent"}})
@@ -153,10 +187,18 @@ def test_start_respects_explicit_backend(tmp_path, monkeypatch):
 
 
 def test_start_non_generative_task_gets_no_backend(tmp_path, monkeypatch):
-    """A non-generative (offline-optimizable) inline task spawns with NO backend env — it stays on
-    Settings' own default."""
+    """A non-generative (offline-optimizable) inline task gets NO inferred backend — it stays on
+    Settings' own default, and nothing is added to the child env.
+
+    "No env entry" alone stopped discriminating once `Settings.backend` defaulted to `llm`
+    (2026-08-04): a generative task's resolved `llm` is no longer a deviation either, so it has no
+    env entry now. The preflight's inferred-backend warning is what still tells the two apart, and
+    is asserted here as the negative half of
+    `test_start_defaults_backend_llm_for_inline_generative_task`."""
     client, spawned = _start_env(tmp_path, monkeypatch)
     task = {"benchmark": "quadratic", "goal": "min (x-3)^2", "direction": "min"}
+    pre = client.post("/api/start/preflight", json={"run_id": "toy", "task": task})
+    assert pre.status_code == 200 and pre.json()["warnings"] == []   # never inferred for this kind
     r = client.post("/api/start", json={"run_id": "toy", "task": task})
     assert r.status_code == 200
     assert "LOOPLAB_BACKEND" not in (spawned["env"] or {})
@@ -164,35 +206,47 @@ def test_start_non_generative_task_gets_no_backend(tmp_path, monkeypatch):
 
 def test_start_defaults_backend_llm_for_generative_task_file(tmp_path, monkeypatch):
     """The task_file path (a catalogue/genesis task_file card — no inline task dict) gets the same
-    default: the file's JSON is read and normalized best-effort inside the shared predicate."""
+    default: the file's JSON is read and normalized best-effort inside the shared predicate.
+
+    Asserted on the canonical launch document + the preflight's inference warning rather than the
+    child env — see `_start_env` for why `llm` no longer travels as an env deviation."""
     client, spawned = _start_env(tmp_path, monkeypatch)
     tf = tmp_path / "mytask.json"
     tf.write_text(json.dumps(_repo_task(tmp_path)), encoding="utf-8")
+    pre = client.post("/api/start/preflight", json={"run_id": "genfile", "task_file": str(tf)})
+    assert pre.json()["warnings"] == ["backend=llm was inferred for this generative task"]
     r = client.post("/api/start", json={"run_id": "genfile", "task_file": str(tf)})
     assert r.status_code == 200
-    assert spawned["env"]["LOOPLAB_BACKEND"] == "llm"
+    assert _launch_doc(tmp_path, "genfile")["settings"]["backend"] == "llm"
 
 
 def test_start_task_file_read_parity_yaml_and_bom(tmp_path, monkeypatch):
     """READ PARITY (review I3): the predicate reads the task file with the SAME loader the spawned
     engine uses (appconfig.load_document) — a YAML unified config (`task:` block) and a BOM'd JSON,
     both of which the engine happily runs, must ALSO get the backend default (a raw json.loads
-    silently skipped them, launching NoOpRepoDeveloper runs from valid files)."""
+    silently skipped them, launching NoOpRepoDeveloper runs from valid files).
+
+    Asserted on the canonical launch document + the preflight's inference warning rather than the
+    child env — see `_start_env` for why `llm` no longer travels as an env deviation."""
     import yaml
     client, spawned = _start_env(tmp_path, monkeypatch)
     task = _repo_task(tmp_path)
     # a YAML unified config: the task lives under the `task:` block, next to a settings: block
     yf = tmp_path / "mytask.yaml"
     yf.write_text(yaml.safe_dump({"task": task, "settings": {"max_nodes": 3}}), encoding="utf-8")
+    pre = client.post("/api/start/preflight", json={"run_id": "genyaml", "task_file": str(yf)})
+    assert pre.json()["warnings"] == ["backend=llm was inferred for this generative task"]
     r = client.post("/api/start", json={"run_id": "genyaml", "task_file": str(yf)})
     assert r.status_code == 200
-    assert spawned["env"]["LOOPLAB_BACKEND"] == "llm"
+    assert _launch_doc(tmp_path, "genyaml")["settings"]["backend"] == "llm"
     # a BOM'd JSON task file (Windows editors): utf-8-sig read succeeds where json.loads chokes
     bf = tmp_path / "bomtask.json"
     bf.write_text(json.dumps(task), encoding="utf-8-sig")
+    pre = client.post("/api/start/preflight", json={"run_id": "genbom", "task_file": str(bf)})
+    assert pre.json()["warnings"] == ["backend=llm was inferred for this generative task"]
     r = client.post("/api/start", json={"run_id": "genbom", "task_file": str(bf)})
     assert r.status_code == 200
-    assert spawned["env"]["LOOPLAB_BACKEND"] == "llm"
+    assert _launch_doc(tmp_path, "genbom")["settings"]["backend"] == "llm"
 
 
 # ---- D7: node_logs for OPERATOR cmd.stages pipelines --------------------------------------------

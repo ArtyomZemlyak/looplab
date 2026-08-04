@@ -61,14 +61,17 @@ also run `python -m looplab.cli`.
 ## Quick start
 
 ```bash
-# 1. Run a toy optimization task offline (no LLM, no network) — no file needed:
-looplab run --no-genesis --kind quadratic --goal "minimize (x-3)^2+(y+1)^2" --direction min --out runs/demo
+# 1. Run a toy optimization task offline (no LLM, no network) — no file needed.
+#    --backend toy is required: `backend` defaults to `llm` (changed 2026-08-04).
+looplab run --no-genesis --kind quadratic --goal "minimize (x-3)^2+(y+1)^2" --direction min --out runs/demo --backend toy
 
 # 2. Inspect the result and verify reproducibility.
 looplab inspect runs/demo          # raw launch snapshot + current folded best result
 looplab replay  runs/demo          # rebuild full state from the event log
 
 # 3. A real ML task: polynomial-degree + ridge selection via 5-fold CV.
+#    `backend` defaults to `llm`, so this one calls a model — add `--backend toy` to stay offline
+#    (templated regression roles), or point LOOPLAB_LLM_BASE_URL/--model at a reachable endpoint.
 looplab run examples/regression_task.json --out runs/reg --max-nodes 14
 ```
 
@@ -138,7 +141,7 @@ still works). The fields desugar to nine adapters:
 
 | `kind` | What it optimizes | Example |
 |---|---|---|
-| `quadratic` | A toy numeric objective (offline default) | `examples/toy_task.json` |
+| `quadratic` | A toy numeric objective (the model-free kind; needs `--backend toy`) | `examples/toy_task.json` |
 | `regression` | Polynomial + ridge model selection via CV | `examples/regression_task.json` |
 | `classification` | Tune a classifier for K-fold CV accuracy | `examples/classification_task.json` |
 | `timeseries` | Forecaster smoothing/seasonality via backtest | `examples/timeseries_task.json` |

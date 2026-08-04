@@ -224,15 +224,26 @@ class ToolUsingResearcher:
             operator = str((args or {}).get("operator") or "draft")
             return _clamp_fill(Idea(operator=operator, params={}, rationale=rationale), self.bounds)
 
-    def _fallback(self, messages: list) -> Idea:
+    def _fallback(self, messages: list, cause: Optional[BaseException] = None) -> Idea:
         # Force a structured emit from the accumulated context; if even that fails, return a
         # safe bounds-filled default so the run never crashes.
+        # `cause` is the exception `propose` caught, when it had one. Default None keeps the
+        # `drive_tool_loop(fallback=...)` callback contract (it calls `fallback(messages)`), which is
+        # the genuinely causeless path — the loop simply ran out of turns without an emit. It exists
+        # because the degraded node used to record NO reason at all: a run against an unreachable
+        # endpoint emitted N identical `x=0,y=0` nodes annotated "fallback (agent parse failed)" with
+        # the transport error nowhere in the log, so the only signal that anything was wrong was a
+        # flat metric. `preflight_role_endpoints` (agents/preflight.py) is what STOPS that run; naming
+        # the cause here is what makes the residual case (an endpoint that dies MID-run) diagnosable.
+        # LLMResearcher's sibling fallback has recorded its `last` error this way all along.
         try:
             idea = parse_structured(
                 self.client, messages + [{"role": "user", "content": "Emit the Idea now."}],
                 IdeaEmission, self.parser).to_idea()
-        except ParseError:
-            idea = Idea(operator="draft", params={}, rationale="fallback (agent parse failed)")
+        except ParseError as e:
+            why = f"{cause or e}"[:300]
+            idea = Idea(operator="draft", params={},
+                        rationale=f"fallback (agent parse failed: {why})")
         return _clamp_fill(idea, self.bounds)
 
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
@@ -288,8 +299,10 @@ class ToolUsingResearcher:
                 validate=self._validate_emit, **self.loop_opts)
         except BudgetExceeded:      # hard budget stop -> propagate and end the run
             raise
-        except Exception:  # noqa: BLE001 - a transport/endpoint failure (LLMError after retries) on
-            # the flagship agentic path must NOT crash the run: degrade to a safe bounds-filled Idea,
+        except Exception as e:  # noqa: BLE001 - a transport/endpoint failure (LLMError after retries)
+            # on the flagship agentic path must NOT crash the run: degrade to a safe bounds-filled Idea,
             # the same contract as LLMResearcher / ToolUsingStrategist. `_fallback` is itself resilient
             # (parse_structured swallows LLMError -> draft Idea), so it can't re-raise the transport error.
-            return self._fallback(messages)
+            # Hand it the CAUSE, though: the degraded node is the only record that this happened, and a
+            # rationale that just says "parse failed" is indistinguishable from a weak model's bad JSON.
+            return self._fallback(messages, e)

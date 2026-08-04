@@ -14,7 +14,7 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
 | Guide | What it covers |
 |---|---|
 | **[Installation](installation.md)** | Requirements, install extras, optional backends |
-| **[Quickstart](quickstart.md)** | Your first run, offline → LLM-driven, reading results |
+| **[Quickstart](quickstart.md)** | Your first run (`--backend toy` for the offline path) → LLM-driven, reading results |
 
 ## Reference
 

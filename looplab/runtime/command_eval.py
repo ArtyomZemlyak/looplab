@@ -339,6 +339,40 @@ METRIC_READERS = {
 }
 
 
+# The readers whose spec is DEAD without a `path`, registered beside the reader table that decides
+# it: `_read_file` returns None the instant `spec["path"]` is missing, while `_read_adapter` DEFAULTS
+# its path and the stdout readers have none — so "needs a path" is a per-reader fact, not a property
+# of file-ness, and it belongs next to `METRIC_READERS` for the same reason the kind set does (doc 25
+# RA-04/RA-05). Without a submit-time check the omission is invisible: `key` is the key INSIDE the
+# file (never the file name), so a `{"kind":"file_json","key":"metric"}` spec validates on its kind,
+# the run starts, and EVERY node fails `no_metric` with nothing naming the cause.
+READERS_REQUIRING_PATH = frozenset({"file_json", "file_regex"})
+
+
+def metric_spec_path_error(spec) -> Optional[str]:
+    """Why `spec` can never read a metric for want of a usable `path` — or None when it can.
+
+    A NON-STRING `path` is rejected too, and is the worse of the two failures: `_confined` catches
+    only (OSError, ValueError, RuntimeError), so `Path(workdir) / 123` raises an uncaught TypeError
+    out of `read_metric` and takes down the RUN rather than failing the node.
+    """
+    if not isinstance(spec, dict):
+        return None
+    kind = spec.get("kind", "stdout_json")
+    if kind not in READERS_REQUIRING_PATH:
+        return None
+    path = spec.get("path")
+    if isinstance(path, str) and path.strip():
+        return None
+    example = ('{"kind": "%s", "path": "metrics.json", "key": "metric"}' % kind)
+    if path is not None and not isinstance(path, str):
+        return (f"metric reader {kind!r} needs `path` to be a STRING file path relative to the eval "
+                f"workdir, got {type(path).__name__}: {str(path)[:60]!r}. e.g. {example}")
+    return (f"metric reader {kind!r} needs a `path`: the file the eval writes, relative to the node's "
+            f"eval workdir. e.g. {example} — `key` is the key INSIDE that file, not the file name. "
+            "Without `path` the reader returns nothing and every node fails no_metric.")
+
+
 def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
                 since: Optional[float] = None) -> Optional[float]:
     """Read the metric for one eval according to `spec` (an eval_spec['metric']). Built-in

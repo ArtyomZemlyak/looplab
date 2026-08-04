@@ -158,14 +158,52 @@ class ResearchCadenceMixin:
         # research LLM spans + the research_completed append both live in THIS op-trace → the event is
         # stamped with it (UI scopes the event's trace to just the research, not a node).
         with self._op_span("deep_research", trigger=trigger):
-            # The receipt goes down BEFORE the provider call: the memo only becomes durable at
-            # `_record_deep_research`, and a kill in that window used to leave every trigger gate
-            # outstanding, so resume bought the same think again.
-            attempt_id = self._record_research_attempt(state, trigger=trigger, manual=manual)
-            memo = self._compute_deep_research(state, trigger, trace=False)
-            self._record_deep_research(memo, trigger=trigger, manual=manual,
-                                       attempt_id=attempt_id)
+            self._research_attempt_step(state, trigger, manual=manual)
         return fold(self.store.read_all())
+
+    def _research_attempt_step(self, state: RunState, trigger: str, *, manual: bool = False,
+                               last_sig: Optional[str] = None) -> tuple[Optional[str], bool]:
+        """ONE paid Deep-Research think — receipt, provider call, record — as a single INDIVISIBLE
+        step. The one spelling shared by the serial cadence (`_run_deep_research`) and BOTH concurrent
+        seams (`orchestrator._spawn_research`, `orchestrator._research_overlap_loop`).
+
+        The receipt goes down BEFORE the provider call: the memo only becomes durable at
+        `_record_deep_research`, and a kill in that window used to leave every trigger gate
+        outstanding, so resume bought the same think again.
+
+        INDIVISIBILITY IS THE POINT, and it is why this is one SYNC method rather than three calls at
+        each caller. The concurrent seams run it through a single non-abandonable
+        `anyio.to_thread.run_sync` hop, and a worker thread has no cancellation points — so a cancel
+        that lands anywhere between "the gate was spent" and "the memo is durable" is delivered only
+        AFTER the memo lands. Split across separate awaits (as it was), the eval-join cancel in
+        `_dispatch_evals`/`_run_card_session` landed on `to_thread.run_sync`'s leading checkpoint and
+        raised BaseException `CancelledError` — invisible to the callers' `except Exception` — so on
+        any task whose evals finish faster than the research call the cadence gate was spent, the
+        provider was paid AND waited for, and the answer was thrown away. Measured live: 4
+        `research_attempted` / 0 `research_completed` over a 12-node run. `7a2a2ff4`'s "an interrupted
+        think is simply spent rather than re-paid" is for a hard process kill, not for the normal path.
+
+        Bounded, so an operator stop cannot hang on it: the un-interruptible window is exactly the one
+        the concurrent seams already committed to (the provider call, bounded by the research
+        endpoint's timeout) plus the record, whose optional verify pass is bounded by the same
+        endpoint timeout and whose appends are bounded by the store lock. Nothing new is shielded —
+        the fix REMOVES a checkpoint, it does not add a shield.
+
+        Returns `(sig, recorded)`: the memo's content signature (None when the compute yielded
+        nothing) and whether it was appended. `last_sig` is the repeated-overlap convergence gate —
+        an identical re-run is not re-recorded (that pass rides a TIME cadence and is deliberately
+        unreceipted, so nothing is spent by skipping it)."""
+        attempt_id = self._record_research_attempt(state, trigger=trigger, manual=manual)
+        memo = self._compute_deep_research(state, trigger, trace=False)
+        if memo is None:
+            # Contractually unreachable (`_compute_deep_research` degrades to a stub memo rather than
+            # returning None), and kept only so a stubbed/foreign compute cannot crash the record.
+            return None, False
+        sig = research_memo_sig(memo)
+        if last_sig is not None and sig == last_sig:
+            return sig, False
+        self._record_deep_research(memo, trigger=trigger, manual=manual, attempt_id=attempt_id)
+        return sig, True
 
     def _record_research_attempt(self, state: RunState, *, trigger: str,
                                  manual: bool) -> Optional[str]:

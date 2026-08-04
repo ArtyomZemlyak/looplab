@@ -209,22 +209,19 @@ def normalize_card_scoring(value: CardScoring | Mapping[str, object] | None) -> 
     )
 
 
-def is_freshness_dropped_speculative_node(state: RunState, node: Node) -> bool:
-    """Prove the narrow Layer-5 budget refund from folded durable receipts.
+def _durable_speculative_lifecycle(state: RunState, node: Node) -> bool:
+    """Whether BOTH durable Layer-5 receipts bind this exact attempt-zero lifecycle to its Card.
 
-    ``reason='superseded'`` alone is intentionally insufficient: normal build/reset races use the
-    same reason and remain charged.  A refund requires the Node's durable speculative marker, the
-    matching successful ``card_build_done`` link, and a zero-cost freshness terminal.
+    The Node's own ``speculative``/``card_build_generation`` marker (from ``node_created``) and the
+    matching committed ``card_build_done`` link (``state.speculative_nodes``) must agree on the Card
+    id AND the request epoch.  Either receipt alone is forgeable by an unrelated build of the same
+    Card; together they name one producer result.
     """
 
     link = getattr(state, "speculative_nodes", {}).get(node.id)
     generation = getattr(node, "card_build_generation", None)
     return bool(
-        node.status is NodeStatus.failed
-        and node.attempt == 0
-        and node.error_reason == "superseded"
-        and node.error == CARD_FRESHNESS_SUPERSEDED_ERROR
-        and node.eval_seconds == 0
+        node.attempt == 0
         and getattr(node, "speculative", False) is True
         and isinstance(link, Mapping)
         and link.get("card_id") == node.idea.card_id
@@ -234,20 +231,78 @@ def is_freshness_dropped_speculative_node(state: RunState, node: Node) -> bool:
     )
 
 
+def is_unevaluated_speculative_discard(state: RunState, node: Node) -> bool:
+    """Prove the Layer-5 budget refund for a speculative build that NEVER RAN, from folded receipts.
+
+    A speculative build that turns out not to match the next selection is thrown away before it is
+    ever dispatched: it costs exactly one Developer call and touches no sandbox/GPU.  Charging it a
+    node-budget slot is budget THEFT from the experiments the run still has to execute, so the slot
+    is refunded.  A speculative node that DID consume an evaluation is a real experiment and keeps
+    its slot, whatever its outcome.
+
+    "Never ran" is proven, never inferred.  Three independent durable facts must agree:
+
+    * both speculative receipts bind this attempt-zero lifecycle to one committed producer result
+      (``_durable_speculative_lifecycle``) — an ordinary node can therefore never be refunded;
+    * the terminal itself carries the writer's pre-dispatch marker ``Node.never_evaluated`` (the
+      additive ``node_failed`` field), OR — for logs written before that marker existed — the exact
+      zero-cost freshness receipt that was the original narrow refund;
+    * the folded execution evidence CORROBORATES it: zero charged eval seconds and no
+      ``stage_finished`` row.  Any evidence that the sandbox actually started outvotes the marker.
+
+    Deliberately NOT keyed on ``reason='superseded'`` alone: ordinary build/reset races use the same
+    reason and remain charged.  Absence of a node workdir on disk is not evidence at all — replay
+    cannot see the filesystem, and the refund must be a pure function of the event log.
+    """
+
+    return bool(
+        node.status is NodeStatus.failed
+        and _durable_speculative_lifecycle(state, node)
+        and node.eval_seconds == 0
+        and not getattr(node, "stages", None)
+        and (
+            getattr(node, "never_evaluated", False) is True
+            or (
+                node.error_reason == "superseded"
+                and node.error == CARD_FRESHNESS_SUPERSEDED_ERROR
+            )
+        )
+    )
+
+
+def is_freshness_dropped_speculative_node(state: RunState, node: Node) -> bool:
+    """The original narrow Layer-5 refund: a zero-cost Card-freshness drop.
+
+    Retained as the named special case (and the pre-marker log format) of the general
+    ``is_unevaluated_speculative_discard`` predicate above, which is what budget accounting uses.
+    """
+
+    return bool(
+        node.status is NodeStatus.failed
+        and node.error_reason == "superseded"
+        and node.error == CARD_FRESHNESS_SUPERSEDED_ERROR
+        and node.eval_seconds == 0
+        and _durable_speculative_lifecycle(state, node)
+    )
+
+
 def node_counts_toward_card_budget(state: RunState, node: Node) -> bool:
     """Whether a node consumes the L3 creation budget.
 
     Tombstones and both kinds of current gate exclusion do not steal future search capacity:
     constraint-gated nodes have ``feasible=False`` and trust-gated nodes are in ``breed_excluded``.
     Failed and aborted attempts still count unless separately tombstoned; they consumed a real build.
-    The sole Layer-5 refund is a zero-cost freshness drop proven by BOTH durable speculative receipts.
+    The Layer-5 refund is a speculative build proven to have been discarded BEFORE it consumed any
+    evaluation — this is the single place that answers "did this node spend budget", and the physical
+    reservation ceiling (``Engine._hard_node_reservation_limit``) reads the same predicate through
+    ``refunded_card_budget_node_ids`` so the two halves of the budget cannot disagree.
     """
 
     return (
         not node.tombstoned
         and node.feasible
         and node.id not in state.breed_excluded
-        and not is_freshness_dropped_speculative_node(state, node)
+        and not is_unevaluated_speculative_discard(state, node)
     )
 
 
@@ -258,6 +313,35 @@ def card_budget_used(state: RunState) -> int:
         1 for node in state.nodes.values()
         if node_counts_toward_card_budget(state, node)
     )
+
+
+def refunded_card_budget_node_ids(state: RunState) -> frozenset[int]:
+    """Node ids whose physical reservation was refunded because the build never ran.
+
+    ``card_budget_used`` removes these from the L3 denominator; the id ALLOCATOR
+    (``Engine._node_id_ceiling``) cannot, because node ids are monotonic and never reused.  So the
+    physical ceiling extends itself by exactly this set instead — same predicate, one accounting.
+    Bare ``node_building`` reservations that never became a Node are intentionally NOT here: they own
+    no Node row, and inventing a second Node-less refund ledger is what this helper exists to avoid.
+    """
+
+    return frozenset(
+        node_id for node_id, node in state.nodes.items()
+        if is_unevaluated_speculative_discard(state, node)
+    )
+
+
+def refunded_node_reservations(state: RunState, limit: int) -> int:
+    """Refunded physical reservations, bounded by one whole operator budget.
+
+    The bound is an anti-livelock floor, not accounting: a refunded slot is re-spent on another
+    speculative build, which can itself be discarded, so an unbounded refund would let a pathological
+    freshness loop mint Developer calls forever with no eval budget to stop it (a discarded build
+    charges no eval seconds and no wall clock).  Capping the total refund at the configured ceiling
+    keeps the worst case at 2x reservations — finite, deterministic, and identical under replay.
+    """
+
+    return min(len(refunded_card_budget_node_ids(state)), max(0, _bounded_nonnegative_int(limit)))
 
 
 def _effective_policy_state(state: RunState) -> RunState:

@@ -4,11 +4,12 @@ This walks through your first run — offline first, then driven by a real LLM.
 
 ## 1. Run a task offline
 
-No LLM and no network are required. The default `toy` backend uses a deterministic optimizer, so
-you can see the full loop work in seconds:
+No LLM and no network are required. The `toy` backend uses a deterministic optimizer, so you can see
+the full loop work in seconds. `backend` defaults to `llm` (a real run wants a live model), so ask
+for the offline one explicitly:
 
 ```bash
-looplab run examples/toy_task.json --out runs/demo --max-nodes 14
+looplab run examples/toy_task.json --out runs/demo --max-nodes 14 --backend toy
 ```
 
 What just happened:

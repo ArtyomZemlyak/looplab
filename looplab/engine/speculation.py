@@ -535,6 +535,13 @@ class SpeculationMixin:
                     generation=0,
                     error="invalid precoded Card result",
                     reason="superseded",
+                    # Every discard on this method's path is pre-dispatch by construction: the
+                    # producer result is rejected before `_emit_node_created`, or the created node is
+                    # closed in the same turn, and no evaluation is ever scheduled for it. Stamp the
+                    # durable receipt so the L5 refund is proven, not inferred (a bare reservation
+                    # owns no Node row and is simply not refundable — see
+                    # `refunded_card_budget_node_ids`).
+                    never_evaluated=True,
                 )
             if result.roles is not None:
                 self._discard_node_build_telemetry(
@@ -592,6 +599,7 @@ class SpeculationMixin:
                                else "speculative build frozen before commit (pause/stop/budget)"),
                         reason="superseded" if superseded else "frozen",
                         drop_card=superseded,
+                        never_evaluated=True,
                     )
                     self._discard_node_build_telemetry(
                         researcher=researcher, developer=developer,
@@ -631,6 +639,7 @@ class SpeculationMixin:
                     generation=0,
                     error="speculative node commit lost its event-tail CAS",
                     reason="superseded",
+                    never_evaluated=True,
                 )
                 self._discard_node_build_telemetry(
                     researcher=researcher, developer=developer,
@@ -649,6 +658,7 @@ class SpeculationMixin:
                     generation=0,
                     error="speculative node creation was rejected during replay",
                     reason="superseded",
+                    never_evaluated=True,
                 )
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)
                 return
@@ -1455,6 +1465,13 @@ class SpeculationMixin:
                             "error": CARD_FRESHNESS_SUPERSEDED_ERROR,
                             "reason": "superseded",
                             "eval_seconds": 0.0,
+                            # Durable proof for the L5 node-budget refund. This loop only reaches a
+                            # node that is still `pending` on a FRESH fold and is NOT in
+                            # `eval_inflight` (GPU dispatch burns to terminal above), so no sandbox
+                            # ever ran for this lifecycle: the prediction cost one Developer call and
+                            # nothing else. Stamping it here is what lets replay reach the same
+                            # budget number without consulting the filesystem.
+                            "never_evaluated": True,
                         },
                         expected_last_seq=tail,
                     )

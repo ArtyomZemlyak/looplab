@@ -580,6 +580,34 @@ Documentation-only work, offline corpora, and benchmark harness design may run i
 that writes domain state, launches processes, calls the network, changes promotion, or consumes hidden data
 must pass through the prerequisite gates above.
 
+> **⚠ This ordering does not describe how the project actually shipped (noted 2026-08-04).** The R1/R2/R3
+> identity contracts (`RunManifest`, `BudgetLedger`, `ProcessSupervisor`, `EvaluationRef`) have **zero**
+> hits in the code, yet the doc-25 decomposition is already landing on master, and the two largest
+> programs of the window — doc 22 (parallelism) and doc 23 (Card kanban) — appear nowhere in §7. Doc 25
+> does not supersede this: its header states "Doc 17 still owns release ordering". A decision is pending;
+> the full annotation with the open question is in this file's source immediately below.
+
+<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — this critical path is not the order the project actually
+shipped, and no later document changed the decision.
+WHAT THIS DOC PROMISES: R0 -> R1 -> R2/R3 -> R4 -> R5, with §6.6:539 ("decompose only after the identity
+contracts exist") gating decomposition behind R1/R2.
+WHAT ACTUALLY HAPPENED: the R1/R2/R3 identity contracts named in §6.3:459-460 do not exist in code —
+`RunManifest`, `BudgetLedger`, `ProcessSupervisor` and `EvaluationRef` each have ZERO hits across
+`looplab/`, `tests/`, `ui/` and `tools/`; they appear only in docs 16/17/20/26. Meanwhile the doc-25
+modularity decomposition (`docs/25-architecture-modularity-review-2026-08-01.md` §2:397-422) is already
+landing on master (`9cebd0df` TO-05, `83598e47` TO-06, 2026-08-04) — i.e. R4-shaped work running ahead of
+R1/R2. Doc 25 does NOT supersede this ordering: its own header (`docs/25:13`) says "Doc 17 still owns
+release ordering", and it contains no `R0`/`identity contract`/`RunManifest` reference and no rationale
+for decomposing first. The constraint was bypassed, not revised.
+ALSO ABSENT: the two largest delivery programs of this window — doc 22 (agent parallelism, 2026-07-19) and
+doc 23 (Hypothesis-Card kanban, 2026-07-20, ~220 commits between them) — appear NOWHERE in §7's ordering
+(`kanban` has 0 occurrences in this file; every `Card` mention sits in Part III/IV/V, none in §7). So the
+release ordering has never described the actual critical path since 2026-07-19.
+NEEDS A BUSINESS DECISION: is the R0->R5 identity-contract critical path still the release gate — in which
+case doc-25 decomposition and the doc-22/23 programs must be re-sequenced behind R1/R2 and the four
+identity contracts actually built — or is it retired, in which case §6.3/§7.1 must be rewritten around the
+order the project is really shipping in and §6.6:539's sequencing rule withdrawn? -->
+
 #### 7.2 Delivery horizons
 
 **Horizon 0 — finish containment after the landed fix series.** Preserve the shipped envelope-aware
@@ -3158,11 +3186,15 @@ portfolio into every prompt. It does not make an LLM-authored report canonical.
 
 - **Evidence before synthesis.** A claim with no resolvable evidence refs is an ungrounded note, never a
   trusted lesson or novelty signal.
-  <!-- CODEX AGENT: two current readers violate the stronger completeness implication of this invariant.
-  RunStateCache folds the valid prefix returned by iter_event_jsonl after corruption and exposes it to
-  SiblingRunTools/AllRunsTools with no partial-source receipt; research_claims refresh replaces only current
-  v3 rows while the reader continues indexing same-run legacy v1/v2 claims. A role can therefore synthesize
-  from a truncated run or superseded claim as though it were current complete evidence. -->
+  <!-- CODEX AGENT: (partially RESOLVED 2026-07-27 by `af618c51`; annotation narrowed 2026-08-04.) The
+  RunStateCache half of this finding is CLOSED: `tools/_runcache.py:83-122` now records a per-run
+  `log_divergence` receipt outside the LRU and `source_note()` renders an explicit `[PARTIAL SOURCE]`
+  banner, which `tools/run_tools.py:684,702` and `tools/machine_runs_tools.py:791,818` emit — so a
+  truncated sibling/all-run read can no longer pass as a whole run. (`ec11165e`, 2026-07-31, only
+  LRU-bounded the same cache; it deliberately kept the receipt outside eviction.)
+  STILL OPEN: research_claims refresh replaces only current v3 rows while the reader continues indexing
+  same-run legacy v1/v2 claims, so a role can still synthesize from a superseded claim as though it were
+  current evidence. -->
 - **Abstention before false transfer.** Unknown applicability produces “possibly related / inspect,” not
   “tried before” and never an automatic rejection.
 - **Scope is explicit and multi-valued.** Exact-task, application, domain, modality/language, dataset family,
@@ -4106,11 +4138,13 @@ opinion must never rewrite portfolio truth. Therefore:
   in-loop agent's reasoning produces that persists cross-run is a *machine-proposed* lesson/D8 claim, written
   by the ENGINE at finalize through the existing role-routed lessons path — never a direct mutation of the
   shared claim/concept store.
-  <!-- CODEX AGENT: the write-capability boundary is intact, but read-only is not sufficient for safety.
-  Default sibling/all-run providers currently receive RunStateCache's health-less truncated prefix, and the
-  research-claim projection can retain superseded legacy rows after re-finalization. Those sources need
-  completeness/freshness receipts and abstention semantics before this paragraph can support "no poisoning"
-  as an end-to-end consumer claim. -->
+  <!-- CODEX AGENT: (partially RESOLVED 2026-07-27 by `af618c51`; annotation narrowed 2026-08-04.) The
+  write-capability boundary is intact, and the completeness half is now closed: default sibling/all-run
+  providers no longer receive a health-less truncated prefix — `tools/_runcache.py:100-122` carries the
+  divergence receipt and `run_tools.py:684,702` / `machine_runs_tools.py:791,818` render the
+  `[PARTIAL SOURCE]` note. STILL OPEN: the research-claim projection can retain superseded legacy rows
+  after re-finalization, so the freshness receipt + abstention semantics this paragraph needs to support
+  "no poisoning" end-to-end are not yet in place on that source. -->
 - **This is about the in-loop agents, NOT the owner's ASSISTANT.** The assistant acts on the operator's
   behalf, behind a permission-mode confirm card, and IS a full editor: it merges/splits/purges the cross-run
   taxonomy (Phase 2a `ConceptGovernanceTools`) and — PART V (D) — re-tags a run's node concepts

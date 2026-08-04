@@ -13,11 +13,11 @@ Every task shares these:
 
 | Field | Type | Description |
 |---|---|---|
-| `kind` | string | The adapter to use (table below). **Optional** — with the composable schema it's inferred from the fields; a `kind`-less task with no recognizable capability field is rejected (no silent quadratic default). The CLI's `--kind quadratic` offline default is separate. |
+| `kind` | string | The adapter to use (table below). **Optional** — with the composable schema it's inferred from the fields; a `kind`-less task with no recognizable capability field is rejected (no silent quadratic default). `--kind` on the CLI has no default either: omit it and Genesis picks the kind. |
 | `id` | string | A short identifier for the task (groups sibling runs) |
 | `goal` | string | A natural-language objective; the agent reads this |
 | `direction` | `min` \| `max` | Whether lower or higher metric is better |
-| `seed` | int | Random seed for reproducible data generation |
+| `seed` | int | Random seed for reproducible data generation. **Not universal** — the built-in synthetic kinds and `repo` carry it; `mlebench_real` has none (the competition owns the split) |
 
 ## The composable schema (recommended)
 
@@ -159,7 +159,8 @@ below use it.
 
 ## `quadratic`
 
-A toy numeric objective — the offline default. The Researcher proposes points; there's no code
+A toy numeric objective, and the one kind that runs with no model at all — pass `--backend toy`
+(`backend` itself defaults to `llm` since 2026-08-04). The Researcher proposes points; there's no code
 generation. Good for learning the loop and testing crash-resume.
 
 ```jsonc
@@ -333,13 +334,25 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `protect` | Files the agent may **never** touch (e.g. the eval entrypoint) |
 | `eval.command` | The command run to evaluate a candidate (**argv list, no shell** — no `&&`) |
 | `eval.setup` | Optional command run **before** each eval to install **dependencies** (e.g. `pip install -r requirements.txt`). **Not for training** — training is a stage the agent declares (see below). |
-| `eval.metric.reader` | How to read the metric: `stdout_json` / `stdout_regex` / `file_json` / `file_regex` / `auto`. (Legacy `eval.metric.kind` still works.) |
-| `eval.metric.key` | The JSON key / regex / file path to read |
-| `eval.metric.resource_key` | Optional JSON key for an explicit training resource (for example `step`). ASHA live kill is supported only by `stdout_json` and compares observations carrying the same declared resource value; without it endpoint ranking is advisory only. `stdout_regex` supports advisory ranking but never kill; the other readers have no live-watchdog path. |
+| `eval.metric.reader` | How to read the metric: `stdout_json` / `stdout_regex` / `file_json` / `file_regex` / `auto`. Legacy `eval.metric.kind` still works **for the four concrete readers only** — `"auto"` must be spelled `{"reader": "auto"}`, because only that spelling folds to the onboarding path (`adapters/tasks.py:241`); `{"kind": "auto"}` is not a known reader and raises. |
+| `eval.metric.key` | The **JSON key** to read (`stdout_json`, `file_json` — dotted keys supported) or the **regex** (`stdout_regex`, `file_regex`). For the two `file_*` readers this is the key/pattern *inside* the file, **not** the file itself — the file is `eval.metric.path`. |
+| `eval.metric.path` | **`file_json` / `file_regex` only** — the metrics file the candidate/framework writes, relative to the eval workdir. Required by those two readers; ignored by the `stdout_*` readers. |
+| `eval.metric.resource_key` | Optional JSON key for an explicit training resource (for example `step`). ASHA live kill is supported only by `stdout_json` and compares observations carrying the same declared resource value; without it endpoint ranking is advisory only. That comparison is the evidence, not the decision: the stop itself requires a confident `stop` verdict from the ASHA judge (`asha_live_kill_confidence`), so a run with no LLM client is never killed this way. `stdout_regex` supports advisory ranking but never kill; the other readers have no live-watchdog path. |
 | `eval.timeout` | Per-eval timeout (seconds) — set it generously for training (often 7200–14400) |
 | `data` / `dataset` | `name → path` map, **read-only symlink-mounted** at `./name` by default; a value may be a [per-source permission object](#per-source-data-permissions). `~`/`$VARS` expand |
-| `references` | Read-only inputs: `[{name, path, mount}]` — `mount: true` copies to `./name`, `false` is context-only |
+| `references` | Read-only inputs: `[{name, path, mount}]` — `mount: true` exposes the source at `./name` as a **read-only symlink** (and a read-only bind mount under the Docker tiers), **not** a copy (`engine/workspace.py:183-185`, `engine/eval_dispatch.py:151-153`); `false` is context-only. Edits under `./name` therefore reach your source — the read-only mount is what prevents that. |
 | `editables` | Multi-repo workspace: extra editable repos, each mounted at its own `name/` subdir |
+| `eval.stages` | Operator-declared ordered pipeline (`data_prep` → `train` → …). When set, these **are** the canonical stages and the Developer's own `looplab_stages.json` is ignored; the LAST stage's stdout carries the metric. Each stage is `{name, command:[argv], timeout?, check?}` |
+| `eval.cwd` | Working directory for the eval, relative to the node eval workdir (default `.`) |
+| `eval.setup_timeout` | Per-node `eval.setup` budget in seconds (default `600`) |
+| `eval.run_setup` | **Run-level** setup: runs ONCE at run start in the editable repo root, not per node — the autonomy default when deps don't change between experiments. A failure aborts the run |
+| `eval.run_setup_timeout` | `run_setup` budget in seconds (default `1800`) |
+| `eval.profiles` | Named override+timeout sets the Researcher picks per node, e.g. `{"smoke": {"overrides": ["max_steps=20"], "timeout": 60}}`. The confirm phase forces `full` |
+| `eval.params_style` | `none` (default) or `cli_overrides` |
+| `eval.metrics` | Extra **named** readers reported alongside the primary, for audit/observability: `{"latency_ms": {"kind": "stdout_json", "key": "latency"}}` |
+| `eval.constraints` | Reader specs carrying a `max`/`min` bound. A node that violates any (or whose constraint value can't be read) is still measured but **excluded from best-selection** — "optimize the metric subject to `latency_ms <= 100`". Operator-owned (trust boundary) |
+| `eval.cross_check` | An INDEPENDENT built-in reader (`stdout_json`/`stdout_regex`/`file_json`/`file_regex` — never `adapter`) that re-reads the same metric from a source the agent can't forge. Used by `eval_trust_mode="ratify_freeze_drift"`; `None` disables it |
+| `eval.drift_tolerance` | Tolerance for the `cross_check` comparison (default `1e-6`; must be finite and ≥ 0) |
 
 The metric-source file and the files you list in `protect` cannot be overwritten by the agent
 (enforced by the write/diff gate); the scorer entrypoint is protected only if you `protect` it. Offline or

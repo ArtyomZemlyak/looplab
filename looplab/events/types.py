@@ -315,6 +315,15 @@ EV_TRAIN_MONITOR_ALERT = "train_monitor_alert"
 # remains splice-neutral and replay-safe. The raw advisory row can still feed a later proposal through
 # watchdog_reflection; that prompt effect is separate from fold/champion semantics.
 EV_ASHA_RANK = "asha_rank"
+# The ASHA watchdog's LLM STOP DECISION (engine/asha_monitor.py). The deterministic rank test above is
+# only the EVIDENCE; when it fires past the grace window a judge sees the live curve, the same-resource
+# sibling distribution + bar, the other metrics the run prints, and the training monitor's latest health
+# verdict, and answers continue|watch|stop (`status`; "unavailable" when no client answered). `kill`
+# records whether the node was actually stopped. DIAGNOSTIC / fold-ignored for the same reason as
+# EV_ASHA_RANK: the judge runs in a concurrent per-eval task, so its splice position is thread-dependent
+# and must not reach folded state — the stop itself is recorded by the node's single `node_failed`
+# terminal (reason=asha_underperforming), which is what replay reads instead of re-invoking the LLM.
+EV_ASHA_VERDICT = "asha_verdict"
 # A served `fork` request whose `fork_done` receipt was spent but which produced NO node. The receipt
 # is appended BEFORE `_create_node` on purpose (at-most-once beats duplicating a paid experiment), and
 # `_create_node` can then decline silently in a live process: a lost proposal-authority CAS, a slot
@@ -391,6 +400,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_CONCEPT_LENS_STARTED, EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED,
     EV_TRAIN_MONITOR_ALERT,
     EV_ASHA_RANK,
+    EV_ASHA_VERDICT,
     EV_FORK_UNFULFILLED,
     EV_LESSONS_STORE_UNAVAILABLE,
     # EV_ENV_CHANGED moved to the FOLDED set (F18): it now sets a dedup flag (RunState.env_changed) so

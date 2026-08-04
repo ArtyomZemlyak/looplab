@@ -1,20 +1,26 @@
-"""ASHA live-curve watchdog: pure rank/extraction helpers + the advisory/opt-in-kill loop. The loop is
-advisory-only unless `_asha_live_kill`, appends only the fold-IGNORED EV_ASHA_RANK, and reuses the
-training monitor's kill_signal — so none of this touches folded selection or replay."""
+"""ASHA live-curve watchdog: pure rank/extraction helpers + the advisory/LLM-mediated-kill loop. The
+loop is advisory-only unless `_asha_live_kill`, appends only the fold-IGNORED EV_ASHA_RANK /
+EV_ASHA_VERDICT, and reuses the training monitor's kill_signal — so none of this touches folded
+selection or replay. The rank test is EVIDENCE: the stop itself needs a confident `stop` from the LLM
+judge, which is consulted INSIDE the rank gate and therefore can only ever narrow the kill set."""
 import threading
 import time
 
 import anyio
+import pytest
 
 from looplab.adapters.tasks import normalize_task
 from looplab.core.models import Event, Idea, Node, NodeStatus, RunState
 from looplab.engine.asha_monitor import (
-    AshaMonitorMixin, IntermediateSample, _curve_metric_at, asha_underperforming,
-    extract_resource_curve, latest_intermediate, latest_intermediate_sample,
+    AshaMonitorMixin, AshaVerdict, IntermediateSample, _curve_metric_at, asha_judge_context,
+    asha_underperforming, extract_resource_curve, latest_extra_metrics, latest_intermediate,
+    latest_intermediate_sample, latest_train_verdict, rank_bar, should_asha_kill,
     sibling_final_metrics, sibling_metrics_at_resource,
 )
 from looplab.engine.train_monitor import snapshot_training_logs
-from looplab.events.types import DIAGNOSTIC_EVENTS, EV_ASHA_RANK
+from looplab.events.types import (
+    DIAGNOSTIC_EVENTS, EV_ASHA_RANK, EV_ASHA_VERDICT, EV_TRAIN_MONITOR_ALERT,
+)
 
 
 # --------------------------------------------------------------------- latest_intermediate (reuses read_metric)
@@ -339,15 +345,47 @@ class _Tracer:
         return _Span()
 
 
+class _JudgeClient:
+    """Stand-in for the Developer's LLM client. Answers through `complete_tool` — the SAME structured
+    path production takes (`structured_judge` -> `parse_structured` -> tool_call), so the verdict is
+    really schema-validated here — and records every prompt it was shown so a test can assert what
+    evidence the judge actually received. `verdict=None` raises instead, standing in for an endpoint
+    failure / unparseable answer."""
+
+    def __init__(self, verdict=None):
+        self._verdict = verdict
+        self.calls = 0
+        self.contexts: list[str] = []
+
+    def complete_tool(self, messages, schema):
+        self.calls += 1
+        self.contexts.append(messages[-1]["content"])
+        if self._verdict is None:
+            raise RuntimeError("judge endpoint is down")
+        return dict(self._verdict)
+
+
+class _JudgeDeveloper:
+    def __init__(self, client):
+        self.client = client
+
+
 class _AshaStub(AshaMonitorMixin):
-    def __init__(self, *, kill=False, quantile=0.5, min_siblings=3, cadence=0.01):
+    def __init__(self, *, kill=False, quantile=0.5, min_siblings=3, cadence=0.01,
+                 judge=None, kill_confidence=0.8):
         self.tracer = _Tracer()
         self._write_lock = anyio.Lock()
         self.store = _FakeStore()
         self._asha_live_kill = kill
         self._asha_live_quantile = quantile
         self._asha_live_min_siblings = min_siblings
+        self._asha_live_kill_confidence = kill_confidence
         self._cadence = cadence
+        # No `developer` at all == the offline/toy path: `_asha_verdict` finds no client and returns
+        # None, which `should_asha_kill` treats as "do not stop".
+        self.judge = judge
+        if judge is not None:
+            self.developer = _JudgeDeveloper(judge)
 
     def _asha_cadence(self):
         return self._cadence
@@ -510,11 +548,16 @@ def test_loop_opt_in_kill_requires_comparable_resource_evidence(tmp_path, monkey
     assert alerts[0]["endpoint_underperforming"] is True
     assert alerts[0]["resource_underperforming"] is False
 
-    # With enough truly same-resource evidence, persistent underperformance can still free compute.
+    # With enough truly same-resource evidence AND a confident stop verdict from the judge, persistent
+    # underperformance can still free compute. The rank flag alone no longer stops anything: the judge
+    # is what turns the evidence into a decision (see the LLM-mediated section below).
     (wd / "train.log").write_text('{"recall": 0.01, "step": 1}\n', encoding="utf-8")
     on = {}
-    _run_loop(_AshaStub(kill=True, min_siblings=3, cadence=0.01), wd, spec, "max", on,
-              monkeypatch, finals=[0.8, 0.7, 0.6], curves=peer_resource_curves, window=0.2)
+    stopper = _JudgeClient({"status": "stop", "reason": "flat at 1% while peers were at 5-9%",
+                            "confidence": 0.95})
+    _run_loop(_AshaStub(kill=True, min_siblings=3, cadence=0.01, judge=stopper), wd, spec, "max", on,
+              monkeypatch, finals=[0.8, 0.7, 0.6], curves=peer_resource_curves, window=0.2,
+              until=lambda s: bool(on.get("kill")))
     assert on.get("kill") is True
     assert on.get("terminal_reason") == "asha_underperforming"
 
@@ -560,8 +603,12 @@ def test_asha_kill_cannot_overwrite_training_monitor_terminal(tmp_path, monkeypa
         "confidence": 0.97,
     }
 
+    # A judge that WOULD stop this node: the ASHA watchdog must still lose the claim to the training
+    # monitor's earlier one, so the node keeps exactly one terminal explanation.
     _run_loop(
-        _AshaStub(kill=True, min_siblings=3, cadence=0.01), wd,
+        _AshaStub(kill=True, min_siblings=3, cadence=0.01,
+                  judge=_JudgeClient({"status": "stop", "reason": "far behind at the same step",
+                                      "confidence": 0.99})), wd,
         {"kind": "stdout_json", "key": "recall", "resource_key": "step"},
         "max", claimed, monkeypatch, finals=[0.8, 0.7, 0.6],
         tails=[
@@ -582,3 +629,434 @@ def test_asha_kill_cannot_overwrite_training_monitor_terminal(tmp_path, monkeypa
 
 def test_asha_rank_is_diagnostic():
     assert EV_ASHA_RANK in DIAGNOSTIC_EVENTS      # fold-ignored -> splice-neutral by construction
+
+
+def test_asha_verdict_is_diagnostic():
+    # The judge runs in a concurrent per-eval task, so its row's splice position is thread-dependent:
+    # it MUST be fold-ignored. The kill itself is carried by the node's ordinary single terminal.
+    assert EV_ASHA_VERDICT in DIAGNOSTIC_EVENTS
+
+
+# ------------------------------------------------------- the LLM judge: pure decision surface
+
+def test_rank_bar_is_the_ordering_the_rank_test_uses():
+    # The bar handed to the judge must be exactly the one `asha_underperforming` compares against —
+    # one spelling of the WORST->BEST ordering, so the prompt can never describe a different test.
+    pop = [0.1, 0.2, 0.3, 0.9]
+    for direction in ("min", "max"):
+        for q in (0.0, 0.25, 0.5, 1.0):
+            bar = rank_bar(pop, direction, quantile=q)
+            worse = bar + 0.01 if direction == "min" else bar - 0.01
+            better = bar - 0.01 if direction == "min" else bar + 0.01
+            assert asha_underperforming(worse, pop, direction, quantile=q) is True
+            assert asha_underperforming(better, pop, direction, quantile=q) is False
+    assert rank_bar([], "min") is None and rank_bar(pop, "min", quantile=1.5) is None
+
+
+@pytest.mark.parametrize("status", ["continue", "watch", "stop"])
+def test_should_asha_kill_never_widens_beyond_the_rank_test(status):
+    """THE core safety property: whatever the judge says, no kill without the deterministic rank flag.
+
+    The loop only reaches the judge inside the rank gate, and this predicate re-requires that same bit —
+    so a model that answers 'stop' to everything (or a prompt-injected log that talks it into stopping)
+    can still only ever stop a node the old quantile test would ALSO have stopped."""
+    confident = AshaVerdict(status=status, reason="whatever", confidence=1.0)
+    for rank in (False, None):                    # rank test says "fine" / "cannot decide"
+        assert should_asha_kill(confident, enabled=True, threshold=0.8,
+                                rank_underperforming=rank) is False
+    # With the rank flag set, ONLY a confident 'stop' acts — the LLM narrows, never widens.
+    assert should_asha_kill(confident, enabled=True, threshold=0.8,
+                            rank_underperforming=True) is (status == "stop")
+
+
+def test_should_asha_kill_requires_enabled_confident_and_present_verdict():
+    stop = AshaVerdict(status="stop", reason="hopeless", confidence=0.9)
+    assert should_asha_kill(stop, enabled=True, threshold=0.8, rank_underperforming=True) is True
+    assert should_asha_kill(stop, enabled=False, threshold=0.8, rank_underperforming=True) is False
+    assert should_asha_kill(stop, enabled=True, threshold=0.95, rank_underperforming=True) is False
+    # No verdict at all (no client / endpoint failure / call cap) is NOT authority to kill.
+    assert should_asha_kill(None, enabled=True, threshold=0.0, rank_underperforming=True) is False
+
+
+@pytest.mark.parametrize("confidence", [float("nan"), float("inf"), None, "high"])
+def test_non_finite_judge_confidence_cannot_kill_even_at_zero_threshold(confidence):
+    # `min(1.0, NaN)` is 1.0 in Python: a non-finite confidence must be treated as INVALID, never as
+    # maximal authority (the same trap `train_monitor._normalize_monitor_confidence` exists for).
+    verdict = AshaVerdict.model_construct(status="stop", reason="x", confidence=confidence)
+    assert should_asha_kill(verdict, enabled=True, threshold=0.0, rank_underperforming=True) is False
+
+
+def test_nan_threshold_fails_closed():
+    stop = AshaVerdict(status="stop", reason="hopeless", confidence=1.0)
+    assert should_asha_kill(stop, enabled=True, threshold=float("nan"),
+                            rank_underperforming=True) is False
+
+
+# ------------------------------------------------------- the judge's context (pure)
+
+def test_latest_extra_metrics_reads_the_newest_metric_record():
+    log = ('{"recall": 0.1, "step": 1, "loss": 2.5, "lr": 0.01, "note": "warmup"}\n'
+           '{"recall": 0.2, "step": 2, "loss": 1.5, "lr": 0.01}\n')
+    spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
+    # the metric and the declared resource are already context; everything else numeric is extra.
+    assert latest_extra_metrics(log, spec) == {"loss": 1.5, "lr": 0.01}
+    assert latest_extra_metrics(log, {"kind": "stdout_regex", "pattern": "x"}) == {}
+    assert latest_extra_metrics("", spec) == {} and latest_extra_metrics("noise", spec) == {}
+    # non-numeric values are dropped by the shared extra_metrics contract, never rendered as text.
+    assert "note" not in latest_extra_metrics('{"recall": 0.1, "note": "hi", "loss": 2.0}\n',
+                                              {"kind": "stdout_json", "key": "recall"})
+
+
+def test_latest_train_verdict_matches_only_this_node_lifecycle():
+    def _rows(*payloads):
+        return [Event(seq=i, ts=0.0, type=EV_TRAIN_MONITOR_ALERT, data=dict(p))
+                for i, p in enumerate(payloads)]
+
+    healthy = {"node_id": 4, "generation": 1, "status": "healthy", "reason": "loss falling",
+               "confidence": 0.7}
+    broken = {"node_id": 4, "generation": 1, "status": "broken", "reason": "loss is nan",
+              "confidence": 0.9}
+    assert latest_train_verdict(_rows(healthy, broken), 4, 1) == {
+        "status": "broken", "reason": "loss is nan", "confidence": 0.9}
+    assert latest_train_verdict(_rows(broken), 4, 0) is None       # a stale generation is not evidence
+    assert latest_train_verdict(_rows(broken), 5, 1) is None       # another node's verdict is not ours
+    assert latest_train_verdict([], 4, 1) is None
+    # Untrusted rows: a bool node_id, a string generation, an unknown status -> no verdict, not a guess.
+    assert latest_train_verdict(_rows({**broken, "node_id": True}), 1, 1) is None
+    assert latest_train_verdict(_rows({**broken, "generation": "1"}), 4, 1) is None
+    assert latest_train_verdict(_rows({**broken, "status": "melted"}), 4, 1) is None
+    # A non-finite confidence stays out of the dict instead of being reported as 0.0-with-authority.
+    assert latest_train_verdict(_rows({**broken, "confidence": float("nan")}), 4, 1) == {
+        "status": "broken", "reason": "loss is nan"}
+
+
+def test_judge_context_carries_curve_bar_direction_extras_and_train_verdict():
+    context = asha_judge_context(
+        node_id=7, generation=0, direction="max", metric_key="recall",
+        sample=IntermediateSample(value=0.01, resource_key="step", resource=2.0),
+        live_curve=[[1.0, 0.005], [2.0, 0.01]],
+        comparable_population=[0.05, 0.07, 0.09], quantile=0.5, under_streak=3,
+        endpoint_population=[0.6, 0.7, 0.8],
+        extra_metrics={"loss": 2.31}, train_verdict={"status": "broken", "confidence": 0.9,
+                                                     "reason": "loss is nan since step 40"})
+    assert "MAXIMIZE `recall`" in context and "higher is better" in context
+    assert "1 -> 0.005, 2 -> 0.01" in context                    # the SHAPE of the live curve
+    assert "step=2" in context and "recall=0.01" in context
+    assert "loss=2.31" in context                                # extra_metrics the rank test ignored
+    assert "0.05, 0.07, 0.09" in context                         # same-resource peers, worst -> best
+    assert "50% bar is 0.07" in context                          # the exact bar that flagged this node
+    assert "0.6, 0.7, 0.8" in context and "background" in context  # endpoints, explicitly discounted
+    assert "3 consecutive checks" in context                     # how long the flag has held
+    assert "broken" in context and "loss is nan since step 40" in context   # the train-monitor verdict
+
+
+def test_judge_context_degrades_without_optional_evidence():
+    # No curve, no extras, no train verdict, no resource on the sample: the judge simply gets less.
+    context = asha_judge_context(
+        node_id=1, generation=0, direction="min", metric_key="loss",
+        sample=IntermediateSample(value=1.5), live_curve=None,
+        comparable_population=[], quantile=0.5, under_streak=3, endpoint_population=[])
+    assert "MINIMIZE `loss`" in context and "loss=1.5" in context
+    assert "bar" not in context and "background" not in context
+
+
+# ------------------------------------------------------- the judge inside the loop
+
+def test_asha_verdict_needs_a_client_and_goes_through_the_shared_structured_judge():
+    offline = _AshaStub()                      # no developer at all (toy / offline path)
+    assert offline._asha_verdict("evidence") is None
+    live = _AshaStub(judge=_JudgeClient({"status": "watch", "reason": "still improving",
+                                         "confidence": 0.4}))
+    verdict = live._asha_verdict("evidence")
+    assert isinstance(verdict, AshaVerdict) and verdict.status == "watch"
+    assert live.judge.calls == 1 and "evidence" in live.judge.contexts[0]
+    # An endpoint failure is swallowed into "no verdict" — which cannot kill.
+    assert _AshaStub(judge=_JudgeClient(None))._asha_verdict("evidence") is None
+
+
+def _kill_setup(tmp_path):
+    """A node whose live curve is genuinely below three same-rung peers — the rank test fires."""
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text('{"recall": 0.01, "step": 1}\n', encoding="utf-8")
+    curves = [[[1.0, 0.05], [8.0, 0.80]], [[1.0, 0.07], [8.0, 0.70]], [[1.0, 0.09], [8.0, 0.60]]]
+    return wd, {"kind": "stdout_json", "key": "recall", "resource_key": "step"}, curves
+
+
+@pytest.mark.parametrize("verdict,killed", [
+    ({"status": "stop", "reason": "flat while peers climbed", "confidence": 0.95}, True),
+    ({"status": "stop", "reason": "maybe hopeless", "confidence": 0.5}, False),   # below threshold
+    ({"status": "watch", "reason": "behind but still climbing", "confidence": 0.99}, False),
+    ({"status": "continue", "reason": "gap is inside the peer spread", "confidence": 0.99}, False),
+    (None, False),                                       # endpoint failure => no verdict => no kill
+])
+def test_kill_happens_only_on_a_confident_stop_verdict(tmp_path, monkeypatch, verdict, killed):
+    wd, spec, curves = _kill_setup(tmp_path)
+    signal = {}
+    judge = _JudgeClient(verdict)
+    stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01, judge=judge)
+    _run_loop(stub, wd, spec, "max", signal, monkeypatch, finals=[0.8, 0.7, 0.6], curves=curves,
+              window=0.2, until=(lambda s: bool(signal.get("kill"))) if killed else None)
+
+    assert bool(signal.get("kill")) is killed
+    assert judge.calls >= 1, "the rank flag must reach the judge"
+    rows = [d for (t, d) in stub.store.events if t == EV_ASHA_VERDICT]
+    assert rows, "every judged rank flag records its decision, kill or not"
+    assert rows[0]["kill"] is killed
+    assert rows[0]["status"] == (verdict["status"] if verdict else "unavailable")
+    if killed:
+        assert signal.get("terminal_reason") == "asha_underperforming"
+        # the judge's own words ride the terminal explanation, next to the deterministic evidence.
+        assert "flat while peers climbed" in signal.get("reason", "")
+        assert "sibling observations at the same resource" in signal.get("reason", "")
+
+
+def test_the_judge_is_never_consulted_where_the_rank_test_would_not_kill(tmp_path, monkeypatch):
+    """The LLM cannot widen the kill set: with a judge that stops EVERYTHING, none of the cases the
+    deterministic rank test spares even reaches it."""
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    always_stop = {"status": "stop", "reason": "stop everything", "confidence": 1.0}
+    spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
+    curves = [[[1.0, 0.05], [8.0, 0.80]], [[1.0, 0.07], [8.0, 0.70]], [[1.0, 0.09], [8.0, 0.60]]]
+
+    # (a) the live curve is BETTER than the peers were at the same rung -> no rank flag.
+    (wd / "train.log").write_text('{"recall": 0.30, "step": 1}\n', encoding="utf-8")
+    healthy_signal, healthy_judge = {}, _JudgeClient(always_stop)
+    _run_loop(_AshaStub(kill=True, min_siblings=3, cadence=0.01, judge=healthy_judge), wd, spec,
+              "max", healthy_signal, monkeypatch, finals=[0.8, 0.7, 0.6], curves=curves, window=0.2)
+    assert healthy_signal.get("kill") is not True and healthy_judge.calls == 0
+
+    # (b) no declared resource_key -> only an endpoint rank, which may never stop a run.
+    (wd / "train.log").write_text('{"recall": 0.01}\n', encoding="utf-8")
+    endpoint_signal, endpoint_judge = {}, _JudgeClient(always_stop)
+    _run_loop(_AshaStub(kill=True, min_siblings=3, cadence=0.01, judge=endpoint_judge), wd,
+              {"kind": "stdout_json", "key": "recall"}, "max", endpoint_signal, monkeypatch,
+              finals=[0.8, 0.7, 0.6], curves=curves, window=0.2)
+    assert endpoint_signal.get("kill") is not True and endpoint_judge.calls == 0
+
+    # (c) too few same-resource peers -> the evidence floor is not met.
+    (wd / "train.log").write_text('{"recall": 0.01, "step": 1}\n', encoding="utf-8")
+    thin_signal, thin_judge = {}, _JudgeClient(always_stop)
+    _run_loop(_AshaStub(kill=True, min_siblings=3, cadence=0.01, judge=thin_judge), wd, spec, "max",
+              thin_signal, monkeypatch, finals=[0.8, 0.7, 0.6], curves=[curves[0], None, None],
+              window=0.2)
+    assert thin_signal.get("kill") is not True and thin_judge.calls == 0
+
+    # (d) the intervention itself is off -> advisory only, and no paid call is made either.
+    off_signal, off_judge = {}, _JudgeClient(always_stop)
+    _run_loop(_AshaStub(kill=False, min_siblings=3, cadence=0.01, judge=off_judge), wd, spec, "max",
+              off_signal, monkeypatch, finals=[0.8, 0.7, 0.6], curves=curves, window=0.2)
+    assert off_signal.get("kill") is not True and off_judge.calls == 0
+
+
+def test_grace_window_is_re_armed_when_the_judge_spares_the_node(tmp_path, monkeypatch):
+    """A spared node must earn the next consult with a fresh streak — otherwise the judge is asked
+    every tick until repetition eventually produces a 'stop' out of a borderline curve."""
+    wd, spec, curves = _kill_setup(tmp_path)
+    judge = _JudgeClient({"status": "watch", "reason": "still early", "confidence": 0.9})
+    stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01, judge=judge)
+    _run_loop(stub, wd, spec, "max", {}, monkeypatch, finals=[0.8, 0.7, 0.6], curves=curves,
+              window=0.3, until=lambda s: judge.calls >= 2)
+    ticks = len([d for (t, d) in stub.store.events if t == EV_ASHA_VERDICT])
+    assert judge.calls == ticks >= 1
+    # Every consult costs a full grace window (>2 underperforming ticks) — never one call per tick.
+    for row in [d for (t, d) in stub.store.events if t == EV_ASHA_VERDICT]:
+        assert row["under_streak"] == 3
+
+
+def test_judge_sees_the_train_monitor_verdict_when_one_exists(tmp_path, monkeypatch):
+    wd, spec, curves = _kill_setup(tmp_path)
+    judge = _JudgeClient({"status": "stop", "reason": "nan loss confirms it", "confidence": 0.9})
+    stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01, judge=judge)
+    # The sibling watchdog already published its health verdict for THIS node lifecycle …
+    stub.store.events.append((EV_TRAIN_MONITOR_ALERT, {
+        "node_id": 0, "generation": 0, "status": "broken",
+        "reason": "loss is nan since step 40", "confidence": 0.92}))
+    # … and one for a DIFFERENT node, which must not leak into this node's decision.
+    stub.store.events.append((EV_TRAIN_MONITOR_ALERT, {
+        "node_id": 9, "generation": 0, "status": "healthy", "reason": "other node is fine"}))
+    signal = {}
+    _run_loop(stub, wd, spec, "max", signal, monkeypatch, finals=[0.8, 0.7, 0.6], curves=curves,
+              window=0.2, until=lambda s: bool(signal.get("kill")))
+
+    assert judge.contexts, "the judge must have been consulted"
+    context = judge.contexts[0]
+    assert "loss is nan since step 40" in context and "broken" in context
+    assert "other node is fine" not in context
+    rows = [d for (t, d) in stub.store.events if t == EV_ASHA_VERDICT]
+    assert rows and rows[0]["train_monitor_status"] == "broken"   # legible in the durable record too
+
+
+def test_judge_context_reaches_the_prompt_without_a_train_verdict(tmp_path, monkeypatch):
+    wd, spec, curves = _kill_setup(tmp_path)
+    judge = _JudgeClient({"status": "watch", "reason": "early", "confidence": 0.6})
+    stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01, judge=judge)
+    _run_loop(stub, wd, spec, "max", {}, monkeypatch, finals=[0.8, 0.7, 0.6], curves=curves,
+              window=0.2, until=lambda s: judge.calls >= 1)
+    context = judge.contexts[0]
+    assert "health monitor" not in context          # nothing invented when the monitor never spoke
+    assert "recall=0.01" in context and "step=1" in context
+    assert "0.05, 0.07, 0.09" in context and "50% bar is 0.07" in context
+
+
+def test_kill_decision_appends_only_diagnostics_never_a_terminal(tmp_path, monkeypatch):
+    """Invariant #2 at this watchdog's boundary: the monitor NEVER writes a terminal. It records
+    fold-ignored diagnostics and hands the decision to `_evaluate` through `kill_signal`, which writes
+    the node's single `node_failed`."""
+    wd, spec, curves = _kill_setup(tmp_path)
+    signal = {}
+    stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01,
+                     judge=_JudgeClient({"status": "stop", "reason": "hopeless", "confidence": 0.95}))
+    _run_loop(stub, wd, spec, "max", signal, monkeypatch, finals=[0.8, 0.7, 0.6], curves=curves,
+              window=0.2, until=lambda s: bool(signal.get("kill")))
+
+    assert signal.get("kill") is True
+    kinds = {t for (t, _d) in stub.store.events}
+    assert kinds <= {EV_ASHA_RANK, EV_ASHA_VERDICT}, f"watchdog wrote non-diagnostic events: {kinds}"
+    assert kinds <= DIAGNOSTIC_EVENTS
+    # …and it stops watching after claiming, so a second tick cannot re-decide or re-spend.
+    assert len([d for (t, d) in stub.store.events if t == EV_ASHA_VERDICT]) == 1
+
+
+def test_verdict_reason_is_redacted_before_storage(tmp_path, monkeypatch):
+    wd, spec, curves = _kill_setup(tmp_path)
+    stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01,
+                     judge=_JudgeClient({"status": "stop", "reason": "token sk-secret in the log",
+                                         "confidence": 0.95}))
+    stub._redact = lambda text: text.replace("sk-secret", "[redacted]")
+    signal = {}
+    _run_loop(stub, wd, spec, "max", signal, monkeypatch, finals=[0.8, 0.7, 0.6], curves=curves,
+              window=0.2, until=lambda s: bool(signal.get("kill")))
+    rows = [d for (t, d) in stub.store.events if t == EV_ASHA_VERDICT]
+    assert rows and "sk-secret" not in rows[0]["reason"] and "[redacted]" in rows[0]["reason"]
+    assert "sk-secret" not in signal.get("reason", "")
+
+
+
+# ---------------------------------------- the durable log: one terminal, splice-neutral, offline replay
+
+def _kill_against_a_real_log(tmp_path, judge, *, extra_events=()):
+    """Drive the REAL watchdog loop against a REAL `EventStore` — no monkeypatched fold, no stub store.
+
+    The log is a genuine run prefix: a finished sibling whose `node_evaluated` carries the durable
+    per-rung `resource_curve` the rank test reads. The loop therefore ranks against real folded state and,
+    on a confident stop verdict, fills `kill_signal` exactly as it does in an eval. Returns the store and
+    the signal so the caller can assert what the DURABLE log looks like afterwards.
+    """
+    from looplab.events.eventstore import EventStore
+
+    workdir = tmp_path / "node_1"
+    workdir.mkdir()
+    (workdir / "train.log").write_text('{"metric": 0.01, "step": 1}\n', encoding="utf-8")
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    for node_id in (0, 1):
+        store.append("node_created", {"node_id": node_id, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {}}})
+    store.append("node_evaluated", {"node_id": 0, "metric": 0.95,
+                                    "resource_curve": [[1.0, 0.90], [8.0, 0.95]]})
+    for event_type, data in extra_events:
+        store.append(event_type, dict(data))
+
+    stub = _AshaStub(kill=True, min_siblings=1, cadence=0.01, judge=judge)
+    stub.store = store
+    signal: dict = {}
+
+    async def drive():
+        cancel = threading.Event()
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(AshaMonitorMixin._monitor_asha, stub, 1, 0, str(workdir), cancel,
+                          {"kind": "stdout_json", "key": "metric", "resource_key": "step"},
+                          "max", signal, None)
+            deadline = time.monotonic() + _LOOP_SETTLE_TIMEOUT_S
+            while not signal.get("kill") and time.monotonic() < deadline:
+                await anyio.sleep(0.005)
+            tg.cancel_scope.cancel()
+
+    anyio.run(drive)
+    return store, signal
+
+
+def test_a_judged_kill_leaves_one_terminal_and_a_replay_that_never_calls_the_llm(tmp_path, monkeypatch):
+    """The durable end of the contract, on a real event log.
+
+    Deliberately stops at the boundary this watchdog owns: it fills `kill_signal` and `_evaluate` writes
+    the node's ONE terminal (`engine/evaluate.py`, the `kill_signal.get("kill") and not ok` branch —
+    a single append followed by `return`). So the log here is exactly what that produces, and what must
+    hold of it is that the watchdog contributed only fold-IGNORED rows, that the node has exactly one
+    terminal, and that replaying it reconstructs the failed node WITHOUT the judge.
+    """
+    from looplab.events.replay import fold
+
+    judge = _JudgeClient({"status": "stop", "reason": "flat at 0.01 while the peer was at 0.90",
+                          "confidence": 0.95})
+    store, signal = _kill_against_a_real_log(tmp_path, judge)
+    assert signal.get("kill") is True and signal.get("terminal_reason") == "asha_underperforming"
+    assert judge.calls >= 1, "the rank flag must have reached the judge"
+
+    # The watchdog itself contributed ONLY fold-ignored diagnostics …
+    watchdog_rows = [e for e in store.read_all() if e.type in (EV_ASHA_RANK, EV_ASHA_VERDICT)]
+    assert watchdog_rows and {e.type for e in watchdog_rows} <= DIAGNOSTIC_EVENTS
+    verdicts = [e.data for e in watchdog_rows if e.type == EV_ASHA_VERDICT]
+    assert verdicts and verdicts[0]["status"] == "stop" and verdicts[0]["kill"] is True
+    assert not [e for e in store.read_all() if e.type in ("node_evaluated", "node_failed")
+                and e.data.get("node_id") == 1]
+
+    # … and `_evaluate` then writes the ONE terminal, naming the watchdog's reason.
+    store.append("node_failed", {"node_id": 1, "generation": 0, "reason": "asha_underperforming",
+                                 "error": "live watchdog stopped the run early: "
+                                          + str(signal.get("reason", ""))[:400],
+                                 "eval_seconds": 1.0})
+    events = list(store.read_all())
+    terminals = [e for e in events if e.type in ("node_evaluated", "node_failed")
+                 and e.data.get("node_id") == 1]
+    assert len(terminals) == 1 and terminals[0].type == "node_failed"
+    assert "flat at 0.01" in terminals[0].data["error"]      # the judge's words ride the terminal
+
+    # REPLAY reads that terminal and never re-invokes the judge. Break every path into the model first:
+    # if the fold touched one, this raises instead of quietly making a paid call.
+    def _boom(*_a, **_k):
+        raise AssertionError("replay must never invoke the ASHA judge")
+
+    monkeypatch.setattr(AshaMonitorMixin, "_asha_verdict", _boom)
+    monkeypatch.setattr("looplab.core.parse.parse_structured", _boom)
+    monkeypatch.setattr("looplab.trust.judge.structured_judge", _boom)
+    calls_before = judge.calls
+    state = fold(events)
+    assert state.nodes[1].status is NodeStatus.failed
+    assert state.nodes[1].error_reason == "asha_underperforming"
+    assert state.nodes[0].status is NodeStatus.evaluated and state.nodes[0].metric == 0.95
+    assert judge.calls == calls_before, "replay must be offline"
+
+    # SPLICE-NEUTRALITY: the judge appends from a CONCURRENT per-eval task, so its row's byte position is
+    # thread-dependent. Fold-ignored means that cannot matter — moving every EV_ASHA_VERDICT row, or
+    # dropping it as a pre-upgrade log has, must leave folded state identical.
+    def _projection(rows):
+        st = fold(list(rows))
+        return [(n.id, n.status, n.metric, n.error_reason) for n in st.nodes.values()]
+
+    baseline = _projection(events)
+    assert _projection([e for e in events if e.type != EV_ASHA_VERDICT]) == baseline
+    assert _projection([e for e in events if e.type == EV_ASHA_VERDICT]
+                       + [e for e in events if e.type != EV_ASHA_VERDICT]) == baseline
+    # A duplicate terminal from a corrupt/replayed log still folds to the SAME node (first wins).
+    assert _projection(events + [terminals[0]]) == baseline
+
+
+def test_the_judge_reads_the_train_monitor_verdict_off_a_real_log(tmp_path):
+    """`latest_train_verdict` against a real store, inside the real loop: the sibling watchdog's row is a
+    DIAGNOSTIC event the fold never carries, so this is the one path that proves the judge still sees it."""
+    judge = _JudgeClient({"status": "stop", "reason": "the nan loss confirms it", "confidence": 0.9})
+    _store, signal = _kill_against_a_real_log(
+        tmp_path, judge,
+        extra_events=[(EV_TRAIN_MONITOR_ALERT,
+                       {"node_id": 1, "generation": 0, "status": "broken",
+                        "reason": "loss is nan since step 40", "confidence": 0.92}),
+                      (EV_TRAIN_MONITOR_ALERT,
+                       {"node_id": 7, "generation": 0, "status": "healthy",
+                        "reason": "another node is fine", "confidence": 0.8})])
+    assert signal.get("kill") is True
+    context = judge.contexts[0]
+    assert "loss is nan since step 40" in context and "broken" in context
+    assert "another node is fine" not in context

@@ -1165,6 +1165,15 @@ class Node(BaseModel):
     # marker to distinguish a committed producer result from an unrelated build of the same Card.
     speculative: bool = Field(default=False, exclude=True)
     card_build_generation: Optional[int] = Field(default=None, ge=0, exclude=True)
+    # Durable "this lifecycle was terminalized BEFORE any evaluation was dispatched" receipt, stamped
+    # by the writer on the node's single `node_failed` terminal (additive data field, reader-defaulted
+    # -> old logs fold to False and every budget number is byte-identical). It is what lets the L3/L5
+    # node-budget REFUND (search/card_selection.py::is_unevaluated_speculative_discard) be proven from
+    # the event log rather than inferred from the absence of a workdir on disk, which replay cannot see.
+    # Fold-internal like its two speculative siblings: no public boundary distinguishes a discarded
+    # build from any other failed node. It rides the terminal itself, so "first terminal wins" already
+    # makes it order-tolerant — no second event has to be correlated with this one.
+    never_evaluated: bool = Field(default=False, exclude=True)
 
     @property
     def robust_metric(self) -> Optional[float]:

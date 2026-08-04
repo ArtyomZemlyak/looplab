@@ -81,6 +81,33 @@ The differentiator vs everything surveyed: existing OSS systems each hold *one* 
 
 ### E. Evaluation — *leakage-first trust layer* ([ADR-6](03-decisions.md))
 - **Leakage checker (primary)**: train/test **+ temporal + target** leakage auto-detect/correct (our genuine differentiator).
+
+> **⚠ Not true today (2026-08-04).** The **temporal and target** detectors have no shipped caller — only
+> the synthetic MLE-bench adapter defines `leakage_inputs()`, and the check is a once-per-run setup gate,
+> not a per-candidate step. A product decision is pending; the full annotation with the open question is
+> in this file's source next to this line.
+
+<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — "our genuine differentiator" is still the stated product edge
+(reasserted as recently as `docs/26-ouroboros-airi-analysis-2026-08-02.md:35`), but the temporal/target half
+has no shipped caller.
+WHAT THE CODE DOES: `engine/audit.py::_leakage_blocks` (:283) short-circuits unless the task defines `leakage_inputs()`,
+and the ONLY adapter that defines it is the SYNTHETIC `adapters/mlebench.py::leakage_inputs` (:229) — so
+`trust/leakage.py::target_leakage` and `::temporal_leakage` are never invoked by any shipped real task. It is also a ONCE-PER-RUN setup gate — a single `self._leakage_blocks()` call site inside the
+once-per-run setup block of `engine/orchestrator.py::run` — not the per-candidate pipeline step
+[02 §3.6](02-architecture.md) describes.
+ALREADY DECIDED, DO NOT RE-LITIGATE: the audit-only posture is deliberate — `trust_gate` defaults to
+`"audit"` and `code_leakage_detect` to `False` (`core/config.py:729,732`) per
+[doc 10 §trust_gate](10-autoresearch-improvement-research.md) (2026-07-02) and
+[doc 16 P1-7](16-architecture-code-review-2026-07-11.md) / [doc 17 §1](17-project-review-and-directions-2026-07-11.md)
+(2026-07-11: "do not enable hard gating by default until a labelled calibration corpus establishes
+precision"). The `thorough` profile turns the bundle on in one word.
+STILL OPEN: [doc 17:147-149](17-project-review-and-directions-2026-07-11.md) already recorded "the
+temporal/target-leakage differentiator (ADR-6's stated edge) has no live caller … the claimed moat needs
+one adapter that exercises it end-to-end", and three weeks later no adapter has arrived.
+NEEDS A BUSINESS DECISION: do we fund a real split-bearing adapter that calls `leakage_inputs()` end-to-end
+(making temporal/target leakage a genuine, demonstrable differentiator), or do we stop marketing
+temporal/target leakage detection as a differentiator and describe it as an unwired capability until one
+exists? -->
 - **Consistent evaluation**: fixed splits/seeds across candidates; select on a trustworthy validation metric, not test (the +9–15 pt lever).
 - **Variance gating, tiered**: robust CV everywhere; multi-seed confirmation only at the top-k promotion frontier (not p<0.01 on every node).
 - *Optional (open-ended mode):* co-evolving anti-reward-hack evaluator — only when the agent defines its own metric.
@@ -108,14 +135,64 @@ The differentiator vs everything surveyed: existing OSS systems each hold *one* 
 - Accept pre-existing artifacts (web pages, tables, PDFs, files, prior runs); **analyze against the goal first**, then plan.
 - Pre-phase: ingest (Docling/GROBID/trafilatura) → web/literature grounding (MLE-STAR style) → goal-conditioned analysis + novelty gate → **ranked experiment backlog**; re-ground as results arrive. Immutable goal anchor.
 
+> **Superseded (2026-06-21, [ADR-6](03-decisions.md) row "ADR-3 ingestion pre-phase"; recorded shipped
+> 2026-06-22).** The heavy pipeline above was deliberately lightened to **retrieve-and-seed (≈4 candidates)
+> + data profiling** — see §10 P3.5 below, which already carries the lightened scope.
+> [05-build-decisions.md §275](05-build-decisions.md) additionally records "GraphRAG implied as built
+> (02/04) → **deferred/cut**", and [06-implementation-plan.md I16](06-implementation-plan.md) records what
+> actually shipped: `core/profile.py` + a `data_profiled` event emitted by the orchestrator. There is no
+> `Ingestion` class, `GoalConfig`, `goal_anchor`, `retrieve_more`, `Backlog`, Elo tournament, Docling,
+> GROBID or trafilatura in the code, and none is a declared dependency. Web/literature grounding ships
+> separately and **off by default** ([doc 16:659](16-architecture-code-review-2026-07-11.md),
+> [doc 17:195](17-project-review-and-directions-2026-07-11.md)).
+
 ### K. Configuration & backends
 - One **LiteLLM** layer; per-role model config; local/API switch without code changes.
+
+> **⚠ Not true today (2026-08-04).** LoopLab does **not** ship LiteLLM — `litellm` is not a dependency and
+> no production path constructs `LiteLLMClient`. What ships is one layer over **any OpenAI-compatible
+> `/v1` endpoint** (Ollama, vLLM, SGLang, OpenAI). See [LLM & coding agents](guide/llm-and-agents.md).
+> A positioning decision is pending; the full annotation is in this file's source next to this line.
+
+<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — "one LiteLLM layer" (here, and §3 goal 3 above, and the
+"Backend flexibility" NFR in §7) is still the stated architecture and competitive edge, and NO later
+document ever revised it: as recently as the canonical plan
+[doc 17:2067](17-project-review-and-directions-2026-07-11.md) (2026-07-11) the claim is restated as fact
+("LoopLab routes every role through LiteLLM and ships no model"), and doc 25 (2026-08-01) reviews
+`core/llm.py` line by line without mentioning LiteLLM once.
+WHAT THE CODE DOES: `litellm` is in NEITHER `pyproject.toml` `dependencies` NOR any optional extra, so it
+is never installed. `core/llm.py::make_llm_client` — the one Settings->client factory used by the CLI,
+server, adapters and the agent loop — has a single `return OpenAICompatibleClient(...)`, i.e. it returns
+the OpenAI-SDK-over-httpx client UNCONDITIONALLY. `core/llm.py::LiteLLMClient` exists but is constructed
+only in two tests (`tests/test_llm_broker.py`, `tests/test_openai_client.py`); no production path reaches
+it. The module docstring and the `OpenAICompatibleClient` docstring still call LiteLLM "the documented
+production gateway", which is what these docs document — a circular citation, not evidence.
+CONSEQUENCE FOR THE CLAIM: "100+ providers" ([02 §9](02-architecture.md)) is not what ships. What ships is
+"any OpenAI-compatible `/v1` endpoint" (Ollama, vLLM, SGLang, OpenAI itself) — genuinely broad, but a
+different and smaller promise, and it is the promise the user guide already makes
+(`guide/llm-and-agents.md`, `guide/quickstart.md`). The ADR-11 §1 secrets design (gateway tokens, never
+provider keys) rests on the LiteLLM Proxy and therefore does not ship either.
+NEEDS A BUSINESS DECISION: is LiteLLM still the intended backend — in which case declare it as a
+dependency, route `make_llm_client` through it, and keep the 100+-provider claim — or is
+"OpenAI-compatible endpoint only" the actual product, in which case the LiteLLM claim must be struck from
+01/02/03 and from the marketing position, and ADR-11's gateway-token secrets model needs a replacement?
+(Operator instruction 2026-08-04: LiteLLM stays AS IT IS in code for now; this is a docs/positioning
+decision, not a code change.) -->
 - **Pluggable research algorithm** ([ADR-2](03-decisions.md)): the search strategy is a config-selected plugin (`GreedyTree`/`Evolutionary`/`MCTS` or your own) — overridable without forking.
 - **Pluggable role backends** ([ADR-7](03-decisions.md)): each role is `backend: llm` or `backend: cli_agent` (OpenHands/Aider/SWE-agent/Claude Code) — config-selected, no fork.
 - Everything common is config-driven; deep changes go through documented plugin interfaces.
 
 ### L. Capability layer — tools & skills ([ADR-9](03-decisions.md))
 - **MCP capability bus**: engine capabilities (`query_archive`, `profile_data`, `check_leakage`, `run_code`) exposed as MCP servers, consumed identically by our roles **and** external agent backends — one capability, one place, identical results.
+> **⚠ Not true today (2026-08-04).** No MCP **server** was ever built. LoopLab ships an optional MCP
+> *client* used by the owner chat assistant only, and `mcp` is not a declared dependency. A product
+> decision is pending; the full annotation is on [ADR-9](03-decisions.md).
+
+<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — see the full annotation on [ADR-9](03-decisions.md). In short:
+LoopLab ships an MCP *client* (`tools/mcp_tools.py`), never a server; `FastMCP`/`stdio_server`/`mcp.server`
+have zero hits in `looplab/`; none of the four tool names above exists anywhere in the code; and `mcp` is
+not a declared dependency, so on a stock install the path degrades to contributing no tools at all. -->
+
 - **Agent Skills** (`SKILL.md`): ML recipes (K-fold CV, Muon, leakage checks) with progressive disclosure; the old seed-knowledge library migrates here. Per-role tool allow-lists as a security boundary.
 
 ### M. Knowledge & memory ([ADR-10](03-decisions.md))
@@ -155,8 +232,24 @@ Concrete capabilities the system must expose (interfaces detailed in the archite
 - `VarianceGate.confirm(solution, n_seeds) -> GateResult` — statistical promotion test.
 - `Evaluator.add_exploit_rule(rule)` — harden the evaluator (co-evolution).
 
+> **Superseded (2026-06-21, [ADR-6](03-decisions.md)).** The co-evolving evaluator — and with it
+> `ExploitRule`/`add_exploit_rule` — was demoted to "optional, open-ended / self-metric mode only" and was
+> never built: neither symbol exists in the code. The shipped analogue is the static reward-hack detector
+> set (`trust/reward_hack.py`, `reward_hack_detect`, default `False`); see
+> [02 §13](02-architecture.md) for the corrected extension-point row.
+
 **Search/memory layer**
 - `SearchPolicy.select(dag, archive) -> Node` — pick where to expand next (explore/exploit). Also `.expand`, `.should_merge`, `.stop` (see [02 §3.7](02-architecture.md)).
+
+> **Superseded (shipped shape, recorded 2026-06-22 → 2026-07-11).** The shipped protocol is
+> **one method** — `search/policy.py:60-61::SearchPolicy.next_actions(state) -> list[dict]` — not
+> `select`/`expand`/`should_merge`/`stop`. The one-method shape is the interface every later doc uses:
+> [07-architecture-review.md:43](07-architecture-review.md) (first sighting, 2026-06-22),
+> [A7-strategist-design.md:129](A7-strategist-design.md) (2026-06-24, names the call site), and
+> [16-architecture-code-review-2026-07-11.md:617](16-architecture-code-review-2026-07-11.md)
+> ("`SearchPolicy` promises only `next_actions`"). The **registry** half of
+> [ADR-2](03-decisions.md) shipped as designed (`search/policy.py::_REGISTRY` + `make_policy`,
+> config-selectable, no core edit).
 - `Archive.add(entry)` / `.query(context) -> list[Entry]` / `.merge(a, b) -> Idea`.
 
 **Orchestration layer**
@@ -171,6 +264,10 @@ Concrete capabilities the system must expose (interfaces detailed in the archite
 
 **Ingestion layer** ([ADR-3](03-decisions.md))
 - `Ingestion.goal_anchor` / `.ingest` / `.retrieve_more` / `.analyze` / `.plan -> Backlog`.
+
+> **Superseded (2026-06-21, [ADR-6](03-decisions.md)) — see the pointer under §5.J above.** None of these
+> symbols exists in the code; the shipped grounding pre-phase is the data profiler (`core/profile.py`
+> + the `data_profiled` event, [06 I16](06-implementation-plan.md)).
 
 **Tracking layer** ([ADR-4](03-decisions.md))
 - `Tracker.log_run` / `.set_lineage(parent_ids)` / `.reproduce(run_id)` / `.branch_from(run_id, overrides)`.

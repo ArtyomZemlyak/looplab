@@ -453,7 +453,8 @@ def run(
     memory_dir: Optional[str] = typer.Option(None, help="Cross-run case memory dir."),
     max_seconds: Optional[float] = typer.Option(None, help="Wall-clock budget; abort when exceeded."),
     ablate_every: Optional[int] = typer.Option(None, help="Ablation refinement every N improves (0=off)."),
-    require_approval: bool = typer.Option(False, help="HITL: pause for `approve` before finishing."),
+    require_approval: Optional[bool] = typer.Option(
+        None, help="HITL: pause for `approve` before finishing."),
     confirm_top_k: Optional[int] = typer.Option(None, help="Confirm top-k under multiple seeds."),
     confirm_seeds: Optional[int] = typer.Option(None, help="Seeds for the confirmation pass."),
     crash_after: Optional[int] = typer.Option(None, hidden=True,
@@ -508,13 +509,21 @@ def run(
                         ("llm_model", model), ("knowledge_dir", knowledge_dir),
                         ("memory_dir", memory_dir), ("max_seconds", max_seconds),
                         ("ablate_every", ablate_every), ("confirm_top_k", confirm_top_k),
-                        ("confirm_seeds", confirm_seeds)):
+                        ("confirm_seeds", confirm_seeds),
+                        # TRI-STATE here like every other typed bool on this command, and for the
+                        # same reason: `Optional[bool]` defaulting to None makes
+                        # `--no-require-approval` forward FALSE instead of being indistinguishable
+                        # from "flag absent". Declared `bool` + a separate `if require_approval:`, it
+                        # could only ever forward the TRUE case, so the documented "CLI over file
+                        # over environment" precedence (docs/guide/cli-reference.md) held in ONE
+                        # direction: a `require_approval: true` config plus `--no-require-approval`
+                        # still paused for an `approve` the operator had explicitly opted out of, and
+                        # the run ended finished=False, blocked forever.
+                        ("require_approval", require_approval)):
         if value is not None:
             typed[name] = value
     if agent_surface is not None:
         typed["agent_surface"] = [g.strip() for g in agent_surface.split(",") if g.strip()]
-    if require_approval:
-        typed["require_approval"] = True
     try:
         sets = appconfig.parse_sets(set_)
     except ValueError as e:

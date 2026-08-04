@@ -3,7 +3,9 @@
 ## Requirements
 
 - **Python ≥ 3.11**
-- A POSIX or Windows shell. The local engine needs **no Docker and no network** by default.
+- A POSIX or Windows shell. The local engine needs **no Docker**. It needs **no network either — but
+  only with `--backend toy`**: since 2026-08-04 `backend` defaults to `llm` (operator decision,
+  `core/config.py:927`), so a plain `looplab run` expects a reachable LLM endpoint.
 
 ## Install
 
@@ -66,7 +68,7 @@ These are **not Python extras** — they're external tools you point LoopLab at:
 ```bash
 python -c "import looplab; print(looplab.__version__)"   # 0.1.0
 looplab --help                                            # CLI is on PATH
-looplab run examples/toy_task.json --out runs/check --max-nodes 4
+looplab run examples/toy_task.json --out runs/check --max-nodes 4 --backend toy
 ```
 
 If `looplab` is not found after install, the same CLI is always reachable as

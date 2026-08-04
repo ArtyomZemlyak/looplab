@@ -473,8 +473,16 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # the first paid call instead would mean discovering the missing key partway into a run. Optional
     # offline consumers (embedding/Memora) retain their own hash/lexical fallback and are not strict.
     validate_bound_profiles(settings)
+    # The calibrated lane is the toy benchmark and its replays ONLY. A receipt supplied alongside a
+    # real Dataset/Repo/Command workload used to drag the whole run into the offline measurement
+    # profile (backend="toy", every optional subsystem off) — a run that could not do the operator's
+    # work at all. Since a receipt no longer authorizes anything on a real workload (Engine admits
+    # positive speculation_depth without one), it must not rewrite that run's settings either; the
+    # Engine still revalidates the receipt itself and refuses a stale/forged one.
+    from looplab.adapters.toytask import ToyTask
     narrow_speculation_runtime = bool(
-        speculation_gate_calibration or settings.speculation_gate_receipt)
+        speculation_gate_calibration
+        or (settings.speculation_gate_receipt and type(task) is ToyTask))
     if narrow_speculation_runtime:
         # A public receipt authorizes only the offline source-owned profile that produced it. The
         # helper intentionally preserves max_nodes, treatment depth and receipt placement.
@@ -498,6 +506,14 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         speculation_runtime_scope_digest(settings.masked_snapshot())
         if narrow_speculation_runtime else None
     )
+    # …and fail here, still before any role is built, when a required role's endpoint is UNREACHABLE
+    # rather than merely uncredentialed. Same gate, same reason, one step later: `settings` is final
+    # only after the calibration profile above has been applied, so the probe tests the endpoints the
+    # roles will actually use. Every LLM role degrades silently on a transport failure — a dead
+    # endpoint otherwise yields N identical empty fallback nodes, a flat metric and finished=True.
+    # See `agents/preflight.py::preflight_role_endpoints` for the measurement.
+    from looplab.agents.preflight import preflight_role_endpoints
+    preflight_role_endpoints(settings)
     role_builder = (_make_calibration_roles if narrow_speculation_runtime else make_roles)
     researcher, developer = role_builder(task, settings, run_dir)
     # Agentic-foresight tools: run-introspection (own experiments) + data facts, so the ranker can

@@ -363,17 +363,31 @@ def test_engine_enables_shared_total_only_for_positive_canonical_value(tmp_path)
 def test_env_legacy_parallel_build_does_not_enable_shared_broker_end_to_end(tmp_path, monkeypatch):
     """End-to-end: a config/startup load with only LOOPLAB_PARALLEL_BUILD sets the build width but must
     NOT enable the finite shared broker — the legacy value cannot silently serialize every provider call
-    through the env→Settings→Engine path."""
+    through the env→Settings→Engine path.
+
+    The canonical default moved `None` -> `0` (AUTO) on 2026-08-04. The property is asserted where it
+    actually lives — the BROKER'S OWN `total` — rather than on the literal `Settings` default: AUTO is
+    not the positive canonical value the shared budget opts in on, so the total still resolves to None.
+    AUTO does now SHADOW the legacy width at startup (canonical wins over legacy whenever it is set),
+    so the "legacy width is honored" half is asserted where that fallback is still live: with the
+    canonical axis explicitly unset."""
     from looplab.core.config import Settings
     from looplab.engine.options import EngineOptions
 
     monkeypatch.setenv("LOOPLAB_PARALLEL_BUILD", "3")
     settings = Settings()
-    assert settings.llm_parallel is None and settings.parallel_build == 3
+    assert settings.llm_parallel == 0 and settings.parallel_build == 3   # AUTO, not promoted to 3
 
     engine = _engine(tmp_path / "env-legacy", options=EngineOptions.from_settings(settings))
-    assert engine._llm_parallel == 3                        # legacy build width is honored
-    assert engine._llm_broker.snapshot()["total"] is None   # ...but the shared broker stays off
+    assert engine._llm_broker.snapshot()["total"] is None   # THE property: no finite shared budget
+    # AUTO settles the build fan-out to the settled eval width (hardware-derived), never to a total.
+    assert engine._llm_parallel == engine._eval_parallel
+
+    # Canonical unset -> the legacy build width is still honored as the fan-out, still with no total.
+    legacy_only = _engine(tmp_path / "env-legacy-unset",
+                          options=EngineOptions.from_settings(Settings(llm_parallel=None)))
+    assert legacy_only._llm_parallel == 3                       # legacy build width is honored
+    assert legacy_only._llm_broker.snapshot()["total"] is None  # ...but the shared broker stays off
 
 
 def test_canonical_operator_override_reconfigures_broker_but_legacy_does_not(tmp_path):

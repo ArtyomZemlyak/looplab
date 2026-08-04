@@ -70,8 +70,11 @@ before the provider or the command can be reached. Recording only the *result* m
 "the model answered" and "the memo is durable" indistinguishable from "nothing happened", and resume
 bought the same think, the same build, or the same install a second time. With the attempt on disk:
 
-- a research trigger is spent by its attempt, so an interrupted think is simply lost rather than
-  re-paid (ask again explicitly if you still want it);
+- a research trigger is spent by its attempt, so a think interrupted by a **process kill** is simply
+  lost rather than re-paid (ask again explicitly if you still want it). The ordinary case — the
+  evaluation the think overlaps finishing first — is not a loss: the receipt, the provider call and
+  the memo are one indivisible step, so a think that reached the provider always lands its memo
+  before the eval window closes;
 - a Card-build request that carries an attempt from a dead process is **quarantined** — closed and
   moved to the serial path — instead of silently re-issued to a provider;
 - `run_setup` is exactly-once for a command that reported an outcome and at-least-once across a kill
@@ -551,8 +554,8 @@ untrusted tier.
   rank (break near-ties toward the more divergent candidate), and the novelty gate (engage a soft
   dedup + one informed re-propose even when the static gate is off) — so novelty pressure is one
   meta-decision, applied coherently, and always via the LLM roles rather than a hard-coded rule.
-- **Card-driven selection** (`card_driven_selection`, off by default) — lets the receipt-backed Card
-  queue own the next macro action instead of the policy/pilot arm. The run-start record pins this
+- **Card-driven selection** (`card_driven_selection`, on by default) — the receipt-backed Card
+  queue owns the next macro action instead of the policy/pilot arm. The run-start record pins this
   choice, and Card authority wins if `agent_drives_actions` is also enabled. The Strategist can shape
   the separate atomic `card_scoring` treatment (explore/balanced/exploit plus bounded novelty and
   coverage weights); it ranks only Cards that have already passed durable readiness and live-anchor

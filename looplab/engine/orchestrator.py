@@ -95,7 +95,7 @@ from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limi
 from looplab.search.card_selection import (
     META_CARD_ID, SpeculativeSelectionContext, card_action as projected_card_action,
     card_budget_used, card_next_actions, card_selection_set, eligible_cards,
-    forced_card_actions, speculative_raw_actions,
+    forced_card_actions, refunded_node_reservations, speculative_raw_actions,
 )
 from looplab.search.speculation_calibration import (
     SPECULATION_CALIBRATION_PROFILE_DIGEST,
@@ -401,6 +401,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         asha_live_kill = _opt("asha_live_kill")
         asha_live_quantile = _opt("asha_live_quantile")
         asha_live_min_siblings = _opt("asha_live_min_siblings")
+        asha_live_kill_confidence = _opt("asha_live_kill_confidence")
         timeout = _opt("timeout")
         sweep_timeout_mult = _opt("sweep_timeout_mult")
         eval_stall_timeout_s = _opt("eval_stall_timeout_s")
@@ -682,9 +683,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # both roles); `agent_drives_actions` additionally lets it pick the next macro action.
         self.unified_agent = unified_agent
         self.agent_drives_actions = unified_agent and agent_drives_actions
-        # The receipt-backed Card authority wins when both opt-in selectors are enabled. Letting the
+        # The Card authority wins when both opt-in selectors are enabled. Letting the
         # free-form agent arm pre-empt it would silently bypass the atomic existing-work claim below.
         self.card_driven_selection = bool(card_driven_selection)
+        # GPU pool + max_parallel=0 AUTO. Multi-GPU boxes were used at 1/N: a single-command eval pins
+        # itself to one GPU (or DataParallel-deadlocks on cleanup), leaving the others idle. To actually
+        # parallelize, each concurrent eval is pinned to a DISTINCT GPU via CUDA_VISIBLE_DEVICES (see
+        # evaluate.py::_evaluate); `max_parallel=0` means AUTO — run one experiment per detected GPU.
+        # Settled HERE, ahead of the Layer-5 admission block below, because `speculation_depth = -1`
+        # (AUTO) resolves off the settled eval width and the resolved integer is what the admission
+        # envelope, the runtime-scope pin and `run_started` all have to agree on.
+        self._gpu_ids: list[int] = _detect_gpu_ids()
+        self._gpu_physical_ids, self._gpu_mem = detect_gpu_inventory(self._gpu_ids)
+        if _eval_parallel_value == 0:                    # AUTO: the agent/operator lets the box decide
+            _eval_parallel_value = max(1, len(self._gpu_ids))
+        self._eval_parallel = max(1, int(_eval_parallel_value))
+        # Now that eval_parallel is settled, resolve llm_parallel (0 = AUTO = eval_parallel), so a build
+        # fan-out never exceeds what we can concurrently evaluate.
+        self._llm_parallel = self._resolve_llm_parallel(self._llm_parallel_startup_opt)
+        # AUTO (-1) follows the same settled width; every other value is used as spelled. Resolving
+        # BEFORE the local is read again keeps one settled integer flowing into the envelope checks,
+        # the runtime-scope digest and the run_started pin — a hardware-derived depth must never reach
+        # the durable log, or replay on another box would rebuild a different search treatment.
+        speculation_depth, self._speculation_depth_auto = self._resolve_speculation_depth(
+            speculation_depth)
         # Keep a settled, bounded scalar for the Layer-5 producer/consumer seam. Zero is a hard
         # off-switch; no task group/request event is allowed to infer a non-zero depth from hardware.
         self.speculation_depth = max(0, min(64, int(speculation_depth or 0)))
@@ -868,75 +890,121 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             from looplab.search.speculation_quality import speculation_implementation_digest
             self._speculation_implementation_digest = speculation_implementation_digest()
         elif self.card_driven_selection and self.speculation_depth > 0:
-            from looplab.adapters.toytask import ToyTask
+            # WHY THIS IS ADMITTED ON ANY TaskAdapter (2026-08-04 operator decision; this block used
+            # to additionally require `workload_scope == "quadratic_toy"` AND `type(task) is ToyTask`,
+            # so every real Dataset/Repo/Command workload was refused and the public knob only ever
+            # replayed its own benchmark):
+            #
+            # Card speculation pre-builds the code for the experiment PREDICTED to be selected next.
+            # A build whose prediction misses is DISCARDED BEFORE IT EVER RUNS — the discard is a
+            # `superseded` terminal appended from `_drop_stale_speculation`, which only reaches a node
+            # that is still `pending` on a fresh fold and not in `eval_inflight`, so no sandbox, no
+            # workdir and no GPU second was ever spent on it. Its whole cost is one Developer call.
+            # The toy-only fence was never about that cost. It existed because a discarded build still
+            # consumed a slot of the run's NODE budget, so the same budget bought fewer real
+            # experiments: measured at equal task/seed/budget with speculation the only variable, the
+            # baseline evaluated 12/12 nodes while the depth-1 treatment evaluated 9/12 with three
+            # `superseded` discards and finished ~2.6% worse. That 2.6% IS the `normalized_regret` the
+            # calibration gate bounds — the gate protected the EXPERIMENT BUDGET, not search
+            # correctness. `search/card_selection.py::is_unevaluated_speculative_discard` now refunds
+            # exactly that slot (and `_hard_node_reservation_limit` refunds the matching physical
+            # reservation), so the harm the evidence measured is gone and demanding per-workload
+            # evidence that "the harm is small" is ceremony.
+            #
+            # THE PROPERTY THIS ARGUMENT DEPENDS ON — a speculative miss is provably cheap ONLY while
+            # it never consumed a real evaluation. If any future path lets a speculative build reach
+            # an evaluation before its selection is confirmed, that is real GPU time and MUST NOT be
+            # admitted on this reasoning. It is asserted, not hoped for, at the single dispatch funnel:
+            # `engine/evaluate.py::_evaluate` -> `_assert_speculative_selection_confirmed`.
             if not self.run_dir.name.strip():
                 raise ValueError("positive Card speculation requires a non-empty run id")
-            if not self.speculation_gate_receipt:
+            if self._policy_name != SPECULATION_POLICY_SCOPE:
+                # Not a workload fence: the speculative freshness test asks the POLICY for the
+                # counterfactual next action, and `greedy` is the one policy whose counterfactual the
+                # Card scorer/selector was built and measured against.
                 raise ValueError(
-                    "positive speculation_depth requires speculation_gate_receipt from "
-                    "`looplab speculation-gate`"
+                    f"Card speculation requires policy={SPECULATION_POLICY_SCOPE!r}, "
+                    f"got {self._policy_name!r}"
                 )
             from looplab.search.speculation_quality import (
-                speculation_task_profile_digest,
-                validated_speculation_gate_receipt,
+                speculation_implementation_digest,
+                speculation_product_authority_digest,
             )
-            _gate_receipt = validated_speculation_gate_receipt(
-                self.speculation_gate_receipt,
-            )
-            runtime_errors, expected_runtime_scope = _narrow_runtime_envelope_errors()
-            if (
-                runtime_errors
-                or _gate_receipt is None
-                or _gate_receipt.get("require_gpu") is not True
-                or not _gate_receipt.get("gpu_inventory")
-                or _gate_receipt.get("policy_scope") != SPECULATION_POLICY_SCOPE
-                or type(_gate_receipt.get("admitted_depth")) is not int
-                or _gate_receipt.get("admitted_depth") != self.speculation_depth
-                or type(_gate_receipt.get("admitted_max_nodes")) is not int
-                or _gate_receipt.get("admitted_max_nodes") != max_nodes
-                or _gate_receipt.get("runtime_scope_sha256") != expected_runtime_scope
-                or _gate_receipt.get("calibration_profile_digest")
-                != SPECULATION_CALIBRATION_PROFILE_DIGEST
-                or _gate_receipt.get("workload_scope") != "quadratic_toy"
-                # The receipt is intentionally scoped to the shipped quadratic adapter, not merely
-                # to an arbitrary TaskAdapter/subclass that can spoof the same model_dump while
-                # executing a different workload.
-                # CODEX AGENT: the public positive-depth path currently admits only the calibration
-                # toy itself; every real Dataset/Repo/Command TaskAdapter is rejected here. Thus the
-                # generic Settings/UI knob is not a product rollout at all, only a replay of its own
-                # benchmark. Keep it explicitly maintainer-only or define workload-scoped evidence
-                # before users can reasonably interpret speculation_depth as usable functionality.
-                or type(task) is not ToyTask
-                or _gate_receipt.get("task_profile_sha256")
-                != speculation_task_profile_digest(task)
-                or not isinstance(_gate_receipt.get("implementation_digest"), str)
-                or not _gate_receipt.get("implementation_digest")
-                or self._policy_name != SPECULATION_POLICY_SCOPE
-            ):
-                raise ValueError(
-                    "speculation_gate_receipt is stale, invalid, non-GPU, policy/depth-mismatched, "
-                    "runtime-scope/max-nodes-mismatched, or does not pass the current "
-                    "scorer/search-quality gates"
+            if self.speculation_gate_receipt:
+                # A receipt is OPTIONAL now, but supplying one is a claim that must hold: it is
+                # revalidated end-to-end (schema, thresholds, self-digest, current implementation and
+                # environment digests, and a full recomputation from its own raw paired run dirs), so
+                # a stale or forged receipt is still refused — loudly, rather than being ignored.
+                from looplab.adapters.toytask import ToyTask
+                from looplab.search.speculation_quality import (
+                    speculation_task_profile_digest,
+                    validated_speculation_gate_receipt,
                 )
-            _guard_calibrated_role_factory()
-            self._speculation_gate_receipt_digest = _gate_receipt["self_digest"]
-            self._speculation_implementation_digest = _gate_receipt["implementation_digest"]
+                _gate_receipt = validated_speculation_gate_receipt(
+                    self.speculation_gate_receipt,
+                )
+                if (
+                    _gate_receipt is None
+                    or _gate_receipt.get("require_gpu") is not True
+                    or not _gate_receipt.get("gpu_inventory")
+                    or _gate_receipt.get("policy_scope") != SPECULATION_POLICY_SCOPE
+                    or _gate_receipt.get("calibration_profile_digest")
+                    != SPECULATION_CALIBRATION_PROFILE_DIGEST
+                    or _gate_receipt.get("workload_scope") != "quadratic_toy"
+                    or not isinstance(_gate_receipt.get("implementation_digest"), str)
+                    or not _gate_receipt.get("implementation_digest")
+                ):
+                    raise ValueError(
+                        "speculation_gate_receipt is stale, invalid, non-GPU, policy-mismatched, "
+                        "or does not pass the current scorer/search-quality gates"
+                    )
+                if type(task) is ToyTask:
+                    # CALIBRATED REPLAY LANE. Re-running the benchmark's own workload under its own
+                    # receipt still gets the full narrow envelope: the exact Settings profile, roles,
+                    # policy, sandbox, treatment depth, node budget and runtime-scope digest the
+                    # evidence was measured under. Weakening this lane would let a receipt earned on
+                    # one measured runtime authorize a different one under the same name.
+                    runtime_errors, expected_runtime_scope = _narrow_runtime_envelope_errors()
+                    if (
+                        runtime_errors
+                        or type(_gate_receipt.get("admitted_depth")) is not int
+                        or _gate_receipt.get("admitted_depth") != self.speculation_depth
+                        or type(_gate_receipt.get("admitted_max_nodes")) is not int
+                        or _gate_receipt.get("admitted_max_nodes") != max_nodes
+                        or _gate_receipt.get("runtime_scope_sha256") != expected_runtime_scope
+                        # The receipt is scoped to the shipped quadratic adapter, not merely to an
+                        # arbitrary TaskAdapter/subclass that can spoof the same model_dump while
+                        # executing a different workload.
+                        or _gate_receipt.get("task_profile_sha256")
+                        != speculation_task_profile_digest(task)
+                    ):
+                        raise ValueError(
+                            "speculation_gate_receipt is stale, invalid, non-GPU, "
+                            "policy/depth-mismatched, runtime-scope/max-nodes-mismatched, or does "
+                            "not pass the current scorer/search-quality gates"
+                        )
+                    _guard_calibrated_role_factory()
+                    self._speculation_runtime_scope_sha256 = expected_runtime_scope
+                # ...on any other workload the receipt binds nothing to this run: it attests that the
+                # benchmark passes on this build, which is exactly what it measured. No runtime-scope
+                # pin is minted, because none was measured for this workload.
+                self._speculation_gate_receipt_digest = _gate_receipt["self_digest"]
+                self._speculation_implementation_digest = _gate_receipt["implementation_digest"]
+            else:
+                # PRODUCT LANE — the operator's setting is the whole authority. What is still pinned
+                # durably is the run's own IDENTITY, so a resume cannot reinterpret a speculative
+                # prefix under different code: the implementation digest (same value the receipt lane
+                # pins), the policy scope, and a lane token that a receipt-authorized log can never
+                # match. `_require_pinned_speculation_receipt` compares all three on every re-entry.
+                self._speculation_implementation_digest = speculation_implementation_digest()
+                self._speculation_gate_receipt_digest = speculation_product_authority_digest(
+                    policy_scope=SPECULATION_POLICY_SCOPE,
+                    implementation_digest=self._speculation_implementation_digest,
+                    task_kind=str(getattr(task, "kind", "") or ""),
+                )
             self._speculation_policy_scope = SPECULATION_POLICY_SCOPE
-            self._speculation_runtime_scope_sha256 = expected_runtime_scope
             self._speculation_gate_admitted = True
         self._strategy_fidelity: Optional[str] = None   # None => use the Idea's own profile
-        # GPU pool + max_parallel=0 AUTO. Multi-GPU boxes were used at 1/N: a single-command eval pins
-        # itself to one GPU (or DataParallel-deadlocks on cleanup), leaving the others idle. To actually
-        # parallelize, each concurrent eval is pinned to a DISTINCT GPU via CUDA_VISIBLE_DEVICES (see
-        # evaluate.py::_evaluate); `max_parallel=0` means AUTO — run one experiment per detected GPU.
-        self._gpu_ids: list[int] = _detect_gpu_ids()
-        self._gpu_physical_ids, self._gpu_mem = detect_gpu_inventory(self._gpu_ids)
-        if _eval_parallel_value == 0:                    # AUTO: the agent/operator lets the box decide
-            _eval_parallel_value = max(1, len(self._gpu_ids))
-        self._eval_parallel = max(1, int(_eval_parallel_value))
-        # Now that eval_parallel is settled, resolve llm_parallel (0 = AUTO = eval_parallel), so a build
-        # fan-out never exceeds what we can concurrently evaluate.
-        self._llm_parallel = self._resolve_llm_parallel(self._llm_parallel_startup_opt)
         # Layer-2 compatibility lives solely in the two descriptors above. New runtime logic reads the
         # canonical attributes; legacy Engine(...) callers and direct assignments transparently feed them.
         # The canonical field is also the opt-in switch for the SHARED provider-call budget. An
@@ -979,6 +1047,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._asha_live_kill = bool(asha_live_kill)
         self._asha_live_quantile = float(asha_live_quantile)
         self._asha_live_min_siblings = max(1, int(asha_live_min_siblings))
+        # Minimum confidence the LLM stop-verdict needs before the rank flag may actually kill. The judge
+        # is consulted only INSIDE the rank gate, so this can only ever narrow the stop set.
+        self._asha_live_kill_confidence = asha_live_kill_confidence
         self.sweep_timeout_mult = max(1.0, sweep_timeout_mult)
         self.crash_after = crash_after
         self.confirm_top_k = confirm_top_k
@@ -1880,7 +1951,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # emission, _write_lock point, and fold site stays exactly where it was in the original run().
 
     def _hard_node_reservation_limit(self, state: RunState) -> int:
-        """Return the operator-owned ceiling for distinct durable Node reservations."""
+        """Return the operator-owned ceiling for distinct durable Node reservations.
+
+        The ceiling is extended by exactly the reservations the L3 accounting has already REFUNDED
+        (``refunded_node_reservations`` — a speculative build proven by the event log to have been
+        discarded before it consumed any evaluation).  Without that term the two halves of the budget
+        disagreed and the refund was inert: ``card_budget_used`` stopped charging the slot, but
+        ``_node_id_ceiling`` — the monotonic id ALLOCATOR, which can never reuse an id — kept it
+        spent, so a run that discarded three predictions simply ran three fewer experiments on the
+        same budget. Both halves now read one predicate, and this stays a pure function of the folded
+        log, so replay reaches the identical number.
+        """
 
         base_limit = getattr(self, "_base_max_nodes", None)
         if base_limit is None:
@@ -1894,10 +1975,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             base_limit = int(base_limit)
         except (TypeError, ValueError, OverflowError):
             base_limit = 0
-        return max(
+        operator_limit = max(
             0,
             base_limit + int(state.budget_overrides.get("add_nodes", 0) or 0),
         )
+        # The refund is bounded by the operator ceiling itself (see `refunded_node_reservations`), so
+        # a freshness loop can never mint unbounded builds off its own discards.
+        return operator_limit + refunded_node_reservations(state, operator_limit)
 
     def _unmaterialized_card_request_indices(self, state: RunState) -> set[int]:
         """Return exact outstanding request indexes that still own a future Node slot.
@@ -2102,10 +2186,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 "speculation_policy_scope": self._speculation_policy_scope,
             })
         elif self.card_driven_selection and self.speculation_depth:
+            # A runtime-scope pin is NOT required here: it only exists for the calibrated lane, whose
+            # evidence measured one exact Settings/policy/sandbox envelope. The product lane measured
+            # no such envelope, so minting a digest for it would be a pin that means nothing. The
+            # lane token below is what a resume compares, and it differs between the two lanes.
             if (
                 not self._speculation_gate_admitted
                 or not self._speculation_gate_receipt_digest
-                or not self._speculation_runtime_scope_sha256
+                or not self._speculation_implementation_digest
             ):
                 raise RuntimeError("positive Card speculation reached run start without gate evidence")
             values["speculation_gate_receipt_digest"] = (
@@ -2303,6 +2391,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 "run-start receipt/profile, implementation, policy, depth, seed and GPU pins"
             )
 
+        # AUTO depth is a STARTUP resolution off the live box (`_resolve_speculation_depth`), exactly
+        # like eval_parallel/llm_parallel. Invariant #6 therefore owns re-entry: adopt the depth the
+        # log pinned, so resuming on a differently-sized box continues the run's own search treatment
+        # rather than refusing it. An EXPLICITLY spelled depth is never adopted — a changed explicit
+        # treatment must still fail closed below.
+        if (
+            getattr(self, "_speculation_depth_auto", False)
+            and type(recorded_depth) is int
+            and 0 <= recorded_depth <= 64
+        ):
+            self.speculation_depth = recorded_depth
+
         if (
             not isinstance(getattr(entry, "run_id", None), str)
             or not entry.run_id.strip()
@@ -2311,7 +2411,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             or not self._speculation_implementation_digest
             or recorded_impl != self._speculation_implementation_digest
             or not self._speculation_gate_admitted
-            or not recorded_runtime_scope
+            # EQUALITY, not "must be present": the calibrated lane pins a runtime scope and the
+            # product lane deliberately pins none, so an empty-vs-empty match is the product lane
+            # agreeing with itself, while either lane meeting the other's log still fails closed.
             or recorded_runtime_scope != self._speculation_runtime_scope_sha256
             or getattr(entry, "card_driven_selection", False) is not True
             or type(recorded_depth) is not int
@@ -2949,17 +3051,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # Best-effort: an error in the advisory research MUST NOT propagate — it shares the eval's
             # task group, so an uncaught raise here would CANCEL the in-flight eval. Swallow everything.
             try:
-                # Receipt first: the trigger gate must be spent BEFORE the provider call, or a kill
-                # between the model answering and the memo landing buys the same think twice.
-                attempt = await anyio.to_thread.run_sync(
-                    functools.partial(self._record_research_attempt, snap,
-                                      trigger=trig, manual=False))
-                memo = await anyio.to_thread.run_sync(
-                    functools.partial(self._compute_deep_research, snap, trig, trace=False))
-                if memo is not None:
-                    await anyio.to_thread.run_sync(
-                        functools.partial(self._record_deep_research, memo, trigger=trig,
-                                          manual=False, attempt_id=attempt))
+                # Receipt first (the trigger gate must be spent BEFORE the provider call, or a kill
+                # between the model answering and the memo landing buys the same think twice), then
+                # the provider call, then the record — as ONE non-abandonable thread hop, never three
+                # awaits. A worker thread has no cancellation points, so a sibling eval that finishes
+                # (or raises) and unwinds this shared group cannot land a cancel BETWEEN spending the
+                # gate and landing the memo: `_research_attempt_step` documents why that split was
+                # not a rare-kill case but the normal path on any fast-eval task. Deliberately NOT
+                # abandon_on_cancel (the default): the DeepResearcher owns a paid client and mutable
+                # run-bound tools, and the record WRITES the event log — both must be joined before
+                # the eval window closes.
+                await anyio.to_thread.run_sync(
+                    functools.partial(self._research_attempt_step, snap, trig, manual=False))
             except Exception:  # noqa: BLE001 — never let deep research disturb the eval
                 pass
         tg.start_soon(_bg)
@@ -2992,8 +3095,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         land mid-window), and stops calling the LLM past the per-window cap. Its allowlisted
         BACKGROUND_APPENDABLE records are order-tolerant and never rewrite the current champion, while
         their hints/open hypotheses deliberately steer later proposals and are reconstructed by replay.
-        Runs in `_dispatch_evals`'s background task group; cancelled when the evals join."""
-        from looplab.engine.research_cadence import research_memo_sig
+        Runs in `_dispatch_evals`'s background task group; cancelled when the evals join — which is
+        exactly why each paid pass is a SINGLE indivisible `_research_attempt_step` hop."""
         from looplab.engine.train_monitor import next_monitor_sleep
         base = self._research_repeat_cadence()
         # Fire promptly if research was already due at spawn (one-shot promptness); else wait a full
@@ -3034,15 +3137,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         functools.partial(self._maybe_merge_hypotheses, snap))
                 if cap > 0 and calls >= cap:
                     return                   # research LLM budget spent; the health monitor still runs
-                # Only the FIRST pass carries the initially-due cadence/strategist trigger and thus a
-                # durable gate worth receipting; `_record_research_attempt` no-ops for the `repeat`
-                # passes that follow (their cadence is an in-process timer, not a folded marker).
-                attempt = await anyio.to_thread.run_sync(
-                    functools.partial(self._record_research_attempt, snap,
-                                      trigger=trig, manual=False))
-                # DeepResearcher owns a paid client and mutable run-bound tools. Its worker
-                # must be joined before the eval window closes; abandoning it permits post-finalization
-                # usage events and lets the next research pass rebind the same tools under a live call.
                 # Counted as an ATTEMPT, before the call rather than after it returns. Incrementing
                 # only on success meant a provider that consistently RAISES (broken auth, endpoint
                 # down, or a failure after tokens were already charged) never touched
@@ -3050,14 +3144,37 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # eval window — the one budget backstop, blind to exactly the failure mode that can
                 # spend money without producing anything.
                 calls += 1
-                memo = await anyio.to_thread.run_sync(
-                    functools.partial(self._compute_deep_research, snap, trig, trace=False),
+                # ONE hop for the whole paid pass: receipt -> provider -> record. Only the FIRST pass
+                # carries the initially-due cadence/strategist trigger and thus a durable gate worth
+                # receipting; `_record_research_attempt` no-ops for the `repeat` passes that follow
+                # (their cadence is an in-process timer, not a folded marker).
+                #
+                # These three used to be three separate awaits, and the eval-join cancel below
+                # (`_dispatch_evals`/`_run_card_session`'s `finally`) then landed on the leading
+                # checkpoint of the RECORD hop: the gate was spent, the provider was paid AND waited
+                # for, and the finished memo was discarded. Not a rare kill — the normal path on any
+                # task whose evals finish faster than the research call (measured live: 4
+                # `research_attempted` / 0 `research_completed` over a 12-node run). A worker thread
+                # has no cancellation points, so folding the three into `_research_attempt_step` makes
+                # the cancel arrive only AFTER the memo is durable — see that method for the full
+                # argument and for why the shielded window stays bounded.
+                #
+                # Deliberately NOT abandon_on_cancel (unlike the pure reads above), for BOTH halves of
+                # the step: the DeepResearcher owns a paid client and mutable run-bound tools, so
+                # abandoning it permits post-finalization usage events and lets the next research pass
+                # rebind the same tools under a live call; and the record WRITES the event log (and may
+                # run a verify LLM pass), so abandoning it could append
+                # research_completed/hint/hypothesis_added AFTER _dispatch_evals returns — possibly
+                # past finalize. Waiting for the append (bounded, far shorter than the compute path)
+                # is safer.
+                sig, recorded = await anyio.to_thread.run_sync(
+                    functools.partial(self._research_attempt_step, snap, trig,
+                                      manual=False, last_sig=last_sig),
                     abandon_on_cancel=False)
-                if memo is None:
+                if sig is None:
                     next_sleep = base
                     continue
-                sig = research_memo_sig(memo)
-                if sig == last_sig:          # converged — same conclusions; don't re-record, just back off
+                if not recorded:             # converged — same conclusions; don't re-record, just back off
                     converged += 1
                     # cap = max(base, 3600): the backoff must never drop BELOW the configured interval
                     # FLOOR. next_monitor_sleep returns min(cap, base·2^k); with the default cap=3600 a
@@ -3070,13 +3187,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 last_sig = sig
                 converged = 0
                 next_sleep = base
-                # The RECORD thread is deliberately NOT abandon_on_cancel (unlike the reads above): it
-                # WRITES the event log (and may run a verify LLM pass), so abandoning it could append
-                # research_completed/hint/hypothesis_added AFTER _dispatch_evals returns — possibly past
-                # finalize. Waiting for the append (bounded, far shorter than the compute path) is safer.
-                await anyio.to_thread.run_sync(
-                    functools.partial(self._record_deep_research, memo, trigger=trig,
-                                      manual=False, attempt_id=attempt))
                 trig = "repeat"              # subsequent passes are repeats, not the initial due trigger
             except anyio.get_cancelled_exc_class():
                 raise                        # cooperative cancellation (evals joined) — must propagate
@@ -4577,12 +4687,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return fold(self.store.read_all()) if wrote else state
 
     def _fail_reserved_build(self, *, node_id: int, card_id: Optional[str], generation: int,
-                             reason: str, error: str, drop_card: bool = True) -> None:
+                             reason: str, error: str, drop_card: bool = True,
+                             never_evaluated: bool = False) -> None:
         """Close a pre-node reservation and, when bare, its immutable Card work item.
 
         A terminal on a bare ``node_building`` clears the transient marker but creates no Node evidence.
         Without the paired card_auto_dropped receipt that Card would resurrect as a fresh proposed item after
         replay.  Existing-node reruns pass ``drop_card=False`` because they reuse the original lifecycle.
+
+        ``never_evaluated`` stamps the durable pre-dispatch receipt (``Node.never_evaluated``) that the
+        L5 node-budget refund is proven from.  It stays OPT-IN and defaults False: only a caller that
+        can show, from the state it just folded, that no evaluation was ever dispatched for this exact
+        lifecycle may claim it — an ordinary failed/aborted build keeps counting exactly as before.
         """
         # Fail closed first. If the process dies between these two appends, the still-live build marker
         # makes recovery retry the terminal, while the Card is already non-selectable. Skip an existing
@@ -4598,6 +4714,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         }
         if card_id:
             payload["card_id"] = card_id
+        if never_evaluated:
+            payload["never_evaluated"] = True
         self.store.append(EV_NODE_FAILED, payload)
 
     def _resolve_llm_parallel(self, value: int) -> int:
@@ -4616,6 +4734,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # unvalidated. The explicit Settings/Strategist paths are already bounded 0..64.
         resolved = self._eval_parallel if value == 0 else value
         return min(64, max(1, resolved))
+
+    def _resolve_speculation_depth(self, value) -> tuple[int, bool]:
+        """Resolve startup ``speculation_depth`` to a settled backlog cap plus its AUTO flag.
+
+        ``-1`` = AUTO = one speculative prefetch per concurrent evaluation lane, i.e. the ALREADY
+        SETTLED ``self._eval_parallel`` (itself ``0`` = AUTO = one experiment per detected GPU, at
+        least one), clamped to 1..64. Depth follows the eval width rather than the LLM width because
+        the backlog exists to keep the box busy: what a prefetch buys is a node ready the moment an
+        eval lane frees, so more prefetches than lanes buy nothing. (With ``llm_parallel`` itself
+        defaulting to AUTO = the eval width, the two coincide on an unconfigured box.)
+
+        AUTO needs its own sentinel because ``0`` is already the hard off-switch AND a run_started
+        pinned search treatment. The returned flag records that the operator asked for AUTO, so
+        re-entry can prefer the log's pinned depth over a value re-derived from a different box
+        (invariant #6) instead of refusing the resume — see `_require_pinned_speculation_receipt`.
+        Anything unparseable degrades to OFF: hardware must never be able to turn speculation ON.
+        """
+        try:
+            depth = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0, False
+        if depth != -1:
+            return depth, False
+        return min(64, max(1, int(self._eval_parallel))), True
 
     def _reconfigure_llm_broker(self, value) -> None:
         """Apply one live canonical total without replacing a broker held by active borrowers."""

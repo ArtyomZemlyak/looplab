@@ -64,6 +64,7 @@ class EngineOptions:
     asha_live_kill: bool = False         # opt-in: tree-kill a persistently-underperforming node early
     asha_live_quantile: float = 0.5      # rank bar = this quantile of finished siblings' finals (median)
     asha_live_min_siblings: int = 3      # min finished peers before it ranks at all
+    asha_live_kill_confidence: float = 0.8   # min LLM stop-verdict confidence to act on a rank flag
     timeout: float = 30.0
     # Hard ceiling for a governed Researcher `Idea.eval_timeout`. Keep equal to the product default:
     # a bare Engine and EngineOptions.from_settings(Settings()) must enforce the same finite ceiling.
@@ -126,9 +127,11 @@ class EngineOptions:
     agent_drives_actions: bool = False   # agent picks the next macro action (within a legal gate)
     # Layer 3: opt-in Card queue owns macro-action selection; false preserves the legacy policy/pilot path.
     card_driven_selection: bool = False
-    # Layer 5: maximum request+committed speculative Card backlog. Zero keeps speculation fully off.
+    # Layer 5: maximum request+committed speculative Card backlog. Zero keeps speculation fully off;
+    # -1 is AUTO (Engine resolves it to the settled eval width — see `Engine._resolve_speculation_depth`).
     speculation_depth: int = 0
-    # Local scorer-fidelity + paired GPU A/B receipt required by the public positive-depth path.
+    # OPTIONAL calibration-benchmark receipt. Not required to run speculation; when present the Engine
+    # revalidates it and refuses a stale/forged one (`Engine.__init__`'s admission block).
     speculation_gate_receipt: Optional[str] = None
     inline_repair: bool = True           # hybrid: triage + repair a crashed node IN PLACE (no new node)
     inline_repair_attempts: int = 0      # max in-place repair retries per node (0 = UNLIMITED)

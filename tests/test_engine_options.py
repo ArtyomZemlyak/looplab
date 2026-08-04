@@ -49,6 +49,7 @@ ATTR_BY_FIELD = {
     "asha_live_kill": "_asha_live_kill",
     "asha_live_quantile": "_asha_live_quantile",
     "asha_live_min_siblings": "_asha_live_min_siblings",
+    "asha_live_kill_confidence": "_asha_live_kill_confidence",
     "timeout": "timeout",
     "max_eval_timeout": "max_eval_timeout",
     "sweep_timeout_mult": "sweep_timeout_mult",
@@ -157,6 +158,12 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
     # novelty, holdout, search, repair, confirm).
     settings = Settings(
         max_parallel=3,
+        # Spell the CANONICAL widths explicitly. Their product default is now `0` = startup AUTO,
+        # which resolves against the detected GPU count — a differential that let both sides AUTO
+        # would compare hardware, not the mapping, and would silently shadow the legacy
+        # `max_parallel` above (canonical wins over legacy whenever it is set).
+        eval_parallel=2,
+        llm_parallel=4,
         timeout=7.5,
         max_eval_timeout=90.0,
         sweep_timeout_mult=2.0,
@@ -277,8 +284,14 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         cross_run_read_tools=settings.cross_run_read_tools,
         fingerprint_universal=settings.fingerprint_universal,
         # Training monitor ships ON in Settings (advisory); pass it through so the explicit-kwarg engine
-        # matches from_settings (else old=library-default False vs new=True).
+        # matches from_settings (else old=library-default False vs new=True). Same for the two watchdog
+        # KILLS and the canonical parallelism pair, all of which became product defaults on 2026-08-04
+        # while the bare-library EngineOptions deliberately stayed conservative (see
+        # tests/test_options_divergence.py for the frozen table of those intended gaps).
+        eval_parallel=settings.eval_parallel,
+        llm_parallel=settings.llm_parallel,
         train_monitor=settings.train_monitor,
+        train_monitor_kill=settings.train_monitor_kill,
         asha_live=settings.asha_live,
         asha_live_kill=settings.asha_live_kill,
         asha_live_quantile=settings.asha_live_quantile,
@@ -296,7 +309,11 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
     assert old.researcher._digest_cap == new.researcher._digest_cap == 1234
     # Spot-check a few of the deliberately non-default values actually made it through (guards
     # against a both-sides-defaults false pass).
-    assert new.max_parallel == 3 and new.timeout == 7.5 and new.max_eval_timeout == 90.0
+    # `max_parallel`/`parallel_build` are read-through aliases for the canonical widths, so the
+    # canonical values above are what they report (the legacy `max_parallel=3` is deliberately shadowed).
+    assert new._eval_parallel == 2 and new._llm_parallel == 4
+    assert new.max_parallel == 2 and new.parallel_build == 4
+    assert new.timeout == 7.5 and new.max_eval_timeout == 90.0
     assert new._policy_name == "evolutionary" and new.max_nodes == 17
     assert new.trust_gate == "gate" and new._holdout_fraction == 0.4
     assert new._inline_repair_attempts == 6 and new._seed_mode == "tracked"

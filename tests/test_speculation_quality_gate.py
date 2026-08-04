@@ -31,6 +31,7 @@ from looplab.engine.orchestrator import (
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.search.archive import DiversityArchive
+from looplab.core.config import CONFIG_SNAPSHOT_SCHEMA
 from looplab.search.speculation_calibration import (
     SPECULATION_CALIBRATION_SEEDS,
     speculation_runtime_scope_digest,
@@ -348,12 +349,22 @@ def _make_run(
 ) -> Path:
     path.mkdir(parents=True)
     depth = treatment_depth if treatment else 0
+    # Build the fixture in the shape a REAL run writes, not the raw Settings field set. The profile
+    # is "every Settings field"; a `config.snapshot.json` on disk is `Settings.masked_snapshot()`,
+    # which POPS credential bindings (`llm_api_key_base_url`) and STAMPS the document's own format
+    # marker (`config_snapshot_schema`, not a Settings field at all). Splatting the profile here
+    # produced a document no run could ever write — which is exactly why nothing caught that the
+    # gate's own field check compared against the wrong set and could never pass on real evidence
+    # (feat 3721e47c added the marker, feat 3837953b added the popped binding, and between them they
+    # made `looplab speculation-gate` unpassable for over a week).
     config = dict(SPECULATION_CALIBRATION_PROFILE_SETTINGS)
     config.update({
         "speculation_depth": depth,
         "max_nodes": max_nodes,
         "speculation_gate_receipt": None,
     })
+    config.pop("llm_api_key_base_url", None)
+    config["config_snapshot_schema"] = CONFIG_SNAPSHOT_SCHEMA
     config.update(extra_config or {})
     (path / "config.snapshot.json").write_text(
         json.dumps(config, sort_keys=True), encoding="utf-8")

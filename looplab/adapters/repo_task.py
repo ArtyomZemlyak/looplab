@@ -178,7 +178,7 @@ class EvalSpec(BaseModel):
         # unreadable → every node fails with no_metric, so reject it at submit with a clear message.
         # The reader table in `runtime/command_eval.py` is the authority; validating against a local
         # copy is how the kinds came to be enumerated in three places (doc 25 RA-04/RA-05).
-        from looplab.runtime.command_eval import METRIC_READERS
+        from looplab.runtime.command_eval import METRIC_READERS, metric_spec_path_error
         _KINDS = set(METRIC_READERS)
         if isinstance(v, dict):
             k = v.get("kind", "stdout_json")
@@ -187,6 +187,14 @@ class EvalSpec(BaseModel):
                     f"eval.metric.kind {k!r} is not a metric reader. Use one of {sorted(_KINDS)} (HOW to "
                     "read the printed metric, e.g. stdout_json). The max/min DIRECTION belongs in the "
                     "task's `direction`, not here.")
+            # A KNOWN kind is not yet a USABLE spec. `file_json`/`file_regex` need the file to read;
+            # checking only the reader NAME let `{"kind":"file_json","key":"metric"}` through, and the
+            # run then failed EVERY node with `no_metric` and no hint at the missing field. Failing at
+            # submit is the whole point of having submit-time validation — same standard the kind
+            # check above already sets, and the same authority (`runtime/command_eval.py`) decides it.
+            path_err = metric_spec_path_error(v)
+            if path_err:
+                raise ValueError(f"eval.metric: {path_err}")
         return v
 
     @field_validator("cross_check")

@@ -90,9 +90,11 @@ before launching, and:
   skip Genesis, it constrains it; what the run does within a kind depends on the model);
 - reads **where your data lives** straight from the goal — one path or several, a file or a folder —
   and authors the data mounts, so you don't need `--data` (it remains an optional shortcut);
-- defaults the backend to `llm` for a generative kind (`dataset`/`repo`/`mlebench_real`/…); offline
-  kinds (`quadratic`/…) keep their default and still run with no model. (The Web UI's genesis card
-  applies the same default — an explicit backend, wherever set, always wins.)
+- defaults the backend to `llm` for a generative kind (`dataset`/`repo`/`mlebench_real`/…). Since
+  2026-08-04 `llm` is also the GLOBAL default (`core/config.py:927`), so the offline kinds
+  (`quadratic`/…) no longer fall back to a model-free run on their own — pass `--backend toy` when you
+  want one. (The Web UI's genesis card applies the same default — an explicit backend, wherever set,
+  always wins.)
 
 Genesis needs a reachable model (it reasons about your goal). Add `--no-genesis` to build the task
 from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.
@@ -105,10 +107,10 @@ from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.
 | `--genesis / --no-genesis` | on | With `--goal`, let the LLM author the task (pinning to `--kind` if given, and reading data locations from your words). `--no-genesis` builds it from `--kind`/`--set` alone. |
 | `--direction min\|max` | — | Optimization direction |
 | `--data PATH` | — | Shortcut for a **dataset**'s data path or a **repo**'s path (rejected for other kinds); under Genesis you can instead name the location(s) in `--goal` |
-| `-s, --set KEY=VALUE` | — | Override **any** engine setting (repeatable); same keys as `settings:` / `LOOPLAB_*` |
+| `-s, --set KEY=VALUE` | — | Override an engine setting (repeatable); same keys as `settings:` / `LOOPLAB_*`. **Not quite "any"**: the credential fields `llm_api_key` / `llm_api_key_base_url` are refused, so a secret never lands in shell history or the resolved snapshot — set them via `LOOPLAB_*` env or the secret store |
 | `--out DIR` | the file's `out:` or `runs/run_local` | Run directory (created if missing) |
 | `--max-nodes N` | `8` | Node (candidate) budget for the search |
-| `--backend toy\|llm` | `toy` | Role backend: offline optimizer or a live LLM |
+| `--backend toy\|llm` | `llm` | Role backend: offline optimizer or a live LLM. **Default changed toy→llm on 2026-08-04** (operator decision, `core/config.py:927`) — pass `--backend toy` for an offline run |
 | `--model ID` | `qwen3:8b` | LLM model id (when `--backend llm`) |
 | `--developer-backend NAME` | `default` | Delegate the Developer to `opencode` / `aider` / `goose` / `continue` |
 | `--agent-cmd PATH` | — | Override the external agent's launcher/path |
@@ -121,7 +123,7 @@ from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.
 | `--ablate-every N` | `0` | Run ablation-driven refinement every N improvements (0 = off) |
 | `--confirm-top-k K` | `0` | Confirm the top-k candidates under multiple seeds before finishing |
 | `--confirm-seeds N` | `0` | Number of seeds for the confirmation pass |
-| `--require-approval` | off | HITL: pause for `approve` before finishing |
+| `--require-approval / --no-require-approval` | off | HITL: pause for `approve` before finishing. `--no-require-approval` is the explicit off form (it is the default, so it only matters when a config file / `LOOPLAB_REQUIRE_APPROVAL` turns approval on) |
 
 > `--crash-after N` is a hidden test hook that hard-exits after N evaluations (used to demonstrate
 > crash-resume).
@@ -130,7 +132,7 @@ from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.
 
 ```bash
 looplab init && looplab run looplab.yaml                  # scaffold a config, edit, run
-looplab run --no-genesis --kind quadratic --goal "minimize x^2+y^2" --direction min   # no file, no LLM
+looplab run --no-genesis --kind quadratic --goal "minimize x^2+y^2" --direction min --backend toy   # no file, no LLM
 looplab run examples/toy_task.json --out runs/demo --max-nodes 14
 looplab run examples/toy_task.json -s policy=asha -s n_seeds=5            # --set any setting
 looplab run examples/code_regression_task.json --backend llm --max-nodes 6
@@ -273,7 +275,7 @@ looplab speculation-gate \
   runs/seed0-depth0 runs/seed0-depth1 \
   runs/seed1-depth0 runs/seed1-depth1 \
   runs/seed2-depth0 runs/seed2-depth1 \
-  --output "$PWD/.looplab/speculation-quality.receipt.json"
+  --output "$PWD/.looplab/speculation-quality.receipt.json"   # -o is the short form
 ```
 
 Use the exact absolute path printed by the command as `speculation_gate_receipt`, together with
@@ -338,7 +340,7 @@ looplab concept-coverage RUN_DIR [--task-type dense-retrieval] [--offline] [--mo
 | `--task-type NAME` | inferred from the run's `task_id` | Concept pack to SEED the agent's build (e.g. `dense-retrieval`); the LLM verifies/expands it, or builds from scratch when no pack matches |
 | `--offline` | off (**default is the agentic build**) | Skip the LLM/network and use only the deterministic alias heuristic over the curated seed pack — a fast local fallback (needs a pack; no per-task importance) |
 | `--model ID` | configured model | Override the model for the agentic build |
-| `--jobs N` | `8` | Concurrent node-tagging calls in the agentic build |
+| `-j, --jobs N` | `8` | Concurrent node-tagging calls in the agentic build |
 | `--persist` | off | Append generation-fenced memberships to an exact, fully finalized finished snapshot. Repeated same-source results are idempotent. Agentic/LLM results carry reviewed `classifier` provenance, become visible to replay-derived indexes, and can upgrade identical earlier heuristic ids; the command does **not** rebuild a capsule already emitted during finalization. Exact `--offline` results carry `offline-heuristic` provenance and remain display-only. Operator edits and existing classifier evidence cannot be downgraded. There is no live-run override. |
 | `--repo PATH` | — | Task repo to ground the per-task uncovered-region derivation with a D1 prior-art brief |
 
@@ -723,7 +725,7 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structu
 | Option | Default | Description |
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` and/or `research_claims.jsonl` (or a lessons file) |
-| `--top N` | `20` | How many most-evidenced claims to list |
+| `--top N` | `20` | How many most-evidenced claims to list — **and, with `--pack`, the pack's `max_claims` cap** (`engine/claims_retrieval.py::build_context_pack`), so it bounds both listings and the rendered context pack |
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
 | `--pack` | off | Render the hard claim-count-capped agent **context pack** (Step 5): pinned → ratified → mixed → support-only (`supported` wire state) → opposition-only (`refuted`) → insufficient; a caveat can replace the weakest non-pinned positive; omitted pins are counted explicitly. Concept tendencies are derived from the full retained pre-cap aggregate while the rendered labels remain bounded |
 | `--fuzzy` | off | Suggestion-grade bounded token-Jaccard complete-link merge: every pair must clear the threshold and share scope, polarity and maturity; it is non-transitive and never scope-agnostic, but remains display/review grouping rather than claim identity |
@@ -1006,7 +1008,7 @@ prompt (no redraws), so scripts stay deterministic.
 | Option | Default | Description |
 |---|---|---|
 | `--server URL` | *(auto)* | URL of a running server, e.g. `http://127.0.0.1:8765`. Omit to reuse/auto-launch a local one |
-| `--run-root DIR` | `runs` | Run-dir root, used only when auto-launching a server |
+| `--run-root DIR` | `$LOOPLAB_RUN_ROOT` or `runs` | Run-dir root, used only when auto-launching a server |
 
 Auto-launching needs the `[ui]` extra (`pip install -e ".[ui]"`); pointing at an already-running
 server needs nothing beyond the core install. Honours `LOOPLAB_UI_TOKEN` for token-gated servers.

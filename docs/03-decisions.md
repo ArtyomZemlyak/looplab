@@ -52,6 +52,20 @@ Event envelope (one JSON value per line): `{v, type, ts, run_id, node_id, parent
 
 ## ADR-2 — Pluggable / overridable research algorithm
 
+> **Partially superseded by the shipped shape (recorded 2026-06-22 → 2026-07-11).** The *decision*
+> (search strategy is a config-selected plugin the core loop knows only by protocol) **shipped and
+> holds** — `search/policy.py::_REGISTRY` + `make_policy(name, …)` + `available_policies()`, with
+> `greedy`/`evolutionary`/`mcts`/`asha`/`bohb` auto-registered and selectable without an engine change.
+> The **protocol signature below did not ship**: the shipped protocol is one method,
+> `search/policy.py:60-61` — `def next_actions(self, state: RunState) -> list[dict]` — returning a batch
+> of typed actions per loop iteration. `select`/`expand`/`should_merge`/`stop` do not exist. The
+> one-method shape is what [07-architecture-review.md:43](07-architecture-review.md),
+> [A7-strategist-design.md:129](A7-strategist-design.md) and
+> [16-architecture-code-review-2026-07-11.md:617](16-architecture-code-review-2026-07-11.md) describe.
+> The same sentence's claim that this injection pattern "already covers … `ExploitRule`" is superseded by
+> [ADR-6](#adr-6-2026-sota-re-review-are-we-actually-better-and-what-to-change): `ExploitRule` was never
+> built.
+
 **Requirement.** The research/search algorithm must be changeable (plugin or override).
 
 **Decision.** The search strategy is a **first-class plugin** behind a `SearchPolicy` protocol, selected by config and injected by the orchestrator. The core loop knows only the protocol, never a concrete algorithm.
@@ -67,6 +81,19 @@ Built-ins ship as separate classes: `GreedyTree` (AIDE-style), `Evolutionary` (a
 ---
 
 ## ADR-3 — Ingest & analyze existing artifacts *before* planning experiments
+
+> **Superseded 2026-06-21 by [ADR-6](#adr-6-2026-sota-re-review-are-we-actually-better-and-what-to-change)
+> ("ADR-3 ingestion pre-phase → right direction, lighten it"); shipped scope recorded 2026-06-22.** The
+> six-step pipeline below is the original heavy design and was deliberately reduced to **≈4
+> retrieve-and-seed candidates + schema/leakage data profiling**.
+> [05-build-decisions.md:175,275](05-build-decisions.md) additionally records GraphRAG as
+> **deferred/cut**; [06-implementation-plan.md I16](06-implementation-plan.md) records what was built —
+> `core/profile.py` plus the orchestrator's `data_profiled` event. No `Ingestion`, `GoalConfig`,
+> `goal_anchor`, `retrieve_more`, `Backlog` or Elo tournament exists in the code, and Docling, GROBID,
+> trafilatura and repomix are not dependencies. Web/literature grounding ships separately and **off by
+> default** ([16:659](16-architecture-code-review-2026-07-11.md),
+> [17:195,1046](17-project-review-and-directions-2026-07-11.md)). Read this ADR as the research record
+> behind that lightening, not as a description of a shipped subsystem.
 
 **Requirement.** The system can be given pre-existing artifacts (web pages, tables, files, papers, prior results) and must **analyze them against the research goal first**, then form an experiment plan — instead of starting blind.
 
@@ -190,6 +217,14 @@ All five are folded into [02-architecture.md](02-architecture.md) (data model, c
 2. **Ablation-driven targeted refinement** — generate an ablation to find the highest-impact code block, then deeply optimize *that* block (MLE-STAR's signature; an AIRA-class "strong operator").
 3. **Depth-bounded Debug operator** — explicit, capped iterative repair as a first-class operator (every strong system has one).
 4. **Leakage checker** — train/test **+ temporal + target** leakage auto-detection (our genuine differentiation opportunity; only MLE-STAR ships even a partial one).
+   <!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — the train/test half runs; the temporal + target half has no
+   live caller. `engine/audit.py::_leakage_blocks` only runs the detectors when the task defines
+   `leakage_inputs()`, and the sole adapter that does is the SYNTHETIC `adapters/mlebench.py`, so
+   `trust/leakage.py::target_leakage`/`::temporal_leakage` are unreachable from any shipped real task.
+   [doc 17:147-149](17-project-review-and-directions-2026-07-11.md) recorded this on 2026-07-11 ("the
+   claimed moat needs one adapter that exercises it end-to-end") and no adapter has arrived, yet the
+   newest doc in the tree ([26:35](26-ouroboros-airi-analysis-2026-08-02.md), 2026-08-02) still sells it.
+   Full annotation + the business question: [01 §5.E](01-product-design.md). -->
 5. **Consistent, leakage-proof evaluation + throughput-based parallel test-time scaling** — the highest-ROI levers per AIRA (+10–15 pts), plus cheap proxy evals (subset/reduced-epoch) to multiply iterations.
 
 ### The one-line strategy correction
@@ -278,6 +313,51 @@ roles:
 
 **Invariant to design toward:** *one capability lives in exactly one place (an MCP server); one recipe (a Skill) teaches every agent how to use it well.* This overlaps the knowledge architecture ([ADR-10](03-decisions.md)) — Skills are the **procedural** memory tier.
 
+> **⚠ Never built (noted 2026-08-04).** None of the five MCP servers above exists, and no in-loop role
+> consumes an MCP tool. What ships is an optional outbound MCP **client** (`tools/mcp_tools.py`) wired
+> only into the owner chat assistant, with `mcp` undeclared as a dependency (so it silently contributes
+> no tools on a stock install). The server bus was deferred as an infra seam in
+> [06-implementation-plan.md](06-implementation-plan.md) (2026-06-22) and the client was restricted to
+> the assistant, off by default, as a security decision in
+> [17-project-review-and-directions-2026-07-11.md](17-project-review-and-directions-2026-07-11.md) —
+> but the capability-bus invariant itself was never retired. A product decision is pending; the full
+> annotation with the open question is in this file's source immediately below.
+
+<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — ADR-9's capability bus was never built and was never formally
+retired. It is still on the books as an invariant while nothing implements it.
+WHAT THIS ADR PROMISES: five MCP SERVERS (`knowledge-mcp`, `archive-mcp`, `ml-tools-mcp`, `sandbox-mcp`,
+`web-mcp`) exposing `query_archive` / `profile_data` / `check_leakage` / `run_code`, "consumed identically
+by our own roles (via function-calling, `async_mcp_tool(...)`) and by external agent backends (via MCP
+config URL)", so "the leakage-checker exists in exactly ONE place".
+WHAT THE CODE DOES: `tools/mcp_tools.py:1-3` is an MCP *CLIENT* provider — it consumes tools FROM
+externally-configured servers, the exact inverse of the ADR. `FastMCP`, `stdio_server` and `mcp.server`
+have ZERO hits in `looplab/`; so do all four tool names above; there is no server module of any kind (doc
+25's exhaustive `tools/` inventory finds only this client). It is wired at ONE site,
+`serve/assistant.py:1665-1675` — the owner chat assistant — and `agents/factory.py` has zero MCP
+references, so no in-loop role ever sees an MCP tool. `mcp` is NOT a declared dependency in
+`pyproject.toml`; the provider is written to degrade silently ("no config, no `mcp` SDK, or a server that
+won't connect -> that server simply contributes no tools"), so on a stock install this whole path is a
+silent no-op. There is also no MCP setting in `guide/configuration.md`, i.e. no supported way for a user
+to configure a server.
+ALREADY DECIDED, DO NOT RE-LITIGATE: (a) the SERVER bus was deferred as an infra seam on 2026-06-22 —
+[06-implementation-plan.md:111,179](06-implementation-plan.md) lists "🧱 LanceDB/FastMCP backends" under
+"Infra-seams (need external infra, deferred)"; (b) restricting the CLIENT to the assistant, off by
+default, is a deliberate SECURITY decision —
+[17-project-review-and-directions-2026-07-11.md:445-447,2057,2076](17-project-review-and-directions-2026-07-11.md)
+("keep web/literature and MCP off by default"; "MCP is assistant-only today … do not reach it from the
+autonomous loop"; "never auto-promote retrieved external instructions into tool authority"). Neither
+decision retires the capability-bus invariant, and nothing has re-affirmed building the servers since
+2026-06-22.
+NEEDS A BUSINESS DECISION: is the MCP capability bus still a product commitment — in which case it needs
+an owner, `mcp` as a declared dependency, and a plan reconciling it with doc 17's "off by default,
+assistant-only" security decision — or is it retired, in which case ADR-9's one-capability-one-place
+invariant, [01 §5.L](01-product-design.md), [02 §3.14](02-architecture.md) and the §13 extension-point row
+must be rewritten around what actually ships: an optional outbound MCP client for the owner's assistant?
+Second, smaller question: should `mcp` be declared as an extra so the assistant's MCP path fails loudly
+rather than silently contributing nothing?
+(Operator instruction 2026-08-04: MCP stays AS IT IS in code for now; this is a docs/positioning
+decision, not a code change.) -->
+
 ---
 
 ## ADR-10 — Unified knowledge & memory architecture
@@ -308,6 +388,12 @@ knowledge/
 **Requirement.** Clear the remaining un-specified nuances. One decision each:
 
 1. **Secrets / API keys** → front all providers with a **local LLM gateway (LiteLLM Proxy)**; roles/sandbox get short-lived **gateway tokens, never provider keys**; real keys in a secret manager (dev: gitignored `.env`; prod: Vault), referenced not inlined; **redaction filter + `gitleaks`** over the event log. Keys never enter sandbox, prompt, or log.
+   <!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — the gateway half of this decision rests on LiteLLM, which is
+   not a dependency and is on no shipped code path (`core/llm.py::make_llm_client` always returns
+   `OpenAICompatibleClient`). There are no short-lived gateway tokens: the client reads a provider key
+   from config/env directly (`core/llm.py::make_llm_client`'s `api_key` / `settings.llm_api_key`). The redaction filter
+   DID ship (`engine/audit.py:269::_redact`, applied to persisted stdout tails). Full annotation + the
+   business question: [01 §5.K](01-product-design.md). -->
 2. **Configuration** → **`pydantic-settings`** (typed `BaseSettings`) as the single config model, loading layered sources in precedence **defaults < `config.yaml` < `.env` < env vars < CLI** (via `settings_customise_sources` / a YAML source). Typed validation + coercion fail-fast at startup; **nested env override** (`LOOPLAB__ROLES__DEVELOPER__MODEL=...`) for per-field tweaks and profiles. Secrets are **env/`SecretStr` references, never values**, and are excluded from dumps. Write the fully-resolved, **secret-masked** snapshot to `runs/<id>/config.resolved.yaml` + git SHA + `uv.lock` hash — the reproduction key. *(Chose pydantic-settings over Hydra: native env/`.env`/secret handling and one typed model matter more here than Hydra's multirun/sweep composition; layered YAML profiles cover the composition we need.)*
 3. **Observability / event taxonomy** → align events to the **OpenTelemetry GenAI semantic conventions** (`gen_ai.*` spans: model, input/output tokens, latency, finish reason, cost) as the canonical trace; domain events (operator-applied, eval-run, gate-decision) as child spans; files-as-truth event log is the durable backing store. Cost/token/latency are first-class on every model/tool event.
 4. **Human-in-the-loop** → **approvals are command events** (reuse [ADR-1](03-decisions.md)): engine writes `pending_approval` and halts the thread; human appends `approval_granted|rejected|amended`; engine resumes from the log (identical to crash-resume). Default gates: plan approval (toggle), network egress, budget-threshold, winner-promotion.
@@ -316,6 +402,12 @@ knowledge/
 7. **Engine self-testing** → **mocked-LLM smoke test** in CI (record/replay) + a versioned **golden-task** regression suite + nightly **canary** on live models + **adversarial fixtures** (planted leakage, known variance) that unit-test the evaluator/gate. Dashboard "engine quality over time" (solve rate, regret vs baseline, $/solved).
 8. **Security of agent code** → beyond the sandbox: **deny-by-default egress**; **cgroup/ulimit** CPU/mem/disk/time caps + wall-clock kill; install only from a **pinned lockfile / allowlisted index** (no arbitrary runtime installs); treat all ingested/web content as **untrusted data, not instructions** (delimit + injection-scan + approval gate before any egress/install). Prompt injection from ingested artifacts is a real vector ([ADR-3](03-decisions.md)).
 9. **Cost governance** → **hierarchical, gateway-enforced budgets**: run-level cap subdivided per role/thread; in-engine accountant trips an approval gate at 80%, hard-kills at 100%; cost attributed per `(run_id, thread_id, role, model, operator)`; report $/result.
+   <!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — the 80%/100% machinery exists but is dead. `CostAccountant`
+   (`core/llm.py::CostAccountant`) takes `limit=None`, and inside `::CostAccountant.add` both the warn
+   branch and the `raise BudgetExceeded` are guarded on `self.limit is not None`; no dollar-budget field
+   exists anywhere in `Settings`, and all three `CostAccountant(...)` construction sites pass no limit.
+   Cost ATTRIBUTION did ship — the durable per-run ledger is `engine/costs.py` (`llm_usage`/`llm_cost` +
+   `.llm-usage-outbox`). Full annotation + the business question: [02 §11](02-architecture.md). -->
 10. **Multi-tenancy / isolation** → **one run = one `run_id` namespace**: dedicated run dir + per-thread **git worktree** + per-thread sandbox container + scoped gateway token + one MLflow run; `run_id`+`thread_id` are required fields on every event and the prefix of every path.
 - **Also added (not previously listed):** **data/artifact lifecycle & retention** (GC of old run dirs, large-artifact storage policy, PII in ingested data) and **provenance-for-publishable-results** (a "winner" must carry config snapshot + seeds + data hashes + model snapshot + event-log id so it's defensible/reproducible).
 

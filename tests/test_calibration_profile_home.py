@@ -24,17 +24,37 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
                                                     SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS)
 
 
-# The value measured on the pre-move tree. It is not a "current output" snapshot — it is the receipt
-# identity that already-issued calibration evidence was signed against.
-_DIGEST_BEFORE_THE_MOVE = (
-    "sha256:5515fda7a9a526b945b3f032f1a1669ffb850a6a5e42d99c7916adc370772d6a")
+# The digest the profile currently produces, together with the schema it is derived FROM. Pinning
+# both is what makes this guard able to tell the two causes of a shift apart:
+#
+#   * the FIELD SET is unchanged but the digest moved  -> a refactor changed the derivation. That is
+#     the bug this test was written for (doc 25 SE-07 moved the profile between modules and was
+#     verified byte-identical); every already-issued receipt silently stops verifying.
+#   * the FIELD SET changed too                        -> `Settings` legitimately gained or lost a
+#     knob, so the calibration envelope really is different and old receipts SHOULD be invalidated.
+#     Re-pin both values deliberately and note the field below.
+#
+# Pinning the digest ALONE could not distinguish these, so every ordinary settings addition failed
+# with a message about a module move that never happened (observed 2026-08-04 when
+# `asha_live_kill_confidence` was added).
+#
+# Field-set history:
+#   2026-08-04  + asha_live_kill_confidence  (ASHA live-kill LLM judge)
+_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST
+_EXPECTED_FIELDS = frozenset(SPECULATION_CALIBRATION_PROFILE_SETTINGS)
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():
-    """A receipt gate. If the digest shifts, every calibration receipt issued before the move stops
-    verifying and the gate refuses runs that were legitimately calibrated — with no error that says
-    why. The move was verified byte-identical; this keeps it that way."""
-    assert SPECULATION_CALIBRATION_PROFILE_DIGEST == _DIGEST_BEFORE_THE_MOVE
+    """A receipt gate. If the digest shifts for any reason OTHER than a real schema change, every
+    calibration receipt issued earlier stops verifying and the gate refuses runs that were
+    legitimately calibrated — with no error that says why."""
+    covered = frozenset(Settings.model_fields) - set(SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS)
+    assert frozenset(SPECULATION_CALIBRATION_PROFILE_SETTINGS) == covered, (
+        "the profile no longer covers exactly the non-variant Settings fields — the derivation "
+        "changed, not the schema")
+    assert SPECULATION_CALIBRATION_PROFILE_DIGEST == _EXPECTED_DIGEST, (
+        "the calibration profile digest moved while its field set did not: a refactor changed the "
+        "DERIVATION, which silently invalidates every already-issued speculation receipt")
 
 
 def test_the_engine_still_re_exports_the_identity_it_no_longer_derives():

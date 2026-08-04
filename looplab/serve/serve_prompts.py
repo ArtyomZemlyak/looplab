@@ -93,7 +93,9 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         "cheap search + a full confirm. (Categorical impl-switches are NOT numeric — use the config "
         "approach above for those.)\n"
         "- metric.reader options: stdout_json (default) | stdout_regex | file_json / file_regex (read a "
-        "file the run writes; dotted key ok) | auto (the agent writes the reader). Choose file_* "
+        'file the run writes; these two REQUIRE "path":"<that file, relative to the eval workdir>" — '
+        "`key` is the key INSIDE the file, never the file; dotted key ok) | auto (the agent writes the "
+        "reader). Choose file_* "
         "when the metric lands in a FILE rather than stdout. (Legacy spelling metric.kind still works.)\n"
         "- NO repo/code, just DATA + a goal (\"here is my data, get the best metric you see fit\"): "
         'author the fully-generative DATA task (again no `kind`) {"goal":"<what to do>","direction":"max",'

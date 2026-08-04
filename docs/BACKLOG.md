@@ -7,6 +7,33 @@
 **Status legend:** ✅ done · 🟡 partial (some sub-items done) · ⬜ todo
 **Priority:** P0 (do next) · P1 · P2 · **Effort:** S / M / L
 
+> **⚠ STALE — read the caveats before trusting any status here (added 2026-08-04).** Last content edit
+> `59c33465`, 2026-07-22; the header date above (2026-06-24) is ~6 weeks behind HEAD. Four things a
+> reader must know:
+>
+> 1. **The file contradicts itself by construction.** Every roadmap ID marked ✅ in the "★ Shipped
+>    2026-06-24" section below is *re-listed as ⬜ todo* in §2's Themes A–I (46 IDs). §2 is the older
+>    text; the ★ Shipped roll-up is the newer one. **Where they disagree, prefer ★ Shipped — and then
+>    verify against the code.**
+> 2. **IDs are not unique — three separate namespaces share one letter-digit space.** `C2` means
+>    "best-of-N" in ★Shipped/§2 but "secrets/output redaction" in §0/§1; `C3` means "deep repair" vs
+>    "auth token"; `C5` means "read-model integrity" (§1) vs "agentless mode" (§2). §6 introduces a
+>    THIRD `D1–D5` namespace (static-analysis defect classes) unrelated to `D1 real MLE-bench`. Never
+>    cite a bare ID from this file without its section.
+> 3. **Every inline `file.py:NNN` citation in this file is dead** (8 of 8 checked). They are rendered as
+>    `master` links, so they resolve but point at unrelated code — e.g. `server.py:245` for `delete_run`
+>    (which moved to `serve/routers/org.py:237`), `llm.py:72` for `_post` (now `core/llm.py:911`),
+>    `orchestrator.py:808` for a stdout-tail claim whose real site is `engine/evaluate.py:732` **and
+>    whose "persisted verbatim" claim is refuted — redaction shipped** (`engine/audit.py:269::_redact`).
+>    Symbol-level citations (`module::Symbol`) fare much better (11 of 12 resolve).
+> 4. **Roughly half the shipped system is not tracked here at all.** Absent entirely: the Card/kanban
+>    board (`docs/23`), Part IV/V concepts & novelty, the per-run cost ledger (`engine/costs.py`), the
+>    live watchdogs (`engine/train_monitor.py`, `engine/asha_monitor.py`), claims governance
+>    (`cli/governance_cmds.py`), the assistant serve surface, and the owner attention feed
+>    (`serve/attention.py`). Absence from this file is **not** evidence that something is unbuilt.
+>
+> Individually corrected items are marked **[corrected 2026-08-04]** inline below.
+
 ---
 
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
@@ -32,9 +59,18 @@ proxy, time-series, classification, a live `qwen3:30b-a3b` run, UI preview of ev
 - ✅ **Theme I:** I1 feature-engineering · I2 time-series adapter · I3 code-leakage · I4 notebook export ·
   I5 Pareto selector.
 
-**Still open** (external-infra-gated): **D1 real MLE-bench** (needs Kaggle creds + dataset download) +
+~~**Still open** (external-infra-gated): **D1 real MLE-bench** (needs Kaggle creds + dataset download) +
 the **out-of-process grader** (a careful eval-loop refactor — B1 `host_score` is the scoring primitive
-it builds on). B6 parked per user decision.
+it builds on). B6 parked per user decision.~~
+
+**[corrected 2026-08-04] All three of those shipped.** `D1 real MLE-bench` →
+`looplab/adapters/mlebench_real.py::MLEBenchRealTask` (`kind="mlebench_real"`), **registered** at
+`looplab/adapters/tasks.py:22,93`, plus `mlebench_prep.py` and `kaggle_dl.py`; a `kaggle` alias folds to
+it (`tasks.py:127-135`). **Out-of-process grader** → `looplab/adapters/mlebench_grade.py` ("the HOST
+scores it with mle-bench's *real* competition grader"). **B6 holdout guard** → shipped and **ON by
+default**: `holdout_fraction=0.25` and `holdout_select=True` (`core/config.py:779-786`, whose own comment
+reads "D1 holdout-gated promotion (B6, Arbor-style)"), implemented by
+`looplab/engine/holdout.py:59::HoldoutGrader`.
 
 ---
 
@@ -118,21 +154,32 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
 - ⬜ **P1 · A1 multi-fidelity racing ASHA/Hyperband (M).** Successive-halving scheduler over existing
   `eval_profile` smoke/full; emit `rung_promoted`. → `policy.py`.
 - ⬜ **P1 · A2 surrogate-guided proposal TPE/RF (M–L).** Fit `(params→metric)`; EI/UCB acquisition.
-- ⬜ **P2 · A3 BOHB/DEHB fusion (M).** Capstone once A1+A2 land.
+- 🟡 **P2 · A3 BOHB/DEHB fusion (M).** Capstone once A1+A2 land. **[corrected 2026-08-04 — the ★ Shipped
+  roll-up above lists "A3 BOHB" as ✅; that OVERSTATES it.** `"bohb"` is a registry **alias for the ASHA
+  factory** — `search/policy.py:722` reads `"bohb": _make_asha`, with the comment "Hence 'bohb' is an
+  alias for the ASHA factory (kept exactly for compatibility)". The fusion is the ASHA racing schedule
+  plus a surrogate wired in as the Researcher by the CLI; there is no BOHB/DEHB policy object.]
 - ⬜ **P2 · A4 LATS-style MCTS (M).** LLM value est + reflection + novelty/dedup.
 - ⬜ **P1 · A5 budget-aware proposal (S).** Surface remaining eval budget into the prompt/policy.
 - ⬜ **P0 · A7 Strategist role — adaptive meta-control (M rule + M llm) (NEW, user-requested).** Optional
   LLM role that reads run state and **picks the search policy/allocator + Developer mode (agentless vs
   agentic) + operator mix** per situation; every choice is also a direct config knob (config-first).
   Emits `strategy_decision` (audit) + a "why this strategy" panel. **Ship the rule-based baseline
-  first** (zero-dep, deterministic), then the LLM variant. Default OFF. → `roles.Strategist`,
-  `make_strategist`, config `strategist_backend=off|rule|llm`. *Pairs:* A5/A6/E4.
+  first** (zero-dep, deterministic), then the LLM variant. ~~Default OFF.~~ → `roles.Strategist`,
+  `make_strategist`, config ~~`strategist_backend=off|rule|llm`~~. *Pairs:* A5/A6/E4.
+  **[corrected 2026-08-04 — shipped, and the documented default is backwards.** The real default is
+  `strategist_backend = "agent"` (`core/config.py:755`) — the tool-using AGENTIC backend, not off — and
+  there are FOUR values, `off|rule|llm|agent` (validated set in `core/config.py`'s enum table). See
+  [A7-strategist-design.md](A7-strategist-design.md), which is the current design record.]
 
 ### Theme B · Trust & eval integrity
-- 🅿️ **P2 · B6 held-out test + generalization-gap guard (M) — PARKED IN BACKLOG (user decision).** Still
-  the #1 verified *unsolved* problem and the recommended gate before a published D1 MLE-bench number,
-  but **deliberately not P0/Phase-1**. A final split the search never sees; fold
-  `generalization_gap = val − test`; flag/penalize high-gap winners. → eval contract + confirm panel.
+- ✅ **P2 · B6 held-out test + generalization-gap guard (M) — SHIPPED, ON BY DEFAULT.**
+  **[corrected 2026-08-04 — this entry previously read "🅿️ PARKED IN BACKLOG (user decision) … still the
+  #1 verified *unsolved* problem", which is false.]** `looplab/engine/holdout.py:59::HoldoutGrader`
+  builds the deterministic holdout partition and runs the end-of-run phase that re-scores the val-top-k
+  on reserved unseen rows; defaults are `holdout_fraction=0.25`, `holdout_select=True`,
+  `holdout_top_k=3` (`core/config.py:779-786`; `0.0` = off). Original scope, for the record: a final
+  split the search never sees; fold `generalization_gap = val − test`; flag/penalize high-gap winners.
 - ⬜ **P1 · B5 reward-hacking detector (M).** Flag suspicious wins (grader import, runtime writes to
   protected paths, val≠host-recompute) → `reward_hack_suspected` event in Trust panel.
 - *(B1/B2/B3/B4 tracked in §1 Foundation.)*
@@ -150,7 +197,11 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
 - ⬜ **P2 · C6 better ACI / write-over-edit (M).** Tuned edit/navigate/test interface (SWE-agent finding).
 
 ### Theme D · Benchmarks & real tasks
-- ⬜ **P1 · D1 wire real MLE-bench (L).** Kaggle download + real grader. *Needs B1+B6.* Highest proof point.
+- ✅ **P1 · D1 wire real MLE-bench (L).** Kaggle download + real grader. *Needs B1+B6.* Highest proof point.
+  **[corrected 2026-08-04 — shipped and registered:** `adapters/mlebench_real.py::MLEBenchRealTask`
+  (`kind="mlebench_real"`, registered `adapters/tasks.py:22,93`), `adapters/mlebench_grade.py` (host-side
+  real grader), `adapters/mlebench_prep.py`, `adapters/kaggle_dl.py`; runbook in
+  [MLEBENCH.md](MLEBENCH.md). B6 (its stated prerequisite) also shipped — see Theme B.]
 - ⬜ **P2 · D2 self-benchmark harness (M).** N held-out tasks per release; capability regression test.
 - ⬜ **P2 · D3 more task adapters (M each).** *(overlaps I2.)*
 - ⬜ **P1 · D4 dataset/data-version provenance (S).** Pin data hashes into the run. *(overlaps I3.)*

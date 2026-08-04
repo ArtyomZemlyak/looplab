@@ -98,9 +98,55 @@ def _workdir_manifest_digest(node) -> str:
         option=orjson.OPT_SORT_KEYS)).hexdigest()
 
 
+class SpeculativeEvaluationInvariantError(AssertionError):
+    """A speculative build reached an evaluation without a confirmed selection. See below."""
+
+
 class EvaluateMixin:
     """The engine's eval-task cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
+
+    @staticmethod
+    def _assert_speculative_selection_confirmed(state, node) -> None:
+        """INVARIANT: a speculative build must never consume an evaluation before its selection
+        is confirmed.
+
+        This is the load-bearing premise of admitting positive ``speculation_depth`` on real
+        Dataset/Repo/Command workloads (see the admission block in `engine/orchestrator.py`): a
+        prediction that misses is thrown away BEFORE it runs, so a miss costs one Developer call and
+        zero GPU seconds, and its node-budget slot is refunded
+        (`search/card_selection.py::is_unevaluated_speculative_discard`). Every part of that argument
+        collapses the moment a speculative node can reach the sandbox on an unconfirmed selection:
+        the miss would then be real GPU time on a real training run, which the argument does not
+        cover and which MUST NOT be admitted on it.
+
+        Confirmation is the durable ``card_build_done`` link (`state.speculative_nodes`) binding this
+        exact attempt-zero lifecycle to the Card it was built for. The producer appends it only after
+        the consumer claims the build as the selection it actually wanted; `_run_card_session`
+        additionally re-runs `speculative_card_is_fresh` immediately before dispatch, so the link is
+        the durable, replay-visible half of a confirmation the session has already re-checked in
+        memory. Asserted HERE because `_evaluate` is the single funnel every evaluation passes
+        through — the card session, the ordinary dispatcher, recovery and direct library callers all
+        arrive here — so no future path can reach a sandbox around it.
+
+        Spelled as an explicit raise rather than `assert`: `python -O` strips assert statements, and
+        an invariant whose whole purpose is to stop unbudgeted GPU spend must not be optimized out.
+        """
+        if getattr(node, "speculative", False) is not True or node.attempt != 0:
+            return
+        link = getattr(state, "speculative_nodes", {}).get(node.id)
+        generation = getattr(node, "card_build_generation", None)
+        if not (
+            isinstance(link, Mapping)
+            and type(generation) is int
+            and link.get("card_id") == node.idea.card_id
+            and link.get("generation") == generation
+        ):
+            raise SpeculativeEvaluationInvariantError(
+                f"speculative node {node.id} reached evaluation without a confirmed selection "
+                "(no matching card_build_done link); refusing to spend evaluation budget on an "
+                "unconfirmed prediction"
+            )
 
     @property
     def _probe_developer(self):
@@ -133,6 +179,9 @@ class EvaluateMixin:
                     or node.id in state.aborted_nodes or node.rerun_from is not None
                     or state.paused or state.finished or state.stop_requested):
                 return
+            # The one gate that keeps a speculative miss provably free: no unconfirmed prediction may
+            # cross into the sandbox. See `_assert_speculative_selection_confirmed`.
+            self._assert_speculative_selection_confirmed(state, node)
             generation = node.attempt       # immutable identity of THIS worker's node lifecycle
             # The trace is opened before the fold above so pre-start exits remain observable. Once
             # this worker has an exact lifecycle, stamp the root; the span index uses that root receipt

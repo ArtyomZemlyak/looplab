@@ -2593,10 +2593,14 @@ def test_run_config_uses_folded_launch_pins_and_repairs_legacy_snapshot_drift(tm
         "card_driven_selection": True,
         "speculation_depth": 4,
     })
+    # Every pinned field must actually DRIFT from the run_started pin above, or the mismatch/heal
+    # assertions below silently stop covering it. `card_driven_selection` is spelled False here for
+    # exactly that reason: its product default flipped to True on 2026-08-04, so leaving it implicit
+    # made the stale snapshot agree with the pin by accident.
     snapshot = Settings(
         timeout=30.0, holdout_fraction=0.1, holdout_select=False,
         select_verifier=False, verifier_ci_tie=False, select_verifier_samples=1,
-        speculation_depth=0,
+        card_driven_selection=False, speculation_depth=0,
     ).masked_snapshot()
     (rd / "config.snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
     client = TestClient(make_app(tmp_path))

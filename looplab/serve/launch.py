@@ -506,9 +506,18 @@ def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
     """True when a launch should default `backend="llm"`: the task normalizes to a GENERATIVE kind
     (the agent writes/edits code) and nobody chose a backend. CLI parity (mega-review P10):
     `looplab run --goal` already defaults backend=llm for these kinds (cli.py's `backend_chosen`
-    rule), but Settings.backend defaults to "toy" — a repo/dataset run launched over HTTP without
-    this got NoOpRepoDeveloper and every node silently re-evaluated the unchanged baseline (no
-    error, just a flat run).
+    rule), and `Settings.backend` used to default to "toy" — a repo/dataset run launched over HTTP
+    without this got NoOpRepoDeveloper and every node silently re-evaluated the unchanged baseline
+    (no error, just a flat run). Since 2026-08-04 that product default is "llm", so the inferred
+    value normally EQUALS the resolved one and this rule changes no outcome on a stock deployment.
+    It is kept, not deleted, because it is the only thing that makes the card/launch preview state
+    the backend a generative task needs, and it becomes load-bearing again the moment a deployment
+    sets a different `backend` default (an env/.env/UI value makes it "chosen", so it stays honest).
+    A consequence worth knowing when reading the /api/start tests: the resolved `llm` is no longer a
+    DEVIATION from the server's own `Settings()` baseline, so it stops travelling to the child as a
+    LOOPLAB_BACKEND env var. The child still gets it — every resolved setting is written into the
+    canonical unified `task.input.json`, whose `settings:` block reaches `appconfig.build_settings`
+    as pydantic init kwargs and therefore outranks env/.env.
 
     Caller: the GENESIS CARD only, and display-only — so the operator can see and override the
     inferred backend before confirming. /api/start does NOT call this; it applies the same rule over

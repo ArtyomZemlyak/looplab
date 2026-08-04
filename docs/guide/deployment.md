@@ -1,6 +1,7 @@
 # Deployment
 
-The local CLI needs **no Docker and no network**. This guide covers the two scenarios where extra
+The local CLI needs **no Docker**, and no network when you pass `--backend toy` (since 2026-08-04
+`backend` defaults to `llm`, so a default run expects a reachable LLM endpoint). This guide covers the two scenarios where extra
 infrastructure matters: the **untrusted sandbox tier** and the **one-command Compose stack** for a
 single-operator, self-hosted setup.
 
@@ -112,7 +113,7 @@ before and after folding without holding the command lock across the fold, and r
 run was reset or replaced.
 
 Read-only sharing is available only when this owner credential is configured. From a run's
-**Lab → Collaboration** panel, the owner chooses an expiry (one hour through 30 days), optionally
+**Lab → Comments & sharing** panel, the owner chooses an expiry (one hour through 30 days), optionally
 includes redacted source evidence, and creates a link. The link is a one-run bearer capability:
 
 - a review URL has the form `/review#/rv_…?gen=…&node=…`: the bearer and diagnostic state are both

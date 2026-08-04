@@ -166,6 +166,10 @@ const NARR = {
   asha_rank: (d) => `ASHA: #${d.node_id} ${fmt(d.intermediate)} ${d.underperforming === false
     ? 'rank recovered'
     : `${d.endpoint_underperforming === false ? 'same-resource' : 'endpoint'} rank warning`}`,
+  // asha_verdict is the STOP DECISION taken over a persistent rank flag — the rank test is only the
+  // evidence. The COMMON row is a judge that kept the run alive (kill=false), so render the decision,
+  // not just the flag; `unavailable` means nobody answered (no client / capped), which never kills.
+  asha_verdict: (d) => `ASHA judge: #${d.node_id} ${d.kill ? 'STOP — early kill' : `keep running (${d.status || 'unavailable'})`}${d.reason ? ' — ' + String(d.reason).slice(0, 90) : ''}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}`,
   restart: () => 'run restart requested (pause-and-resume handoff)',
 }
 
@@ -214,6 +218,7 @@ const NARR_VALID = {
   annotation: d => ownValue(d, 'node_id') && ownValue(d, 'text'),
   train_monitor_alert: d => ownValue(d, 'node_id') && ownValue(d, 'status'),
   asha_rank: d => ownValue(d, 'node_id') && ownValue(d, 'intermediate'),
+  asha_verdict: d => ownValue(d, 'node_id') && ownValue(d, 'status'),
   hypothesis_added: d => ownValue(d, 'statement'),
   hypothesis_merged: d => ownValue(d, 'statement'),
   lessons_distilled: d => ownValue(d, 'count'),
@@ -285,7 +290,7 @@ const GROUPS = [
   ['decision', 'decisions', 'policy_decision strategy_decision rung_promoted agent_decision set_strategy hypothesis_ranked foresight_selected coverage_snapshot'],
   ['research', 'research', 'research_completed deep_research hypothesis_added hypothesis_merged lessons_refreshed lessons_distilled cross_run_prior hypothesis_updated lessons_reconciled'],
   ['report', 'report', 'report_generated reflection_note report_refresh_failed'],
-  ['trust', 'trust', 'reward_hack_suspected data_leakage spec_drift novelty_rejected drift_unavailable workspace_changed novelty_graded train_monitor_alert asha_rank'],
+  ['trust', 'trust', 'reward_hack_suspected data_leakage spec_drift novelty_rejected drift_unavailable workspace_changed novelty_graded train_monitor_alert asha_rank asha_verdict'],
   ['control', 'actions', 'hint pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart'],
   ['lifecycle', 'lifecycle', 'run_started run_finished llm_cost budget data_profiled data_provenance host_grading diversity_archive setup_started setup_step setup_finished workspace_seeded run_setup_started run_setup_finished env_changed log_repaired card_auto_dropped'],
 ]

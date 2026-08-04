@@ -1895,7 +1895,7 @@ def test_resumed_zero_gpu_engine_reruns_freshness_and_drops_now_stale_pin(tmp_pa
     assert node.error == CARD_FRESHNESS_SUPERSEDED_ERROR
 
 
-def test_freshness_drop_keeps_physical_slot_spent_until_add_nodes(
+def test_freshness_drop_refunds_its_physical_slot_and_add_nodes_still_extends(
     tmp_path, monkeypatch,
 ):
     engine, _producer = _engine(tmp_path / "freshness-physical-slot")
@@ -1915,24 +1915,26 @@ def test_freshness_drop_keeps_physical_slot_spent_until_add_nodes(
     dropped = fold(engine.store.read_all())
     assert dropped.nodes[dropped_node].status is NodeStatus.failed
     assert dropped.nodes[dropped_node].error_reason == "superseded"
+    assert dropped.nodes[dropped_node].never_evaluated is True
 
-    # The exact freshness failure is absent from the Card policy count, but its historical node id
-    # still spends the only physical reservation slot. Selection therefore cannot mint a replacement
-    # until the operator explicitly extends the hard ceiling.
+    # The build never reached a sandbox, so it spends nothing: it is absent from the Card policy
+    # count AND its physical reservation is refunded, so selection may immediately mint a
+    # replacement. Without the second half the refund was inert — the id allocator kept the slot.
     engine._refresh_speculation_budget(dropped)
     assert card_budget_used(dropped) == 0
-    assert engine._node_reservation_slots_remaining(dropped) == 0
+    assert engine._node_reservation_slots_remaining(dropped) == 1
     request_count = len(dropped.card_build_requests)
-    assert engine._request_card_build() is False
-    assert len(fold(engine.store.read_all()).card_build_requests) == request_count
-
-    engine.store.append(EV_BUDGET_EXTEND, {"add_nodes": 1})
-    extended = fold(engine.store.read_all())
-    assert engine._node_reservation_slots_remaining(extended) == 1
     assert engine._request_card_build() is True
     requested = fold(engine.store.read_all())
     assert len(requested.card_build_requests) == request_count + 1
     assert engine._speculation_depth_used(requested) == 1
+
+    # The refund is one slot per discarded build, not a blank cheque: the outstanding request now
+    # owns the refunded slot, and only an explicit operator extension adds another.
+    assert engine._node_reservation_slots_remaining(requested) == 0
+    engine.store.append(EV_BUDGET_EXTEND, {"add_nodes": 1})
+    extended = fold(engine.store.read_all())
+    assert engine._node_reservation_slots_remaining(extended) == 1
 
 
 def _mark_producer_failed(engine: Engine, card_id: str, *, x: float) -> None:
