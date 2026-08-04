@@ -13,6 +13,7 @@ policy with no HTTP dependency; it belongs with the launch boundary it has to ag
 from __future__ import annotations
 
 import ast
+import dataclasses
 import inspect
 import threading
 
@@ -52,6 +53,57 @@ def test_both_indexes_reject_the_same_bad_bounds(module, bad):
     factory = module.CommandObservationIndex if module is command_observation else module.EventLogPager
     with pytest.raises(ValueError, match="max_indexed_runs must be a positive integer"):
         factory(max_indexed_runs=bad)
+
+
+def test_both_index_payloads_sit_on_the_shared_cursor():
+    """The five byte-cursor fields were declared twice and updated the same way at the end of both
+    scans. The PAYLOADS still differ — decoded events with a dense-seq rule vs byte-offset rows with
+    a monotonic-seq rule — which is why only the cursor merged."""
+    from looplab.serve._log_index import LogIndexCursor
+
+    for module in (command_observation, log_pages):
+        assert issubclass(module._Index, LogIndexCursor), module.__name__
+
+    shared = {"identity", "metadata", "revision", "observed_size", "valid_end", "torn_tail"}
+    for module in (command_observation, log_pages):
+        own = {f.name for f in dataclasses.fields(module._Index)} - shared
+        assert own, f"{module.__name__} has no payload of its own left — the merge went too far"
+        assert not (own & shared)
+
+
+def test_the_cursor_records_all_three_scan_outcomes_together():
+    """A `valid_end` advanced without its `observed_size` lets the next poll skip the bytes between
+    them; a stale `torn_tail` stops the re-scan a writer filling reserved bytes in place depends on.
+    They move as one call so a caller cannot update two of the three."""
+    from looplab.serve._log_index import LogIndexCursor
+
+    cursor = LogIndexCursor(identity=(1, 2), metadata=(3, 4))
+    cursor.note_scanned(120, 200, True)
+    assert (cursor.valid_end, cursor.observed_size, cursor.torn_tail) == (120, 200, True)
+    cursor.note_scanned(200, 200, False)
+    assert (cursor.valid_end, cursor.observed_size, cursor.torn_tail) == (200, 200, False)
+
+
+def test_minting_a_revision_fails_outstanding_cursors_closed():
+    """A rewritten prefix must ROTATE the revision, not extend it — identity, generation and growth
+    all survive an in-place rewrite, so without this an old client cursor kept resolving and stitched
+    replacement rows into the timeline it had already shown."""
+    from looplab.serve._log_index import LogIndexCursor
+
+    cursor = LogIndexCursor(identity=(1, 2), metadata=(3, 4))
+    before = cursor.revision
+    cursor.mint_revision()
+    assert cursor.revision != before and len(cursor.revision) == len(before)
+
+
+def test_two_fresh_cursors_do_not_share_a_revision():
+    """`field(default_factory=...)`, not a class attribute — a shared default would make every index
+    in the process answer to the same client cursor."""
+    from looplab.serve._log_index import LogIndexCursor
+
+    a = LogIndexCursor(identity=(1, 2), metadata=(3, 4))
+    b = LogIndexCursor(identity=(1, 2), metadata=(3, 4))
+    assert a.revision != b.revision
 
 
 def test_the_shared_bound_returns_the_value_it_validated():

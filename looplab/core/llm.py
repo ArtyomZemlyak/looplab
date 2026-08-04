@@ -317,6 +317,63 @@ def reasoning_body(model: str, mode: str = "", style: str = "auto",
     return body
 
 
+class _ResponseCache:
+    """T7: the bounded LRU of DETERMINISTIC (temperature-0) response bodies (doc 25 CO-05).
+
+    The map, its bound and the lock that pairs them used to be three loose attributes on the client,
+    so every reader had to know that `_cache_lock` guards the read-modify-write — a hit's
+    `move_to_end` and a put's eviction are each a PAIR of OrderedDict ops, and OrderedDict's
+    individual ops being atomic does not make a pair atomic. Worker threads share one client.
+
+    Deep copies live here rather than at the call sites for the same reason: callers mutate the body
+    they are handed (`complete_text` -> `_apply_native_tool_calls`), so an entry shared by reference
+    is corrupted for every later hit.
+    """
+
+    __slots__ = ("_entries", "_lock", "max_entries")
+
+    def __init__(self, max_entries: int = 256):
+        self._entries: "OrderedDict[str, dict]" = OrderedDict()
+        self._lock = threading.Lock()
+        self.max_entries = max_entries
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def __contains__(self, key: object) -> bool:
+        with self._lock:
+            return key in self._entries
+
+    def __iter__(self):
+        with self._lock:
+            return iter(list(self._entries))
+
+    def get(self, key: str) -> Optional[dict]:
+        """A DEEP COPY of the entry, most-recently-used, or None."""
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            self._entries.move_to_end(key)       # recency: this key survives the next eviction
+            return copy.deepcopy(entry)
+
+    def put(self, key: str, body: dict) -> None:
+        """Store a COPY and evict the least recently used down to the bound."""
+        copied = copy.deepcopy(body)
+        with self._lock:
+            self._entries[key] = copied
+            self._entries.move_to_end(key)
+            while len(self._entries) > self.max_entries:
+                self._entries.popitem(last=False)
+
+    def peek(self, key: str) -> Optional[dict]:
+        """The stored entry itself, without a copy or a recency bump — for tests/introspection that
+        need to prove the STORED value was not mutated by a caller's copy."""
+        with self._lock:
+            return self._entries.get(key)
+
+
 class OpenAICompatibleClient:
     """OpenAI-compatible chat client on the openai SDK (httpx transport). Implements the
     `parse.LLMClient` Protocol, so it drops into the LLM roles like any other backend.
@@ -417,12 +474,9 @@ class OpenAICompatibleClient:
         # bodies are tens of KB each, and nothing ever evicted them. The cache exists to catch the
         # NEAR-TERM repeats (a retry, a panel re-ask, a verify pass re-issuing the same prompt);
         # those all land well inside a few hundred entries, so a recency bound costs no realistic
-        # hit rate. `_cache_lock` guards the read-modify-write (hit -> move_to_end, put -> evict):
-        # worker threads share one client, and OrderedDict's individual ops being atomic does not
-        # make that pair atomic.
-        self._cache: Optional["OrderedDict[str, dict]"] = OrderedDict() if cache else None
-        self._cache_max = 256
-        self._cache_lock = threading.Lock()
+        # hit rate. The bound, the lock pairing each read-modify-write, and the deep copies live in
+        # `_ResponseCache` above (doc 25 CO-05).
+        self._cache: Optional[_ResponseCache] = _ResponseCache() if cache else None
         # Transport: the openai SDK over an httpx client. `connect` bounds TCP/TLS establishment
         # (=header_timeout); `read` = the inter-read idle limit (a long-but-alive generation keeps
         # resetting it, so it's never cut off). httpx's `read` timeout can't catch an SSE
@@ -749,13 +803,9 @@ class OpenAICompatibleClient:
         """
         if ck is None or self._cache is None:
             return None
-        with self._cache_lock:
-            entry = self._cache.get(ck)
-            if entry is not None:
-                self._cache.move_to_end(ck)       # recency: this key survives the next eviction
-        if entry is None:
+        cached = self._cache.get(ck)              # already a deep copy, already recency-bumped
+        if cached is None:
             return None
-        cached = copy.deepcopy(entry)
         # A cache hit performs no provider work. Zero every billed usage counter in this call's
         # copy: otherwise trace aggregation would duplicate both tokens and paid cost even though
         # CostAccountant correctly skips cache hits. The original cached body remains untouched.
@@ -772,104 +822,126 @@ class OpenAICompatibleClient:
         """T7 cache WRITE + LRU eviction (doc 25 CO-05). No-op when the request is uncacheable."""
         if ck is None or self._cache is None:
             return
-        copied = copy.deepcopy(body)             # cache a COPY (the returned body is mutated
-        with self._cache_lock:                   # in place by callers — keep the cached entry clean)
-            self._cache[ck] = copied
-            self._cache.move_to_end(ck)
-            while len(self._cache) > self._cache_max:
-                self._cache.popitem(last=False)   # drop the least recently used
+        self._cache.put(ck, body)                # stores a COPY and evicts the least recently used
+
+    # The retry-policy TABLE, keyed on exception type (doc 25 CO-05). An ordered list of
+    # `(types, handler-name)` pairs rather than a dict, because both properties a dict would lose are
+    # load-bearing: SUBCLASS dispatch (`APITimeoutError` must reach the `APIConnectionError` handler,
+    # and `RateLimitError`/`InternalServerError` share one) and ORDER — the entries are tried
+    # top-down, exactly as the `except` ladder they replaced. `None` is the catch-all tail.
+    _RETRY_POLICY: tuple = (
+        (openai.BadRequestError, "_policy_bad_request"),
+        (openai.AuthenticationError, "_policy_auth"),
+        ((openai.RateLimitError, openai.InternalServerError), "_policy_throttled"),
+        (openai.APIConnectionError, "_policy_connection"),
+        (openai.PermissionDeniedError, "_policy_forbidden"),
+        (json.JSONDecodeError, "_policy_unparseable"),
+        (None, "_policy_unclassified"),
+    )
 
     def _retry_or_raise(self, exc: BaseException, attempt: int, use_stream: bool) -> bool:
         """This client's per-exception retry policy for ONE failed attempt (doc 25 CO-05).
 
-        Extracted verbatim from `_post`'s six-way exception ladder, in the SAME order — the ladder's
-        order is load-bearing (see the stream_options/reasoning comments below), so the isinstance
-        chain must not be reordered. Two outcomes only:
+        Dispatches `_RETRY_POLICY` in order — the same order as the six-way `except` ladder it
+        replaced, whose order is load-bearing (see `_policy_bad_request`). Two outcomes only:
 
-        * RETURN → take another attempt. Any backoff `sleep` has already happened here. The returned
-          flag is the stream-stall ratchet: True means the next attempt must degrade off SSE.
+        * RETURN → take another attempt. Any backoff `sleep` has already happened in the handler. The
+          returned flag is the stream-stall ratchet: True means the next attempt must degrade off SSE.
         * RAISE → the clean `LLMError` the caller would have raised, `from exc`.
 
         Permanent per-client degrade state (`_stream_options_ok`, `_reasoning_ok`, `_stream_stalls`)
-        is mutated here, exactly as the inline ladder did.
+        is mutated by the handlers, exactly as the inline ladder did.
         """
-        if isinstance(exc, openai.BadRequestError):
-            # A 400 that rejects our REASONING toggle — a litellm-proxied model like glm-5.1
-            # returns UnsupportedParamsError for `reasoning_effort` — isn't a real bad request:
-            # drop reasoning for this client and retry (deepseek keeps it; glm-5.1 adapts).
-            # Checked BEFORE the reasoning branch: `_is_reasoning_reject`'s generic keys
-            # ("extra_forbidden", "unrecognized", …) also match a stream_options rejection, so
-            # letting it win would drop the reasoning toggle and retry with the ACTUAL offending
-            # field still attached — the identical 400, every attempt.
-            if use_stream and self._stream_options_ok and _is_stream_options_reject(_err_body(exc)):
-                self._stream_options_ok = False   # permanent for this client (see `_sdk_chat`)
-                if attempt < self._max_retries:
-                    return False                  # re-issue without the optional usage field
-                raise LLMError(f"LLM request to {self.base_url} rejected `stream_options` on the "
-                               f"final attempt; it is now disabled for this client so a retry "
-                               f"will succeed: {exc}") from exc
-            if self.reasoning and self._reasoning_ok and _is_reasoning_reject(_err_body(exc)):
-                self._reasoning_ok = False   # permanent for this client: the NEXT request drops the param
-                if attempt < self._max_retries:
-                    return False             # a remaining attempt re-issues with reasoning dropped
-                # On the LAST attempt the loop can't retry — but `_reasoning_ok` is now False, so the
-                # caller's retry/fallback WILL succeed. Surface a CLEAR reason instead of falling
-                # through to the generic, misleading "no response after retries" (every sibling retry
-                # branch guards on attempt<_max_retries; this one silently did not).
-                raise LLMError(f"LLM request to {self.base_url} rejected the reasoning param on the "
-                               f"final attempt; reasoning is now disabled for this client so a retry "
-                               f"will succeed: {exc}") from exc
-            raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
-        if isinstance(exc, openai.AuthenticationError):
-            raise LLMError(f"LLM request to {self.base_url} failed: {exc} — check the API key "
-                           "(LOOPLAB_LLM_API_KEY)") from exc
-        if isinstance(exc, (openai.RateLimitError, openai.InternalServerError)):   # 429 / 5xx
+        for types, handler in self._RETRY_POLICY:
+            if types is None or isinstance(exc, types):
+                return getattr(self, handler)(exc, attempt, use_stream)
+        raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc  # pragma: no cover
+
+    def _policy_bad_request(self, exc, attempt: int, use_stream: bool) -> bool:
+        # A 400 that rejects our REASONING toggle — a litellm-proxied model like glm-5.1
+        # returns UnsupportedParamsError for `reasoning_effort` — isn't a real bad request:
+        # drop reasoning for this client and retry (deepseek keeps it; glm-5.1 adapts).
+        # Checked BEFORE the reasoning branch: `_is_reasoning_reject`'s generic keys
+        # ("extra_forbidden", "unrecognized", …) also match a stream_options rejection, so
+        # letting it win would drop the reasoning toggle and retry with the ACTUAL offending
+        # field still attached — the identical 400, every attempt.
+        if use_stream and self._stream_options_ok and _is_stream_options_reject(_err_body(exc)):
+            self._stream_options_ok = False   # permanent for this client (see `_sdk_chat`)
             if attempt < self._max_retries:
-                ra = _retry_after_seconds(_retry_after_of(exc))
-                # Honor a POSITIVE server Retry-After up to RETRY_AFTER_CAP_S (a directive); otherwise
-                # use our own exponential backoff (already ≤ BACKOFF_CAP_S). `if ra` (not `is not
-                # None`): `_retry_after_seconds` clamps to max(0.0, …), so a `Retry-After: 0`, a
-                # negative value, or an HTTP-date already in the PAST (clock skew) yields ra==0.0 —
-                # honoring that would sleep(0) and burn every retry in milliseconds, defeating the
-                # 429/5xx backoff entirely. Treat a non-positive directive as "unusable" → backoff.
-                time.sleep(min(ra, RETRY_AFTER_CAP_S) if ra else _backoff(attempt))
-                return False
-            raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
-        if isinstance(exc, openai.APIConnectionError):
-            # httpx transport failure. APITimeoutError (a subclass) = a read/connect timeout: a
-            # stalled mid-stream read or a black-holed request — always transient, and the
-            # reliable interrupt the urllib+ssl path lacked (a glm SSE stall hung for minutes).
-            # A plain APIConnectionError is retried only when `_sdk_transient` says so (reset/EOF),
-            # else it fails fast (refused/DNS/cert). A STREAM stall degrades the next attempt to
-            # non-stream and ratchets the permanent-degrade counter. This ALSO catches a raw httpx
-            # stream-body error that `_stream_with_idle_guard` normalized to APIConnectionError
-            # (the SDK leaves those unwrapped) — `_sdk_transient` reads its httpx __cause__.
-            is_timeout = isinstance(exc, openai.APITimeoutError)
-            transient = is_timeout or _sdk_transient(exc)
-            stalled = bool(use_stream and transient)
-            if stalled:
-                self._stream_stalls += 1
-            if transient and attempt < self._max_retries:
-                time.sleep(_backoff(attempt))
-                return stalled
-            raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
-        if isinstance(exc, openai.PermissionDeniedError):   # 403 — often a burst/rate-limit throttle, not hard-forbidden
-            if _is_throttle_403(_err_body(exc)) and attempt < self._max_retries:
-                time.sleep(_backoff(attempt))
-                return False
-            raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
-        if isinstance(exc, json.JSONDecodeError):
-            # A gateway 200 with an empty / whitespace / keepalive-only body makes the SDK's
-            # decoder raise a RAW json.JSONDecodeError — NOT an openai.APIError — so without this
-            # it'd escape `_post` uncaught and abort the run (the role layer only retries+falls
-            # back on LLMError). Mirror the old `_parse_chat_body`-None path: a transient gateway
-            # hiccup — retry with backoff, then a clean LLMError. NARROW on purpose: a ValueError/
-            # AttributeError from our own _accumulate_stream/_tool_call_slot code must NOT be
-            # masked here as a "gateway hiccup" — let a real accumulation bug propagate loudly.
+                return False                  # re-issue without the optional usage field
+            raise LLMError(f"LLM request to {self.base_url} rejected `stream_options` on the "
+                           f"final attempt; it is now disabled for this client so a retry "
+                           f"will succeed: {exc}") from exc
+        if self.reasoning and self._reasoning_ok and _is_reasoning_reject(_err_body(exc)):
+            self._reasoning_ok = False   # permanent for this client: the NEXT request drops the param
             if attempt < self._max_retries:
-                time.sleep(_backoff(attempt))
-                return False
-            raise LLMError(f"LLM request to {self.base_url} returned an unparseable body") from exc
+                return False             # a remaining attempt re-issues with reasoning dropped
+            # On the LAST attempt the loop can't retry — but `_reasoning_ok` is now False, so the
+            # caller's retry/fallback WILL succeed. Surface a CLEAR reason instead of falling
+            # through to the generic, misleading "no response after retries" (every sibling retry
+            # branch guards on attempt<_max_retries; this one silently did not).
+            raise LLMError(f"LLM request to {self.base_url} rejected the reasoning param on the "
+                           f"final attempt; reasoning is now disabled for this client so a retry "
+                           f"will succeed: {exc}") from exc
+        raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
+
+    def _policy_auth(self, exc, attempt: int, use_stream: bool) -> bool:
+        raise LLMError(f"LLM request to {self.base_url} failed: {exc} — check the API key "
+                       "(LOOPLAB_LLM_API_KEY)") from exc
+
+    def _policy_throttled(self, exc, attempt: int, use_stream: bool) -> bool:   # 429 / 5xx
+        if attempt < self._max_retries:
+            ra = _retry_after_seconds(_retry_after_of(exc))
+            # Honor a POSITIVE server Retry-After up to RETRY_AFTER_CAP_S (a directive); otherwise
+            # use our own exponential backoff (already ≤ BACKOFF_CAP_S). `if ra` (not `is not
+            # None`): `_retry_after_seconds` clamps to max(0.0, …), so a `Retry-After: 0`, a
+            # negative value, or an HTTP-date already in the PAST (clock skew) yields ra==0.0 —
+            # honoring that would sleep(0) and burn every retry in milliseconds, defeating the
+            # 429/5xx backoff entirely. Treat a non-positive directive as "unusable" → backoff.
+            time.sleep(min(ra, RETRY_AFTER_CAP_S) if ra else _backoff(attempt))
+            return False
+        raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
+
+    def _policy_connection(self, exc, attempt: int, use_stream: bool) -> bool:
+        # httpx transport failure. APITimeoutError (a subclass) = a read/connect timeout: a
+        # stalled mid-stream read or a black-holed request — always transient, and the
+        # reliable interrupt the urllib+ssl path lacked (a glm SSE stall hung for minutes).
+        # A plain APIConnectionError is retried only when `_sdk_transient` says so (reset/EOF),
+        # else it fails fast (refused/DNS/cert). A STREAM stall degrades the next attempt to
+        # non-stream and ratchets the permanent-degrade counter. This ALSO catches a raw httpx
+        # stream-body error that `_stream_with_idle_guard` normalized to APIConnectionError
+        # (the SDK leaves those unwrapped) — `_sdk_transient` reads its httpx __cause__.
+        is_timeout = isinstance(exc, openai.APITimeoutError)
+        transient = is_timeout or _sdk_transient(exc)
+        stalled = bool(use_stream and transient)
+        if stalled:
+            self._stream_stalls += 1
+        if transient and attempt < self._max_retries:
+            time.sleep(_backoff(attempt))
+            return stalled
+        raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
+
+    def _policy_forbidden(self, exc, attempt: int, use_stream: bool) -> bool:
+        # 403 — often a burst/rate-limit throttle, not hard-forbidden.
+        if _is_throttle_403(_err_body(exc)) and attempt < self._max_retries:
+            time.sleep(_backoff(attempt))
+            return False
+        raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
+
+    def _policy_unparseable(self, exc, attempt: int, use_stream: bool) -> bool:
+        # A gateway 200 with an empty / whitespace / keepalive-only body makes the SDK's
+        # decoder raise a RAW json.JSONDecodeError — NOT an openai.APIError — so without this
+        # it'd escape `_post` uncaught and abort the run (the role layer only retries+falls
+        # back on LLMError). Mirror the old `_parse_chat_body`-None path: a transient gateway
+        # hiccup — retry with backoff, then a clean LLMError. NARROW on purpose: a ValueError/
+        # AttributeError from our own _accumulate_stream/_tool_call_slot code must NOT be
+        # masked here as a "gateway hiccup" — let a real accumulation bug propagate loudly.
+        if attempt < self._max_retries:
+            time.sleep(_backoff(attempt))
+            return False
+        raise LLMError(f"LLM request to {self.base_url} returned an unparseable body") from exc
+
+    def _policy_unclassified(self, exc, attempt: int, use_stream: bool) -> bool:
         # The ladder's final `except openai.APIError`: any other SDK-level protocol error -> clean
         # LLMError. `_post` catches only APIError|JSONDecodeError, so nothing else reaches here.
         raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc

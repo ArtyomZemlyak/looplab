@@ -292,9 +292,56 @@ def test_the_accessors_are_inert_when_caching_is_disabled():
     assert c._cache_get("k") is None
 
 
+def test_the_cache_is_a_unit_with_its_own_bound_and_lock():
+    """The map, its bound and the lock pairing each read-modify-write were three loose attributes on
+    the client, so every reader had to know that a hit's `move_to_end` and a put's eviction are each
+    a PAIR of OrderedDict ops — and worker threads share one client (doc 25 CO-05)."""
+    from looplab.core.llm import _ResponseCache
+
+    cache = _ResponseCache(max_entries=2)
+    assert len(cache) == 0 and "k" not in cache
+    cache.put("k", {"n": 1})
+    assert len(cache) == 1 and "k" in cache and list(cache) == ["k"]
+
+
+def test_the_cache_copies_in_both_directions():
+    """Neither the caller's body nor the stored entry may be reachable by reference from the other."""
+    from looplab.core.llm import _ResponseCache
+
+    cache = _ResponseCache()
+    body = {"choices": [{"message": {"content": "ok"}}]}
+    cache.put("k", body)
+
+    body["choices"][0]["message"]["content"] = "MUTATED BY THE CALLER"
+    assert cache.peek("k")["choices"][0]["message"]["content"] == "ok"
+
+    got = cache.get("k")
+    got["choices"][0]["message"]["content"] = "MUTATED BY THE READER"
+    assert cache.peek("k")["choices"][0]["message"]["content"] == "ok"
+
+
+def test_a_miss_is_none_not_a_key_error():
+    from looplab.core.llm import _ResponseCache
+
+    cache = _ResponseCache()
+    assert cache.get("absent") is None and cache.peek("absent") is None
+
+
+def test_peek_does_not_refresh_recency():
+    """`peek` exists for introspection; letting it bump recency would make a test's own look change
+    which entry the next eviction takes."""
+    from looplab.core.llm import _ResponseCache
+
+    cache = _ResponseCache(max_entries=2)
+    cache.put("a", {}); cache.put("b", {})
+    cache.peek("a")
+    cache.put("c", {})
+    assert set(cache) == {"b", "c"}, "peek refreshed 'a' and evicted the wrong entry"
+
+
 def test_the_cache_evicts_the_least_recently_used():
     c = _client()
-    c._cache_max = 3
+    c._cache.max_entries = 3
     for i in range(3):
         c._cache_put(f"k{i}", {"n": i})
     c._cache_get("k0")                       # k0 becomes the most recent, so k1 is now the victim
@@ -336,17 +383,51 @@ def test_post_still_catches_the_raw_decode_error_that_is_not_an_sdk_error():
         "the two-family catch is only redundant if the SDK starts owning decode errors")
 
 
-def test_the_policy_helper_never_returns_on_a_path_it_cannot_retry():
-    """`_retry_or_raise` is fail-closed by construction: a `return` means "attempt again", so a branch
-    that fell through without raising would silently retry a hard 401/400 until the retries ran out
-    and then report the misleading generic 'no response after retries'."""
-    fn = _body(OpenAICompatibleClient._retry_or_raise)
-    returns = [n for n in ast.walk(fn) if isinstance(n, ast.Return)]
-    assert returns, "the helper must be able to ask for a retry"
-    for node in returns:
-        assert isinstance(node.value, (ast.Constant, ast.Name)), (
-            "a retry decision must be a plain flag, not an expression that could evaluate to None "
-            "and read as 'no stall' when it meant 'no opinion'")
-    assert isinstance(fn.body[-1], ast.Raise), (
-        "the helper falls off its end without raising — an unclassified error would return None, "
-        "which `_post` reads as 'retry, not stalled'")
+def _policy_handlers():
+    return [getattr(OpenAICompatibleClient, name)
+            for _types, name in OpenAICompatibleClient._RETRY_POLICY]
+
+
+def test_the_policy_table_is_ordered_and_ends_in_a_catch_all():
+    """A dict keyed on type would lose both properties this table needs. ORDER: a stream_options
+    rejection also matches `_is_reasoning_reject`'s generic keys, so BadRequest must be tried before
+    anything that could claim it. CATCH-ALL: whatever the SDK grows next must still become a clean
+    LLMError, because only LLMError triggers the role layer's retry+fallback."""
+    table = OpenAICompatibleClient._RETRY_POLICY
+    assert table[0][0] is _openai.BadRequestError
+    assert [t for t, _ in table[:-1]] == [t for t, _ in table[:-1] if t is not None], (
+        "a catch-all before the end makes every entry after it dead")
+    assert table[-1][0] is None, "the table falls through with no handler"
+
+
+def test_every_declared_handler_exists_and_every_handler_is_declared():
+    """Two-way registry guard, the same discipline CLAUDE.md applies to the other duck-typed seams:
+    a handler renamed out of the table stops running and NOTHING says so."""
+    declared = {name for _t, name in OpenAICompatibleClient._RETRY_POLICY}
+    defined = {n for n in vars(OpenAICompatibleClient) if n.startswith("_policy_")}
+    assert declared == defined, (declared ^ defined)
+    for name in declared:
+        assert callable(getattr(OpenAICompatibleClient, name))
+
+
+def test_no_policy_handler_returns_on_a_path_it_cannot_retry():
+    """Fail-closed by construction: a `return` means "attempt again", so a handler that fell through
+    without raising would silently retry a hard 401/400 until the retries ran out and then report the
+    misleading generic 'no response after retries'."""
+    for fn in _policy_handlers() + [OpenAICompatibleClient._retry_or_raise]:
+        tree = _body(fn)
+        for node in [n for n in ast.walk(tree) if isinstance(n, ast.Return)]:
+            assert isinstance(node.value, (ast.Constant, ast.Name, ast.Call)), (
+                f"{fn.__name__}: a retry decision must be a plain flag or a delegated call, not an "
+                "expression that could evaluate to None and read as 'no stall'")
+        assert isinstance(tree.body[-1], ast.Raise), (
+            f"{fn.__name__} falls off its end without raising — an unclassified error would return "
+            "None, which `_post` reads as 'retry, not stalled'")
+
+
+def test_the_dispatcher_holds_no_policy_of_its_own():
+    """The point of the table: a new provider quirk is a new ENTRY, not a seventh inline branch."""
+    tree = _body(OpenAICompatibleClient._retry_or_raise)
+    tests = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "isinstance"]
+    assert len(tests) == 1, "the dispatcher grew its own type checks alongside the table"
