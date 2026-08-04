@@ -16,7 +16,7 @@ import os
 import random
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState, validate_direction
@@ -82,6 +82,69 @@ class DataSpec(BaseModel):
         if self.mount and self.edit:
             self.mount = False
         return self
+
+
+# What a pathless `file_json`/`file_regex` reader COSTS in each of EvalSpec's four reader slots —
+# each one MEASURED before it was written down, because they are not the same failure and a message
+# naming the wrong symptom sends the operator hunting the wrong bug. `runtime/command_eval.py` owns
+# the other half of the message (which readers need a path + the corrected example) and is the only
+# spelling of it; only the consequence sentence is per-slot, and this is its only spelling.
+_PATHLESS_COST = {
+    # `_read_file` returns None -> the node has no metric at all.
+    "metric": "Without `path` the reader returns nothing and every node fails no_metric.",
+    # `run_command_eval`'s `declared` comprehension drops a reader that returns None, so the extra
+    # metric is simply absent from the node's report — the quietest of the four.
+    "metrics": ("Without `path` this extra reader is silently dropped: the node reports no value "
+                "under that name and nothing anywhere says why."),
+    # `_violations` counts an UNREADABLE value as a violation ("an unverifiable constraint is a
+    # violation, never a silent pass"), so the bound can never be satisfied.
+    "constraints": ("Without `path` the bound can never be verified, and an unverifiable constraint "
+                    "counts as a VIOLATION — every node is marked infeasible and excluded from "
+                    "best-selection, so the run finishes with no best node."),
+    # `_drift(primary, None, tol)` is True by construction ("can't corroborate -> drift").
+    "cross_check": ("Without `path` the cross reader corroborates nothing and the drift check fails "
+                    "closed — under eval_trust_mode=\"ratify_freeze_drift\" EVERY node's metric is "
+                    "discarded as drift and the run finishes with no best node."),
+}
+
+
+def eval_reader_path_errors(spec) -> list[str]:
+    """Every "this reader can never read anything" problem in an EvalSpec, one message per reader.
+
+    Walks `EvalSpec.readers()` (the single enumeration of the reader slots) and asks
+    `runtime/command_eval.metric_spec_path_error` — the authority that lives beside the reader table
+    deciding the fact — about each one. Returns [] for a usable spec, and for anything that isn't an
+    EvalSpec (a toy/dataset task has no readers).
+
+    Shared by the submit-time refusal below and `cli/run_cmds.py::resume`, which reports the SAME
+    text as a warning for a run that was started before the refusal existed (see `_readers_usable`).
+    """
+    from looplab.runtime.command_eval import metric_spec_path_error
+    if not isinstance(spec, EvalSpec):
+        return []
+    out: list[str] = []
+    for label, slot, reader in spec.readers():
+        err = metric_spec_path_error(reader, consequence=_PATHLESS_COST[slot])
+        if err:
+            out.append(f"{label}: {err}")
+    return out
+
+
+def _grandfathered(info: ValidationInfo) -> bool:
+    """True when this task document is being RE-loaded for a run that ALREADY EXISTS.
+
+    `resume`/`finalize` rebuild the task by re-validating the verbatim `task.snapshot.json` the run
+    was started with, so a validator that raises retroactively makes every pre-existing run
+    unresumable — the same trap that made `DataSpec._mount_edit_consistent` coerce instead of reject.
+    A new refusal therefore has to distinguish "someone is submitting this spec" from "this spec is
+    already the recorded truth of a run in progress", and the pydantic validation CONTEXT is that
+    signal: `adapters/tasks.py::validate_task(..., existing_run=True)` sets it, direct construction
+    (`EvalSpec(...)`, `RepoTask(**d)`) never does, so the strict path is the DEFAULT and only the
+    reload sites opt out. CLAUDE.md invariant #6 is the same principle for settings: what the run
+    recorded when it started wins on resume.
+    """
+    ctx = getattr(info, "context", None)
+    return bool(isinstance(ctx, dict) and ctx.get("existing_run"))
 
 
 class EvalSpec(BaseModel):
@@ -181,7 +244,9 @@ class EvalSpec(BaseModel):
         # unreadable → every node fails with no_metric, so reject it at submit with a clear message.
         # The reader table in `runtime/command_eval.py` is the authority; validating against a local
         # copy is how the kinds came to be enumerated in three places (doc 25 RA-04/RA-05).
-        from looplab.runtime.command_eval import METRIC_READERS, metric_spec_path_error
+        # A KNOWN kind is not yet a USABLE spec — the `path` half of that moved to `_readers_usable`
+        # below, which applies it to ALL FOUR reader slots instead of only this one.
+        from looplab.runtime.command_eval import METRIC_READERS
         _KINDS = set(METRIC_READERS)
         if isinstance(v, dict):
             k = v.get("kind", "stdout_json")
@@ -190,14 +255,6 @@ class EvalSpec(BaseModel):
                     f"eval.metric.kind {k!r} is not a metric reader. Use one of {sorted(_KINDS)} (HOW to "
                     "read the printed metric, e.g. stdout_json). The max/min DIRECTION belongs in the "
                     "task's `direction`, not here.")
-            # A KNOWN kind is not yet a USABLE spec. `file_json`/`file_regex` need the file to read;
-            # checking only the reader NAME let `{"kind":"file_json","key":"metric"}` through, and the
-            # run then failed EVERY node with `no_metric` and no hint at the missing field. Failing at
-            # submit is the whole point of having submit-time validation — same standard the kind
-            # check above already sets, and the same authority (`runtime/command_eval.py`) decides it.
-            path_err = metric_spec_path_error(v)
-            if path_err:
-                raise ValueError(f"eval.metric: {path_err}")
         return v
 
     @field_validator("cross_check")
@@ -205,6 +262,59 @@ class EvalSpec(BaseModel):
     def _cross_check_not_adapter(cls, v):
         from looplab.runtime.command_eval import validate_cross_check
         return validate_cross_check(v)
+
+    def readers(self) -> list[tuple[str, str, dict]]:
+        """Every metric-reader spec this eval declares, as `(label, slot, spec)` — THE enumeration of
+        "where a reader can appear", so a rule about readers is applied to all four slots or to none.
+
+        It was not: the submit-time `path` check covered only the primary `metric`, and the same
+        pathless `file_json` in `metrics` / `constraints` / `cross_check` still validated, started a
+        run, and failed it three different quiet ways (`_PATHLESS_COST`). `_eval_protected` had
+        already had to hand-write this same walk for the write-gate's protected-name list.
+
+        `label` is what the operator wrote in the task file (`eval.constraints[0]`), so a refusal can
+        name the field; `slot` is the FIELD, for looking up a per-slot rule. Order matches the order
+        `run_command_eval` reads them in, and is what `_eval_protected`'s dedupe preserves."""
+        out: list[tuple[str, str, dict]] = []
+        if isinstance(self.metric, dict):
+            out.append(("eval.metric", "metric", self.metric))
+        for name, r in (self.metrics or {}).items():
+            if isinstance(r, dict):
+                out.append((f"eval.metrics[{name!r}]", "metrics", r))
+        for i, c in enumerate(self.constraints or []):
+            if isinstance(c, dict):
+                nm = c.get("name")
+                out.append((f"eval.constraints[{i}]" + (f" (name={nm!r})" if nm else ""),
+                            "constraints", c))
+        if isinstance(self.cross_check, dict):
+            out.append(("eval.cross_check", "cross_check", self.cross_check))
+        return out
+
+    @model_validator(mode="after")
+    def _readers_usable(self, info: ValidationInfo):
+        """Refuse a reader that can never read anything, in ANY of the four slots, at SUBMIT time.
+
+        Deliberately NOT inside `validate_cross_check`: that predicate is ALSO the runtime guard
+        `run_command_eval` calls per eval, so a raise there would abort the eval worker mid-run with
+        no terminal event for the node — the failure mode `_dig`/`_regex_metric`/`_confined` each have
+        a comment about. Submit time is the only place this can refuse without changing runtime
+        behaviour, and a model validator is the one seam every submit surface (CLI, `/api/start`,
+        Genesis, the agent-facing run tools) already goes through.
+
+        The reload escape hatch is `_grandfathered`: `resume`/`finalize` re-validate the run's own
+        `task.snapshot.json`, and a run that already exists must stay resumable even when the spec it
+        recorded is one we would now refuse. Resume reports these as warnings instead (see
+        `cli/run_cmds.py::resume`), so the diagnosis is not lost — only the refusal is.
+        """
+        if _grandfathered(info):
+            return self
+        errs = eval_reader_path_errors(self)
+        if errs:
+            # ALL of them, not the first: a spec that mis-authors `metrics` AND `constraints` the same
+            # way (the natural case — the author had one wrong idea about `key`, not four) would
+            # otherwise cost one submit round-trip per slot.
+            raise ValueError("\n".join(errs))
+        return self
 
     @field_validator("stages")
     @classmethod
@@ -442,26 +552,22 @@ class RepoTask(BaseModel):
         `metrics`, each `constraints` reader, and the drift `cross_check` (review C1 — secondary
         reader paths were left unprotected, so constraint/aux/drift values could be forged).
         Namespaced under the eval `cwd` so the protected name matches the workspace-relative path
-        the agent edits."""
+        the agent edits.
+
+        The "every reader the eval uses" walk is `EvalSpec.readers()` — the one enumeration, so this
+        list and the submit-time path check (`_readers_usable`) cannot come to disagree about which
+        slots exist. `str(path)` because a non-string `path` reaches here on the RELOAD path
+        (grandfathered, see `_grandfathered`) and `pre + 123` used to raise TypeError out of
+        `repo_spec()`, i.e. out of `Engine.__init__` — a crash instead of a resumable run."""
         if not self.eval:
             return []
         cwd = self._normp((self.eval.cwd or ".").strip()).strip("/")
         pre = "" if cwd in (".", "") else cwd + "/"
         out: list[str] = []
-
-        def _add(reader) -> None:
-            if not isinstance(reader, dict):
-                return
+        for _label, _slot, reader in self.eval.readers():
             kind = reader.get("kind", "")
             if (kind.startswith("file_") or kind == "adapter") and reader.get("path"):
-                out.append(self._normp(pre + reader["path"]))
-
-        _add(self.eval.metric)
-        for r in (self.eval.metrics or {}).values():
-            _add(r)
-        for c in (self.eval.constraints or []):
-            _add(c)
-        _add(self.eval.cross_check)
+                out.append(self._normp(pre + str(reader["path"])))
         seen: set[str] = set()
         return [p for p in out if not (p in seen or seen.add(p))]   # dedupe, keep order
 

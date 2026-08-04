@@ -66,7 +66,17 @@ Score, …); the **Card lifecycle board** (1 card = 1 hypothesis), **cross-run m
     GPU packing is concurrent inside one Run. Separate local Engine processes that share an OS-user
     filesystem namespace conservatively serialize GPU ownership through one crash-released pool lease;
     this avoids treating ordinal, GPU-UUID, and MIG aliases as different hardware. Different OS users,
-    containers, or hosts do not share that lease and require an external scheduler.
+    containers, or hosts do not share that lease and require an external scheduler. Because that lease
+    is pool-wide, a blocked wait is announced — the lease file and the holding process id — rather than
+    looking like a stalled Run.
+
+    An **undeclared** footprint resolves against the task as well as the box. A task adapter may
+    declare itself CPU-locked (`gpu_capable() -> False`; the shipped toy, regression, classification,
+    timeseries and offline MLE-bench adapters do, because their solution code is a numpy/stdlib
+    template or their brief forbids anything else); an undeclared footprint on such a task reserves
+    nothing and never touches the pool lease, so an offline quadratic run cannot queue behind a
+    neighbour's training job. Absent that declaration the task is assumed GPU-capable and the
+    historical rule stands, and an explicit `footprint.gpus` always outranks the adapter's answer.
 
     Admission scans the queue for the first experiment whose complete footprint fits *now*, so an
     explicit CPU-only node behind a GPU-heavy one still starts. That is work-conserving but not fair

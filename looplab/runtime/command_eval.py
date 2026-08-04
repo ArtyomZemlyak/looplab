@@ -349,12 +349,26 @@ METRIC_READERS = {
 READERS_REQUIRING_PATH = frozenset({"file_json", "file_regex"})
 
 
-def metric_spec_path_error(spec) -> Optional[str]:
+# The slot-agnostic tail of the refusal. WHAT a pathless reader costs depends on which slot it is
+# in, and the four costs are genuinely different — measured: a pathless `metrics` entry is dropped
+# from the node's report, a pathless `constraints` entry reads as unverifiable (which `_violations`
+# counts as a violation, so EVERY node is excluded from best-selection), a pathless `cross_check`
+# makes `_drift` fail closed (so every node's metric is discarded), and only the primary `metric`
+# fails `no_metric`. A message naming the WRONG symptom is worse than one naming none — it sends the
+# operator hunting the wrong failure — so the consequence sentence is the CALLER's
+# (`adapters/repo_task.py::_PATHLESS_COST` holds the four), and only this always-true fallback,
+# "which readers need a path", and the corrected example live here.
+_PATHLESS_COST = "Without `path` this reader can never return a value."
+
+
+def metric_spec_path_error(spec, *, consequence: Optional[str] = None) -> Optional[str]:
     """Why `spec` can never read a metric for want of a usable `path` — or None when it can.
 
     A NON-STRING `path` is rejected too, and is the worse of the two failures: `_confined` catches
     only (OSError, ValueError, RuntimeError), so `Path(workdir) / 123` raises an uncaught TypeError
     out of `read_metric` and takes down the RUN rather than failing the node.
+
+    `consequence`: the caller's MEASURED failure mode for its own reader slot (see `_PATHLESS_COST`).
     """
     if not isinstance(spec, dict):
         return None
@@ -370,7 +384,7 @@ def metric_spec_path_error(spec) -> Optional[str]:
                 f"workdir, got {type(path).__name__}: {str(path)[:60]!r}. e.g. {example}")
     return (f"metric reader {kind!r} needs a `path`: the file the eval writes, relative to the node's "
             f"eval workdir. e.g. {example} — `key` is the key INSIDE that file, not the file name. "
-            "Without `path` the reader returns nothing and every node fails no_metric.")
+            + (consequence or _PATHLESS_COST))
 
 
 def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,

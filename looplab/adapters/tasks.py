@@ -318,17 +318,25 @@ def normalize_task(data: dict) -> dict:
     return d
 
 
-def validate_task(data: dict) -> TaskAdapter:
+def validate_task(data: dict, *, existing_run: bool = False) -> TaskAdapter:
     """Build + validate a task adapter from an in-memory dict (the inline-task / genesis path). Raises
     on an unknown kind OR a kind-specific validation failure (e.g. mlebench_real resolving an unknown
     competition slug) — the SAME validation the engine runs at startup, so callers can reject a bad
-    spec synchronously instead of spawning a detached engine that dies before writing any events."""
+    spec synchronously instead of spawning a detached engine that dies before writing any events.
+
+    `existing_run=True` marks this as a RE-load of a run that already has history — `resume`,
+    `finalize` and read-only inspection rebuild the task from the verbatim `task.snapshot.json` the
+    run was started with. It reaches the models as pydantic validation CONTEXT (propagated to nested
+    models), where a validator added AFTER that snapshot was written can decline to retroactively
+    invalidate it; see `adapters/repo_task.py::_grandfathered` for the one rule that uses it and why.
+    The default is the STRICT path, so a new submit surface is fail-closed by omission and only the
+    reload sites opt out."""
     data = normalize_task(data)                       # composable/legacy schema -> canonical + inferred kind
     kind = data["kind"]                               # normalize_task guarantees it (or raises)
     cls = _KINDS.get(kind)
     if cls is None:
         raise ValueError(f"unknown task kind: {kind!r} (known: {sorted(_KINDS)})")
-    adapter = cls.model_validate(data)
+    adapter = cls.model_validate(data, context={"existing_run": bool(existing_run)})
     contract = getattr(adapter, "comparison_contract", None)
     if contract is not None and contract.direction != adapter.direction:
         # direction is part of both execution and comparison semantics.  A mismatch
@@ -349,13 +357,15 @@ def validate_task(data: dict) -> TaskAdapter:
     return adapter
 
 
-def load_task(path: str | Path) -> TaskAdapter:
+def load_task(path: str | Path, *, existing_run: bool = False) -> TaskAdapter:
     # Accepts a bare task file (legacy JSON, or YAML) OR a unified config file — in which case only
     # its `task:` block is validated here (the engine settings are read separately by the CLI). The
     # reader handles JSON/YAML and a BOM from Windows editors.
+    # `existing_run` forwards to validate_task: pass it when `path` is (or stands in for) a run's own
+    # `task.snapshot.json`, so re-entering an existing run can't be refused by a rule added later.
     from looplab.core.appconfig import load_document
     task, _settings, _out = load_document(Path(path))
-    return validate_task(task)
+    return validate_task(task, existing_run=existing_run)
 
 
 # Re-export: the factory moved to its dependency-true home (core/llm.py — it only ever needed

@@ -124,11 +124,15 @@ def _choice(value: str, choices: tuple[str, ...], param: str) -> str:
     return value
 
 
-def _load_task(task_file: Path) -> TaskAdapter:
+def _load_task(task_file: Path, *, existing_run: bool = False) -> TaskAdapter:
     """Load a task JSON with friendly CLI errors: a missing file or malformed/invalid task becomes a
-    one-line BadParameter (exit 2), not a raw multi-frame Python traceback dumped at the user."""
+    one-line BadParameter (exit 2), not a raw multi-frame Python traceback dumped at the user.
+
+    `existing_run=True` when the file is the snapshot of a run that already has history (`resume`,
+    `finalize`, wrap-up recovery): a validation rule added after that snapshot was written must not
+    make the run unresumable. See `adapters/repo_task.py::_grandfathered`."""
     try:
-        return load_task(task_file)
+        return load_task(task_file, existing_run=existing_run)
     except FileNotFoundError:
         raise typer.BadParameter(f"task file not found: {task_file}")
     except (ValueError, KeyError, TypeError) as e:

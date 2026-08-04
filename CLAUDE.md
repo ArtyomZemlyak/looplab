@@ -146,9 +146,18 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 - **Tool providers**: the `bind_state` hook is OPTIONAL (`tools/_base.py` — providers that don't
   need run state simply omit it), but a provider that DOES implement it must accept the second
   `parent` argument (`bind_state(self, state, parent=None)`) or it raises `TypeError` at dispatch.
-- **Tests isolate the environment** (`tests/conftest.py`): dotenv loading is disabled and
-  `LOOPLAB_MEMORY_DIR`/`LOOPLAB_KNOWLEDGE_DIR` point at tmp dirs. Engine tests construct
-  `Engine(...)` directly (~100 call sites) — keep its keyword API stable.
+- **Tests isolate the environment** (`tests/conftest.py`): dotenv loading is disabled,
+  `LOOPLAB_MEMORY_DIR`/`LOOPLAB_KNOWLEDGE_DIR` point at tmp dirs, and the host GPU-pool lease is
+  redirected to a per-test file. Engine tests construct `Engine(...)` directly (~100 call sites) —
+  keep its keyword API stable.
+- **The host GPU-pool lease is ONE file per OS user** (`/tmp/looplab-gpu-pool-<uid>.lock`,
+  `engine/resources.py`) and is exclusive ACROSS PROCESSES on purpose. So a GPU-owning run waits for
+  every co-hosted GPU-owning run — potentially for hours — and that wait used to be completely
+  silent, which reads as a deadlock and repeatedly got debugged as one. It now logs the lease path
+  and the holding PID at WARNING. Work that needs no GPU must not enter that queue at all: an
+  UNSPECIFIED footprint resolves against the TASK (`adapters/tasks.py::gpu_capable`, absent means
+  capable) as well as the box, so the offline/synthetic adapters never take the lease. If a run
+  genuinely stalls before its first eval, check that lock before suspecting the engine.
 - Settings are flat on purpose (`LOOPLAB_<FIELD>` env vars map 1:1); never nest or rename fields —
   snapshots and env compat depend on the names.
 - `looplab/sweep.py` is NOT a CLI subcommand — it is a runtime helper imported by *generated*

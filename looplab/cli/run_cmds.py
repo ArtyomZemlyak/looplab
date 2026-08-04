@@ -28,6 +28,7 @@ from looplab.engine.orchestrator import (
 )
 from looplab.engine.finalize import finalize_run, incomplete_finalize_scope
 from looplab.events.replay import fold
+from looplab.adapters.repo_task import eval_reader_path_errors
 from looplab.adapters.tasks import validate_task
 from looplab.search.speculation_calibration import canonical_speculation_toy_task
 from looplab.core import appconfig
@@ -245,7 +246,7 @@ def _pending_finalization_inputs(run_dir: Path, task_id: str | None):
             "cannot complete pending finalization without the original run snapshot(s): "
             + ", ".join(missing))
 
-    recovery_task = _load_task(task_snap)
+    recovery_task = _load_task(task_snap, existing_run=True)
     if task_id and recovery_task.id != task_id:
         raise typer.BadParameter(
             f"task.snapshot.json belongs to task {recovery_task.id!r}, but the event log belongs "
@@ -726,7 +727,13 @@ def resume(
             raise typer.BadParameter(
                 "no --task-file given and no task.snapshot.json in the run dir")
         task_file = snap
-    task = _load_task(task_file)
+    # `existing_run=True`: this run already has an event log, so a validation rule added since it
+    # started must not be able to refuse it. The rules that CAN be waived this way report themselves
+    # as warnings below instead — the diagnosis survives, only the refusal is dropped (invariant #6:
+    # what the run recorded at `run_started` wins on resume).
+    task = _load_task(task_file, existing_run=True)
+    for _warn in eval_reader_path_errors(getattr(task, "eval", None)):
+        typer.echo(f"warning: {_warn}", err=True)
     # Restore the ORIGINAL run's settings from the snapshot `run` wrote — a fresh Settings()
     # would silently drop run-only flags (require_approval, trust_mode, confirm_*, eval_trust_mode,
     # backend, …), e.g. finishing a paused not-yet-approved run without any approval.
@@ -871,7 +878,7 @@ def finalize(
                    f"(task file not found: {snap})")
         return
     settings = load_run_settings(run_dir, strict=True)
-    eng = _engine(run_dir, _load_task(snap), settings, crash_after=None)
+    eng = _engine(run_dir, _load_task(snap, existing_run=True), settings, crash_after=None)
     _preflight_speculation_authority(eng)
     with _engine_singleton(run_dir) as ok:
         if not ok:

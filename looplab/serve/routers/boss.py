@@ -755,7 +755,10 @@ def build_router(srv) -> APIRouter:
                 from looplab.adapters.tasks import load_task
                 snap = rd / "task.snapshot.json"
                 if snap.exists():
-                    providers.append(DataTools(load_task(snap)))
+                    # A read-only look at a run that ALREADY EXISTS: load its snapshot with the same
+                    # grandfathering `resume` uses, so a spec a later validator would refuse doesn't
+                    # silently cost this run its DataTools (repo_task.py::_grandfathered).
+                    providers.append(DataTools(load_task(snap, existing_run=True)))
             except Exception:  # noqa: BLE001 - tools are best-effort; RunTools alone is fine
                 pass
             tools = providers[0] if len(providers) == 1 else CompositeTools(providers)
