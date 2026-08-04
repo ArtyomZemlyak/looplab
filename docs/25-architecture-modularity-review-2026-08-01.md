@@ -2676,6 +2676,40 @@ rather than sitting open behind a status note.
 
 *Recommendation:* Replace the category sets + three chains with a single per-field descriptor table mapping name -> {project, is_lossless, slice_units}; generic kinds (text/ref/int/list) become shared descriptor factories, complex fields keep bespoke pairs but registered in one place.
 
+*Resolution (2026-08-04) — TWO chains collapsed into `_FIELD_KINDS`; the third was never a per-field chain.*
+
+`_FieldKind(project, lossless)` pairs each field's projector with its exactness verifier, and
+`_FIELD_KINDS` is built from the existing category SETS via shared factories (`_text_kind`,
+`_ref_kind`, `_int_kind`, `_nonneg_int_kind`, `_float_kind`, `_positive_float_kind`,
+`_ref_list_kind`, `_int_list_kind`, `_bool_kind`, `_mapping_kind`, `_named_scalars_kind`), with the
+eleven complex fields registered as explicit pairs. `_field_value` and `_field_projection_lossless`
+are each three lines of table lookup.
+
+The verifier is the half that made this worth doing. It decides whether the completeness RECEIPT
+claims a field came through exactly, so a verifier that drifts from its projector does not corrupt
+the wire data — it LIES about it, and this module's own comments record exactly that happening once
+(`matched_concept_outcome` rows verified against the wrong key set). The two halves now sit on one
+line together instead of fifty lines apart, and a field cannot acquire a projector without a
+verifier.
+
+**`_field_slice` is left alone: the finding miscounts it as a third per-field chain.** It dispatches
+on the RAW VALUE's type (str → characters, list → items, dict → entries, else → values) with two
+name-keyed special cases for dicts whose loss partition is a key SET rather than a length. Folding a
+`slice_units` column into the descriptors would push per-field data into a function that is
+deliberately type-driven, and the two special cases would still need naming somewhere.
+
+Verified by golden master rather than by inspection: every field in `_FIELDS` × a 31-value corpus
+(None/bools/ints/floats/NaN/inf/2^31 boundaries/empty and oversized strings/lists/dicts/tuples) run
+through BOTH chains before and after — **1426 rows, zero differences**.
+
+Pinned by six tests in `tests/test_card_public_projection.py` (31 → 37): every published field has
+both halves, neither function may contain a category-set or per-name branch again, an unregistered
+field is skipped AND never certified exact, and per generic kind a clean value round-trips exactly
+while a clipped/sliced/rejected one is never certified. Teeth-tested against 5 breaks, 4 biting — the
+fifth (dropping `len(raw) <= _MAX_ITEMS` from a list verifier) turned out to be a NON-break: `_refs`
+already slices to the bound, so `_refs(raw) == list(raw)` fails on a long list anyway and the guard
+is redundant in the original expression, which is preserved verbatim.
+
 #### SC-10 · MEDIUM · inconsistency · effort: medium
 
 **ShareStore duplicates ReviewStore's capability-link concept with weaker, inconsistent hardening**
