@@ -43,7 +43,7 @@ from looplab.serve.settings_store import (
 from looplab.serve.settings_ui_schema import (
     SETTINGS_UI_SCHEMA, SETTINGS_UI_SCHEMA_ETAG, SETTINGS_UI_SCHEMA_VERSION,
 )
-from looplab.core.redact import is_secret_key_name, redact_persisted_text
+from looplab.core.redact import bounded_redacted_tree, redact_persisted_text
 
 
 _MEMORY_TIER_LIMIT = 200
@@ -355,51 +355,28 @@ def _finite_number(value):
         return None
 
 
-def _bounded_json_value(value, *, depth: int = 0, budget: Optional[list[int]] = None):
-    """Bound one case param tree by depth, fanout and a shared scalar-item budget."""
-    budget = budget if budget is not None else [96]
-    if budget[0] <= 0:
-        return None, True
-    budget[0] -= 1
-    if value is None or isinstance(value, bool):
-        return value, False
-    if isinstance(value, (int, float)):
-        finite = _finite_number(value)
-        return finite, finite is None
-    if isinstance(value, str):
-        safe = _memory_text(value, 500)
-        return safe, len(value) > len(safe)
-    if depth >= 2:
-        return None, True
-    if isinstance(value, dict):
-        out, truncated = {}, len(value) > 32
-        for raw_key in sorted(value, key=str)[:32]:
-            key = _memory_text(raw_key, 80)
-            if not key:
-                truncated = True
-                continue
-            if key in out:
-                truncated = True
-                continue
-            # Mask a secret-NAMED key before projecting its value (matches the sibling projectors
-            # core/advisory_payloads._tree and trust/cross_run's walk): _memory_text's entropy redaction
-            # only catches high-entropy strings, so a short/wordlike credential like {"api_key":"tok-abcd"}
-            # would otherwise leak into the memory-browser response. Classify on the ORIGINAL key (per 8d1bcda).
-            if is_secret_key_name(raw_key):
-                out[key] = "***"
-                continue
-            projected, cut = _bounded_json_value(value[raw_key], depth=depth + 1, budget=budget)
-            out[key] = projected
-            truncated = truncated or cut
-        return out, truncated
-    if isinstance(value, (list, tuple)):
-        out, truncated = [], len(value) > 32
-        for item in value[:32]:
-            projected, cut = _bounded_json_value(item, depth=depth + 1, budget=budget)
-            out.append(projected)
-            truncated = truncated or cut
-        return out, truncated
-    return None, True
+# See the genesis sibling for why the character cell is derived from the node budget rather than
+# chosen: this projection only ever meant to bound NODES.
+_MEMORY_NODES = 96
+_MEMORY_STR_CAP = 500
+
+
+def _bounded_json_value(value):
+    """Bound one case param tree by depth, fanout and a shared scalar-item budget.
+
+    The walk is `core/redact.py::bounded_redacted_tree`, shared with the span/trace sanitizer, the
+    advisory payloads and the genesis evidence projection (doc 25 SR-06). Masking a secret-NAMED key
+    is why sharing matters here: `redact_persisted_text`'s entropy pass only catches high-entropy
+    strings, so a short wordlike credential like `{"api_key": "tok-abcd"}` would otherwise reach the
+    memory-browser response intact — and the classification happens on the ORIGINAL key (8d1bcda),
+    which is a rule that had to hold in every copy and did not.
+    """
+    truncated = [False]
+    projected = bounded_redacted_tree(
+        value, [_MEMORY_NODES * _MEMORY_STR_CAP], [_MEMORY_NODES],
+        max_items=32, max_depth=2, str_cap=_MEMORY_STR_CAP, key_cap=80,
+        truncated=truncated)
+    return projected, truncated[0]
 
 
 def _project_memory_row(tier: str, row) -> Optional[dict]:

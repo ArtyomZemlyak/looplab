@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 from pathlib import Path
@@ -24,55 +23,38 @@ from looplab.serve.serve_prompts import RESEARCH_BRIEF_SYSTEM, genesis_system
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 from looplab.serve.launch import _defaults_backend_llm
 from looplab.serve.scope_report_store import _prior_learnings_index
-from looplab.core.redact import is_secret_key_name, redact_persisted_text
+from looplab.core.redact import bounded_redacted_tree, redact_persisted_text
 
 def _evidence_text(value: object, cap: int) -> str:
     return redact_persisted_text(
         value, max_chars=cap, entropy=True, single_line=True)
 
 
-def _bounded_evidence_value(value: object, *, depth: int = 0,
-                            budget: Optional[list[int]] = None) -> tuple[object, bool]:
-    """Project user/operator JSON without materializing an unbounded prompt serialization."""
-    budget = budget if budget is not None else [128]
-    if budget[0] <= 0:
-        return None, True
-    budget[0] -= 1
-    if value is None or isinstance(value, bool):
-        return value, False
-    if type(value) in {int, float}:
-        try:
-            return (value, False) if math.isfinite(float(value)) else (None, True)
-        except (OverflowError, TypeError, ValueError):
-            return None, True
-    if isinstance(value, str):
-        safe = _evidence_text(value, 500)
-        return safe, safe != value
-    if depth >= 3:
-        return None, True
-    if isinstance(value, dict):
-        out: dict[str, object] = {}
-        truncated = len(value) > 32
-        for raw_key in sorted(value, key=str)[:32]:
-            key = _evidence_text(raw_key, 80)
-            if not key or is_secret_key_name(key) or key in out:
-                truncated = True
-                continue
-            projected, cut = _bounded_evidence_value(
-                value[raw_key], depth=depth + 1, budget=budget)
-            out[key] = projected
-            truncated = truncated or cut
-        return out, truncated
-    if isinstance(value, (list, tuple)):
-        out = []
-        truncated = len(value) > 32
-        for item in value[:32]:
-            projected, cut = _bounded_evidence_value(
-                item, depth=depth + 1, budget=budget)
-            out.append(projected)
-            truncated = truncated or cut
-        return out, truncated
-    return None, True
+# Node and per-string bounds for the genesis evidence projection. The CHARACTER budget is derived
+# rather than chosen: `bounded_redacted_tree` bounds both characters and nodes, this projection only
+# ever meant to bound NODES, so sizing the character cell at nodes x per-string cap keeps it
+# non-binding and preserves the original guarantee exactly.
+_EVIDENCE_NODES = 128
+_EVIDENCE_STR_CAP = 500
+
+
+def _bounded_evidence_value(value: object) -> tuple[object, bool]:
+    """Project user/operator JSON without materializing an unbounded prompt serialization.
+
+    The walk is `core/redact.py::bounded_redacted_tree`, shared with the span/trace sanitizer, the
+    advisory payloads and the memory browser (doc 25 SR-06). This was a near-copy of the memory
+    browser's, and the copies had drifted on the one rule that matters at a redaction boundary: a
+    credential-named key was DROPPED here and MASKED there, so the same payload produced different
+    output depending on which endpoint served it, and only one of the two told the operator anything
+    had happened. Masking wins — "this field exists and is a secret" is strictly more useful than a
+    silently absent key, and it is what every other projector in the codebase already did.
+    """
+    truncated = [False]
+    projected = bounded_redacted_tree(
+        value, [_EVIDENCE_NODES * _EVIDENCE_STR_CAP], [_EVIDENCE_NODES],
+        max_items=32, max_depth=3, str_cap=_EVIDENCE_STR_CAP, key_cap=80,
+        truncated=truncated)
+    return projected, truncated[0]
 
 
 def build_router(srv) -> APIRouter:

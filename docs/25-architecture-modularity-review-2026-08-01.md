@@ -2996,6 +2996,44 @@ path, the same reason `serve/engine_proc.py` imports it inside its functions.
 
 *Recommendation:* One configurable bounded-projection walker in core/redact.py (budget, depth, fanout, secret-key policy, truncation receipts as parameters); migrate the two near-identical copies first.
 
+*Resolution (2026-08-04) — the walker the finding asks for ALREADY existed; the two copies just were not on it.*
+
+`core/redact.py::bounded_redacted_tree` was built for CO-06 and is used by `core/tracing.py` and
+`core/advisory_payloads.py`. It already carries the stricter union of those two prior copies. What it
+lacked was the one thing the serve routers needed — a truncation receipt — so both had kept a walker
+of their own. It now takes an optional `truncated` out-cell, and `genesis._bounded_evidence_value`
+and `misc._bounded_json_value` are thin wrappers that keep only their own CONSTANTS (nodes 128/96,
+depth 3/2, fanout 32, string cap 500, key cap 80).
+
+**The copies had already drifted, on exactly the rule that matters at a redaction boundary.** Given
+`{"api_key": "tok-abcd"}`, genesis DROPPED the key and reported `truncated=True`; misc MASKED it as
+`"***"` and reported `truncated=False`. Same payload, two endpoints, two answers — and the dropping
+one told the operator nothing about why a field had vanished. Masking wins: "this field exists and is
+a secret" is strictly more useful than a silently absent key, it is what every other projector in the
+codebase already did, and it is not truncation because nothing was dropped for SIZE.
+
+Two further behaviours the routers gain by sharing:
+
+* **A hostile mapping degrades instead of raising.** Both called `.items()` unguarded, so a `dict`
+  subclass whose iteration throws took the response down as a 500. The shared walker answers
+  `<mapping unavailable>`.
+* **A key that redacts to a colliding or empty name is dropped AND reported**, rather than silently
+  overwriting the earlier member.
+
+The character budget is DERIVED (`nodes x string cap`) rather than chosen, so it stays non-binding
+and the original node-only bound is preserved exactly.
+
+**Not migrated, deliberately.** `reviews._scrub_json` is a different job: an UNBOUNDED key-aware
+scrubber with deterministic collision suffixes, whose contract is "copy everything, mask secrets" —
+bounding it would silently truncate a reviewer's evidence. `assistant._public_scope` and
+`_shared_message` are allow-list projectors, not recursive walkers. The finding's own advice was to
+migrate the two near-identical copies first, and those are the two.
+
+`tests/test_bounded_redacted_tree.py` 38 → 45: the receipt reports each omission/shortening kind
+(parametrized), masking a secret is NOT a cut, an exhausted budget is reported, neither router walks
+itself any more, both agree on a credential-named key, and a hostile mapping no longer reaches either
+endpoint as a 500. Teeth-tested against 7 breaks, all biting.
+
 #### SR-07 · MEDIUM · mergeable-entities · effort: small — **RESOLVED (2026-08-02)**
 
 **cross_run.py: five concept-governance POSTs and two steward POSTs are the same endpoint modulo one function**

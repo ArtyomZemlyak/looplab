@@ -198,7 +198,9 @@ def redact_persisted_identity(value, *, max_chars: int) -> str:
 
 def bounded_redacted_tree(value, budget: list[int], items: list[int], *,
                           max_items: int = 64, max_depth: int = 5,
-                          str_cap: int | None = None, key_cap: int = 160, depth: int = 0):
+                          str_cap: int | None = None, key_cap: int = 160, depth: int = 0,
+                          truncated: list[bool] | None = None,
+                          mask_secret_keys: bool = True):
     """Bound and redact an untrusted structured value into a small JSON-compatible shape.
 
     ONE walker for both durable boundaries that need this (doc 25 CO-06): the span/trace records in
@@ -225,16 +227,35 @@ def bounded_redacted_tree(value, budget: list[int], items: list[int], *,
     * **An `int` SUBCLASS stays an int** (`isinstance`, not `type(...) is`), so an `IntEnum` keeps its
       value instead of becoming a string.
     * **The walk stops as soon as the character budget is spent**, at every container level.
+
+    `truncated` is an optional out-cell (`[False]`) set True whenever the projection OMITTED or
+    SHORTENED something: a spent budget, a sliced fanout, a depth cut, a key that redacted to empty,
+    a string the cap shortened, or a mapping that degraded. It exists because the serve routers show
+    the operator a "this was cut" receipt (doc 25 SR-06) and had each grown their own walker to
+    compute it. Masking a secret key is deliberately NOT truncation: nothing was dropped for SIZE,
+    and telling an operator their config was truncated when a credential was merely hidden is a
+    misleading receipt.
+
+    `mask_secret_keys=False` emits nothing for a credential-named key rather than `"***"`. Only for a
+    caller whose consumer cannot show a masked placeholder; the default is to mask, because "this
+    field exists and is a secret" is strictly more useful to an operator than a silently absent key.
     """
+    def cut():
+        if truncated is not None:
+            truncated[0] = True
+
     def safe_text(item, *, cap=None, single_line=False):
         allowed = budget[0] if cap is None else min(budget[0], max(0, int(cap)))
         text = redact_persisted_text(item, max_chars=allowed, entropy=True,
                                      single_line=single_line)
+        if len(text) < len(_persisted_input(item)):
+            cut()
         budget[0] = max(0, budget[0] - len(text))
         return text
 
     def walk(item, level):
         if budget[0] <= 0:
+            cut()
             return ""
         if item is None or isinstance(item, bool):
             return item
@@ -245,31 +266,43 @@ def bounded_redacted_tree(value, budget: list[int], items: list[int], *,
         if isinstance(item, float):
             return item if math.isfinite(item) else safe_text(item, cap=32)
         if level >= max_depth:
+            cut()
             return safe_text("<depth-limited>", cap=32, single_line=True)
         if isinstance(item, dict):
             out = {}
             try:
+                if len(item) > max_items:
+                    cut()
                 for key, child in _islice(item.items(), max_items):
                     if items[0] <= 0:
+                        cut()
                         break
                     items[0] -= 1
                     safe_key = safe_text(key, cap=key_cap, single_line=True)
-                    if not safe_key:
+                    if not safe_key or safe_key in out:
+                        cut()          # a key that redacts to empty, or collides, loses its value
                         continue
                     if is_secret_key_name(key):
+                        if not mask_secret_keys:
+                            continue
                         out[safe_key] = "***"
                         budget[0] = max(0, budget[0] - 3)
                     else:
                         out[safe_key] = walk(child, level + 1)
                     if budget[0] <= 0:
+                        cut()
                         break
                 return out
             except Exception:  # noqa: BLE001 - a redaction boundary must never raise at its caller
+                cut()
                 return safe_text("<mapping unavailable>", cap=64, single_line=True)
         if isinstance(item, (list, tuple)):
             out = []
+            if len(item) > max_items:
+                cut()
             for child in _islice(item, max_items):
                 if budget[0] <= 0 or items[0] <= 0:
+                    cut()
                     break
                 items[0] -= 1
                 out.append(walk(child, level + 1))
