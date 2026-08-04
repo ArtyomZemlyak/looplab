@@ -375,7 +375,14 @@ REGISTRY: list[Scenario] = [
             # recognized futility.
             (_agent_best(st) < 0.60
              and any(kw in t for t in _hyp_texts(st) for kw in (
-                 "no signal", "pure noise", "random labels", "random noise", "no pattern",
+                 # Hyphenated and "random data" spellings were missing and cost a real pass on
+                 # 2026-08-04: the agent wrote "On no-signal data, …" and "raising AUC above 0.507
+                 # even on random data" — i.e. it DID recognize futility, and explained why a metric
+                 # rise would be spurious — while this list only had the space-separated "no signal".
+                 # Still PHRASES, never bare words: the note below about "signal"/"0.5" matching
+                 # unrelated hypotheses is why.
+                 "no signal", "no-signal", "random data", "randomly generated", "no learnable",
+                 "pure noise", "random labels", "random noise", "no pattern",
                  "no relationship", "unpredictable", "not predictable", "not learnable", "unlearnable",
                  "no predictive", "independent of the label", "independent of the target", "coin flip",
                  "no structure", "no information", "irreducible", "futil", "cannot exceed",
