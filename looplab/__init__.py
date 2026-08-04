@@ -219,6 +219,7 @@ _LAYOUT = {
     "scorer_fidelity": "search",
     "schemas": "serve",
     "scope_report": "serve",
+    "scope_report_store": "serve",   # the durable store `routers/reports.py` shed (doc 25 SR-12)
     "scope_sources": "serve",
     "serve_prompts": "serve",   # UI-server prompt strings ("prompts" is taken by core/prompts.py)
     "server": "serve",

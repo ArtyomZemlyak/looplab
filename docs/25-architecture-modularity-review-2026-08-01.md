@@ -3013,20 +3013,30 @@ than asserting a call graph that no longer exists, and both spellings sit in one
 can check them against each other. `cli/run_cmds.py`'s pointer at the old location is updated, and a
 guard test fails on any surviving `routers.control._defaults_backend_llm` reference.
 
-**`_prior_learnings_index` — deferred, and it is not a one-function move.** It depends on eleven
-private helpers and three constants of the scope-report STORE (`_validated_reports_dir`,
-`_confined_report_path`, `_read_json_record`, `_scope_report_path`, `_legacy_scope_report_path`,
-`_record_matches_scope`, `_record_payload_matches_scope`, `_scope_store_lock`,
-`_action_bound_scope_record_is_confirmed`, `_SCOPE_TYPES`, `_PRIOR_REPORT_MAX_FILES`,
-`_PRIOR_REPORT_PARSE_MAX_BYTES`). That store is ~1 400 lines of `routers/reports.py` (lines 147-1549,
-ahead of `build_router`) and its correct home is a new `serve/scope_report_store.py`, not
-`serve/scope_report.py` — which documents itself as free of run-root/store details so it stays
-unit-testable with plain dicts. The blocker is a live hazard, not size: ~16 tests monkeypatch
-`routers.reports` module globals that the store functions read (`strict_atomic_write_text`,
-`capture_scope_source`, `_read_scope_action_lease_marker`, `_PRIOR_REPORT_PARSE_MAX_BYTES`). Moving
-the functions turns every one of those patches into a silent no-op — the tests keep passing while
-testing nothing, the same failure mode CT-09 documents for `verify.py`. The extraction is worth doing
-with SR-02, and each patch target has to be re-pointed and re-verified individually.
+**`_prior_learnings_index` — done (2026-08-04), by extracting the store it depends on.** It reads
+eleven private helpers and three constants of the scope-report STORE, so it could never move alone.
+That store is now `serve/scope_report_store.py` — 103 names, ~1 400 lines that used to sit ahead of
+`build_router` in `routers/reports.py` and contain no HTTP at all. `routers/genesis.py` imports the
+STORE; `routers/reports.py` star-imports it so `reports.<name>` keeps resolving for its own
+`build_router` and for the tests that spell it that way. **No router imports another router any
+more**, and the guard test's expected list is now empty. Its home is not `serve/scope_report.py`,
+which documents itself as free of run-root/store details so it stays unit-testable with plain dicts.
+
+The monkeypatch hazard was real and was handled head-on rather than hoped away. A star import BINDS
+BY VALUE, so patching `reports.<name>` no longer reaches the store's own global lookup — and the
+first run after the move failed exactly there: ten receipt/fence-recovery tests went green-to-red
+because their injected write failure stopped arriving. Two of the four seams
+(`strict_atomic_write_text`, `_read_scope_action_lease_marker`) are genuinely read from BOTH modules
+— the store writes receipts and fences, the router writes the report record — so
+`tests/test_report.py::_patch_store` patches the name wherever it exists, and a guard test asserts
+that both modules really do call `strict_atomic_write_text`, so the helper cannot silently degrade
+into patching one. All 16 sites were re-pointed and re-verified.
+
+Pinned by `tests/test_serve_module_seams.py` (33): no router imports a router (empty list), genesis
+and reports resolving to the SAME `_prior_learnings_index` object, the store holding no `APIRouter`
+or route decorator, `__all__` matching what the module actually defines (a name added without
+declaring it stops resolving through the star import and takes its tests with it), and the
+both-modules write seam. Teeth-tested against 6 breaks, all biting.
 
 **The `srv.list_*_fn` late-binding — deferred.** `list_runs`, `list_runs_membership` and `list_tasks`
 are not standalone functions: they close over `srv` AND over `build_router`-local state
