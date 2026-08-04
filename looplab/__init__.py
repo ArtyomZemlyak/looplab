@@ -120,6 +120,7 @@ _LAYOUT = {
     "eventstore": "events",
     "evaluate": "engine",
     "engine_proc": "serve",
+    "finalize_scope": "events",   # the finalize-scope read side (doc 25 XP-07)
     "finalize": "engine",
     "foresight": "search",
     "gate": "trust",

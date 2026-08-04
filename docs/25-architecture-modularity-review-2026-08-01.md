@@ -234,6 +234,8 @@ synthetic task adapters (RA-06).
   `agents.cli_agent.PRESETS`).
 - **SE-07 / XP-07** the lazy search↔engine cycle around speculation calibration constants —
   contradicting `speculation_calibration.py`'s own stated purpose.
+  *(resolved 2026-08-04 — the constants had already moved down; the last upward import,
+  `incomplete_finalize_scope`'s five-function pure cluster, now lives in `events/finalize_scope.py`.)*
 - **AG-07** agents↔search cycle held apart only by import placement, direction undocumented.
   *(resolved 2026-08-02 — stated in CLAUDE.md, enforced by `tests/test_agents_search_direction.py`.)*
 - **SR-12** router-to-router private imports and late-bound `srv.*_fn` attribute wiring (also XP-05).
@@ -5437,6 +5439,41 @@ entry, and a fresh upward import from `core/parse.py`.
 *Evidence:* speculation_quality.py (search layer) lazily imports engine.finalize.incomplete_finalize_scope and engine.orchestrator's SPECULATION_CALIBRATION_PROFILE_* constants — upward imports into the orchestrator from a policy package. Its implementation digest rglobs every looplab/*.py and hashes raw bytes into the receipt manifest (1955-1985), so a comment-only or docs-adjacent edit anywhere in the codebase revokes every issued calibration receipt; the module's own inline comment (≈1961) states this 'turns review-only commits into an operational stop/resume outage and forces six fresh GPU calibration runs after documentation edits' and recommends a versioned semantic manifest instead — i.e. the code ships with an acknowledged unresolved design defect.
 
 *Recommendation:* Move the calibration-profile constants into search (or a shared core module) so engine imports them downward, and implement the comment's own recommendation: pin receipts to an explicit rollout/protocol version plus exact hashes of only execution-affecting files.
+
+*Resolution (2026-08-04):* Both halves done; the first half of the finding was already partly stale.
+
+**Layering.** The calibration-profile constants had already moved to `search/speculation_calibration.py`
+and the orchestrator already imports them DOWNWARD, so that half needed nothing. One upward import
+remained — `engine.finalize.incomplete_finalize_scope`. It was not alone: it sits in a cluster of five
+pure functions over an event list (`_adjacent_claim`, `_finalize_begun`, `_scope_has_step`,
+`finalize_scope_quiescent`, `incomplete_finalize_scope`) that read event types and nothing else. That
+cluster is a READ SIDE, not orchestration, so it moved verbatim to `looplab/events/finalize_scope.py`,
+which `search` may import downward. `engine/finalize.py` re-exports all five, so the existing engine
+and `serve/run_commands.py` import sites — and every monkeypatch seam through them — resolve to the
+SAME objects; `_LAYOUT` gained the module. A test now pins the direction for this module specifically,
+alongside the package-wide `tests/test_agents_search_direction.py`.
+
+**Digest.** The comment's own recommendation is implemented, but not as it was written. "Exact hashes
+of only execution-affecting FILES" cannot be decided per file — every shipped `.py` can affect
+execution, which is exactly why the rglob was total. The separable axis is not which files but which
+BYTES: the manifest now hashes `ast.dump(ast.parse(raw))` per file, so comments, blank lines, line
+endings and rewrapping vanish while everything that can change what the process does survives. The
+manifest stays total, so nothing is silently excluded.
+
+Two decisions worth recording. Docstrings are deliberately KEPT execution-affecting — a tool's
+docstring is its agent-facing description, so editing one really can change a run; that is a narrower
+claim than "review-only", and the test says so. A file that does not parse falls back to its raw
+bytes, which can only over-revoke, never under-revoke.
+
+The schema is bumped to `looplab.speculation-implementation/v2` rather than reused: the same tree now
+hashes differently, so receipts issued under v1 are revoked ONCE by this change. That is correct, and
+it is the last time a comment edit will do it.
+
+One defect was found in this fix's own first draft and is worth naming, because the test that caught
+it is the one worth keeping: hashing the parsed tree while still recording `"bytes": len(raw)` put the
+byte-for-byte sensitivity straight back into the manifest through the OTHER field, and a test that
+only exercised `_semantic_source` passed anyway. The row is now minted by one `_manifest_entry`
+helper whose every field derives from the same bytes, and the guard asserts on the ROW.
 
 #### XP-08 · LOW · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
