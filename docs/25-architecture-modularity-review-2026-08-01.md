@@ -1893,6 +1893,60 @@ guard rests on (every delegation site is under `not pieces`) and says why. All 9
 
 *Recommendation:* Split `_post` into `_cache_get`/`_cache_put`, a `_classify_response(parsed, use_stream)` returning accept/retry/stall, and a retry-policy table keyed on exception type; move the cache into a small `_ResponseCache` class. Behavior-preserving mechanical extraction only — the comments move with the code.
 
+*Resolution (2026-08-04) — `_post` is 199 → 83 lines; five concerns are now units with their own tests.*
+
+Behaviour-preserving mechanical extraction, comments moved verbatim with the code
+(`looplab/core/llm.py`):
+
+* `_cache_get(ck)` / `_cache_put(ck, body)` — T7 lookup + recency bump + hit-usage zeroing, and
+  insertion + LRU eviction. Both no-op on an uncacheable key or a disabled cache, so `_post` no
+  longer branches on either.
+* `_retry_or_raise(exc, attempt, use_stream)` — the six-way exception ladder, in the SAME order (the
+  stream_options-before-reasoning order is load-bearing and now says so in the docstring). Two
+  outcomes only: RETURN means "another attempt", with the backoff already served and the returned
+  flag carrying the SSE ratchet; every other path RAISES the `LLMError` the ladder raised. `_post`'s
+  six `except` clauses collapse to one, over `(openai.APIError, json.JSONDecodeError)` — both
+  families, because a keepalive-only body escapes the SDK's decoder as a raw `JSONDecodeError` that
+  is *not* an `APIError`, and narrowing the catch to the SDK base would let it abort the run.
+* `_keepalive_stall(parsed, use_stream)` — the empty-200 classifier, now a `staticmethod` and a pure
+  function of the parsed body.
+* `_account_keepalive_stall(parsed)` — billing a stalled-but-billable envelope.
+
+The point of the split is testability, not line count. The keepalive-stall table has the most
+expensive failure mode in the method — a false "stall" both regenerates minutes of reasoning tokens
+and ratchets the client permanently off SSE — and it was previously reachable only through a full
+fake transport, so the two rows with real incident history (`reasoning` present, `finish_reason`
+present) were sampled rather than pinned.
+
+`tests/test_llm_post_decomposition.py` (34) pins the units: the 9-row keepalive table, the billing
+pair, twelve retry-policy rows (backoff served vs not, the stream-only degrade ratchet, `Retry-After`
+positive/capped/non-positive, throttle-403 vs hard-403, the reject ORDER, the decode retry, the
+unclassified-SDK-error catch-all), the cache accessors (deep copy, zeroed counters, uncacheable
+no-op, LRU victim), and three structural guards — `_post` keeps exactly one `except`, that `except`
+still names both families, and `_retry_or_raise` ends in a `raise` so an unclassified error can never
+return `None` and read as "retry, not stalled". Teeth-tested against 15 breaks, all of which bite.
+The pre-existing end-to-end `_post` tests in `test_openai_client.py` are unchanged and still pass —
+they are the behaviour-preservation evidence.
+
+**Deliberately NOT done, with reasons:**
+
+* *"a retry-policy table keyed on exception type"* — kept as an ordered `isinstance` chain. A dict
+  keyed on type cannot express the ladder's two load-bearing properties: the order (a
+  `stream_options` rejection matches `_is_reasoning_reject`'s generic keys, so reasoning must be
+  checked second) and subclass dispatch (`APITimeoutError` must hit the `APIConnectionError` branch,
+  `RateLimitError`/`InternalServerError` share one). A table would need an ordered list of
+  `(type, handler)` pairs — the chain, spelled with more indirection.
+* *"move the cache into a small `_ResponseCache` class"* — the accessors already take the cache
+  bookkeeping out of `_post`, which is what the finding measured. A wrapper class would have to
+  re-expose `__len__`/`__setitem__`/`__contains__`/`is None` to keep its existing callers working
+  (`test_openai_client.py`, `test_phase5_scale.py`, `test_llm_broker.py` all reach into `_cache` /
+  `_cache_max` directly), leaving a dict-shaped object around a dict.
+* The finding also names `_bounded_create` + its inflight/teardown accounting as "another ~120
+  lines". Measured at 92 lines today and left alone: unlike `_post` it is ONE concern (bounded
+  creation with pool teardown under concurrent siblings), so splitting it would scatter the lock
+  choreography rather than separate concerns. `__init__` (123 lines) is likewise config
+  normalization only.
+
 #### CO-06 · MEDIUM · duplication · effort: small
 
 **Two near-identical bounded redacting JSON-tree sanitizers (tracing vs advisory_payloads)**
@@ -2298,26 +2352,43 @@ rather than sitting open behind a status note.
 
 *Recommendation:* Extract the common capability-store core (digest, TTL validation, tombstone semantics, atomic publish, resolve) and have both stores parameterize it; ShareStore then inherits cross-process safety for free.
 
-*Evidence RE-VERIFIED (2026-08-03), not yet fixed.* `ShareStore` has grown from the 122 lines the
-review measured to 484 (`serve/assistant.py:935-1419`) — a peer hardened it substantially with
-`_safe_dir_locked`, `_safe_record_path_locked`, `_validated_record`, `_prune_locked` and
-`revoke_token`. That made it worth checking whether the finding had aged out before acting on it.
+*Evidence RE-VERIFIED (2026-08-03).* `ShareStore` has grown from the 122 lines the review measured
+to 484 (`serve/assistant.py:935-1419`) — a peer hardened it substantially with `_safe_dir_locked`,
+`_safe_record_path_locked`, `_validated_record`, `_prune_locked` and `revoke_token`. That made it
+worth checking whether the finding had aged out before acting on it. It had not: `ShareStore.__init__`
+held `threading.Lock()` and nothing else, while `ReviewStore` acquired `_interprocess_lock`
+(`serve/reviews.py:211,220`) on top of a per-path process lock.
 
-It has not. The specific gap the finding names is intact:
+*Resolution (2026-08-04) — the GUARANTEE gap is closed; the shared-core extraction is not attempted.*
 
-* `ShareStore.__init__` holds `threading.Lock()` and nothing else — no cross-process exclusion, so
-  two uvicorn workers can still interleave `revoke_session`'s read-modify-write.
-* `ReviewStore` acquires `_interprocess_lock` (`serve/reviews.py:211,220`) on top of a per-path
-  process lock, and reserves ids with `O_EXCL`.
+`ShareStore` now matches its sibling's locking contract exactly (`serve/assistant.py`):
 
-Both remain one-file-per-capability bearer-token stores with sha256 `token_hash`, TTL bounds,
-`revoked_at` tombstones, `public()` views that strip the digest, and constant-time `resolve` — the
-same concept, still with materially different guarantees.
+* a module-level per-path process lock (`_SHARE_STORE_LOCKS`, keyed on the normcased absolute
+  `<root>/.shares` path) so two `ShareStore` objects over one directory contend on ONE lock;
+* `_store_lock()`, which takes that process lock with a bounded timeout and then a **required,
+  non-blocking** `_interprocess_lock` on `<store>/.lock`, and raises the store's own retryable 503
+  rather than yielding if either cannot be had — no thread-only fallback;
+* the same MUTATIONS-only split `ReviewStore` uses: `create` / `revoke_token` / `revoke_session` take
+  `_store_lock()`; `resolve` / `active_for_session` / `active_summary_by_session` keep the plain
+  thread lock, because a read cannot corrupt the store and locking it would turn cross-worker
+  contention into 503s on the HTTP read path.
 
-Deliberately NOT started rather than half-applied: this is a security-relevant store pair, the
-shared core touches mint/revoke/resolve on both, and a partial extraction that leaves one path on
-the weaker lock is worse than the duplication. The measured starting point is above so the work
-begins from evidence rather than a re-read.
+That removes the concrete loss the finding named: two uvicorn workers can no longer interleave
+`revoke_session`'s read-modify-write and leave live a link the owner was told was dead.
+
+Pinned by `tests/test_share_store_cross_process.py` (12 tests): each mutator's guards are read out of
+the AST, the reader split is asserted in both directions, the sibling's own split is re-derived from
+`reviews.py` so a change to one is visibly a change to both, the per-path sharing is proved with two
+instances, contention is proved to raise a 503, and the interprocess failure path is pinned
+structurally (every handler in `_store_lock` raises, none yields, `required=True`, `blocking=False`)
+because the same-interpreter contention test raises before that block is ever reached.
+
+**Deliberately NOT done:** the recommendation's *shared capability-store core*. Extracting mint /
+revoke / resolve across two security-relevant stores is a much larger change than the guarantee gap,
+and a partial extraction that leaves one path on the weaker primitive is worse than the duplication.
+The duplication remains; the divergence in guarantees does not. Remaining differences, for whoever
+takes the extraction: `ReviewStore` also has `O_EXCL` id reservation, abandoned-reservation healing,
+and a recovery/replay contract that `ShareStore` has no analogue for.
 
 #### SC-11 · MEDIUM · inconsistency · effort: medium
 

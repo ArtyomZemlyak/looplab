@@ -739,32 +739,183 @@ class OpenAICompatibleClient:
                           sort_keys=True, default=str)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
+    def _cache_get(self, ck: Optional[str]) -> Optional[dict]:
+        """T7 cache READ — lookup, recency bump, and the hit's usage zeroing (doc 25 CO-05).
+
+        `None` means "no usable entry": an uncacheable request (`ck is None`), caching disabled, or a
+        miss. A hit is returned as a DEEP COPY, because downstream (e.g. complete_text ->
+        _apply_native_tool_calls) mutates the message in place, which would otherwise corrupt the
+        shared cached entry for every later hit.
+        """
+        if ck is None or self._cache is None:
+            return None
+        with self._cache_lock:
+            entry = self._cache.get(ck)
+            if entry is not None:
+                self._cache.move_to_end(ck)       # recency: this key survives the next eviction
+        if entry is None:
+            return None
+        cached = copy.deepcopy(entry)
+        # A cache hit performs no provider work. Zero every billed usage counter in this call's
+        # copy: otherwise trace aggregation would duplicate both tokens and paid cost even though
+        # CostAccountant correctly skips cache hits. The original cached body remains untouched.
+        usage = _normalize_usage(cached.get("usage"))
+        for field in _USAGE_FIELDS:
+            usage[field] = 0
+        usage["cost"] = 0.0
+        cached["usage"] = usage
+        # Restore the per-call telemetry a live call would have set.
+        self._last_usage = usage
+        return cached
+
+    def _cache_put(self, ck: Optional[str], body: dict) -> None:
+        """T7 cache WRITE + LRU eviction (doc 25 CO-05). No-op when the request is uncacheable."""
+        if ck is None or self._cache is None:
+            return
+        copied = copy.deepcopy(body)             # cache a COPY (the returned body is mutated
+        with self._cache_lock:                   # in place by callers — keep the cached entry clean)
+            self._cache[ck] = copied
+            self._cache.move_to_end(ck)
+            while len(self._cache) > self._cache_max:
+                self._cache.popitem(last=False)   # drop the least recently used
+
+    def _retry_or_raise(self, exc: BaseException, attempt: int, use_stream: bool) -> bool:
+        """This client's per-exception retry policy for ONE failed attempt (doc 25 CO-05).
+
+        Extracted verbatim from `_post`'s six-way exception ladder, in the SAME order — the ladder's
+        order is load-bearing (see the stream_options/reasoning comments below), so the isinstance
+        chain must not be reordered. Two outcomes only:
+
+        * RETURN → take another attempt. Any backoff `sleep` has already happened here. The returned
+          flag is the stream-stall ratchet: True means the next attempt must degrade off SSE.
+        * RAISE → the clean `LLMError` the caller would have raised, `from exc`.
+
+        Permanent per-client degrade state (`_stream_options_ok`, `_reasoning_ok`, `_stream_stalls`)
+        is mutated here, exactly as the inline ladder did.
+        """
+        if isinstance(exc, openai.BadRequestError):
+            # A 400 that rejects our REASONING toggle — a litellm-proxied model like glm-5.1
+            # returns UnsupportedParamsError for `reasoning_effort` — isn't a real bad request:
+            # drop reasoning for this client and retry (deepseek keeps it; glm-5.1 adapts).
+            # Checked BEFORE the reasoning branch: `_is_reasoning_reject`'s generic keys
+            # ("extra_forbidden", "unrecognized", …) also match a stream_options rejection, so
+            # letting it win would drop the reasoning toggle and retry with the ACTUAL offending
+            # field still attached — the identical 400, every attempt.
+            if use_stream and self._stream_options_ok and _is_stream_options_reject(_err_body(exc)):
+                self._stream_options_ok = False   # permanent for this client (see `_sdk_chat`)
+                if attempt < self._max_retries:
+                    return False                  # re-issue without the optional usage field
+                raise LLMError(f"LLM request to {self.base_url} rejected `stream_options` on the "
+                               f"final attempt; it is now disabled for this client so a retry "
+                               f"will succeed: {exc}") from exc
+            if self.reasoning and self._reasoning_ok and _is_reasoning_reject(_err_body(exc)):
+                self._reasoning_ok = False   # permanent for this client: the NEXT request drops the param
+                if attempt < self._max_retries:
+                    return False             # a remaining attempt re-issues with reasoning dropped
+                # On the LAST attempt the loop can't retry — but `_reasoning_ok` is now False, so the
+                # caller's retry/fallback WILL succeed. Surface a CLEAR reason instead of falling
+                # through to the generic, misleading "no response after retries" (every sibling retry
+                # branch guards on attempt<_max_retries; this one silently did not).
+                raise LLMError(f"LLM request to {self.base_url} rejected the reasoning param on the "
+                               f"final attempt; reasoning is now disabled for this client so a retry "
+                               f"will succeed: {exc}") from exc
+            raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
+        if isinstance(exc, openai.AuthenticationError):
+            raise LLMError(f"LLM request to {self.base_url} failed: {exc} — check the API key "
+                           "(LOOPLAB_LLM_API_KEY)") from exc
+        if isinstance(exc, (openai.RateLimitError, openai.InternalServerError)):   # 429 / 5xx
+            if attempt < self._max_retries:
+                ra = _retry_after_seconds(_retry_after_of(exc))
+                # Honor a POSITIVE server Retry-After up to RETRY_AFTER_CAP_S (a directive); otherwise
+                # use our own exponential backoff (already ≤ BACKOFF_CAP_S). `if ra` (not `is not
+                # None`): `_retry_after_seconds` clamps to max(0.0, …), so a `Retry-After: 0`, a
+                # negative value, or an HTTP-date already in the PAST (clock skew) yields ra==0.0 —
+                # honoring that would sleep(0) and burn every retry in milliseconds, defeating the
+                # 429/5xx backoff entirely. Treat a non-positive directive as "unusable" → backoff.
+                time.sleep(min(ra, RETRY_AFTER_CAP_S) if ra else _backoff(attempt))
+                return False
+            raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
+        if isinstance(exc, openai.APIConnectionError):
+            # httpx transport failure. APITimeoutError (a subclass) = a read/connect timeout: a
+            # stalled mid-stream read or a black-holed request — always transient, and the
+            # reliable interrupt the urllib+ssl path lacked (a glm SSE stall hung for minutes).
+            # A plain APIConnectionError is retried only when `_sdk_transient` says so (reset/EOF),
+            # else it fails fast (refused/DNS/cert). A STREAM stall degrades the next attempt to
+            # non-stream and ratchets the permanent-degrade counter. This ALSO catches a raw httpx
+            # stream-body error that `_stream_with_idle_guard` normalized to APIConnectionError
+            # (the SDK leaves those unwrapped) — `_sdk_transient` reads its httpx __cause__.
+            is_timeout = isinstance(exc, openai.APITimeoutError)
+            transient = is_timeout or _sdk_transient(exc)
+            stalled = bool(use_stream and transient)
+            if stalled:
+                self._stream_stalls += 1
+            if transient and attempt < self._max_retries:
+                time.sleep(_backoff(attempt))
+                return stalled
+            raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
+        if isinstance(exc, openai.PermissionDeniedError):   # 403 — often a burst/rate-limit throttle, not hard-forbidden
+            if _is_throttle_403(_err_body(exc)) and attempt < self._max_retries:
+                time.sleep(_backoff(attempt))
+                return False
+            raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
+        if isinstance(exc, json.JSONDecodeError):
+            # A gateway 200 with an empty / whitespace / keepalive-only body makes the SDK's
+            # decoder raise a RAW json.JSONDecodeError — NOT an openai.APIError — so without this
+            # it'd escape `_post` uncaught and abort the run (the role layer only retries+falls
+            # back on LLMError). Mirror the old `_parse_chat_body`-None path: a transient gateway
+            # hiccup — retry with backoff, then a clean LLMError. NARROW on purpose: a ValueError/
+            # AttributeError from our own _accumulate_stream/_tool_call_slot code must NOT be
+            # masked here as a "gateway hiccup" — let a real accumulation bug propagate loudly.
+            if attempt < self._max_retries:
+                time.sleep(_backoff(attempt))
+                return False
+            raise LLMError(f"LLM request to {self.base_url} returned an unparseable body") from exc
+        # The ladder's final `except openai.APIError`: any other SDK-level protocol error -> clean
+        # LLMError. `_post` catches only APIError|JSONDecodeError, so nothing else reaches here.
+        raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
+
+    @staticmethod
+    def _keepalive_stall(parsed: Optional[dict], use_stream: bool) -> bool:
+        """Did an HTTP-200 STREAM finish with nothing usable? (doc 25 CO-05)
+
+        A stream is a "keepalive-only stall" ONLY when it produced NOTHING usable: no content, no
+        tool_calls, no reasoning, AND no finish_reason. A reasoning model that hit its length limit
+        while thinking (finish_reason="length", non-empty `reasoning`, empty `content`) is a REAL —
+        if truncated — response, not a stall: retrying it 5× regenerates minutes of reasoning tokens
+        and ratchets `_stream_stalls` to the permanent-degrade threshold, turning the idle timeout
+        into a hard deadline for the rest of the run. finish_reason present (even "stop" with empty
+        content) likewise means the endpoint answered — return it and let the no-choices check decide.
+        """
+        if not (use_stream and parsed is not None and parsed.get("choices")):
+            return False
+        ch0 = (parsed.get("choices") or [{}])[0] or {}
+        m = ch0.get("message") or {}
+        return not (m.get("content") or m.get("tool_calls") or m.get("reasoning")
+                    or ch0.get("finish_reason"))
+
+    def _account_keepalive_stall(self, parsed: Optional[dict]) -> None:
+        """Bill a keepalive-only stream before discarding it (doc 25 CO-05).
+
+        A keepalive-only stream is still a completed, BILLABLE provider call — the same reasoning
+        `_post`'s accepted-body path states ("a billable HTTP-200 envelope with known usage but no
+        choices is still a real call and may otherwise be retried for free"). Only the accepted body
+        was accounted, so up to `_max_retries` empty attempts spent real money that never reached the
+        cost limits or the durable ledger; with a flapping endpoint the run's recorded spend drifted
+        arbitrarily far below the invoice.
+        """
+        usage = _normalize_usage((parsed or {}).get("usage"))
+        if usage["total_tokens"] or usage["cost"]:
+            self.accountant.add(usage["cost"], usage=usage)
+            self._last_usage = usage
+
     def _post(self, payload: dict) -> dict:
         # T7 LLM response cache: serve an identical DETERMINISTIC (temp 0) request from cache instead
         # of re-hitting the model — cuts cost on retry/panel/verify flows. Sampling calls (temp>0)
         # are never cached (see _cache_key). Replay itself never calls the model (Ideas are recorded
         # in events), so this is a within-run/live cost saver, not a correctness dependency.
         ck = self._cache_key(payload)
-        entry = None
-        if ck is not None:
-            with self._cache_lock:
-                entry = self._cache.get(ck)
-                if entry is not None:
-                    self._cache.move_to_end(ck)       # recency: this key survives the next eviction
-        if entry is not None:
-            cached = copy.deepcopy(entry)
-            # A cache hit performs no provider work. Zero every billed usage counter in this call's
-            # copy: otherwise trace aggregation would duplicate both tokens and paid cost even though
-            # CostAccountant correctly skips cache hits. The original cached body remains untouched.
-            usage = _normalize_usage(cached.get("usage"))
-            for field in _USAGE_FIELDS:
-                usage[field] = 0
-            usage["cost"] = 0.0
-            cached["usage"] = usage
-            # Restore the per-call telemetry a live call would have set, and hand back a DEEP COPY:
-            # downstream (e.g. complete_text -> _apply_native_tool_calls) mutates the message in
-            # place, which would otherwise corrupt the shared cached entry for every later hit.
-            self._last_usage = usage
+        cached = self._cache_get(ck)
+        if cached is not None:
             return cached
         # A network blip / HTTP error / non-JSON body must surface as a clean LLMError, not an
         # unhandled transport exception that aborts the whole run — the role layer
@@ -775,9 +926,9 @@ class OpenAICompatibleClient:
         body = None
         _stalled_prev = False               # this call's previous attempt stalled mid-stream
         for attempt in range(self._max_retries + 1):
-            # Build the request per attempt so a param-compat retry (below) can drop the reasoning
-            # toggle. `_reasoning_ok` starts True and flips off permanently for THIS client the first
-            # time the endpoint rejects our reasoning param.
+            # Build the request per attempt so a param-compat retry (see `_retry_or_raise`) can drop
+            # the reasoning toggle. `_reasoning_ok` starts True and flips off permanently for THIS
+            # client the first time the endpoint rejects our reasoning param.
             # Stall-degrade: stream by default (httpx read-timeout = inter-token idle guard), but drop
             # to a single blocking read for the attempt right after a stream stall, and permanently
             # once this client has stalled STREAM_STALL_DEGRADE_AFTER times — a flaky proxied endpoint
@@ -792,85 +943,15 @@ class OpenAICompatibleClient:
                 # cannot retain a build permit while asking for another lane at total=1.
                 with llm_request_permit():
                     parsed = self._sdk_chat(payload, use_stream)
-            except openai.BadRequestError as e:
-                # A 400 that rejects our REASONING toggle — a litellm-proxied model like glm-5.1
-                # returns UnsupportedParamsError for `reasoning_effort` — isn't a real bad request:
-                # drop reasoning for this client and retry (deepseek keeps it; glm-5.1 adapts).
-                # Checked BEFORE the reasoning branch: `_is_reasoning_reject`'s generic keys
-                # ("extra_forbidden", "unrecognized", …) also match a stream_options rejection, so
-                # letting it win would drop the reasoning toggle and retry with the ACTUAL offending
-                # field still attached — the identical 400, every attempt.
-                if use_stream and self._stream_options_ok and _is_stream_options_reject(_err_body(e)):
-                    self._stream_options_ok = False   # permanent for this client (see `_sdk_chat`)
-                    if attempt < self._max_retries:
-                        continue                      # re-issue without the optional usage field
-                    raise LLMError(f"LLM request to {self.base_url} rejected `stream_options` on the "
-                                   f"final attempt; it is now disabled for this client so a retry "
-                                   f"will succeed: {e}") from e
-                if self.reasoning and self._reasoning_ok and _is_reasoning_reject(_err_body(e)):
-                    self._reasoning_ok = False   # permanent for this client: the NEXT request drops the param
-                    if attempt < self._max_retries:
-                        continue                 # a remaining iteration re-issues with reasoning dropped
-                    # On the LAST attempt the loop can't retry — but `_reasoning_ok` is now False, so the
-                    # caller's retry/fallback WILL succeed. Surface a CLEAR reason instead of falling
-                    # through to the generic, misleading "no response after retries" (every sibling retry
-                    # branch guards on attempt<_max_retries; this one silently did not).
-                    raise LLMError(f"LLM request to {self.base_url} rejected the reasoning param on the "
-                                   f"final attempt; reasoning is now disabled for this client so a retry "
-                                   f"will succeed: {e}") from e
-                raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
-            except openai.AuthenticationError as e:
-                raise LLMError(f"LLM request to {self.base_url} failed: {e} — check the API key "
-                               "(LOOPLAB_LLM_API_KEY)") from e
-            except (openai.RateLimitError, openai.InternalServerError) as e:   # 429 / 5xx
-                if attempt < self._max_retries:
-                    ra = _retry_after_seconds(_retry_after_of(e))
-                    # Honor a POSITIVE server Retry-After up to RETRY_AFTER_CAP_S (a directive); otherwise
-                    # use our own exponential backoff (already ≤ BACKOFF_CAP_S). `if ra` (not `is not
-                    # None`): `_retry_after_seconds` clamps to max(0.0, …), so a `Retry-After: 0`, a
-                    # negative value, or an HTTP-date already in the PAST (clock skew) yields ra==0.0 —
-                    # honoring that would sleep(0) and burn every retry in milliseconds, defeating the
-                    # 429/5xx backoff entirely. Treat a non-positive directive as "unusable" → backoff.
-                    time.sleep(min(ra, RETRY_AFTER_CAP_S) if ra else _backoff(attempt))
-                    continue
-                raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
-            except openai.APIConnectionError as e:
-                # httpx transport failure. APITimeoutError (a subclass) = a read/connect timeout: a
-                # stalled mid-stream read or a black-holed request — always transient, and the
-                # reliable interrupt the urllib+ssl path lacked (a glm SSE stall hung for minutes).
-                # A plain APIConnectionError is retried only when `_sdk_transient` says so (reset/EOF),
-                # else it fails fast (refused/DNS/cert). A STREAM stall degrades the next attempt to
-                # non-stream and ratchets the permanent-degrade counter. This ALSO catches a raw httpx
-                # stream-body error that `_stream_with_idle_guard` normalized to APIConnectionError
-                # (the SDK leaves those unwrapped) — `_sdk_transient` reads its httpx __cause__.
-                is_timeout = isinstance(e, openai.APITimeoutError)
-                transient = is_timeout or _sdk_transient(e)
-                if use_stream and transient:
-                    _stalled_prev = True
-                    self._stream_stalls += 1
-                if transient and attempt < self._max_retries:
-                    time.sleep(_backoff(attempt))
-                    continue
-                raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
-            except openai.PermissionDeniedError as e:   # 403 — often a burst/rate-limit throttle, not hard-forbidden
-                if _is_throttle_403(_err_body(e)) and attempt < self._max_retries:
-                    time.sleep(_backoff(attempt))
-                    continue
-                raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
-            except openai.APIError as e:   # any other SDK-level protocol error -> clean LLMError
-                raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
-            except json.JSONDecodeError as e:
-                # A gateway 200 with an empty / whitespace / keepalive-only body makes the SDK's
-                # decoder raise a RAW json.JSONDecodeError — NOT an openai.APIError — so without this
-                # it'd escape `_post` uncaught and abort the run (the role layer only retries+falls
-                # back on LLMError). Mirror the old `_parse_chat_body`-None path: a transient gateway
-                # hiccup — retry with backoff, then a clean LLMError. NARROW on purpose: a ValueError/
-                # AttributeError from our own _accumulate_stream/_tool_call_slot code must NOT be
-                # masked here as a "gateway hiccup" — let a real accumulation bug propagate loudly.
-                if attempt < self._max_retries:
-                    time.sleep(_backoff(attempt))
-                    continue
-                raise LLMError(f"LLM request to {self.base_url} returned an unparseable body") from e
+            except (openai.APIError, json.JSONDecodeError) as e:
+                # One catch, one policy table. `_retry_or_raise` RAISES on every non-retryable path,
+                # so returning here always means "take another attempt"; what it returns is the
+                # stream-stall ratchet that decides whether the next attempt degrades off SSE. The
+                # two families are what the ladder caught: every SDK error derives from
+                # `openai.APIError`, and a keepalive-only 200 body escapes the SDK's decoder as a RAW
+                # `json.JSONDecodeError` that is NOT an APIError.
+                _stalled_prev = self._retry_or_raise(e, attempt, use_stream) or _stalled_prev
+                continue
             else:
                 # HTTP 200 read cleanly, but the body can still be unusable: a hosted gateway
                 # sometimes returns an empty / whitespace / SSE-keepalive-only body (OpenRouter sends
@@ -883,36 +964,14 @@ class OpenAICompatibleClient:
                 # A parsed dict is accepted (an `{"error": ...}` envelope has no `choices` and fails
                 # fast at the post-loop check). Only two cases retry: an unparseable body (None), or a
                 # STREAM that produced an empty message (keepalive-only heartbeats, no content/tool_call).
-                ch0 = ((parsed.get("choices") or [{}])[0] or {}) if parsed else {}
-                m = ch0.get("message") or {}
-                # A stream is a "keepalive-only stall" ONLY when it produced NOTHING usable: no
-                # content, no tool_calls, no reasoning, AND no finish_reason. A reasoning model that
-                # hit its length limit while thinking (finish_reason="length", non-empty `reasoning`,
-                # empty `content`) is a REAL — if truncated — response, not a stall: retrying it 5×
-                # regenerates minutes of reasoning tokens and ratchets `_stream_stalls` to the
-                # permanent-degrade threshold, turning the idle timeout into a hard deadline for the
-                # rest of the run. finish_reason present (even "stop" with empty content) likewise
-                # means the endpoint answered — return it and let the no-choices check decide.
-                empty_stream = (use_stream and parsed is not None and parsed.get("choices")
-                                and not m.get("content") and not m.get("tool_calls")
-                                and not m.get("reasoning") and not ch0.get("finish_reason"))
+                empty_stream = self._keepalive_stall(parsed, use_stream)
                 if parsed is not None and not empty_stream:
                     body = parsed
                     break
                 if empty_stream:                # keepalive-only stream = the same stall family
                     _stalled_prev = True
                     self._stream_stalls += 1
-                    # A keepalive-only stream is still a completed, BILLABLE provider call — the same
-                    # reasoning the accepted-body path states below ("a billable HTTP-200 envelope
-                    # with known usage but no choices is still a real call and may otherwise be
-                    # retried for free"). Only the accepted body was accounted, so up to
-                    # `_max_retries` empty attempts spent real money that never reached the cost
-                    # limits or the durable ledger; with a flapping endpoint the run's recorded spend
-                    # drifted arbitrarily far below the invoice.
-                    _empty_usage = _normalize_usage((parsed or {}).get("usage"))
-                    if _empty_usage["total_tokens"] or _empty_usage["cost"]:
-                        self.accountant.add(_empty_usage["cost"], usage=_empty_usage)
-                        self._last_usage = _empty_usage
+                    self._account_keepalive_stall(parsed)
                 if attempt < self._max_retries:
                     time.sleep(_backoff(attempt))
                     continue
@@ -930,13 +989,7 @@ class OpenAICompatibleClient:
         if "choices" not in body or not body["choices"]:
             # Ollama/vLLM emit {"error": ...} envelopes on a bad request — don't index [0] blind.
             raise LLMError(f"LLM response had no choices: {str(body)[:200]}")
-        if ck is not None:                       # T7: cache a COPY (the returned body is mutated
-            copied = copy.deepcopy(body)         # in place by callers — keep the cached entry clean)
-            with self._cache_lock:
-                self._cache[ck] = copied
-                self._cache.move_to_end(ck)
-                while len(self._cache) > self._cache_max:
-                    self._cache.popitem(last=False)   # drop the least recently used
+        self._cache_put(ck, body)                # T7
         return body
 
     def _model_params(self) -> dict:

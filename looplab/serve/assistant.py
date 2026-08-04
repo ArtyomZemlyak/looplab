@@ -24,7 +24,7 @@ import secrets
 import shutil
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -922,6 +922,13 @@ SHARE_TITLE_MAX_CHARS = 120
 SHARE_REVOKED_RETENTION_SECONDS = SHARE_MAX_TTL_SECONDS
 
 
+# One process lock PER STORE PATH, shared by every ShareStore instance in this interpreter, so two
+# server objects over the same `.shares` dir cannot each hold their own private lock (doc 25 SC-10).
+_SHARE_STORE_LOCKS_GUARD = threading.Lock()
+_SHARE_STORE_LOCKS: dict[str, threading.Lock] = {}
+_SHARE_STORE_LOCK_TIMEOUT_SECONDS = 5.0
+
+
 class ShareError(ValueError):
     """A share capability request failed before a token could be published."""
 
@@ -944,7 +951,44 @@ class ShareStore:
     def __init__(self, run_root):
         self.root = Path(run_root) / "assistant"
         self.dir = self.root / ".shares"
-        self._lock = threading.Lock()
+        self._lock = self._process_lock()
+        self._lock_path = self.dir / ".lock"
+
+    def _process_lock(self) -> threading.Lock:
+        # Keyed on the STORE PATH, not the instance: `abspath` is lexical, so a missing `.shares`
+        # dir cannot turn construction into an I/O failure.
+        key = os.path.normcase(os.path.abspath(os.fspath(Path(self.root) / ".shares")))
+        with _SHARE_STORE_LOCKS_GUARD:
+            return _SHARE_STORE_LOCKS.setdefault(key, threading.Lock())
+
+    @contextmanager
+    def _store_lock(self):
+        """Serialize MUTATIONS across server workers, not just threads (doc 25 SC-10).
+
+        A share link is a bearer capability; `revoke_session` is a read-modify-write over a directory
+        of records, and with only an in-process lock two uvicorn workers could interleave it — one
+        worker's revocation lost behind the other's write, leaving a link the owner believes is dead.
+        `ReviewStore` already pairs a per-path process lock with a REQUIRED OS lock for exactly this,
+        and this is now the same pattern rather than a second, weaker one.
+
+        Non-blocking on purpose: a contended store gives the HTTP layer a bounded, retryable 503
+        instead of parking a request thread behind another worker indefinitely. There is deliberately
+        no thread-only fallback — a filesystem that cannot provide the ordering fails closed.
+        """
+        from looplab.events.eventstore import (
+            EventStoreLockError, InterprocessLockContended, _interprocess_lock)
+
+        if not self._lock.acquire(timeout=_SHARE_STORE_LOCK_TIMEOUT_SECONDS):
+            raise self._store_unavailable()
+        try:
+            try:
+                self.dir.mkdir(parents=True, exist_ok=True)
+                with _interprocess_lock(self._lock_path, required=True, blocking=False):
+                    yield
+            except (EventStoreLockError, InterprocessLockContended, OSError) as exc:
+                raise self._store_unavailable() from exc
+        finally:
+            self._lock.release()
 
     def _safe_dir_locked(self, *, create: bool = False) -> Optional[Path]:
         """Return the real, direct ``.shares`` directory or fail closed.
@@ -1222,7 +1266,7 @@ class ShareStore:
         if ts is None or not math.isfinite(ts + ttl):
             raise ShareError("share expiry is unavailable", code="assistant_share_time_unavailable",
                              status_code=503)
-        with self._lock:
+        with self._store_lock():
             directory = self._safe_dir_locked(create=True)
             if directory is None:
                 raise self._store_unavailable()
@@ -1300,7 +1344,7 @@ class ShareStore:
         ts = self._now(now)
         if separator != "." or ts is None:
             return False
-        with self._lock:
+        with self._store_lock():
             directory = self._safe_dir_locked()
             path = self._path(link_id, directory) if directory is not None else None
             if path is None:
@@ -1330,7 +1374,7 @@ class ShareStore:
             raise ShareError("share revocation time is unavailable",
                              code="assistant_unshare_time_unavailable", status_code=503)
         revoked = 0
-        with self._lock:
+        with self._store_lock():
             directory = self._safe_dir_locked()
             if directory is None:
                 if self._store_entry_exists_locked():
