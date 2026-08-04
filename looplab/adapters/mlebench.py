@@ -287,3 +287,11 @@ class MLEBenchTask(BaseModel):
                 "and importing them will crash. Print nothing after that JSON line.")
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
                 LLMDeveloper(client, brief=brief))
+
+    def gpu_capable(self) -> bool:
+        """The OFFLINE synthetic MLE-bench tutorial task: every brief above pins the solution to "ONLY
+        numpy and the Python standard library", and `core/hardware.py::task_runtime_caps` names this
+        adapter as one that genuinely runs on numpy+stdlib and must never be told torch exists. The
+        REAL competition adapter (`mlebench_real.py`) makes no such claim and stays GPU-capable. Keeps
+        this task out of the host GPU pool lease (`engine/resources.py::_task_gpu_capable`)."""
+        return False

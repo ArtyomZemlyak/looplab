@@ -65,6 +65,15 @@ class TaskAdapter(Protocol):
     - `comparison_contract` (attribute) — optional typed scientific comparability identity;
       persisted by launch surfaces and consumed only by cross-run reporting. Third-party adapters
       that do not opt in remain valid TaskAdapter implementations and produce unranked observations.
+    - `gpu_capable() -> bool` — whether this task's solution code can use a GPU AT ALL; consumed by
+      `engine/resources.py` (`_task_gpu_capable`) as the second input to an UNSPECIFIED footprint.
+      ABSENT MEANS CAPABLE: only an adapter that positively returns False opts out, so a third-party
+      adapter (or one that has simply never thought about it) keeps the historical reserve-first
+      behaviour. Returning False is a claim that no candidate this adapter can produce touches CUDA —
+      the shipped synthetic/offline tasks qualify because their Developer is a numpy/stdlib template
+      or their brief forbids anything else. Getting it wrong in the False direction lets two
+      co-hosted runs double-book a device, so declare it only where the whole task family is provably
+      CPU-locked; getting it wrong in the True direction only costs the historical blocking.
     """
     id: str
     goal: str
@@ -83,6 +92,9 @@ TASK_OPTIONAL_HOOKS: tuple[str, ...] = (
     "llm_roles", "assets", "columns", "leakage_inputs", "host_grader", "data_samples",
     "repo_spec", "agent_brief", "eval_spec", "make_onboarder", "params",
     "comparison_contract",
+    # Scheduler-facing capability declaration probed by engine/resources.py — registered so an
+    # adapter that renames it goes red instead of silently re-acquiring the host GPU pool lease.
+    "gpu_capable",
     # RepoTask-specific field probed by the repo Developer's onboarding flow
     # (adapters/repo_developer.py) — registered so a one-sided rename goes red like any hook.
     "onboard_command")

@@ -11,7 +11,6 @@ truncate each other — so we fsync best-effort and give every write its OWN tem
 from __future__ import annotations
 
 import errno
-import errno
 import math
 import os
 import tempfile
@@ -296,68 +295,66 @@ def durable_no_replace_rename(source, destination, *, label: str) -> None:
     strict_fsync_parent(destination)
 
 
-def durable_no_replace_rename(source, destination, *, label: str) -> None:
-    """Rename one SIBLING path to a name that must not already exist, durably (doc 25 SC-05).
+def exchange_paths_if_supported(first: str | os.PathLike, second: str | os.PathLike) -> bool:
+    """ATOMICALLY swap two names on one filesystem, or report that this one cannot (doc 25 SC-05).
 
-    Both callers — the reset route archiving a replaced event log, and the deletion service moving a
-    run into quarantine — need the same three properties, and each had written the same ~45 lines of
-    ctypes to get them:
+    The third rename shape this module owns, beside `durable_no_replace_rename` (never replace) and
+    `_strict_replace` (always replace). Swapping is what a caller needs when BOTH names must stay
+    occupied throughout — publishing a rebuilt directory over the one currently being served, where
+    the obvious alternative (remove the old, then move the new in) has an instant in which the only
+    copy of a working artifact has already been destroyed. Directories are the point: `os.replace`
+    swaps files but refuses a non-empty directory with ENOTEMPTY.
 
-    * **No replace.** A plain ``os.rename`` silently REPLACES a raced destination. For an archive name
-      or a quarantine directory that means destroying whatever a concurrent operation just put there,
-      which is the one outcome neither caller can recover from. `lexists` is a courtesy check that
-      gives a clean error; the kernel flag is the actual guarantee, because between the check and the
-      rename another worker can win.
-    * **Durability before the receipt advances.** `strict_fsync_parent` makes both the new name and
-      the source-name removal survive a crash, so a receipt that says "moved" is never ahead of the
-      filesystem.
-    * **Loud refusal where the primitive is missing.** An old kernel without ``renameat2``, or a
-      platform that is neither Linux, macOS nor Windows, raises `ENOTSUP` rather than falling back to
-      a replacing rename — silently downgrading the guarantee is worse than failing the operation.
+    **This one DEGRADES where its neighbours fail closed, and the inversion is deliberate.** For a
+    quarantine move or a paid-work claim, an unavailable primitive means the GUARANTEE is gone, so
+    the operation must stop — silently downgrading to a replacing rename is worse than failing.
+    Here the missing primitive costs only ATOMICITY, never the guarantee: a caller that reads False
+    falls back to an ordered retire -> publish -> delete sequence that is recoverable at every point,
+    just not instantaneous. Raising would deny a caller a publish it can still perform correctly. So
+    the answer is a bool the caller MUST read, not an exception it must catch, and `_if_supported`
+    is in the name so no call site can be unsure which of the two contracts it is on. Do not "make
+    this consistent" with `durable_no_replace_rename`: they answer different questions.
 
-    `label` names the operation in the error ("replay archive", "deletion quarantine"): the two
-    callers' messages were the ONLY thing that differed between the copies.
+    Every unavailable-primitive reason is False, and they are not exotic. Linux `renameat2` flags are
+    rejected with EINVAL by any filesystem that does not implement `rename2` — a JupyterHub geesefs/S3
+    home is one, measured, which is precisely where an ordered fallback earns its keep — old kernels
+    lack the syscall, Windows has no equivalent, and a name that does not exist yet is a create, not
+    a swap. `renamex_np(RENAME_SWAP)` is the Darwin spelling.
+
+    Durability is the CALLER's here, unlike `durable_no_replace_rename`'s bundled
+    `strict_fsync_parent`, because the two contracts attract callers with opposite sync policies —
+    see `best_effort_fsync_parent` for the tier a derived artifact wants.
     """
-    source = Path(source)
-    destination = Path(destination)
-    if source.parent != destination.parent:
-        raise ValueError(f"{label} must be a sibling of its source")
-    if os.path.lexists(destination):
-        raise FileExistsError(errno.EEXIST, f"{label} destination already exists", str(destination))
     if os.name == "nt":
-        _windows_move_write_through(source, destination, replace=False)
-        return
+        return False
 
     import ctypes
     import sys
 
-    old_name = os.fsencode(os.path.abspath(source))
-    new_name = os.fsencode(os.path.abspath(destination))
-    libc = ctypes.CDLL(None, use_errno=True)
-    if sys.platform.startswith("linux"):
-        rename_exclusive = getattr(libc, "renameat2", None)
-        if rename_exclusive is None:
-            raise OSError(
-                errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
-        rename_exclusive.argtypes = [
-            ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-        rename_exclusive.restype = ctypes.c_int
-        result = rename_exclusive(-100, old_name, -100, new_name, 1)  # AT_FDCWD, RENAME_NOREPLACE
-    elif sys.platform == "darwin":
-        rename_exclusive = getattr(libc, "renamex_np", None)
-        if rename_exclusive is None:
-            raise OSError(
-                errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
-        rename_exclusive.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-        rename_exclusive.restype = ctypes.c_int
-        result = rename_exclusive(old_name, new_name, 0x00000004)  # RENAME_EXCL
-    else:
-        raise OSError(
-            errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
-    if result != 0:
-        code = ctypes.get_errno() or errno.EIO
-        raise OSError(code, f"durable no-replace {label} rename failed", str(destination))
-    strict_fsync_parent(destination)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        old_name = os.fsencode(os.path.abspath(first))
+        new_name = os.fsencode(os.path.abspath(second))
+        if sys.platform.startswith("linux"):
+            rename_exchange = getattr(libc, "renameat2", None)
+            if rename_exchange is None:
+                return False
+            rename_exchange.argtypes = [
+                ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+            rename_exchange.restype = ctypes.c_int
+            result = rename_exchange(-100, old_name, -100, new_name, 2)  # AT_FDCWD, RENAME_EXCHANGE
+        elif sys.platform == "darwin":
+            rename_exchange = getattr(libc, "renamex_np", None)
+            if rename_exchange is None:
+                return False
+            rename_exchange.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            rename_exchange.restype = ctypes.c_int
+            result = rename_exchange(old_name, new_name, 0x00000002)  # RENAME_SWAP
+        else:
+            return False
+    except (OSError, AttributeError, ValueError):
+        return False
+    return result == 0
 
 
 def _strict_replace(source: str | os.PathLike, destination: str | os.PathLike) -> None:
@@ -416,6 +413,38 @@ def best_effort_fsync(fileno: int) -> None:
     threading.Thread(target=_sync, daemon=True).start()
     if not done.wait(_FSYNC_TIMEOUT):
         _FSYNC_DISABLED = True   # fsync is BLOCKING (stalled FUSE/S3) — stop trying for this process
+
+
+def best_effort_fsync_parent(path: str | os.PathLike) -> None:
+    """Publish a change to *path*'s NAME, degrading where the sync cannot be confirmed.
+
+    The best-effort tier of `strict_fsync_parent`, and the same convention: pass the path whose
+    directory ENTRY changed (a rename's destination, a fresh directory), and the directory containing
+    that name is what gets synced.
+
+    Which tier a caller belongs to is decided by what an unconfirmed sync could cost. Strict is
+    fail-closed because a paid-work claim that is not durably visible can authorize a duplicate paid
+    call — an irreversible external side effect. A DERIVED artifact (a rebuilt UI bundle, a snapshot)
+    has no such consequence, and `best_effort_fsync` records why the sync must be allowed to fail or
+    block at all: on an object-store FUSE mount it can raise, or hang uninterruptibly in the kernel.
+    Refusing to publish a good artifact because geesefs would not confirm a directory sync fails the
+    operation for a durability level it never needed — which for `serve/uibuild.py` would recreate
+    the "no servable UI" outcome its staged publish exists to remove.
+
+    Windows exposes no portable directory-handle fsync; there, `_windows_move_write_through` is what
+    orders a rename, so this is a no-op rather than a silent partial guarantee.
+    """
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(Path(path).parent, flags)
+    except OSError:
+        return   # an unopenable parent is the caller's problem to notice, not a durability failure
+    try:
+        best_effort_fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:

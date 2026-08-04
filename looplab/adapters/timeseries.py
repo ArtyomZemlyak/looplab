@@ -135,3 +135,9 @@ class TimeSeriesTask(BaseModel):
         bounds = {"alpha": (0.0, 1.0), "period": (1.0, float(self.max_period))}
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
                 TimeSeriesDeveloper(self._series(), h=self.backtest_h))
+
+    def gpu_capable(self) -> bool:
+        """Both role pairs end in `TimeSeriesDeveloper`, a fixed seasonal-naive numpy template — the
+        roles only pick `alpha`/`period`, never code. Keeps this task out of the host GPU pool lease
+        (`engine/resources.py::_task_gpu_capable`)."""
+        return False

@@ -8,10 +8,12 @@ visible logical set, admission falls back to count-only instead of guessing.
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import stat
 import tempfile
 import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import BinaryIO, Optional
@@ -23,7 +25,18 @@ from looplab.core.models import effective_card_footprint, normalize_researcher_f
 from looplab.runtime.sandbox import GpuPinUnenforceable, is_secret_env
 
 
+_LOG = logging.getLogger(__name__)
+
 _CUDA_DISABLED_SELECTORS = frozenset({"-1", "none", "nodevfiles", "void"})
+
+# How often a still-blocked host-lease wait repeats its notice.  The wait itself re-polls every 0.5s
+# (`_wait_for_gpu_change`), far too often to log; the FIRST tick is announced immediately because that
+# is the one which otherwise reads as a hang, and the repeats exist only to prove the process is
+# still waiting rather than wedged.
+_LEASE_NOTICE_INTERVAL_S = 30.0
+# Bounded read of the holder stamp below.  Only this module writes a lease file, so anything longer is
+# a foreign/stale file and is reported as an unknown holder instead of being echoed back.
+_LEASE_STAMP_BYTES = 64
 
 
 def default_gpu_host_lease_path() -> Path:
@@ -86,6 +99,7 @@ def _try_acquire_gpu_host_lease(path: Path) -> Optional[BinaryIO]:
         except (ImportError, AttributeError, NotImplementedError, ValueError) as exc:
             raise GpuPinUnenforceable(
                 f"host GPU allocation lease is unsupported: {exc}") from exc
+        _stamp_gpu_host_lease_holder(handle)
         return handle
     except BaseException:
         try:
@@ -96,6 +110,51 @@ def _try_acquire_gpu_host_lease(path: Path) -> Optional[BinaryIO]:
         except OSError:
             pass
         raise
+
+
+def _stamp_gpu_host_lease_holder(handle: BinaryIO) -> None:
+    """Record the winning PID in the lease body so a BLOCKED peer can name who it is waiting for.
+
+    Written only AFTER the lock is won: before that the bytes still belong to the live holder and
+    overwriting them would erase the very answer this stamp exists to give.  Purely diagnostic — the
+    descriptor, not the content, is the ownership token — so every failure is swallowed; a lease that
+    could not be stamped simply reports an unknown holder.  The file position is restored to 0
+    because that is the byte `_release_gpu_host_lease` (and Windows' one-byte `msvcrt.locking`)
+    operates on.
+    """
+    try:
+        handle.seek(0)
+        handle.write(f"pid={os.getpid()}\n".encode("ascii"))
+        handle.flush()
+        handle.truncate()
+    except (OSError, ValueError):     # noqa: BLE001 -- a diagnostic stamp never fails a reservation
+        pass
+    finally:
+        try:
+            handle.seek(0)
+        except (OSError, ValueError):
+            pass
+
+
+def describe_gpu_host_lease_holder(path) -> str:
+    """Best-effort "who holds it" phrase for the contention notice.  Never raises.
+
+    The holder is readable because the lease is per-OS-user by construction (`0o600`, uid in the
+    name), and a flock/`msvcrt` lock does not prevent a reader from opening the file.  A stale or
+    foreign body (a lease written by an older build, which stamped a single NUL) degrades to an
+    honest "holder unknown" rather than echoing junk.
+    """
+    try:
+        with open(path, "rb") as handle:
+            body = handle.read(_LEASE_STAMP_BYTES)
+    except (OSError, ValueError):     # noqa: BLE001 -- diagnostics must not mask the real wait
+        return "holder unknown"
+    text = body.decode("ascii", "replace").strip("\x00 \t\r\n")
+    if text.startswith("pid=") and text[4:].isdecimal():
+        # Deliberately NOT liveness-checked: the lock is what proves a holder exists, and a
+        # `kill(pid, 0)` race could print a reassuring "dead" for a holder that is very much alive.
+        return f"held by pid {text[4:]}"
+    return "holder unknown"
 
 
 def _release_gpu_host_lease(handle: BinaryIO) -> None:
@@ -215,6 +274,13 @@ class ResourceSchedulingMixin:
             self._gpu_host_lease_path = None
         if not hasattr(self, "_gpu_host_lease_handle"):
             self._gpu_host_lease_handle = None
+        if not hasattr(self, "_gpu_host_lease_wait_since"):
+            # Contention-notice bookkeeping (see `_note_gpu_host_lease_contention`). Lives here rather
+            # than in Engine.__init__ so the focused mixin users get it too — the silent wait they can
+            # reproduce is exactly the one worth narrating.
+            self._gpu_host_lease_wait_since = None
+        if not hasattr(self, "_gpu_host_lease_notice_at"):
+            self._gpu_host_lease_notice_at = None
         if not hasattr(self, "_gpu_lock"):
             self._gpu_lock = threading.Lock()
         if not hasattr(self, "_gpu_condition"):
@@ -295,14 +361,47 @@ class ResourceSchedulingMixin:
             and getattr(card, "dropped_by", None) == "operator"
         )
 
+    def _task_gpu_capable(self) -> bool:
+        """Whether THIS run's task can use a GPU at all — the other input to an UNSPECIFIED footprint.
+
+        Nothing else in the request answers this question.  ``_eval_parallel`` and ``_gpu_ids`` describe
+        the BOX, not the work, so with an undeclared footprint the scheduler was deciding "does this
+        need a GPU?" from hardware alone: on a two-GPU host a `--kind quadratic` toy run (pure
+        arithmetic, no CUDA anywhere in its solution code) reserved a device under AUTO width and the
+        WHOLE pool under serial width, and therefore took the pool-wide cross-process host lease — so it
+        blocked, invisibly and indefinitely, behind any co-hosted run's training job.
+
+        The optional `gpu_capable()` TaskAdapter hook (registered in `adapters/tasks.py`) is the task's
+        own answer.  ABSENT MEANS CAPABLE, deliberately: an adapter that has not thought about it, a
+        third-party adapter, and a partially-constructed Engine all keep today's reserve-first behaviour,
+        so the fix can never silently un-reserve work that really does touch a device.  Only an adapter
+        that positively declares itself CPU-locked opts out.
+        """
+        if not hasattr(self, "task"):
+            return True                              # focused mixin users / __new__ engines: unchanged
+        probe = getattr(self.task, "gpu_capable", None)
+        if not callable(probe):
+            return True
+        try:
+            return bool(probe())
+        except Exception:  # noqa: BLE001 -- a broken adapter hook must not un-reserve a real GPU job
+            return True
+
     def _resource_request_for_node(self, node, *, resource_pin=None) -> dict:
         """Translate a node footprint into the effective admission request.
 
-        UNSPECIFIED preserves the historical split: a serial eval remains unpinned and can see the
-        whole box; a parallel eval reserves one device.  Explicit ``gpus=0`` is a CPU request and
-        bypasses the GPU queue.  Explicit positive counts are clamped to the detected pool (0 on a
-        GPU-less host -> ``required_unavailable``), so admission can fail closed without waiting forever
-        for capacity that cannot exist or silently changing an explicit positive requirement into CPU work.
+        UNSPECIFIED preserves the historical split FOR A GPU-CAPABLE TASK: a serial eval remains
+        unpinned and can see the whole box; a parallel eval reserves one device.  A task that declares
+        itself CPU-locked (`_task_gpu_capable`) instead makes an undeclared footprint a zero-device
+        request, so it neither pins nor holds the pool — see `_try_reserve_node_resources`.  Explicit
+        ``gpus=0`` is a CPU request and bypasses the GPU queue.  Explicit positive counts are clamped to
+        the detected pool (0 on a GPU-less host -> ``required_unavailable``), so admission can fail
+        closed without waiting forever for capacity that cannot exist or silently changing an explicit
+        positive requirement into CPU work.
+
+        A DECLARED footprint is still authoritative on a CPU-locked task: the researcher/operator
+        outranks the adapter's blanket answer, and an over-declaration keeps failing closed exactly as
+        before rather than being quietly downgraded.
         """
         raw = effective_card_footprint(
             getattr(getattr(node, "idea", None), "footprint", None),
@@ -314,13 +413,14 @@ class ResourceSchedulingMixin:
         pool_size = len(getattr(self, "_gpu_ids", []) or [])
         required_unavailable = bool(declared and raw.get("gpus", 0) > 0 and pool_size == 0)
         parallel = max(1, int(self._eval_parallel or 1))
+        task_gpu_capable = self._task_gpu_capable()
         if cpu_only:
             count = 0
         elif required_unavailable:
             count = int(raw["gpus"])
         elif declared:
             count = int((effective or {}).get("gpus", 0))
-        elif pool_size and parallel > 1:
+        elif pool_size and parallel > 1 and task_gpu_capable:
             count = 1
         else:
             count = 0
@@ -331,6 +431,10 @@ class ResourceSchedulingMixin:
             "cpu_only": cpu_only,
             "required_unavailable": required_unavailable,
             "unspecified": not declared,
+            # A SOURCE field, not an admission outcome: it is a property of the run's task, identical
+            # for every node and every re-fold, so `_node_resource_reservation_is_current` compares it
+            # like the rest of the request and can never see it drift.
+            "task_gpu_capable": task_gpu_capable,
             "pin": bool(count > 0 and not required_unavailable),
             "footprint": effective,
         }
@@ -358,6 +462,45 @@ class ResourceSchedulingMixin:
         }
         expected_source = {key: value for key, value in expected.items() if key != "pin"}
         return admitted_source == expected_source
+
+    def _note_gpu_host_lease_contention(self, lease_path) -> None:
+        """Narrate a blocked host-lease wait; called from inside ``_gpu_condition``.
+
+        Without this the wait is TOTALLY silent: the run appends `setup_finished`, creates its nodes,
+        and then nothing — `_wait_for_gpu_change` re-polls every 0.5s forever while another process
+        holds the pool, which is indistinguishable from a deadlock and has repeatedly been
+        misdiagnosed as one.  Deliberately at WARNING so it reaches stderr through logging's
+        `lastResort` handler in a CLI run that never configured logging at all; rate-limited to
+        `_LEASE_NOTICE_INTERVAL_S` because the poll rate is not a sane log rate.
+        """
+        now = time.monotonic()
+        if self._gpu_host_lease_wait_since is None:
+            self._gpu_host_lease_wait_since = now
+            self._gpu_host_lease_notice_at = None
+        if (self._gpu_host_lease_notice_at is not None
+                and now - self._gpu_host_lease_notice_at < _LEASE_NOTICE_INTERVAL_S):
+            return
+        self._gpu_host_lease_notice_at = now
+        _LOG.warning(
+            "waiting for the host GPU pool lease %s (%s) — waited %.0fs so far. That lease is "
+            "pool-wide and exclusive ACROSS PROCESSES, so this run cannot start an evaluation until "
+            "the other LoopLab process releases every GPU it reserved. If this work needs no GPU, "
+            "declare footprint {\"gpus\": 0} on the idea/Card, or fence the run with "
+            "CUDA_VISIBLE_DEVICES= to leave the pool entirely.",
+            lease_path, describe_gpu_host_lease_holder(lease_path),
+            now - self._gpu_host_lease_wait_since)
+
+    def _note_gpu_host_lease_acquired(self, lease_path) -> None:
+        """Close the loop on a notice we already emitted; called from inside ``_gpu_condition``."""
+        waited_since = self._gpu_host_lease_wait_since
+        self._gpu_host_lease_wait_since = None
+        noticed = self._gpu_host_lease_notice_at is not None
+        self._gpu_host_lease_notice_at = None
+        if noticed and waited_since is not None:
+            # Same level as the warning it answers: an operator who was told to expect a hang has to
+            # see the hang end on the same stream, or the last thing in the log stays a scary warning.
+            _LOG.warning("acquired the host GPU pool lease %s after %.0fs",
+                         lease_path, time.monotonic() - waited_since)
 
     def _acquire_gpus(self, n: int, mem: Optional[int] = None) -> Optional[list[int]]:
         """Atomically reserve the first ``n`` fitting logical devices.
@@ -408,7 +551,9 @@ class ResourceSchedulingMixin:
                 # task-group with no terminal and re-crashing on every resume.
                 handle = _try_acquire_gpu_host_lease(Path(lease_path))
                 if handle is None:
+                    self._note_gpu_host_lease_contention(lease_path)
                     return None
+                self._note_gpu_host_lease_acquired(lease_path)
                 self._gpu_host_lease_handle = handle
             chosen = fitting[:count]
             chosen_set = set(chosen)
@@ -456,11 +601,17 @@ class ResourceSchedulingMixin:
             return {**request, "gpu_ids": []}
         reserve_count = request["count"]
         whole_pool_unpinned = bool(
-            request["unspecified"] and reserve_count == 0 and self._gpu_ids)
+            request["unspecified"] and request["task_gpu_capable"]
+            and reserve_count == 0 and self._gpu_ids)
         if whole_pool_unpinned:
             # Legacy serial execution intentionally leaves CUDA visibility untouched so one candidate
             # may use the whole box. Reserve every logical device internally for the same lifecycle;
             # otherwise an unpinned serial Run could bypass both the local pool and the host lease.
+            # Gated on `task_gpu_capable` for the same reason the pinned branch is: this reservation
+            # buys the child NOTHING (its env is left untouched either way) — its ONLY job is to stop a
+            # co-hosted run from handing out devices this one might grab. A task whose solution code
+            # cannot touch CUDA can grab nothing, so claiming the whole box on its behalf is pure
+            # cross-process blocking with no counterpart benefit.
             reserve_count = len(self._gpu_ids)
         try:
             gpu_ids = self._acquire_gpus(reserve_count, request["gpu_mem_mib"])

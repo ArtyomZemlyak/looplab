@@ -185,6 +185,12 @@ class RegressionTask(BaseModel):
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
                 RegressionDeveloper(X, Y, k=self.cv_k))
 
+    def gpu_capable(self) -> bool:
+        """Both role pairs end in `RegressionDeveloper`, a fixed numpy template — the roles only pick
+        `degree`/`lam`, never code. Keeps this task out of the host GPU pool lease (see
+        `adapters/tasks.py::TASK_OPTIONAL_HOOKS` and `engine/resources.py::_task_gpu_capable`)."""
+        return False
+
 
 class CodeRegressionTask(BaseModel):
     """Like RegressionTask, but the LLM *writes the solution code* (reading the dataset
@@ -249,3 +255,10 @@ class CodeRegressionTask(BaseModel):
         )
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
                 LLMDeveloper(client, brief=brief))
+
+    def gpu_capable(self) -> bool:
+        """The LLM writes the code here, but the brief above pins it to "ONLY numpy and the Python
+        standard library" — the same offline stack `core/hardware.py::task_runtime_caps` locks this
+        task to, and it never offers it the torch capability sentence. Keeps it out of the host GPU
+        pool lease (`engine/resources.py::_task_gpu_capable`)."""
+        return False

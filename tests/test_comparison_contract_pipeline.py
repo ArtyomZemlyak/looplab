@@ -110,8 +110,12 @@ def test_cli_snapshot_persists_adapter_canonical_contract(tmp_path):
     task_file.write_text(json.dumps(_toy()), encoding="utf-8")
     run_dir = tmp_path / "run"
 
+    # `-s backend=toy`: the subject is what `run` PERSISTS into task.snapshot.json, not which roles
+    # it uses. Since the `backend` default flipped to "llm" (2026-08-04) an unpinned `run` trips the
+    # LLM endpoint preflight offline and never reaches the snapshot.
     result = CliRunner().invoke(
-        app, ["run", str(task_file), "--out", str(run_dir), "--max-nodes", "1"])
+        app, ["run", str(task_file), "--out", str(run_dir), "--max-nodes", "1",
+              "-s", "backend=toy"])
 
     assert result.exit_code == 0, result.output
     snapshot = json.loads((run_dir / "task.snapshot.json").read_text(encoding="utf-8"))

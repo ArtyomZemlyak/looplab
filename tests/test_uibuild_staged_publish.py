@@ -313,8 +313,9 @@ def test_an_interrupted_publish_never_leaves_both_bundles_unusable(
         tmp_path, monkeypatch, crash_after, atomic_exchange):
     """Kill the process at every filesystem step of the publish; a bundle must always survive.
 
-    The fallback publish (`atomic_exchange=False`, which is what geesefs and every filesystem
-    without renameat2 flags actually gets) is two renames, and only ONE order is safe: retire the
+    The fallback publish (`atomic_exchange=False` — what `atomicio.exchange_paths_if_supported`
+    reports on geesefs and every filesystem without renameat2 flags) is two renames, and only ONE
+    order is safe: retire the
     old bundle to a sibling name first, publish the staged one second. The intuitive order — remove
     `dist`, then move the new bundle in — has an instant where the only copy of a working bundle has
     already been deleted. That is the defect this whole mechanism exists to remove, so it is checked
@@ -324,7 +325,7 @@ def test_an_interrupted_publish_never_leaves_both_bundles_unusable(
     stage = _write_bundle(uibuild._stage_dir(dist), "new")
     retired = uibuild._retired_dir(dist)
     if not atomic_exchange:
-        monkeypatch.setattr(uibuild, "_exchange_directories", lambda *_a, **_k: False)
+        monkeypatch.setattr(uibuild, "exchange_paths_if_supported", lambda *_a, **_k: False)
 
     with _crash_after(tmp_path, crash_after):
         try:
@@ -425,7 +426,7 @@ def test_a_publish_that_fails_in_process_restores_the_previous_bundle(tmp_path, 
     dist = _write_bundle(src / "dist", "old")
     before = _tree(dist)
     stage = _write_bundle(uibuild._stage_dir(dist), "new")
-    monkeypatch.setattr(uibuild, "_exchange_directories", lambda *_a, **_k: False)
+    monkeypatch.setattr(uibuild, "exchange_paths_if_supported", lambda *_a, **_k: False)
     _deny_rename_from(monkeypatch, stage)
 
     with pytest.raises(OSError):
@@ -445,7 +446,7 @@ def test_even_an_unrestorable_publish_keeps_the_previous_bundle_and_says_where(
     before = _tree(dist)
     stage = _write_bundle(uibuild._stage_dir(dist), "new")
     retired = uibuild._retired_dir(dist)
-    monkeypatch.setattr(uibuild, "_exchange_directories", lambda *_a, **_k: False)
+    monkeypatch.setattr(uibuild, "exchange_paths_if_supported", lambda *_a, **_k: False)
     _deny_rename_from(monkeypatch, stage, retired)
     logs = []
 
@@ -464,7 +465,7 @@ def test_the_whole_build_survives_an_unpublishable_dist(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
     monkeypatch.setattr(uibuild, "_has_npm", lambda: True)
     monkeypatch.setattr(uibuild, "_run", _emitting_build(src, "new"))
-    monkeypatch.setattr(uibuild, "_exchange_directories", lambda *_a, **_k: False)
+    monkeypatch.setattr(uibuild, "exchange_paths_if_supported", lambda *_a, **_k: False)
     _deny_rename_from(monkeypatch, uibuild._stage_dir(dist))
     logs = []
 
@@ -475,7 +476,9 @@ def test_the_whole_build_survives_an_unpublishable_dist(tmp_path, monkeypatch):
 
 
 def test_the_atomic_exchange_publish_is_used_where_the_filesystem_supports_it(tmp_path):
-    """Where `renameat2(RENAME_EXCHANGE)` works there is no window at all — `dist` never vanishes.
+    """Where `atomicio.exchange_paths_if_supported` says yes there is no window at all — `dist` never
+    vanishes. (The primitive itself is covered in tests/test_atomicio_exchange.py; this asserts the
+    publish actually goes through it.)
 
     Skipped rather than asserted on unsupported mounts: geesefs (this repo's own JupyterHub home)
     rejects every renameat2 flag with EINVAL, which is precisely why the ordered fallback above is
@@ -483,7 +486,7 @@ def test_the_atomic_exchange_publish_is_used_where_the_filesystem_supports_it(tm
     src = _src_with_sources(tmp_path)
     dist = _write_bundle(src / "dist", "old")
     stage = _write_bundle(uibuild._stage_dir(dist), "new")
-    if not uibuild._exchange_directories(stage, dist):
+    if not uibuild.exchange_paths_if_supported(stage, dist):
         pytest.skip("this filesystem has no renameat2/renamex_np directory exchange")
 
     assert (dist / "assets" / "new.js").is_file()

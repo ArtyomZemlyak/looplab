@@ -1,6 +1,7 @@
 """Layer-4 footprint-aware GPU inventory and admission contracts."""
 from __future__ import annotations
 
+import os
 import threading
 import types
 
@@ -15,7 +16,8 @@ from looplab.runtime.sandbox import GpuPinUnenforceable
 
 
 class _Pool(ResourceSchedulingMixin):
-    def __init__(self, ids=(0, 1), mem=None, *, parallel=2, physical=None, lease_path=None):
+    def __init__(self, ids=(0, 1), mem=None, *, parallel=2, physical=None, lease_path=None,
+                 gpu_capable=None):
         self._gpu_ids = list(ids)
         self._gpu_physical_ids = physical or {gpu: str(gpu) for gpu in ids}
         self._gpu_mem = dict(mem or {})
@@ -28,6 +30,11 @@ class _Pool(ResourceSchedulingMixin):
         self._eval_gpu_reservations = {}
         self.max_parallel = parallel
         self._eval_parallel = parallel
+        # No `task` at all is the DEFAULT here on purpose: that is the conservative branch of
+        # `_task_gpu_capable`, so every pre-existing case below keeps asserting the historical
+        # reserve-first behaviour. `gpu_capable=` opts a case into a task that answers.
+        if gpu_capable is not None:
+            self.task = types.SimpleNamespace(gpu_capable=lambda: gpu_capable)
 
 
 def _node(node_id, footprint, *, attempt=0):
@@ -125,6 +132,103 @@ def test_serial_unspecified_eval_holds_whole_pool_without_changing_visibility(tm
     serial._release_gpus(reservation["gpu_ids"])
     assert sibling._acquire_gpus(1) == [0]
     sibling._release_gpus([0])
+
+
+def test_cpu_locked_task_never_takes_or_waits_on_the_cross_process_host_lease(tmp_path):
+    """An UNSPECIFIED footprint used to resolve against the BOX alone — detected devices and eval
+    width — so on a two-GPU host a task whose solution code cannot touch CUDA (`--kind quadratic`:
+    closed-form arithmetic) reserved a device at AUTO width and the WHOLE pool at serial width, took
+    the pool-wide cross-process host lease, and then blocked indefinitely and SILENTLY behind any
+    co-hosted run's training job. A task that declares itself CPU-locked must reserve nothing, take
+    no lease, and never wait — while leaving the child's CUDA visibility exactly as it was."""
+    lease = tmp_path / "gpu-pool.lock"
+    owner = _Pool(ids=(0, 1), lease_path=lease)          # a GPU-owning neighbour holds the pool
+    assert owner._acquire_gpus(1) == [0]
+
+    for parallel in (1, 2):                              # serial whole-pool AND AUTO one-device
+        cpu = _Pool(ids=(0, 1), parallel=parallel, lease_path=lease, gpu_capable=False)
+        request = cpu._resource_request_for_node(_node(0, None))
+        assert request["count"] == 0 and request["pin"] is False
+        assert request["unspecified"] is True and request["task_gpu_capable"] is False
+        reservation = cpu._try_reserve_node_resources(_node(0, None))
+        assert reservation is not None                   # never None -> the caller never waits
+        assert reservation["gpu_ids"] == []
+        assert "whole_pool_unpinned" not in reservation
+        assert cpu._gpu_host_lease_handle is None        # the contended lease was never even opened
+        # Identical to the legacy unpinned branch: CUDA_VISIBLE_DEVICES is left untouched, so this is
+        # a scheduling change only — no candidate process sees a different device set than before.
+        assert cpu._resource_eval_env(reservation) is None
+
+    # The guarantee the lease exists for is untouched: a GPU-capable neighbour still cannot get in.
+    capable = _Pool(ids=(0, 1), lease_path=lease)
+    assert capable._try_reserve_node_resources(_node(1, None)) is None
+    owner._release_gpus([0])
+    assert capable._try_reserve_node_resources(_node(1, None))["gpu_ids"] == [0]
+
+
+def test_declared_footprint_still_outranks_a_cpu_locked_task(tmp_path):
+    """The adapter's blanket answer is the UNSPECIFIED default, not a veto: an explicit
+    researcher/operator declaration keeps reserving, pinning and failing closed exactly as before."""
+    lease = tmp_path / "gpu-pool.lock"
+    cpu = _Pool(ids=(0, 1), lease_path=lease, gpu_capable=False)
+
+    declared = cpu._try_reserve_node_resources(_node(0, {"gpus": 1}))
+    assert declared["gpu_ids"] == [0] and declared["pin"] is True
+    assert cpu._gpu_host_lease_handle is not None        # a REAL device request still takes the lease
+    assert cpu._resource_eval_env(declared)["CUDA_VISIBLE_DEVICES"] == "0"
+    # An explicit gpus=0 remains the only CPU-ONLY declaration (it fences visibility); the task-level
+    # answer stays a scheduling opt-out that leaves the child env alone.
+    zero = cpu._try_reserve_node_resources(_node(1, {"gpus": 0}))
+    assert zero["cpu_only"] is True
+    assert cpu._resource_eval_env(zero, inherit_host=False)["CUDA_VISIBLE_DEVICES"] == ""
+    cpu._release_gpus(declared["gpu_ids"])
+    assert cpu._gpu_host_lease_handle is None
+
+
+def test_a_blocked_host_lease_wait_names_the_lease_file_and_its_holder(tmp_path, caplog):
+    """The wait used to be TOTALLY silent — `setup_finished`, three `node_created`, then nothing for
+    hours — which reads as a deadlock and was repeatedly misdiagnosed as one. A blocked wait must say
+    what it is waiting for and who has it; the holder is stamped into the lease body at acquisition,
+    so naming it costs one bounded read."""
+    import logging
+
+    from looplab.engine.resources import describe_gpu_host_lease_holder
+
+    lease = tmp_path / "gpu-pool.lock"
+    owner = _Pool(ids=(0, 1), lease_path=lease)
+    assert owner._acquire_gpus(1) == [0]
+    assert describe_gpu_host_lease_holder(lease) == f"held by pid {os.getpid()}"
+
+    blocked = _Pool(ids=(0, 1), lease_path=lease)
+    with caplog.at_level(logging.WARNING, logger="looplab.engine.resources"):
+        assert blocked._acquire_gpus(1) is None
+        # Rate-limited to one notice per interval: the wait re-polls twice a second and that is not a
+        # sane log rate. The FIRST tick is never suppressed — it is the one that reads as a hang.
+        assert blocked._acquire_gpus(1) is None
+    notices = [r.getMessage() for r in caplog.records]
+    assert len(notices) == 1
+    assert str(lease) in notices[0] and f"held by pid {os.getpid()}" in notices[0]
+
+    owner._release_gpus([0])
+    with caplog.at_level(logging.WARNING, logger="looplab.engine.resources"):
+        caplog.clear()
+        assert blocked._acquire_gpus(1) == [0]
+    # The hang story has to END on the same stream it started on, or the last word stays a warning.
+    assert any("acquired the host GPU pool lease" in r.getMessage() for r in caplog.records)
+    blocked._release_gpus([0])
+
+
+def test_a_wait_that_was_never_announced_stays_quiet_on_acquisition(tmp_path, caplog):
+    """The close-the-loop notice answers a warning we actually emitted. An uncontended acquisition —
+    every ordinary run — must stay silent, or the fix trades a silent hang for a noisy success."""
+    import logging
+
+    lease = tmp_path / "gpu-pool.lock"
+    pool = _Pool(ids=(0, 1), lease_path=lease)
+    with caplog.at_level(logging.WARNING, logger="looplab.engine.resources"):
+        assert pool._acquire_gpus(1) == [0]
+    assert caplog.records == []
+    pool._release_gpus([0])
 
 
 def test_all_or_nothing_wait_has_no_lost_wakeup_under_concurrent_releases():

@@ -191,7 +191,10 @@ def test_engine_reentry_skips_setup_for_finish_seq_pending(tmp_path, monkeypatch
         "id": "t", "kind": "quadratic", "goal": "g", "direction": "min",
         "bounds": {"x": [-1.0, 1.0]},
     })
-    eng = cli._engine(run_dir, task, Settings(max_nodes=1), crash_after=None)
+    # `backend="toy"`: `_engine` runs the LLM endpoint preflight, and the `backend` default is "llm"
+    # since 2026-08-04 — an offline suite would refuse to build the engine before reaching the
+    # reentry behaviour under test. The subject is the pending-finish repair, not which roles run.
+    eng = cli._engine(run_dir, task, Settings(max_nodes=1, backend="toy"), crash_after=None)
     monkeypatch.setattr(
         eng, "_setup_phase",
         lambda _state: pytest.fail("setup must not run before pending finish recovery"),
@@ -586,7 +589,13 @@ def test_cli_entry_repairs_finish_seq_pending_without_reopening_search(tmp_path,
     )
     task.write_text(task_doc, encoding="utf-8")
     (run_dir / "task.snapshot.json").write_text(task_doc, encoding="utf-8")
-    (run_dir / "config.snapshot.json").write_text("{}", encoding="utf-8")
+    # `backend: toy` in the CONFIG SNAPSHOT, not on the argv: BOTH entries reach `_engine` (and its
+    # LLM endpoint preflight) with the run's own recorded settings — `resume` via
+    # `load_run_settings`, `run` via `_pending_finalization_inputs`, which deliberately ignores the
+    # new invocation's flags on a pending-finalization boundary. A `-s backend=toy` would therefore
+    # be dropped by the `run` half. Since the `backend` default flipped to "llm" (2026-08-04) an
+    # empty snapshot means an unreachable endpoint offline; this run is offline by construction.
+    (run_dir / "config.snapshot.json").write_text('{"backend": "toy"}', encoding="utf-8")
     store = EventStore(run_dir / "events.jsonl")
     store.append(
         "run_started", {"run_id": run_dir.name, "task_id": "t", "goal": "g",

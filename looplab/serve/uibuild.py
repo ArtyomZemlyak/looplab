@@ -28,10 +28,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, Callable, Iterator, Sequence
 
-# The one durability dependency: `core/atomicio` owns this codebase's atomic-write discipline and is
-# itself import-light (stdlib only), so it does not cost this module its "importable before the [ui]
-# extra is installed" property.
-from looplab.core.atomicio import best_effort_fsync
+# `core/atomicio` owns every rename/durability primitive this module publishes with, and is itself
+# import-light (stdlib only), so depending on it costs nothing of this module's "importable before
+# the [ui] extra is installed" property. Nothing filesystem-atomic is spelled locally: a second copy
+# of a rename flag is exactly where a guarantee quietly stops holding
+# (tests/test_durable_no_replace_rename.py greps for one).
+from looplab.core.atomicio import best_effort_fsync_parent, exchange_paths_if_supported
 
 
 _DEPS_STAMP = ".looplab-dependencies.sha256"
@@ -343,75 +345,6 @@ def _prepare_stage(stage: Path) -> None:
         raise OSError(errno.ENOTEMPTY, "could not clear the UI staging directory", str(stage))
 
 
-def _sync_directory_entry(directory: Path) -> None:
-    """Best-effort durability for a rename inside *directory* — `core/atomicio`'s discipline.
-
-    `atomicio.atomic_write_bytes` is the model this publish follows (unique temp -> best-effort
-    fsync -> rename), and its BEST-EFFORT sync is deliberate: that module's own docstring records
-    that fsync on a FUSE/S3 home (geesefs/s3fs/goofys — where this bug was hit) may raise or block.
-    `atomicio.strict_fsync_parent` is the fail-closed variant, reserved for paid-work claims whose
-    visibility must precede an external side effect; using it here would mean refusing to publish a
-    good bundle because a FUSE mount would not confirm a directory sync — the exact "no servable UI"
-    outcome the staged publish exists to remove. Windows exposes no portable directory-handle fsync;
-    `_windows_move_write_through` (its own rename) is where that platform's ordering comes from.
-    """
-    if os.name == "nt":
-        return
-    try:
-        descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    except OSError:
-        return
-    try:
-        best_effort_fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _exchange_directories(staged: Path, published: Path) -> bool:
-    """Swap two sibling directory names in ONE atomic step; False where that is unsupported.
-
-    The only publish with no window at all: a reader sees either the old bundle or the new one under
-    ``dist``, never a missing directory. Linux `renameat2(RENAME_EXCHANGE)` / macOS
-    `renamex_np(RENAME_SWAP)` — the same ctypes shape `atomicio.durable_no_replace_rename` uses for
-    its no-replace flag, minus that helper's strict sync (see `_sync_directory_entry`).
-
-    Every failure is a soft "not available here", because a caller that can fall back to the ordered
-    two-rename publish loses nothing by it. That fallback is not hypothetical: measured on this
-    repo's own JupyterHub mount, ext4/tmpfs support the exchange and geesefs rejects *any* renameat2
-    flag with EINVAL, so the fallback is the path that actually runs where the bug was reported.
-    """
-    if os.name == "nt":
-        return False
-
-    import ctypes
-    import sys
-
-    try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        first = os.fsencode(os.path.abspath(staged))
-        second = os.fsencode(os.path.abspath(published))
-        if sys.platform.startswith("linux"):
-            swap = getattr(libc, "renameat2", None)
-            if swap is None:
-                return False
-            swap.argtypes = [
-                ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-            swap.restype = ctypes.c_int
-            result = swap(-100, first, -100, second, 2)  # AT_FDCWD, RENAME_EXCHANGE
-        elif sys.platform == "darwin":
-            swap = getattr(libc, "renamex_np", None)
-            if swap is None:
-                return False
-            swap.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-            swap.restype = ctypes.c_int
-            result = swap(first, second, 0x00000002)  # RENAME_SWAP
-        else:
-            return False
-    except (OSError, AttributeError, ValueError):
-        return False
-    return result == 0
-
-
 def _recover_interrupted_publish(dist: Path, *, log: Callable[[str], None]) -> None:
     """Heal a publish that died between the two renames, and collect what a finished one left.
 
@@ -451,7 +384,7 @@ def _recover_interrupted_publish(dist: Path, *, log: Callable[[str], None]) -> N
         log(f"[ui] the previous bundle is intact at {retired} but could not be restored "
             f"to {dist}: {exc}")
         return
-    _sync_directory_entry(dist.parent)
+    best_effort_fsync_parent(dist)
     # The staged bundle lost, so it is scratch now: recovery deliberately restores the bundle that
     # was being SERVED, and the restored stamp makes the caller rebuild from the current source
     # anyway. Dropping it here matters because recovery can leave the caller with nothing to do —
@@ -464,23 +397,22 @@ def _recover_interrupted_publish(dist: Path, *, log: Callable[[str], None]) -> N
 def _publish_staged_dist(stage: Path, dist: Path, *, log: Callable[[str], None]) -> None:
     """Give a verified staged bundle the ``dist`` name without ever losing BOTH bundles.
 
-    Preferred: one atomic `RENAME_EXCHANGE` — zero window, and the previous bundle lands under the
-    staging name where the discard below collects it.
+    Preferred: `atomicio.exchange_paths_if_supported` swaps the two names in one atomic step — zero
+    window, and the previous bundle lands under the staging name where the discard below collects it.
 
-    Fallback (geesefs, and every other filesystem without renameat2 flags): two renames, in the one
-    order that is recoverable. RETIRE FIRST (``dist`` -> ``<dist>.looplab-previous``), then PUBLISH
-    (``stage`` -> ``dist``). The intuitive order — delete ``dist``, then move the staged bundle in —
-    has an instant where the only copy of a working bundle has already been destroyed, which is the
-    original defect in miniature. This order has no such instant: between the two renames a complete
-    bundle exists under the retired name AND another under the staging name, so a crash anywhere in
-    the sequence leaves `_recover_interrupted_publish` something to put back. That is also why the
-    old bundle is RENAMED away rather than deleted, and why it is deleted only after the new bundle
-    already holds the ``dist`` name.
+    Fallback, taken whenever that helper reports the filesystem cannot (geesefs among them): two
+    renames, in the one order that is recoverable. RETIRE FIRST (``dist`` -> ``<dist>.looplab-previous``),
+    then PUBLISH (``stage`` -> ``dist``). The intuitive order — delete ``dist``, then move the staged
+    bundle in — has an instant where the only copy of a working bundle has already been destroyed,
+    which is the original defect in miniature. This order has no such instant: between the two renames
+    a complete bundle exists under the retired name AND another under the staging name, so a crash
+    anywhere in the sequence leaves `_recover_interrupted_publish` something to put back. That is also
+    why the old bundle is RENAMED away rather than deleted, and why it is deleted only after the new
+    bundle already holds the ``dist`` name.
     """
-    parent = dist.parent
     retired = _retired_dir(dist)
-    if dist.exists() and _exchange_directories(stage, dist):
-        _sync_directory_entry(parent)
+    if dist.exists() and exchange_paths_if_supported(stage, dist):
+        best_effort_fsync_parent(dist)
         _discard_dir(stage)  # holds the PREVIOUS bundle now that the names are swapped
         return
 
@@ -488,7 +420,7 @@ def _publish_staged_dist(stage: Path, dist: Path, *, log: Callable[[str], None])
     retired_previous = False
     if dist.exists():
         os.rename(dist, retired)  # sibling rename onto a name just cleared, so it cannot replace
-        _sync_directory_entry(parent)
+        best_effort_fsync_parent(retired)
         retired_previous = True
     try:
         os.rename(stage, dist)
@@ -496,7 +428,7 @@ def _publish_staged_dist(stage: Path, dist: Path, *, log: Callable[[str], None])
         if retired_previous:
             _recover_interrupted_publish(dist, log=log)
         raise
-    _sync_directory_entry(parent)
+    best_effort_fsync_parent(dist)
     _discard_dir(retired)
 
 

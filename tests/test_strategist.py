@@ -1241,10 +1241,17 @@ def test_gpu_pool_auto_max_parallel_and_distinct_pinning(tmp_path, monkeypatch):
     assert eng._acquire_gpus(1) == [a]             # a released GPU is reusable
     # single-experiment mode never pins (uses the box as-is, backward-compatible). The rule is a
     # property of ADMISSION, not of the acquire primitive: an UNSPECIFIED footprint asks for a
-    # device only when the run is actually evaluating in parallel.
+    # device only when the run is actually evaluating in parallel AND THE TASK CAN USE ONE.
     eng1 = _engine(tmp_path / "gpu-single", max_parallel=1)
     assert eng1._resource_request_for_node(object())["count"] == 0
-    assert eng._resource_request_for_node(object())["count"] == 1
+    # `_engine` builds a ToyTask, which declares `gpu_capable() -> False` (a closed-form 2-D objective
+    # in pure arithmetic). So even at AUTO width its unspecified footprint asks for NOTHING — that is
+    # what keeps a `--kind quadratic` run from taking, and then blocking on, the cross-process host
+    # GPU pool lease. Width alone no longer decides; the task's own answer is the second input.
+    assert eng._resource_request_for_node(object())["count"] == 0
+    monkeypatch.setattr(type(eng.task), "gpu_capable", lambda self: True)
+    assert eng._resource_request_for_node(object())["count"] == 1   # capable + parallel -> one device
+    assert eng1._resource_request_for_node(object())["count"] == 0   # capable + serial -> still unpinned
 
 
 def test_experiment_time_budget_cue_surfaces_limit_and_calibration(tmp_path):

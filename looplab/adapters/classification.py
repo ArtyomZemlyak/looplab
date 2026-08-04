@@ -143,3 +143,9 @@ class ClassificationTask(BaseModel):
         bounds = {"lr": (0.001, 1.0), "l2": (0.0, 1.0), "iters": (10.0, 500.0)}
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
                 ClassificationDeveloper(X, Y, k=self.cv_k))
+
+    def gpu_capable(self) -> bool:
+        """Both role pairs end in `ClassificationDeveloper`, a fixed numpy logistic-regression
+        template — the roles only pick `lr`/`l2`/`iters`, never code. Keeps this task out of the host
+        GPU pool lease (`engine/resources.py::_task_gpu_capable`)."""
+        return False

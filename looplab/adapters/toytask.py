@@ -50,3 +50,10 @@ class ToyTask(BaseModel):
                 ". Lower metric is better; move toward lower-loss regions using the history.")
         return (LLMResearcher(client, space_hint=hint, bounds=self.bounds, parser=parser),
                 ToyObjectiveDeveloper(noise=self.noise))
+
+    def gpu_capable(self) -> bool:
+        """No candidate of this task can touch a GPU: both Developers evaluate a closed-form 2-D
+        objective in pure arithmetic, and the roles only ever choose `x`/`y`. Declaring it keeps a
+        `--kind quadratic` run out of the pool-wide host GPU lease (`engine/resources.py`), which it
+        used to take on any multi-GPU box — and then block on, silently, behind a co-hosted run."""
+        return False

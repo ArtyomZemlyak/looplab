@@ -60,3 +60,27 @@ def _isolate_looplab_home(monkeypatch, tmp_path):
     home = tmp_path / "_ll_home"
     monkeypatch.setenv("LOOPLAB_MEMORY_DIR", str(home / "memory"))
     monkeypatch.setenv("LOOPLAB_KNOWLEDGE_DIR", str(home / "knowledge"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_host_gpu_pool_lease(monkeypatch, tmp_path):
+    """The host GPU-pool lease is ONE file per OS user (`/tmp/looplab-gpu-pool-<uid>.lock`) and is
+    exclusive ACROSS PROCESSES by design. On a GPU box that makes it shared state between the suite
+    and every other thing the developer is running: an Engine test that reserves a device blocks on a
+    real training run's lease and waits — the suite stops at a fixed test count and reads as a hang,
+    which is exactly how it was misdiagnosed. Point it at a per-test tmp file, the same insulation
+    `_isolate_looplab_home` gives cross-run memory.
+
+    Both bindings are patched: `resources` is the canonical home, and `orchestrator` imported the name
+    directly, so patching only one leaves the Engine calling the real path. Tests that pass an
+    explicit `lease_path` are untouched — they already own their file.
+
+    Does NOT reach subprocess-based tests (a spawned `looplab` reads the real default). Those are safe
+    for a different reason: the shipped offline/synthetic adapters now declare `gpu_capable() -> False`
+    (`adapters/tasks.py`), so a toy/regression/mlebench CLI run never asks for the pool at all."""
+    from looplab.engine import orchestrator, resources
+
+    lease = tmp_path / "_ll_gpu_pool.lock"
+    for module in (resources, orchestrator):
+        monkeypatch.setattr(module, "default_gpu_host_lease_path", lambda _p=lease: _p,
+                            raising=False)

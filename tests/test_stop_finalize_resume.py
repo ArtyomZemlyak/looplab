@@ -89,6 +89,13 @@ def _run_dir(tmp_path: Path) -> Path:
     # a minimal snapshot so `finalize`/`resume` can build an engine if they need to (they won't here)
     (rd / "task.snapshot.json").write_text('{"kind":"quadratic","goal":"g","direction":"min"}',
                                            encoding="utf-8")
+    # …and the config snapshot that goes with it. `finalize`/`resume` restore settings from the run
+    # dir (`load_run_settings`), never from the argv, so this is the ONLY place an offline backend
+    # can be spelled for them. Without it they get ambient `Settings()`, whose `backend` default
+    # flipped to "llm" on 2026-08-04, and `_engine`'s LLM endpoint preflight refuses to build an
+    # engine against the unreachable default endpoint. These tests are about the stop/finalize/resume
+    # EVENTS, not about which roles run.
+    (rd / "config.snapshot.json").write_text('{"backend": "toy"}', encoding="utf-8")
     return rd
 
 
