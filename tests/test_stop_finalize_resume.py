@@ -142,7 +142,9 @@ def test_cli_resume_preserves_pending_finalize_after_error_finish(monkeypatch, t
     def singleton(_rd):
         yield True
 
-    monkeypatch.setattr(run_cmds, "_load_task", lambda _path: object())
+    # `**_kwargs`: `resume` loads the snapshot with `existing_run=True` so a validation rule added
+    # since this run started cannot refuse it (`cli/__init__.py::_load_task`).
+    monkeypatch.setattr(run_cmds, "_load_task", lambda _path, **_kwargs: object())
     monkeypatch.setattr(run_cmds, "_engine", lambda *_args, **_kwargs: fake)
     monkeypatch.setattr(run_cmds, "_engine_singleton", singleton)
     monkeypatch.setattr(run_cmds, "_run_engine_guarded", lambda eng: fold(eng.store.read_all()))

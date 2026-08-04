@@ -450,7 +450,11 @@ def _install_cli_engine(monkeypatch, run_dir: Path):
         eng.settings = settings
         return eng
     monkeypatch.setattr(cli, "_engine", _capture_engine)
-    monkeypatch.setattr(cmds, "_load_task", lambda _p: object())
+    # `**_kwargs`, not a bare positional: every re-entry path loads the snapshot with
+    # `existing_run=True` so a validation rule added since the run started cannot make it
+    # unresumable (`cli/__init__.py::_load_task`). A one-arg stub turns that into a TypeError the
+    # command under test never raises on its own.
+    monkeypatch.setattr(cmds, "_load_task", lambda _p, **_kwargs: object())
     return eng
 
 
@@ -526,11 +530,16 @@ def test_cli_finalize_accepts_explicit_task_file_for_legacy_run(tmp_path, monkey
     loaded = []
     from looplab import cli
     monkeypatch.setattr(cli, "_engine", lambda *_a, **_k: eng)
-    monkeypatch.setattr(cmds, "_load_task", lambda path: loaded.append(path) or object())
+    monkeypatch.setattr(
+        cmds, "_load_task",
+        lambda path, **kwargs: loaded.append((path, kwargs)) or object())
 
     cmds.finalize(run_dir, task_file=legacy_task)
 
-    assert loaded == [legacy_task]
+    # Both halves: the EXPLICIT --task-file wins over the (deleted) snapshot, and it is loaded as an
+    # EXISTING run — a legacy run is exactly the one a validation rule added since it started would
+    # otherwise refuse, which is the case this test is named for.
+    assert loaded == [(legacy_task, {"existing_run": True})]
     assert not fold(store.read_all()).finalization_pending()
 
 

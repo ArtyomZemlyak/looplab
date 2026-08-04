@@ -38,7 +38,11 @@ _CONSUMER_FILES = [
 _REQUIRED = {"id", "goal", "direction", "build_roles"}
 # Plain DATA FIELDS of the composable task model (not optional behaviour hooks): probed by the
 # lessons fingerprinting with defaults for legacy snapshots — legitimate reads, not hook seams.
-_DATA_FIELDS = {"kind", "metric", "goal"}
+# `eval` is the operator-given EvalSpec, declared only by RepoTask, which `cli/run_cmds.py::resume`
+# reads with a default to re-report an unusable reader as a warning on a run that predates the
+# submit-time refusal. Membership here is NOT a free pass: `test_every_data_field_probe_names_a_
+# declared_model_field` below keeps the same two-way rename protection the hook registry gives.
+_DATA_FIELDS = {"kind", "metric", "goal", "eval"}
 # `(?:self\.)?(?:_e\.)?` covers the engine-delegate spelling `self._e.task` (lessons mixins).
 _PROBE = re.compile(r'getattr\((?:self\.)?(?:_e\.)?task,\s*"([a-z_]+)"')
 
@@ -60,6 +64,26 @@ def test_every_task_probe_names_a_registered_hook():
         f"getattr(task, ...) probes for unregistered hook(s) {unknown} — either a typo'd probe "
         "(silently returns None forever) or a new hook missing from "
         "adapters/tasks.py::TASK_OPTIONAL_HOOKS (register it + document it in the docstring).")
+
+
+def test_every_data_field_probe_names_a_declared_model_field():
+    """The `_DATA_FIELDS` escape hatch must not become the hole the hook registry closed.
+
+    A name listed there is exempt from `TASK_OPTIONAL_HOOKS` precisely because it is a declared
+    field of the task model rather than a behaviour hook — so hold it to that. Otherwise a typo'd
+    probe, or a field renamed on the adapter, goes back to silently reading `None` forever: the
+    `resume` reader warning would simply stop firing, with nothing red anywhere.
+
+    Pydantic v2 keeps fields in `model_fields`, NOT as class attributes, so `dir(cls)` cannot see
+    them — checking the wrong one reports every data field as missing."""
+    from looplab.adapters.tasks import _KINDS
+
+    undeclared = {name for name in _DATA_FIELDS
+                  if not any(name in getattr(cls, "model_fields", {}) for cls in _KINDS.values())}
+    assert not undeclared, (
+        f"_DATA_FIELDS name(s) {undeclared} are declared by NO shipped adapter — either the probe "
+        "is typo'd (it silently reads None forever) or the field was renamed; fix the probe or "
+        "move the name to adapters/tasks.py::TASK_OPTIONAL_HOOKS if it became a real hook.")
 
 
 def test_every_registered_hook_has_a_consumer():
@@ -90,3 +114,29 @@ def test_shipped_adapters_only_implement_registered_hooks():
                                      or name.replace("get_", "") == hook):
                     near_misses.setdefault(kind, []).append((name, hook))
     assert not near_misses, f"adapter member(s) one letter away from a registered hook: {near_misses}"
+
+
+def test_every_cli_snapshot_reload_is_grandfathered():
+    """Every `_load_task` in `cli/run_cmds.py` re-reads a run's OWN `task.snapshot.json` — the
+    wrap-up recovery, `resume`, and `finalize`. All three must pass `existing_run=True`, or a
+    validation rule added after that snapshot was written makes the run unresumable
+    (`adapters/repo_task.py::_grandfathered`, and CLAUDE.md invariant #6 for the settings half).
+
+    A grep guard rather than three behavioural tests, because the failure is invisible: the run
+    simply refuses at the CLI boundary, and only for tasks recorded before whichever rule was added
+    — never for anything the suite creates fresh. `run` builds its task through `validate_task`
+    instead and deliberately keeps the strict path; if a FRESH-submission caller ever needs
+    `_load_task`, exempt it here by name rather than dropping the rule."""
+    import ast
+
+    source = (_PKG / "cli" / "run_cmds.py").read_text(encoding="utf-8")
+    calls = [node for node in ast.walk(ast.parse(source))
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id == "_load_task"]
+    assert calls, "no `_load_task` call found — did the reload path move or get renamed?"
+    strict = [node.lineno for node in calls
+              if not any(kw.arg == "existing_run" and getattr(kw.value, "value", None) is True
+                         for kw in node.keywords)]
+    assert not strict, (
+        f"`_load_task` at cli/run_cmds.py line(s) {strict} reloads a run snapshot WITHOUT "
+        "existing_run=True — a validation rule added since that run started will refuse to resume it.")
