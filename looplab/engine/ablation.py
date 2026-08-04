@@ -120,11 +120,10 @@ class AblationMixin:
                 if not self._ablation_parent_current(parent_id, generation):
                     superseded = True
                     break
-                _t0 = time.monotonic()
-                res = await self._run_ablation_probe(
+                res, seconds, current = await self._timed_ablation_probe(
                     code, workdir, parent_id, generation)
-                abl_seconds += time.monotonic() - _t0
-                if not self._ablation_parent_current(parent_id, generation):
+                abl_seconds += seconds
+                if not current:
                     superseded = True
                 if res.metric is not None and res.exit_code == 0 and not res.timed_out:
                     impacts[p] = abs(res.metric - base)
@@ -155,6 +154,34 @@ class AblationMixin:
                     rationale=f"ablation: refine highest-impact '{top}' (impacts={impacts})",
                     footprint=proposal.footprint,
                     concept_mode="delta", concepts_added=[], concepts_removed=[])
+        self._build_refine_block_child(parent, parent_id, generation, idea, state)
+
+    async def _timed_ablation_probe(self, source: str, workdir, parent_id: int, generation: int):
+        """Run ONE off-tree ablation probe and report `(result, seconds, parent_still_current)`.
+
+        The wall-clock comes BACK rather than being accumulated in place because it is budgeted on
+        the `ablate` event (P1-2): a probe whose seconds are dropped spends entirely outside
+        `max_eval_seconds`. Both loops also have to re-check the parent immediately after the probe —
+        it is the longest thing either does, so it is where a supersede is most likely to land.
+
+        `_write_assets` deliberately stays at the call sites: `_ablate` stages the workdir BEFORE
+        asking its probe developer to implement the ablated idea, and pulling it in here would move
+        that staging after an LLM call for no reason other than symmetry.
+        """
+        started = time.monotonic()
+        res = await self._run_ablation_probe(source, workdir, parent_id, generation)
+        return (res, time.monotonic() - started,
+                self._ablation_parent_current(parent_id, generation))
+
+    def _build_refine_block_child(self, parent, parent_id: int, generation: int, idea, state) -> None:
+        """Reserve → implement → emit the ONE `refine_block` child an ablation produces.
+
+        Identical for both ablation modes (doc 25 EC-06): `_ablate` and `_ablate_code` differ only in
+        how they SCORE and how they build `idea`, and everything from the reservation onward was
+        verbatim in both. That tail carries three abandon paths, and each one has to do TWO things —
+        fail or discard the reservation AND drop the developer telemetry. A second copy is exactly
+        where one half of one of those pairs goes missing without anything noticing.
+        """
         reservation = self._reserve_node_build(
             {
                 "kind": "refine_block",
@@ -260,11 +287,10 @@ class AblationMixin:
                 workdir = (self.run_dir / "ablate"
                            / f"node_{parent_id}_g{generation}_{ablation_id[:8]}_block_{idx}")
                 self._write_assets(workdir)
-                _t0 = time.monotonic()
-                res = await self._run_ablation_probe(
+                res, seconds, current = await self._timed_ablation_probe(
                     ablated, workdir, parent_id, generation)
-                abl_seconds += time.monotonic() - _t0
-                if not self._ablation_parent_current(parent_id, generation):
+                abl_seconds += seconds
+                if not current:
                     superseded = True
                 if res.metric is not None and res.exit_code == 0 and not res.timed_out:
                     impacts[str(idx)] = round(abs(res.metric - base), 6)
@@ -303,44 +329,4 @@ class AblationMixin:
                                f"#{top} and keep the rest. Block:\n{top_src}"),
                     footprint=parent.idea.footprint,
                     concept_mode="delta", concepts_added=[], concepts_removed=[])
-        reservation = self._reserve_node_build(
-            {
-                "kind": "refine_block",
-                "parent_id": parent_id,
-                "parent_generations": {str(parent_id): generation},
-            },
-            idea,
-            scored_against=state.best_node_id,
-            source="engine",
-        )
-        if reservation is None:
-            self._discard_node_build_telemetry()
-            return
-        node_id = reservation.node_id
-        idea = reservation.idea.model_copy(deep=True)
-        self._reset_developer_footprint(self.developer)
-        new_code = self._implement(
-            self._directed_idea(idea.model_copy(deep=True), state), parent)   # §1: directives (see _ablate)
-        idea, footprint_finalized = self._finalize_developer_footprint(
-            idea, self.developer, new_code)
-        if not self._ablation_parent_current(parent_id, generation):
-            self._fail_reserved_build(
-                node_id=node_id, card_id=reservation.card_id, generation=0,
-                error="parent lifecycle changed while building", reason="superseded")
-            self._discard_node_build_telemetry()
-            return
-        self._emit_node_created(
-            node_id=node_id, parent_ids=[parent_id], operator="refine_block",
-            idea=durable_idea_payload(idea), code=new_code,
-            files=getattr(self.developer, "last_files", {}) or {},
-            parent_generations={str(parent_id): generation},
-            **({"footprint_finalized": True} if footprint_finalized else {}))
-        if node_id not in fold(self.store.read_all()).nodes:
-            self._fail_reserved_build(
-                node_id=node_id, card_id=reservation.card_id, generation=0,
-                error="ablation node creation was rejected during replay", reason="superseded")
-            self._discard_node_build_telemetry()
-            return
-        self._emit_agent_report(node_id)
-        self._emit_hypothesis_ranked(node_id, 0)   # consume predictive telemetry for THIS node (see above)
-        self._emit_foresight_selected(node_id, 0)
+        self._build_refine_block_child(parent, parent_id, generation, idea, state)

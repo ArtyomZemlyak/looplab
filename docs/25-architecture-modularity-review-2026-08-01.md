@@ -887,6 +887,37 @@ degradations that actually distinguish the two rules.
 
 *Recommendation:* Extract `_build_refine_block_child(parent_id, generation, idea, state)` for the shared tail, and a `_probe(ablated_code_or_idea, workdir_suffix)` helper for the timed lifecycle-checked probe. The two entry points keep only their distinct impact computation and Idea construction.
 
+*Resolution (2026-08-04) — both extractions done; `ablation.py` 346 → 332 lines with the ~55-line tail spelled once.*
+
+* **`_build_refine_block_child(parent, parent_id, generation, idea, state)`** — everything from the
+  reservation onward. `_ablate` and `_ablate_code` now end on the same single line, keeping only
+  what genuinely differs: how they score (numeric-param delta vs code-block delta with a `None`
+  marker for "removing this BROKE the pipeline, so it is maximally essential") and how they build
+  the `Idea`. `_ablate` also keeps its own extra currency check, because only it makes an LLM
+  `propose` call before building the idea and therefore has a window the other mode does not.
+* **`_timed_ablation_probe(source, workdir, parent_id, generation) -> (result, seconds, current)`** —
+  the timed, lifecycle-checked probe. The wall-clock is RETURNED rather than accumulated inside the
+  helper, deliberately: it is budgeted on the `ablate` event (P1-2), and a caller that forgets to
+  sum it is then visibly wrong at the call site instead of silently spending outside
+  `max_eval_seconds`.
+
+`_write_assets` stayed at the call sites. `_ablate` stages the workdir BEFORE asking its probe
+developer to implement the ablated idea, and folding it into the helper would have moved that
+staging to after an LLM call — a real reordering bought for nothing but symmetry.
+
+The tail is where the duplication actually mattered. It carries three abandon paths — reservation
+refused, parent superseded mid-build, creation rejected during replay — and each has to do TWO
+things: drop the developer telemetry (or it leaks onto whichever node is created next) and, for two
+of the three, fail the reservation it already holds (or the card stays `building` forever). Half of
+one pair going missing in one copy is precisely the drift a second copy hides.
+
+Pinned by four new tests in `tests/test_ablation.py` (2 → 6): neither mode may contain
+`_reserve_node_build`/`_emit_node_created`/`_fail_reserved_build` any more, the tail has exactly
+three abandon paths and an AST walk proves each is preceded by the discard (and two by the failure),
+the probe helper returns a 3-tuple while neither loop re-grows its own `time.monotonic()`, and
+behaviourally the `ablate` event still carries non-negative probe seconds. Teeth-tested against 5
+breaks, all biting.
+
 #### EC-07 · MEDIUM · inconsistency · effort: small — **RESOLVED (2026-08-02)**
 
 **Strategist/concept cadence uses modulo gating that its sibling cadence explicitly fixed as a bug**
