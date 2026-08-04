@@ -406,28 +406,25 @@ def latest_train_verdict(rows, node_id: int, generation: int) -> Optional[dict]:
     Read off the RAW event rows, never from `RunState`: `EV_TRAIN_MONITOR_ALERT` is a DIAGNOSTIC
     (fold-ignored) event, so the fold cannot supply it. Rows are untrusted append-only data — a bool
     `node_id`, a string generation or an unknown status must degrade to "no verdict", never mislead the
-    judge about which lifecycle it is looking at. The reason text was already redacted at its source
-    (`_monitor_training` redacts before appending). Pure; safe on an empty/None row list."""
+    judge about which lifecycle it is looking at. The lifecycle half of that is `last_lifecycle_row`,
+    shared with both watchdogs' resume recoveries (doc 25 EC-04); the status/confidence half is this
+    function's own, because only the judge cares what a verdict MEANS. The reason text was already
+    redacted at its source (`_monitor_training` redacts before appending).
+    Pure; safe on an empty/None row list."""
+    from looplab.engine.train_monitor import last_lifecycle_row
     from looplab.events.types import EV_TRAIN_MONITOR_ALERT
 
-    for event in reversed(list(rows or ())):
-        if getattr(event, "type", None) != EV_TRAIN_MONITOR_ALERT:
-            continue
-        data = getattr(event, "data", None) or {}
-        nid, gen = data.get("node_id"), data.get("generation")
-        if isinstance(nid, bool) or not isinstance(nid, int) or nid != node_id:
-            continue
-        if isinstance(gen, bool) or not isinstance(gen, int) or gen != generation:
-            continue
-        status = str(data.get("status") or "").strip().lower()
-        if status not in ("healthy", "watch", "broken"):
-            return None            # newest row for this lifecycle is unusable -> no verdict, not a guess
-        confidence, confidence_valid = _normalize_monitor_confidence(data.get("confidence"))
-        out: dict = {"status": status, "reason": str(data.get("reason") or "")[:300]}
-        if confidence_valid:
-            out["confidence"] = confidence
-        return out
-    return None
+    data = last_lifecycle_row(rows, EV_TRAIN_MONITOR_ALERT, node_id, generation)
+    if data is None:
+        return None
+    status = str(data.get("status") or "").strip().lower()
+    if status not in ("healthy", "watch", "broken"):
+        return None                # newest row for this lifecycle is unusable -> no verdict, not a guess
+    confidence, confidence_valid = _normalize_monitor_confidence(data.get("confidence"))
+    out: dict = {"status": status, "reason": str(data.get("reason") or "")[:300]}
+    if confidence_valid:
+        out["confidence"] = confidence
+    return out
 
 
 def _fmt(value) -> str:
@@ -584,7 +581,8 @@ class AshaMonitorMixin:
         from looplab.engine.evaluate import _watch_limiter
         import anyio
 
-        from looplab.engine.train_monitor import claim_watchdog_kill, read_training_tail_raw
+        from looplab.engine.train_monitor import (
+            claim_watchdog_kill, last_lifecycle_row, read_training_tail_raw)
         from looplab.events.replay import fold
         from looplab.events.types import DIAGNOSTIC_EVENTS, EV_ASHA_RANK, EV_ASHA_VERDICT
 
@@ -606,24 +604,16 @@ class AshaMonitorMixin:
         try:
             prior_rows = await anyio.to_thread.run_sync(
                 self.store.read_all, limiter=_watch_limiter())
-            for event in reversed(prior_rows):
-                data = getattr(event, "data", None) or {}
-                if (getattr(event, "type", None) == EV_ASHA_RANK
-                        and isinstance(data.get("node_id"), int)
-                        and not isinstance(data.get("node_id"), bool)
-                        and data.get("node_id") == node_id
-                        and isinstance(data.get("generation"), int)
-                        and not isinstance(data.get("generation"), bool)
-                        and data.get("generation") == generation):
-                    endpoint = data.get("endpoint_underperforming")
-                    resource = data.get("resource_underperforming")
-                    if (isinstance(endpoint, bool)
-                            and (resource is None or isinstance(resource, bool))):
-                        last_flag = (endpoint, resource)
-                    else:
-                        raw_flag = data.get("underperforming", True)
-                        last_flag = (raw_flag, None) if isinstance(raw_flag, bool) else None
-                    break
+            prior = last_lifecycle_row(prior_rows, EV_ASHA_RANK, node_id, generation)
+            if prior is not None:
+                endpoint = prior.get("endpoint_underperforming")
+                resource = prior.get("resource_underperforming")
+                if (isinstance(endpoint, bool)
+                        and (resource is None or isinstance(resource, bool))):
+                    last_flag = (endpoint, resource)
+                else:
+                    raw_flag = prior.get("underperforming", True)
+                    last_flag = (raw_flag, None) if isinstance(raw_flag, bool) else None
         except Exception:  # noqa: BLE001 - advisory history lookup; the live monitor still proceeds
             pass
 

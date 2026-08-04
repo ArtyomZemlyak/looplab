@@ -529,11 +529,14 @@ def test_cli_finalize_accepts_explicit_task_file_for_legacy_run(tmp_path, monkey
     from looplab import cli
     monkeypatch.setattr(cli, "_engine", lambda *_a, **_k: eng)
     monkeypatch.setattr(cmds, "_load_task",
-                        lambda path, **_k: loaded.append(path) or object())
+                        lambda path, **kwargs: loaded.append((path, kwargs)) or object())
 
     cmds.finalize(run_dir, task_file=legacy_task)
 
-    assert loaded == [legacy_task]
+    # Both halves: the EXPLICIT --task-file wins over the (deleted) snapshot, and it loads as an
+    # EXISTING run. A legacy run is exactly the one a validator added since it started would refuse,
+    # which is the case this test is named for — so assert the flag, not just the path.
+    assert loaded == [(legacy_task, {"existing_run": True})]
     assert not fold(store.read_all()).finalization_pending()
 
 

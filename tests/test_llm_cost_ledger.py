@@ -649,3 +649,111 @@ def test_legacy_snapshot_retry_reserves_pending_delta_instead_of_duplicating_it(
         "completion_tokens": 1,
         "total_tokens": 5,
     }
+
+
+# --- one durable-usage commit protocol (doc 25 EC-10) -------------------------------------------
+#
+# The append/verify/acknowledge sequence used to exist in three near-copies (the accountant sink,
+# `_drain_outbox`, and reconcile's retry loop), each making slightly different verification choices,
+# so the correctness argument had to be re-derived per site. These pin the properties that must hold
+# at EVERY site, and the ONE difference that is deliberate.
+
+def test_only_the_sink_may_trust_a_bare_successful_append():
+    """`trust_success=True` rests on "this process minted this id moments ago", which is true at
+    exactly one call site. `_drain_outbox` replays a PRIOR process's record, and reconcile retries an
+    id whose first append already failed — neither can make that claim, so both must rescan."""
+    import ast
+    import inspect
+    import textwrap
+
+    from looplab.engine import costs as costs_module
+
+    source = Path(costs_module.__file__).read_text(encoding="utf-8")
+    trusting = []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "_commit_usage_delta"):
+            continue
+        trust = next((kw.value for kw in node.keywords if kw.arg == "trust_success"), None)
+        assert trust is not None, (
+            f"_commit_usage_delta at line {node.lineno} omits trust_success — the verification "
+            "choice is the one thing every call site must state explicitly")
+        if getattr(trust, "value", None) is True:
+            trusting.append(node.lineno)
+    assert len(trusting) == 1, (
+        f"expected exactly ONE trusting call site (the accountant sink), found {trusting}")
+
+    # ...and it is inside the sink, not merely somewhere in the file.
+    sink_source = textwrap.dedent(inspect.getsource(costs_module.bind_cost_accountants))
+    assert "trust_success=True" in sink_source
+    for other in (costs_module._drain_outbox, costs_module.reconcile_cost_accountants):
+        assert "trust_success=True" not in textwrap.dedent(inspect.getsource(other)), other
+
+
+def _commit(engine, usage_id="a" * 32, clean=None, **kwargs):
+    from looplab.engine.costs import _commit_usage_delta, sanitize_usage_delta
+
+    # SANITIZED, like every production caller: verification compares against
+    # `sanitize_usage_delta(event.data)`, so a partial dict can never equal what was stored.
+    return _commit_usage_delta(
+        engine, usage_id, sanitize_usage_delta(clean or {"cost": 1.0, "calls": 1}), **kwargs)
+
+
+def test_a_commit_that_raised_after_committing_is_still_durable(tmp_path):
+    """`EventStore.append` can COMMIT and then surface an error, so an exception is not evidence of
+    absence. Every site has to re-read rather than believe the raise — that is the subtle half of
+    the protocol, and it is why the exception is returned rather than raised."""
+    eng = _engine(tmp_path / "raised-after-commit")
+    real_append = eng.store.append
+
+    def commits_then_raises(event_type, data, *args, **kwargs):
+        real_append(event_type, data, *args, **kwargs)
+        raise OSError("ack lost after durable write")
+
+    eng.store.append = commits_then_raises
+    for trust in (True, False):
+        durable, acknowledged, error = _commit(
+            eng, usage_id=f"{'b' if trust else 'c'}" * 32, trust_success=trust)
+        assert durable is True, trust
+        assert acknowledged is True, trust
+        assert error is None, trust
+
+
+def test_a_commit_that_never_landed_returns_the_appends_own_error(tmp_path):
+    """The sink reports this exception to its caller and is the only site that can tell it apart
+    from the outbox failure it may have to report instead — so it must come back, not be swallowed."""
+    eng = _engine(tmp_path / "never-landed")
+    boom = OSError("disk full")
+
+    def never_lands(*_args, **_kwargs):
+        raise boom
+
+    eng.store.append = never_lands
+    durable, acknowledged, error = _commit(eng, trust_success=False)
+    assert (durable, acknowledged) == (False, False)
+    assert error is boom
+
+
+def test_an_unreadable_log_never_acknowledges_a_write(tmp_path):
+    """Acknowledgement ERASES the outbox record that lets a later process retry. A read we could not
+    perform is not permission to do that, so verification fails closed even though the append itself
+    returned cleanly."""
+    eng = _engine(tmp_path / "unreadable-log")
+    eng.store.append = lambda *_a, **_k: None          # pretend success, write nothing
+    eng.store.read_all = lambda: (_ for _ in ()).throw(OSError("log unreadable"))
+
+    durable, acknowledged, error = _commit(eng, trust_success=False)
+    assert (durable, acknowledged, error) == (False, False, None)
+
+
+def test_a_durable_delta_the_outbox_will_not_release_is_reported_not_dropped(tmp_path, monkeypatch):
+    """The conflict case: the event IS durable, but the outbox holds a record we cannot prove is
+    ours. Every caller has to keep that visible — the sink raises, the other two refuse to report
+    completion — so the helper must distinguish it from a clean success."""
+    from looplab.engine import costs as costs_module
+
+    eng = _engine(tmp_path / "unreleasable")
+    monkeypatch.setattr(costs_module, "_forget_outbox", lambda *_a, **_k: False)
+
+    durable, acknowledged, error = _commit(eng, trust_success=True)
+    assert durable is True and acknowledged is False and error is None

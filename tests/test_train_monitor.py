@@ -640,3 +640,113 @@ def test_monitor_cadence_derives_from_budget():
     assert _CadenceHost(600.0, 60.0)._monitor_cadence() == 30.0       # floored at 30s
     assert _CadenceHost(600.0, None)._monitor_cadence() == 600.0      # no budget -> config
     assert _CadenceHost(600.0, 0)._monitor_cadence() == 600.0         # non-positive budget -> config
+
+
+# --- one lifecycle scan for both watchdogs (doc 25 EC-04) ---------------------------------------
+#
+# Three sites hand-rolled "the newest row of this diagnostic type for exactly this (node, generation)",
+# with the bool-guarded field validation copied verbatim. These pin the guard, and the property the
+# tick-loop scaffold would have enforced had it been extractable.
+
+def _row(event_type, **data):
+    return Event(seq=0, ts=0.0, type=event_type, data=data)
+
+
+def test_the_lifecycle_scan_rejects_a_bool_node_id_masquerading_as_an_int():
+    """`isinstance(True, int)` is True in Python, so an untrusted row carrying `node_id: true` matches
+    a plain `== node_id` test against node 1 — and hands a watchdog another lifecycle's history as if
+    it were its own. Same trap on `generation`."""
+    from looplab.engine.train_monitor import last_lifecycle_row
+
+    rows = [
+        _row("t", node_id=True, generation=1, status="broken"),
+        _row("t", node_id=1, generation=True, status="broken"),
+    ]
+    assert last_lifecycle_row(rows, "t", 1, 1) is None
+    rows.append(_row("t", node_id=1, generation=1, status="watch"))
+    assert last_lifecycle_row(rows, "t", 1, 1) == {
+        "node_id": 1, "generation": 1, "status": "watch"}
+
+
+def test_the_lifecycle_scan_returns_the_newest_match_even_when_unusable():
+    """It must not keep scanning backwards past a bad newest row into an OLDER one: that would answer
+    a resuming watchdog with a stale verdict it has already moved past. Callers turn an unreadable
+    payload into "no history"; the scan's job is only to find the right ROW."""
+    from looplab.engine.train_monitor import last_lifecycle_row
+
+    rows = [
+        _row("t", node_id=1, generation=0, status="broken"),
+        _row("t", node_id=1, generation=0, status="nonsense"),
+    ]
+    assert last_lifecycle_row(rows, "t", 1, 0) == {
+        "node_id": 1, "generation": 0, "status": "nonsense"}
+
+
+def test_the_lifecycle_scan_ignores_other_types_generations_and_empty_logs():
+    from looplab.engine.train_monitor import last_lifecycle_row
+
+    rows = [
+        _row("other", node_id=1, generation=0, status="broken"),
+        _row("t", node_id=2, generation=0, status="broken"),
+        _row("t", node_id=1, generation=9, status="broken"),
+        _row("t", generation=0, status="broken"),               # no node_id at all
+    ]
+    assert last_lifecycle_row(rows, "t", 1, 0) is None
+    assert last_lifecycle_row(None, "t", 1, 0) is None
+    assert last_lifecycle_row([], "t", 1, 0) is None
+
+
+def test_all_three_lifecycle_scans_go_through_the_shared_helper():
+    """Both resume recoveries and `asha_monitor.latest_train_verdict`. A site that re-grows the
+    reversed scan gets its own copy of the bool guard, which is the half that drifts."""
+    import inspect
+    import textwrap
+
+    from looplab.engine import asha_monitor as asha
+    from looplab.engine import train_monitor as train
+
+    sites = {
+        "train resume": train.TrainingMonitorMixin._monitor_training,
+        "asha resume": asha.AshaMonitorMixin._monitor_asha,
+        "latest_train_verdict": asha.latest_train_verdict,
+    }
+    for name, fn in sites.items():
+        source = textwrap.dedent(inspect.getsource(fn))
+        assert "last_lifecycle_row(" in source, f"{name} no longer uses the shared scan"
+        assert "reversed(" not in source, f"{name} re-grew its own reverse scan"
+
+
+def test_every_watchdog_tick_loop_reraises_cancellation_before_swallowing():
+    """The scaffold both loops share is 7 lines around 60-160 lines of unrelated body, so they stay
+    separate — but the ONE line that must not be dropped is guarded here.
+
+    Each loop ends in a blanket `except Exception: continue`, so a transient disk/LLM/tracer hiccup
+    skips a tick instead of disabling the watcher for the rest of a long eval. anyio's cancellation
+    is delivered as an exception, so without an earlier `except anyio.get_cancelled_exc_class(): raise`
+    that blanket clause SWALLOWS the cancel: the eval finishes and the watchdog keeps looping against
+    a dead node, holding the task group open."""
+    import ast
+    import inspect
+    import textwrap
+
+    from looplab.engine import asha_monitor as asha
+    from looplab.engine import train_monitor as train
+
+    for name, fn in {"train": train.TrainingMonitorMixin._monitor_training,
+                     "asha": asha.AshaMonitorMixin._monitor_asha}.items():
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        loops = [node for node in ast.walk(tree) if isinstance(node, ast.While)]
+        assert loops, f"{name} has no tick loop"
+        guarded = False
+        for handler in (h for loop in loops for node in ast.walk(loop)
+                        if isinstance(node, ast.Try) for h in node.handlers):
+            names = ast.dump(handler.type) if handler.type is not None else ""
+            if "get_cancelled_exc_class" in names:
+                assert any(isinstance(stmt, ast.Raise) for stmt in handler.body), (
+                    f"{name} catches cancellation but does not re-raise it")
+                guarded = True
+                break
+            # A blanket clause reached FIRST would already have swallowed the cancel.
+            assert "Exception" not in names, (
+                f"{name}'s tick loop swallows Exception before re-raising cancellation")
+        assert guarded, f"{name}'s tick loop never re-raises cancellation"

@@ -288,6 +288,57 @@ def _forget_outbox(engine: object, usage_id: str,
     return True
 
 
+def _delta_is_durable(engine: object, usage_id: str,
+                      clean: dict[str, int | float]) -> bool:
+    """Re-read the log and ask whether THIS id already carries exactly this delta.
+
+    Unreadable evidence answers False: a write is never acknowledged on the strength of a read we
+    could not perform, because acknowledgement is what erases the outbox record that would otherwise
+    let a later process retry it.
+    """
+    try:
+        return _event_usage_deltas(engine.store.read_all()).get(usage_id) == clean
+    except Exception:  # noqa: BLE001 - keep the pending retry rather than trust a failed read
+        return False
+
+
+def _commit_usage_delta(engine: object, usage_id: str, clean: dict[str, int | float],
+                        *, trust_success: bool) -> tuple[bool, bool, Exception | None]:
+    """Append one usage delta, then answer whether it is DURABLE and whether the outbox let go.
+
+    The single home of the durability rule for a usage append (doc 25 EC-10). Three callers — the
+    accountant sink, `_drain_outbox`, and `reconcile_cost_accountants`' retry loop — each carried a
+    near-copy, and because they made slightly different verification choices, the correctness
+    argument had to be re-derived at every site to see whether the difference was deliberate. It now
+    IS the one difference, spelled as a flag.
+
+    The subtle part both branches share: `EventStore.append` can COMMIT and then surface an error, so
+    an exception is not evidence of absence — only a re-read is.
+
+    `trust_success=True` skips the post-append rescan on the branch where the append returned
+    normally. `usage_id` is a fresh 128-bit token (`secrets.token_hex(16)`, collision-guarded against
+    `pending`), so no other telemetry can own its identity and a committed append IS the durable
+    winner. PERF-1: that rescan was O(K^2) across a run and ran for every paid call while holding the
+    engine cost lock. The "append raised" branch never trusts, because there durability is genuinely
+    ambiguous.
+
+    Returns `(durable, acknowledged, error)`. `acknowledged` is meaningless unless `durable` — there
+    is nothing to acknowledge otherwise — and a durable-but-unacknowledged delta is the conflict case
+    every caller has to keep visible rather than silently drop. `error` is the append's own exception,
+    returned because only the sink can tell it apart from the outbox failure it may have to report
+    instead.
+    """
+    try:
+        engine.store.append(EV_LLM_USAGE, _payload(usage_id, clean))
+    except Exception as exc:  # append may have committed before surfacing an error
+        if not _delta_is_durable(engine, usage_id, clean):
+            return False, False, exc
+    else:
+        if not trust_success and not _delta_is_durable(engine, usage_id, clean):
+            return False, False, None
+    return True, _forget_outbox(engine, usage_id, clean), None
+
+
 def _drain_outbox(engine: object,
                   persisted: dict[str, dict[str, int | float]]) -> bool:
     """Replay every prior-process delta with its original ID before allowing a summary."""
@@ -327,26 +378,15 @@ def _drain_outbox(engine: object,
             if persisted[usage_id] != clean or not _forget_outbox(engine, usage_id, clean):
                 complete = False
             continue
-        try:
-            engine.store.append(EV_LLM_USAGE, _payload(usage_id, clean))
-        except Exception:  # append may have committed before surfacing an error
-            try:
-                durable = _event_usage_deltas(engine.store.read_all()).get(usage_id) == clean
-            except Exception:  # noqa: BLE001 - keep the outbox for a later process
-                durable = False
-            if not durable:
-                complete = False
-                continue
-        else:
-            try:
-                durable = _event_usage_deltas(engine.store.read_all()).get(usage_id) == clean
-            except Exception:  # noqa: BLE001 - never acknowledge an unverified first writer
-                durable = False
-            if not durable:
-                complete = False
-                continue
+        # Never trust a bare successful append here: this record was written by a PRIOR process, so
+        # its id is not one this process minted and the first-writer argument does not apply.
+        durable, acknowledged, _exc = _commit_usage_delta(
+            engine, usage_id, clean, trust_success=False)
+        if not durable:
+            complete = False
+            continue
         persisted[usage_id] = clean
-        if not _forget_outbox(engine, usage_id, clean):
+        if not acknowledged:
             complete = False
     return complete
 
@@ -426,34 +466,20 @@ def bind_cost_accountants(engine: object, *, include_existing: bool = False) -> 
                                 # than this new callback. Never append over or erase that ambiguity.
                                 append_error = outbox_error
                             else:
-                                try:
-                                    engine.store.append(EV_LLM_USAGE, _payload(usage_id, clean))
-                                except Exception as exc:  # append may have committed before raise
-                                    try:
-                                        persisted = _event_usage_deltas(engine.store.read_all())
-                                    except Exception:  # noqa: BLE001 - retain the pending retry
-                                        persisted = {}
-                                    if persisted.get(usage_id) == clean:
-                                        _record(_binding, clean)
-                                        _binding["pending"].pop(usage_id, None)
-                                        if not _forget_outbox(engine, usage_id, clean):
-                                            append_error = _OutboxEvidenceError(
-                                                "usage event is durable but outbox acknowledgement "
-                                                "conflicts")
-                                    else:
-                                        append_error = outbox_error or exc
+                                # `trust_success`: this id was minted HERE, moments ago, so a
+                                # committed append is the durable winner and needs no rescan
+                                # (PERF-1 — see `_commit_usage_delta`). This is the only site that
+                                # can make that claim, and the only one that passes True.
+                                durable, acknowledged, exc = _commit_usage_delta(
+                                    engine, usage_id, clean, trust_success=True)
+                                if not durable:
+                                    # The outbox failure, when there was one, is the stronger
+                                    # diagnosis: it explains why the retry evidence is unusable.
+                                    append_error = outbox_error or exc
                                 else:
-                                    # The append committed and `usage_id` is a fresh 128-bit token
-                                    # (secrets.token_hex(16), collision-guarded against `pending`), so
-                                    # no other telemetry can own its identity — this delta is the
-                                    # durable winner. Trust the successful append instead of rescanning
-                                    # the whole log (PERF-1: the rescan was O(K^2) across a run, run for
-                                    # every paid call while holding the engine cost lock). The rescan is
-                                    # still done on the "append raised" branch above, where durability
-                                    # is genuinely ambiguous.
                                     _record(_binding, clean)
                                     _binding["pending"].pop(usage_id, None)
-                                    if not _forget_outbox(engine, usage_id, clean):
+                                    if not acknowledged:
                                         append_error = _OutboxEvidenceError(
                                             "usage event is durable but outbox acknowledgement "
                                             "conflicts")
@@ -565,28 +591,17 @@ def reconcile_cost_accountants(engine: object) -> bool:
                 except Exception:
                     # Still try events.jsonl: a successful append is itself the durable boundary.
                     pass
-                try:
-                    engine.store.append(EV_LLM_USAGE, _payload(usage_id, clean))
-                except Exception:  # append may have committed before surfacing an error
-                    try:
-                        now_persisted = _event_usage_deltas(engine.store.read_all())
-                    except Exception:  # noqa: BLE001
-                        now_persisted = {}
-                    if now_persisted.get(usage_id) != clean:
-                        complete = False
-                        continue
-                else:
-                    try:
-                        now_persisted = _event_usage_deltas(engine.store.read_all())
-                    except Exception:  # noqa: BLE001
-                        now_persisted = {}
-                    if now_persisted.get(usage_id) != clean:
-                        complete = False
-                        continue
+                # Rescan even on success: this is a RETRY of an id whose first append already failed
+                # once, so "the append returned" is not the same evidence it is in the sink.
+                durable, acknowledged, _exc = _commit_usage_delta(
+                    engine, usage_id, clean, trust_success=False)
+                if not durable:
+                    complete = False
+                    continue
                 _record(binding, clean)
                 binding["pending"].pop(usage_id, None)
                 persisted[usage_id] = clean
-                if not _forget_outbox(engine, usage_id, clean):
+                if not acknowledged:
                     complete = False
         return complete and not any(binding["pending"] for binding in bindings.values())
 

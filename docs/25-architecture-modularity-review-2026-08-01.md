@@ -843,6 +843,44 @@ worker-seam case.
 
 *Recommendation:* Add two tiny shared helpers in train_monitor.py (which asha_monitor already imports from): `last_diagnostic_row(events, event_type, node_id, generation)` for the resume scan, and optionally a `watchdog_tick_loop(cadence, cancel, tick_fn)` scaffold. Full merger of the two monitors is NOT recommended (one is LLM-judged health, the other metric-rank; the split is documented), but the mechanical scaffolding should be single-sourced.
 
+*Resolution (2026-08-04) — the resume scan is shared by THREE sites; the tick-loop scaffold is declined, and its one load-bearing line is guarded instead.*
+
+**`last_lifecycle_row(rows, event_type, node_id, generation)`** in `engine/train_monitor.py`. The
+finding names two copies; there was a third — `asha_monitor.latest_train_verdict`, which does the
+identical scan for `EV_TRAIN_MONITOR_ALERT` so the ASHA judge can see the health verdict. All three
+now call it and keep only their own interpretation of the row they get back (a status string, an
+endpoint/resource flag pair with a legacy fallback, a sanitized verdict dict).
+
+The copied idiom is worth single-sourcing because of what it defends against, not its length: rows
+are UNTRUSTED append-only data, and `isinstance(True, int)` is True in Python, so a payload carrying
+`node_id: true` matches a plain `== node_id` test against node 1 and hands a watchdog ANOTHER
+lifecycle's history as its own. The scan also deliberately returns the newest matching row even when
+its contents are unusable — walking further back would answer a resuming watchdog with a verdict it
+has already moved past.
+
+**The `watchdog_tick_loop(cadence, cancel, tick_fn)` scaffold is declined**, and the finding's own
+"optionally" is why it was worth re-deciding rather than mechanically applying. The shared skeleton
+is 7 lines wrapped around 60 and 160 lines of unrelated body, and three things fight the extraction:
+the training monitor's cadence MUTATES per tick (the observer self-paces via the LLM's
+`recheck_after_s` and a healthy run backs off) while ASHA's is fixed; both bodies `return` from the
+enclosing coroutine to stop watching after claiming a kill, which a `tick_fn` would have to signal
+back out of band; and both use `continue` throughout, which changes meaning inside a callback. The
+result would be two rewritten loop bodies to share seven lines — more risk than the duplication.
+
+What the scaffold WOULD have enforced is guarded directly instead:
+`test_every_watchdog_tick_loop_reraises_cancellation_before_swallowing` walks both loops' handlers
+and asserts each re-raises `anyio.get_cancelled_exc_class()` BEFORE its blanket
+`except Exception: continue`. That blanket clause exists so a transient disk/LLM/tracer hiccup skips
+one tick rather than disabling the watcher for the rest of a long eval — but anyio delivers
+cancellation as an exception, so without the earlier clause it swallows the cancel and the watchdog
+keeps looping against a finished node, holding its task group open. That is the real failure mode
+the shared scaffold was protecting against, and a guard catches it without rewriting either body.
+
+Pinned by five new tests in `tests/test_train_monitor.py` (34 → 39): the bool-`node_id` /
+bool-`generation` traps, newest-match-even-when-unusable, wrong type/node/generation and empty logs,
+a structural guard that all three sites use the helper and none contains `reversed(` any more, and
+the cancellation guard above. Teeth-tested against 6 breaks, all biting.
+
 #### EC-05 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **Novelty reject/repropose/audit block duplicated between LLM and semantic gates**
@@ -886,6 +924,37 @@ degradations that actually distinguish the two rules.
 *Evidence:* After their (also structurally parallel) probe loops, both methods repeat the same tail verbatim: _reserve_node_build with kind='refine_block' + parent_generations, None-check -> _discard_node_build_telemetry, idea = reservation.idea.model_copy(deep=True), _reset_developer_footprint, `self._implement(self._directed_idea(idea.model_copy(deep=True), state), parent)`, _finalize_developer_footprint, `_ablation_parent_current` re-check -> _fail_reserved_build('parent lifecycle changed while building'), _emit_node_created(operator='refine_block', ...), fold-membership check -> _fail_reserved_build('ablation node creation was rejected during replay'), then _emit_agent_report/_emit_hypothesis_ranked/_emit_foresight_selected (ablation.py:158-204 vs 306-346). The probe loops also duplicate the workdir naming, wall-clock accumulation, and superseded-flag dance (104-132 vs 254-274).
 
 *Recommendation:* Extract `_build_refine_block_child(parent_id, generation, idea, state)` for the shared tail, and a `_probe(ablated_code_or_idea, workdir_suffix)` helper for the timed lifecycle-checked probe. The two entry points keep only their distinct impact computation and Idea construction.
+
+*Resolution (2026-08-04) — both extractions done; `ablation.py` 346 → 332 lines with the ~55-line tail spelled once.*
+
+* **`_build_refine_block_child(parent, parent_id, generation, idea, state)`** — everything from the
+  reservation onward. `_ablate` and `_ablate_code` now end on the same single line, keeping only
+  what genuinely differs: how they score (numeric-param delta vs code-block delta with a `None`
+  marker for "removing this BROKE the pipeline, so it is maximally essential") and how they build
+  the `Idea`. `_ablate` also keeps its own extra currency check, because only it makes an LLM
+  `propose` call before building the idea and therefore has a window the other mode does not.
+* **`_timed_ablation_probe(source, workdir, parent_id, generation) -> (result, seconds, current)`** —
+  the timed, lifecycle-checked probe. The wall-clock is RETURNED rather than accumulated inside the
+  helper, deliberately: it is budgeted on the `ablate` event (P1-2), and a caller that forgets to
+  sum it is then visibly wrong at the call site instead of silently spending outside
+  `max_eval_seconds`.
+
+`_write_assets` stayed at the call sites. `_ablate` stages the workdir BEFORE asking its probe
+developer to implement the ablated idea, and folding it into the helper would have moved that
+staging to after an LLM call — a real reordering bought for nothing but symmetry.
+
+The tail is where the duplication actually mattered. It carries three abandon paths — reservation
+refused, parent superseded mid-build, creation rejected during replay — and each has to do TWO
+things: drop the developer telemetry (or it leaks onto whichever node is created next) and, for two
+of the three, fail the reservation it already holds (or the card stays `building` forever). Half of
+one pair going missing in one copy is precisely the drift a second copy hides.
+
+Pinned by four new tests in `tests/test_ablation.py` (2 → 6): neither mode may contain
+`_reserve_node_build`/`_emit_node_created`/`_fail_reserved_build` any more, the tail has exactly
+three abandon paths and an AST walk proves each is preceded by the discard (and two by the failure),
+the probe helper returns a 3-tuple while neither loop re-grows its own `time.monotonic()`, and
+behaviourally the `ablate` event still carries non-negative probe seconds. Teeth-tested against 5
+breaks, all biting.
 
 #### EC-07 · MEDIUM · inconsistency · effort: small — **RESOLVED (2026-08-02)**
 
@@ -953,6 +1022,46 @@ paid-retry exposure is the KNOWN GAP already documented on `_maybe_snapshot_conc
 *Evidence:* The subtle sequence 'append EV_LLM_USAGE(_payload(usage_id, clean)); on exception re-read and check _event_usage_deltas(...)[usage_id]==clean; on success verify or trust; then _record + pending.pop + _forget_outbox (with the durable-but-unacknowledged conflict case)' exists in three near-copies: the sink closure inside bind_cost_accountants (costs.py:426-459), _drain_outbox (317-351), and the per-binding retry loop in reconcile_cost_accountants (556-591). Each copy makes slightly different verification choices (the sink trusts a successful append per the PERF-1 comment; the other two always rescan), so the protocol's correctness argument must be re-derived per site.
 
 *Recommendation:* Extract one `_commit_usage_delta(engine, usage_id, clean, persisted_cache, *, trust_success)` returning (durable, ack_ok) and have all three sites call it. The intentional verification differences become one explicit flag instead of three divergent code paths.
+
+*Resolution (2026-08-04) — one protocol, one flag; the three call sites are 60 lines of ladder shorter.*
+
+`_commit_usage_delta(engine, usage_id, clean, *, trust_success) -> (durable, acknowledged, error)`
+in `engine/costs.py`, over a small `_delta_is_durable(engine, usage_id, clean)`. All three sites —
+the accountant sink inside `bind_cost_accountants`, `_drain_outbox`, and the per-binding retry loop
+in `reconcile_cost_accountants` — now call it, and the per-site bookkeeping that legitimately
+differs (`_record` + `pending.pop` for the two binding-aware sites, `persisted[usage_id] = clean`
+for the two cache-carrying ones) stays at the call sites where a reader can see it.
+
+Three return values rather than the recommended two. `error` has to come back because the sink
+reports it to its caller and is the only site that can tell an append failure apart from the outbox
+failure it may have to report instead (`append_error = outbox_error or exc`); raising from the
+helper would have forced the other two sites into a try/except they do not otherwise need.
+
+The finding's real point was that "each copy makes slightly different verification choices, so the
+protocol's correctness argument must be re-derived per site". That difference is now ONE keyword,
+and it is stated at every call site — `trust_success` has no default, so a fourth caller cannot
+inherit a verification policy by omission. The argument for each value is local:
+
+* **the sink passes `True`** — it minted this id moments ago (`secrets.token_hex(16)`,
+  collision-guarded against `pending`), so no other telemetry can own the identity and a committed
+  append IS the durable winner. PERF-1: the rescan it skips was O(K²) across a run and ran for every
+  paid call while holding the engine cost lock.
+* **`_drain_outbox` passes `False`** — the record it is replaying was written by a PRIOR process, so
+  the first-writer argument is not the current process's to make.
+* **reconcile's retry passes `False`** — it is retrying an id whose first append already failed, so
+  a bare success is not the evidence it is in the sink.
+
+The half both branches share is the one that was easy to get wrong in triplicate: `EventStore.append`
+can COMMIT and then surface an error, so an exception is never evidence of absence — only a re-read
+is — and an unreadable log answers "not durable", because acknowledgement ERASES the outbox record a
+later process would retry from.
+
+Pinned by five tests in `tests/test_llm_cost_ledger.py` (23 → 27, one is a two-way parametrized
+case): a structural guard that exactly one call site trusts a bare success AND that it is the sink
+(both directions — the other two are asserted not to), commit-then-raise is durable under both flag
+values, a commit that never landed returns the append's own exception object, an unreadable log
+never acknowledges, and durable-but-unacknowledged stays distinguishable from a clean success.
+Teeth-tested against 6 breaks, all biting.
 
 #### EC-11 · LOW · flat-code · effort: small
 
