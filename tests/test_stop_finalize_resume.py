@@ -142,7 +142,9 @@ def test_cli_resume_preserves_pending_finalize_after_error_finish(monkeypatch, t
     def singleton(_rd):
         yield True
 
-    monkeypatch.setattr(run_cmds, "_load_task", lambda _path: object())
+    # `**_k` absorbs `_load_task`'s reload flag (`existing_run=`), which `resume` passes so an
+    # already-started run stays loadable under a validator added after its snapshot was written.
+    monkeypatch.setattr(run_cmds, "_load_task", lambda _path, **_k: object())
     monkeypatch.setattr(run_cmds, "_engine", lambda *_args, **_kwargs: fake)
     monkeypatch.setattr(run_cmds, "_engine_singleton", singleton)
     monkeypatch.setattr(run_cmds, "_run_engine_guarded", lambda eng: fold(eng.store.read_all()))

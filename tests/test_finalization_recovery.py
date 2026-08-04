@@ -450,7 +450,9 @@ def _install_cli_engine(monkeypatch, run_dir: Path):
         eng.settings = settings
         return eng
     monkeypatch.setattr(cli, "_engine", _capture_engine)
-    monkeypatch.setattr(cmds, "_load_task", lambda _p: object())
+    # `**_k` absorbs `_load_task`'s reload flag (`existing_run=`): `resume`/`finalize` pass it so a
+    # run that already exists can't be refused by a validator added since it started.
+    monkeypatch.setattr(cmds, "_load_task", lambda _p, **_k: object())
     return eng
 
 
@@ -526,7 +528,8 @@ def test_cli_finalize_accepts_explicit_task_file_for_legacy_run(tmp_path, monkey
     loaded = []
     from looplab import cli
     monkeypatch.setattr(cli, "_engine", lambda *_a, **_k: eng)
-    monkeypatch.setattr(cmds, "_load_task", lambda path: loaded.append(path) or object())
+    monkeypatch.setattr(cmds, "_load_task",
+                        lambda path, **_k: loaded.append(path) or object())
 
     cmds.finalize(run_dir, task_file=legacy_task)
 

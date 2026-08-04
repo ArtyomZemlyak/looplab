@@ -732,7 +732,7 @@ def resume(
     # as warnings below instead — the diagnosis survives, only the refusal is dropped (invariant #6:
     # what the run recorded at `run_started` wins on resume).
     task = _load_task(task_file, existing_run=True)
-    for _warn in eval_reader_path_errors(getattr(task, "eval", None)):
+    for _warn in eval_reader_path_errors(task):
         typer.echo(f"warning: {_warn}", err=True)
     # Restore the ORIGINAL run's settings from the snapshot `run` wrote — a fresh Settings()
     # would silently drop run-only flags (require_approval, trust_mode, confirm_*, eval_trust_mode,

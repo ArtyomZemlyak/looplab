@@ -108,18 +108,24 @@ _PATHLESS_COST = {
 }
 
 
-def eval_reader_path_errors(spec) -> list[str]:
+def eval_reader_path_errors(task_or_spec) -> list[str]:
     """Every "this reader can never read anything" problem in an EvalSpec, one message per reader.
 
     Walks `EvalSpec.readers()` (the single enumeration of the reader slots) and asks
     `runtime/command_eval.metric_spec_path_error` — the authority that lives beside the reader table
-    deciding the fact — about each one. Returns [] for a usable spec, and for anything that isn't an
-    EvalSpec (a toy/dataset task has no readers).
+    deciding the fact — about each one. Returns [] for a usable spec.
+
+    Accepts the TASK as well as the spec, and unwraps it HERE rather than at the call site: a
+    getattr probe for `eval` on a task would read as a duck-typed TaskAdapter hook and trip the
+    two-way `TASK_OPTIONAL_HOOKS` registry scan (tests/test_task_adapter_contract.py) — correctly,
+    because it is not one. `eval` is a declared FIELD of exactly one adapter, so an isinstance says
+    that precisely, and every other kind (toy/dataset/mlebench) yields [] with no readers to check.
 
     Shared by the submit-time refusal below and `cli/run_cmds.py::resume`, which reports the SAME
     text as a warning for a run that was started before the refusal existed (see `_readers_usable`).
     """
     from looplab.runtime.command_eval import metric_spec_path_error
+    spec = task_or_spec.eval if isinstance(task_or_spec, RepoTask) else task_or_spec
     if not isinstance(spec, EvalSpec):
         return []
     out: list[str] = []

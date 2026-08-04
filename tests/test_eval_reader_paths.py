@@ -62,6 +62,12 @@ def _msg(excinfo) -> str:
     return str(excinfo.value)
 
 
+def load_task_dict(d: dict):
+    """Build a task from a dict the way `resume` does — grandfathered, so a spec submit refuses can
+    still be constructed for the tests that need one."""
+    return validate_task(d, existing_run=True)
+
+
 # ------------------------------------------------------------------ 1. eval.metrics (extra readers)
 def test_a_pathless_extra_metric_is_silently_dropped_then_refused(tmp_path):
     """Reproduction: the declared `lat` reader produces nothing and NOTHING says so — the node's
@@ -309,9 +315,13 @@ def test_which_readers_need_a_path_is_spelled_once():
         assert metric_spec_path_error({"kind": "adapter"}, consequence=cost) is None
 
 
-def test_the_walk_is_empty_for_a_task_that_has_no_readers():
-    """`cli/run_cmds.py::resume` calls this on whatever task it loaded — a toy/dataset task has no
-    `eval` at all, and `None` must not become an AttributeError on the resume path."""
+def test_the_walk_takes_a_whole_task_and_is_empty_when_there_are_no_readers():
+    """`cli/run_cmds.py::resume` calls this on whatever task it loaded — which may be a toy/dataset
+    task with no `eval` at all, or (in tests that stub the loader) not a task at all. None of those
+    may become an AttributeError on the resume path."""
+    task = load_task_dict(_task(cross_check=_PATHLESS))              # a RepoTask, not an EvalSpec
+    assert eval_reader_path_errors(task) == eval_reader_path_errors(task.eval) != []
     assert eval_reader_path_errors(None) == []
+    assert eval_reader_path_errors(object()) == []                   # the stubbed-loader case
     assert eval_reader_path_errors({"metric": _PATHLESS}) == []      # a bare dict is not an EvalSpec
     assert eval_reader_path_errors(EvalSpec(command=["python", "t.py"])) == []
