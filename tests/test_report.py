@@ -5222,9 +5222,9 @@ def test_a_scope_report_read_never_probes_liveness_or_spawns_an_engine(tmp_path,
 
     app = make_app(tmp_path)
     srv = app.state.looplab
-    assert srv.list_runs_membership_fn is not None, "the membership projection must be bound"
+    assert callable(srv.run_membership), "the membership projection must be an AppState method"
 
-    rows = srv.list_runs_membership_fn()
+    rows = srv.run_membership()
     assert probes == [], f"the membership read probed engine liveness for {probes}"
     assert reconciles == [], f"the membership read ran the resume reconciler for {reconciles}"
     assert rows and all(

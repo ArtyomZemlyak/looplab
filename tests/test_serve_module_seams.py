@@ -297,3 +297,42 @@ def test_the_shared_write_seam_is_read_from_both_modules():
     for module in (scope_report_store, reports):
         source = inspect.getsource(module)
         assert "strict_atomic_write_text(" in source, module.__name__
+
+
+def test_the_run_list_projections_are_appstate_methods():
+    """`build_router` used to compute these, then ASSIGN them onto the AppState bag so
+    `routers/reports.py` could read them back — an implicit protocol that existed only after the
+    right build_router calls had run, with no type or registry guarding it (doc 25 SR-12)."""
+    from looplab.serve.appstate import AppState
+
+    for name in ("run_summaries", "run_membership"):
+        assert callable(getattr(AppState, name, None)), name
+    assert not hasattr(AppState, "list_runs_membership_fn"), (
+        "the late-bound attribute is back alongside the method — two ways to read one projection")
+
+
+def test_the_scope_report_reads_the_method_not_the_bag():
+    from looplab.serve.routers import reports
+
+    source = inspect.getsource(reports)
+    assert "srv.run_membership()" in source
+    assert "list_runs_membership_fn" not in source
+
+
+def test_the_projection_module_imports_no_router():
+    """It is imported BY the routers (through AppState), so an import back would close a cycle."""
+    tree = next(t for path, t in iter_trees() if path.name == "run_projections.py")
+    modules = {n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+    assert not any(m.startswith("looplab.serve.routers") for m in modules), modules
+
+
+def test_the_run_summary_cache_stays_on_appstate():
+    """Where the reset/delete paths already invalidate it — a cache local to the projection module
+    would keep serving generation A's summary after a reset replaced the log."""
+    from looplab.serve import run_projections
+
+    source = inspect.getsource(run_projections)
+    assert "srv.summary_cache" in source
+    module_level = [n for n in ast.parse(source).body if isinstance(n, ast.Assign)]
+    assert not [t for n in module_level for t in n.targets
+                if isinstance(t, ast.Name) and "cache" in t.id], "a second cache lives here now"

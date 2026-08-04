@@ -3038,11 +3038,21 @@ or route decorator, `__all__` matching what the module actually defines (a name 
 declaring it stops resolving through the star import and takes its tests with it), and the
 both-modules write seam. Teeth-tested against 6 breaks, all biting.
 
-**The `srv.list_*_fn` late-binding — deferred.** `list_runs`, `list_runs_membership` and `list_tasks`
-are not standalone functions: they close over `srv` AND over `build_router`-local state
-(`_run_summaries` and its `_summary_cache`). Promoting them to AppState methods means moving the
-run-summary projection and its cache too, which is the same order of work as the store extraction
-above and belongs with it.
+**The `srv.list_*_fn` late-binding — done (2026-08-04) for the two side-effect-free projections.**
+`run_summaries` and `run_membership` are `serve/run_projections.py`, exposed as real
+`AppState.run_summaries()` / `AppState.run_membership()` methods; `routers/reports.py` calls the
+method instead of reading `srv.list_runs_membership_fn or srv.list_runs_fn` back off the bag, and the
+attribute is gone from `AppState` entirely so there is only one way to reach the projection. The
+per-run fold cache stays on `AppState.summary_cache`, where the reset/delete paths already invalidate
+it — a cache local to the new module would keep serving generation A's summary after a reset replaced
+the log. `run_projections.py` imports no router, so the graph stays acyclic.
+
+`srv.list_runs_fn` and `srv.list_tasks_fn` REMAIN attributes, deliberately: unlike the two above,
+those are the route bodies themselves — `list_runs` overlays live engine-liveness facts (a lock probe
+with a best-effort resume re-spawn, which is exactly why the membership projection was split out of
+it in the first place), and `list_tasks` reads the on-disk catalogue relative to the repo. Promoting a
+route body to an AppState method would move HTTP concerns into the state bag, which is the opposite
+of what this finding asks for.
 
 #### SR-13 · LOW · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
