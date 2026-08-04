@@ -23,9 +23,10 @@ import difflib
 from pathlib import Path
 
 from looplab.core.atomicio import file_identity
-from looplab.core.text import normalize_text, tokenize
+from looplab.core.text import normalize_text
 from looplab.tools._base import RESULT_CAP, fn_spec
-from looplab.trust.cross_run import cross_run_text, same_live_direction, valid_live_direction
+from looplab.trust.cross_run import (
+    LessonScope, cross_run_text, scope_terms, valid_live_direction)
 
 _LOG = logging.getLogger(__name__)
 _TOOL_NAMES = frozenset({
@@ -86,8 +87,9 @@ _TOOL_UNAVAILABLE = "(cross-run tool unavailable)"
 _MAX_TOOL_RESULT_CHARS = RESULT_CAP - 400
 
 
-def _toks(s: str) -> set[str]:
-    return {w for w in tokenize(s) if len(w) > 2}
+def _toks(s: str) -> frozenset[str]:
+    """The shared cross-run tokenizer (`trust/cross_run.py::scope_terms`, doc 25 TO-07)."""
+    return scope_terms(s)
 
 
 def _safe_text(value, limit: int) -> str:
@@ -181,10 +183,11 @@ class CrossRunTools:
                  audience: str = "portfolio"):
         self.dir = Path(memory_dir) if memory_dir else None
         self.role = str(role or "researcher")
-        self._task_id = ""
-        self._run_id = ""
-        self._direction = ""
-        self._scope_terms: set[str] = set()
+        # The visibility predicate itself is `trust/cross_run.py::LessonScope`, shared with
+        # `MemoryTools` so the two readers of `lessons.jsonl` cannot disagree (doc 25 TO-07). The
+        # five loose fields it replaced are still readable as properties — a dozen call sites here
+        # spell `self._task_id` / `self._direction` / `self._run_id`.
+        self._scope = LessonScope()
         self._concepts: set[str] = set()      # E2: the current run's concept set (for similar_runs overlap)
         self._concept_projection_status = "complete"
         self._concept_projection_reasons: tuple[str, ...] = ()
@@ -197,7 +200,6 @@ class CrossRunTools:
         self.audience = str(audience or "portfolio")
         if self.audience not in self.AUDIENCES:
             self.audience = "run"          # an unrecognized audience fails CLOSED, never portfolio-wide
-        self._bound = False
         # (cache key, capsules, {id(capsule): canonical concept set}) — see `_capsule_snapshot`.
         self._capsule_cache: tuple | None = None
         self._capsule_scope_receipt = {
@@ -217,12 +219,7 @@ class CrossRunTools:
         """
         if state is None:
             return
-        self._bound = True
-        self._task_id = str(getattr(state, "task_id", "") or getattr(state, "id", "") or "")
-        self._run_id = str(getattr(state, "run_id", "") or "")
-        direction = str(getattr(state, "direction", "") or "")
-        self._direction = direction if direction in ("min", "max") else ""
-        self._scope_terms = _toks(getattr(state, "goal", "") or "")
+        self._scope = LessonScope.of(state)
         # E2: use the same strict CURRENT projection as the run tools. Historical tombstones/aborts and
         # unresolved delta fallbacks must not authorize cross-run overlap or masquerade as known-empty.
         from looplab.search.concept_projection import current_concept_projection
@@ -242,55 +239,51 @@ class CrossRunTools:
         return (f"[{self._concept_projection_status.upper()} current_concept_projection "
                 f"reasons={reasons}]")
 
+    # Read-only views of the shared scope. A dozen call sites below (and several tests) spell these
+    # names; keeping them as properties means ONE source of truth instead of a second copy that can
+    # fall out of step with `self._scope`.
+    @property
+    def _bound(self) -> bool:
+        return self._scope.bound
+
+    @property
+    def _task_id(self) -> str:
+        return self._scope.task_id
+
+    @property
+    def _run_id(self) -> str:
+        return self._scope.run_id
+
+    @property
+    def _direction(self) -> str:
+        return self._scope.direction
+
+    @property
+    def _scope_terms(self) -> frozenset[str]:
+        return self._scope.goal_terms
+
     def _is_current_run(self, row: dict) -> bool:
         """Whether a persisted cross-run row belongs to the bound live run."""
-        return bool(
-            self._bound
-            and self._run_id
-            and str(row.get("run_id") or "") == self._run_id
-        )
+        return self._scope.is_current_run(row)
 
     def _in_scope(self, row: dict, *, source: str = "generic") -> bool:
         """True for compatible direction plus exact task or strict related-goal fingerprint.
 
         Goal terms come from bare fingerprint tokens; rows without that fingerprint (including v3 D8)
         are exact-task-only. Facets are not a visibility input.
+
+        The predicate itself is `trust/cross_run.py::LessonScope.allows`, shared with `MemoryTools`
+        (doc 25 TO-07). What stays here is the ONE source-specific rule: a CAPSULE additionally needs
+        a complete persisted fingerprint before related-task visibility is granted, which is a fact
+        about how capsules are written and not part of the general row predicate.
         """
-        if not self._bound:
-            return True                                        # unbound -> portfolio-wide
-        # run_id is the replacement-generation fence. A stale durable row carrying the
-        # live run's identity is never "prior" evidence, even when its task and direction still match.
-        if self._is_current_run(row):
-            return False
-        # This fence is fail-closed on missing/malformed polarity, so every WRITER must persist
-        # `direction` or its rows are invisible here. `lessons_distill.py` omitted it (only `store_case`
-        # wrote it, which is why cases surfaced and lessons did not) — fixed at both lesson writers, and
-        # `tests/test_cross_run.py::test_production_lessons_reach_a_bound_reader` pins the
-        # writer→bound-reader path so the two can't drift apart again. Rows written before that fix
-        # stay filtered, which is the intended fail-closed behaviour for unknown polarity.
-        # a bound provider is agent-facing. Exact task identity cannot override missing or
-        # malformed polarity provenance; only an explicitly unbound human/CLI audit stays portfolio-wide.
-        if not same_live_direction(self._direction, row.get("direction")):
-            return False
-        if self._task_id and str(row.get("task_id") or "") == self._task_id:
-            return True
-        fp = row.get("fingerprint")
-        if isinstance(fp, list) and self._scope_terms:
-            if source == "capsule":
-                from looplab.engine.memory import _capsule_fingerprint_scope_complete
-                # only an exact persisted fingerprint may grant related-task visibility.
-                # A legacy/trimmed capsule remains available through exact task identity or unbound audit.
-                if not _capsule_fingerprint_scope_complete(row):
-                    return False
-            row_terms = {t for t in fp if isinstance(t, str) and ":" not in t}
-            shared = row_terms & self._scope_terms
-            # A single generic word ("model", "retrieval", "training") is not a security scope.  Similar
-            # cross-task transfer requires at least two salient terms covering half of the smaller side;
-            # exact task ids remain authoritative. Agent-proposed facets currently affect neither this
-            # visibility predicate nor retrieval order.
-            if len(shared) >= 2 and len(shared) / max(1, min(len(row_terms), len(self._scope_terms))) >= 0.5:
-                return True
-        return False
+        if source == "capsule" and self._scope.bound and not self._scope.exact_task(row):
+            from looplab.engine.memory import _capsule_fingerprint_scope_complete
+            # only an exact persisted fingerprint may grant related-task visibility.
+            # A legacy/trimmed capsule remains available through exact task identity or unbound audit.
+            if not _capsule_fingerprint_scope_complete(row):
+                return False
+        return self._scope.allows(row)
 
     def specs(self) -> list[dict]:
         if not self.dir:

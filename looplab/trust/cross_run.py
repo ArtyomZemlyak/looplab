@@ -14,6 +14,7 @@ from looplab.core.redact import (
     redact_persisted_identity,
     redact_persisted_text,
 )
+from looplab.core.text import tokenize
 
 _OPAQUE_IDENTITY_KEYS = frozenset({
     "action_id", "invocation_id", "claim_uid", "scope", "scope_task", "task_id", "run_id",
@@ -39,6 +40,102 @@ def same_live_direction(current, persisted) -> bool:
     # garbled provenance fails closed; an exact task id must never manufacture polarity compatibility.
     return (valid_live_direction(current) and isinstance(persisted, str)
             and persisted == current)
+
+
+def scope_terms(text) -> frozenset[str]:
+    """The salient tokens of a goal or statement, for cross-run scope comparison (doc 25 TO-07).
+
+    ONE tokenizer, because the same query used to match different lesson sets depending on which
+    tool the model happened to call: `cross_run_tools` split on unicode word characters while
+    `memory_tools` used an ASCII `[a-z0-9@._]+` class that kept `run_id` and `a.b` whole. Both read
+    the same `lessons.jsonl`, so "what matches" has to be one answer.
+    """
+    return frozenset(w for w in tokenize(text) if len(w) > 2)
+
+
+class LessonScope:
+    """Which persisted cross-run rows a BOUND agent may see (doc 25 TO-07).
+
+    `CrossRunTools` invested heavily in this predicate — fail-closed on missing or malformed
+    `direction`, the current run's own rows excluded as a replacement-generation fence, related-task
+    visibility only through a strict goal-fingerprint overlap — and `MemoryTools.search_lessons` then
+    read the SAME `lessons.jsonl` with none of it. `agents/factory.py` binds BOTH providers to a run
+    whenever `memory_dir` and `cross_run_read_tools` are set, so every row one tool deliberately hid
+    was retrievable one tool over, in the same agent's toolset.
+
+    The predicate lives here rather than on either provider so the two surfaces cannot drift again,
+    and so it is testable without constructing a tool provider.
+
+    UNBOUND is portfolio-wide on purpose: a CLI or human audit reading the ledger directly has no
+    live run to be scoped against, and narrowing it would hide evidence from the OPERATOR rather
+    than from an agent.
+    """
+
+    __slots__ = ("bound", "run_id", "task_id", "direction", "goal_terms")
+
+    def __init__(self, *, bound: bool = False, run_id: str = "", task_id: str = "",
+                 direction: str = "", goal_terms=frozenset()):
+        self.bound = bound
+        self.run_id = run_id
+        self.task_id = task_id
+        self.direction = direction if valid_live_direction(direction) else ""
+        self.goal_terms = frozenset(goal_terms)
+
+    @classmethod
+    def of(cls, state) -> "LessonScope":
+        """Read one live run state into a scope. A `None` state stays unbound (portfolio-wide)."""
+        if state is None:
+            return cls()
+        return cls(
+            bound=True,
+            run_id=str(getattr(state, "run_id", "") or ""),
+            task_id=str(getattr(state, "task_id", "") or getattr(state, "id", "") or ""),
+            direction=str(getattr(state, "direction", "") or ""),
+            goal_terms=scope_terms(getattr(state, "goal", "") or ""),
+        )
+
+    def is_current_run(self, row: dict) -> bool:
+        """Whether a persisted cross-run row belongs to the bound live run."""
+        return bool(self.bound and self.run_id and str(row.get("run_id") or "") == self.run_id)
+
+    def exact_task(self, row: dict) -> bool:
+        return bool(self.task_id and str(row.get("task_id") or "") == self.task_id)
+
+    def related_goal(self, row: dict) -> bool:
+        """Strict related-task overlap over the BARE fingerprint tokens.
+
+        A single generic word ("model", "retrieval", "training") is not a security scope. Similar
+        cross-task transfer requires at least two salient terms covering half of the smaller side;
+        exact task ids remain authoritative. Rows carrying no fingerprint (including v3 D8) are
+        exact-task-only. Agent-proposed facets affect neither this predicate nor retrieval order.
+        """
+        fp = row.get("fingerprint")
+        if not (isinstance(fp, list) and self.goal_terms):
+            return False
+        row_terms = {t for t in fp if isinstance(t, str) and ":" not in t}
+        shared = row_terms & self.goal_terms
+        return (len(shared) >= 2
+                and len(shared) / max(1, min(len(row_terms), len(self.goal_terms))) >= 0.5)
+
+    def allows(self, row: dict) -> bool:
+        """True for compatible direction plus exact task or strict related-goal fingerprint."""
+        if not self.bound:
+            return True                                        # unbound -> portfolio-wide
+        # run_id is the replacement-generation fence. A stale durable row carrying the
+        # live run's identity is never "prior" evidence, even when its task and direction still match.
+        if self.is_current_run(row):
+            return False
+        # This fence is fail-closed on missing/malformed polarity, so every WRITER must persist
+        # `direction` or its rows are invisible here. `lessons_distill.py` omitted it (only `store_case`
+        # wrote it, which is why cases surfaced and lessons did not) — fixed at both lesson writers, and
+        # `tests/test_cross_run.py::test_production_lessons_reach_a_bound_reader` pins the
+        # writer→bound-reader path so the two can't drift apart again. Rows written before that fix
+        # stay filtered, which is the intended fail-closed behaviour for unknown polarity.
+        # A bound provider is agent-facing. Exact task identity cannot override missing or
+        # malformed polarity provenance; only an explicitly unbound human/CLI audit stays portfolio-wide.
+        if not same_live_direction(self.direction, row.get("direction")):
+            return False
+        return self.exact_task(row) or self.related_goal(row)
 
 
 def cross_run_text(value, *, max_chars: int, single_line: bool = True,

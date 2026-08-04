@@ -3860,6 +3860,47 @@ permission, the generation captured after the approval, and one provider re-inli
 
 *Recommendation:* Either route MemoryTools.search_lessons through the same `_in_scope` predicate (bind_state it like CrossRunTools) or fold search_lessons/recall_notes into CrossRunTools as two more verbs; at minimum share one tokenizer helper so the two surfaces agree on what matches.
 
+*Resolution (2026-08-04) — both halves, via one shared predicate. This CHANGES what a bound agent sees.*
+
+`trust/cross_run.py` now owns `LessonScope` (the visibility predicate) and `scope_terms` (the
+tokenizer). `MemoryTools` gained a `bind_state` hook and filters `search_lessons` through
+`self._scope.allows(row)`; `CrossRunTools._in_scope` delegates to the same object.
+
+The predicate moved to `trust/` rather than onto either provider because it is a trust boundary, not
+tool plumbing, and because a predicate that lives on one of two peers is one refactor away from being
+"the other one's business" again. `CrossRunTools`'s five loose scope attributes (`_bound`, `_task_id`,
+`_run_id`, `_direction`, `_scope_terms`) became read-only PROPERTIES over `self._scope` — a dozen call
+sites in that file read them, and a plain copy would be the same drift in miniature.
+
+Behaviour, stated plainly: a BOUND agent's `search_lessons` no longer returns rows with unknown or
+opposite `direction`, rows from a foreign task family without a strict goal-fingerprint overlap, or
+this run's own rows. An UNBOUND provider — the CLI/human audit path — stays portfolio-wide, which is
+the direction that would LOSE evidence if narrowed, and is exactly how `CrossRunTools` already
+behaved.
+
+One rule stayed on the provider rather than moving: a CAPSULE additionally needs a complete persisted
+fingerprint before foreign-task visibility is granted (`_capsule_fingerprint_scope_complete`). That is
+a fact about how capsules are written — capped or legacy-unknown fingerprints exist — and not part of
+the general row predicate. It is now expressed as one guard ahead of the shared call instead of being
+tangled into the middle of it.
+
+`recall_notes` is deliberately NOT filtered. `meta_notes.jsonl` carries no direction or task-family
+provenance to scope on, so applying this predicate would hide every note rather than the unsafe ones.
+A test pins that as a decision instead of an oversight.
+
+`tests/live/scenarios.py::memory_recall` seeded its lesson without `direction`, which a bound reader
+now hides — the fixture was updated to persist it, matching what both production lesson writers do.
+`docs/guide/memory.md`'s retrieval table states the scoping.
+
+Pinned by `tests/test_lesson_scope.py` (20): the unbound/bound split, the polarity table (missing,
+empty, `"minimize"`, `"MIN"`, `0`, `["min"]` all hidden), the self-run fence, the two-salient-terms
+overlap rule, the namespaced-token rule (provenance must not DILUTE the denominator and make an
+on-topic row look unrelated), a sparse bound state binding closed rather than degrading open, both
+providers answering identically end to end, the empty-result message disclosing that a scope ran, the
+capsule rule in both directions, and one tokenizer across both modules — asserted over the AST,
+because both modules now describe the old ASCII pattern in their comments and a substring scan
+matches its own explanation. Teeth-tested against 15 breaks, all biting.
+
 #### TO-08 · MEDIUM · duplication · effort: medium
 
 **Seven-plus independent implementations of 'fit a tool result under RESULT_CAP with an honest marker'**

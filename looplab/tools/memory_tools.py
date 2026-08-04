@@ -9,13 +9,11 @@ from __future__ import annotations
 import json
 import logging
 import math
-import re
 from pathlib import Path
 
 from looplab.tools._base import RESULT_CAP, fn_spec
 from looplab.core.redact import redact_persisted_text
-
-_WORD = re.compile(r"[a-z0-9@._]+")
+from looplab.trust.cross_run import LessonScope, scope_terms
 _LOG = logging.getLogger(__name__)
 _TOOL_NAMES = frozenset({"search_lessons", "recall_notes"})
 _TOOL_UNAVAILABLE = "(memory tool unavailable)"
@@ -33,8 +31,14 @@ _TASK_ID_CHARS = 120
 _OUTCOME_CHARS = 48
 
 
-def _toks(value: str) -> set[str]:
-    return {word for word in _WORD.findall(value.lower()) if len(word) > 2}
+def _toks(value: str) -> frozenset[str]:
+    """The shared cross-run tokenizer (`trust/cross_run.py::scope_terms`, doc 25 TO-07).
+
+    This module used to split on an ASCII `[a-z0-9@._]+` class while `cross_run_tools`
+    split on unicode word characters, so the SAME query matched different rows of the same
+    `lessons.jsonl` depending on which tool the model happened to call.
+    """
+    return scope_terms(value)
 
 
 def _safe_text(value, max_chars: int) -> str:
@@ -73,6 +77,20 @@ class MemoryTools:
 
     def __init__(self, memory_dir: str | None):
         self.dir = Path(memory_dir) if memory_dir else None
+        # Unbound until a run binds us: a CLI/human audit reading the ledger directly stays
+        # portfolio-wide, exactly as `CrossRunTools` does (doc 25 TO-07).
+        self._scope = LessonScope()
+
+    def bind_state(self, state, parent=None) -> None:
+        """Learn the live run's scope, so `search_lessons` hides what `CrossRunTools` hides.
+
+        `agents/factory.py` binds BOTH providers whenever `memory_dir` and `cross_run_read_tools` are
+        set, and this one read the same `lessons.jsonl` with no direction, task, or self-run filter —
+        so the rows the sibling deliberately withheld (unknown polarity, a foreign task family, this
+        run's own output fed back as prior evidence) were retrievable one tool over in the same
+        agent's toolset. One predicate now answers for both (doc 25 TO-07).
+        """
+        self._scope = LessonScope.of(state)
 
     def specs(self) -> list[dict]:
         if not self.dir:
@@ -212,6 +230,8 @@ class MemoryTools:
                 statement = row.get("statement")
                 if not isinstance(statement, str):
                     continue
+                if not self._scope.allows(row):        # doc 25 TO-07 — the sibling's own predicate
+                    continue
                 overlap = len(query_tokens & _toks(statement))
                 if query_tokens and not overlap:
                     continue
@@ -219,7 +239,9 @@ class MemoryTools:
             # Prefer stronger lexical matches and newer rows for ties. Blank search means newest.
             hits = [item[2] for item in sorted(ranked, reverse=True)[:limit]]
             if not hits:
-                return "(no matching lessons in the bounded recent memory window)"
+                return ("(no matching lessons in the bounded recent memory window visible to this run)"
+                        if self._scope.bound else
+                        "(no matching lessons in the bounded recent memory window)")
             lines = [self._lesson_line(row) for row in hits]
             return _bounded_result(self._header(source_truncated, skipped, limit_capped), lines)
 

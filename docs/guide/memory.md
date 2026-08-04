@@ -266,7 +266,7 @@ necessarily exposed as an on-demand tool.
 | Memory | Tool(s) |
 |---|---|
 | Knowledge base + cases | `kb_search`, `list_notes`, `read_note` |
-| Lessons | `search_lessons` — returns each claim's verdict + “N agreeing recorded observations; not independent verification” |
+| Lessons | `search_lessons` — returns each claim's verdict + “N agreeing recorded observations; not independent verification”. Scoped to what the live run may see: same objective `direction` (rows without one are invisible), exact task **or** a strict goal-fingerprint overlap, and never the run's own rows. Same predicate as the `cross_run_*` tools; an unbound CLI/human reader stays portfolio-wide |
 | Meta-notes | `recall_notes` — model-distilled explanatory hypotheses for this/similar task, not causal proof |
 | Skills | `list_skills`, `use_skill` |
 | Own experiments | `list_experiments`, `read_experiment`, `read_code` |

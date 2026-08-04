@@ -427,6 +427,11 @@ REGISTRY: list[Scenario] = [
         seed_nodes=[], max_nodes=2, memory=True,
         seed_memory={"lessons": [{
             "task_id": "prior-run", "fingerprint": ["kind:dataset", "dir:max", "target", "auc", "roc"],
+            # `direction` is what both production lesson writers persist, and BOTH agent-facing
+            # readers now fail closed without it (doc 25 TO-07) — a lesson learned while maximizing
+            # is advice in the wrong direction for a minimizing run. Seeding it makes this scenario
+            # prove the SCOPED pull, not an unscoped one no real ledger row would take.
+            "direction": "max",
             "statement": ("ZEPHYRSIGNAL: for this data family an x1*x2 interaction feature with gradient "
                           "boosting is the key lever; plain linear models plateau near chance."),
             "outcome": "supported", "delta": 0.3, "confidence": 0.9, "run_id": "prior-run",
