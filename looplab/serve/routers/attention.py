@@ -11,6 +11,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Query
 
+from looplab.core.atomicio import file_identity
 from looplab.events.eventstore import log_divergence
 from looplab.serve.attention import (
     ATTENTION_NEEDS_ACTION_KINDS, project_event_attention, project_runtime_attention,
@@ -131,8 +132,7 @@ def build_router(srv) -> APIRouter:
                     rd = validator(rd)
                     log = rd / "events.jsonl"
                 stat = log.stat()
-                signature = (stat.st_dev, stat.st_ino, stat.st_ctime_ns,
-                             stat.st_size, stat.st_mtime_ns)
+                signature = file_identity(stat)
                 cached = cache.get(rd.name)
                 if cached is not None and cached[0] == signature:
                     projection = cached[1]
@@ -148,10 +148,8 @@ def build_router(srv) -> APIRouter:
                         candidate = project_event_attention(rd.name, srv.events(rd))
                         divergence = log_divergence(log)
                         after = log.stat()
-                        before_sig = (before.st_dev, before.st_ino, before.st_ctime_ns,
-                                      before.st_size, before.st_mtime_ns)
-                        after_sig = (after.st_dev, after.st_ino, after.st_ctime_ns,
-                                     after.st_size, after.st_mtime_ns)
+                        before_sig = file_identity(before)
+                        after_sig = file_identity(after)
                         if divergence is not None:
                             # `iter_jsonl` deliberately returns the valid prefix of a damaged log.
                             # That is useful for forensic reads, but an owner alert inferred from a

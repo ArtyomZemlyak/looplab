@@ -2308,6 +2308,49 @@ rather than sitting open behind a status note.
 
 *Recommendation:* Not full unification (the strength requirements genuinely differ), but a shared core file-identity toolkit: one canonical stat-signature function with named strength tiers (metadata / probe / descriptor-watch) so fixes to a tier propagate to every consumer.
 
+*Resolution (2026-08-03):* The tier vocabulary lives beside the canonical tuple in
+`core/atomicio.py`: `file_identity` (same file AND unchanged — every way the bytes could have been
+swapped) and the new `same_file_entry` (replacement only — growth keeps the answer, a new inode
+changes it). Not full unification, as the finding says: a site needing something between the two
+declares it AGAINST these definitions.
+
+Converted the sites that were spelling a weaker tuple for NO stated reason, and two were bugs, not
+style:
+
+* `serve/appstate.py`'s state-cache key omitted `st_dev`. Inode numbers are unique per DEVICE, so
+  two runs whose logs shared an inode across filesystems could collide on one key — and what that
+  key guards is a whole projected `RunState`.
+* `serve/routers/attention.py`'s three hand-spelled 5-tuples were `file_identity` minus
+  `st_file_attributes`, so on Windows a log that gained a reparse point compared EQUAL and the cached
+  projection was served for a different file.
+
+The two sites that already documented themselves as deliberate subsets (`log_pages._metadata`,
+`command_observation._metadata`) were left alone — that is exactly the behaviour the convention
+asks for. `scope_sources._file_identity` was a documented variant that never named what it varied
+FROM; its docstring now does.
+
+**The finding undercounted.** It says "six different ways"; an AST sweep for tuples built out of
+`st_*` reads finds ~27 across the tree. Several are legitimately the weak replacement-only tier, so
+converting them all needs per-site judgement rather than a sweep — but at least one carries the same
+defect just fixed above: `tools/_runcache.py:63` spells `file_identity`'s fields reordered and
+without `st_file_attributes`.
+
+`tests/test_file_identity_tiers.py` therefore pins the two tiers as BEHAVIOUR (growth keeps
+`same_file_entry`; a same-size in-place rewrite defeats it but not `file_identity`), pins both fixed
+bugs, and turns the remainder into a LEDGER: the count of unconverted hand-rolled signatures cannot
+grow without the test going red, and lowering it is the work. That is a bounded, visible backlog
+instead of an unbounded claim of coverage. Teeth-verified against 5 breakages.
+
+The guard is AST-based, not grep: a regex over stat field names flagged thirty INCIDENTAL reads (an
+`st_size` check next to an `st_mtime` sort key), which is not a competing definition. The question is
+whether a TUPLE is being built out of stat fields.
+
+It also walks the tree through `tests/_source_scan.iter_sources()` rather than its own `rglob` — the
+`test_no_guard_test_re_derives_the_walk` guard caught this file doing exactly that, for the SECOND
+time in this campaign (CT-10's grep guard was the first). Two occurrences is a pattern, not a slip:
+the reflex when writing a tree-wide guard is to reach for `rglob`, and the shared helper exists
+because at least one tracked file carries a UTF-8 BOM that a fresh walk decodes differently.
+
 #### SC-12 · LOW · duplication · effort: small
 
 **Duplicated liveness/identity probe pairs and operator escape-hatch scaffolding inside run_commands**

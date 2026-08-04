@@ -26,6 +26,7 @@ from typing import BinaryIO, Optional
 import orjson
 from fastapi import HTTPException
 
+from looplab.core.atomicio import same_file_entry
 from looplab.events.eventstore import (
     MAX_EVENT_BATCH_BYTES, decode_event_record, is_event_batch_record,
     prefix_anchor_from_handle)
@@ -545,7 +546,7 @@ class EventLogPager:
         with handle, self._paths.hold(str(path)):
             stat = os.fstat(handle.fileno())
             snapshot_size = stat.st_size
-            identity = (stat.st_dev, stat.st_ino)
+            identity = same_file_entry(stat)
             metadata = _metadata_signature(stat)
             index = self._refresh(path, handle, snapshot_size, identity, metadata)
             actual = index.generation
@@ -582,7 +583,7 @@ class EventLogPager:
                     current_generation = _first_generation(current_handle, current.st_size)
             except OSError:
                 raise _generation_changed(actual, None)
-            if ((current.st_dev, current.st_ino) != identity or current.st_size < snapshot_size
+            if (same_file_entry(current) != identity or current.st_size < snapshot_size
                     or current_generation != actual
                     or (current.st_size == snapshot_size
                         and _metadata_signature(current) != metadata)):

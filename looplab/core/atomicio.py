@@ -51,6 +51,23 @@ def file_identity(info: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def same_file_entry(info: os.stat_result) -> tuple[int, int]:
+    """The WEAKEST useful tier: "does this name still point at the same file?" (doc 25 SC-11).
+
+    `(st_dev, st_ino)` answers replacement only — an `os.replace` swap, an archive-and-recreate — and
+    deliberately says nothing about the CONTENT. That is the right question for a reader holding an
+    open cursor into an append-only log: growth is the normal path and must not invalidate the
+    cursor, while a new inode under the same name must.
+
+    Use `file_identity` when the question is "same file AND unchanged". Sites that need something in
+    between (timestamps only, or an identity shared by `lstat`/`fstat` where Windows' ctime diverges)
+    say so against these two definitions rather than spelling a third tuple with no stated reason —
+    which is how six independent signatures drifted apart, some silently omitting `st_dev` or the
+    Windows reparse field.
+    """
+    return int(info.st_dev), int(info.st_ino)
+
+
 def _fsync_timeout() -> float:
     try:
         value = float(os.environ.get("LOOPLAB_FSYNC_TIMEOUT", "5") or 5)

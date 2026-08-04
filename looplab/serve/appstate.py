@@ -19,6 +19,7 @@ from typing import Callable, Optional
 
 from fastapi import HTTPException
 
+from looplab.core.atomicio import file_identity
 from looplab.core.models import Event
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import iter_event_jsonl
@@ -234,8 +235,9 @@ class AppState:
             # size/mtime; it must never hit generation A's cached payload for generation B.
             # `audience` is part of the key: the review payload is a DIFFERENT projection of the same
             # log, and serving it from the owner entry (or vice versa) would leak across the boundary.
-            ckey = (str(rd), stt.st_ino, stt.st_ctime_ns, stt.st_size, stt.st_mtime_ns, upto_seq,
-                    audience)
+            # `file_identity`, not a hand-rolled tuple: this one used to omit `st_dev`, so two
+            # runs whose logs shared an inode number across devices could collide on one key.
+            ckey = (str(rd), *file_identity(stt), upto_seq, audience)
         except OSError:
             ckey = None
         if ckey is not None:
@@ -395,8 +397,7 @@ class AppState:
                 # size+mtime, so those two mutable metadata fields are not a file identity.  Match the
                 # reset-safe state/list caches and the span index: include the underlying file identity
                 # and creation/change time as well as the content metadata.
-                return (stt.st_dev, stt.st_ino, stt.st_ctime_ns,
-                        stt.st_size, stt.st_mtime_ns)
+                return file_identity(stt)
             except FileNotFoundError:
                 return None
             except OSError:

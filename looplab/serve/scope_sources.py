@@ -129,7 +129,9 @@ def _attributes(status: os.stat_result) -> int:
 
 
 def _file_identity(status: os.stat_result) -> tuple[int, ...]:
-    """Identity shared by lstat/fstat without Windows' divergent ctime."""
+    """A deliberate VARIANT of `core/atomicio.file_identity` (doc 25 SC-11): st_mode added, and
+    st_ctime_ns dropped because Windows reports a divergent ctime through `lstat` vs `fstat` and this
+    signature is compared across both."""
     return (
         int(status.st_dev),
         int(status.st_ino),

@@ -28,6 +28,7 @@ from typing import BinaryIO, Mapping, Optional
 
 import orjson
 
+from looplab.core.atomicio import same_file_entry
 from looplab.core.models import Event, RunState
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import decode_event_record, event_sequence_continues
@@ -97,7 +98,9 @@ class _Index:
 
 
 def _identity(stat: os.stat_result) -> tuple[int, int]:
-    return stat.st_dev, stat.st_ino
+    """`core/atomicio.same_file_entry` — the replacement-only tier (doc 25 SC-11). Growth is the
+    normal append path and must keep the cursor; a new inode under the same name must reset it."""
+    return same_file_entry(stat)
 
 
 def _metadata(stat: os.stat_result) -> tuple[int, int]:
