@@ -191,11 +191,13 @@ def _self_calls(fn, name):
 
 
 @pytest.mark.parametrize("callee", ["_spawn", "_claim_restart_spawn"])
-def test_execute_no_longer_starts_a_process_itself(callee):
-    """Both process-starting calls belong to the phase helpers. A call reappearing inside `_execute`
-    means a third copy of the lease/Popen sequence, which is how the first two drifted."""
-    assert _self_calls(RunCommandService._execute, callee) == [], (
-        f"`_execute` calls self.{callee} directly again")
+@pytest.mark.parametrize("phase", [RunCommandService._execute, RunCommandService._admit,
+                                   RunCommandService._monitor])
+def test_no_phase_starts_a_process_itself(phase, callee):
+    """Both process-starting calls belong to the two helpers. A call reappearing in any PHASE means a
+    third copy of the lease/Popen sequence, which is how the first two drifted."""
+    assert _self_calls(phase, callee) == [], (
+        f"`{phase.__name__}` calls self.{callee} directly again")
 
 
 @pytest.mark.parametrize("helper,callee,count", [
@@ -208,13 +210,34 @@ def test_each_phase_owns_exactly_one_spawn_sequence(helper, callee, count):
 
 
 def test_both_spawn_call_sites_go_through_the_shared_helper():
-    """Two, not one: the admission spawn and the monitor's re-spawn after a pre-existing engine died.
-    Losing one means that path grew its own copy again."""
-    assert len(_self_calls(RunCommandService._execute, "_spawn_under_claim")) == 2
-    assert len(_self_calls(RunCommandService._execute, "_try_restart_claim")) == 2
+    """One per PHASE: the admission spawn and the monitor's re-spawn after a pre-existing engine
+    died. Losing one means that path grew its own copy again."""
+    for helper in ("_spawn_under_claim", "_try_restart_claim"):
+        assert len(_self_calls(RunCommandService._admit, helper)) == 1, helper
+        assert len(_self_calls(RunCommandService._monitor, helper)) == 1, helper
 
 
-def test_execute_stays_below_the_size_that_made_it_unreviewable():
-    fn = _body(RunCommandService._execute)
-    assert (fn.end_lineno - fn.lineno + 1) < 420, (
-        "`_execute` is drifting back toward the ~460-line state machine the finding measured")
+@pytest.mark.parametrize("phase,ceiling", [
+    (RunCommandService._execute, 40),      # the spine: short-circuit, admit, monitor
+    (RunCommandService._admit, 250),
+    (RunCommandService._monitor, 170),
+])
+def test_no_phase_grows_back_into_the_whole_state_machine(phase, ceiling):
+    """The finding measured ONE ~460-line function holding the lock scope, the spawn ladder and the
+    deadline slide at once. Three ceilings, so re-merging them is a red test rather than a slow
+    drift back."""
+    fn = _body(phase)
+    assert (fn.end_lineno - fn.lineno + 1) < ceiling, phase.__name__
+
+
+def test_the_sequencer_is_held_by_the_admission_phase_alone():
+    """`_admit` owns the `with self.sequence(rd)` for its whole body, so every early return releases
+    it. `_execute` used to hand-roll `__enter__`/`__exit__` with a `sequence_held` flag its `finally`
+    had to re-check — one more thing to get right in a 460-line function."""
+    admit = _body(RunCommandService._admit)
+    body = [n for n in admit.body if not isinstance(n, ast.Expr)]   # drop the docstring
+    assert len(body) == 1 and isinstance(body[0], ast.With), (
+        "the admission body is no longer ONE lock scope")
+
+    spine = textwrap.dedent(inspect.getsource(RunCommandService._execute))
+    assert "__enter__" not in spine and "sequence_held" not in spine

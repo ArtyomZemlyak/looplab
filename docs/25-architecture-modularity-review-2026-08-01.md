@@ -2425,10 +2425,33 @@ restart-claim won/lost/uncertain outcomes, and structural guards that `_execute`
 `_spawn` nor `_claim_restart_spawn` directly and still routes BOTH sites of each through the helper.
 Teeth-tested against 12 breaks, all biting.
 
-**Still open:** `_execute` is 381 lines. The remaining bulk is the admission ladder and the monitor
-loop itself, which share `record`, `spec`, `command_id`, `last_progress_seq`, `sequence_ctx` and a
-dozen early returns; splitting them means a status enum threaded through both, which is a different
-change from removing duplication and belongs with SR-02's decomposition of this module.
+*Completed (2026-08-04) — "split the monitor loop body from the admission phase", the recommendation's
+second half.*
+
+`_execute` is now a 22-line spine: terminal short-circuit → `_admit` → `_monitor`, with the
+worker-failure handler and the execution-claim release around them.
+
+* **`_admit(rd, path, record, command_id) -> (spec, record)`** (227 lines) is everything that runs
+  under the per-run SEQUENCER. `(None, record)` means it already terminalized and there is nothing to
+  watch. No status enum was needed — `spec` is the value the monitor needs anyway, and its absence is
+  the stop signal.
+* **`_monitor(rd, path, record, command_id, spec)`** (144 lines) is the observation loop plus the
+  deadline exit. It runs OUTSIDE the sequencer and re-takes it only for the moments that must be
+  serialized. `event_type` is re-derived from the record rather than threaded through: it is only
+  used to NAME the operation in an error message, and `_admit` read it from the same field.
+
+The sequencer became a plain `with self.sequence(rd):` covering `_admit`'s whole body. `_execute`
+used to hand-roll `__enter__`/`__exit__` with a `sequence_held` flag its `finally` had to re-check —
+one more thing to get right in a 460-line function, and now a `with` block releases on every early
+return by construction.
+
+`tests/test_command_worker_spawn_phases.py` grew to 23: the process-starting guards apply to all
+three phases (so a third copy cannot hide in any of them), each helper is called once per phase, each
+phase has its own size ceiling (so re-merging them is a red test rather than a slow drift back), and
+the admission body is asserted to be exactly ONE lock scope with no `__enter__`/`sequence_held` left
+in the spine. Two source-scanning guards elsewhere were re-pointed at `_monitor`
+(`test_run_command_service.py`'s domain-progress slide assertion) rather than deleted. Teeth harness
+12 → 14 breaks, all biting.
 
 #### SC-08 · MEDIUM · other · effort: small — **RESOLVED (2026-08-02)**
 

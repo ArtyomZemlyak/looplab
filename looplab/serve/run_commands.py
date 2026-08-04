@@ -3792,29 +3792,29 @@ class RunCommandService:
                     "GET may reconcile late completion; otherwise POST this command id's /retry endpoint",
                     retryable=True))
 
-    def _execute(self, rd: Path, path: Path, initial: dict, *, claimed: bool) -> None:
-        record = self._load(path) or dict(initial)
-        command_id = str(record.get("id") or "")
-        if record.get("absolute_deadline_at") is None:
-            record["absolute_deadline_at"] = time.time() + self.max_observation_timeout
-        sequence_ctx = None
-        sequence_held = False
-        try:
-            if record.get("status") in TERMINAL_STATUSES:
-                return
-            sequence_ctx = self.sequence(rd)
-            sequence_ctx.__enter__()
-            sequence_held = True
+    def _admit(self, rd: Path, path: Path, record: dict, command_id: str):
+        """Everything that runs under the per-run SEQUENCER, up to where the monitor loop begins.
+
+        Split from `_execute` (doc 25 SC-07): the admission phase and the observation loop shared one
+        427-line function and one `try`, so the lock scope, the spawn ladder and the deadline slide
+        all had to be held in mind at once. Returns `(spec, record)` to monitor, or `(None, record)`
+        when this phase already terminalized the command and there is nothing left to watch.
+
+        The sequencer is held for the whole body and released on EVERY exit — including the early
+        ones — which is what the hand-rolled `__enter__`/`__exit__` pair plus a `sequence_held` flag
+        in the caller's `finally` used to do.
+        """
+        with self.sequence(rd):
             # Another process may have completed/rejected it while this worker waited for the run.
             record = self._load(path) or record
             if record.get("status") in TERMINAL_STATUSES:
-                return
+                return None, record
             event_type = str(record.get("event_type") or "")
             spec = CONTROL_SPECS.get(event_type)
             if spec is None:
                 self._terminal(path, record, "rejected", error=_error(
                     "invalid_command", f"unknown control event: {event_type!r}"))
-                return
+                return None, record
             try:
                 self._reject_unresolved_reset(rd, "execute this run command")
             except HTTPException as exc:
@@ -3825,7 +3825,7 @@ class RunCommandService:
                     str(detail.get("remediation") or (
                         "Observe the saved Replay operation before retrying this command.")),
                     retryable=exc.status_code >= 500))
-                return
+                return None, record
 
             observation = self._observe(rd)
             intent = self._find_intent(rd, command_id, record, observation)
@@ -3837,7 +3837,7 @@ class RunCommandService:
                     "the attached external finalize intent is missing or changed",
                     "do not retry automatically; inspect/repair the event log and command record",
                     retryable=False))
-                return
+                return None, record
             recorded_event_seq = record.get("event_seq")
             if recorded_event_seq is not None and (
                     intent is None or intent.seq != recorded_event_seq):
@@ -3846,7 +3846,7 @@ class RunCommandService:
                     "the durable command record points to a marked intent that is missing or changed",
                     "do not retry automatically; inspect/repair the event log and command record",
                     retryable=False))
-                return
+                return None, record
             # Once this command's marked intent is durable, never re-run state preflight during
             # recovery.  Its own fold may have cleared an approval gate or satisfied pause; treating
             # that changed state as a fresh submission would incorrectly turn a succeeded command
@@ -3866,7 +3866,7 @@ class RunCommandService:
                             "approval_state_changed",
                             "the approval request changed before the intent could be recorded",
                             "refresh the run and submit a new approval command", retryable=False))
-                        return
+                        return None, record
                 # Capture causality BEFORE folding state for the decision. In particular, an engine
                 # can complete an externally-appended finalize after `_decision` observes pending but
                 # before this worker continues; that run_finished must remain *after* the attach
@@ -3886,10 +3886,10 @@ class RunCommandService:
                     decision = "noop"
                 if decision == "reject":
                     self._terminal(path, record, "rejected", error=err)
-                    return
+                    return None, record
                 if decision == "noop":
                     self._terminal(path, record, "noop")
-                    return
+                    return None, record
             else:
                 decision = "already_appended"
             if decision == "append" and intent is None:
@@ -3902,7 +3902,7 @@ class RunCommandService:
                     if append_error is not None:
                         status = "failed" if append_error.get("retryable") else "rejected"
                         self._terminal(path, record, status, error=append_error)
-                        return
+                        return None, record
                 else:
                     store = EventStore(self._events_path(rd))
                 if event_type in {EV_APPROVAL_GRANTED, EV_SPEC_APPROVED}:
@@ -3917,7 +3917,7 @@ class RunCommandService:
                             "approval_state_changed",
                             "the approval state changed before the intent could be recorded",
                             "refresh the run and submit a new approval command", retryable=False))
-                        return
+                        return None, record
                 elif event_type == EV_RESTART:
                     # Restart is a compound lifecycle boundary. A finalize/reset/other control that
                     # wins after admission must not be silently crossed by a later pause+resume
@@ -3930,7 +3930,7 @@ class RunCommandService:
                             "restart_state_changed",
                             "the run changed before the restart intent could be recorded",
                             "refresh the run and submit a new restart command", retryable=False))
-                        return
+                        return None, record
                 elif event_type not in COLLABORATION_EVENTS:
                     intent = store.append(event_type, event_data)
                 record["baseline_seq"] = decision_baseline
@@ -3947,13 +3947,13 @@ class RunCommandService:
             observation = self._observe(rd)
             if self._postcondition(rd, record, observation):
                 self._succeeded(rd, path, record)
-                return
+                return None, record
             domain_error = (self._domain_failure(rd, record, observation)
                             if spec.engine_policy is not EnginePolicy.NO_SPAWN else None)
             if domain_error is not None:
                 self._clear_spawn_claim(rd, command_id)
                 self._terminal(path, record, "failed", error=domain_error)
-                return
+                return None, record
 
             liveness = self._engine_state(rd)
             if spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is None:
@@ -3961,10 +3961,10 @@ class RunCommandService:
                     path, record, "failed",
                     error=self._engine_unknown_error(
                         f"start a driver for {event_type}", retryable=True))
-                return
+                return None, record
             if spec.engine_policy is EnginePolicy.RESTART_AFTER_EXIT and liveness is False:
                 if not self._try_restart_claim(rd, path, record):
-                    return
+                    return None, record
             elif spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is False:
                 spawned_now = False
                 if self._recent_spawn_claim(rd):
@@ -3976,7 +3976,7 @@ class RunCommandService:
                     terminalized, pid = self._spawn_under_claim(
                         rd, path, record, command_id, restarting=False)
                     if terminalized:
-                        return
+                        return None, record
                     spawned_now = True
                     record["spawned_by_command"] = True
                     record["waiting_for_spawn"] = False
@@ -3999,7 +3999,7 @@ class RunCommandService:
                         if domain_error is not None:
                             self._clear_spawn_claim(rd, command_id)
                             self._terminal(path, record, "failed", error=domain_error)
-                            return
+                            return None, record
                         # Lock is startup evidence only. ENSURE_RUNNING stays executing until the
                         # exact command_ack arrives; finalize waits for finished + dead.
                         if self._engine_state(rd) is True:
@@ -4018,146 +4018,167 @@ class RunCommandService:
                         record["updated_at"] = time.time()
                         self._save(path, record)
 
-            sequence_ctx.__exit__(None, None, None)
-            sequence_held = False
+            return spec, record
 
+    def _monitor(self, rd: Path, path: Path, record: dict, command_id: str, spec) -> None:
+        """Watch for the postcondition until it arrives or the deadline expires (doc 25 SC-07).
+
+        Runs OUTSIDE the sequencer — it re-takes it only for the moments that must be serialized (a
+        replacement spawn, the terminal write). Entered only after `_admit` returned a spec, so every
+        precondition it would otherwise re-check has already been established.
+        """
+        # Re-derived, not threaded through: it is only ever used to NAME the operation in an error
+        # message, and `_admit` read it from this same record field.
+        event_type = str(record.get("event_type") or "")
+        observation = self._observe(rd)
+        if (spec.engine_policy is EnginePolicy.ENSURE_RUNNING
+                and self._postcondition(rd, record, observation)):
+            self._succeeded(rd, path, record)
+            return
+
+        # The baseline is the DOMAIN cursor, matching what the slide below compares against —
+        # seeding it from `latest_seq` would start the window ahead of every domain event whose
+        # seq a later control append had already passed, and the first real progress would then
+        # fail to slide.
+        if record.get("last_progress_seq") is None:
+            last_progress_seq = observation.max_non_control_seq
+        else:
+            last_progress_seq = int(record.get("last_progress_seq", -1))
+        while True:
+            self._heartbeat_execution(rd, command_id)
             observation = self._observe(rd)
-            if (spec.engine_policy is EnginePolicy.ENSURE_RUNNING
-                    and self._postcondition(rd, record, observation)):
+            if self._postcondition(rd, record, observation):
                 self._succeeded(rd, path, record)
                 return
+            domain_error = (self._domain_failure(rd, record, observation)
+                            if spec.engine_policy is not EnginePolicy.NO_SPAWN else None)
+            if domain_error is not None:
+                self._clear_spawn_claim(rd, command_id)
+                self._terminal(path, record, "failed", error=domain_error)
+                return
 
-            # The baseline is the DOMAIN cursor, matching what the slide below compares against —
-            # seeding it from `latest_seq` would start the window ahead of every domain event whose
-            # seq a later control append had already passed, and the first real progress would then
-            # fail to slide.
-            if record.get("last_progress_seq") is None:
-                last_progress_seq = observation.max_non_control_seq
-            else:
-                last_progress_seq = int(record.get("last_progress_seq", -1))
-            while True:
-                self._heartbeat_execution(rd, command_id)
-                observation = self._observe(rd)
-                if self._postcondition(rd, record, observation):
-                    self._succeeded(rd, path, record)
-                    return
-                domain_error = (self._domain_failure(rd, record, observation)
-                                if spec.engine_policy is not EnginePolicy.NO_SPAWN else None)
-                if domain_error is not None:
-                    self._clear_spawn_claim(rd, command_id)
-                    self._terminal(path, record, "failed", error=domain_error)
-                    return
+            now = time.time()
+            latest_seq = observation.latest_seq
+            liveness = self._engine_state(rd)
+            alive = liveness is True
+            if (alive and record.get("spawned_by_command")
+                    and not record.get("spawn_claim_released")):
+                self._clear_spawn_claim(rd, command_id)
+                record["spawn_claim_released"] = True
+            # Pause/finalize may legitimately wait through one long evaluation or wrap-up. A
+            # live lock or fresh event progress slides their observation deadline; an actually
+            # stalled/dead driver still reaches a terminal timeout.
+            # DOMAIN progress, not any append. Keying the slide on `latest_seq` counted CONTROL
+            # and collaboration events too — and card drops/comments deliberately bypass the
+            # active-driver gate, so while a finalize sat `executing` an operator who kept
+            # appending them repeatedly bumped `latest_seq` and extended this observation window
+            # against a stalled or dead driver that had made no finalize progress at all, bounded
+            # only by `absolute_deadline_at` (~20 min). `max_non_control_seq` is the signal the
+            # observation layer already builds for exactly this — it excludes CONTROL_EVENTS —
+            # and the driver-liveness half of the condition (`alive`) is untouched, so a live
+            # engine still slides its own deadline whether or not it has appended yet.
+            progress_seq = observation.max_non_control_seq
+            if ((record.get("postcondition") in {"paused_and_stopped", "finished_and_stopped"}
+                 or spec.engine_policy is not EnginePolicy.NO_SPAWN)
+                    and (alive or observation.has_domain_progress(last_progress_seq))):
+                last_progress_seq = progress_seq
+                record["last_progress_seq"] = progress_seq
+                # Never shrink a longer Popen→engine.lock lease installed above. Fresh progress
+                # extends a normal observation deadline, while an in-flight spawn keeps its full
+                # startup window even if this is the monitor's first pass.
+                record["deadline_at"] = max(
+                    float(record.get("deadline_at") or 0), now + self.command_timeout)
+                record["deadline_at"] = min(
+                    float(record.get("absolute_deadline_at") or record["deadline_at"]),
+                    float(record["deadline_at"]))
+                record["updated_at"] = now
+                self._save(path, record)
 
-                now = time.time()
-                latest_seq = observation.latest_seq
-                liveness = self._engine_state(rd)
-                alive = liveness is True
-                if (alive and record.get("spawned_by_command")
-                        and not record.get("spawn_claim_released")):
-                    self._clear_spawn_claim(rd, command_id)
-                    record["spawn_claim_released"] = True
-                # Pause/finalize may legitimately wait through one long evaluation or wrap-up. A
-                # live lock or fresh event progress slides their observation deadline; an actually
-                # stalled/dead driver still reaches a terminal timeout.
-                # DOMAIN progress, not any append. Keying the slide on `latest_seq` counted CONTROL
-                # and collaboration events too — and card drops/comments deliberately bypass the
-                # active-driver gate, so while a finalize sat `executing` an operator who kept
-                # appending them repeatedly bumped `latest_seq` and extended this observation window
-                # against a stalled or dead driver that had made no finalize progress at all, bounded
-                # only by `absolute_deadline_at` (~20 min). `max_non_control_seq` is the signal the
-                # observation layer already builds for exactly this — it excludes CONTROL_EVENTS —
-                # and the driver-liveness half of the condition (`alive`) is untouched, so a live
-                # engine still slides its own deadline whether or not it has appended yet.
-                progress_seq = observation.max_non_control_seq
-                if ((record.get("postcondition") in {"paused_and_stopped", "finished_and_stopped"}
-                     or spec.engine_policy is not EnginePolicy.NO_SPAWN)
-                        and (alive or observation.has_domain_progress(last_progress_seq))):
-                    last_progress_seq = progress_seq
-                    record["last_progress_seq"] = progress_seq
-                    # Never shrink a longer Popen→engine.lock lease installed above. Fresh progress
-                    # extends a normal observation deadline, while an in-flight spawn keeps its full
-                    # startup window even if this is the monitor's first pass.
-                    record["deadline_at"] = max(
-                        float(record.get("deadline_at") or 0), now + self.command_timeout)
-                    record["deadline_at"] = min(
-                        float(record.get("absolute_deadline_at") or record["deadline_at"]),
-                        float(record["deadline_at"]))
-                    record["updated_at"] = now
-                    self._save(path, record)
+            if spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is None:
+                # Preserve any extant spawn claim: an inaccessible lock may belong to the child
+                # we launched, so terminalize observably but never clear/retry into a duplicate.
+                self._terminal(
+                    path, record, "failed",
+                    error=self._engine_unknown_error(
+                        f"continue driving {event_type}", retryable=True))
+                return
 
-                if spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is None:
-                    # Preserve any extant spawn claim: an inaccessible lock may belong to the child
-                    # we launched, so terminalize observably but never clear/retry into a duplicate.
-                    self._terminal(
-                        path, record, "failed",
-                        error=self._engine_unknown_error(
-                            f"continue driving {event_type}", retryable=True))
-                    return
+            # Check the bounded absolute deadline before considering another Popen. A slow child
+            # owns its lease through this boundary; expiry must terminalize the command first,
+            # not launch a second child in the same monitor iteration.
+            absolute_deadline = float(record.get(
+                "absolute_deadline_at", record.get("deadline_at") or now))
+            if now >= min(float(record["deadline_at"]), absolute_deadline):
+                break
 
-                # Check the bounded absolute deadline before considering another Popen. A slow child
-                # owns its lease through this boundary; expiry must terminalize the command first,
-                # not launch a second child in the same monitor iteration.
-                absolute_deadline = float(record.get(
-                    "absolute_deadline_at", record.get("deadline_at") or now))
-                if now >= min(float(record["deadline_at"]), absolute_deadline):
-                    break
-
-                # A pre-existing engine can die before acknowledging this intent. Re-ensure exactly
-                # one driver under the same per-run sequencer; the spawn-inflight lease closes the
-                # Popen→engine.lock window for other command workers/processes.
-                if spec.engine_policy is EnginePolicy.RESTART_AFTER_EXIT and not alive:
-                    with self.sequence(rd):
-                        retry_observation = self._observe(rd)
-                        if self._postcondition(rd, record, retry_observation):
-                            self._succeeded(rd, path, record)
+            # A pre-existing engine can die before acknowledging this intent. Re-ensure exactly
+            # one driver under the same per-run sequencer; the spawn-inflight lease closes the
+            # Popen→engine.lock window for other command workers/processes.
+            if spec.engine_policy is EnginePolicy.RESTART_AFTER_EXIT and not alive:
+                with self.sequence(rd):
+                    retry_observation = self._observe(rd)
+                    if self._postcondition(rd, record, retry_observation):
+                        self._succeeded(rd, path, record)
+                        return
+                    retry_liveness = self._engine_state(rd)
+                    if retry_liveness is None:
+                        self._terminal(
+                            path, record, "failed",
+                            error=self._engine_unknown_error(
+                                "start the replacement run driver", retryable=True))
+                        return
+                    if retry_liveness is False:
+                        if not self._try_restart_claim(rd, path, record):
                             return
-                        retry_liveness = self._engine_state(rd)
-                        if retry_liveness is None:
-                            self._terminal(
-                                path, record, "failed",
-                                error=self._engine_unknown_error(
-                                    "start the replacement run driver", retryable=True))
+            elif spec.engine_policy is not EnginePolicy.NO_SPAWN and not alive:
+                with self.sequence(rd):
+                    retry_observation = self._observe(rd)
+                    if self._postcondition(rd, record, retry_observation):
+                        self._succeeded(rd, path, record)
+                        return
+                    retry_liveness = self._engine_state(rd)
+                    if retry_liveness is None:
+                        self._terminal(
+                            path, record, "failed",
+                            error=self._engine_unknown_error(
+                                f"restart a driver for {event_type}", retryable=True))
+                        return
+                    if retry_liveness is False and not self._recent_spawn_claim(rd):
+                        terminalized, pid = self._spawn_under_claim(
+                            rd, path, record, command_id, restarting=True)
+                        if terminalized:
                             return
-                        if retry_liveness is False:
-                            if not self._try_restart_claim(rd, path, record):
-                                return
-                elif spec.engine_policy is not EnginePolicy.NO_SPAWN and not alive:
-                    with self.sequence(rd):
-                        retry_observation = self._observe(rd)
-                        if self._postcondition(rd, record, retry_observation):
-                            self._succeeded(rd, path, record)
-                            return
-                        retry_liveness = self._engine_state(rd)
-                        if retry_liveness is None:
-                            self._terminal(
-                                path, record, "failed",
-                                error=self._engine_unknown_error(
-                                    f"restart a driver for {event_type}", retryable=True))
-                            return
-                        if retry_liveness is False and not self._recent_spawn_claim(rd):
-                            terminalized, pid = self._spawn_under_claim(
-                                rd, path, record, command_id, restarting=True)
-                            if terminalized:
-                                return
-                            record["spawned_by_command"] = True
-                            record["engine_pid"] = pid
-                            record["updated_at"] = time.time()
-                            self._save(path, record)
-                            startup_deadline = min(
-                                float(record.get("absolute_deadline_at") or time.time()),
-                                time.time() + self.startup_timeout)
-                            while time.time() < startup_deadline:
-                                self._heartbeat_execution(rd, command_id)
-                                startup_observation = self._observe(rd)
-                                if (self._postcondition(rd, record, startup_observation)
-                                        or self._engine_state(rd) is True):
-                                    self._clear_spawn_claim(rd, command_id)
-                                    record["spawn_claim_released"] = True
-                                    break
-                                time.sleep(self.poll_interval)
+                        record["spawned_by_command"] = True
+                        record["engine_pid"] = pid
+                        record["updated_at"] = time.time()
+                        self._save(path, record)
+                        startup_deadline = min(
+                            float(record.get("absolute_deadline_at") or time.time()),
+                            time.time() + self.startup_timeout)
+                        while time.time() < startup_deadline:
+                            self._heartbeat_execution(rd, command_id)
+                            startup_observation = self._observe(rd)
+                            if (self._postcondition(rd, record, startup_observation)
+                                    or self._engine_state(rd) is True):
+                                self._clear_spawn_claim(rd, command_id)
+                                record["spawn_claim_released"] = True
+                                break
+                            time.sleep(self.poll_interval)
 
-                time.sleep(self.poll_interval)
-            self._terminalize_expired(rd, path, record, command_id, spec)
+            time.sleep(self.poll_interval)
+        self._terminalize_expired(rd, path, record, command_id, spec)
+
+    def _execute(self, rd: Path, path: Path, initial: dict, *, claimed: bool) -> None:
+        record = self._load(path) or dict(initial)
+        command_id = str(record.get("id") or "")
+        if record.get("absolute_deadline_at") is None:
+            record["absolute_deadline_at"] = time.time() + self.max_observation_timeout
+        try:
+            if record.get("status") in TERMINAL_STATUSES:
+                return
+            spec, record = self._admit(rd, path, record, command_id)
+            if spec is not None:
+                self._monitor(rd, path, record, command_id, spec)
         except Exception as exc:  # noqa: BLE001 - worker failures must become observable records
             try:
                 self._terminal(path, record, "failed", error=_error(
@@ -4167,7 +4188,5 @@ class RunCommandService:
             except Exception:
                 pass
         finally:
-            if sequence_held and sequence_ctx is not None:
-                sequence_ctx.__exit__(None, None, None)
             if claimed:
                 self._release_execution(rd, command_id)
