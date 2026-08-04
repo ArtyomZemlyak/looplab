@@ -701,6 +701,11 @@ def _assemble_strategy(out: "_StrategyOut", *, source: str = "llm") -> Strategy:
     return strat
 
 
+# A private sentinel, not None: `None` is a LEGITIMATE `decide` result ("no strategy change"),
+# so it cannot double as "the parse failed" without collapsing the two outcomes.
+_RULE_FALLBACK = object()
+
+
 class LLMStrategist:
     """Structured-output meta-controller. Falls back to the rule baseline (and ultimately None) on
     any parse/transport failure, so a flaky local model never crashes the run."""
@@ -712,7 +717,7 @@ class LLMStrategist:
         self._rule = RuleStrategist(n_seeds=n_seeds)
 
     def decide(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
-        from looplab.core.parse import ParseError, parse_structured
+        from looplab.core.parse import forced_structured
         output_model = _strategy_output_model(ctx)
         messages = [
             # P8: the Strategist decides timeouts/parallelism/fidelity, so the hardware attention
@@ -722,12 +727,14 @@ class LLMStrategist:
                                + "\n\n" + _attention_points()},
             {"role": "user", "content": _strategist_brief(state, ctx)},
         ]
-        try:
-            out = parse_structured(self.client, messages, output_model, self.parser)
-        except BudgetExceeded:      # a hard budget stop must end the run, not degrade to the rule
-            raise
-        except (ParseError, Exception):  # noqa: BLE001 — never crash the run on a strategy call
-            return self._rule.decide(state, ctx)   # graceful fallback to deterministic heuristics
+        # No `nudge`: this is the PRIMARY call, not a forced re-emit after a failed one. The shared
+        # salvage (doc 25 AG-05) keeps the budget re-raise — a hard budget stop must end the run, not
+        # degrade to the rule — and everything else falls back to the deterministic heuristics.
+        out = forced_structured(
+            self.client, messages, output_model, self.parser,
+            on_fail=lambda _exc: _RULE_FALLBACK)
+        if out is _RULE_FALLBACK:
+            return self._rule.decide(state, ctx)
         return _assemble_strategy(out)
 
 

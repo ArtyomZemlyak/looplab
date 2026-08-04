@@ -236,14 +236,22 @@ class ToolUsingResearcher:
         # flat metric. `preflight_role_endpoints` (agents/preflight.py) is what STOPS that run; naming
         # the cause here is what makes the residual case (an endpoint that dies MID-run) diagnosable.
         # LLMResearcher's sibling fallback has recorded its `last` error this way all along.
-        try:
-            idea = parse_structured(
-                self.client, messages + [{"role": "user", "content": "Emit the Idea now."}],
-                IdeaEmission, self.parser).to_idea()
-        except ParseError as e:
+        from looplab.core.parse import forced_structured
+
+        def _degraded(e: BaseException) -> Idea:
             why = f"{cause or e}"[:300]
-            idea = Idea(operator="draft", params={},
+            return Idea(operator="draft", params={},
                         rationale=f"fallback (agent parse failed: {why})")
+
+        # Through the shared salvage (doc 25 AG-05), which widens what degrades here from `ParseError`
+        # alone to everything-but-`BudgetExceeded`. That matches the contract `propose` above already
+        # states — "`_fallback` is itself resilient … so it can't re-raise the transport error" — which
+        # the narrower catch satisfied only because `parse_structured` converts `LLMError` into a
+        # `ParseError` on its way out. `_fallback` is ALSO the `drive_tool_loop(fallback=…)` callback,
+        # where a raise has no handler at all, so relying on that conversion was the fragile half.
+        idea = forced_structured(
+            self.client, messages, IdeaEmission, self.parser,
+            nudge="Emit the Idea now.", then=lambda out: out.to_idea(), on_fail=_degraded)
         return _clamp_fill(idea, self.bounds)
 
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:

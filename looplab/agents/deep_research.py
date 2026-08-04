@@ -222,18 +222,19 @@ class DeepResearcher:
             return memo
 
     def _forced(self, messages: list[dict], memo: ResearchMemo, sources: list[dict]) -> ResearchMemo:
-        from looplab.core.parse import ParseError, parse_structured
-        try:
-            out = parse_structured(
-                self.client, messages + [{"role": "user", "content": "Emit the memo now."}],
-                _MemoOut, self.parser)
-            return self._assemble(out, memo, sources)
-        except BudgetExceeded:      # a hard budget stop must end the run, not be swallowed as a memo
-            raise
-        except (ParseError, Exception):  # noqa: BLE001
+        from looplab.core.parse import forced_structured
+
+        def _no_memo(_exc: BaseException) -> ResearchMemo:
             memo.summary = "(deep research produced no memo)"
             memo.sources = sources
             return memo
+
+        # The shared salvage (doc 25 AG-05) keeps the budget re-raise this site used to state itself:
+        # a hard budget stop must end the run, not be swallowed as an empty memo.
+        return forced_structured(
+            self.client, messages, _MemoOut, self.parser,
+            nudge="Emit the memo now.",
+            then=lambda out: self._assemble(out, memo, sources), on_fail=_no_memo)
 
 
 def _arg_label(args: dict) -> str:

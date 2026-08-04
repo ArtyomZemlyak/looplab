@@ -3844,6 +3844,43 @@ loudly.
 
 *Recommendation:* Add one helper in tool_loop or core.parse — forced_structured(client, messages, model_cls, parser, nudge, on_fail) — keeping each caller's nudge wording and default factory as arguments (prompt strings stay byte-identical); the four sites shrink to one call each.
 
+*Resolution (2026-08-04) — three of the four; the fourth is a different shape and keeps its own.*
+
+`core/parse.py::forced_structured(client, messages, model, parser, *, nudge, then, on_fail)`. The
+agentic Researcher's forced emit, the deep Researcher's forced memo and the Strategist's
+parse-or-rule decision now each call it once. Nudge wording stays a caller argument — prompt strings
+are contracts and must not drift into a shared default — and the Strategist passes none at all,
+because its call is the PRIMARY one rather than a forced re-emit after a failure.
+
+`LLMResearcher.propose` is NOT migrated. It is a two-attempt retry LOOP that folds the parse error
+back into the prompt before re-asking, and that re-prompt is the point: without it the retry is
+byte-identical and deterministically re-fails. Collapsing it into a single forced parse would delete
+the only thing that makes the second attempt worth making.
+
+`then` runs INSIDE the guarded region, because two callers transform the parsed model there
+(`.to_idea()`, `_assemble(...)`) and a transform that raises must degrade with everything else rather
+than escape past the very salvage that exists to keep the run alive.
+
+**The exception posture is what actually justified the extraction.** It depends on a fact visible at
+no call site: `BudgetExceeded` is deliberately not an `LLMError`, so unlike a transport failure it
+passes straight through `parse_structured` instead of arriving as a `ParseError`. A hard budget stop
+must therefore END the run, while everything else degrades. Two of the three sites re-stated that
+re-raise; the third (`ToolUsingResearcher._fallback`) caught only `ParseError` and got the same
+effect by accident, because `parse_structured` converts `LLMError` on its way out. That accident was
+load-bearing in the wrong place: `_fallback` is also the `drive_tool_loop(fallback=…)` callback, where
+a raise has no handler at all. It now degrades on everything but a budget stop, which is the contract
+`propose`'s own comment already claimed for it.
+
+The Strategist needed a private `_RULE_FALLBACK = object()` sentinel rather than `None`: `None` is a
+LEGITIMATE `decide` result ("no strategy change"), so it cannot double as "the parse failed" without
+collapsing two different outcomes.
+
+`tests/test_parse_llm.py` 20 → 26. Teeth-tested against 6 breaks — a budget stop degrading, the
+transform escaping the guard, the nudge always appended, the sentinel collapsed to `None`, and a site
+parsing directly again — all biting. (The transform break had to be written twice: the first attempt
+left the second `try` under the original handlers, so it preserved the semantics it was meant to
+break and reported a false green.)
+
 #### AG-06 · LOW · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **The 4-line 'except BudgetExceeded: raise / except Exception: fallback' idiom is copy-pasted at 9+ sites in the package**

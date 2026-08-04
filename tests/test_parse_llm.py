@@ -179,3 +179,100 @@ def test_coerce_unwraps_pep604_optional():
     assert _coerce_value(3.9, int | None) == 4             # PEP 604 spelling (was skipped before the fix)
     assert _coerce_value(None, int | None) is None
     assert _coerce_value("true", bool | None) is True
+
+
+# --- one forced-structured salvage (doc 25 AG-05) -----------------------------------------------
+#
+# Three agent roles each wrote out "force a parse, degrade to a safe default". The exception posture
+# is the part that had to be right in all of them and depends on a fact visible at none of them.
+
+class _Out(Idea):
+    pass
+
+
+def _forced(client, **kwargs):
+    from looplab.core.parse import forced_structured
+
+    return forced_structured(
+        client, [{"role": "user", "content": "go"}], Idea, "tool_call", **kwargs)
+
+
+def test_a_budget_stop_ends_the_run_instead_of_degrading():
+    """`BudgetExceeded` is deliberately NOT an `LLMError`, so unlike a transport failure it passes
+    straight through `parse_structured` rather than arriving as a `ParseError`. If the salvage caught
+    it, a hard budget stop would silently become a fallback Idea / an empty memo / a rule decision,
+    and the run would keep spending."""
+    from looplab.core.errors import LLMError
+
+    assert not issubclass(BudgetExceeded, LLMError), (
+        "if this ever changes, every salvage site degrades on a budget stop")
+    with pytest.raises(BudgetExceeded):
+        _forced(FakeClient(tool=[BudgetExceeded("stop")]), on_fail=lambda _e: "DEGRADED")
+
+
+@pytest.mark.parametrize("failure", [
+    ParseError("unparseable"),
+    RuntimeError("transport died"),
+    ValueError("weird"),
+])
+def test_every_other_failure_degrades_to_the_callers_default(failure):
+    seen = []
+    out = _forced(FakeClient(tool=[failure]), on_fail=lambda e: seen.append(e) or "DEGRADED")
+    assert out == "DEGRADED" and len(seen) == 1
+
+
+def test_a_transform_that_raises_degrades_rather_than_escaping_the_salvage():
+    """`then` runs INSIDE the guarded region on purpose: two callers transform the parsed model there
+    (`.to_idea()`, `_assemble(...)`), and a transform that blows up must not escape past the very
+    salvage that exists to keep the run alive."""
+    client = FakeClient(tool=[{"operator": "draft", "params": {"x": 1.0}, "rationale": "r"}])
+    out = _forced(client, then=lambda _o: (_ for _ in ()).throw(TypeError("bad")),
+                  on_fail=lambda _e: "DEGRADED")
+    assert out == "DEGRADED"
+
+
+def test_the_nudge_is_appended_as_a_trailing_user_turn_only_when_given():
+    seen: list[list[dict]] = []
+
+    class _Recorder(FakeClient):
+        def complete_tool(self, messages, json_schema):
+            seen.append(list(messages))
+            return {"operator": "draft", "params": {}, "rationale": "r"}
+
+    _forced(_Recorder(), nudge="Emit the Idea now.", on_fail=lambda _e: None)
+    assert seen[-1][-1] == {"role": "user", "content": "Emit the Idea now."}
+
+    _forced(_Recorder(), on_fail=lambda _e: None)
+    assert seen[-1] == [{"role": "user", "content": "go"}], "no nudge must mean no extra turn"
+
+
+def test_the_three_single_parse_salvages_share_the_helper():
+    """The retry LOOP in `LLMResearcher.propose` is deliberately NOT one of them: it folds the parse
+    error back into the prompt and re-asks, which is a different shape, and collapsing it would lose
+    the error-feedback turn that stops the retry being byte-identical (and deterministically
+    re-failing)."""
+    import inspect
+    import textwrap
+
+    from looplab.agents.agent import ToolUsingResearcher
+    from looplab.agents.deep_research import DeepResearcher
+    from looplab.agents.strategist import LLMStrategist
+
+    for owner, name in ((ToolUsingResearcher, "_fallback"), (DeepResearcher, "_forced"),
+                        (LLMStrategist, "decide")):
+        source = textwrap.dedent(inspect.getsource(getattr(owner, name)))
+        assert "forced_structured(" in source, f"{owner.__name__}.{name} left the shared salvage"
+        assert "except BudgetExceeded" not in source, (
+            f"{owner.__name__}.{name} re-states the budget posture the helper owns")
+        assert "parse_structured(" not in source, f"{owner.__name__}.{name} still parses directly"
+
+    loop = textwrap.dedent(inspect.getsource(LLMResearcher.propose))
+    assert "could not be parsed" in loop, "the retry loop lost its error-feedback re-prompt"
+
+
+def test_the_strategist_keeps_none_distinguishable_from_a_failed_parse():
+    """`None` is a LEGITIMATE `decide` result — "no strategy change" — so it cannot double as "the
+    parse failed" without collapsing two different outcomes into one."""
+    from looplab.agents import strategist as strategist_module
+
+    assert strategist_module._RULE_FALLBACK is not None
