@@ -78,6 +78,15 @@ _PIP_NAME: dict[str, str] = {
     "einops": "einops",
     "transformers": "transformers",
     "tokenizers": "tokenizers",
+    # Retrieval/embedding stack. Added 2026-08-04 after a dense-retrieval repo task hit
+    # `No module named 'sentence_transformers'` and the engine treated a mainstream package as a
+    # code bug rather than an install — the agent then had no way forward, because the import sat
+    # in a `protect`ed file it could not edit. `faiss` maps to the CPU wheel on purpose: it is the
+    # one that installs everywhere, and a GPU build is a deliberate environment choice, not
+    # something to guess from a traceback.
+    "sentence_transformers": "sentence-transformers",
+    "faiss": "faiss-cpu",
+    "evaluate": "evaluate",
     "datasets": "datasets",
     "accelerate": "accelerate",
     "tensorflow": "tensorflow",

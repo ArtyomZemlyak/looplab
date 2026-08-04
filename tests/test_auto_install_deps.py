@@ -70,6 +70,20 @@ def test_is_installable_allowlist_and_pip_name_mapping():
     assert not deps.is_installable("definitely_not_a_real_module")
 
 
+def test_the_retrieval_stack_is_installable_not_read_as_a_code_bug():
+    """A dense-retrieval repo task imports these, and an off-list name is treated as a CODE BUG, not
+    an install — so the node fails and the agent has no way forward when (as in the real testbed) the
+    import sits in a `protect`ed file it cannot edit. Measured 2026-08-04: a rubert task died on
+    `No module named 'sentence_transformers'` for exactly this reason.
+
+    `faiss` maps to the CPU wheel deliberately: it is the build that installs everywhere, and a GPU
+    build is an environment decision rather than something to infer from a traceback."""
+    for module in ("sentence_transformers", "faiss", "evaluate"):
+        assert deps.is_installable(module), f"{module} would be read as a code bug"
+    assert deps.pip_package("sentence_transformers") == "sentence-transformers"
+    assert deps.pip_package("faiss") == "faiss-cpu"
+
+
 # ----------------------------------------------------------------- engine: install-then-rerun
 class _MissingLibThenInstalled:
     """First eval raises ModuleNotFoundError for a 'known' lib; once the injected installer drops a
