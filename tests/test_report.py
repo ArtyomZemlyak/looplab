@@ -1635,11 +1635,21 @@ def test_report_worker_rejects_replaced_generation_before_client_creation(tmp_pa
     """A queued report for an archived generation may neither spend nor write into its replacement."""
     from looplab.events.eventstore import EventStore
 
+    import threading
+
     rd = _seed_finished_run(tmp_path)
     app = make_app(tmp_path)
     created = []
+    # Only THIS request's thread. `make_llm_client` is patched on the shared
+    # `looplab.serve.server` module, so any background worker another test left running in this
+    # process resolves the patched name too — and swallows the AssertionError into its own
+    # never-raise handler, leaving a stray entry here. That made this test fail roughly one full-suite
+    # run in two while the property it actually asserts (this refresh must not build a client) held.
+    caller = threading.get_ident()
 
     def forbidden_client(_settings, **_kw):
+        if threading.get_ident() != caller:
+            raise AssertionError("not this request's client")   # a stray worker's, not ours
         created.append(True)
         raise AssertionError("a stale generation must be rejected before client construction")
 

@@ -260,7 +260,7 @@ def test_deterministic_cache_evicts_least_recently_used_instead_of_growing_forev
 
     c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", temperature=0,
                                    stream=False, cache=True)
-    c._cache_max = 4
+    c._cache.max_entries = 4
     calls = []
 
     def request(payload, _use_stream):

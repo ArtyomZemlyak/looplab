@@ -1928,24 +1928,39 @@ return `None` and read as "retry, not stalled". Teeth-tested against 15 breaks, 
 The pre-existing end-to-end `_post` tests in `test_openai_client.py` are unchanged and still pass —
 they are the behaviour-preservation evidence.
 
-**Deliberately NOT done, with reasons:**
+*Completed (2026-08-04) — the two remaining recommendations.*
 
-* *"a retry-policy table keyed on exception type"* — kept as an ordered `isinstance` chain. A dict
-  keyed on type cannot express the ladder's two load-bearing properties: the order (a
-  `stream_options` rejection matches `_is_reasoning_reject`'s generic keys, so reasoning must be
-  checked second) and subclass dispatch (`APITimeoutError` must hit the `APIConnectionError` branch,
-  `RateLimitError`/`InternalServerError` share one). A table would need an ordered list of
-  `(type, handler)` pairs — the chain, spelled with more indirection.
-* *"move the cache into a small `_ResponseCache` class"* — the accessors already take the cache
-  bookkeeping out of `_post`, which is what the finding measured. A wrapper class would have to
-  re-expose `__len__`/`__setitem__`/`__contains__`/`is None` to keep its existing callers working
-  (`test_openai_client.py`, `test_phase5_scale.py`, `test_llm_broker.py` all reach into `_cache` /
-  `_cache_max` directly), leaving a dict-shaped object around a dict.
-* The finding also names `_bounded_create` + its inflight/teardown accounting as "another ~120
-  lines". Measured at 92 lines today and left alone: unlike `_post` it is ONE concern (bounded
-  creation with pool teardown under concurrent siblings), so splitting it would scatter the lock
-  choreography rather than separate concerns. `__init__` (123 lines) is likewise config
-  normalization only.
+**The retry-policy table now exists**: `OpenAICompatibleClient._RETRY_POLICY`, an ORDERED tuple of
+`(types, handler-name)` pairs dispatched top-down by `_retry_or_raise`, with each former ladder rung
+its own `_policy_*` method. A list rather than a dict because both properties a dict would lose are
+load-bearing — SUBCLASS dispatch (`APITimeoutError` must reach the `APIConnectionError` handler;
+`RateLimitError`/`InternalServerError` share one) and ORDER (a `stream_options` rejection also
+matches `_is_reasoning_reject`'s generic keys, so BadRequest must be tried before anything that could
+claim it). The tail entry is `(None, "_policy_unclassified")`: whatever the SDK grows next still
+becomes a clean `LLMError`, because only `LLMError` triggers the role layer's retry+fallback. The
+table is registry-guarded in BOTH directions, the discipline CLAUDE.md applies to the other
+duck-typed seams — every declared handler must exist, and every `_policy_*` method must be declared,
+so a handler renamed out of the table is a red test rather than a rung that silently stops running.
+
+**The cache is a class**: `_ResponseCache` owns the `OrderedDict`, its bound (`max_entries`), the
+lock that pairs each read-modify-write, and the deep copies in BOTH directions. The earlier objection
+— that a wrapper would have to re-expose a dict surface for its callers — was a reason to update six
+test call sites, not a reason to leave three loose attributes on the client. It exposes `get` (copy +
+recency bump), `put` (copy + evict), `peek` (the stored entry, no copy, no bump — so a test's own
+look cannot change which entry the next eviction takes) and `__len__`/`__contains__`/`__iter__`.
+`_cache_lock` and `_cache_max` are gone from the client; `self._cache is None` still means caching is
+disabled.
+
+Six extra tests cover the class directly (both copy directions, a miss answering `None` rather than
+raising, `peek` not refreshing recency) and four cover the table (order, catch-all tail, the two-way
+registry, and the dispatcher holding no policy of its own). The teeth harness grew 15 → 23 breaks,
+all biting.
+
+**Still deliberately NOT done:** the finding also names `_bounded_create` + its inflight/teardown
+accounting as "another ~120 lines". Measured at 92 lines today and left alone — unlike `_post` it is
+ONE concern (bounded creation with pool teardown under concurrent siblings), so splitting it would
+scatter the lock choreography rather than separate concerns. `__init__` (123 lines) is likewise
+config normalization only, and is not named by the finding.
 
 #### CO-06 · MEDIUM · duplication · effort: small
 

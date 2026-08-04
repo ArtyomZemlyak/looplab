@@ -113,7 +113,7 @@ def test_llm_cache_serves_stored_body(monkeypatch):
 
     payload = {"model": "m", "messages": [{"role": "user", "content": "q"}], "temperature": 0}
     ck = c._cache_key(payload)
-    c._cache[ck] = body                       # pre-seed the cache
+    c._cache.put(ck, body)                    # pre-seed the cache
     monkeypatch.setattr(c, "_sdk_chat", fake_request)
     out = c._post(payload)
     # served from cache, no network — and returned as a COPY (mutating it must not corrupt the
@@ -124,7 +124,7 @@ def test_llm_cache_serves_stored_body(monkeypatch):
         "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0,
     }
     out["choices"][0]["message"]["content"] = "MUTATED"
-    assert c._cache[ck] == body
+    assert c._cache.peek(ck) == body          # `peek`: the STORED entry, no copy, no bump
 
 
 # --------------------------------------------------------------------------- #
