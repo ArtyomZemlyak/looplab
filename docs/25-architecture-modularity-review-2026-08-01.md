@@ -3878,6 +3878,39 @@ against 13 breaks, all biting.
 
 *Recommendation:* Make RepoTools a thin adapter over RepoScoutTools configured with named_roots (renaming the three tool names in specs and keeping its .git-internals filter), or delete it and expose RepoScoutTools with the repo_* aliases to the Researcher. One walker, one secret gate, one budget.
 
+*Evidence RE-VERIFIED (2026-08-04); measured, NOT started.* The gap the finding names is real and the
+drift is one-directional — `RepoScoutTools` is uniformly the stricter walker, so every difference is a
+guard `RepoTools` LACKS:
+
+* `repo_grep` walks with no file budget at all, where `_grep` stops after 4 000 files and says so;
+* it descends `_SKIP_DIRS` and hidden directories that `_grep` prunes (`node_modules`, `.mypy_cache`,
+  venvs, checkpoints);
+* it has no per-file size skip, where `_grep` skips anything over 2 MB;
+* it caps at 40 hits with no receipt, where `_grep` clamps to ≤200 and emits `(capped at N hits)` —
+  so an overflowing `repo_grep` reads as an exhaustive search.
+
+`repo_read` already delegates (`RepoScoutTools._paginate`), which is why the M9 full-file-then-paginate
+fix reached it.
+
+Not started rather than half-applied, because the adapter is not the mechanical rename the
+recommendation implies and this is a path-restriction surface:
+
+1. **Glob semantics differ.** `RepoTools.repo_list` matches a bare `*.py` RECURSIVELY (its
+   `glob_files` walks); `RepoScoutTools._find_files` runs a pathlib glob, where `*.py` is one level.
+   An adapter has to rewrite the pattern (`*.py` → `**/*.py`) and get the "already recursive / already
+   has a separator" cases right, or the Researcher silently stops seeing subdirectory files.
+2. **Root selection differs.** `_grep` and `_find_files` each take ONE root; `repo_grep` searches
+   every mount, so the adapter loops and merges — including merging each root's own `(capped at N)`
+   receipt, or the merged answer claims completeness the parts did not.
+3. **`<repo>/<path>` resolution is RepoTools-only.** `RepoScoutTools._resolve` tries `default_root /
+   path` then CWD; it has no notion of a named-mount prefix, so `a/x.py` under mounts `a` and `b`
+   does not resolve through it. `RepoTools._resolve` has to survive the adapter, which is exactly the
+   piece a "thin adapter" was supposed to delete.
+
+The existing tests pin the output SHAPE (`"model.py:1"`, `"a/x.py:1"`, `"pkg/util.py"`), and
+`_disp` with `named_roots=[(name, path), …]` does reproduce it — so the target design is sound; it is
+the three points above that make this a real change with its own verification rather than a rename.
+
 #### TO-07 · MEDIUM · inconsistency · effort: medium
 
 **MemoryTools and CrossRunTools expose the same lessons.jsonl with contradictory scoping policy and two different tokenizers**
