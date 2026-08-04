@@ -132,13 +132,25 @@ class AppState:
         self._trace_view_lock = threading.Lock()
         self.reports_dir = root / "reports"
         # Late-bound route callables (set by their owning router's build_router; see module docstring).
+        # `list_runs_fn` remains for the LIVE-fact overlay only (the runs router's own route body,
+        # which probes engine liveness); the two SIDE-EFFECT-FREE projections are methods below
+        # (doc 25 SR-12), so a reader no longer depends on which build_router calls have run.
         self.list_runs_fn: Optional[Callable[[], list]] = None
         # The membership-only projection of the same list: run_id -> task/project/supertask, with
         # NO engine-liveness lock probe and NO durable-resume reconciler. Scope reports need only
         # those columns, and calling the full handler for them made a report READ probe every run's
         # lock and potentially SPAWN an engine process.
-        self.list_runs_membership_fn: Optional[Callable[[], list]] = None
         self.list_tasks_fn: Optional[Callable[[], dict]] = None
+
+    def run_summaries(self) -> list:
+        """The mtime-cached per-run fold summaries, WITHOUT the live-fact overlay (doc 25 SR-12)."""
+        from looplab.serve.run_projections import run_summaries
+        return run_summaries(self)
+
+    def run_membership(self) -> list:
+        """Only the columns `reports._scope_run_ids` joins on. Side-effect free by construction."""
+        from looplab.serve.run_projections import run_membership
+        return run_membership(self)
 
     # ------------------------------------------------------------------ helpers
     def run_dir(self, run_id: str) -> Path:

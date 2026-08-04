@@ -212,6 +212,7 @@ _LAYOUT = {
     "roles": "agents",
     "run_commands": "serve",
     "run_files": "serve",
+    "run_projections": "serve",   # the run-list projections AppState now owns (doc 25 SR-12)
     "run_deletion": "core",
     "run_reset": "core",
     "run_tools": "tools",

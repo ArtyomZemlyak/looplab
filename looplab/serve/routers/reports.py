@@ -71,7 +71,7 @@ def build_router(srv) -> APIRouter:
         # a per-run engine-liveness lock probe and the best-effort resume reconciler — which can
         # SPAWN an engine process — so every scope-report GET (the staleness check included) was
         # paying for live facts it never reads, and mutating the workspace to get them.
-        summaries = (srv.list_runs_membership_fn or srv.list_runs_fn)()
+        summaries = srv.run_membership()   # a real method, not a build_router side effect
         if scope_type == "task":
             return [s["run_id"] for s in summaries if s.get("task_id") == scope_id]
         if scope_type == "supertask":
