@@ -2453,6 +2453,37 @@ in the spine. Two source-scanning guards elsewhere were re-pointed at `_monitor`
 (`test_run_command_service.py`'s domain-progress slide assertion) rather than deleted. Teeth harness
 12 → 14 breaks, all biting.
 
+*Regression found and fixed (2026-08-04) — the two-value return became a contract, and one exit
+missed it.*
+
+Turning `_execute`'s inline admission into a function that RETURNS made every exit part of a tuple
+contract the compiler does not check. One of the eighteen exits kept its bare `return`: the
+ENSURE_RUNNING success inside the admission startup poll loop, reached whenever the engine this
+command started folds the intent and acks before the short startup window elapses — the fast local
+case. It handed `None` to `spec, record = self._admit(...)`, which raised `TypeError`, which the
+spine's catch-all recorded as `command_worker_failed` OVER the `succeeded` status that exit had just
+written. It surfaced as an intermittent full-suite failure in
+`test_monitor_reensures_dead_preexisting_driver_and_heartbeats_long_pause` (an operator flipping the
+driver dead between the intent append and the liveness check takes exactly this path), which is why
+it read as a wall-clock flake rather than as the logic bug it was.
+
+Two fixes, and the second is the one that generalizes:
+
+* `return None, record` at that exit (landed independently and concurrently as `f6f9fe41`, whose
+  comment is the one in the tree), plus an AST guard that EVERY `ast.Return` in `_admit` is a
+  2-tuple — so the next exit added to the admission phase cannot repeat this.
+* The spine's crash handler re-reads the record before writing. A record that is already terminal on
+  disk is the durable answer and is left alone (this handler exists to make a crash observable, never
+  to demote a command whose effect landed), and a genuine crash is now reported against what
+  admission PERSISTED, so `event_seq`/`baseline_seq` survive — a failure record that dropped them
+  reads as a command that never appended an intent, the one state operators are told not to
+  auto-retry.
+
+`tests/test_command_worker_spawn_phases.py` 23 → 28. The admission case is driven at BOTH altitudes:
+once at the phase boundary, where the tuple contract actually lives and a bare `return` raises before
+anything has been re-read, and once through the whole spine, because the crash guard would otherwise
+mask exactly this regression end-to-end. Teeth harness 14 → 21 breaks, all biting.
+
 #### SC-08 · MEDIUM · other · effort: small — **RESOLVED (2026-08-02)**
 
 **Unresolved embedded review marker acknowledging an O(events) full-log read on the per-command append path**

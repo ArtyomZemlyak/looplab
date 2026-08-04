@@ -241,3 +241,131 @@ def test_the_sequencer_is_held_by_the_admission_phase_alone():
 
     spine = textwrap.dedent(inspect.getsource(RunCommandService._execute))
     assert "__enter__" not in spine and "sequence_held" not in spine
+
+
+# --- the admission phase's return contract ---------------------------------------------------
+#
+# `_execute` unpacks `spec, record = self._admit(...)`. That makes every exit from the admission
+# phase part of a two-value CONTRACT, and the split introduced one exit that forgot it (below).
+
+def test_every_admission_exit_returns_the_two_value_contract():
+    """A bare `return` inside `_admit` does not end the command — it hands `None` to the caller's
+    tuple unpacking, which raises TypeError, which the spine's catch-all turns into
+    `command_worker_failed` written OVER the terminal status that exit had just recorded. The
+    ENSURE_RUNNING success inside the startup poll loop shipped that way: a spawned engine that
+    acked fast enough reported a succeeded command as failed."""
+    for node in ast.walk(_body(RunCommandService._admit)):
+        if isinstance(node, ast.Return):
+            shape = "bare" if node.value is None else ast.dump(node.value)[:40]
+            assert isinstance(node.value, ast.Tuple) and len(node.value.elts) == 2, (
+                f"`_admit` line {node.lineno} returns {shape}, not (spec, record)")
+
+
+def _ensure_running_record(svc, rd, command_id=COMMAND_ID):
+    """The route's own pre-admission record for an ENSURE_RUNNING command.
+
+    Deliberately carries NO `event_seq`: `_admit` is what appends the marked intent, and the spawn
+    ladder under test runs only on that first pass. `deadline_at` must be in the future or the
+    startup poll loop below is skipped entirely and the `else` clause declares a slow start."""
+    import time
+
+    path = svc._path(rd, command_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {"id": command_id, "status": "executing", "event_type": "set_strategy",
+              "postcondition": "engine_ack", "data": {"strategy": {"policy": "mcts"}},
+              "deadline_at": time.time() + 5.0, "updated_at": time.time()}
+    svc._save(path, record)
+    return path, record
+
+
+def _acking_service(tmp_path):
+    """A service whose spawned "engine" folds the intent and acks IMMEDIATELY — the fast local case,
+    and the only way to reach admission's ENSURE_RUNNING success exit inside the startup window."""
+    seen: dict = {}
+    calls: list = []
+
+    def _spawn(_args, **_kwargs):
+        calls.append(_args)
+        store = EventStore(seen["rd"] / "events.jsonl")
+        intent = next(event for event in reversed(store.read_all())
+                      if (event.data or {}).get("_command_id"))
+        store.append("command_ack", {"command_id": (intent.data or {})["_command_id"],
+                                     "event_seq": intent.seq})
+        return 4242
+
+    svc, rd = _service(tmp_path, spawn=_spawn, alive=False)
+    seen["rd"] = rd
+    return svc, rd, calls
+
+
+def test_admission_returns_the_pair_when_its_spawned_engine_acks_at_once(tmp_path):
+    """Driven at the phase boundary, because that is where the contract lives: the caller UNPACKS
+    this. A bare `return` raises TypeError right here, before any record has been re-read."""
+    import time
+
+    svc, rd, calls = _acking_service(tmp_path)
+    path, record = _ensure_running_record(svc, rd)
+    record["absolute_deadline_at"] = time.time() + svc.max_observation_timeout
+
+    spec, admitted = svc._admit(rd, path, dict(record), COMMAND_ID)
+
+    assert spec is None, "admission terminalized, so there is nothing left for the monitor to watch"
+    assert admitted is not None
+    # The DURABLE status, not `admitted["status"]`: `_terminal` writes a copy and deliberately leaves
+    # the caller's dict alone, so every terminalizing exit returns a record still reading "executing".
+    assert svc._load(path)["status"] == "succeeded", svc._load(path)
+    assert len(calls) == 1, calls
+
+
+def test_admission_spawn_that_acks_inside_the_startup_window_succeeds(tmp_path):
+    """And the same case through the whole spine: the durable record an operator polls must read
+    `succeeded`, not the worker's own crash report written over it."""
+    svc, rd, calls = _acking_service(tmp_path)
+    path, record = _ensure_running_record(svc, rd)
+
+    svc._execute(rd, path, dict(record), claimed=False)
+
+    final = svc._load(path)
+    assert final["status"] == "succeeded", final
+    assert final["error"] is None, final
+    assert len(calls) == 1, calls
+
+
+def test_a_worker_crash_never_overwrites_the_durable_terminal_status(tmp_path):
+    """The spine's catch-all exists to make a worker crash OBSERVABLE, not to re-decide an outcome
+    that is already durable. It holds the pre-admission copy of the record, so writing it blind
+    demotes a command whose effect actually landed."""
+    svc, rd = _service(tmp_path)
+    path, record = _record(svc, rd)
+
+    def _admit_then_crash(_rd, _path, current, _command_id):
+        svc._succeeded(_rd, _path, current)
+        raise RuntimeError("boom")
+
+    svc._admit = _admit_then_crash
+    svc._execute(rd, path, dict(record), claimed=False)
+
+    final = svc._load(path)
+    assert final["status"] == "succeeded", final
+    assert final["error"] is None, final
+
+
+def test_a_worker_crash_reports_failure_against_the_admitted_record(tmp_path):
+    """And when the crash IS the outcome, it must be recorded on what admission persisted.
+    `event_seq`/`baseline_seq` are how `/retry` and reconciliation find the marked intent; a
+    failure record that dropped them reads as a command whose intent was never appended, which is
+    the one state the operator is told never to retry automatically."""
+    svc, rd = _service(tmp_path)
+    path, record = _record(svc, rd)
+
+    def _admit_then_crash(_rd, _path, current, _command_id):
+        svc._save(_path, {**current, "event_seq": 7, "baseline_seq": 3})
+        raise RuntimeError("boom")
+
+    svc._admit = _admit_then_crash
+    svc._execute(rd, path, dict(record), claimed=False)
+
+    final = svc._load(path)
+    assert final["status"] == "failed", final
+    assert final["error"]["code"] == "command_worker_failed", final
+    assert (final.get("event_seq"), final.get("baseline_seq")) == (7, 3), final
