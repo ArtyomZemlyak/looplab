@@ -2298,6 +2298,27 @@ rather than sitting open behind a status note.
 
 *Recommendation:* Extract the common capability-store core (digest, TTL validation, tombstone semantics, atomic publish, resolve) and have both stores parameterize it; ShareStore then inherits cross-process safety for free.
 
+*Evidence RE-VERIFIED (2026-08-03), not yet fixed.* `ShareStore` has grown from the 122 lines the
+review measured to 484 (`serve/assistant.py:935-1419`) — a peer hardened it substantially with
+`_safe_dir_locked`, `_safe_record_path_locked`, `_validated_record`, `_prune_locked` and
+`revoke_token`. That made it worth checking whether the finding had aged out before acting on it.
+
+It has not. The specific gap the finding names is intact:
+
+* `ShareStore.__init__` holds `threading.Lock()` and nothing else — no cross-process exclusion, so
+  two uvicorn workers can still interleave `revoke_session`'s read-modify-write.
+* `ReviewStore` acquires `_interprocess_lock` (`serve/reviews.py:211,220`) on top of a per-path
+  process lock, and reserves ids with `O_EXCL`.
+
+Both remain one-file-per-capability bearer-token stores with sha256 `token_hash`, TTL bounds,
+`revoked_at` tombstones, `public()` views that strip the digest, and constant-time `resolve` — the
+same concept, still with materially different guarantees.
+
+Deliberately NOT started rather than half-applied: this is a security-relevant store pair, the
+shared core touches mint/revoke/resolve on both, and a partial extraction that leaves one path on
+the weaker lock is worse than the duplication. The measured starting point is above so the work
+begins from evidence rather than a re-read.
+
 #### SC-11 · MEDIUM · inconsistency · effort: medium
 
 **Event-log rewrite/race detection implemented six different ways across serve/**
