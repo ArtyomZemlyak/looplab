@@ -195,6 +195,7 @@ _LAYOUT = {
     # the package-layout audit and also breaks the supported ``looplab.public_cards`` legacy alias.
     "public_cards": "serve",
     "readmodel": "events",
+    "receipts": "core",         # the one bounded-receipt-count rule (doc 25 EM-12)
     "redact": "core",
     "regression": "adapters",
     "replay": "events",
