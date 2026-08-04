@@ -3993,7 +3993,15 @@ class RunCommandService:
                         if self._postcondition(rd, record, observation):
                             if spec.engine_policy is EnginePolicy.ENSURE_RUNNING:
                                 self._succeeded(rd, path, record)
-                                return
+                                # `(None, record)`, not a bare `return`. This method's contract is a
+                                # PAIR (see the docstring), and the caller unpacks it —
+                                # `spec, record = self._admit(...)`. A bare return handed it `None`,
+                                # raised `TypeError: cannot unpack non-iterable NoneType`, and the
+                                # caller's `except Exception` then recorded `command_worker_failed`
+                                # ON TOP of the `succeeded` we had just written. So the one path that
+                                # reports a command as having WORKED was the one path that reported it
+                                # as failed — timing-dependent, which is why it passed in isolation.
+                                return None, record
                             break
                         domain_error = self._domain_failure(rd, record, observation)
                         if domain_error is not None:
