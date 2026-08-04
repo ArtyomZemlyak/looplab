@@ -30,7 +30,8 @@ def ui(run_root: Path = typer.Option(
        build: bool = typer.Option(True, "--build/--no-build",
                                    help="Auto-build the React bundle when missing or stale (needs Node/npm). "
                                         "A requested refresh failure will not serve old/partial output; "
-                                        "use --no-build only to serve it explicitly."),
+                                        "use --no-build only to serve it explicitly. --no-build skips the "
+                                        "build, not the repair of an interrupted publish."),
        rebuild: bool = typer.Option(False, "--rebuild",
                                     help="Force a fresh `npm run build` even if a bundle exists.")):
     """Serve the live React UI over the run dirs (needs the [ui] extra: pip install 'looplab[ui]').
@@ -42,20 +43,32 @@ def ui(run_root: Path = typer.Option(
     PATH, so a fresh `pip install -e ".[ui]"` needs no manual `npm run build`. A failed build cannot
     damage the bundle you already had — it is staged and published only once verified — but this
     command still refuses to serve that older bundle under a requested build; use --no-build to
-    accept that risk explicitly, or --rebuild to force a fresh build."""
+    accept that risk explicitly, or --rebuild to force a fresh build.
+
+    Under every flag, a publish an earlier process was KILLED in the middle of is repaired before
+    anything else happens, so --no-build really does serve the last good bundle even on a box where
+    no build can run."""
+    from looplab.serve.uibuild import (  # no third-party imports; fine before the [ui] check
+        ensure_ui_built,
+        is_built,
+        recover_ui_bundle,
+        ui_dist_dir,
+    )
+    # Heal an interrupted publish FIRST, whatever the build flags say. A publish killed mid-swap
+    # (signal, OOM, pod cull) leaves the last good bundle under a scratch name with nothing servable
+    # at ui/dist — and `--no-build`, the documented "serve the last good bundle" escape hatch, is
+    # what an operator reaches for then, on exactly the box where a rebuild is what does not work.
+    # Recovery is not a build: it only puts back a bundle a completed build already verified and
+    # stamped, so it is honest under --no-build. Doing it here also keeps `had_bundle` truthful — it
+    # has to mean "a bundle we could still serve", which after a crashed publish includes this one.
+    had_bundle = recover_ui_bundle(log=typer.echo)
     if build or rebuild:
-        # Note whether a bundle existed before the build. A failed refresh must not silently serve
-        # the OLD UI under a successful `looplab ui` launch — that intent is unchanged. What changed
-        # is the fate of that old bundle: builds now stage their output and publish it only once
-        # verified (looplab/serve/uibuild.py), so a failure leaves the previous bundle byte-identical
-        # rather than destroyed by Vite's emptyOutDir. Say so, because "refusing to serve" otherwise
-        # reads as "your UI is gone" to an operator who just watched a build fail.
-        from looplab.serve.uibuild import (  # no third-party imports; fine before the [ui] check
-            ensure_ui_built,
-            is_built,
-            ui_dist_dir,
-        )
-        had_bundle = is_built(ui_dist_dir())
+        # A failed refresh must not silently serve the OLD UI under a successful `looplab ui`
+        # launch — that intent is unchanged. What changed is the fate of that old bundle: builds now
+        # stage their output and publish it only once verified (looplab/serve/uibuild.py), so a
+        # failure leaves the previous bundle byte-identical rather than destroyed by Vite's
+        # emptyOutDir. Say so, because "refusing to serve" otherwise reads as "your UI is gone" to
+        # an operator who just watched a build fail.
         built = ensure_ui_built(force=rebuild, log=typer.echo)
         if not built and had_bundle:
             typer.echo("UI build failed; the previous bundle was left untouched and is still "

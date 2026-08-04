@@ -31,10 +31,30 @@ failure; adding, removing, or changing either dependency manifest invalidates th
 
 **A build never writes into the bundle you are currently serving.** It emits into a sibling staging directory,
 and that is published over `ui/dist` only once the staged output has a valid `index.html` — by a single atomic
-directory exchange where the filesystem supports one, otherwise by a retire-then-publish rename pair that a
-process killed mid-swap can always recover from on its next run. A failed rebuild therefore leaves the previous
-bundle byte-identical, whatever stage of the build it died in.
-A failed requested refresh still never silently serves that older bundle: the command exits and tells you how
+directory exchange where the filesystem supports one, otherwise by a retire-then-publish rename pair. A failed
+rebuild therefore leaves the previous bundle byte-identical, whatever stage of the build it died in.
+
+**A publish that is *killed* mid-swap is repaired on the next `looplab ui` or `build-ui`, whether or not a build
+is possible there.** That distinction is the whole point: a kill (Ctrl-C, OOM, pod cull) and a toolchain that
+cannot build are usually the same incident, so a repair only a build could perform would be unreachable exactly
+when it is needed. Every `looplab ui` therefore heals an interrupted publish before anything else — **`--no-build`
+included**, because skipping the build is not skipping the repair — and the last good bundle returns to `ui/dist`
+even on a box where `npm run build` cannot run at all. It returns as the same files, not a copy: recovery is a
+rename. Detail worth knowing:
+
+- If the **first** publish was the one killed there is no previous bundle to put back, so the *staged* one is
+  published instead — but only when the interrupted build had already verified and freshness-stamped it.
+  Unstamped staged output is never published; it is mid-build or abandoned output, and the next build clears it.
+- Recovery holds the same source-root interprocess lock a build does, so it cannot race a concurrent build. When
+  there is nothing to repair it takes no lock at all, and a healthy bundle still launches instantly. When another
+  build already holds that lock it steps aside after a few seconds instead of waiting the build out — the holder
+  performs the identical repair as its own first act, so `--no-build` never stalls behind someone else's build.
+- It never touches a bundle LoopLab did not publish: a `LOOPLAB_UI_DIST` or wheel-packaged bundle is never staged
+  over, and a `ui/dist` holding files no LoopLab build put there is left exactly as it is. Recovery clears that
+  name only when it is empty (an `rmdir`, so the kernel — not a check that could race — is what refuses to delete
+  anything else); otherwise it prints both paths, the blocked `ui/dist` and the intact bundle beside it, and stops.
+
+A failed requested refresh still never silently serves an older bundle: the command exits and tells you how
 to repair it, and `looplab ui --no-build` serves the last good bundle explicitly. If Node isn't installed and no
 previous bundle exists, the command prints manual build guidance and still starts the API with the not-built
 placeholder.
@@ -45,7 +65,7 @@ placeholder.
 | `--host HOST` | `127.0.0.1` | Bind host |
 | `--port PORT` | `8765` | Bind port |
 | `--root-path PATH` | `""` | ASGI prefix for a non-prefix-stripping proxy; auto-derived from `JUPYTERHUB_SERVICE_PREFIX` when unset |
-| `--build / --no-build` | `--build` | Verify/rebuild a missing, unstamped or stale default bundle (`--no-build` explicitly skips the freshness check) |
+| `--build / --no-build` | `--build` | Verify/rebuild a missing, unstamped or stale default bundle (`--no-build` explicitly skips the freshness check — but not the repair of an interrupted publish) |
 | `--rebuild` | off | Force a fresh `npm run build` even if a bundle already exists |
 
 ```bash
@@ -494,6 +514,14 @@ cd "$OLDPWD" && looplab ui                                  # finds ui/dist, no 
 Putting the bundle at the default `ui/dist` means no env var and it persists across pod restarts.
 Alternatively keep it on local disk and pin `export LOOPLAB_UI_DIST=/tmp/ll-ui/dist` (= "use this
 prebuilt bundle, never rebuild" — also how the Docker image ships its bundle).
+
+**`ui/dist` is gone and there is a `ui/.dist.looplab-previous` next to it.** A publish was killed
+between its two renames; that directory is the bundle you were serving, whole. Run `looplab ui`
+(or `looplab ui --no-build` on a box where the build cannot run) and it is renamed back into place
+before the server starts — no toolchain needed. The one case the command will not resolve by itself
+is a `ui/dist` that already holds files no LoopLab build put there: it refuses to delete them, says
+so, and names both paths, so move `ui/dist` aside and rename `ui/.dist.looplab-previous` onto it.
+`ui/.dist.looplab-stage` is a build's scratch output; the next build clears it.
 
 For the containerized UI + model + engine, see [Deployment](deployment.md).
 <!-- CODEX AGENT: DOCUMENTATION CORRECTION (`19e1415`). The older inline review note beside the Card

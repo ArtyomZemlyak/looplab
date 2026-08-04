@@ -11,6 +11,8 @@ Builds therefore emit into a sibling STAGING directory and publish it over `dist
   * a failed build leaves the previous bundle byte-identical, and still servable via `--no-build`;
   * a successful build replaces it wholesale (no file of the old bundle survives);
   * an interrupted publish can never leave `dist` in a state where NEITHER bundle is usable;
+  * recovery from one is reachable WITHOUT a working toolchain — the crash and the broken
+    toolchain are the same incident, so a repair only a build can perform is no repair at all;
   * a pinned `LOOPLAB_UI_DIST` is never built into, and grows no staging directories;
   * the freshness-stamp fast path still does no work at all.
 
@@ -21,9 +23,11 @@ from __future__ import annotations
 import errno
 import os
 import shutil
+import time
 from contextlib import contextmanager
 
 import pytest
+from typer.testing import CliRunner
 
 from looplab.core.atomicio import file_identity
 from looplab.serve import uibuild
@@ -405,6 +409,321 @@ def test_a_finished_publish_leaves_no_retired_copy_to_shadow_the_new_bundle(tmp_
     assert (dist / "assets" / "new.js").is_file()
     assert not uibuild._retired_dir(dist).exists()
     assert not uibuild._stage_dir(dist).exists()
+
+
+# --------------------------------------------- recovery must not need a working toolchain
+#
+# The crash and the broken toolchain are usually the SAME incident. The failure this whole mechanism
+# was written for was measured on a JupyterHub geesefs home where `npm run build` cannot work at all,
+# and that is exactly the box where an operator kills a `looplab ui` that appears to hang. Recovery
+# that only ran inside the build was therefore unreachable in its own motivating scenario: a complete
+# bundle under `.dist.looplab-previous`, nothing servable at `dist`, and no message naming either.
+
+
+def _killed_mid_swap(src, marker="old"):
+    """The state a SIGINT between the two publish renames leaves: `dist` gone, previous retired.
+
+    Built by running the real publish and killing it, not by staging directories by hand, so the
+    test cannot drift away from what the code actually produces.
+    """
+    dist = _write_bundle(src / "dist", marker)
+    uibuild._write_build_stamp(dist, "the-stamp-of-the-source-that-built-it")
+    stage = _write_bundle(uibuild._stage_dir(dist), "new")
+    identity = _identity(dist / "index.html")
+    real_exchange = uibuild.exchange_paths_if_supported
+    uibuild.exchange_paths_if_supported = lambda *_a, **_k: False  # geesefs: no renameat2
+    try:
+        with _crash_after(src, 2):  # rmtree(retired) + rename(dist -> retired), then die
+            with pytest.raises(_Crash):
+                uibuild._publish_staged_dist(stage, dist, log=lambda *_: None)
+    finally:
+        uibuild.exchange_paths_if_supported = real_exchange
+    # `_ensure_ui_built_locked`'s `finally: _discard_dir(stage)` runs even on the way out of a
+    # KeyboardInterrupt, so the NEW bundle is gone too — the measured state, not a kinder one.
+    shutil.rmtree(stage, ignore_errors=True)
+    assert not uibuild.is_built(dist) and uibuild.is_built(uibuild._retired_dir(dist))
+    return dist, identity
+
+
+def test_recovery_runs_when_the_toolchain_is_missing_entirely(tmp_path, monkeypatch):
+    """No npm: `ensure_ui_built` still refuses (nothing was built), but the UI comes back.
+
+    Before this, every path that could not BUILD returned before the lock, and recovery lived only
+    inside it — so the one command an operator runs after a killed publish reported "cannot build"
+    and left a working bundle sitting under a name nothing had told them about.
+    """
+    src = _src_with_sources(tmp_path)
+    dist, before_identity = _killed_mid_swap(src)
+    monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
+    monkeypatch.setattr(uibuild, "_has_npm", lambda: False)
+    monkeypatch.setattr(uibuild, "_run", lambda *a, **k: pytest.fail("there is no npm to run"))
+    logs = []
+
+    assert uibuild.ensure_ui_built(log=logs.append) is False  # a build genuinely did not happen
+
+    assert uibuild.is_built(dist), "the last good bundle is servable again"
+    assert _identity(dist / "index.html") == before_identity, "a copy, not the bundle itself"
+    assert (dist / "assets" / "old.js").is_file()
+    assert not uibuild._retired_dir(dist).exists()
+    assert any("restored the previous UI bundle" in message for message in logs)
+
+
+def test_recover_ui_bundle_repairs_with_no_toolchain_at_all(tmp_path, monkeypatch):
+    """The entry point `looplab ui --no-build` uses: repair only, no build attempted or needed."""
+    src = _src_with_sources(tmp_path)
+    dist, before_identity = _killed_mid_swap(src)
+    monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
+    monkeypatch.setattr(uibuild, "_has_npm", lambda: pytest.fail("recovery must not ask about npm"))
+    monkeypatch.setattr(uibuild, "_run", lambda *a, **k: pytest.fail("recovery must not build"))
+
+    assert uibuild.recover_ui_bundle(log=lambda *_: None) is True
+
+    assert uibuild.is_built(dist)
+    assert _identity(dist / "index.html") == before_identity
+    assert not uibuild._retired_dir(dist).exists()
+
+
+def test_ui_no_build_serves_the_recovered_bundle(tmp_path, monkeypatch):
+    """`looplab ui --no-build` is the documented escape hatch, so it must actually reach `serve`."""
+    from looplab.cli import app
+
+    src = _src_with_sources(tmp_path)
+    dist, before_identity = _killed_mid_swap(src)
+    monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
+    monkeypatch.setattr(uibuild, "_has_npm", lambda: False)
+    monkeypatch.setattr(uibuild, "ensure_ui_built",
+                        lambda **_kwargs: pytest.fail("--no-build must not build"))
+    served = []
+    monkeypatch.setattr("looplab.serve.server.serve",
+                        lambda run_root, **kwargs: served.append(run_root))
+
+    result = CliRunner().invoke(app, ["ui", "--no-build", "--run-root", str(tmp_path / "runs")])
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert served, "the server was never started"
+    assert uibuild.is_built(dist)
+    assert _identity(dist / "index.html") == before_identity
+
+
+def test_a_requested_build_that_cannot_run_still_points_at_the_recovered_bundle(tmp_path, monkeypatch):
+    """Plain `looplab ui` on a box with no npm: refuse to serve silently, but say where the UI is.
+
+    The refusal is unchanged — a requested refresh that failed must not quietly serve something
+    older. What must be true now is that the thing it names EXISTS: `--no-build` has a bundle to
+    serve because recovery ran before the toolchain check, not after it.
+    """
+    from looplab.cli import app
+
+    src = _src_with_sources(tmp_path)
+    dist, _identity_before = _killed_mid_swap(src)
+    monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
+    monkeypatch.setattr(uibuild, "_has_npm", lambda: False)
+
+    result = CliRunner().invoke(app, ["ui", "--run-root", str(tmp_path / "runs")])
+
+    assert result.exit_code == 1
+    assert "previous bundle was left untouched" in result.output
+    assert "--no-build" in result.output
+    # Not the "output no successful build produced" branch: this bundle is a recovered one, and
+    # telling an operator their restored UI is unexplained junk would be worse than saying nothing.
+    assert "no successful build produced" not in result.output
+    assert uibuild.is_built(dist)
+
+
+def test_recovery_is_serialized_against_a_concurrent_build(tmp_path, monkeypatch):
+    """Recovery renames directories a build also renames, so it holds the same source-root lock."""
+    src = _src_with_sources(tmp_path)
+    dist, _before = _killed_mid_swap(src)
+    monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
+    held = []
+    real_lock = uibuild._ui_build_lock
+
+    @contextmanager
+    def watched_lock(source, **kwargs):
+        with real_lock(source, **kwargs):
+            held.append(uibuild.is_built(dist))
+            yield
+
+    monkeypatch.setattr(uibuild, "_ui_build_lock", watched_lock)
+
+    assert uibuild.recover_ui_bundle(log=lambda *_: None) is True
+    assert held == [False], "the repair happened inside the lock, not before or after it"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="holds a POSIX flock from a second descriptor")
+def test_recovery_gives_up_quickly_when_a_build_holds_the_lock(tmp_path, monkeypatch):
+    """It waits SECONDS, not the build deadline — and it is not the one that has to do the repair.
+
+    Whoever holds this lock is a build, and a build's first act is the same recovery. Waiting out
+    `_BUILD_LOCK_TIMEOUT_S` would repair nothing that is not already being repaired, while turning
+    `looplab ui --no-build` — whose whole promise is not to wait for a build — into a five-minute
+    silent stall behind someone else's `npm run build`.
+    """
+    import fcntl
+
+    src = _src_with_sources(tmp_path)
+    dist, _before = _killed_mid_swap(src)
+    monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
+    monkeypatch.setattr(uibuild, "_RECOVERY_LOCK_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(uibuild, "_BUILD_LOCK_POLL_S", 0.01)
+    logs = []
+
+    with (src / uibuild._BUILD_LOCK).open("a+b") as sibling:  # stands in for a running build
+        sibling.write(b"\0")
+        sibling.flush()
+        fcntl.flock(sibling.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        started = time.monotonic()
+        assert uibuild.recover_ui_bundle(log=logs.append) is False
+        waited = time.monotonic() - started
+
+    assert waited < 30, f"waited {waited:.1f}s — that is the BUILD deadline, not recovery's"
+    assert any("holds" in message for message in logs)
+    assert uibuild.is_built(uibuild._retired_dir(dist)), "left intact for the lock holder to restore"
+
+    # …and once the build lets go, the very next launch repairs it.
+    assert uibuild.recover_ui_bundle(log=logs.append) is True
+    assert uibuild.is_built(dist)
+
+
+def test_recovery_with_nothing_to_repair_takes_no_lock(tmp_path, monkeypatch):
+    """A healthy tree must not pay for this. `looplab ui` runs it on EVERY launch.
+
+    The probe is deliberately narrow (`_publish_recovery_pending`): a leftover scratch directory
+    beside a good bundle is garbage the next build collects, so reporting it would make every launch
+    take the lock — and wait on a sibling build for it — to tidy something nobody can observe.
+    """
+    src = _src_with_sources(tmp_path)
+    dist = _write_bundle(src / "dist", "current")
+    _write_bundle(uibuild._stage_dir(dist), "someone-elses-build-in-progress")
+    monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
+    monkeypatch.setattr(uibuild, "_ui_build_lock",
+                        lambda *a, **k: pytest.fail("must not take the build lock"))
+
+    assert uibuild.recover_ui_bundle(log=lambda *_: None) is True
+    assert uibuild._stage_dir(dist).exists(), "a live build's staging directory was not disturbed"
+
+
+def test_recovery_never_touches_a_pinned_or_packaged_bundle(tmp_path, monkeypatch):
+    """LOOPLAB_UI_DIST and a wheel's packaged dist are never staged over, so they cannot need this."""
+    pinned = _write_bundle(tmp_path / "pinned", "prebuilt")
+    before = _tree(pinned)
+    monkeypatch.setenv("LOOPLAB_UI_SRC", str(tmp_path / "ui"))
+    monkeypatch.setenv("LOOPLAB_UI_DIST", str(pinned))
+    monkeypatch.setattr(uibuild, "_ui_build_lock",
+                        lambda *a, **k: pytest.fail("must not lock a pinned bundle's source root"))
+
+    assert uibuild.recover_ui_bundle(log=lambda *_: None) is True
+    assert _tree(pinned) == before
+    assert not uibuild._stage_dir(pinned).exists()
+    assert not uibuild._retired_dir(pinned).exists()
+
+    monkeypatch.delenv("LOOPLAB_UI_DIST")  # no sources either -> the wheel's packaged bundle
+    packaged = uibuild.ui_dist_dir()
+    assert uibuild.recover_ui_bundle(log=lambda *_: None) == uibuild.is_built(packaged)
+    assert not uibuild._stage_dir(packaged).exists()
+    assert not uibuild._retired_dir(packaged).exists()
+
+
+# ------------------------------------------- a crash during the FIRST publish keeps its bundle
+
+
+def test_a_stamped_stage_is_published_when_the_first_publish_died(tmp_path, monkeypatch):
+    """No previous bundle means no retire rename, so a kill before the publish rename strands it.
+
+    Nothing SERVABLE is lost either way — there was nothing to serve. But the staged bundle is a
+    finished, verified, freshness-stamped build, and the alternative is that the next
+    `_prepare_stage` deletes it. That was a wasted build when recovery only ran ahead of another
+    build; it is a UI that never comes up now that recovery also runs where no build can.
+    """
+    src = _src_with_sources(tmp_path)
+    dist = src / "dist"
+    stage = _write_bundle(uibuild._stage_dir(dist), "first")
+    uibuild._write_build_stamp(stage, uibuild._build_digest(src))
+    staged_identity = _identity(stage / "index.html")
+    monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
+    monkeypatch.setattr(uibuild, "_has_npm", lambda: False)
+    logs = []
+
+    assert uibuild.recover_ui_bundle(log=logs.append) is True
+
+    assert (dist / "assets" / "first.js").is_file()
+    assert _identity(dist / "index.html") == staged_identity
+    assert uibuild._installed_build_digest(dist) == uibuild._build_digest(src)
+    assert not uibuild._stage_dir(dist).exists()
+    assert any("left staged" in message for message in logs)
+
+
+def test_an_unstamped_stage_is_never_published(tmp_path, monkeypatch):
+    """The stamp is the certificate. Without it the staged tree is mid-build or abandoned output.
+
+    Publishing an unverified stage is the exact false-green `_prepare_stage` exists to prevent: a
+    build that died before emitting anything would otherwise inherit the previous attempt's output
+    and report success.
+    """
+    src = _src_with_sources(tmp_path)
+    dist = src / "dist"
+    _write_bundle(uibuild._stage_dir(dist), "unverified")  # index.html, but no build stamp
+    monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
+    monkeypatch.setattr(uibuild, "_has_npm", lambda: False)
+
+    assert uibuild.recover_ui_bundle(log=lambda *_: None) is False
+    assert not dist.exists()
+    assert uibuild.is_built(uibuild._stage_dir(dist)), "left for `_prepare_stage` to clear"
+
+
+def test_a_retired_bundle_still_wins_over_a_stamped_stage(tmp_path):
+    """Promotion is only for the first-publish case; otherwise the SERVED bundle is what comes back."""
+    src = _src_with_sources(tmp_path)
+    dist = src / "dist"
+    _write_bundle(uibuild._retired_dir(dist), "was-being-served")
+    stage = _write_bundle(uibuild._stage_dir(dist), "never-served")
+    uibuild._write_build_stamp(stage, uibuild._build_digest(src))
+
+    uibuild._recover_interrupted_publish(dist, log=lambda *_: None)
+
+    assert (dist / "assets" / "was-being-served.js").is_file()
+    assert not uibuild._stage_dir(dist).exists()
+
+
+# ------------------------------------------- what recovery may and may not delete at `dist`
+
+
+def test_recovery_refuses_to_delete_a_dist_directory_it_did_not_create(tmp_path, monkeypatch):
+    """`dist` is the OPERATOR's path — the one directory here LoopLab may not have created.
+
+    Neither publish path can leave `dist` half-populated (both replace the whole name with a rename,
+    which is atomic), so a `dist` with files but no `index.html` came from somewhere else: a
+    hand-copied bundle, an interrupted `cp -r`, a directory of notes. Recovery used to `rmtree` it
+    on the grounds that nothing servable was there. Nothing servable is not nothing.
+    """
+    src = _src_with_sources(tmp_path)
+    dist = src / "dist"
+    dist.mkdir()
+    (dist / "half-copied-bundle.js").write_text("the only copy", encoding="utf-8")
+    retired = _write_bundle(uibuild._retired_dir(dist), "old")
+    retired_before = _tree(retired)
+    monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
+    logs = []
+
+    assert uibuild.recover_ui_bundle(log=logs.append) is False
+
+    assert (dist / "half-copied-bundle.js").read_text(encoding="utf-8") == "the only copy"
+    assert _tree(retired) == retired_before, "the previous bundle is still whole where it was"
+    assert uibuild.is_built(retired)
+    # An operator who cannot see the retired name cannot act on it, so the refusal has to name both.
+    assert any(str(retired) in message and str(dist) in message for message in logs)
+
+
+def test_recovery_clears_an_empty_dist_directory_and_restores(tmp_path, monkeypatch):
+    """An empty directory holds no data, and `rmdir` makes that the kernel's ruling, not ours."""
+    src = _src_with_sources(tmp_path)
+    dist = src / "dist"
+    dist.mkdir()
+    _write_bundle(uibuild._retired_dir(dist), "old")
+    monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))
+
+    assert uibuild.recover_ui_bundle(log=lambda *_: None) is True
+    assert (dist / "assets" / "old.js").is_file()
 
 
 def _deny_rename_from(monkeypatch, *sources):

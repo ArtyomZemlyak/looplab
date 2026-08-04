@@ -9,6 +9,8 @@ on PATH, it builds it once. Missing Node degrades to a clear message + placehold
 A build NEVER writes into the live bundle: it emits into a sibling staging directory and that is
 published over `dist` only once `is_built()` accepts the staged output, so a failed rebuild leaves
 the previous bundle byte-identical and still servable (see the staged-publish section below).
+Repairing a publish that was KILLED mid-swap is `recover_ui_bundle()`, a separate entry point on
+purpose: it must work where a build cannot, since that is where the failure happens.
 
 Path resolution is the single source of truth for both this builder and `server._ui_dist`:
   - source tree : LOOPLAB_UI_SRC  or  <repo>/ui
@@ -43,6 +45,9 @@ _STAGE_SUFFIX = ".looplab-stage"
 _RETIRED_SUFFIX = ".looplab-previous"
 _BUILD_LOCK_TIMEOUT_S = 300.0
 _BUILD_LOCK_POLL_S = 0.1
+# Recovery waits SECONDS, not the build deadline: whoever holds the lock is a build, and a build's
+# first act is that same recovery (`_ensure_ui_built_locked`). See `_recover_publish_under_lock`.
+_RECOVERY_LOCK_TIMEOUT_S = 5.0
 
 
 def ui_source_dir() -> Path:
@@ -137,11 +142,14 @@ def _acquire_with_deadline(attempt, *, timeout_s: float) -> None:
 
 
 @contextmanager
-def _ui_build_lock(src: Path) -> Iterator[None]:
+def _ui_build_lock(src: Path, *, timeout_s: float = _BUILD_LOCK_TIMEOUT_S) -> Iterator[None]:
     """Serialize dependency installation and Vite output across ``looplab`` processes.
 
     The stable source-root lock protects both ``node_modules`` and Vite's ``emptyOutDir`` build.
     Platform imports stay local so this module remains stdlib-only and importable everywhere.
+
+    ``timeout_s`` exists for the one caller that is not a build: recovery needs the same exclusion a
+    build does but must not inherit a build's willingness to WAIT for one (`_RECOVERY_LOCK_TIMEOUT_S`).
     """
     lock_path = src / _BUILD_LOCK
     handle = lock_path.open("a+b")
@@ -155,10 +163,10 @@ def _ui_build_lock(src: Path) -> Iterator[None]:
             os.fsync(handle.fileno())
         handle.seek(0)
         if os.name == "nt":
-            _acquire_windows_lock(handle)
+            _acquire_windows_lock(handle, timeout_s=timeout_s)
             locked = True
         else:
-            _acquire_posix_lock(handle)
+            _acquire_posix_lock(handle, timeout_s=timeout_s)
             locked = True
         yield
     finally:
@@ -311,6 +319,14 @@ def _write_build_stamp(dist: Path, digest: str) -> None:
 #
 # So the build writes into a sibling staging directory and we publish that over `dist` only after
 # `is_built()` accepts the staged output. A failed build touches the previous bundle not at all.
+#
+# A publish that is KILLED (SIGINT, OOM, pod cull) is a different failure from a build that FAILS,
+# and it needs a different escape route. `KeyboardInterrupt` is not an `OSError`, so it runs none of
+# the handlers below; it just stops the process between two renames, with the last good bundle safe
+# under a scratch name. Recovery must therefore be reachable on its own — `recover_ui_bundle`, run
+# by `looplab ui` whatever its build flags say — because the operator's next command after a killed
+# publish is as likely to be `--no-build` as a rebuild, and because a box where a rebuild is
+# impossible is where a publish is most likely to have been killed in the first place.
 
 
 def _stage_dir(dist: Path) -> Path:
@@ -345,11 +361,75 @@ def _prepare_stage(stage: Path) -> None:
         raise OSError(errno.ENOTEMPTY, "could not clear the UI staging directory", str(stage))
 
 
+def _claim_dist_name(dist: Path, intact: Path, *, log: Callable[[str], None]) -> bool:
+    """Free the ``dist`` name for the complete bundle at *intact*, or say why we won't.
+
+    Nothing SERVABLE can be lost here — every caller has already established that ``dist`` has no
+    ``index.html``. What CAN be lost is data that is not ours. ``dist`` is the operator's own path,
+    and it is the one directory this module touches that LoopLab may not have created: neither
+    publish path can leave it half-populated (both replace that whole name with a rename, which is
+    atomic), so a ``dist`` holding files but no entry point came from somewhere else — a hand-copied
+    bundle, an interrupted `cp -r`, a directory of notes.
+
+    So the removal is `rmdir`, never `rmtree`: the KERNEL refuses a non-empty directory, which makes
+    "recovery cannot delete somebody's data" a property of the syscall rather than of a check that
+    a concurrent writer could race. An empty directory — or no directory at all — is the only thing
+    it clears, and it is also the only thing an interrupted publish of ours can produce here.
+    """
+    if not dist.exists():
+        return True
+    try:
+        dist.rmdir()
+    except OSError as exc:
+        log(f"[ui] a complete UI bundle is intact at {intact}, but {dist} holds content no LoopLab "
+            f"build put there, so it was left untouched ({exc}). Move {dist} aside and rename "
+            f"{intact} onto it to serve that bundle again.")
+        return False
+    return True
+
+
+def _promote_staged_bundle(stage: Path, dist: Path, *, log: Callable[[str], None]) -> None:
+    """Publish a bundle whose FIRST publish died before the rename that would have named it ``dist``.
+
+    Reached only when nothing is servable at ``dist`` and no bundle was ever retired — the signature
+    of a crash during a first publish, where the retire rename is skipped because there is nothing
+    to retire. The preference `_recover_interrupted_publish` documents (the retired bundle over the
+    staged one, because it restores exactly the state the interrupted command started from) does not
+    arise here: there is no state to restore to, so the choice is this bundle or nothing.
+
+    The gate is the freshness STAMP, not merely `is_built(stage)`. `_ensure_ui_built_locked` writes
+    that stamp as the last thing before publishing — after the toolchain exited 0, after the source
+    digest was re-verified unchanged, and after `is_built` accepted the staged output — so a stamped
+    stage is a complete, certified build missing only its rename. An UNSTAMPED one is mid-build or
+    abandoned output, and publishing that is precisely the false-green `_prepare_stage` exists to
+    prevent. Recovery runs under the build lock, so no live build can be writing into ``stage``
+    while this reads it.
+
+    Discarding it instead (what the next `_prepare_stage` does) was defensible while recovery only
+    ever ran as the prelude to a build that would replace it anyway. It is not defensible now that
+    recovery also runs where a rebuild is IMPOSSIBLE — no Node on PATH, or `looplab ui --no-build` —
+    because there this bundle is the difference between a servable UI and none.
+    """
+    if not is_built(stage) or not _installed_build_digest(stage):
+        return
+    if not _claim_dist_name(dist, stage, log=log):
+        return
+    try:
+        os.rename(stage, dist)
+    except OSError as exc:
+        log(f"[ui] a complete UI bundle is staged at {stage} but could not be published "
+            f"to {dist}: {exc}")
+        return
+    best_effort_fsync_parent(dist)
+    log(f"[ui] published the verified bundle a previous build left staged at {stage}.")
+
+
 def _recover_interrupted_publish(dist: Path, *, log: Callable[[str], None]) -> None:
     """Heal a publish that died between the two renames, and collect what a finished one left.
 
-    Called under the build lock at the start of every build, and directly when an in-process publish
-    raises. Whenever ``<dist>.looplab-previous`` exists, exactly two states are possible:
+    Called under the build lock at the start of every build, from `recover_ui_bundle` when a build
+    is not even possible, and directly when an in-process publish raises. Whenever
+    ``<dist>.looplab-previous`` exists, exactly two states are possible:
 
       * ``dist`` is a complete bundle — the publish finished and the retired copy is garbage.
       * ``dist`` is missing or incomplete — the process died mid-swap, and the retired copy is the
@@ -358,6 +438,9 @@ def _recover_interrupted_publish(dist: Path, *, log: Callable[[str], None]) -> N
     Restoring the RETIRED bundle rather than the staged one is deliberate: it restores exactly the
     state the interrupted command started from. Its freshness stamp no longer matches the source, so
     the caller simply rebuilds — which is the correct outcome, not a lost UI.
+
+    With no retired copy at all the crash was during a FIRST publish, which retires nothing; there
+    `_promote_staged_bundle` publishes the staged bundle if the build had already certified it.
     """
     retired = _retired_dir(dist)
     stage = _stage_dir(dist)
@@ -369,15 +452,10 @@ def _recover_interrupted_publish(dist: Path, *, log: Callable[[str], None]) -> N
         _discard_dir(stage)
         return
     if not is_built(retired):
+        _promote_staged_bundle(stage, dist, log=log)
         return
-    if dist.exists():
-        # No index.html here, so nothing servable can be lost — and this only ever runs alongside a
-        # retired bundle WE created, never against a directory an operator put here themselves.
-        _discard_dir(dist)
-        if dist.exists():
-            log(f"[ui] the previous bundle is intact at {retired}, but {dist} could not be cleared "
-                "to restore it.")
-            return
+    if not _claim_dist_name(dist, retired, log=log):
+        return
     try:
         os.rename(retired, dist)
     except OSError as exc:
@@ -392,6 +470,76 @@ def _recover_interrupted_publish(dist: Path, *, log: Callable[[str], None]) -> N
     # `_prepare_stage`, so this is the only place that leftover would ever be collected.
     _discard_dir(stage)
     log(f"[ui] restored the previous UI bundle to {dist} after an interrupted publish.")
+
+
+def _publish_recovery_pending(dist: Path) -> bool:
+    """Cheap probe: is there an interrupted publish to heal, WITHOUT taking the build lock?
+
+    Two stats, so `ensure_ui_built`'s promise that an up-to-date bundle costs no lock, no npm and no
+    directory churn survives — that fast path runs on every `looplab ui` launch.
+
+    Deliberately narrow: it asks whether a bundle is UNSERVABLE while a scratch name that might hold
+    one exists, not whether there is tidying to do. A leftover scratch directory beside a perfectly
+    good ``dist`` is garbage the next build collects anyway, so a probe that reported it would make
+    every launch take a lock, and wait on a sibling build for it, to collect something no operator
+    can observe — spending the one property this fast path exists to provide on nothing.
+    """
+    if is_built(dist):
+        return False
+    return _retired_dir(dist).exists() or _stage_dir(dist).exists()
+
+
+def _recover_publish_under_lock(src: Path, dist: Path, *, log: Callable[[str], None]) -> None:
+    """Run recovery serialized against a concurrent build, without requiring that one be POSSIBLE.
+
+    Recovery mutates the same directories a build does, so it has to hold the same lock — but it
+    must not inherit the build's preconditions or its PATIENCE. Its preconditions, because the state
+    it repairs is most likely to be met on exactly the box where a build cannot run (see
+    `recover_ui_bundle`). Its patience, because whoever holds that lock IS a build, and a build's
+    first act is this same recovery — so waiting out the five-minute build deadline would repair
+    nothing that is not already being repaired, while turning `looplab ui --no-build`, whose whole
+    promise is not to wait for a build, into a long silent stall.
+
+    Lock failure is not fatal here the way it is for a build: there is a bundle on disk either way,
+    and the caller reports what is actually servable. Say what happened and leave the disk alone.
+    """
+    if not _publish_recovery_pending(dist):
+        return
+    try:
+        with _ui_build_lock(src, timeout_s=_RECOVERY_LOCK_TIMEOUT_S):
+            _recover_interrupted_publish(dist, log=log)
+    except TimeoutError:  # an OSError subclass, so it has to be caught FIRST
+        log(f"[ui] another LoopLab build holds {src}; leaving any interrupted publish to it.")
+    except (OSError, ImportError, AttributeError, NotImplementedError, ValueError) as exc:
+        log(f"[ui] could not lock {src} to recover an interrupted UI publish: {exc}")
+
+
+def recover_ui_bundle(*, log: Callable[[str], None] = print) -> bool:
+    """Restore the last good bundle if a publish was interrupted. Returns True iff one is servable.
+
+    The repair half of `ensure_ui_built`, reachable WITHOUT a toolchain — which is the entire point.
+    A publish is interrupted by a signal, an OOM kill or a pod cull, and the operator's next command
+    is at least as likely to be `looplab ui --no-build` (the documented escape hatch: serve the last
+    good bundle) as a rebuild. On the JupyterHub geesefs home where this failure was first observed
+    the rebuild is the part that does not work. Recovery living ONLY inside `_ensure_ui_built_locked`
+    therefore made it unreachable in precisely the situation staged publishing exists to survive: a
+    complete bundle sitting under ``<dist>.looplab-previous``, no servable UI, and nothing telling
+    the operator where it went.
+
+    A bundle LoopLab never published is never touched: an explicit LOOPLAB_UI_DIST and a wheel's
+    packaged ``ui_dist`` are reported exactly as `ensure_ui_built` leaves them. Neither can be the
+    target of a staged publish, so neither can have an interrupted one to heal.
+    """
+    dist = ui_dist_dir()
+    if os.environ.get("LOOPLAB_UI_DIST"):
+        return is_built(dist)
+    src = ui_source_dir()
+    if not (src / "package.json").is_file():
+        # No React sources, so `ui_dist_dir` resolved to the wheel's immutable packaged bundle —
+        # nothing stages over that, and the build lock has no source root to live in either.
+        return is_built(dist)
+    _recover_publish_under_lock(src, dist, log=log)
+    return is_built(dist)
 
 
 def _publish_staged_dist(stage: Path, dist: Path, *, log: Callable[[str], None]) -> None:
@@ -564,7 +712,10 @@ def ensure_ui_built(*, force: bool = False, log: Callable[[str], None] = print) 
 
     Returning False never means the previous bundle was damaged: every build path emits into a
     staging directory and publishes it only once verified, so an existing ``dist`` is either left
-    exactly as it was or wholly replaced by a bundle that passed `is_built`.
+    exactly as it was or wholly replaced by a bundle that passed `is_built`. It does not mean the
+    previous bundle is UNREACHABLE either: an interrupted publish is healed before the toolchain is
+    consulted, so a False from the no-npm path below still leaves the last good bundle under
+    ``dist`` for `--no-build` (`recover_ui_bundle`).
     """
     dist = ui_dist_dir()
 
@@ -584,6 +735,18 @@ def ensure_ui_built(*, force: bool = False, log: Callable[[str], None] = print) 
         log(f"[ui] no React sources at {src} — cannot build "
             "(install from a source checkout, or set LOOPLAB_UI_DIST to a prebuilt bundle).")
         return is_built(dist)
+
+    # Finish or undo a publish a previous process died in the middle of BEFORE anything below can
+    # return early — the npm check especially, which is exactly where an operator whose publish was
+    # killed on a box with no working toolchain used to be told "cannot build" and left with a
+    # complete bundle under a scratch name they were never shown. Costs two stats when there is
+    # nothing to heal (`_publish_recovery_pending`), and it runs before the freshness check so a
+    # restored bundle that IS current still takes the free fast path.
+    #
+    # This re-locks rather than deferring to `_ensure_ui_built_locked`'s own call, which stays the
+    # authoritative one: that call is unreachable from every early return here, and a sibling
+    # process can crash a publish in the window between the two acquisitions regardless.
+    _recover_publish_under_lock(src, dist, log=log)
 
     # Fast path before opening the lock. Every stale/missing path repeats this exact check after
     # acquiring it, so a waiter observes the first process's stamp and does not rebuild the same tree.

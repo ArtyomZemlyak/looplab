@@ -967,7 +967,7 @@ looplab ui [--run-root DIR] [--host HOST] [--port PORT] [--root-path PATH] [--bu
 | `--host HOST` | `127.0.0.1` | Bind host |
 | `--port PORT` | `8765` | Bind port |
 | `--root-path PATH` | `""` | ASGI `root_path` for a non-prefix-stripping proxy; auto-derived from `JUPYTERHUB_SERVICE_PREFIX` when unset |
-| `--build` / `--no-build` | `--build` | Verify/rebuild a missing, unstamped or stale default bundle (needs Node/npm); `--no-build` explicitly serves the existing prebuilt/stale bundle without freshness checks |
+| `--build` / `--no-build` | `--build` | Verify/rebuild a missing, unstamped or stale default bundle (needs Node/npm); `--no-build` explicitly serves the existing prebuilt/stale bundle without freshness checks. Both first repair a publish an earlier process was killed mid-swap, which needs no toolchain |
 | `--rebuild` | off | Force a fresh `npm run build` even if a bundle already exists |
 
 Dependency install plus Vite output are serialized by a required source-root interprocess lock. Freshness is
