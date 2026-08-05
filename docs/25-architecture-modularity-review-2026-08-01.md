@@ -1034,7 +1034,7 @@ exactly the kind the finding's own recommendation is aimed at, in the one phase 
 * Six phase methods — `_card_phase_serve_raw_stage`, `_card_phase_drop_stale`,
   `_card_phase_serve_head`, `_card_phase_admit_evals`, `_card_phase_request_build`,
   `_card_phase_decide_exit` — plus `_start_head_producer` and `_card_eval_one` hoisted out of the
-  closure. The turn loop is now twelve lines.
+  closure. The turn body is now twelve lines of phase dispatch.
 * `_fold_current()` reads the log on every call and reuses the previous fold only while the observed
   tail — `(len(events), events[-1].seq)` — has not moved. It also keys on the `fold` callable itself,
   because `looplab.engine.speculation.fold` is a documented patch seam and a memo outliving a swap

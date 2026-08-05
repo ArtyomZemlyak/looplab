@@ -2275,8 +2275,8 @@ class SpeculationMixin:
         The turn loop is six named phases over ONE folded snapshot per phase (doc 25 EC-02).  Each
         phase re-derives its own snapshot through `_fold_current`, which serves the previous fold
         only while the observed log tail is unmoved — so a phase that appends is re-folded for the
-        next phase BY CONSTRUCTION rather than by remembering to, and an idle poll that appends
-        nothing folds once instead of nine times.
+        next phase BY CONSTRUCTION rather than by remembering to, and the session folds once per
+        OBSERVED TAIL instead of six-to-nine times per turn.
         """
 
         if not self._speculation_enabled():
