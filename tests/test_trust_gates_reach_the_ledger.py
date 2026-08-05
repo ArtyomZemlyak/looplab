@@ -23,9 +23,12 @@ separate file from the namespace guards, which are about who MINTS the namespace
 whether anything is emitted at all.
 
 The two concatenations are now the named rule `EvaluateMixin._trust_gate_signals`, so the same
-property is ALSO checkable without driving a run: two of the last three tests call the rule directly
-and die on the identical mutation in milliseconds, and the third pins its concatenation on the AST.
-Both halves stay — the rule proves the findings are produced, the run proves they reach the ledger.
+property is ALSO checkable without driving a run: two of the last four tests call the rule directly
+and die on the identical mutation in milliseconds, and the last two pin the chain that carries its
+result to the event — `_trust_gate_signals` -> `_trust_scan_signals` -> `sigs` in `_evaluate` (doc
+25 ES-03 split the middle link out of `_evaluate`, so there are now two places the `+=`/`=` can be
+lost instead of one). Both halves stay — the rule proves the findings are produced, the run proves
+they reach the ledger.
 """
 from __future__ import annotations
 
@@ -173,18 +176,52 @@ def test_the_named_rule_keeps_both_gates_optional(tmp_path):
     assert _namespaces(both, src="") == set()
 
 
-def test_the_evaluator_still_concatenates_the_named_rule():
+def test_the_scan_still_concatenates_the_named_rule():
     """Naming the rule moved one failure mode rather than removing it: `sigs +=
     self._trust_gate_signals(...)` can lose its `sigs +=` exactly as the two calls it replaced could,
     and the three unit tests above would not notice. The end-to-end tests at the top of this file are
     what CATCH that; this states it as well, on the AST — a comment naming the method is not an
-    `ast.AugAssign`, and neither is a bare call whose result is dropped."""
+    `ast.AugAssign`, and neither is a bare call whose result is dropped.
+
+    The concatenation moved OUT of `_evaluate` on 2026-08-05 (doc 25 ES-03): the reward-hack half and
+    this half are now the one named rule `_trust_scan_signals`, which `_evaluate` calls. So the same
+    assertion is made about its new home, and the test below adds the link the split created — that
+    `_evaluate` still BINDS what the rule returns."""
     concatenations = [
-        node for node in ast.walk(function_tree(EvaluateMixin._evaluate))
+        node for node in ast.walk(function_tree(EvaluateMixin._trust_scan_signals))
         if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
         and node.target.id == "sigs" and isinstance(node.value, ast.Call)
         and isinstance(node.value.func, ast.Attribute)
         and node.value.func.attr == "_trust_gate_signals"]
     assert len(concatenations) == 1, (
-        "`_evaluate` must concatenate `_trust_gate_signals` into `sigs` exactly once — the trust "
-        "gates are computed and dropped otherwise")
+        "`_trust_scan_signals` must concatenate `_trust_gate_signals` into `sigs` exactly once — "
+        "the trust gates are computed and dropped otherwise")
+
+
+def test_the_evaluator_binds_what_the_scan_returns():
+    """The seam the extraction created. `_trust_scan_signals` returns the findings and appends
+    nothing, so `_evaluate` calling it without binding the result — `self._trust_scan_signals(...)`
+    on a line of its own, the exact mutation the rule above is about, one level out — computes every
+    detector and drops the lot. Pinned as a real `ast.Assign` to `sigs`, so a comment carrying the
+    call expression does not satisfy it."""
+    bindings = [
+        node for node in ast.walk(function_tree(EvaluateMixin._evaluate))
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "_trust_scan_signals"
+        and [target.id for target in node.targets if isinstance(target, ast.Name)] == ["sigs"]]
+    assert len(bindings) == 1, (
+        "`_evaluate` must bind `self._trust_scan_signals(...)` to `sigs` exactly once — the scan "
+        "appends nothing itself, so an unbound call runs every detector and discards the findings")
+    # …and the surface it hands the scan must be the SAME string `code_digest` commits to, which is
+    # what `_trust_scan_surface` exists to guarantee: the digest below is of `scan_src`, so a caller
+    # that re-derived the surface for one of the two would hash bytes the detectors never saw.
+    surfaces = [
+        node for node in ast.walk(function_tree(EvaluateMixin._evaluate))
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "_trust_scan_surface"
+        and [target.id for target in node.targets if isinstance(target, ast.Name)] == ["scan_src"]]
+    assert len(surfaces) == 1, "`scan_src` must come from `_trust_scan_surface`, derived once"
+    assert "scan_src" in [ast.unparse(arg) for arg in bindings[0].value.args], (
+        "the scan must be handed the same `scan_src` the digest is taken over")

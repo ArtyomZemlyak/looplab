@@ -120,6 +120,123 @@ def _workdir_manifest_digest(node) -> str:
         option=orjson.OPT_SORT_KEYS)).hexdigest()
 
 
+def _repair_provider_failure(node_code: str, new_code, repaired_files, repaired_deleted,
+                             unparseable_repairs: int) -> tuple[Optional[str], int]:
+    """Did the repair CALL fail at the provider, and how many not-Python answers has it given?
+
+    A pure rule with a name (doc 25 ES-03) because the property it decides has already cost a real
+    run: as ~50 lines in the middle of `_evaluate`'s attempt loop, the only way to observe any of
+    its four branches was to drive a whole sandboxed eval against a dead endpoint. It returns the
+    provider-failure message (or None) and the UPDATED unparseable counter — the counter round-trips
+    through the return value rather than being mutated in place, so a caller that forgets to carry
+    it back is a name the caller has to bind, not a silently-frozen count.
+    """
+    # DOES THE ARTIFACT LOOK LIKE THE THING IT REPLACES? Only asked when the whole-file
+    # `code` really is what this repair shipped: a repo/multi-file repair returns "" and
+    # carries its work in `files`/`deleted`, and a node whose own code is empty never had
+    # a whole-file artifact to begin with. `engine/triage.py::repair_artifact_defect`
+    # documents the two answers and why they are treated differently.
+    _artifact_defect = ""
+    if not repaired_files and not repaired_deleted and (node_code or "").strip():
+        _artifact_defect = repair_artifact_defect(new_code)
+    # A REPAIR THAT DID NOT PRODUCE A REPAIR. The Developer returns the in-band
+    # "(developer error: …)" sentinel when its OWN session failed — an unreachable
+    # endpoint, a 401, a 402 "out of credits" — so `new_code` is a provider/transport
+    # error message, not code. Nothing downstream could tell the difference: the sentinel
+    # was committed as the node's code by `node_repaired`, re-materialized into the
+    # workdir, and re-evaluated; the eval then failed with a fresh error, so the loop
+    # simply asked again. A dead OpenRouter account produced 2343 such "repairs" on ONE
+    # node at ~11/min for 3.5 h, each one a full re-eval.
+    #
+    # A provider failure is not a code defect, so it must not drive the code-repair loop.
+    # No `node_repaired`, no attempt spent, no files written — the loop breaks here and
+    # the node terminalizes ONCE below with reason="developer_crash" naming the provider
+    # failure, and the run-level circuit breaker fires. (Deliberately NOT committing the
+    # sentinel as node.code also keeps the recovery sweep's `_developer_sentinel` scan,
+    # which keys on exactly that, from later re-terminalizing this node.)
+    #
+    # `is_developer_error` recognises exactly ONE shape of this, LoopLab's own sentinel,
+    # produced by `adapters/repo_developer.py` alone. Two more shapes reach here:
+    #   * a repair that RAISED — normalized into the sentinel at the call above, so it
+    #     arrives here already wearing the shape this branch understands;
+    #   * a repair that answered with PROSE. When the prose PARSES — a comment-only or
+    #     docstring-only answer — the eval exits 0 with no metric, and the node used to
+    #     terminalize as `no_metric`, telling the operator "the command printed no metric"
+    #     about a provider that is dead, with no pause. `"no_code"` is the engine's own
+    #     proof of the same fact the sentinel asserts: an artifact whose module body can
+    #     never execute cannot be a repair, whoever wrote it.
+    #
+    # The remaining answer, `"unparseable"`, keeps today's behaviour of committing the
+    # artifact and letting the next eval's SyntaxError inform the next repair — which is
+    # how a TRUNCATED generation recovers, and stopping a node on one truncation would be
+    # a regression. It is counted DIRECTLY (not inferred from the error text, which can
+    # carry a varying provider request id and so looks new every time) and becomes the
+    # provider verdict once a repair call has answered with something that is not Python
+    # `_UNPARSEABLE_REPAIR_LIMIT` times on one node.
+    if _artifact_defect == "unparseable":
+        unparseable_repairs += 1
+    _dev_err = None
+    if is_developer_error(new_code):
+        _dev_err = str(new_code)[:400]
+    elif _artifact_defect == "no_code":
+        _dev_err = ("the repair returned no executable code, only text: "
+                    + " ".join(str(new_code).split())[:200])
+    elif unparseable_repairs >= _UNPARSEABLE_REPAIR_LIMIT:
+        _dev_err = (f"the repair has now returned something that is not valid Python "
+                    f"{unparseable_repairs}x — the last one began: "
+                    + " ".join(str(new_code).split())[:160])
+    return _dev_err, unparseable_repairs
+
+
+def _repair_change_set(prev_files, prev_deleted, repaired_files,
+                       repaired_deleted) -> tuple[set, list]:
+    """THIS repair's real change set: files whose content moved, plus its own deletions.
+
+    Named (doc 25 ES-03) because both halves are DELTAS against the pre-repair node and the reason
+    is not visible from the expression — a cumulative read of either silently disables checkpoint
+    reuse for the rest of the node's life, which is a cost regression no test of the repair loop's
+    outcome would notice.
+    """
+    # The repair's REAL change set = files whose content actually differs from the pre-repair
+    # node (last_files is cumulative — see prev_files above), plus THIS repair's deletions.
+    changed = {f for f, c in repaired_files.items() if prev_files.get(f) != c}
+    # Deletions likewise get the delta, not the cumulative set: a deletion that predates
+    # the completed train stage cannot invalidate its checkpoint — the stage already ran
+    # (and passed) without that file on disk. Blocking on the cumulative `repaired_deleted`
+    # (seeded from node.deleted at repair_from) would permanently disable stage reuse for
+    # any node whose implement ever deleted a file; only THIS repair's deletions can
+    # invalidate the checkpoint, so only they enter the reuse decision.
+    new_deleted = [d for d in repaired_deleted if d not in prev_deleted]
+    changed |= set(new_deleted)
+    return changed, new_deleted
+
+
+def _repair_forces_full_retrain(res, next_start) -> bool:
+    """Does this repair discard completed EARLIER-stage work, i.e. does it count against the cap?
+
+    Three conditions with one meaning, which is why they are a named rule (doc 25 ES-03) rather
+    than a compound `if` carrying fifteen lines of comment in the middle of the attempt loop.
+    """
+    # Count a full re-train against the cap ONLY when completed EARLIER-stage work is being
+    # discarded: a LATER stage failed yet reuse was refused because the repair could
+    # have changed an earlier stage. A first-stage failure (nothing to reuse) or a single-
+    # command eval is an ordinary retry, bounded by the attempt budget like any other — NOT the
+    # retrain cap (mirrors config.py: "only a repair that changes an EARLIER stage's code
+    # forces a full re-train ... counted"). The CALLER checks this BEFORE incrementing so cap=N
+    # runs exactly N.
+    # First-vs-later is judged from the PRE-repair `res.stages` (one record per stage that
+    # ran, in order, the failed stage always LAST) — never from the failed stage's index in
+    # the POST-repair `_stages`: a repair that renames/drops the failed stage (or a
+    # _resolved_stages exception fallback to []) loses that index (-1) for FIRST- and
+    # LATER-stage failures alike. A renamed LATER stage still discards completed
+    # earlier-stage work on the forced full re-run, so it keeps consuming the cap (the
+    # point of counting the renamed case at all — leaving it uncounted let a
+    # stage-renaming repair burn unlimited full trains); a renamed FIRST stage never had
+    # earlier work to discard, so it must stay an ordinary retry.
+    was_first = len(res.stages or []) <= 1
+    return bool(res.failed_stage) and not was_first and next_start is None
+
+
 class SpeculativeEvaluationInvariantError(AssertionError):
     """A speculative build reached an evaluation without a confirmed selection. See below."""
 
@@ -445,6 +562,76 @@ class EvaluateMixin:
                 seen["kind"] = intervention
                 cancel.set()
                 return
+
+    def _eval_failure_text(self, res) -> str:
+        """The ONE description of a failed eval — the repair prompt, `node_repaired.error_in`, the
+        judge's history rows and the terminal's `error` field are all this string.
+
+        A named rule (doc 25 ES-03) because it is the engine's only account of what went wrong, and
+        both of the branches below were retrofitted after a run had already been misdiagnosed by
+        the text they replaced. As inline lines in the attempt loop neither could be exercised
+        without a real sandbox producing exactly the right stderr.
+        """
+        # A clean run (exit 0) with no parseable metric is the most confusing failure for the
+        # repair agent — the terse "no_metric" gave it nothing to fix, so the debug node just
+        # re-ran and failed again. Tell it EXACTLY what the eval reads (the configured metric
+        # key + the one line it must print), so a no-metric node can actually be repaired.
+        _ms = (self._eval_spec.get("metric") or {}) if isinstance(self._eval_spec, dict) else {}
+        _mk = _ms.get("key", "metric")
+        _no_metric_hint = (
+            f" — the command ran cleanly (exit 0) but printed NO parseable metric. The eval reads"
+            f" a stdout JSON line for key {_mk!r}; the entrypoint MUST print exactly one line like"
+            f" print(json.dumps({{{_mk!r}: <float>}})) as its last stdout."
+            if _ms.get("kind", "stdout_json") == "stdout_json"
+            else " — ran cleanly but produced no parseable metric (check the eval's metric reader).")
+        # BLANK-BUT-TRUTHY stderr takes the fallback too. `"  \n \t "` is truthy, so it used
+        # to survive this `or` and become the node's WHOLE diagnosis: the repair prompt, the
+        # `node_repaired.error_in` audit row and the terminal's `error` field were all
+        # whitespace. (It also normalized to the empty error signature, which the anti-stuck
+        # guard of the time read as an unconditional exemption — 1055 repairs in a 60 s wall
+        # with no terminal. That guard is gone, but a failure the engine cannot describe is
+        # still the worst thing to hand a judge that decides on the failure text.) Deciding on
+        # the STRIPPED text while keeping the unstripped bytes when there is content leaves
+        # every non-blank tail byte-identical.
+        _stderr_tail = self._redact(res.stderr[-500:])
+        return (_stderr_tail if _stderr_tail.strip() else "") or (
+            f"metric drift: {res.drift}" if res.drift is not None else
+            f"exit={res.exit_code} timed_out={res.timed_out} no_metric{_no_metric_hint}"
+        )
+
+    def _repaired_footprint(self, node, new_code, repaired_files, reservation):
+        """The repaired artifact's resource declaration, clamped to the devices already held.
+
+        A named rule (doc 25 ES-03): the property is a SAFETY one — a repair must never grow onto a
+        sibling's GPU — and inline it was reachable only from a repo-task repair inside a live
+        multi-GPU reservation, which no test drives. Returns None when the artifact declares
+        nothing, exactly as `developer_artifact_footprint` does.
+        """
+        repaired_footprint = developer_artifact_footprint(
+            node.idea.footprint, new_code, repaired_files)
+        if repaired_footprint is not None:
+            repaired_footprint = (
+                self._clamp_resource_footprint(repaired_footprint)
+                or repaired_footprint)
+            # A repair keeps the dispatcher's lifecycle reservation.  It may refine the
+            # declaration within those already-held devices, but cannot grow onto GPUs owned
+            # by a sibling while the retry loop is live.
+            if ((reservation or {}).get("cpu_only")
+                    and "gpus" in repaired_footprint):
+                repaired_footprint["gpus"] = 0
+            elif ((reservation or {}).get("pin")
+                  and "gpus" in repaired_footprint):
+                repaired_footprint["gpus"] = min(
+                    repaired_footprint["gpus"],
+                    int(reservation.get("count", 0) or 0))
+            held_ids = ((reservation or {}).get("gpu_ids") or [])
+            held_mem = [getattr(self, "_gpu_mem", {}).get(gpu)
+                        for gpu in held_ids]
+            held_mem = [value for value in held_mem if type(value) is int]
+            if (held_mem and isinstance(repaired_footprint.get("gpu_mem_mib"), int)):
+                repaired_footprint["gpu_mem_mib"] = min(
+                    repaired_footprint["gpu_mem_mib"], min(held_mem))
+        return repaired_footprint
 
     async def _evaluate(self, node_id: int, limiter: anyio.CapacityLimiter,
                         max_es: Optional[float] = None) -> None:
@@ -823,32 +1010,9 @@ class EvaluateMixin:
                 if ok:
                     break
                 reason = _failure_reason(res)
-                # A clean run (exit 0) with no parseable metric is the most confusing failure for the
-                # repair agent — the terse "no_metric" gave it nothing to fix, so the debug node just
-                # re-ran and failed again. Tell it EXACTLY what the eval reads (the configured metric
-                # key + the one line it must print), so a no-metric node can actually be repaired.
-                _ms = (self._eval_spec.get("metric") or {}) if isinstance(self._eval_spec, dict) else {}
-                _mk = _ms.get("key", "metric")
-                _no_metric_hint = (
-                    f" — the command ran cleanly (exit 0) but printed NO parseable metric. The eval reads"
-                    f" a stdout JSON line for key {_mk!r}; the entrypoint MUST print exactly one line like"
-                    f" print(json.dumps({{{_mk!r}: <float>}})) as its last stdout."
-                    if _ms.get("kind", "stdout_json") == "stdout_json"
-                    else " — ran cleanly but produced no parseable metric (check the eval's metric reader).")
-                # BLANK-BUT-TRUTHY stderr takes the fallback too. `"  \n \t "` is truthy, so it used
-                # to survive this `or` and become the node's WHOLE diagnosis: the repair prompt, the
-                # `node_repaired.error_in` audit row and the terminal's `error` field were all
-                # whitespace. (It also normalized to the empty error signature, which the anti-stuck
-                # guard of the time read as an unconditional exemption — 1055 repairs in a 60 s wall
-                # with no terminal. That guard is gone, but a failure the engine cannot describe is
-                # still the worst thing to hand a judge that decides on the failure text.) Deciding on
-                # the STRIPPED text while keeping the unstripped bytes when there is content leaves
-                # every non-blank tail byte-identical.
-                _stderr_tail = self._redact(res.stderr[-500:])
-                err = (_stderr_tail if _stderr_tail.strip() else "") or (
-                    f"metric drift: {res.drift}" if res.drift is not None else
-                    f"exit={res.exit_code} timed_out={res.timed_out} no_metric{_no_metric_hint}"
-                )
+                # The node's whole account of what went wrong — see `_eval_failure_text`, which is
+                # where the no-metric hint and the blank-stderr fallback now live.
+                err = self._eval_failure_text(res)
                 # Environment self-prep (deps.py): a crash that is purely a missing KNOWN library is
                 # not a bad idea — install it (trusted_local only) and re-run BEFORE the crash-triage
                 # agent can reject the idea. This is what lets torch/XGBoost/CatBoost (e.g. a GRU
@@ -1023,60 +1187,12 @@ class EvaluateMixin:
                 # even IS this repair's artifact.
                 repaired_files = dict(getattr(self.developer, "last_files", {}) or {})
                 repaired_deleted = list(getattr(self.developer, "last_deleted", []) or [])
-                # DOES THE ARTIFACT LOOK LIKE THE THING IT REPLACES? Only asked when the whole-file
-                # `code` really is what this repair shipped: a repo/multi-file repair returns "" and
-                # carries its work in `files`/`deleted`, and a node whose own code is empty never had
-                # a whole-file artifact to begin with. `engine/triage.py::repair_artifact_defect`
-                # documents the two answers and why they are treated differently.
-                _artifact_defect = ""
-                if not repaired_files and not repaired_deleted and (node.code or "").strip():
-                    _artifact_defect = repair_artifact_defect(new_code)
-                # A REPAIR THAT DID NOT PRODUCE A REPAIR. The Developer returns the in-band
-                # "(developer error: …)" sentinel when its OWN session failed — an unreachable
-                # endpoint, a 401, a 402 "out of credits" — so `new_code` is a provider/transport
-                # error message, not code. Nothing downstream could tell the difference: the sentinel
-                # was committed as the node's code by `node_repaired`, re-materialized into the
-                # workdir, and re-evaluated; the eval then failed with a fresh error, so the loop
-                # simply asked again. A dead OpenRouter account produced 2343 such "repairs" on ONE
-                # node at ~11/min for 3.5 h, each one a full re-eval.
-                #
-                # A provider failure is not a code defect, so it must not drive the code-repair loop.
-                # No `node_repaired`, no attempt spent, no files written — the loop breaks here and
-                # the node terminalizes ONCE below with reason="developer_crash" naming the provider
-                # failure, and the run-level circuit breaker fires. (Deliberately NOT committing the
-                # sentinel as node.code also keeps the recovery sweep's `_developer_sentinel` scan,
-                # which keys on exactly that, from later re-terminalizing this node.)
-                #
-                # `is_developer_error` recognises exactly ONE shape of this, LoopLab's own sentinel,
-                # produced by `adapters/repo_developer.py` alone. Two more shapes reach here:
-                #   * a repair that RAISED — normalized into the sentinel at the call above, so it
-                #     arrives here already wearing the shape this branch understands;
-                #   * a repair that answered with PROSE. When the prose PARSES — a comment-only or
-                #     docstring-only answer — the eval exits 0 with no metric, and the node used to
-                #     terminalize as `no_metric`, telling the operator "the command printed no metric"
-                #     about a provider that is dead, with no pause. `"no_code"` is the engine's own
-                #     proof of the same fact the sentinel asserts: an artifact whose module body can
-                #     never execute cannot be a repair, whoever wrote it.
-                #
-                # The remaining answer, `"unparseable"`, keeps today's behaviour of committing the
-                # artifact and letting the next eval's SyntaxError inform the next repair — which is
-                # how a TRUNCATED generation recovers, and stopping a node on one truncation would be
-                # a regression. It is counted DIRECTLY (not inferred from the error text, which can
-                # carry a varying provider request id and so looks new every time) and becomes the
-                # provider verdict once a repair call has answered with something that is not Python
-                # `_UNPARSEABLE_REPAIR_LIMIT` times on one node.
-                if _artifact_defect == "unparseable":
-                    unparseable_repairs += 1
-                _dev_err = None
-                if is_developer_error(new_code):
-                    _dev_err = str(new_code)[:400]
-                elif _artifact_defect == "no_code":
-                    _dev_err = ("the repair returned no executable code, only text: "
-                                + " ".join(str(new_code).split())[:200])
-                elif unparseable_repairs >= _UNPARSEABLE_REPAIR_LIMIT:
-                    _dev_err = (f"the repair has now returned something that is not valid Python "
-                                f"{unparseable_repairs}x — the last one began: "
-                                + " ".join(str(new_code).split())[:160])
+                # WAS THIS A REPAIR AT ALL, OR A DEAD PROVIDER? The four answers and the incident
+                # each one was retrofitted for live in `_repair_provider_failure`. The unparseable
+                # counter round-trips through the return value — it is per-NODE, not per-attempt, so
+                # losing it here would silently restore the unbounded loop it bounds.
+                _dev_err, unparseable_repairs = _repair_provider_failure(
+                    node.code, new_code, repaired_files, repaired_deleted, unparseable_repairs)
                 if _dev_err is not None:
                     triage_outcome = ("abandon", "the repair CALL failed at the provider — no "
                                                  "repaired code was produced")
@@ -1087,30 +1203,8 @@ class EvaluateMixin:
                         "the Developer's LLM provider failed while repairing node "
                         f"{node_id}, so the repair returned an error instead of code — {_dev_err}")
                     break
-                repaired_footprint = developer_artifact_footprint(
-                    node.idea.footprint, new_code, repaired_files)
-                if repaired_footprint is not None:
-                    repaired_footprint = (
-                        self._clamp_resource_footprint(repaired_footprint)
-                        or repaired_footprint)
-                    # A repair keeps the dispatcher's lifecycle reservation.  It may refine the
-                    # declaration within those already-held devices, but cannot grow onto GPUs owned
-                    # by a sibling while the retry loop is live.
-                    if ((_resource_reservation or {}).get("cpu_only")
-                            and "gpus" in repaired_footprint):
-                        repaired_footprint["gpus"] = 0
-                    elif ((_resource_reservation or {}).get("pin")
-                          and "gpus" in repaired_footprint):
-                        repaired_footprint["gpus"] = min(
-                            repaired_footprint["gpus"],
-                            int(_resource_reservation.get("count", 0) or 0))
-                    held_ids = ((_resource_reservation or {}).get("gpu_ids") or [])
-                    held_mem = [getattr(self, "_gpu_mem", {}).get(gpu)
-                                for gpu in held_ids]
-                    held_mem = [value for value in held_mem if type(value) is int]
-                    if (held_mem and isinstance(repaired_footprint.get("gpu_mem_mib"), int)):
-                        repaired_footprint["gpu_mem_mib"] = min(
-                            repaired_footprint["gpu_mem_mib"], min(held_mem))
+                repaired_footprint = self._repaired_footprint(
+                    node, new_code, repaired_files, _resource_reservation)
                 attempt += 1
                 async with self._write_lock:
                     repair_payload = {
@@ -1149,17 +1243,10 @@ class EvaluateMixin:
                 # training code can't burn many full trains (the attempt budget bounds the COUNT of
                 # repairs, not their cost). The workdir persists across attempts, so a reused
                 # checkpoint is valid.
-                # The repair's REAL change set = files whose content actually differs from the pre-repair
-                # node (last_files is cumulative — see prev_files above), plus THIS repair's deletions.
-                changed = {f for f, c in repaired_files.items() if prev_files.get(f) != c}
-                # Deletions likewise get the delta, not the cumulative set: a deletion that predates
-                # the completed train stage cannot invalidate its checkpoint — the stage already ran
-                # (and passed) without that file on disk. Blocking on the cumulative `repaired_deleted`
-                # (seeded from node.deleted at repair_from) would permanently disable stage reuse for
-                # any node whose implement ever deleted a file; only THIS repair's deletions can
-                # invalidate the checkpoint, so only they enter the reuse decision.
-                new_deleted = [d for d in repaired_deleted if d not in prev_deleted]
-                changed |= set(new_deleted)
+                # Both halves are DELTAS against the pre-repair node, never the cumulative sets the
+                # developer hands back — see `_repair_change_set`.
+                changed, new_deleted = _repair_change_set(
+                    prev_files, prev_deleted, repaired_files, repaired_deleted)
                 # THE ROW THE JUDGE WILL READ on the next attempt. Appended here, after `changed` is
                 # known, because "which files this fix actually touched" is the column that separates
                 # a repair chain that is working from one that is rewriting the same lines: the
@@ -1180,23 +1267,9 @@ class EvaluateMixin:
                     _stages, res.failed_stage, changed, workdir,
                     deleted=new_deleted,
                     cwd=(self._eval_spec or {}).get("cwd") if isinstance(self._eval_spec, dict) else None)
-                # Count a full re-train against the cap ONLY when completed EARLIER-stage work is being
-                # discarded: a LATER stage failed yet reuse was refused because the repair could
-                # have changed an earlier stage. A first-stage failure (nothing to reuse) or a single-
-                # command eval is an ordinary retry, bounded by the attempt budget like any other — NOT the
-                # retrain cap (mirrors config.py: "only a repair that changes an EARLIER stage's code
-                # forces a full re-train ... counted"). Check BEFORE incrementing so cap=N runs exactly N.
-                # First-vs-later is judged from the PRE-repair `res.stages` (one record per stage that
-                # ran, in order, the failed stage always LAST) — never from the failed stage's index in
-                # the POST-repair `_stages`: a repair that renames/drops the failed stage (or a
-                # _resolved_stages exception fallback to []) loses that index (-1) for FIRST- and
-                # LATER-stage failures alike. A renamed LATER stage still discards completed
-                # earlier-stage work on the forced full re-run, so it keeps consuming the cap (the
-                # point of counting the renamed case at all — leaving it uncounted let a
-                # stage-renaming repair burn unlimited full trains); a renamed FIRST stage never had
-                # earlier work to discard, so it must stay an ordinary retry.
-                was_first = len(res.stages or []) <= 1
-                if res.failed_stage and not was_first and next_start is None:   # forces a full (expensive) re-train
+                # Which repairs count against the retrain cap, and why a renamed stage still does, is
+                # `_repair_forces_full_retrain`. Asked BEFORE incrementing so cap=N runs exactly N.
+                if _repair_forces_full_retrain(res, next_start):   # forces a full (expensive) re-train
                     if (self._inline_repair_retrain_cap
                             and full_retrains >= self._inline_repair_retrain_cap):
                         triage_outcome = ("abandon",

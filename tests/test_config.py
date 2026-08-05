@@ -413,10 +413,12 @@ def test_watchdog_ticks_do_not_share_the_thread_pool_the_evals_pin():
     detection and both watchdog kill signals go blind exactly when a kill matters, while
     over-admitted evals sit on reserved GPUs waiting. The ticks are short reads, so they get their own
     small pool that is always immediately schedulable."""
+    import ast
     import inspect
 
     import anyio
 
+    from _source_scan import function_tree
     from looplab.engine import asha_monitor, evaluate, train_monitor
     from looplab.core.config import Settings
 
@@ -431,8 +433,6 @@ def test_watchdog_ticks_do_not_share_the_thread_pool_the_evals_pin():
 
     # Every periodic tick that can deliver an intervention or a kill goes through it.
     for source, marker in (
-        (inspect.getsource(evaluate.EvaluateMixin._evaluate),
-         "run_sync(\n                                _intervention_seen"),
         (inspect.getsource(train_monitor.TrainingMonitorMixin._monitor_training),
          "read_training_tail(workdir"),
         (inspect.getsource(asha_monitor.AshaMonitorMixin._monitor_asha),
@@ -441,3 +441,19 @@ def test_watchdog_ticks_do_not_share_the_thread_pool_the_evals_pin():
         assert marker in source, marker
         tick = source.split(marker, 1)[1][:200]
         assert "_watch_limiter()" in tick, (marker, tick)
+
+    # The intervention tick is the third, and it is pinned on the AST rather than on a substring.
+    # Since 2026-08-05 (doc 25 ES-03) it is its own method, `_watch_for_intervention`, whose whole
+    # body IS the poll — so it has exactly one threaded read, and a commented-out
+    # `limiter=_watch_limiter()` beside a bare `run_sync(...)` would satisfy a text pin while the
+    # poll queued behind the very evals the dedicated pool exists to escape.
+    ticks = [node
+             for node in ast.walk(function_tree(evaluate.EvaluateMixin._watch_for_intervention))
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+             and node.func.attr == "run_sync"]
+    assert len(ticks) == 1, f"the intervention watcher must make exactly ONE threaded poll, found {len(ticks)}"
+    pools = [keyword.value for keyword in ticks[0].keywords if keyword.arg == "limiter"]
+    assert len(pools) == 1 and isinstance(pools[0], ast.Call) \
+        and getattr(pools[0].func, "id", None) == "_watch_limiter", (
+        "the intervention poll must draw on the dedicated watch pool, never anyio's shared default "
+        f"— it passes limiter={[ast.unparse(pool) for pool in pools]}")
