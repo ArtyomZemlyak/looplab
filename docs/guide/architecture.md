@@ -107,7 +107,7 @@ Score, …); the **Card lifecycle board** (1 card = 1 hypothesis), **cross-run m
 | Append-only log · pure fold · SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
 | Researcher / Developer / unified agent | `agents/roles.py`, `agents/unified_agent.py` |
 | Canonical eval/LLM concurrency + named-lane broker | `engine/orchestrator.py`, `core/llm_broker.py`, `engine/strategy.py` |
-| Card model · replay/public projection · selection | `core/models.py`, `events/replay.py`, `serve/public_cards.py`, `search/card_selection.py` |
+| Card model · identity digests/receipts · replay/public projection · selection | `core/cards.py`, `events/replay.py`, `serve/public_cards.py`, `search/card_selection.py` |
 | Resource admission · GPU lifecycle reservations | `engine/resources.py`, `core/hardware.py` |
 | Speculative Card producer/consumer · freshness/quality gates | `engine/speculation.py`, `search/speculation_quality.py`, `search/speculation_calibration.py` |
 | Foresight (belief-card prioritization, predict-before-execute) | `search/foresight.py` |

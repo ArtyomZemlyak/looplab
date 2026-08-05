@@ -84,6 +84,7 @@ _LAYOUT = {
     "atomicio": "core",
     "best_of_n": "search",
     "card_selection": "search",  # Card-backed candidate election and ownership receipts
+    "cards": "core",          # card identity: digests, ownership receipts, provenance (doc 25 CO-02)
     "bg_tasks": "runtime",
     "classification": "adapters",
     "cli_agent": "agents",

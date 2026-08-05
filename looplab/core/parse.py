@@ -35,7 +35,7 @@ from looplab.core.errors import LLMError
 #   ledger, where an integral float would be a provider bug rather than a value to round.
 # * `tracing._token_int` — deliberately the LAX twin of that one: it coerces and clamps at 0 and never
 #   raises, because tracing must not be able to perturb the operation it observes.
-# * `models._resource_int` / `models.safe_lesson_node_count` — bounded readers for untrusted persisted
+# * `cards._resource_int` / `models.safe_lesson_node_count` — bounded readers for untrusted persisted
 #   payloads; the latter also accepts decimal STRINGS, for old logs that wrote them.
 
 
