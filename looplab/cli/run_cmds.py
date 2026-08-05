@@ -213,13 +213,39 @@ def classify_prior_run(prior, prior_events) -> str:
     return "live"
 
 
+def is_wrap_up(kind: str) -> bool:
+    """Whether this boundary is WRAP-UP ONLY: the loop may complete the terminal the log already
+    carries, and cannot start new work.
+
+    Separate from `announce_wrap_up` because it is needed EARLIER and without the echo: `_engine`
+    decides refuse-vs-warn on an unreachable LLM endpoint from exactly this predicate (a run that
+    can only finish an existing wrap-up has no proposal left to degrade), and that decision happens
+    before the engine exists, while the notice belongs at the point where the run is re-entered.
+    """
+    return kind in WRAP_UP_NOTICE
+
+
 def announce_wrap_up(kind: str) -> bool:
     """Echo the shared notice for a wrap-up state. True means "the caller must not lift this run"."""
-    notice = WRAP_UP_NOTICE.get(kind)
-    if notice is None:
+    if not is_wrap_up(kind):
         return False
-    typer.echo(notice)
+    typer.echo(WRAP_UP_NOTICE[kind])
     return True
+
+
+def wrap_up_degradation_note(eng) -> str | None:
+    """The closing half of a wrap-up whose endpoint was down, or None when it was up.
+
+    `_engine` probes the endpoint on a wrap-up entry and warns instead of refusing; the artifacts it
+    then produces are real but partly model-free. A bare "finalized <dir>" after that would be the
+    silent half of the degradation — the operator would have to scroll back past a whole wrap-up to
+    learn that the report is a placeholder and that no lessons were distilled.
+    """
+    if not getattr(eng, "wrap_up_endpoint_warning", None):
+        return None
+    return ("wrapped up WITHOUT the model: the end-of-run report is the \"(report unavailable)\" "
+            "placeholder and nothing model-authored reached cross-run memory. Those steps are "
+            "marked complete and will not be retried on a later finalize.")
 
 
 def _pending_finalize(state) -> bool:
@@ -660,7 +686,7 @@ def run(
             # old snapshots before Engine construction prevents same-id changed flags from altering a
             # paid report/cost wrap-up. Missing or corrupt snapshots fail closed without rewriting them.
             engine_task, engine_settings = _pending_finalization_inputs(out, prior.task_id)
-            eng = _engine(out, engine_task, engine_settings, crash_after=None)
+            eng = _engine(out, engine_task, engine_settings, crash_after=None, wrap_up_only=True)
             _preflight_speculation_authority(eng, prior_events)
         else:
             # Construction initializes roles/clients and can fail. Preserve the prior run's provenance
@@ -670,6 +696,10 @@ def run(
                 task,
                 settings,
                 crash_after,
+                # A `run` on a dir whose log already carries a wrap-up (a pending finalize) only
+                # completes that boundary — `announce_wrap_up` below refuses to lift it — so the
+                # endpoint preflight warns there instead of refusing, exactly as on the branch above.
+                wrap_up_only=is_wrap_up(prior_kind),
                 **({"speculation_gate_calibration": True}
                    if speculation_gate_calibration else {}),
             )
@@ -702,6 +732,9 @@ def run(
             eng.store.append(EV_RESUME, {})
         state = _run_engine_guarded(eng)
     _print_result(state)
+    _note = wrap_up_degradation_note(eng)
+    if _note:
+        typer.echo(_note, err=True)
 
 
 @app.command()
@@ -717,7 +750,7 @@ def resume(
     # prefix, drop a valid tail, and — worse — resume would append MORE records behind the boundary (an
     # invisible tail). Refuse and direct to `repair-log` (P0-4); a torn TAIL (normal crash-mid-append)
     # is fine.
-    _require_run_dir(
+    entry_store = _require_run_dir(
         run_dir, healthy=True,
         hint="`resume` continues a run started by `looplab run`; use `run` to start one.")
     # Fall back to the verbatim task snapshot `run` wrote into the run dir, so a run can be resumed
@@ -751,7 +784,17 @@ def resume(
         if max_nodes < 1:
             raise typer.BadParameter("--max-nodes must be >= 1")
         settings.max_nodes = max_nodes
-    eng = _engine(run_dir, task, settings, crash_after=None)
+    # `resume` is the one entry point that is wrap-up-only SOMETIMES: it LIFTS a finished/paused run
+    # back into the loop (new work — a dead endpoint must refuse), but on a wrap-up boundary it may
+    # only complete the terminal already on disk (`announce_wrap_up` below refuses to lift it). The
+    # answer lives in the log, so classify the entry prefix BEFORE building the engine, on the store
+    # `_require_run_dir` already scanned for divergence (so its consumed prefix is cached). This read
+    # is not the authority for anything that gets appended — every lifecycle decision below re-folds
+    # under the singleton lock; it only chooses refuse-vs-warn for the endpoint probe.
+    entry_events = entry_store.read_all()
+    entry_kind = classify_prior_run(fold(entry_events), entry_events)
+    eng = _engine(run_dir, task, settings, crash_after=None,
+                  wrap_up_only=is_wrap_up(entry_kind))
     _preflight_speculation_authority(eng)
     # Continuing a STOPPED run: a `stop` (paused) or natural finish re-breaks on the first iteration
     # and does no work unless we LIFT it — so append the universal `resume` event (fold clears
@@ -821,6 +864,9 @@ def resume(
                        f"({_handoff_deadline - now:.0f}s left) — the previous owner is finishing up")
         time.sleep(0.05)
     _print_result(state)
+    _note = wrap_up_degradation_note(eng)
+    if _note:
+        typer.echo(_note, err=True)
 
 
 @app.command()
@@ -879,7 +925,14 @@ def finalize(
                    f"(task file not found: {snap})")
         return
     settings = load_run_settings(run_dir, strict=True)
-    eng = _engine(run_dir, _load_task(snap, existing_run=True), settings, crash_after=None)
+    # `wrap_up_only` unconditionally: this command's whole contract is "stop it AND wrap it up". It
+    # has already appended the stop intent above, so the only move the loop below has left is to
+    # emit the final report and finish — it cannot propose, so an unreachable endpoint is a warning
+    # about which artifacts the wrap-up loses, not a reason to refuse the wrap-up. Before this, a run
+    # whose endpoint had since died could not be finalized AT ALL, and the refusal blamed "empty
+    # fallback proposals" on a run that will never propose again.
+    eng = _engine(run_dir, _load_task(snap, existing_run=True), settings, crash_after=None,
+                  wrap_up_only=True)
     _preflight_speculation_authority(eng)
     with _engine_singleton(run_dir) as ok:
         if not ok:
@@ -909,7 +962,8 @@ def finalize(
             # Normal live/stopped path: the loop sees stop_requested at its first decision boundary,
             # emits the common final report + run_finished, and performs the durable wrap-up.
             _run_engine_guarded(eng)
-    typer.echo(f"finalized {run_dir}")
+    _note = wrap_up_degradation_note(eng)
+    typer.echo(f"finalized {run_dir}" + (f" — {_note}" if _note else ""))
 
 
 @app.command()

@@ -4,6 +4,12 @@ The sibling of `core/llm.py::validate_bound_profiles`, and deliberately its neig
 gate (`cli/__init__.py::_engine`): that one fails before transport when a role's CREDENTIAL is
 unusable, this one fails before the loop when the role's endpoint is simply not THERE.
 
+ONE probe, TWO policies, because the same dead endpoint means different things at different entry
+points: `preflight_role_endpoints` REFUSES a run that is about to propose, and
+`wrap_up_endpoint_warning` WARNS an entry point that can only complete a run that is already over.
+Adding a third caller means choosing between them — and the test for which one is not "does this
+command touch the model" but "can this command still start new work".
+
 Its own module rather than a function in `factory.py` for two reasons: it is a gate, not a
 composition root (the factory's `test_agent_factory_split.py` line cap is a deliberate reminder of
 what that file is FOR), and a preflight that must run BEFORE any role is built has no business
@@ -29,19 +35,11 @@ _PREFLIGHT_MAX_RETRIES = 2
 PREFLIGHT_TIMEOUT_S = 60.0
 
 
-def preflight_role_endpoints(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S) -> None:
-    """Fail before the run starts when a role's provider cannot be reached.
+def _probe_role_endpoints(settings, *, timeout_s: float) -> list[str]:
+    """Probe every distinct role target once; return one description per unreachable target.
 
-    Why this has to be loud. Every LLM role degrades on purpose, and each of those degradations is
-    right for ONE flaky answer and catastrophic for an endpoint that is not there:
-    `core/parse.py::parse_structured` catches `LLMError` and reports it as an unparseable answer,
-    `roles.py::LLMResearcher.propose` turns two of those into an empty `Idea(operator="draft")`, and
-    `agent.py::ToolUsingResearcher.propose` catches Exception and returns `_fallback`. Stacked, a
-    `looplab run examples/toy_task.json --max-nodes 3` against a dead endpoint produced three
-    IDENTICAL `x=0,y=0` nodes annotated "fallback (agent parse failed)", a metric flat at 10.0, and
-    `finished=True` — a completed run with a confident-looking flat result and no error anywhere,
-    while `--backend toy` optimized the same task to 8.05. With `Settings.backend` now defaulting to
-    "llm", that is what a misconfigured or unreachable endpoint hands a user BY DEFAULT.
+    The shared body of the two policies below. Both need exactly the same measurement — what differs
+    is only what a failure MEANS at that entry point, and that decision belongs to the caller.
 
     Probes each DISTINCT target of the roles this configuration actually requires a live model for —
     `llm_credential_consumers`, the same role set the credential preflight checks — so the ordinary
@@ -56,7 +54,7 @@ def preflight_role_endpoints(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S
 
     _shared_active, roles = llm_credential_consumers(settings)
     if not roles:
-        return                                  # backend != "llm": no role talks to a provider
+        return []                               # backend != "llm": no role talks to a provider
     # Roles served by an EXTERNAL coding-agent process are excluded for the same reason
     # `validate_bound_profiles` special-cases them: that process authenticates from its own
     # credential store and is launched with every secret-looking variable stripped, so a probe from
@@ -99,10 +97,74 @@ def preflight_role_endpoints(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S
         except Exception as exc:  # noqa: BLE001 — every transport/protocol failure is the answer
             failures.append(
                 f"{role or 'the default target'} ({target.model} at {target.base_url}): {exc}")
+    return list(dict.fromkeys(failures))
+
+
+def preflight_role_endpoints(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S) -> None:
+    """Fail before the run starts when a role's provider cannot be reached.
+
+    Why this has to be loud. Every LLM role degrades on purpose, and each of those degradations is
+    right for ONE flaky answer and catastrophic for an endpoint that is not there:
+    `core/parse.py::parse_structured` catches `LLMError` and reports it as an unparseable answer,
+    `roles.py::LLMResearcher.propose` turns two of those into an empty `Idea(operator="draft")`, and
+    `agent.py::ToolUsingResearcher.propose` catches Exception and returns `_fallback`. Stacked, a
+    `looplab run examples/toy_task.json --max-nodes 3` against a dead endpoint produced three
+    IDENTICAL `x=0,y=0` nodes annotated "fallback (agent parse failed)", a metric flat at 10.0, and
+    `finished=True` — a completed run with a confident-looking flat result and no error anywhere,
+    while `--backend toy` optimized the same task to 8.05. With `Settings.backend` now defaulting to
+    "llm", that is what a misconfigured or unreachable endpoint hands a user BY DEFAULT.
+
+    THE SCOPE OF THAT REASONING IS A RUN THAT IS ABOUT TO DO WORK. Every sentence above is about a
+    PROPOSAL; a run that is already over makes none, so this refusal is wrong for a wrap-up entry
+    point and `wrap_up_endpoint_warning` is what those call instead.
+    """
+    failures = _probe_role_endpoints(settings, timeout_s=timeout_s)
     if failures:
         raise LLMError(
-            "LLM endpoint preflight failed: " + "; ".join(dict.fromkeys(failures))
+            "LLM endpoint preflight failed: " + "; ".join(failures)
             + ". The run needs a reachable model for these roles — start the endpoint, or point "
               "LOOPLAB_LLM_BASE_URL / --model at one. Run offline with `--backend toy` "
               "(or -s backend=toy). Refusing to start: the roles would degrade to empty fallback "
-              "proposals and the run would report success on a flat, meaningless result.")
+              "proposals and the run would report success on a flat, meaningless result. "
+              "(Wrapping up a run that is already over is not refused — `looplab finalize` warns "
+              "and names the artifacts a missing model degrades.)")
+
+
+def wrap_up_endpoint_warning(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S) -> str | None:
+    """The same probe, for an entry point that can only COMPLETE a run's wrap-up. Never refuses.
+
+    `preflight_role_endpoints` exists because roles that silently degrade to fallback proposals let a
+    run report success on a meaningless result. Past the terminal boundary there is no proposal to
+    degrade: `finalize`, and a `run`/`resume` that lands on an existing wrap-up, may only turn work
+    that was ALREADY PAID FOR into the report, the lessons, the cost roll-up and `tree.html`.
+    Refusing there costs the operator every deterministic artifact — budget summary, diversity
+    archive, case + concept capsule, cost roll-up, `readmodel.sqlite`, `trace.json`, `tree.html`,
+    none of which need a model — to protect the two the model can no longer produce anyway. Worse,
+    the run then stays `finalization_pending` forever: its spend stays stranded in
+    `.llm-usage-outbox` and every later entry point tries the wrap-up again and refuses again.
+
+    So the answer is to proceed and SAY what the missing model costs, rather than to refuse or to
+    degrade silently. The paid steps are the ones named in the returned text, and each of them is
+    already durably marked complete once attempted (`engine/finalize.py::_mark_finalize_step`), so
+    the warning has to arrive BEFORE the wrap-up runs — which is why it is issued at the same gate as
+    the refusal, in `cli/__init__.py::_engine`, before any role is built.
+
+    Returns the operator-facing warning, or None when every required endpoint answers.
+    """
+    failures = _probe_role_endpoints(settings, timeout_s=timeout_s)
+    if not failures:
+        return None
+    return (
+        "⚠ LLM endpoint unreachable while wrapping up: " + "; ".join(failures)
+        + ".\n  This run is over, so no proposal can degrade — wrapping it up anyway. What the "
+          "missing model costs:\n"
+          "    · end-of-run report → the placeholder \"(report unavailable)\", not the written "
+          "report\n"
+          "    · cross-run lessons, skills and curation → nothing the model would have authored; "
+          "the\n      reflection note and each curation log still record this run deterministically"
+          "\n  Everything else is computed without a model and lands normally: budget summary, "
+          "diversity\n  archive, case + concept capsule, LLM cost roll-up, readmodel.sqlite, "
+          "trace.json, tree.html.\n"
+          "  Each step is marked COMPLETE once attempted, so a later `looplab finalize` will NOT "
+          "redo it.\n  If you want the model-written report and lessons, stop now, bring the "
+          "endpoint back, and\n  re-run this command.")

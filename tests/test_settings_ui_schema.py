@@ -99,7 +99,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 158
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 162
     assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 194
     assert hashlib.sha256("\0".join(sorted(keys)).encode()).hexdigest() == SETTINGS_UI_SCHEMA_KEYSET_REVISION
     assert set(keys) <= set(Settings.model_fields)
@@ -113,7 +113,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     assert by_key["speculation_depth"]["type"] == "int"
     assert "only when Card queue selection is enabled" in by_key["speculation_depth"]["help"]
     assert "speculation-gate" in by_key["speculation_depth"]["help"]
-    assert Settings.model_fields["speculation_depth"].default == 0
+    # The DEFAULT itself belongs to config.py (it flipped 0 -> -1/AUTO on 2026-08-05); what this file
+    # pins is that the row was reviewed against whatever ships, which `_check_pinned_default` enforces
+    # at load and this asserts on the packaged copy.
+    assert by_key["speculation_depth"]["default"] == Settings.model_fields["speculation_depth"].default
     assert Settings.model_fields["speculation_depth"].metadata
     assert "speculation_gate_receipt" not in by_key
     assert {"max_parallel", "parallel_build"}.isdisjoint(by_key)

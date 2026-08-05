@@ -468,7 +468,8 @@ def _make_calibration_roles(task: TaskAdapter, settings: Settings, run_dir: Path
 
 
 def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
-            crash_after: Optional[int], *, speculation_gate_calibration: bool = False) -> Engine:
+            crash_after: Optional[int], *, speculation_gate_calibration: bool = False,
+            wrap_up_only: bool = False) -> Engine:
     from looplab.core.llm import validate_bound_profiles
     from looplab.core.tracing import set_llm_capture
     # Fail here, before any role is built, when a role is bound to a connection profile whose
@@ -516,8 +517,24 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # roles will actually use. Every LLM role degrades silently on a transport failure — a dead
     # endpoint otherwise yields N identical empty fallback nodes, a flat metric and finished=True.
     # See `agents/preflight.py::preflight_role_endpoints` for the measurement.
-    from looplab.agents.preflight import preflight_role_endpoints
-    preflight_role_endpoints(settings)
+    #
+    # `wrap_up_only` says this entry point cannot start new work — it can only complete a wrap-up
+    # that is already owed (`finalize`, and the `run`/`resume` boundaries `is_wrap_up` recognizes).
+    # There the refusal's own reason does not apply (nothing proposes after the terminal boundary)
+    # and refusing costs the operator every artifact that needs no model, so the same probe WARNS
+    # instead, naming what the missing endpoint degrades. The result is recorded on the Engine as a
+    # CLI-owned annotation: the engine never reads it, the command reads it to keep its closing line
+    # honest. Residual, accepted: if a concurrent UI control lifts the stop while the wrap-up runs,
+    # the loop could still start work against the dead endpoint — a deliberate conflicting action,
+    # and the warning above already says what that endpoint state means.
+    from looplab.agents.preflight import preflight_role_endpoints, wrap_up_endpoint_warning
+    _wrap_up_warning = None
+    if wrap_up_only:
+        _wrap_up_warning = wrap_up_endpoint_warning(settings)
+        if _wrap_up_warning:
+            typer.echo(_wrap_up_warning, err=True)
+    else:
+        preflight_role_endpoints(settings)
     role_builder = (_make_calibration_roles if narrow_speculation_runtime else make_roles)
     researcher, developer = role_builder(task, settings, run_dir)
     # Agentic-foresight tools: run-introspection (own experiments) + data facts, so the ranker can
@@ -621,7 +638,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # Every pure-config Settings→Engine knob travels as ONE bundle (BACKLOG §4); only the built
     # OBJECTS (roles, sandbox, policy, strategist, scorers, …) and genuinely CLI-specific values
     # (crash_after comes from a CLI flag, not Settings) remain explicit kwargs.
-    return Engine(
+    engine = Engine(
         run_dir,
         task=task,
         researcher=researcher,
@@ -660,6 +677,10 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # dead LLM endpoint degrades to the deterministic lexical abstractor inside make_abstractor.
         lesson_abstractor=_make_lesson_abstractor(settings),
     )
+    # CLI-owned annotation, never read by the engine: the wrap-up commands close with a line that
+    # must say whether the artifacts they just wrote were produced without a model.
+    engine.wrap_up_endpoint_warning = _wrap_up_warning
+    return engine
 
 
 def _print_result(state) -> None:

@@ -191,10 +191,13 @@ def test_engine_reentry_skips_setup_for_finish_seq_pending(tmp_path, monkeypatch
         "id": "t", "kind": "quadratic", "goal": "g", "direction": "min",
         "bounds": {"x": [-1.0, 1.0]},
     })
-    # `backend="toy"`: `_engine` runs the LLM endpoint preflight, and the `backend` default is "llm"
-    # since 2026-08-04 — an offline suite would refuse to build the engine before reaching the
-    # reentry behaviour under test. The subject is the pending-finish repair, not which roles run.
-    eng = cli._engine(run_dir, task, Settings(max_nodes=1, backend="toy"), crash_after=None)
+    # `wrap_up_only=True` is what the CLI passes on this exact boundary (`is_wrap_up`), and it is why
+    # the shipped `backend="llm"` no longer has to be pinned away here: the endpoint probe warns
+    # instead of refusing when the entry point can only complete a wrap-up. The closed port keeps the
+    # suite offline. The subject is the pending-finish repair, not which roles run.
+    eng = cli._engine(run_dir, task,
+                      Settings(max_nodes=1, llm_base_url="http://127.0.0.1:9/v1"),
+                      crash_after=None, wrap_up_only=True)
     monkeypatch.setattr(
         eng, "_setup_phase",
         lambda _state: pytest.fail("setup must not run before pending finish recovery"),
@@ -595,13 +598,15 @@ def test_cli_entry_repairs_finish_seq_pending_without_reopening_search(tmp_path,
     )
     task.write_text(task_doc, encoding="utf-8")
     (run_dir / "task.snapshot.json").write_text(task_doc, encoding="utf-8")
-    # `backend: toy` in the CONFIG SNAPSHOT, not on the argv: BOTH entries reach `_engine` (and its
-    # LLM endpoint preflight) with the run's own recorded settings — `resume` via
-    # `load_run_settings`, `run` via `_pending_finalization_inputs`, which deliberately ignores the
-    # new invocation's flags on a pending-finalization boundary. A `-s backend=toy` would therefore
-    # be dropped by the `run` half. Since the `backend` default flipped to "llm" (2026-08-04) an
-    # empty snapshot means an unreachable endpoint offline; this run is offline by construction.
-    (run_dir / "config.snapshot.json").write_text('{"backend": "toy"}', encoding="utf-8")
+    # The SHIPPED backend ("llm" since 2026-08-04), against an endpoint that is not there — the
+    # scenario an operator actually has when a finished run outlives its model. Both entries reach
+    # `_engine` with the run's own recorded settings (`resume` via `load_run_settings`, `run` via
+    # `_pending_finalization_inputs`, which deliberately ignores the new invocation's flags on a
+    # pending-finalization boundary), and both classify this prefix as WRAP-UP ONLY, so the endpoint
+    # probe warns instead of refusing. This used to need `backend: toy` in the snapshot purely to get
+    # past that refusal; the closed port keeps the suite offline without hiding the live-backend path.
+    (run_dir / "config.snapshot.json").write_text(
+        '{"llm_base_url": "http://127.0.0.1:9/v1"}', encoding="utf-8")
     store = EventStore(run_dir / "events.jsonl")
     store.append(
         "run_started", {"run_id": run_dir.name, "task_id": "t", "goal": "g",
@@ -660,9 +665,11 @@ def test_cli_run_pending_finalize_preserves_and_uses_original_snapshots(
 
     captured = {}
 
-    def fake_engine(run_path, task, settings, crash_after):
+    # `**kwargs` absorbs the constructor's keyword-only flags (`wrap_up_only`, which `run` passes on
+    # every branch, and `speculation_gate_calibration`) — this double stands in for the whole seam.
+    def fake_engine(run_path, task, settings, crash_after, **kwargs):
         captured.update(
-            run_path=run_path, task=task, settings=settings, crash_after=crash_after)
+            run_path=run_path, task=task, settings=settings, crash_after=crash_after, **kwargs)
         return SimpleNamespace(store=EventStore(run_path / "events.jsonl"))
 
     monkeypatch.setattr(cli, "_engine", fake_engine)

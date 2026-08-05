@@ -117,6 +117,13 @@ class SettingsUIField(BaseModel):
     exclusiveMaximum: int | float | None = None
     essential: bool | None = None
     nullable: bool
+    # The default this row's copy was reviewed against — pinned in the catalogue and verified against
+    # the live model at load (settings_ui_schema._check_pinned_default), so it is display data the
+    # browser can trust rather than a second, drifting copy. Every row carries one, but it stays
+    # OPTIONAL here because a Settings field may legitimately default to None, which serializes
+    # identically to an absent key: requiring it at this boundary would buy nothing the loader does
+    # not already enforce precisely. Declared explicitly because this model forbids extras.
+    default: bool | int | float | str | list | dict | None = None
 
 
 class SettingsUIGroup(BaseModel):
