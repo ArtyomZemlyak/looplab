@@ -187,6 +187,27 @@ def curation_ledger_scope(log_name: str) -> tuple[str, str]:
         raise ValueError("unknown curation ledger") from exc
 
 
+_CURATION_LEDGER_FILES = {kind: name for name, (kind, _ledger) in _CURATION_LEDGER_SCOPES.items()}
+
+
+def curation_ledger_file(kind: str) -> str:
+    """The paid-history FILE one steward kind writes — the inverse of `curation_ledger_scope`.
+
+    TWO at-most-once paid protocols write these same three ledgers: the finalize transaction
+    (`curation_protocol.py`) and the on-demand HTTP/CLI one (`steward_invocation.py`). Their crash
+    windows differ on purpose and their writers are deliberately NOT merged (doc 25 EM-03), but the
+    kind -> file mapping is the one thing they must agree on exactly, and it used to be written out
+    three times: here (inverted), as a literal dict inside `steward_invocation._log_path`, and as
+    three string literals at the finalize steward call sites. A ledger added to one copy and not
+    another does not fail — it splits one paid history in two, and an at-most-once gate that reads
+    the wrong file re-pays.
+    """
+    try:
+        return _CURATION_LEDGER_FILES[kind]
+    except KeyError as exc:
+        raise ValueError("unknown steward kind") from exc
+
+
 def raise_governance_storage_unavailable(path: Path, exc: BaseException):
     """Map a known governance storage failure to the content-free public health contract."""
     ledger = _GOVERNANCE_LEDGER_FILES.get(path.name)
@@ -263,7 +284,8 @@ def curation_source_key(*, run_id: str, task_id: str, finish_seq: int | None) ->
     previously valid row in the ledger starts failing, which surfaces as `GovernanceLedgerUnavailable`
     on reads that used to work. It was written out twice (here and in `lessons.py`) with nothing but
     convention holding the copies together; `tests/test_curation_identity.py` now pins the digests
-    (doc 25 EM-04).
+    (doc 25 EM-04). The delegating writer moved with the rest of the finalize transaction and is now
+    `curation_protocol.py::_curation_source_key` (doc 25 EM-03).
     """
     return "source:v1:" + _semantic_digest({
         "v": 1, "run_id": run_id, "task_id": task_id, "finish_seq": finish_seq,
@@ -392,7 +414,41 @@ def observed_path_missing(path: Path) -> bool:
 
 
 def _validate_curation_row(row: dict, *, kind: str) -> str | None:
-    """Validate every known HTTP and finalize curation receipt schema."""
+    """Validate every known HTTP and finalize curation receipt schema.
+
+    FOUR schema generations coexist here because this is a reader of DURABLE HISTORY, not of a
+    format the current writers agree on. Deleting a branch does not simplify anything on disk; it
+    turns whatever is already written in that shape into `GovernanceLedgerUnavailable`, which
+    fail-closes every future curation on that ledger — and for the two ACTION-ID shapes it is worse
+    than that, because their rows are what an at-most-once lookup matches against. Which writer each
+    branch serves, and what its loss would cost (doc 25 EM-03):
+
+    * **v2 semantic finalize** (`v == 2`, no `action`) — written TODAY by
+      `curation_protocol.py::_append_curation_once`. Keyed by the content digest of the exact
+      model-visible snapshot. `_validate_v2_curation_row` re-derives `source_key` and the whole key,
+      so this branch is also the fence that stops any other writer minting a v2 identity.
+    * **v1 begun/terminal** (`v == 1`, `action` present) — written TODAY by
+      `steward_invocation.py`. The `begun` row IS the on-demand protocol's durable claim: an
+      unresolved one makes a retry of the same `action_id` report the claim instead of re-paying.
+    * **legacy run-keyed finalize** (no `action`, no `action_id`, `v` absent or 1) — the shipped
+      finalize writer from `f1e15c79` through `8471f407` ("key finalize stewards by semantic work").
+      No current writer emits it, and it is NOT dead code: `curation_protocol`'s
+      `_legacy_curation_terminal` reads exactly this shape as a suppression gate, so a portfolio
+      carrying one of these rows must still deduplicate a paid finalize against it.
+      (`tests/test_finalize_steward_durability.py::test_known_v1_terminal_history_still_deduplicates_paid_finalize`
+      drives that end to end.)
+    * **undiscriminated action-id audit** (an `action_id`, no `action`, no `v`) — the oldest
+      on-demand audit projection. This repository's history contains no writer for it; it is a
+      compatibility branch for a ledger written by an older or external producer, and it is kept
+      because `read_curation_rows` NORMALIZES such a row into a `steward-invocation` terminal. Drop
+      the branch and a ledger containing one becomes unreadable; keep the branch but drop the
+      normalization and the same `action_id` reads as a cache MISS and is paid for a second time.
+
+    A FIFTH, still older shape — the very first finalize row (`9761a429`), which carried
+    `run_id`/`auto`/`proposals` but no `outcome` — is deliberately NOT admitted: the legacy branch
+    below requires an `outcome` from the closed set, so such a row fails closed rather than being
+    read as an unknown decision.
+    """
     action = row.get("action")
     version = row.get("v")
     if "action" in row and action not in {
@@ -497,7 +553,24 @@ def _validate_curation_row(row: dict, *, kind: str) -> str | None:
 
 def read_curation_rows(
         path: Path, *, kind: str | None = None, ledger: str | None = None) -> list[dict]:
-    """Strictly read one complete paid-curation history, including task facets."""
+    """Strictly read one complete paid-curation history, including task facets.
+
+    ONE loop below enforces TWO sequencing disciplines, because two independent at-most-once
+    protocols write this file (doc 25 EM-03) and each has its own notion of "impossible":
+
+    * the FINALIZE discipline, over `v == 2` rows keyed by `curation_key` — at most one terminal per
+      semantic key, preceded by any number of `unavailable` observations from DISTINCT sources
+      (an unavailable client spends nothing, so it must not consume the key; a repeat from the same
+      source is a duplicate);
+    * the ON-DEMAND discipline, over `action` rows keyed by `action_id` — one `begun` claim and one
+      terminal, the terminal's `begun_revision` pinned to its claim's physical position and both
+      halves carrying the same `request_digest`.
+
+    They are checked in one pass because they interleave physically in one file, not because they
+    are the same rule. The normalization just above is part of the second discipline: an oldest-shape
+    row (an `action_id` with no discriminator) becomes a `steward-invocation` terminal, without which
+    the on-demand cache reads it as a MISS and pays for that id a second time.
+    """
     expected_kind, expected_ledger = curation_ledger_scope(path.name)
     if kind is not None and kind != expected_kind:
         raise ValueError("curation kind does not match ledger")

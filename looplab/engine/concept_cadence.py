@@ -98,8 +98,8 @@ class ConceptCadenceMixin:
         # un-recorded tagging on resume. It is BOUNDED, not prevented: `_RETAG_CAP`/`_HYP_TAG_CAP`
         # limit each pass and per-node incremental reuse skips already-tagged nodes, so the repeat is
         # a small re-spend rather than the whole snapshot. Closing it means the claim-before-dispatch
-        # protocol `lessons.py::_paid_curation_attempt` implements — claim the bounded input digest,
-        # persist terminal/ambiguous receipts — since an eventual snapshot is not a payment fence.
+        # protocol `curation_protocol.py::_paid_curation_attempt` implements — claim the bounded input
+        # digest, persist terminal/ambiguous receipts — since an eventual snapshot is not a payment fence.
         snap = self._concept_coverage_snapshot(state)
         if snap is None:
             return state

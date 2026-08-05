@@ -1874,6 +1874,84 @@ campaign keeps finding:
 
 *Recommendation:* Move the finalize claim/recovery protocol out of lessons.py into a curation_protocol.py module beside steward_invocation.py, and converge new writes on one protocol (the semantic-key v2 shape) so the validator's other branches become legacy-read-only code that can be isolated and eventually retired. The schema plurality is historical, not a requirement of new writes.
 
+*Resolution (2026-08-05) — the MOVE, done; the writer convergence, declined with the measurement.*
+
+`looplab/engine/curation_protocol.py` now owns the finalize at-most-once paid-curation transaction:
+the semantic keys, the claim write/read, the decision lock, the `.curation_invocations/` scratch GC,
+the paid attempt and its recovery, `_append_curation_once`, the shared steward driver and its three
+configurations. `lessons.py` drops from 1,301 to 604 lines — 698 of them were this (645 of method
+bodies plus the claim/scratch constants), so the finding's "~700 of 1,334" was almost exactly right
+against a file EM-02 had since shrunk to 1,301. It stays a
+MIXIN on `LessonMemory` on purpose: every method in it is a live patch seam spelled
+`LessonMemory.<name>` (23 of them, pinned by name in the new guard), and the protocol legitimately
+reads the engine handle for `memory_dir`, the two `_cross_run_curation*` gates and `reflect_client`.
+
+**The cited line numbers had drifted** (the block is 539-959, not 520-937; the validator is 394-495,
+not 370-473; `read_curation_rows` starts at 498, not 476) — `steward_invocation.py:167` was exact.
+
+*Converging the writers on the v2 shape is the part that would have caused harm,* and the reason is
+not stylistic. The v2 validator pins an EXACT field set and rejects anything outside it, so a v2 row
+cannot carry `action_id`, `by`/`at`, `request_digest`, or a non-null `receipt` — every field the
+on-demand protocol needs. "Converge on v2" therefore means WIDENING v2 into a fifth schema, not
+retiring four. Worse, it would collide the two identities: `_already_curated` treats any non-
+`unavailable` v2 row with a matching `curation_key` as terminal, so an operator's on-demand review of
+a portfolio would silently suppress the next unattended finalize curation of the same snapshot — and
+an operator asking for a second look at a snapshot finalize already reviewed would be told it was
+already resolved. Five parametrized cases now pin that red line.
+
+The crash windows differ for a reason, and the difference is the point:
+
+| | finalize (`curation_protocol.py`) | on-demand (`steward_invocation.py`) |
+|---|---|---|
+| identity | the content digest of the exact model-visible snapshot; facets, the task id | the caller's `action_id`, bound to a `request_digest` |
+| who chooses it | the code, from the input | the operator, per request |
+| claim location | a side file, `.curation_invocations/<sha>.json` (never in the ledger) | a `begun` ROW in the ledger |
+| lock | one per semantic key (+ a legacy guard only when a v1 claim exists) | one per LEDGER |
+| lost terminal | the next attempt CLOSES the key with `prior_attempt_incomplete_not_replayed`, derived from the CLAIM's own identity | the next attempt REPLAYS the begun row; the claim stays open until a human picks a new id |
+| deliberate re-run | impossible while the input is unchanged — that is the point | possible with a new id — that is the point |
+
+Unattended work that must never buy the same snapshot twice and operator work that must remain
+re-requestable are opposite requirements. One writer has to drop one of them.
+
+*What the four row schemas actually are, and which are reachable from disk.* `_validate_curation_row`
+is a reader of durable history, so each branch was traced to the writer that shipped it rather than
+assumed legacy:
+
+* **v2 semantic finalize** — written today by `_append_curation_once`.
+* **v1 begun/terminal** — written today by `steward_invocation.py`.
+* **legacy run-keyed finalize** — the shipped writer from `f1e15c79` (`_append_curation_once` writing
+  `{"v": 1, "run_id", "task_id", **rec}`) until `8471f407` re-keyed finalize by semantic work. No
+  current writer emits it and it is not dead: `_legacy_curation_terminal` reads exactly this shape as
+  a suppression gate, and `test_finalize_steward_durability.py::test_known_v1_terminal_history_still_deduplicates_paid_finalize`
+  drives it end to end.
+* **undiscriminated action-id audit** — `git log -S'"action_id": action_id'` over `looplab/` finds no
+  writer for it in this repository: both action-id writers (`f1e15c79`, `6ad5959e`) emit `"action":
+  "steward-invocation"` beside it. It is a compatibility branch, and it is kept because
+  `read_curation_rows` NORMALIZES such a row into a terminal. Deleting the branch makes a ledger
+  containing one unreadable; keeping the branch but deleting the normalization makes the same
+  `action_id` read as a cache MISS and buys the call again. Nothing in the suite covered that second
+  half before this change.
+
+A FIFTH shape exists in history and is deliberately NOT admitted: the original finalize row from
+`9761a429` carried `run_id`/`auto`/`proposals` and no `outcome`, so the legacy branch's closed-outcome
+requirement fails it closed (measured: `GovernanceLedgerUnavailable(reason="invalid_record")`). That
+is the correct treatment — an unknown decision must stop the ledger, not be projected as a known one —
+but it is now written down instead of being an accident.
+
+*One thing did converge.* The kind -> ledger-file vocabulary existed three times: inverted in
+`governance_health._CURATION_LEDGER_SCOPES`, as a literal dict inside `steward_invocation._log_path`,
+and as three filename literals at the finalize steward call sites. It is now
+`governance_health.curation_ledger_file`, and `_run_finalize_steward` derives the log from `kind`
+rather than taking both. A ledger added to one copy and not another does not fail — it splits one paid
+history in two, and an at-most-once gate reading the wrong file re-pays.
+
+`tests/test_curation_protocol.py` — 41 tests. Seven deliberate breaks were applied to a throwaway
+copy of the tree and every one failed loudly: dropping the finalize recovery call (6 failures, 3 of
+them pre-existing tests), ignoring the on-demand `begun` claim (2), deleting the undiscriminated-schema
+branch (2), deleting its normalization (1 — **only** the new guard), reintroducing a second ledger-name
+table (1 — only the new AST guard), leaving a protocol copy behind in `lessons.py` (1), and deleting
+the legacy run-keyed branch (1).
+
 #### EM-04 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **Durable identity derivation (_curation_source_key / _facets_curation_key) duplicated between writer and validator**

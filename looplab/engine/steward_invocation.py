@@ -37,15 +37,12 @@ def _thread_lock(path: Path) -> threading.Lock:
 
 
 def _log_path(memory_dir, kind: str) -> Path:
-    names = {
-        "concept": "concept_curation_log.jsonl",
-        "claim": "claim_curation_log.jsonl",
-        "facets": "task_facets_curation_log.jsonl",
-    }
-    try:
-        name = names[kind]
-    except KeyError as exc:
-        raise ValueError("unknown steward kind") from exc
+    # ONE kind -> ledger vocabulary, shared with the finalize protocol that writes the same three
+    # files (doc 25 EM-03); a second local copy is how the two at-most-once gates come to disagree
+    # about which history they are deduplicating against.
+    from looplab.engine.governance_health import curation_ledger_file
+
+    name = curation_ledger_file(kind)
     if not memory_dir:
         raise ValueError("no memory_dir")
     return Path(memory_dir) / name
