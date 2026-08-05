@@ -1185,6 +1185,89 @@ have compared an empty list to an empty list and proved nothing.
 
 *Recommendation:* Split a ConceptCadenceMixin (concept snapshot/tagging/consolidation/run-base) and move _maybe_verify_ties/_verifier_soundness to their own small mixin (or eval_stages), leaving strategy.py the consult/apply/coverage core. Parametrize the at_node-idempotence predicate over the snapshot list. Break _concept_coverage_snapshot into tag-refresh / consolidation / edges / hypothesis-tag / coverage-summary steps.
 
+*Resolution (2026-08-05) — the split, the one predicate, and a driver over four named steps.*
+
+`engine/concept_cadence.py::ConceptCadenceMixin` (433 lines) and
+`engine/verifier_tiebreak.py::VerifierTiebreakMixin` (168) leave `engine/strategy.py`, which drops
+1260 -> 752 and is now what its module docstring always claimed: build the Strategist's brief,
+validate and merge the operator pin against the decision, apply the knobs through the governance
+matrix, record the breadth snapshot the brief reads. Both new modules are registered in
+`looplab/__init__.py::_LAYOUT` (without which their flat paths stop resolving and every monkeypatch
+through them becomes a silent no-op), both moved `@in_llm_lane("enrichment")` producers are re-spelled
+in `core/llm_broker.py::BACKGROUND_LANE_PRODUCERS` — whose two-way scan keys on
+`<filename>::<method>`, so the move alone would have orphaned them — and CLAUDE.md's inventory goes
+to NINETEEN files / eighteen mixins, with `shared.py` the twentieth.
+
+The finding's numbers are stale by a uniform +26 lines (the method is 750-989, not 776-1014; the
+tie-break 991-1128, not 1017-1154; the predicate copies at 605-609 / 673-676 / 692-695) and it
+overcounts the nesting: `_concept_coverage_snapshot` has THREE `try` statements, not four, at a max
+depth of two — one outer producer guard plus two SIBLINGS inside it. That miscount matters, because
+the sibling structure is the whole design and it is what the decomposition had to preserve: the edge
+assertion and the hypothesis tagging each swallow their own failures ("audit enrichment must not
+break the cadence"), while a failure in the tagging pass itself has nothing left to summarize and
+falls through to the outer guard as "no snapshot". Every other claim held — this is the one finding
+in the batch whose substance survived checking intact.
+
+**Rejected: `eval_stages`** as the home for the tie-break, the recommendation's parenthetical. It is
+the wrong file by the registry's own lights. `eval_stages.py` holds the ONE eval-path producer
+`BACKGROUND_LANE_PRODUCERS` exists to keep OUT of a capped lane (`_stage_check_fn::_check`, whose
+lane is asserted NOT capped by `test_the_per_eval_stage_check_is_not_in_a_capped_lane`), and that
+guard reads the file with `_LANE_DECL.search(source)` — the FIRST `@in_llm_lane` declaration in it —
+then asserts the match is `_check`. Landing `_maybe_verify_ties` (`@in_llm_lane("enrichment")`, a
+CAPPED lane) above `_stage_check_fn` would make that search match the new arrival and the guard would
+start asserting about the wrong function. Putting the registry's positive and negative example in one
+362-line module is not a filing decision; it is a way to break the guard by editing something else.
+
+**Rejected: keeping the predicate as an Engine method.** `_already_covered_at` is gone; the rule is
+`search/coverage.py::already_covered_at(state, n, snapshots)`. A mixin staticmethod would have had to
+live on one of the two cadence clusters and be called cross-cluster from the other, which is what
+`shared.py` exists to prevent — and the predicate has no engine state at all. It composes
+`snapshot_matches_analytics_projection` and belongs beside it, next to `latest_live_snapshot`, its
+mirror on the consumption side; a change to what "still live" means is now visible to producer and
+consumer in one screen. The cost is one retired patch seam, measured before taking it: one call site
+in the suite (`tests/test_coverage.py`), zero in `looplab/`, zero in `docs/`, all re-pointed here. The
+conjunct ORDER is preserved deliberately and now documented — `at_node` first, because the projection
+match digests every node's idea/params/concepts and testing it first would make a long snapshot
+history O(rows x nodes).
+
+**Rejected: folding the producer's trailing `return {…}` into the outer guard.** It sits outside the
+`try` in the original and stays outside it. Moving it in would be tidier and would change which
+failures are swallowed — a `cov` without an `experiments` key currently escapes and crashes the
+cadence — and a refactor is not the place to decide that it shouldn't. One deliberate delta in the
+other direction IS recorded: `stale_tagged_nodes` moved from a method-top import (outside the guard)
+into the two steps that use it, so a MISSING SYMBOL in `search/concept_graph.py` now yields "no
+snapshot" rather than killing the run. Importing the MODULE still escapes, because the driver's
+`skeleton_for` import is still ahead of the `try`; what changed is only reachable from a broken tree,
+which CI import-checks catch before a run ever starts.
+
+The guard is `tests/test_snapshot_cadence_idempotence.py` (10). Its predicate half drives the truth
+table directly, including the two cases a bare `at_node == n` check loses: a row at the right node
+count whose projection went stale under an abort must leave the gate OPEN (an abort changes what the
+snapshot would say without allocating a node), and one producer's snapshots must never satisfy the
+other's gate — the reason the parameter is the LIST and not a hard-coded attribute. Its site half
+drives all three: the flat cadence records once per node count; the concept cadence does not re-enter
+the PAID producer for a node count it already covered (that call site dispatches LLM tagging with no
+claim fence in front of it, so a leaky gate re-spends rather than merely re-appends); and the
+post-producer re-check against a FRESH fold stops a second row for a node count that became covered
+during the call — a site the pre-check cannot cover, because it ran before the write existed. The
+structural pin is AST (`called_names`), and it counts: `_maybe_snapshot_concept_coverage` must reach
+`already_covered_at` TWICE. The step decomposition is guarded behaviourally, on the four DURABLE
+effects rather than the four calls — a driver that stopped calling a step still returns a well-formed
+snapshot dict, so only the log can tell.
+
+Teeth-tested against 8 breaks on a scratch tree, all biting at the intended assertion. Dropping the
+projection half of the predicate fails the two stale-projection cases here plus the pre-existing
+abort tests in `test_coverage`/`test_concept_pivot`; deleting the post-fold gate site fails the
+post-producer test and the AST count; re-inlining the predicate at the flat site in a form that still
+WORKS (import restored, behaviour byte-identical to the pre-split code) fails exactly one assertion —
+the structural one — which is the point of having it; and commenting out any of the four recording
+steps (`_assert_concept_edges`, `_tag_hypothesis_concepts`, `_record_node_concept_tags`, the
+consolidation append) fails the effects test, with the node-row break additionally failing three
+pre-existing `test_authored_concepts` cases.
+
+No diagram change: the split moves no cadence, threshold, default or event type, and the process
+diagram's `concept` block already describes the subsystem by behaviour rather than by file.
+
 #### EC-10 · MEDIUM · duplication · effort: medium
 
 **Durable-usage append/verify/acknowledge protocol implemented three times in costs.py**
