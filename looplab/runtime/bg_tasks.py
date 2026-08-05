@@ -67,6 +67,66 @@ def _child_env(argv) -> dict:
     return base
 
 
+class _BgTask:
+    """One background command's handle, owning the F10 lock discipline that guards its PID.
+
+    The records were plain dicts indexed by string key from six methods, and the subtle part — that
+    `poll()` REAPS and therefore frees the PID, so every reaping poll must hold `deadline_lock` while
+    pre-checks must read `returncode` instead — was enforced by convention and re-explained in five
+    comment blocks (doc 25 RA-09). `locked_reap_and_poll` is that rule as code: the three callers that
+    need "close the fd if the child is gone, then report its status" now say so once.
+
+    Attributes are plain fields rather than dict keys so a typo is an AttributeError at the call site
+    instead of a silent `None` from `.get`.
+    """
+
+    __slots__ = ("proc", "log", "fh", "cursor", "cmd", "cwd", "timed_out", "deadline_lock",
+                 "deadline", "closed")
+
+    def __init__(self, *, proc, log, fh, cmd: str, cwd: str, deadline):
+        self.proc = proc
+        self.log = log
+        self.fh = fh
+        self.cursor = 0
+        self.cmd = cmd
+        self.cwd = cwd
+        self.timed_out = False
+        # Serialize deadline enforcement per task without blocking readers:
+        # watcher/read/list may sweep concurrently, but only one may act on
+        # this PID at a time (the second kill would carry a PID-reuse risk).
+        self.deadline_lock = threading.Lock()
+        self.deadline = deadline
+        self.closed = False
+
+    def reap(self) -> None:
+        """Close our copy of the log write-handle once the child has exited (else one fd leaks per
+        background command for the life of the process)."""
+        if self.proc.poll() is not None and not self.closed:
+            try:
+                self.fh.close()
+            except OSError:
+                pass
+            self.closed = True
+
+    def locked_reap_and_poll(self):
+        """Reap if exited and return the exit code, holding `deadline_lock` across both.
+
+        The ONE spelling of the F10 fence. `poll()` reaps the child and frees its PID, so an unlocked
+        poll here could reap mid-`_kill_tree` and let `killpg` target a REUSED PID — the exact hazard
+        this lock exists to prevent. Callers must not already hold the lock; `_enforce_deadline`
+        always releases it (or never took it) before returning.
+        """
+        with self.deadline_lock:
+            self.reap()
+            return self.proc.poll()
+
+    def status_row(self, tid: str, rc) -> dict:
+        """The status fields `read()` and `list()` both report, spelled once."""
+        return {"task_id": tid, "cmd": self.cmd,
+                "status": "running" if rc is None else "exited", "exit_code": rc,
+                "timed_out": self.timed_out}
+
+
 class BackgroundManager:
     def __init__(self, max_seconds: float = _BG_MAX_SECONDS, max_finished: int = _MAX_FINISHED,
                  watch_interval: float = _WATCH_INTERVAL):
@@ -106,15 +166,9 @@ class BackgroundManager:
                 pass
             raise
         with self._lock:
-            self._tasks[tid] = {"proc": proc, "log": log, "fh": f, "cursor": 0,
-                                "cmd": " ".join(argv), "cwd": cwd,
-                                "timed_out": False,
-                                # Serialize deadline enforcement per task without blocking readers:
-                                # watcher/read/list may sweep concurrently, but only one may act on
-                                # this PID at a time (the second kill would carry a PID-reuse risk).
-                                "deadline_lock": threading.Lock(),
-                                "deadline": (time.monotonic() + self._max_seconds
-                                             if self._max_seconds else None)}
+            self._tasks[tid] = _BgTask(
+                proc=proc, log=log, fh=f, cmd=" ".join(argv), cwd=cwd,
+                deadline=(time.monotonic() + self._max_seconds if self._max_seconds else None))
         self._evict_finished()   # bound retained finished tasks + their log files
         self._ensure_watcher()   # start the always-on deadline sweeper on first use
         return tid
@@ -142,18 +196,17 @@ class BackgroundManager:
     def _sweep_deadlines(self) -> None:
         """Enforce deadlines + reap exited children across ALL tasks, then bound retained logs — the
         same work read()/list() do lazily, now driven by the watcher. Snapshot under the lock, then act
-        outside it: `_enforce_deadline`/`_reap` operate on the handle directly and must not re-enter it."""
+        outside it: `_enforce_deadline` and the handle's own `locked_reap_and_poll` must not re-enter it."""
         with self._lock:
             tasks = list(self._tasks.values())
         # `deadline_lock` must cover every poll/reap. read()/list()/kill() already fence theirs; this
-        # sweep did not, so an unlocked `_reap` here could consume the child WHILE an explicit
+        # sweep did not, so an unlocked reap here could consume the child WHILE an explicit
         # `kill()` still held its pid for tree-kill — reopening exactly the PID-reuse/orphan window
         # those three fence against. `kill()` holds the lock across a 10s `proc.wait`, but the sweep
         # runs on the watcher thread with nothing waiting on it, so blocking here is harmless.
         for t in tasks:
             self._enforce_deadline(t)
-            with t["deadline_lock"]:
-                self._reap(t)
+            t.locked_reap_and_poll()
         self._evict_finished()
 
     def shutdown(self) -> None:
@@ -164,16 +217,6 @@ class BackgroundManager:
         if w is not None:
             w.join(timeout=5)
 
-    @staticmethod
-    def _reap(t) -> None:
-        """Close our copy of the log write-handle once the child has exited (else one fd leaks per
-        background command for the life of the process)."""
-        if t["proc"].poll() is not None and not t.get("closed"):
-            try:
-                t["fh"].close()
-            except OSError:
-                pass
-            t["closed"] = True
 
     @staticmethod
     def _enforce_deadline(t) -> None:
@@ -181,7 +224,7 @@ class BackgroundManager:
         like `kill`). Driven by the always-on watcher thread and also called opportunistically on
         read()/list(). Idempotent; a None deadline (timeout disabled) is a no-op. Operates on the
         handle `t` directly (never re-enters the lock)."""
-        dl = t.get("deadline")
+        dl = t.deadline
         # `returncode`, NOT `poll()`: this pre-check runs OUTSIDE `deadline_lock`, and `poll()` REAPS.
         # While `kill()` (a server thread) holds that lock inside `_kill_tree`, past its own returncode
         # fence, a watcher/read()/list() caller reaching this line could reap a child that exited in
@@ -189,15 +232,15 @@ class BackgroundManager:
         # a REUSED pid. That is the same F10 hazard `_kill_tree` documents and fences against, and it
         # is exactly why the non-reaping read is the right one here; the locked re-check below still
         # calls `poll()`, which is safe because it owns the lock.
-        if dl is None or time.monotonic() <= dl or t["proc"].returncode is not None:
+        if dl is None or time.monotonic() <= dl or t.proc.returncode is not None:
             return
-        deadline_lock = t["deadline_lock"]
+        deadline_lock = t.deadline_lock
         if not deadline_lock.acquire(blocking=False):
             return
         try:
             # Re-check after acquiring: another sweep may have killed/reaped the process while this
             # caller was racing for the task. Never issue a second kill against a stale/reused PID.
-            if t["proc"].poll() is not None:
+            if t.proc.poll() is not None:
                 return
             # Escalating WHOLE-TREE kill (psutil / taskkill /T / killpg -9), not a single SIGTERM a
             # stuck child can ignore forever — the old code sent one TERM and then latched timed_out,
@@ -206,8 +249,8 @@ class BackgroundManager:
             # is still returning, and observers must not see an exited task without its final status.
             # Do not use this flag as an early-return latch: if a best-effort tree kill was a no-op,
             # the next watcher/read sweep must retry while the process remains alive.
-            t["timed_out"] = True
-            _kill_tree(t["proc"])
+            t.timed_out = True
+            _kill_tree(t.proc)
         finally:
             deadline_lock.release()
         # NO exit-time descendant sweep here, unlike the sandbox path's `_reap_process_group`, and
@@ -220,7 +263,7 @@ class BackgroundManager:
         #   * On the KILL path a sweep would be redundant — `_kill_tree` already issues the same
         #     guarded `killpg` over the whole group — and it would mask the retry this loop depends
         #     on: a tree-kill that was a NO-OP must leave the process alive so the next watcher/read
-        #     sweep tries again (see `t["timed_out"]`'s "do not use as an early-return latch" note).
+        #     sweep tries again (see `t.timed_out`'s "do not use as an early-return latch" note).
 
     def _evict_finished(self) -> None:
         """Drop the OLDEST finished tasks (insertion order) once more than `max_finished` are retained,
@@ -235,23 +278,23 @@ class BackgroundManager:
             # for the next pass; eviction is a retention bound, not a correctness gate.
             finished = []
             for tid, t in self._tasks.items():
-                if not t["deadline_lock"].acquire(blocking=False):
+                if not t.deadline_lock.acquire(blocking=False):
                     continue
                 try:
-                    if t["proc"].poll() is not None:
+                    if t.proc.poll() is not None:
                         finished.append(tid)
                 finally:
-                    t["deadline_lock"].release()
+                    t.deadline_lock.release()
             for tid in finished[:-self._max_finished] if len(finished) > self._max_finished else []:
                 t = self._tasks.pop(tid, None)
                 if t is None:
                     continue
                 try:
-                    t["fh"].close()
+                    t.fh.close()
                 except OSError:
                     pass
                 try:
-                    Path(t["log"]).unlink()
+                    Path(t.log).unlink()
                 except OSError:
                     pass
 
@@ -267,21 +310,21 @@ class BackgroundManager:
             # itself is bounded (one seek + ≤ _MAX_READ+4 bytes), so holding the lock across it is fine.
             skip_note = ""
             try:
-                size = os.stat(t["log"]).st_size
+                size = os.stat(t.log).st_size
             except OSError:
-                size = t["cursor"]
-            if size - t["cursor"] > _BACKLOG_CAP:
+                size = t.cursor
+            if size - t.cursor > _BACKLOG_CAP:
                 # Bounded backlog: jump the cursor to the newest _BACKLOG_CAP bytes and SAY SO in the
                 # chunk (honest truncation) — the older output stays recoverable in the log file.
-                skipped = size - t["cursor"] - _BACKLOG_CAP
-                t["cursor"] = size - _BACKLOG_CAP
-                skip_note = f"…({skipped} bytes of older output skipped — full log: {t['log']})…\n"
+                skipped = size - t.cursor - _BACKLOG_CAP
+                t.cursor = size - _BACKLOG_CAP
+                skip_note = f"…({skipped} bytes of older output skipped — full log: {t.log})…\n"
             try:
                 # Incremental seek-read: only the next chunk, never the whole log. +4 bytes of slack
                 # so a chunk that exactly fills the budget is distinguishable from one that was cut
                 # (the UTF-8 boundary strip below keys on `len(chunk) < len(new)`).
-                with open(t["log"], "rb") as lf:
-                    lf.seek(t["cursor"])
+                with open(t.log, "rb") as lf:
+                    lf.seek(t.cursor)
                     new = lf.read(_MAX_READ + 4)
             except OSError:
                 new = b""
@@ -298,20 +341,12 @@ class BackgroundManager:
                     chunk = chunk[:-1]
             # Advance the cursor ONLY by what we return (backpressure): the next poll continues exactly
             # where this reply ended, so nothing past the budget is consumed-then-truncated away.
-            t["cursor"] += len(chunk)
-            pending = max(0, size - t["cursor"])
+            t.cursor += len(chunk)
+            pending = max(0, size - t.cursor)
             text = skip_note + chunk.decode("utf-8", "replace")
         self._enforce_deadline(t)   # reap a task past its wall-clock budget before reporting status
-        # Serialize the reaping poll() against a concurrent watcher kill (F10): poll() reaps the child
-        # and frees its PID, so an unlocked poll() here could reap mid-_kill_tree and let killpg target a
-        # REUSED PID — the exact hazard `deadline_lock` exists to prevent. `_enforce_deadline` already
-        # released the lock (or never took it), so re-acquiring here does not re-enter.
-        with t["deadline_lock"]:
-            self._reap(t)
-            rc = t["proc"].poll()
-        return {"ok": True, "task_id": tid, "cmd": t["cmd"],
-                "status": "running" if rc is None else "exited", "exit_code": rc,
-                "new_output": text, "pending": pending, "timed_out": t.get("timed_out", False)}
+        rc = t.locked_reap_and_poll()   # the F10 fence; see `_BgTask.locked_reap_and_poll`
+        return {"ok": True, **t.status_row(tid, rc), "new_output": text, "pending": pending}
 
     def list(self) -> list:
         with self._lock:
@@ -319,12 +354,7 @@ class BackgroundManager:
         out = []
         for tid, t in items:
             self._enforce_deadline(t)
-            with t["deadline_lock"]:      # F10: serialize the reaping poll() against a watcher kill
-                self._reap(t)
-                rc = t["proc"].poll()
-            out.append({"task_id": tid, "cmd": t["cmd"],
-                        "status": "running" if rc is None else "exited", "exit_code": rc,
-                        "timed_out": t.get("timed_out", False)})
+            out.append(t.status_row(tid, t.locked_reap_and_poll()))
         return out
 
     def kill(self, tid: str) -> dict:
@@ -332,10 +362,10 @@ class BackgroundManager:
             t = self._tasks.get(tid)
         if not t:
             return {"ok": False, "error": f"no such background task {tid!r}"}
-        proc = t["proc"]
+        proc = t.proc
         # Serialize an explicit kill with deadline enforcement too. Otherwise the user-facing kill
         # can race the watcher exactly like two sweeps and issue a second tree-kill for a stale PID.
-        with t["deadline_lock"]:
+        with t.deadline_lock:
             if proc.poll() is None:
                 # Robust TREE kill + VERIFY (arch-review §4 P1-4): the old kill sent one
                 # SIGTERM/terminate, never waited, never escalated, and ALWAYS reported success — a
@@ -352,10 +382,10 @@ class BackgroundManager:
             # PID-reuse hazard that fence exists for.
             rc = proc.poll()
         try:
-            t["fh"].close()
+            t.fh.close()
         except OSError:
             pass
-        t["closed"] = True
+        t.closed = True
         if rc is None:                       # still alive after tree-kill + wait — do NOT claim success
             return {"ok": False, "task_id": tid, "status": "kill_failed",
                     "error": "process did not exit after tree-kill"}

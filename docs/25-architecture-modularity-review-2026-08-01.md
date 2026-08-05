@@ -4907,6 +4907,29 @@ Two things worth naming because they fail silently rather than loudly:
 
 *Recommendation:* Introduce a small _BgTask class owning proc/log/fh/cursor/deadline_lock with methods like locked_poll(), reap(), enforce_deadline() so the lock discipline is encoded once; the five comment blocks collapse into one docstring. Behavior-preserving refactor.
 
+*Resolution (2026-08-05):* `_BgTask` now owns the record and the discipline. The dict is gone —
+`__slots__` fields instead of string keys, so a misspelled read is an `AttributeError` at the call
+site rather than the `None` that `.get("timed_ouy")` used to return and that would have read as "not
+timed out".
+
+`locked_reap_and_poll()` is the F10 rule as code: close the fd if the child is gone, then read its
+status, both under `deadline_lock`. The three callers that needed it (`read`, `list`,
+`_sweep_deadlines`) say so in one line each, and the five comment blocks collapse to one docstring.
+`status_row()` absorbs the status projection `read` and `list` both spelled out.
+
+Three polls deliberately stay outside that helper, each fencing itself for its own reason:
+`_enforce_deadline`'s non-blocking try, `kill`'s fence around the tree-kill, and `_evict_finished`'s
+non-blocking retention sweep. The guard therefore checks that every reaping poll is fenced ONE WAY OR
+THE OTHER rather than that all of them use the helper — the first draft asserted the stricter rule and
+was wrong about `_enforce_deadline`.
+
+The non-reaping pre-check is unchanged and still reads `.returncode`: it runs outside the lock, and
+`poll()` there could reap a child mid-`_kill_tree` and free its PID for reuse.
+
+Test-side: 13 tests constructed or read these records as dicts and were re-pointed in the same change
+(the CLAUDE.md contract-change rule), including two that build a synthetic task to drive
+`_enforce_deadline` directly — those now build a real `_BgTask`, so they exercise the shipped shape.
+
 #### RA-10 · LOW · duplication · effort: small
 
 **mle-bench registry/data-dir resolution and is_prepared are triplicated across the three mlebench modules**
