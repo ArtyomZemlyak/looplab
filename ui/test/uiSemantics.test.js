@@ -343,8 +343,11 @@ test('Dock exposes accepted command records immediately instead of waiting in su
 
 test('displayed run generation participates in state dedupe and is published only after commit', async () => {
   const hooks = await source('hooks.js')
-  assert.match(hooks, /const identityChanged = next => next\[0\] !== lastSeq \|\| next\[1\] !== lastAlive\s*\|\| next\[2\] !== lastGeneration \|\| next\[3\] !== lastEventCount/)
-  assert.match(hooks, /if \(!identityChanged\(next\)\) return next[\s\S]*?\[lastSeq, lastAlive, lastGeneration, lastEventCount\] = next[\s\S]*?setGenerationState/)
+  // The four-component identity moved into ./src/runStateModel.js (doc 25 UI-09), where
+  // runStateModel.test.js drives its truth table instead of matching its text. The property that
+  // still belongs to the hook is the ORDER: dedupe first, then commit — and generation only via
+  // React state, so the publish below can be fenced on the commit.
+  assert.match(hooks, /if \(!identityChanged\(last, next\)\) return next\s*\n\s*last = next\s*\n\s*setGenerationState/)
   assert.match(hooks, /useLayoutEffect\(\(\) => \{ observeRunGeneration\(runId, generation\) \}/)
 })
 

@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react'
+import React, { useEffect, useMemo, useState, useRef } from 'react'
 import { deadlineGet, get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL,
-  clearNodeTrace, commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
+  commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
   retryRunCommand, runNodeApiPath, submitCommand } from './util.js'
 import { usePoll, useScopedResource } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
@@ -20,6 +20,7 @@ import { conceptMaterializationStatus } from './nodeProjection.js'
 import { buildingMarkers } from './buildingModel.js'
 import { deadlineRequest } from './requestDeadline.js'
 import { createInspectorDraftStore, useInspectorDraftField } from './inspectorDraftStore.js'
+import { useTraceClear } from './useTraceClear.js'
 
 // Comments are an explicit Inspector interaction. Keep their independently secured
 // review transport out of the base DAG closure, then load the same component only when this tab opens.
@@ -32,16 +33,6 @@ const withoutNodeTrace = value => value && typeof value === 'object'
 // `deadlineGet`'s own default, kept as a named bound now that the detail read spells its deadline
 // rather than inheriting one from the helper it no longer calls.
 const DETAIL_REQUEST_TIMEOUT_MS = 8000
-
-const newTraceClearOperationId = () => {
-  const token = globalThis.crypto?.randomUUID?.().replace(/-/g, '').toLowerCase()
-  if (!/^[0-9a-f]{32}$/.test(token || '')) {
-    const error = new Error('Secure operation identity is unavailable.')
-    error.code = 'trace_clear_operation_unavailable'
-    throw error
-  }
-  return `tc_${token}`
-}
 
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
 // several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated
@@ -1340,67 +1331,28 @@ function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, work
   const [view, setView] = useState('conversation')   // linear reading by default; span tree on demand
   const [allOpen, setAllOpen] = useState(false)       // bands COLLAPSED by default (expand one to read it)
   const [nonce, setNonce] = useState(0)               // bumped after "clear trace" to reload the bands
-  const initialClearRecovery = useRef(recoverClearState).current
-  const [clearing, setClearing] = useState(
-    initialClearRecovery?.phase === 'busy' ? 'busy' : '') // '' | 'confirm' | 'busy'
-  const initialOnReload = useRef(onReload).current
-  const handledClearRecoveryRevisionRef = useRef(clearRecoverySignal?.revision || 0)
-  const initialClearMessage = useRef(!initialClearRecovery
-    ? null
-    : initialClearRecovery.phase === 'busy'
-      ? {
-          kind: 'status',
-          blocking: true,
-          pending: true,
-          verifyOperation: initialClearRecovery.mode === 'verify',
-          text: initialClearRecovery.mode === 'verify'
-            ? 'Checking whether the original trace clear completed…'
-            : 'Trace clear is still pending. This experiment will stay locked until the request settles.',
-        }
-      : ['blocked', 'reconcile', 'ambiguous'].includes(initialClearRecovery.phase)
-        ? initialClearRecovery.message
-        : initialClearRecovery.phase === 'confirm'
-          ? {
-              kind: 'success',
-              blocking: false,
-              text: 'Trace clear confirmation was cancelled because this view changed. Nothing was submitted.',
-            }
-          : {
-              kind: 'error',
-              blocking: true,
-              text: 'Trace clear state could not be recovered. Refresh this experiment before clearing.',
-            }).current
-  const [clearMessage, setClearMessage] = useState(initialClearMessage)
   const bodyRef = useRef(null)
-  const clearTriggerRef = useRef(null)
-  const clearConfirmRef = useRef(null)
-  const clearRefreshRef = useRef(null)
   const nodeGeneration = Number.isSafeInteger(n.attempt) && n.attempt >= 0 ? n.attempt : null
   const spans = n.trace?.nodes || []
   const unavailable = traceUnavailable(n.trace?.projection)
   const partial = tracePartial(n.trace?.projection)
-  const clearScopeReady = /^[0-9a-f]{64}$/.test(expectedGeneration || '')
-    && /^[0-9a-f]{64}$/.test(expectedTraceRevision || '')
-    && nodeGeneration != null && n.status !== 'building'
-    && detailStatus === 'ready' && !reloadPending && !unavailable
-  const runWritingTrace = live?.engine_running === true
-  const runTraceOwnershipKnown = live?.engine_running === false
-  const clearAvailable = clearScopeReady && runTraceOwnershipKnown
-  const clearUnavailableText = n.status === 'building'
-    ? 'Experiment creation is incomplete; trace clear is unavailable.'
-    : runWritingTrace
-    ? 'The run is active; trace clear is unavailable until it stops.'
-    : !runTraceOwnershipKnown
-      ? 'Run write ownership is being verified; trace clear is unavailable.'
-    : reloadPending
-    ? 'Experiment details are refreshing; clear is unavailable.'
-    : detailStatus === 'loading'
-    ? 'Experiment details are loading; clear is unavailable.'
-    : detailStatus !== 'ready'
-      ? 'Experiment details must refresh successfully before trace can be cleared.'
-      : unavailable
-        ? 'Trace diagnostics could not be loaded; clear is unavailable until a refresh succeeds.'
-      : 'Trace identity is loading; clear is unavailable.'
+  // "Clear trace" erases this node's spans (spans.jsonl is append-only, so a reset+rebuild would else
+  // STACK new bands on the old attempt's). Two-click confirm; disabled while THIS node is being worked.
+  // The phase machine, its durable recovery record and the request live in ./useTraceClear.js
+  // (doc 25 UI-09); what stays here is the control it renders.
+  const {
+    clearing, clearMessage, clearAvailable, clearUnavailableText,
+    clearPrimaryBusy, clearPrimaryVerifying, clearPrimaryConfirm, clearFenced,
+    clearTriggerRef, clearConfirmRef, clearRefreshRef,
+    beginClear, cancelClear, doClear, refreshClearScope,
+  } = useTraceClear({
+    nodeId: n.id, nodeStatus: n.status, nodeGeneration, runId,
+    expectedGeneration, expectedTraceRevision, live, detailStatus, reloadPending, unavailable,
+    onReload, clearScope, clearRecoveryStore, recoverClearState, clearRecoverySignal,
+    publishClearRecovery, bodyRef,
+    // reload the Conversation bands (now empty until a rebuild re-traces)
+    onCleared: () => setNonce(x => x + 1),
+  })
   const agent = n.agent_report
   // Live status: what the node is doing RIGHT NOW. Two live states: an LLM authoring the code
   // (building → writing / repairing / merging), or the sandbox running its eval pipeline (pending →
@@ -1420,308 +1372,6 @@ function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, work
     <span className="muted trace-live-note">live · auto-updates</span></div>
   const retryParentTrace = () => onReload?.('retry')
   const scrollTo = (where) => { const c = bodyRef.current?.closest('.insp-body'); if (c) c.scrollTop = where === 'top' ? 0 : c.scrollHeight }
-  const storeClearRecovery = useCallback(next => {
-    const store = clearRecoveryStore?.current
-    if (!store || !clearScope) return
-    if (!next) {
-      store.delete(clearScope)
-      return
-    }
-    store.delete(clearScope)
-    store.set(clearScope, next)
-    while (store.size > 64) store.delete(store.keys().next().value)
-  }, [clearRecoveryStore, clearScope])
-  const setClearPhase = phase => {
-    storeClearRecovery(phase ? { phase } : null)
-    setClearing(phase)
-  }
-  const shouldRestoreClearFocus = () => {
-    const active = document.activeElement
-    return active === document.body || !active?.isConnected
-      || active === clearConfirmRef.current
-      || (active === clearTriggerRef.current && clearTriggerRef.current?.disabled)
-  }
-  useEffect(() => {
-    if (!initialClearRecovery) return
-    if (initialClearRecovery.phase === 'reconcile') {
-      // Child effects run before the parent Inspector's request owner is installed on a full
-      // remount. Defer one frame so this always starts (and supersedes) a post-POST detail read.
-      const frame = requestAnimationFrame(() => {
-        initialOnReload?.('trace-cleared')
-        clearRefreshRef.current?.focus({ preventScroll: true })
-      })
-      return () => cancelAnimationFrame(frame)
-    }
-    if (initialClearRecovery.phase === 'busy') {
-      const frame = requestAnimationFrame(
-        () => clearConfirmRef.current?.focus({ preventScroll: true }))
-      return () => cancelAnimationFrame(frame)
-    }
-    if (initialClearRecovery.phase === 'confirm') {
-      storeClearRecovery(null)
-      const frame = requestAnimationFrame(
-        () => clearTriggerRef.current?.focus({ preventScroll: true }))
-      return () => cancelAnimationFrame(frame)
-    }
-    if (!initialClearMessage) return
-    if (initialClearRecovery.phase !== 'ambiguous') {
-      storeClearRecovery({ phase: 'blocked', message: initialClearMessage })
-    }
-    const frame = requestAnimationFrame(() => clearRefreshRef.current?.focus({ preventScroll: true }))
-    return () => cancelAnimationFrame(frame)
-  }, [initialClearRecovery, initialClearMessage, initialOnReload, storeClearRecovery])
-  useEffect(() => {
-    const revision = clearRecoverySignal?.revision || 0
-    if (clearRecoverySignal?.scope !== clearScope
-        || revision <= handledClearRecoveryRevisionRef.current) return
-    handledClearRecoveryRevisionRef.current = revision
-    const recovery = clearRecoveryStore?.current?.get(clearScope)
-    if (clearRecoverySignal.kind === 'clear-succeeded') {
-      const restoreFocus = shouldRestoreClearFocus()
-      const message = recovery?.message || {
-        kind: 'success',
-        blocking: true,
-        text: 'Trace was cleared. Refreshing experiment details before another clear is allowed.',
-      }
-      setClearing('')
-      setClearMessage(message)
-      onReload?.('trace-cleared')
-      if (restoreFocus) {
-        requestAnimationFrame(() => clearRefreshRef.current?.focus({ preventScroll: true }))
-      }
-      return
-    }
-    if (['clear-failed', 'refresh-failed'].includes(clearRecoverySignal.kind)) {
-      const restoreFocus = shouldRestoreClearFocus()
-      const message = recovery?.message || {
-        kind: 'error',
-        blocking: true,
-        text: clearRecoverySignal.kind === 'clear-failed'
-          ? 'Trace clear did not complete. Refresh this experiment before trying again.'
-          : 'Experiment details could not be refreshed. Trace clear remains unavailable until a refresh succeeds.',
-      }
-      setClearing('')
-      setClearMessage(message)
-      if (restoreFocus) {
-        requestAnimationFrame(() => clearRefreshRef.current?.focus({ preventScroll: true }))
-      }
-      return
-    }
-    if (clearRecoverySignal.kind !== 'refresh-succeeded' || !clearMessage?.blocking) return
-    const active = document.activeElement
-    const restoreFocus = active === clearRefreshRef.current
-      || active === document.body || !active?.isConnected
-    storeClearRecovery(null)
-    setClearMessage(null)
-    if (restoreFocus) {
-      requestAnimationFrame(() => {
-        const trigger = clearTriggerRef.current
-        const target = trigger && !trigger.disabled
-          ? trigger : bodyRef.current?.closest('.insp-body')
-        target?.focus({ preventScroll: true })
-      })
-    }
-  }, [clearRecoverySignal, clearRecoveryStore, clearScope, clearMessage?.blocking, onReload,
-    storeClearRecovery])
-  useEffect(() => {
-    if (!['confirm', 'busy'].includes(clearing)) return
-    const frame = requestAnimationFrame(() => {
-      if (clearing === 'confirm') {
-        clearConfirmRef.current?.focus({ preventScroll: true })
-        return
-      }
-      const active = document.activeElement
-      if (active === document.body || !active?.isConnected) {
-        clearConfirmRef.current?.focus({ preventScroll: true })
-      }
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [clearing])
-  useEffect(() => {
-    if (clearMessage?.kind !== 'success' || clearMessage.blocking) return
-    const timer = setTimeout(() => setClearMessage(null), 4000)
-    return () => clearTimeout(timer)
-  }, [clearMessage])
-  const finishClear = (message, recovery = null) => {
-    setClearing('')
-    storeClearRecovery(recovery || (message?.blocking ? { phase: 'blocked', message } : null))
-    setClearMessage(message)
-    if (message?.blocking) publishClearRecovery?.(clearScope, 'clear-failed')
-    requestAnimationFrame(() => {
-      const active = document.activeElement
-      if (active === document.body || !active?.isConnected) {
-        const target = message?.blocking
-          ? clearRefreshRef.current
-          : clearTriggerRef.current && !clearTriggerRef.current.disabled
-            ? clearTriggerRef.current : bodyRef.current?.closest('.insp-body')
-        target?.focus({ preventScroll: true })
-      }
-    })
-  }
-  const refreshClearScope = () => {
-    if (reloadPending || clearMessage?.refreshing) return
-    const recovery = clearRecoveryStore?.current?.get(clearScope)
-    if (clearMessage?.verifyOperation && recovery?.operation) {
-      void submitClear(recovery.operation, true)
-      return
-    }
-    setClearMessage(message => message ? { ...message, refreshing: true } : message)
-    if (!onReload?.('trace-clear-recovery')) {
-      const message = {
-        kind: 'error',
-        blocking: true,
-        text: 'Experiment refresh could not start. Trace clear remains unavailable; use the experiment retry notice before trying again.',
-      }
-      storeClearRecovery({ phase: 'blocked', message })
-      setClearMessage(message)
-    }
-  }
-  const submitClear = async (operation, verifying = false) => {
-    const pendingMessage = verifying ? {
-      kind: 'status',
-      blocking: true,
-      pending: true,
-      verifyOperation: true,
-      text: 'Checking whether the original trace clear completed…',
-    } : null
-    storeClearRecovery({
-      phase: 'busy',
-      operation,
-      mode: verifying ? 'verify' : 'clear',
-      ...(pendingMessage ? { message: pendingMessage } : {}),
-    })
-    setClearing('busy')
-    setClearMessage(pendingMessage)
-    try {
-      const timed = deadlineRequest(signal => clearNodeTrace(runId, n.id, {
-        expectedGeneration: operation.expectedGeneration,
-        expectedTraceRevision: operation.expectedTraceRevision,
-        nodeGeneration: operation.nodeGeneration,
-        operationId: operation.operationId,
-        signal,
-      }), 15000)
-      const result = await timed.promise
-      if (result?.status !== 'succeeded'
-          || result?.operation_id !== operation.operationId) {
-        const error = new Error('Trace clear returned an invalid operation receipt.')
-        error.code = 'trace_clear_protocol_error'
-        throw error
-      }
-      setNonce(x => x + 1)          // reload the Conversation bands (now empty until a rebuild re-traces)
-      // Persist the acknowledged mutation above the conditionally mounted Inspector. Only a detail
-      // read started after this POST settles may clear this fence and permit another mutation.
-      const message = {
-        kind: 'success',
-        blocking: true,
-        text: `Trace cleared for #${n.id} · attempt ${operation.nodeGeneration}. Refreshing experiment details…`,
-      }
-      storeClearRecovery({ phase: 'reconcile', message })
-      setClearing('')
-      setClearMessage(message)
-      publishClearRecovery?.(clearScope, 'clear-succeeded')
-    } catch (e) {
-      // Keep server free text out of the UI. Generation conflicts mean the exact confirmation scope
-      // disappeared and are deliberately distinct from the ordinary "run is active" 409.
-      const currentNodeGeneration = Number.isSafeInteger(e?.detail?.current_node_generation)
-        ? e.detail.current_node_generation : null
-      const definitelyNotMutated = [
-        'run_generation_changed', 'node_generation_changed', 'trace_revision_changed',
-        'run_generation_unavailable', 'node_generation_unavailable', 'trace_revision_unavailable',
-        'trace_clear_operation_unavailable', 'trace_clear_operation_conflict',
-        'engine_running', 'engine_lock_unavailable', 'run_lifecycle_lock_unavailable',
-        'STALE_LINK_READ_ONLY',
-      ].includes(e?.code) || (e?.status >= 400 && e.status < 500
-        && ![408, 425, 429].includes(e.status))
-      const verificationIdentityChanged = verifying && [
-        'run_generation_changed',
-        'node_generation_changed',
-        'trace_revision_changed',
-      ].includes(e?.code)
-      const verificationTerminal = verificationIdentityChanged || (verifying && [
-        'trace_clear_operation_superseded',
-        'trace_clear_operation_conflict',
-      ].includes(e?.code))
-      // Once the first request may have escaped, a Verify response is contextual: even a normally
-      // pre-mutation 4xx/503 cannot prove what the earlier handler did. Keep the exact operation
-      // until the server returns success or a durable terminal receipt.
-      const verificationUnresolved = verifying && !verificationTerminal
-      const outcomeUnknown = verificationUnresolved || (!definitelyNotMutated
-        && (e?.status == null || [408, 425, 429].includes(e.status) || e.status >= 500)
-      )
-      const pendingOperationId = e?.code === 'trace_clear_pending'
-        && /^tc_[0-9a-f]{32}$/.test(e?.detail?.operation_id || '')
-        ? e.detail.operation_id : null
-      const recoveryOperation = pendingOperationId
-        ? { ...operation, operationId: pendingOperationId }
-        : operation
-      const text = verificationUnresolved
-        ? e?.code === 'trace_clear_pending'
-          ? 'The original trace clear is still being resolved. Check this same operation again; do not submit a new clear.'
-          : 'The original trace clear could not be verified yet. Its outcome may already have changed the trace; check this same operation again.'
-        : verificationIdentityChanged
-          ? 'The trace lifecycle changed and no matching pending clear operation remains. No additional deletion was attempted. Refresh the current experiment before deciding what to do next.'
-        : e?.code === 'run_generation_changed' || e?.code === 'STALE_LINK_READ_ONLY'
-        ? 'The run changed before the trace was cleared. Nothing was cleared. Review the current run and confirm again.'
-          : e?.code === 'trace_clear_operation_superseded'
-            ? 'The trace changed after an interrupted clear, so the original outcome cannot be reconstructed. No additional deletion was attempted. Refresh the current experiment before deciding what to do next.'
-          : e?.code === 'trace_path_invalid'
-            ? 'Trace storage is not a valid run-owned file. Nothing was cleared. Restore the trace file, then refresh this experiment.'
-          : e?.code === 'trace_clear_operation_conflict'
-            ? 'This clear operation belongs to a different trace lifecycle. Nothing new was cleared. Refresh this experiment before trying again.'
-          : e?.code === 'node_generation_changed'
-          ? currentNodeGeneration == null
-            ? `Experiment #${n.id} changed attempts. Nothing was cleared. Review the current attempt and confirm again.`
-            : `Experiment #${n.id} moved to attempt ${currentNodeGeneration}. Nothing was cleared. Review the current attempt and confirm again.`
-          : e?.code === 'trace_revision_changed'
-            ? 'Trace diagnostics changed before the clear acquired ownership. Nothing was cleared. Refresh this experiment and confirm against the current trace.'
-          : ['run_generation_unavailable', 'node_generation_unavailable',
-              'trace_revision_unavailable',
-              'trace_clear_operation_unavailable'].includes(e?.code)
-              || e?.status === 428
-            ? 'The exact run, trace snapshot, or experiment attempt is unavailable. Nothing was cleared. Reload the run and confirm again.'
-            : e?.code === 'trace_clear_pending'
-              ? 'The original trace clear is still being resolved. Verify this same operation again; do not submit a new clear.'
-            : e?.status === 409
-              ? 'Trace wasn’t cleared because the run is active, busy, or its write ownership could not be verified. Wait for current work to settle, refresh, then try again.'
-              : outcomeUnknown
-                ? 'Trace clear outcome is unknown. Verify this same operation before trying again.'
-                : 'Trace clear was rejected. Nothing was confirmed as deleted. Refresh this experiment before trying again.'
-      const message = {
-        kind: 'error',
-        blocking: true,
-        verifyOperation: outcomeUnknown,
-        text,
-      }
-      finishClear(message, outcomeUnknown
-        ? { phase: 'ambiguous', message, operation: recoveryOperation }
-        : null)
-    }
-  }
-  const doClear = () => {
-    try {
-      return submitClear({
-        expectedGeneration,
-        expectedTraceRevision,
-        nodeGeneration,
-        operationId: newTraceClearOperationId(),
-      })
-    } catch (error) {
-      finishClear({
-        kind: 'error',
-        blocking: true,
-        text: 'A secure trace clear operation could not be created. Reload the run before trying again.',
-      })
-      return false
-    }
-  }
-  // "Clear trace" erases this node's spans (spans.jsonl is append-only, so a reset+rebuild would else
-  // STACK new bands on the old attempt's). Two-click confirm; disabled while THIS node is being worked.
-  const clearPrimaryBusy = clearing === 'busy'
-  const clearPrimaryVerifying = clearPrimaryBusy && clearMessage?.verifyOperation
-  const clearPrimaryConfirm = clearing === 'confirm'
-  const storedClearPhase = clearRecoveryStore?.current?.get(clearScope)?.phase
-  const clearFenced = !!clearMessage?.blocking
-    || ['busy', 'reconcile', 'blocked', 'ambiguous'].includes(storedClearPhase)
   const clearBtn = <span className="trace-clear">
     <button type="button" ref={clearing === '' ? clearTriggerRef : clearConfirmRef}
       className={'seg' + (clearing ? ' on' : '')}
@@ -1741,23 +1391,13 @@ function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, work
         : clearPrimaryVerifying
           ? `Checking the original trace clear outcome for experiment #${n.id}, attempt ${nodeGeneration}.`
         : undefined}
-      onClick={clearing === ''
-        ? () => { setClearMessage(null); setClearPhase('confirm') }
-        : clearPrimaryConfirm ? doClear : undefined}>
+      onClick={clearing === '' ? beginClear : clearPrimaryConfirm ? doClear : undefined}>
       {clearPrimaryVerifying
         ? 'Checking…'
         : clearPrimaryBusy ? 'Clearing…' : clearPrimaryConfirm ? '✕ confirm clear' : '✕ clear trace'}
     </button>
     {clearPrimaryConfirm && <>
-      <button className="seg" onClick={() => {
-        setClearPhase('')
-        requestAnimationFrame(() => {
-          const trigger = clearTriggerRef.current
-          const target = trigger && !trigger.disabled
-            ? trigger : bodyRef.current?.closest('.insp-body')
-          target?.focus({ preventScroll: true })
-        })
-      }}>cancel</button>
+      <button className="seg" onClick={cancelClear}>cancel</button>
       <span className="muted trace-clear-status">
         Clear #{n.id} · attempt {nodeGeneration}? Results and run history stay intact.
       </span></>}

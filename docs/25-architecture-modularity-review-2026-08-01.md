@@ -8306,6 +8306,45 @@ its own validator rejects) and `settingsSchemaResource.test.js:16` (162 !== 158)
 
 *Recommendation:* Extract the connection logic into a plain (non-React) state-machine object with injected timers/fetchers — the same pattern the codebase already uses for pure models — leaving useRunState as a thin subscription wrapper; split Trace's clear-recovery phases into a useTraceClear hook.
 
+*Resolution (2026-08-05):* Done for both subjects, with one deliberate deviation and one location
+dropped. Re-measured first: the line numbers are stale (`ui/src/` moved a lot between 08-01 and
+08-05), the SIZES are not. `useRunState` is `hooks.js:281-633` and its single effect `301-625` — 325
+lines, three machines, 19 effect-scope mutable closure variables plus 2 more per `connect()`.
+`Trace` is `Inspector.jsx:1336-1845` — 510 lines exactly.
+
+`ui/src/runStateModel.js` and `ui/src/traceClearModel.js` are the PURE halves — the same split
+`resourceModel.js` / `useScopedResource` already uses — and `ui/src/useTraceClear.js` is the React
+half the finding asked for. What moved is decisions: what makes a payload a valid run snapshot, when
+one has moved backwards, which HTTP status ends a run for an owner versus for a reviewer, how far
+each backoff ramp climbs, and the trace clear's failure classification.
+
+The deviation is the "state-machine object with injected timers/fetchers, leaving useRunState a thin
+subscription wrapper". The reconnect/abort choreography, the visibility wiring and the setState
+fan-out stayed in the effect, because a machine object owning them would have to re-derive React's
+own effect lifetime — and that re-derivation is exactly where the ordering bugs this code has already
+been hardened against (the cursor reset on a rejected frame, abort-before-reconnect, the
+terminal-probe fence) would come back. The boundary used instead is "a decision, not a step".
+
+The third location, `AssistantBar.jsx:501-618`, is dropped: today it is a bank of `useRef`
+declarations, the finding's own evidence paragraph never mentions AssistantBar, and no part of the
+recommendation attaches to it. Decomposing a 4,408-line component is a different finding.
+
+Gating, which the finding's evidence is really about — none of these rules had a test, because
+reaching them meant standing up a React root, a jsdom document, a fake `fetch` and a fake clock
+first. `ui/test/runStateModel.test.js` gives every rule a truth table and then drives three
+properties through a real `useRunState`: an unchanged frame publishes nothing, a frame whose ONLY
+change is `event_count` publishes a new snapshot (that is what the timeline's exact lag and unread
+counts read), a rewound frame is refused inside a generation while a start-over's `seq: -1` is
+accepted into a new one. `ui/test/traceClearRecovery.test.js` does the same for the clear, and then
+drives the whole path through the real mounted Inspector — which is also the only thing that proves
+`Trace` is still wired to `useTraceClear` rather than carrying a second copy: arm, confirm, answer
+503, and the control must fence itself, say the outcome is unknown, and re-send the SAME operation id
+on recovery instead of submitting a second destructive clear.
+
+Two source pins in `timelineSemantics.test.js` / `uiSemantics.test.js` matched the deleted spelling
+and were re-pointed onto the join that is still the hook's own (dedupe before commit), with the
+identity's truth table now driven rather than matched.
+
 #### UI-10 · LOW · dead-code · effort: small
 
 **Dead component: Inspector.Agent is never rendered**
