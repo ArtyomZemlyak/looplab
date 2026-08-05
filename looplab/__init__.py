@@ -142,6 +142,7 @@ _LAYOUT = {
     "launch": "serve",
     "leakage": "trust",
     "lesson_guard": "trust",   # PART IV D6 lesson over-generalization guard (advisory)
+    "lesson_hygiene": "engine",  # lesson consolidation/contradiction/retrieval (doc 25 EM-10)
     "lessons": "engine",
     "lessons_distill": "engine",
     "lessons_priors": "engine",
