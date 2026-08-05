@@ -148,7 +148,7 @@ test('historical Inspector and Report detail reads carry the exact run generatio
   ])
   assert.match(runView, /expectedGeneration=\{generation\}/g,
     'every historical detail read must carry the run generation the route resolved')
-  assert.match(inspector, /query\.push\(`expected_generation=\$\{encodeURIComponent\(expectedGeneration\)\}`\)/)
+  assert.match(inspector, /detailQuery\.push\(`expected_generation=\$\{encodeURIComponent\(expectedGeneration\)\}`\)/)
   assert.match(report, /params\.set\('expected_generation', solutionGeneration\)/)
 })
 

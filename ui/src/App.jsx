@@ -115,7 +115,9 @@ function cacheCurrentListHistory(navigation, originRunId = null, originControl =
   writeListHistory(navigation, originRunId, originControl)
 }
 
-function ReviewRoute({ token }) {
+// Exported so the review route's own state sequence (gate → terminal → retry) can be driven without
+// mounting the whole owner shell; App still renders it directly.
+export function ReviewRoute({ token }) {
   // The shared resource machine (doc 25 UI-06). A missing token is a GATE, not a failed read: there
   // is nothing to request, so the route must not spend a round trip proving it. `gone` is terminal —
   // a revoked capability can only repeat itself — so the classifier names it and no Retry is offered.

@@ -101,8 +101,11 @@ export function usePoll(fn, ms, deps = [], { pauseHidden = false, immediate = tr
 //   classifyFailure  — `({ transport, message, error, intent, lastGood }) => { status, error, data }`,
 //                      the caller's failure vocabulary. Omitted, a failure is 'stale' when there is
 //                      last-good data and 'error' when there is not, with no message.
-//   onSuccess        — a side effect to run before a successful commit (Inspector releases its
+//   onSuccess(scope) — a side effect to run before a successful commit (Inspector releases its
 //                      trace-clear fence here); `request(...)`'s `onSettled` covers both outcomes.
+//                      It is handed the SCOPE the settling read belongs to, never the render's:
+//                      a response can land between a re-render and the effect that services it, and
+//                      a fence keyed by the wrong scope releases the wrong node's.
 //   pollMs           — refresh interval. Ticks skip an active request rather than queueing.
 //   deps             — extra effect dependencies, for a read whose URL depends on something the
 //                      scope deliberately does not carry. Its LENGTH must be constant across
@@ -122,7 +125,10 @@ export function useScopedResource(read, {
   // Every call site re-creates these callbacks each render (they close over props). Reading them
   // through a ref is what keeps the effect keyed on the SCOPE — re-running it on callback identity
   // would restart the request on every parent render — while still letting a poll tick minutes later
-  // use the current render's reader instead of one frozen at effect time.
+  // use the current render's reader instead of one frozen at effect time. They are then frozen for
+  // the LIFETIME OF ONE REQUEST, so a read, the validation of its response and the wording of its
+  // failure always come from the same render rather than from whichever one happened to be current
+  // when the response landed.
   const latest = useRef(null)
   latest.current = { read, validate, classifyFailure, onSuccess }
   useEffect(() => {
@@ -140,7 +146,8 @@ export function useScopedResource(read, {
         obsolete.controller.abort()
       }
       if (flight.current) return false
-      const timed = deadlineRequest(signal => latest.current.read(signal), timeout)
+      const bound = latest.current
+      const timed = deadlineRequest(signal => bound.read(signal), timeout)
       const request = { owner, controller: timed.controller, promise: timed.promise }
       flight.current = request
       setValue(previous => resourceBegin(previous, { scope, intent, mapLastGood }))
@@ -148,14 +155,14 @@ export function useScopedResource(read, {
         if (flight.current !== request) return
         flight.current = null
         if (!alive) return
-        if (ok) latest.current.onSuccess?.()
+        if (ok) bound.onSuccess?.(scope)
         setValue(previous => resourceSettle(previous, {
-          scope, ok, data, failure, classify: latest.current.classifyFailure,
+          scope, ok, data, failure, classify: bound.classifyFailure,
         }))
         onSettled?.(ok)
       }
       timed.promise.then(payload => {
-        const invalid = latest.current.validate ? latest.current.validate(payload) : null
+        const invalid = bound.validate ? bound.validate(payload) : null
         if (!invalid) settle(true, payload, null)
         else settle(false, null, { transport: false, message: invalid, error: null, intent })
       }, error => {
