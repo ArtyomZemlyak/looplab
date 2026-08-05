@@ -160,7 +160,9 @@ def test_clamp_fill_never_leaves_an_idea_outside_its_own_space():
     must survive `Idea` revalidation unchanged."""
     from looplab.agents.roles import _clamp_fill
     from looplab.core.models import Idea
-    bounds = {"lr": (0.001, 1.0), "l2": (0.0, 1.0), "iters": (10.0, 500.0)}   # classification.py
+    # classification.py's numeric bounds at the time of the incident (it has since gained `degree`;
+    # these three are unchanged, and the property below is about the clamp, not the task).
+    bounds = {"lr": (0.001, 1.0), "l2": (0.0, 1.0), "iters": (10.0, 500.0)}
     live = Idea(operator="draft", params={"lr": 0.5, "l2": 0.001, "iters": 5000.0},
                 space={"lr": [0.1, 0.5, 1.0], "iters": [1000.0, 5000.0]})
     out = _clamp_fill(live, bounds)

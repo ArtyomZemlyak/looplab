@@ -265,6 +265,36 @@ def test_make_roles_offers_sweep_only_off_repo_tasks(tmp_path):
     assert getattr(rr, "handoff", None) is True
 
 
+def test_make_roles_does_not_offer_a_sweep_to_a_templated_developer():
+    """The gate must ask the DEVELOPER, not guess from the backend.
+
+    Every synthetic adapter returns a TEMPLATED Developer from `llm_roles` — it substitutes named
+    params into a fixed program and never reads `idea.space`. None of them is a `developer_backend`
+    PRESET and none has a `repo_spec`, so the two backend clauses above both passed and the sweep
+    was offered anyway. The Researcher then put a hyperparameter in `space` instead of `params`,
+    `implement` fell back to that param's DEFAULT, and the node ran a program the rationale did not
+    describe while the engine reported it as an ordinary result. Measured on a live
+    `examples/classification_task.json` run: 2 of 8 nodes ran a degree-1 (chance, 0.55) program
+    under a rationale reading "Sweep degree {2,3} x lr".
+
+    Driving the real `make_roles` on the real shipped adapters is the point — a source pin on the
+    predicate would not notice a fourth adapter added tomorrow with the same shape."""
+    from looplab.core.config import Settings
+    from looplab.adapters.tasks import load_task, make_roles
+
+    for name in ("classification_task.json", "regression_task.json", "timeseries_task.json"):
+        task = load_task(_ROOT / "examples" / name)
+        r, d = make_roles(task, Settings(backend="llm", unified_agent=False))
+        assert not getattr(d, "honors_idea_space", False), \
+            f"{name}: templated Developer {type(d).__name__} must not claim sweep capability"
+        assert getattr(r, "offer_sweep", None) is False, \
+            f"{name}: sweep offered to a Developer that cannot run one"
+    # `offer_sweep=False` really removes the offer from the assembled prompt — pinned above by
+    # `test_plain_researcher_sweep_offer_gated_and_numeric_note_present` /
+    # `test_plain_researcher_user_turn_sweep_clause_gated` (and the tool-researcher twin at
+    # `test_tool_researcher_gets_shared_capability_fragments`).
+
+
 # --------------------------------------------------------------- P30: pilot menu + merge parents
 class _PilotClient:
     def __init__(self, index=0):

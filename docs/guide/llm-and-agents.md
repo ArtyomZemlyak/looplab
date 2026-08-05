@@ -406,7 +406,7 @@ stripped). A missing file falls back to the built-in default.
 
 | Key | Who uses it |
 |---|---|
-| `researcher_system` | The plain (non-tool) LLM Researcher — the CORE persona only: the sweep/`eval_timeout` capability suffix and the operator note are appended by code after the render (gated on the active backend's capabilities), so an override supplies just the core body |
+| `researcher_system` | The plain (non-tool) LLM Researcher — the CORE persona only: the sweep/`eval_timeout` capability suffix and the operator note are appended by code after the render (the sweep offer is gated on the active **Developer** declaring `honors_idea_space`, so a templated Developer is never promised a grid it cannot run), so an override supplies just the core body |
 | `developer_system` | The LLM Developer (both `implement` and `repair`) — the from-scratch script Developer |
 | `developer_repair_prefix` | Short prefix prepended to `developer_system` on repair calls |
 | `repo_developer_system_intro` | The in-house repo-editing Developer (`LLMRepoDeveloper`): the intro of its system prompt |

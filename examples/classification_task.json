@@ -1,10 +1,12 @@
 {
   "kind": "classification",
-  "id": "blob_classification",
-  "goal": "tune a logistic-regression learner to maximize K-fold CV accuracy",
+  "id": "ring_classification",
+  "goal": "choose a polynomial feature-map degree + the learner's lr/l2/iters to maximize K-fold CV accuracy on two concentric rings",
   "direction": "max",
-  "n": 80,
-  "sep": 1.5,
+  "n": 200,
+  "gap": 1.6,
+  "noise": 0.6,
   "seed": 0,
-  "cv_k": 5
+  "cv_k": 5,
+  "max_degree": 4
 }

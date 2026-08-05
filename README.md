@@ -144,7 +144,7 @@ still works). The fields desugar to nine adapters:
 |---|---|---|
 | `quadratic` | A toy numeric objective (the model-free kind; needs `--backend toy`) | `examples/toy_task.json` |
 | `regression` | Polynomial + ridge model selection via CV | `examples/regression_task.json` |
-| `classification` | Tune a classifier for K-fold CV accuracy | `examples/classification_task.json` |
+| `classification` | Polynomial feature-map degree + classifier tuning via CV | `examples/classification_task.json` |
 | `timeseries` | Forecaster smoothing/seasonality via backtest | `examples/timeseries_task.json` |
 | `code_regression` | LLM **writes the code** that fits the model | `examples/code_regression_task.json` |
 | `mlebench` | Competition-shaped task with a private held-out grader | `examples/mlebench_task.json` |

@@ -141,8 +141,10 @@ class SpeculationMixin:
     # PAYS. A prefetch exists to overlap the Developer's PROVIDER latency with a RUNNING evaluation.
     # When the evaluation finishes in 0.1 s there is nothing to overlap and there never was.
     #
-    # MEASURED, same task, same defaults, same command, both arms 8/8 nodes and the identical
-    # champion (node 7, metric 0.925):
+    # MEASURED on `examples/classification_task.json` AS IT SHIPPED BEFORE 2026-08-05 (the flat
+    # two-blob variant; that example is now the concentric-rings task, whose evaluations take
+    # 0.05-0.6 s — still far under provider latency, so the conclusion is unchanged). Same
+    # defaults, same command, both arms 8/8 nodes and the identical champion (node 7, metric 0.925):
     #
     #     AUTO -> depth 1 : 109 LLM calls, 1,265,911 tokens, 2348.8 s wall
     #     speculation_depth=0 :  75 LLM calls,   817,201 tokens, 2448.6 s wall

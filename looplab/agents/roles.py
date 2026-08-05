@@ -819,6 +819,11 @@ class LLMDeveloper:
     # T8/A0b: this Developer generates real code, so merge_mode="auto" resolves to the
     # code-recombination ensemble merge (the verified strongest operator) instead of mean-params.
     is_code_generating = True
+    # P6/P21: the CAPABILITY the sweep offer is gated on — `implement` below renders `idea.space`
+    # into the grid + trials contract, so this Developer really runs every point. Declared as a
+    # positive marker (absent means NO) because the templated Developers are the majority and none
+    # of them reads `idea.space`; see `agents/factory.py::_offer_sweep`.
+    honors_idea_space = True
 
     def __init__(self, client: LLMClient, brief: str = "",
                  prompts: Optional[PromptStore] = None):
@@ -928,11 +933,12 @@ class WrapsDeveloper:
       The engine's ablation probe reads ``getattr(developer, "inner", developer)`` to bypass
       wrapper retry/fallback/best-of-N machinery (``orchestrator._probe_developer``), so
       `inner` must always be the raw developer a probe should hit.
-    - `brief` / `is_code_generating` / `client` / `prompts` / `last_report`: read-through
-      (and, for `client`/`prompts`, hasattr-guarded write-through) to the wrapped developer —
-      `make_roles` pokes `prompts`, H3 per-role rewiring pokes `client`, T8/A0b
-      merge_mode="auto" resolution reads `is_code_generating`, and the orchestrator reads
-      `last_report` for the `agent_validated` audit event.
+    - `brief` / `is_code_generating` / `honors_idea_space` / `client` / `prompts` / `last_report`:
+      read-through (and, for `client`/`prompts`, hasattr-guarded write-through) to the wrapped
+      developer — `make_roles` pokes `prompts`, H3 per-role rewiring pokes `client`, T8/A0b
+      merge_mode="auto" resolution reads `is_code_generating`, `make_roles`'s sweep gate reads
+      `honors_idea_space`, and the orchestrator reads `last_report` for the `agent_validated`
+      audit event.
     - `last_files` / `last_deleted` / `last_footprint`: per-call output attributes the orchestrator
       reads AFTER implement/repair. Wrappers own them as plain attributes: either mirrored from the
       wrapped developer via `_sync_audit()`, or set by the wrapper's own logic (e.g.
@@ -961,6 +967,12 @@ class WrapsDeveloper:
     @property
     def is_code_generating(self) -> bool:
         return bool(getattr(self._wrapped, "is_code_generating", False))
+
+    # P6/P21: so does the sweep capability — `make_roles` reads it off the (possibly wrapped)
+    # developer to decide whether to offer the Researcher an `idea.space` grid at all.
+    @property
+    def honors_idea_space(self) -> bool:
+        return bool(getattr(self._wrapped, "honors_idea_space", False))
 
     @property
     def client(self):
