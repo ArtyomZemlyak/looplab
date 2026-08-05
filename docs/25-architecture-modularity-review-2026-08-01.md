@@ -805,6 +805,39 @@ reverse direction too — a module that DROPS the import has stopped participati
 
 *Recommendation:* Introduce a tail-seq-keyed fold memo on the EventStore or Engine (`fold_cached(events)` returning the previous RunState when the last seq and object identity match, mirroring _ack_commands' existing cursor/identity technique at 1278-1292). This preserves invariant #4 semantics exactly (any append invalidates) while removing the repeated O(n) folds that the comments repeatedly apologize for.
 
+*Resolution (2026-08-05) — REJECTED as specified, with the hazard verified on the code.*
+
+The DIAGNOSIS is right: the spine does re-fold an unchanged snapshot within one iteration, and the
+module's own comments apologise for it. The MECHANISM ships a data race.
+
+A shared `fold_cached` hands ONE `RunState` object to callers that each get their OWN today. Three
+facts, each checked rather than argued:
+
+* `_BuildReservation` (orchestrator.py:237) has `state: RunState` as its first field and its docstring
+  says it is "handed from the main task to one build worker" — folded state crosses a THREAD boundary.
+* `ToolProvider.bind_state` (tools/_base.py:128) hands a state to every provider that wants one.
+* folded state IS mutated outside `replay.py`: `evaluate.py:403` sets `node.rerun_stage = None`.
+
+So "nothing mutates folded state, therefore sharing it is free" is FALSE on this tree. Today each
+consumer holds a private object and that mutation is harmless; behind a memo it becomes a write to an
+object a worker thread is reading. Invariant #4 says never cache derived state across iterations —
+the memo keeps its letter (any append invalidates) while removing the isolation that made the
+invariant survivable. The saving is unmeasured; the failure mode is a heisenbug in the fold.
+
+The narrow variant the code's own comment asks for — a loop-local `_fold_if_tail_moved` in the serial
+resource wait — is also not shipped: it breaks three tests
+(`test_serial_dispatch_refolds_pin_after_bounded_wait_without_gpu_release`,
+`test_serial_dispatch_releases_stale_pin_reservation_before_eval`,
+`test_dispatch_closes_operator_dropped_card_while_waiting_for_gpu`) whose stubs deliberately model a
+pin change with NO append. In production `resource_pin` folds from `EV_CARD_RESOURCE_PINNED`, so the
+tail gate is sound — but shipping it means rewriting three tests written precisely to distrust a
+conditional re-fold, inside the loop whose failure mode is a silent hang. Not a trade worth making
+for a LOW finding.
+
+If revisited: loop-local tail gate only, never a shared memo; re-point those three tests to append the
+re-pin event (the production invariant); and cover the sibling wait loop in `engine/confirm_phase.py`
+in the same change.
+
 #### ES-13 · LOW · excessive-logic · effort: medium
 
 **Delegator/seam boilerplate has drifted into four coexisting styles (~50 forwarding members in orchestrator.py)**
