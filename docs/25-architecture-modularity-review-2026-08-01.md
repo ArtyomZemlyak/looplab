@@ -1620,6 +1620,26 @@ import contract (`tests/test_claims.py` asserts the re-export set). The import i
 
 *Recommendation:* Extract concept_capsules.py (validation + store + overview/graph/digest + profit signs) and lesson_hygiene.py (consolidate/filter/rank/parse); keep fingerprints + case libraries in memory.py. The private cross-module imports (_dedup_valid_capsules etc.) become public names of the new module, honestly reflecting their real API status. Wire through the existing back-compat shim.
 
+*Resolution (2026-08-05) — the lesson_hygiene half.* `engine/lesson_hygiene.py` now owns the D2
+subsystem: what makes a distilled lesson survive (`consolidate_lessons`, `_agentic_merge_lessons`),
+what disqualifies it (`filter_contradicted`), and how the survivors are retrieved and ranked
+(`retrieve_lessons_harmonic`, `lesson_rank_key`), plus `normalize_statement`, `distilled_claim_stance`
+and `_verdict_base`. `memory.py` drops 1625 -> 1411 lines.
+
+`_VERDICTS` and `_NEGATIVE` travel with them: they are the vocabulary these functions are written in,
+and nothing else decides what a verdict base or a negative outcome means. An AST pass confirmed those
+two constants were the ONLY names the movers still needed from `memory`, so this is a relocation
+rather than a rewrite.
+
+`memory.py` re-exports all eleven names, so `claims_health`'s `_NEGATIVE` / `normalize_statement`
+imports and every monkeypatch seam keep hitting the SAME objects. Two guards pin that: object
+identity (a copy satisfies every import while silently breaking patching), and that the extracted
+module never imports back into `memory` — the break for the second one surfaces as a circular-import
+ERROR rather than a test failure, which is worth stating because a harness filtering only on `FAILED`
+reads it as green.
+
+The `concept_capsules.py` half is NOT done; it is the larger of the two and wants its own pass.
+
 #### EM-11 · MEDIUM · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
 **Vector-backed CaseLibrary is dead in production — only tests use it**

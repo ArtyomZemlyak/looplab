@@ -239,3 +239,38 @@ def test_the_stop_versus_skip_distinction_survived_the_move():
         path.write_bytes(b'{"a":1}\nnot json\n{"a":2}\n')
         assert [r["a"] for r in iter_jsonl(path)] == [1], "iter_jsonl must STOP at the damage"
         assert [r["a"] for r in read_jsonl_lenient(path)] == [1, 2], "lenient must SKIP and continue"
+
+
+# --- EM-10: lesson hygiene is its own module -----------------------------------------------------
+
+def test_lesson_hygiene_re_exports_are_the_same_objects():
+    """`memory.py` was named for the episodic case library but held five subsystems (doc 25 EM-10).
+    The D2 lesson-hygiene one moved out. Identity, not just name resolution, is the contract: a copy
+    satisfies every import while silently breaking monkeypatching — `claims_health` reaches for
+    `_NEGATIVE`/`normalize_statement` through `memory` and must keep hitting the same objects."""
+    from looplab.engine import lesson_hygiene, memory
+
+    for name in ("_NEGATIVE", "_VERDICTS", "distilled_claim_stance", "_verdict_base",
+                 "normalize_statement", "consolidate_lessons", "_agentic_merge_lessons",
+                 "filter_contradicted", "_lesson_index_text", "retrieve_lessons_harmonic",
+                 "lesson_rank_key"):
+        assert getattr(memory, name) is getattr(lesson_hygiene, name), (
+            f"{name} is a COPY in memory, not a re-export")
+
+
+def test_lesson_hygiene_does_not_import_back_into_memory():
+    """If the extracted module reached back into `memory`, the split would have bought a cycle
+    instead of a boundary."""
+    import ast
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "looplab" / "engine" / "lesson_hygiene.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    back = []
+    for node in ast.walk(tree):
+        mod = node.module if isinstance(node, ast.ImportFrom) else None
+        names = ([mod] if mod else
+                 [a.name for a in node.names] if isinstance(node, ast.Import) else [])
+        back += [f"line {node.lineno}: {n}" for n in names
+                 if n and n.startswith("looplab.engine.memory")]
+    assert not back, f"lesson_hygiene imports back into memory: {back}"
