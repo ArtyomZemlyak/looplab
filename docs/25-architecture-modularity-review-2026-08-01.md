@@ -3554,6 +3554,73 @@ for a single named record).
 
 *Recommendation:* Split into phase functions mirroring the receipt phases (discover_or_rejoin, restore_fence, admit_and_prepare, archive, launch, await_generation) each stating its lock preconditions in the signature/docstring; the driver keeps the lock nesting explicit and short.
 
+*Resolution (2026-08-05):* Nine phase functions, each stating its lock precondition; the driver is
+82 lines and holds nothing but the ladder. **Rejected `admit_and_prepare`**, with the measurement.
+
+The finding undercounts in every direction, so the numbers are restated first. Measured on the tree
+before the change: `_reset_blocking` was lines 453-898 — **446** lines, not "~410". It contained
+**ten** `with` statements entering **thirteen** context managers, not "six lock scopes"; six is the
+depth of the deepest CHAIN (sequence → lifecycle → engine_write → config+events+span), which is
+what the prose was describing, and the other six `with` blocks — the pre-sequence re-probe, the
+marker-only fence restore, `launch_env`, and three sequencer re-entries around Popen — are exactly
+the ones a reader has to hold in their head as well. Its statements reached **40 columns, ten
+levels**, not six; six is where the fenced body STARTS. All three cited ranges were stale
+(476-884 / 614-831 / 833-884 against a live 453-898 / 667-809 / 811-898).
+
+DONE. `_discover_or_rejoin`, `_flush_retained_paid_activity`, `_resolve_reset_ownership`,
+`_restore_existing_fence`, `_admit_destructive_reset`, `_classify_launch_evidence`,
+`_publish_and_archive`, `_launch_replacement_engine`, `_await_replacement_generation`. Every body is
+byte-verbatim from the original (extracted by script, then dedented uniformly) so no comment moved a
+character; the driver is 446 -> 82 lines, ten `with` statements -> four, thirteen context managers
+-> six, forty columns -> thirty. Nothing about the transaction changed: every phase call sits at the
+exact statement position its code occupied, and the function has **no `await` at all** (it runs
+under `anyio.to_thread.run_sync`), so no lift could change which lock is held across which await.
+The route's verbs, refusal codes, messages and receipt shapes are untouched, which is why no
+existing test needed re-pointing.
+
+REJECTED, first: `admit_and_prepare` as one phase. Measured, they sit on different rungs — admission
+runs at `("sequence",)`, and `_prepare_receipt` is only reached at
+`("sequence", "lifecycle", "engine_write", "config", "events", "spans")`. Merging them means either
+running the six-lock preparation under one lock or taking all six before the admission checks that
+exist to decide whether the run may be touched at all. They stay two phases three rungs apart.
+
+REJECTED, second: `archive` and (implicitly) prepare as things to EXTRACT. Both were already
+free-standing module functions before this change — `_archive_forward` (51 lines) and
+`_prepare_receipt` (94 lines) — as were `_frozen_launch`, `_validate_reset_quiescence` and
+`_validate_archived_manifest`. The recommendation reads as though none of the six existed; what was
+actually inline was the ORCHESTRATION between them, which is what got named.
+
+Two shapes deliberately kept, because the alternative reads better and is wrong. The two early
+`return`s buried inside the lock nesting became a `finished` slot in each phase's return tuple
+rather than a control-flow exception; the driver returns it after the `with` and the `try/except`
+unwind instead of from inside them, which is the same unwind order a `return` inside a `with`
+already produced, with nothing running in between. And `_restore_existing_fence` still takes two of
+the six locks ITSELF: that config+events pairing without `engine.lock` exists only on the
+marker-only recovery path, is not a rung of the driver's ladder, and is stated in its docstring
+rather than in the precondition registry — which is about what must ALREADY be held.
+
+Guard: `tests/test_reset_phase_locks.py` (6). Nothing pinned this before — every existing reset test
+drives the route from the outside and passes whether the phases are separate, interleaved, or
+holding the wrong locks. Two driven tests replace all six lock context managers with a recorder and
+run real Replays end to end (one that completes, one that rejoins an uncertain launch), asserting
+the acquire/release order and the exact stack held at each phase entry; two structural tests read
+the driver's AST for the `with` nesting each phase call literally sits inside, plus a two-way
+registry check that a new phase must state a precondition. No substring pins — chains are built from
+real `ast.With` ancestors of real `ast.Call` nodes, so a commented-out call satisfies nothing.
+
+Verified by breaking each property on a scratch copy of the tree. (A) inverting the innermost
+acquisition order (span guard first, run config last) and (B) dropping the span-index write guard
+from the `with` each failed 3 of the 6 new tests; (C) moving `_admit_destructive_reset` one rung
+deeper, inside the lifecycle lock, failed 4. Under all three breaks the existing suite stayed
+green — 9 reset tests in `test_server.py` for (A), 17 reset/replay tests across `test_server.py` and
+`test_run_command_service.py` for (B) and (C) — which is the measurement that says what the new
+tests are for.
+
+Not done: `durable_reset_run`'s own ~100-line preamble (generation/operation-id derivation and the
+run-path identity ladder) is untouched — it is HTTP argument validation, not the transaction, and it
+holds no locks. `reset_route` still imports `errno` without using it; that predates this change
+(pyflakes reports it identically before and after) and removing it is a different diff.
+
 #### SC-15 · LOW · under-decomposition · effort: medium
 
 **tui.py Tui class mixes rendering, wizards, chat persistence, and a client-side command-recovery state machine; _reconcile_pending interleaves two protocols**
