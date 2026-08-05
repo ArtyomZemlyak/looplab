@@ -911,6 +911,7 @@ Where each concept lives in the code:
 | Vector store + agentic retrieval | `tools/vectorstore.py`, `tools/retrieval.py`, `tools/knowledge_tools.py`, `agents/agent.py` |
 | Cross-run case library | `engine/memory.py` |
 | Part IV/V concept materialization + graph projections | `core/concepts.py`, `search/concept_projection.py`, `search/concept_graph.py` |
+| Live concept cadence (re-tag, consolidation, edges, coverage snapshot) | `engine/concept_cadence.py` |
 | Cross-run index, claims + agent reads | `engine/cross_run_index.py`, `engine/claims.py`, `tools/cross_run_tools.py` |
 | Portfolio governance + paid steward lifecycle | `engine/concept_registry.py`, `engine/governance_health.py`, `engine/steward_invocation.py`, `engine/concept_steward.py`, `engine/claim_steward.py`, `engine/task_facets.py` |
 | Research Atlas / typed owner governance HTTP | `serve/routers/cross_run.py` |
