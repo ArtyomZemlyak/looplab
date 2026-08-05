@@ -185,6 +185,15 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   base object, and an attribute SET on the panel shadows reads *through the panel* but does NOT
   reach the base's own `self.<attr>` reads until `forward_hints` mirrors it — set hints on the
   outermost wrapper and let the registry forward them, never on `base` directly.
+- **A deliberate refusal is a TYPE, not a message.** `core/errors.py::OperatorRefusal` marks every
+  exception LoopLab raises *on purpose* about the operator's own input (`ConfigRefusal`,
+  `EnvironmentRefusal`, `LLMError`, the `RunStartPinError` family); `cli/__init__.py`'s
+  `_RefusalBoundaryGroup` prints those as one message at exit `REFUSAL_EXIT_CODE` (2) and lets
+  everything else keep its full traceback at exit 1. Raising a BARE `ValueError`/`RuntimeError` for
+  a new refusal silently puts it back in the 42-lines-of-frames presentation this split removed —
+  and widening the boundary to catch bare `ValueError` instead is the worse failure, because a bug
+  reported as a tidy one-line message looks handled. The bar for wearing the marker is in the
+  `OperatorRefusal` docstring; `tests/test_cli_refusals.py` pins both halves, control included.
 - **Tool providers**: the `bind_state` hook is OPTIONAL (`tools/_base.py` — providers that don't
   need run state simply omit it), but a provider that DOES implement it must accept the second
   `parent` argument (`bind_state(self, state, parent=None)`) or it raises `TypeError` at dispatch.

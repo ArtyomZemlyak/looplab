@@ -98,8 +98,15 @@ def _run_engine_guarded(eng: Engine):
     except Exception as e:  # noqa: BLE001 - any fatal abort (e.g. an unreachable LLM endpoint
         # during implement/repair, a missing dep) must surface as a TERMINAL event, not a silent
         # stalled run the UI shows "thinking" forever. Mark finished-with-error, then re-raise so
-        # the traceback still lands in engine.stderr.log. (A user Ctrl-C / cancel is BaseException,
-        # not Exception, so an intentional stop stays resumable.)
+        # the failure still lands in engine.stderr.log — as a traceback for a genuine bug, and as
+        # the one-line refusal for the `core/errors.py::OperatorRefusal` family, which the CLI
+        # boundary (`cli/__init__.py::_RefusalBoundaryGroup`) renders as a message instead
+        # (`LOOPLAB_TRACEBACK=1` puts the frames back). That boundary is where an operator now
+        # reads WHY, and it matters here: `error_text` below is `str(e)` of whatever escaped
+        # `anyio.run`, which for anything raised inside the eval task group is the group's own
+        # "unhandled errors in a TaskGroup (1 sub-exception)" — the leaf message never reaches this
+        # event. (A user Ctrl-C / cancel is BaseException, not Exception, so an intentional stop
+        # stays resumable.)
         try:
             error_text = str(e)[:500]
         except BaseException:  # an adversarial __str__ must not replace the root exception

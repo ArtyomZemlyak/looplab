@@ -93,6 +93,7 @@ from looplab.core.models import (
     durable_idea_payload, idea_proposal_ref, normalize_researcher_footprint, is_developer_error)
 from looplab.core.advisory_payloads import bounded_cross_run_advisory_receipt
 from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
+from looplab.core.errors import ConfigRefusal, EnvironmentRefusal, OperatorRefusal
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limits,
                                      in_llm_lane, llm_broker_scope, llm_lane_scope)
@@ -140,12 +141,18 @@ SPECULATION_CALIBRATION_VARIANT_FIELDS = SPECULATION_CALIBRATION_PROFILE_VARIANT
 # the engine, the CLI and the tests all spell them on this module.
 
 
-class RunStartPinError(RuntimeError):
+class RunStartPinError(OperatorRefusal, RuntimeError):
     """A re-entry contradicts a value this run's own ``run_started`` pinned (engine invariant #6).
 
     This is deliberately distinct from an ordinary fatal engine error.  CLI fatal-error recovery
     writes terminal events, while a refused re-entry must return without changing the log it refused
     to trust — so `cli/run_cmds.py::_run_engine_guarded` re-raises this family untouched.
+
+    ``OperatorRefusal`` is the SECOND thing that distinctness has to buy, and it was missing: the
+    re-raise kept the log clean and then handed the operator a 33-frame traceback whose last line
+    was the carefully written remedy (`engine/widths.py::settled_width_refusal` names the file to
+    edit and the two ways to change the width durably).  `RuntimeError` stays the base, so every
+    existing `except RuntimeError` / `pytest.raises(RuntimeError)` is unaffected.
     """
 
 
@@ -621,7 +628,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         if trust_gate not in ("audit", "gate", "block"):
             # A security control must fail LOUDLY: silently coercing a typo ("Gate") to "audit"
             # would run with no enforcement while the caller believes the gate is on.
-            raise ValueError(f"trust_gate must be 'audit', 'gate' or 'block', got {trust_gate!r}")
+            raise ConfigRefusal(
+                f"trust_gate must be 'audit', 'gate' or 'block', got {trust_gate!r}")
         self.trust_gate = trust_gate
         self._code_leakage_detect = code_leakage_detect
         self._critic_check = critic_check
@@ -908,7 +916,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 calibration_errors.append(
                     "effective CUDA_VISIBLE_DEVICES GPU inventory must be non-empty")
             if calibration_errors:
-                raise ValueError(
+                raise ConfigRefusal(
                     "speculation gate calibration profile mismatch: "
                     + "; ".join(calibration_errors)
                 )
@@ -959,14 +967,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # admitted on this reasoning. It is asserted, not hoped for, at the single dispatch funnel:
             # `engine/evaluate.py::_evaluate` -> `_assert_speculative_selection_confirmed`.
             if not self.run_dir.name.strip():
-                raise ValueError("positive Card speculation requires a non-empty run id")
+                raise ConfigRefusal("positive Card speculation requires a non-empty run id")
             if self._policy_name != SPECULATION_POLICY_SCOPE:
                 # Not a workload fence: the speculative freshness test asks the POLICY for the
                 # counterfactual next action, and `greedy` is the one policy whose counterfactual the
                 # Card scorer/selector was built and measured against.
-                raise ValueError(
+                raise ConfigRefusal(
                     f"Card speculation requires policy={SPECULATION_POLICY_SCOPE!r}, "
-                    f"got {self._policy_name!r}"
+                    f"got {self._policy_name!r} — set `-s policy={SPECULATION_POLICY_SCOPE}`, or "
+                    f"turn speculation off with `-s speculation_depth=0`"
                 )
             from looplab.adapters.toytask import ToyTask
             _calibrated_replay = bool(self.speculation_gate_receipt) and type(task) is ToyTask
@@ -1014,7 +1023,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     or not _gate_receipt.get("implementation_digest")
                 ):
                     if _calibrated_replay:
-                        raise ValueError(
+                        raise ConfigRefusal(
                             "speculation_gate_receipt is stale, invalid, non-GPU, "
                             "policy-mismatched, or does not pass the current "
                             "scorer/search-quality gates"
@@ -1043,7 +1052,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     or _gate_receipt.get("task_profile_sha256")
                     != speculation_task_profile_digest(task)
                 ):
-                    raise ValueError(
+                    raise ConfigRefusal(
                         "speculation_gate_receipt is stale, invalid, non-GPU, "
                         "policy/depth-mismatched, runtime-scope/max-nodes-mismatched, or does "
                         "not pass the current scorer/search-quality gates"
@@ -1179,7 +1188,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         if trust_mode in ("untrusted", "hostile"):
             import shutil as _sh
             if not _sh.which("docker"):
-                raise RuntimeError(
+                raise EnvironmentRefusal(
                     f"trust_mode={trust_mode!r} needs the docker CLI to sandbox evals, but it was "
                     "not found on PATH. Install Docker or use trust_mode='trusted_local'.")
         self._spec_activated = False
@@ -1257,7 +1266,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # Fail loudly: a repo task with no trusted eval AND no onboarder would silently
         # evaluate every node via the empty solution.py path. Require one or the other.
         if self._repo_spec and not self._eval_spec and onboarder is None:
-            raise ValueError(
+            raise ConfigRefusal(
                 "RepoTask has no eval and no onboarder: set `onboard: true` with "
                 "backend=llm (so an onboarder is built), or provide `eval` in the task.")
 

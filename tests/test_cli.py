@@ -6,7 +6,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from looplab.cli import app
+from looplab.cli import REFUSAL_EXIT_CODE, app
 
 ROOT = Path(__file__).resolve().parents[1]
 runner = CliRunner()
@@ -451,23 +451,24 @@ def _stale_speculation_prefix(run_dir):
     )
 
 
+# `SpeculationAuthorizationError` is an `OperatorRefusal`, so it no longer escapes the CLI as an
+# exception — `cli/__init__.py::_RefusalBoundaryGroup` prints it and exits `REFUSAL_EXIT_CODE`.
+# These two tests are about the WRITES a refused preflight must not have made, so they identify the
+# refusal by the pair an operator actually sees (code + message) instead of by `result.exception`,
+# which is now the `SystemExit` the boundary raised.
 def test_resume_authorization_preflight_precedes_lifecycle_writes(tmp_path):
-    from looplab.engine.orchestrator import SpeculationAuthorizationError
-
     run_dir = tmp_path / "stale-resume"
     before = _stale_speculation_prefix(run_dir)
     result = runner.invoke(app, ["resume", str(run_dir)])
 
-    assert result.exit_code == 1
-    assert isinstance(result.exception, SpeculationAuthorizationError)
+    assert result.exit_code == REFUSAL_EXIT_CODE
+    assert "cannot resume this run's Card speculation/calibration" in result.output
     assert (run_dir / "events.jsonl").read_bytes() == before[0]
     assert (run_dir / "config.snapshot.json").read_bytes() == before[1]
     assert (run_dir / "task.snapshot.json").read_bytes() == before[2]
 
 
 def test_run_authorization_preflight_precedes_snapshot_and_reopen_writes(tmp_path):
-    from looplab.engine.orchestrator import SpeculationAuthorizationError
-
     run_dir = tmp_path / "stale-run"
     before = _stale_speculation_prefix(run_dir)
     result = runner.invoke(app, [
@@ -475,8 +476,8 @@ def test_run_authorization_preflight_precedes_snapshot_and_reopen_writes(tmp_pat
         "-s", "backend=toy",
     ])
 
-    assert result.exit_code == 1
-    assert isinstance(result.exception, SpeculationAuthorizationError)
+    assert result.exit_code == REFUSAL_EXIT_CODE
+    assert "cannot resume this run's Card speculation/calibration" in result.output
     assert (run_dir / "events.jsonl").read_bytes() == before[0]
     assert (run_dir / "config.snapshot.json").read_bytes() == before[1]
     assert (run_dir / "task.snapshot.json").read_bytes() == before[2]

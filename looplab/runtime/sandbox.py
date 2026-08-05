@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol
 
+from looplab.core.errors import ConfigRefusal
+
 # Env-var NAMES that look like a secret — redacted from the child process environment so generated
 # code can't read (and persist into the event log) the operator's keys/tokens. Name-based, so it
 # never touches PATH/SYSTEMROOT/TEMP etc. that a process legitimately needs.
@@ -1242,4 +1244,7 @@ def make_sandbox(trust_mode: str = "trusted_local", *, image: Optional[str] = No
         # untrusted LLM code; run under gVisor (runsc) by default. Override via `runtime`.
         kwargs.setdefault("runtime", "runsc")
         return DockerSandbox(image=image or "python:3.12-slim", **kwargs)
-    raise ValueError(f"unknown trust_mode: {trust_mode!r}")
+    # `Settings.trust_mode` is a free-form string too (this ladder is the vocabulary), so a typo
+    # arrives from `-s trust_mode=…` and is an operator input error, not a bug — name the tiers.
+    raise ConfigRefusal(f"unknown trust_mode: {trust_mode!r}; choose one of: "
+                        "trusted_local, untrusted, hostile")

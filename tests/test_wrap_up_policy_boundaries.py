@@ -520,7 +520,7 @@ def test_a_run_that_can_still_propose_still_refuses_on_a_broken_credential(
     run can still spend money on a model, so the credential refusal stands — and it stands FIRST,
     before the endpoint is ever probed."""
     from typer.testing import CliRunner
-    from looplab.cli import app
+    from looplab.cli import REFUSAL_EXIT_CODE, app
 
     run_dir = tmp_path / "liftable"
     run_dir.mkdir()
@@ -534,6 +534,9 @@ def test_a_run_that_can_still_propose_still_refuses_on_a_broken_credential(
 
     result = CliRunner().invoke(app, ["resume", str(run_dir)])
 
-    assert result.exit_code == 1
-    assert "LLM credential preflight failed" in str(result.exception)
+    # `LLMError` is an `OperatorRefusal`, so the refusal reaches the operator as a message +
+    # `REFUSAL_EXIT_CODE` instead of a traceback; the credential gate's own sentence and the
+    # no-lift property (no `resume` event) are what this test is actually about.
+    assert result.exit_code == REFUSAL_EXIT_CODE, result.output
+    assert "LLM credential preflight failed" in result.output
     assert not any(event.type == "resume" for event in store.read_all())

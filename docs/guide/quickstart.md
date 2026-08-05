@@ -54,8 +54,9 @@ runs/demo/
 ## 3. Run a real ML task
 
 Still offline — `--backend toy` again, because you have not pointed LoopLab at a model yet (that is
-step 4). Without it the run is **refused before it starts** with an `LLMError` from the endpoint
-preflight, since `backend` defaults to `llm`:
+step 4). Without it the run is **refused before it starts** by the endpoint preflight (one message,
+[exit code 2](cli-reference.md#exit-codes-a-refusal-is-not-a-crash)), since `backend` defaults to
+`llm`:
 
 ```bash
 looplab run examples/regression_task.json --out runs/reg --max-nodes 14 --backend toy

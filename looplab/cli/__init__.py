@@ -11,6 +11,10 @@ shared builders (`_engine`, `_load_task`, `_engine_singleton`, …) and re-expor
 `looplab.cli:app` (BOTH console scripts), `python -m looplab.cli` (via `__main__.py`) and every
 `looplab.cli.<name>` attribute that tests import or monkeypatch keep resolving exactly as they did
 when this was one file.
+
+It also owns the ONE exception boundary every command shares (`_RefusalBoundaryGroup`): a
+deliberate refusal (`core/errors.py::OperatorRefusal`) becomes a message + exit
+`REFUSAL_EXIT_CODE`, everything else keeps the Rich traceback Typer renders by default.
 """
 from __future__ import annotations
 
@@ -23,9 +27,11 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from typer.core import TyperGroup
 
 from looplab import __version__
 from looplab.core.config import Settings
+from looplab.core.errors import OperatorRefusal
 from looplab.core.run_deletion import (
     RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed)
 from looplab.core.run_reset import (
@@ -74,11 +80,132 @@ class _TotalOutputTyper(typer.Typer):
         _make_cli_streams_total()
         return super().__call__(*args, **kwargs)
 
+
+# A deliberate refusal exits 2 — the code every other refusal on this CLI already uses
+# (`typer.BadParameter`, `_require_run_dir`, `_require_healthy_log`). 1 stays what it has always
+# meant on a program that lets an exception reach the interpreter: LoopLab crashed. So the pair is
+# machine-readable, and `looplab run … || retry` scripts can tell "fix your flags" from "file a bug".
+REFUSAL_EXIT_CODE = 2
+
+# Escape hatch for whoever has to debug a refusal that is firing when it should not: the message is
+# the whole story for an operator, but a maintainer sometimes needs the frames that produced it.
+# A deployment env var rather than a `Settings` field / flag, for the same reason as
+# `LOOPLAB_ALLOW_UNLOCKED_WRITER`: it is a property of the shell you are debugging in, must work on
+# EVERY command (including the ones with no settings surface at all), and must never be snapshotted
+# into a run.
+TRACEBACK_ENV = "LOOPLAB_TRACEBACK"
+
+
+def deliberate_refusals(exc: BaseException) -> list[BaseException]:
+    """The refusals inside `exc`, or an EMPTY list when anything in it is not one.
+
+    Not just `isinstance`, because anyio wraps whatever escapes a task group in an `ExceptionGroup`
+    — even a lone exception (anyio 4). `Engine.run` therefore delivers a MID-RUN refusal grouped
+    while the identical refusal raised at the preflight boundary arrives bare, and taking the bare
+    case only made the same `LLMError` read as a one-line refusal before the loop and as a
+    137-line traceback inside it. That grouping is a transport artifact of structured concurrency,
+    not a difference in kind, so it must not decide the presentation.
+
+    FAIL CLOSED ON A MIXED GROUP. `split` partitions the leaves; one non-refusal leaf and the whole
+    group is returned as "not a refusal" and keeps its traceback. A concurrent batch that hit a
+    dead endpoint AND tripped a real bug is a BUG report — printing the half that reads nicely
+    would hide the half that matters.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        refusals, others = exc.split(OperatorRefusal)
+        if others is not None or refusals is None:
+            return []
+        return list(_exception_leaves(refusals))
+    return [exc] if isinstance(exc, OperatorRefusal) else []
+
+
+def _exception_leaves(exc: BaseException):
+    """Flatten an (arbitrarily nested) exception group to the exceptions it actually carries."""
+    if isinstance(exc, BaseExceptionGroup):
+        for sub in exc.exceptions:
+            yield from _exception_leaves(sub)
+    else:
+        yield exc
+
+
+def refusal_report(exc: BaseException) -> str:
+    """Render a deliberate refusal as the message an operator can act on.
+
+    Everything a refusal knows is in its own sentence — that is the entry bar for carrying
+    `OperatorRefusal` at all — so the body is `str(exc)` and nothing else. What is NOT free is the
+    explicitly CHAINED cause: `raise LLMError("LLM base URL is malformed") from exc` puts the only
+    concrete detail (which part is malformed) in `__cause__`, and printing just the head would drop
+    it. Follow `__cause__` only — never the implicit `__context__`, which is whatever exception
+    happened to be in flight and is noise far more often than not.
+
+    Bounded at three links, and a cause already quoted in the text above it is skipped: most sites
+    interpolate theirs (`f"LLM request to {url} failed: {exc}"`), and repeating it would make the
+    refusal look like the traceback this exists to replace.
+    """
+    lines = [f"Refused: {exc}"]
+    seen = {id(exc)}
+    cause = exc.__cause__
+    while cause is not None and id(cause) not in seen and len(lines) <= 3:
+        seen.add(id(cause))
+        text = str(cause).strip()
+        if text and not any(text in line for line in lines):
+            lines.append(f"  caused by {type(cause).__name__}: {text}")
+        cause = cause.__cause__
+    return "\n".join(lines)
+
+
+class _RefusalBoundaryGroup(TyperGroup):
+    """The ONE place a deliberate refusal stops being an exception and becomes an operator message.
+
+    WHY HERE. Typer's `pretty_exceptions_enable` defaults to True, so anything that reached the
+    interpreter was rendered as a Rich traceback with the message on the last line: a refused
+    `-s policy=mcts -s speculation_depth=1` printed 42 frames, a refused width re-entry 33, and the
+    LLM credential preflight 43. Turning the pretty traceback OFF instead would have been the wrong
+    fix in the other direction — a genuine bug would then print a bare Python traceback and a
+    refusal would still print one. The split has to be by exception TYPE, and it has to be one
+    handler rather than a `try` at each raise site, because the raise sites are in `core`, `engine`,
+    `search` and `runtime`, none of which may know about Typer.
+
+    WHY THE GROUP'S `invoke` and not `Typer.__call__`. `__call__` runs only under the real console
+    script; `typer.testing.CliRunner` (which the suite uses ~60 times) goes straight to
+    `get_command(app).main(...)`. A boundary in `__call__` would therefore be invisible to every
+    test that could prove it works. `invoke` is on the path of both.
+
+    WHAT IT MUST NOT DO — swallow. `except Exception` is wide because `deliberate_refusals` needs
+    to look INSIDE an exception group, but the default action is a bare `raise`: only a value whose
+    every leaf carries `OperatorRefusal` is ever rendered as a message, and that marker is only
+    worn by exceptions raised on purpose about the operator's own input (`core/errors.py` states
+    the bar). Everything else — a plain `ValueError`/`RuntimeError` from the very same modules, a
+    mixed group, Click's own `UsageError`/`Exit` — is re-raised with its traceback and its exit
+    code untouched, because a bug printed as a tidy one-line message is far worse than a refusal
+    printed as a traceback. `LOOPLAB_TRACEBACK=1` re-raises the refusals too.
+    """
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except Exception as exc:  # noqa: BLE001 - classified below; anything unrecognized re-raises
+            refusals = deliberate_refusals(exc)
+            if not refusals or _truthy_env(TRACEBACK_ENV):
+                raise
+            reports: list[str] = []
+            for refusal in refusals:            # a concurrent batch can refuse N times identically
+                report = refusal_report(refusal)
+                if report not in reports:
+                    reports.append(report)
+            typer.echo("\n".join(reports), err=True)
+            # `from exc`, not a bare raise: the refusal stays the recorded CAUSE of the Exit, so
+            # nothing is discarded even on the path that stops printing it. `LOOPLAB_TRACEBACK=1`
+            # above is the supported way to get the frames themselves.
+            raise typer.Exit(REFUSAL_EXIT_CODE) from exc
+
+
 # rich_markup_mode="markdown" (not the Typer default "rich"): in "rich" mode square brackets are
 # parsed as console style tags, so help text like `pip install 'looplab[ui]'` silently renders as
 # `pip install 'looplab'` — the [ui]/[dev]/[otel] extra names vanish. Markdown mode keeps the pretty
 # help panels but treats brackets literally, so install hints stay correct.
 app = _TotalOutputTyper(
+    cls=_RefusalBoundaryGroup,
     add_completion=False,
     rich_markup_mode="markdown",
     help="LoopLab — autonomous ML/DS research engine. Give it a goal; it invents -> implements -> "
