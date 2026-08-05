@@ -3,10 +3,19 @@
 Status: **Layers 1–6 are implemented and validated in implementation commit `8d9952a1`, which is
 pushed to `master`. ~~Card-driven selection remains a default-off, run-start-pinned opt-in.~~
 (**Correction 2026-08-04 — operator decision: `card_driven_selection` now defaults to `True`,
-`core/config.py:1080`. It is still run-start-pinned.**) Positive-
+`core/config.py:1080`. It is still run-start-pinned.**) ~~Positive-
 depth speculation is admitted only by the current scope-bound receipt for the exact measured Greedy /
 quadratic-Toy / depth-1 / max-nodes-12 runtime; every broader workload, policy, depth and budget remains
-default-off and fail-closed.**
+default-off and fail-closed.~~
+(**Correction 2026-08-04 — THE RECEIPT FENCE WAS LIFTED. Positive `speculation_depth` is admitted on ANY
+TaskAdapter, at any depth `1..64` plus `-1` AUTO, with no receipt: the operator's setting is the whole
+authority (`engine/orchestrator.py::Engine.__init__`, PRODUCT LANE). `speculation_depth` still defaults to
+`0` (off) and still requires `card_driven_selection=true` + `policy=greedy`. A receipt supplied off the
+shipped quadratic-Toy calibration lane is now inert in BOTH directions — it neither authorizes nor pins —
+and the run records a product-lane token instead. What replaced the fence is a per-run measurement, not an
+attestation: the node-budget refund makes a discarded prediction cost no experiment, and every run's
+`budget` finalization receipt carries a `speculation` block whose `charged_discards` reports whatever harm
+remains. See `docs/guide/configuration.md` → "Speculation and the `budget` receipt".**)
 
 > **⚠ "Layers 1–6 implemented and validated" overstates what is reachable (noted 2026-08-04).** Verified
 > reachable today: Layer 1's durable Card capture, a read-only board, and five operator controls.
@@ -63,7 +72,7 @@ truth and wins wherever the original target text differs from shipped behavior.
 | Enrichment | structured steering snapshots; memo/claim/lesson refs; Researcher proposal + Developer-finalized footprint; final operator edit/priority/resource overlays; schema seams for novelty/cross-run/concept projection | proposal-time selectable Cards do not yet carry trusted novelty/coverage memberships, so those ranking terms are zero until a linked Node supplies later evidence |
 | Identity / readiness | receipt-bound `Card.identity`, bounded provenance/blockers, fail-closed `selection_ready`; dropped/merged/gated/superseded work is excluded; exact existing-Card claim and counterfactual speculative freshness are tail/generation fenced | none |
 | Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, Docker enforcement for known positive pins and explicit CPU isolation, fail-closed zero-device admission, confirm admission, isolated Card producer/consumer; local Engine processes sharing one OS-user filesystem namespace hold a crash-released pool-wide lease, so separate Runs cannot double-allocate the same GPU | The deliberately conservative lease serializes GPU-owning Runs; cross-user/container/host scheduling remains the external execution backend's responsibility |
-| Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, durable exact ASHA receipts, bounded public lifecycle projection, optimistic edit/priority/resource/drop controls, and run+generation-scoped optimistic UI state | broader rollout scopes remain deferred/default-off; `coded` and optional speculative display lanes are reserved rather than derivable from current replay events |
+| Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, durable exact ASHA receipts, bounded public lifecycle projection, optimistic edit/priority/resource/drop controls, and run+generation-scoped optimistic UI state | ~~broader rollout scopes remain deferred/default-off;~~ (2026-08-04: the Card selector defaults ON and positive-depth speculation is admitted on any workload without a receipt) `coded` remains a reserved lane — the log now HAS a durable eval-start boundary (`node_eval_started`) but the projection collapses every pending node to `running`; a speculative pre-build is not a lane of its own, it rides the same six |
 
 <!-- CODEX AGENT: the Direction-board row remains stale on current master: RunState no longer exposes
 a Hypothesis projection, so the empty/pre-Card surface is an add form over an absent
@@ -196,13 +205,23 @@ implementation digest already differs, and the review annotations added under lo
 again by design. A positive speculation_depth deployment must regenerate the real-GPU evidence/receipt after
 the review blockers are fixed; copying the historical digest or treating comments as digest-neutral would
 defeat the fail-closed admission contract. -->
+<!-- CLAUDE 2026-08-04: the annotation above is superseded — a positive-depth DEPLOYMENT needs no receipt at
+all now (product lane). What it correctly describes is the CALIBRATION lane: a receipt-carrying replay of the
+quadratic Toy workload still pins this digest and still fails closed. See the visible correction below. -->
+
+> **Correction 2026-08-04.** Nothing below has to be regenerated to DEPLOY positive `speculation_depth` any
+> more: off the quadratic-Toy calibration lane a receipt neither authorizes nor pins, so the whole-source
+> implementation digest never gates a real workload's run or its resume. Regenerate this evidence only to
+> re-measure the benchmark itself (`looplab speculation-gate`). The digest sensitivity described below is
+> still exactly right, and still binding, ON that calibration lane.
 
 > The `implementation` digest below is `speculation_implementation_digest()` over the raw bytes of every
 > `looplab/**/*.py`, the required `looplab/serve/settings_ui_schema.json`, and `pyproject.toml` when the
 > checkout supplies it, AT commit `8d9952a1`. That hash is intentionally sensitive to any later byte edit —
 > including comments, schema help and packaging changes — so this receipt is a point-in-time snapshot of
-> that commit, **not** a claim about the current HEAD. A `speculation_depth>0` rollout must regenerate the
-> receipt against the exact deployed HEAD (`validated_speculation_gate_receipt` returns the validated
+> that commit, **not** a claim about the current HEAD. ~~A `speculation_depth>0` rollout must regenerate the
+> receipt against the exact deployed HEAD~~ — a *calibration-lane replay* must
+> (`validated_speculation_gate_receipt` returns the validated
 > receipt; `validate_speculation_gate_receipt` provides the boolean check and both fail closed on mismatch).
 
 - Implementation commit: `8d9952a1` (`feat(cards): harden speculative rollout gate`), pushed directly
@@ -1007,7 +1026,9 @@ does not force a rework.
    L1's `_derive_cards`; captured in 1a.
 5. **Scorer-fidelity** (does the L3 scorer reproduce `next_actions` exactly — `merge_every`/`ablate_every`
    cadence, `operator_bandit` UCB — *before* any staleness) → measured by the deferred quality harness;
-   must go green before `speculation_depth>0`.
+   ~~must go green before `speculation_depth>0`~~ (**Correction 2026-08-04: it gates the calibration
+   RECEIPT, not a rollout. `speculation_depth>0` no longer waits on any harness; the 15-case suite still
+   blocks `looplab speculation-gate` from minting a receipt.**).
 6. **Producer role-pool isolation** — the producer draws a pooled `(researcher,developer)` pair (L2 owns
    the pool, L5 owns the producer; the contract sits in the seam, decision 5).
 7. **`footprint.timeout` vs `idea.eval_timeout`** → RESOLVED (owner decision 3): one canonical
@@ -1170,8 +1191,12 @@ then **6**.
 - **5b.** Freshness gate in the consumer before every scorer consult and pre-GPU (pure predicate over the
   fresh fold for speculative-marked nodes; DROP only on merged/dropped/footprint-miss/not-in-selection-
   SET); on drop append `node_failed(reason='superseded', eval_seconds=0)` under `_write_lock` + optional
-  `DIAGNOSTIC EV_CARD_FRESHNESS`; `speculation_depth: int=Field(default=0,ge=0,le=64)` (0=OFF;
-  1–64 = exact static live-prefetch-backlog depth; adaptive/AUTO depth is deferred); a positive value is
+  `DIAGNOSTIC EV_CARD_FRESHNESS`; ~~`speculation_depth: int=Field(default=0,ge=0,le=64)` (0=OFF;
+  1–64 = exact static live-prefetch-backlog depth; adaptive/AUTO depth is deferred)~~ (**Correction
+  2026-08-04: shipped as `Field(default=0, ge=-1, le=64)` — AUTO shipped and needed its own sentinel
+  because `0` already means fully off. `-1` = AUTO, resolved ONCE at startup to the settled
+  `eval_parallel` and clamped `1`–`64`; it is the RESOLVED integer that `run_started` pins, so a
+  hardware-derived depth never reaches the durable log**); a positive value is
   effective only with `card_driven_selection=True`; live depth = outstanding requests + committed pending
   speculative nodes not already admitted to this exact consumer session; cap ASHA
   speculation to depth-0 across rungs; merge fresh iff both parents in `rank_by_metric[:2]` AND breedable;
@@ -1209,11 +1234,20 @@ then **6**.
 
 > This section is the original 2026-07-20 **target contract** for the rollout gates. Its "mandatory
 > before rollout" items are satisfied for the calibrated Toy scope by the receipt and checked live TODO
-> in §0.0.1 (the current ledger) — treat §0.0.1 as the single source of rollout-authority status. The
-> requirements below still bind a rollout to any *new* workload, which must regenerate its own evidence.
+> in §0.0.1 (the current ledger) — treat §0.0.1 as the single source of rollout-authority status. ~~The
+> requirements below still bind a rollout to any *new* workload, which must regenerate its own evidence.~~
+>
+> **Correction 2026-08-04 — "mandatory before rollout" is no longer true of any of it.** These gates were
+> lifted as a precondition for `speculation_depth>0`: the operator's setting is the whole authority on any
+> workload, and no evidence is regenerated for a new one. They now describe what
+> `looplab speculation-gate` must pass to MINT a receipt, and what a receipt-carrying replay of the
+> quadratic-Toy calibration workload is still held to. Two things replaced the fence, both cheaper than a
+> six-GPU-run ceremony: the node-budget refund (a discarded prediction that can prove it never ran costs no
+> experiment) and the per-run `budget` receipt's `speculation` block, which reports the residual harm —
+> `charged_discards` — on every run for free.
 
-**Mandatory before any `speculation_depth>0` rollout (implemented; validated for the calibrated Toy
-scope per §0.0.1 — a rollout to a new workload regenerates this evidence against its own profile):**
+**Required to mint a receipt, and binding on a calibration-lane replay — NOT a precondition for
+`speculation_depth>0` (implemented; validated for the calibrated Toy scope per §0.0.1):**
 
 - **Search-quality measurement gate**: bounded strict replay of exactly three fresh depth-0/positive-
   depth pairs for fixed seeds `0/1/2` from the source-owned offline calibration profile. It requires
@@ -1247,8 +1281,12 @@ operator-modified trajectory is one of the six clean calibration trajectories.
   <!-- CODEX AGENT: current master already removed `state.hypotheses`, its model, and its serialized key
   without this deprecation window. Either restore the compatibility view or mark this contract superseded by
   a versioned breaking-change ADR; silently updating tests does not migrate API consumers. -->
-- **Adaptive speculation depth** (keep the ready buffer ≈ `eval_parallel` dynamically) — ship the static
-  `speculation_depth` const first.
+- ~~**Adaptive speculation depth** (keep the ready buffer ≈ `eval_parallel` dynamically) — ship the static
+  `speculation_depth` const first.~~ **SHIPPED (2026-08-04) as `speculation_depth = -1` (AUTO)**: the ready
+  buffer is sized to the settled `eval_parallel` (one prefetch per concurrent evaluation lane, clamped
+  `1`–`64`). It resolves ONCE at startup and `run_started` pins the resolved integer, so it is adaptive to
+  the BOX at launch and static for the life of the run — a resume on a differently sized box continues the
+  run's own treatment rather than re-resolving.
 - **General-workload/policy rollout** — the first receipt is intentionally limited to the exact Greedy,
   deterministic quadratic Toy-task and tested-depth scope. Production tasks and other policy/config
   envelopes require their own representative protocol and evidence; no receipt scope is inferred.

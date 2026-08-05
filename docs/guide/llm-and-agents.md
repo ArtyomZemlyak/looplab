@@ -37,6 +37,39 @@ Then run with `--backend llm` (or the env var above):
 looplab run examples/code_regression_task.json --backend llm --max-nodes 6
 ```
 
+### Endpoint preflight (before a run starts)
+
+**A run whose endpoint is not reachable is refused before it starts** — no run directory, no event log,
+no `run_finished` event, nothing to resume. You get an `LLMError` on the command line and a non-zero exit:
+
+```
+LLM endpoint preflight failed: researcher (qwen3:8b at http://localhost:11434/v1): <transport error>.
+The run needs a reachable model for these roles — start the endpoint, or point
+LOOPLAB_LLM_BASE_URL / --model at one. Run offline with `--backend toy` (or -s backend=toy).
+Refusing to start: the roles would degrade to empty fallback proposals and the run would report
+success on a flat, meaningless result.
+```
+
+Why it refuses instead of trying: every LLM role degrades on purpose so one flaky answer cannot kill a
+run, and those degradations stack into a lie when the endpoint is simply absent. An unparseable answer
+becomes an empty `Idea`, which becomes a `fallback (agent parse failed)` proposal. A measured
+`looplab run examples/toy_task.json --max-nodes 3` against a dead endpoint produced three **identical**
+`x=0,y=0` nodes, a metric flat at 10.0 and `finished=True` — a confident-looking completed run with no
+error anywhere — while `--backend toy` optimized the same task to 8.05.
+
+What the check actually does (`looplab/agents/preflight.py`):
+
+| | |
+|---|---|
+| **When** | In the engine constructor, immediately after the credential check and **before any role is built** — so `run`, `resume`, `finalize` and the UI's spawned engines all go through it |
+| **Cost** | One four-token completion per **distinct** target, not one per role. The ordinary single-model run pays exactly one; roles that differ only in credential are still probed separately |
+| **Bounds** | A 60 s whole-call wall guard and 2 retries. A refused connection, bad DNS or 401 is not retried at all, so the common failure is instant; the retries only forgive a transient 429/5xx |
+| **Shape** | The same probe (no stream, no cache, no reasoning) that the Web UI's `/api/llm/health` card issues, so a green card and a startable run mean the same thing |
+| **Skipped for** | `--backend toy` — bypassed **entirely**, no probe of any kind. Also the Developer roles when `--developer-backend` is external (those authenticate from the coding tool's own credential store), and any client supplied through the `make_llm_client` seam that has no `probe` method (a test double or a custom transport is not evidence of an unreachable endpoint) |
+
+A failure lists **every** unreachable role/target, not just the first, so one restart can fix a
+multi-provider setup. Run `looplab smoke` first if you want the same answer without launching anything.
+
 ### Endpoint options
 
 | Endpoint | `LOOPLAB_LLM_BASE_URL` | Notes |
@@ -236,8 +269,17 @@ proxy/WAF burst-throttle, not a real auth failure) is treated as retryable and b
 client makes up to **8 retries** (429 / 5xx / throttle-403) before surfacing an error. If the model
 is genuinely unreachable, a Developer session crashes (`developer_crash`); the engine then **pauses
 the whole run** on the *first* such crash (an `EV_PAUSE`) rather than rapid-firing dozens of dead
-nodes — resume once the endpoint is back. Use `looplab timings RUN_DIR` to see where a run's
-wall-clock actually went (LLM vs eval vs repair vs tools, per node).
+nodes — resume once the endpoint is back.
+
+The same circuit-breaker covers a provider that stops working **mid-run**, during an *inline repair*
+rather than a build. A failed repair *call* is not a repair: the Developer returns the in-band
+`(developer error: …)` sentinel instead of code, so the engine records **no** `node_repaired`
+(the attempt isn't spent, nothing is written to the workdir, the anti-stuck counter is untouched),
+terminalizes that node with `reason="developer_crash"` naming the provider failure, and appends the
+run-level pause. Without it, a provider error string was committed as the node's code and
+re-evaluated: one real run turned an out-of-credits `402` into **2345 `node_repaired` events on a
+single node over 3.5 hours**. Use `looplab timings RUN_DIR` to see where a run's wall-clock actually
+went (LLM vs eval vs repair vs tools, per node).
 
 ## Signal delivery (agent synergy)
 

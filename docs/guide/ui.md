@@ -203,9 +203,12 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   ineligible to win or seed breeding/confirmation. Broad critic/perfect-score warnings remain advisory;
   `critic:hardcoded_metric` is the narrow high-precision critic exception.
 - **Cards board** — the run's bounded work-item projection, grouped into the replay-derived lifecycle
-  lanes (proposed / building / running / evaluated / gated / dropped). `coded` and optional speculative
-  lanes are reserved UI vocabulary until durable ownership/eval-start events make them derivable;
-  unknown future statuses remain visible rather than being hidden. Cards expose receipt
+  lanes (proposed / building / running / evaluated / gated / dropped). A **speculative pre-build is not a
+  separate lane** — it rides those same six. `coded` is the one reserved lane the fold still never
+  produces: the log now *does* carry a durable eval-start boundary (`node_eval_started`, appended for
+  speculative prefetch nodes at the dispatch decision), but the card projection collapses every pending
+  node straight to `running`, so nothing distinguishes coded-but-not-started from running. Unknown future
+  statuses remain visible rather than being hidden. Cards expose receipt
   completeness, selection readiness/blockers, lineage and evidence-node links. Operator controls can
   edit display text, pin the 1-based visible priority, pin a configured GPU request, or deliberately
   drop a Card. All four actions use the same generation-fenced command lifecycle as the rest of the

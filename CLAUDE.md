@@ -48,8 +48,8 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 
 | Path | Contents |
 |---|---|
-| `looplab/core/` | foundation: domain models, `Settings` (config.py = schema, appconfig.py = loader), LLM client (`llm.py` + its `llm_streaming`/`llm_toolcall`/`llm_transient` siblings — every split name re-exported through `llm.py`), parsing, tracing, shared errors; `pathsafe.py` (the single spelling of `is_reparse` / `WINDOWS_RESERVED` / `filesystem_identity`) and `atomicio.file_identity` (the canonical same-file-unchanged stat tuple) — a site needing a SUBSET of either documents why against the shared definition rather than re-deriving it; `jsonutil.py` (`canonical_json` + `canonical_json_digest`/`DIGEST_TEXT_CAP` — the ONE dump/hash tail every identity minter shares, preimages stay at their call sites) and `numeric.py` (`numeric_params`/`knn_idw`, re-exported from `events/digest.py`) |
-| `looplab/events/` | event store, `types.py` (event-type registry), `replay.py::fold` (event log → `RunState`), digest, readmodel, exporters + the pure UI projections (`traceview.py`, `htmlview.py`, `comment_projection.py` = threaded-comment lifecycle projection), `span_index.py` (light span index → `spans.index.jsonl`), `notebook.py` (champion-notebook renderer, an export not a runtime) |
+| `looplab/core/` | foundation: domain models, `Settings` (config.py = schema, appconfig.py = loader), LLM client (`llm.py` + its `llm_streaming`/`llm_toolcall`/`llm_transient` siblings — every split name re-exported through `llm.py`), `llm_broker.py` (run-local concurrency ADMISSION for outbound provider calls — a closed lane vocabulary selected through a `ContextVar`, borrowed by both clients around the real request only, so a producer can be scoped without holding capacity while it reads files or runs tools), parsing, tracing, shared errors; `pathsafe.py` (the single spelling of `is_reparse` / `WINDOWS_RESERVED` / `filesystem_identity`) and `atomicio.file_identity` (the canonical same-file-unchanged stat tuple) — a site needing a SUBSET of either documents why against the shared definition rather than re-deriving it; `jsonutil.py` (`canonical_json` + `canonical_json_digest`/`DIGEST_TEXT_CAP` — the ONE dump/hash tail every identity minter shares, preimages stay at their call sites) and `numeric.py` (`numeric_params`/`knn_idw`, re-exported from `events/digest.py`) |
+| `looplab/events/` | event store, `types.py` (event-type registry), `replay.py::fold` (event log → `RunState`), digest, readmodel, exporters + the pure UI projections (`traceview.py`, `htmlview.py`, `comment_projection.py` = threaded-comment lifecycle projection, `belief_projection.py` = the BELIEF view over the card board — derived, never folded state), `span_index.py` (light span index → `spans.index.jsonl`), `notebook.py` (champion-notebook renderer, an export not a runtime) |
 | `looplab/runtime/` | sandboxes (subprocess/Docker tiers), command evaluation, dep install, background tasks — process execution ONLY, and it imports nothing above `core` |
 | `looplab/tools/` | agent-facing tools; `_base.py` documents the ToolProvider contract; `env_inspect.py` (repo Developer's read-only env inspector: pkg version/API/source), `vectorstore.py` + `memora.py` (embeddings + harmonic index) |
 | `looplab/agents/` | LLM personas: plain roles (`roles.py`), the tool-loop machinery (`tool_loop.py::drive_tool_loop`/`agentic_*`; `agent.py` keeps `run_phase` + `ToolUsingResearcher` and re-exports the rest — patch seams resolve through `agent.py`), external CLI backend (`cli_agent.py`), facade (`unified_agent.py`), and `preflight.py` — the pre-run reachability probe for every role's endpoint, called from `cli/__init__.py::_engine` BEFORE any role is built so an unreachable model refuses the run instead of degrading it to fallback proposals that report success |
@@ -57,7 +57,7 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 | `looplab/trust/` | gates that keep results honest: leakage, reward-hack, CV, redaction, confirmation |
 | `looplab/engine/` | **the orchestrator loop** + cross-run memory; see invariants below. The `Engine` class spans SEVENTEEN files: `orchestrator.py` (`__init__`, the `run` spine, node creation — the module-global `fold` seam lives here) + sixteen mixins — `confirm_phase.py`, `ablation.py`, `novelty.py`, `strategy.py` (cadence; the Strategist agent is `agents/strategist.py`), `research_cadence.py`, `eval_stages.py`, `crash_repair.py`, `eval_dispatch.py`, `audit.py`, `resources.py`, `speculation.py`, `evaluate.py`, `node_build.py`, `proposal_cues.py`, and the two per-eval live-log watchdogs `train_monitor.py` (LLM health verdict + gated kill) and `asha_monitor.py` (live-curve rank vs finished siblings, with the rank result handed to an LLM judge that owns the stop decision and can only make the gate stricter + opt-in kill; both append only fold-ignored DIAGNOSTIC events and reuse `_evaluate`'s `kill_signal`). In a mixin `self` IS the Engine — grep the engine package before renaming an engine attribute or hunting a method. An EIGHTEENTH, `shared.py::SharedEngineMixin`, is the home for members that belong to every cluster and therefore to none (`_agent_may`, `_op_span`, `_cadence_due`, plus `effective_researcher_eval_timeout`): the bar is called-from-more-than-one-cluster AND no state of its own, so it does not become a second god-module. The engine package also holds `costs.py` (the durable per-run `llm_usage`/`llm_cost` cost ledger + `.llm-usage-outbox`) and an expanded `finalize.py` (the `finalize_step`/`finalization_finished` wrap-up handshake) |
 | `looplab/adapters/` | task types (toy → dataset → repo → MLE-bench); the TaskAdapter contract is documented in `adapters/tasks.py` |
-| `looplab/serve/` | FastAPI server (`server.py` is a thin composition root; routes live in `serve/routers/*` — control/runs/genesis/assistant/boss/org/reports/misc/attention/collaboration/reviews/cross_run), TUI, assistant; the authoritative command lifecycle (`run_commands.py`), incremental command-ack observation (`command_observation.py`), the owner attention feed (`attention.py`), the isolated reviewer read namespace (`reviews.py`), and `jupyter.py` (the `jupyter_serverproxy_servers` launch spec); never imported by the engine (the run-end projections live in `events/`) |
+| `looplab/serve/` | FastAPI server (`server.py` is a thin composition root; routes live in `serve/routers/*` — control/runs/genesis/assistant/boss/org/reports/misc/attention/collaboration/reviews/cross_run), TUI, assistant; the authoritative command lifecycle (`run_commands.py`), incremental command-ack observation (`command_observation.py`), the owner attention feed (`attention.py`), the isolated reviewer read namespace (`reviews.py`), `scope_report_store.py` (the durable scope-report STORE — paths/receipts/leases/fences/record validation, none of it HTTP; `routers/reports.py` star-re-exports it, so patch the seams HERE, not on `reports.<name>`), `run_projections.py` (the run-list projections behind `AppState.run_summaries()`/`run_membership()`, imported BY routers and never the other way round), and `jupyter.py` (the `jupyter_serverproxy_servers` launch spec); never imported by the engine (the run-end projections live in `events/`) |
 | `ui/` | React control plane (built artifacts served by `serve/server.py`) |
 
 ## Engine invariants (violating these breaks replay/resume)
@@ -69,6 +69,16 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    MAY additionally append `DIAGNOSTIC_EVENTS` (fold-ignored, so splice-neutral BY CONSTRUCTION — the
    fold never reads them): the training-monitor task appends `EV_TRAIN_MONITOR_ALERT` this way under
    `_write_lock`, asserting membership in `DIAGNOSTIC_EVENTS` at its append site.
+   *An UNLOCKED main-task append* is the third accepted shape, and the one that is deliberately NOT in a
+   registry: `EV_NODE_EVAL_STARTED` (`engine/evaluate.py::_record_eval_start_boundary`, called by the MAIN
+   task from `engine/speculation.py`'s admission decision and again as a funnel backstop in `_evaluate`).
+   It is FOLDED but appended outside `_write_lock`, which is safe because it is ONE independent per-node
+   row that the fold keys by `(node_id, generation)` and applies SET-ONLY: it pairs with nothing, so its
+   splice position cannot change any other event's meaning. It has no registry because the constraint it
+   must satisfy is the opposite of `BACKGROUND_APPENDABLE`'s — placement is load-bearing in the other
+   direction: writing it from the eval WORKER lands it inside `_request_card_build`'s tail-CAS window and
+   makes every prefetch election lose its CAS (measured: depth-1 speculation silently went serial, 17
+   builds / 5 discards became 12 / 0). Keep it on the main task, at the dispatch decision.
    *Thread-side setup* is the remaining typed exception: `_ensure_run_setup` (`engine/eval_dispatch.py`)
    appends the FOLDED `events/types.py::SETUP_THREAD_APPENDABLE` pair from an eval WORKER THREAD
    (`_run_eval` under `anyio.to_thread`), outside `_write_lock`. Safe because `EventStore.append`
@@ -108,7 +118,12 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 - **Back-compat import shim**: `looplab/__init__.py` aliases every pre-split flat module path
   (`looplab.orchestrator` → `looplab.engine.orchestrator`, …) via a meta-path finder; both names
   resolve to the SAME module object, so monkeypatching either path works. Many tests use old flat
-  paths — keep the `_LAYOUT` map in sync when moving modules.
+  paths — keep the `_LAYOUT` map in sync when MOVING modules, and `looplab/__init__.py::_RENAMED`
+  (old FULL path → canonical full path, checked FIRST) when RENAMING one: `_LAYOUT` maps a canonical
+  module STEM to its package, so a renamed module's old name is no longer a stem anywhere and both of
+  its old spellings (dotted + flat pre-split) have to be routed explicitly. Both go through the same
+  `_CompatLoader`, which is the point — these modules are patch seams, and a second module object
+  would make every existing monkeypatch a silent no-op instead of an error.
 - **Layering**: `core` imports nothing above itself; `events` only `core`; `serve` may import
   anything; the engine must not grow new dependencies on `serve`. **`search` may import `agents` at
   module level; `agents` may reach `search` ONLY through a deferred (function-local) import.** That
@@ -136,9 +151,14 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   `adapters/tasks.py::TASK_OPTIONAL_HOOKS`; role outputs `agents/roles.py::DEVELOPER_OUTPUT_ATTRS`
   / `RESEARCHER_ACTION_ATTRS`; hint attrs `agents/roles.py::RESEARCHER_HINT_ATTRS`; prompt keys
   `core/prompts.py::PROMPT_KEYS`; delivered signals `engine/signal_delivery.py::SIGNALS`;
-  background-appendable events `events/types.py::BACKGROUND_APPENDABLE` + its thread-side sibling
-  `SETUP_THREAD_APPENDABLE`. Adding/renaming any such
-  seam means updating the registry in the SAME change. Note `search/foresight.py`'s
+  background-appendable events `events/types.py::BACKGROUND_APPENDABLE`, its thread-side sibling
+  `SETUP_THREAD_APPENDABLE`, and its Card-conditional extension
+  `NON_CARD_SELECTION_BACKGROUND_APPENDABLE` (legacy Hypothesis/Policy selection ONLY — the call site
+  must prove Card-driven selection is off, because `hypothesis_merged` became a Card
+  ownership/lifecycle input and is not universally neutral); LLM retry handlers
+  `core/llm.py::OpenAICompatibleClient._RETRY_POLICY` (a `(exception types, handler)` table dispatched in
+  order — the same order as the `except` ladder it replaced, so reordering it changes behaviour).
+  Adding/renaming any such seam means updating the registry in the SAME change. Note `search/foresight.py`'s
   panel is a `__getattr__` proxy over the wrapped agent: a typo'd read silently resolves to the
   base object, and an attribute SET on the panel shadows reads *through the panel* but does NOT
   reach the base's own `self.<attr>` reads until `forward_hints` mirrors it — set hints on the

@@ -75,7 +75,7 @@ solve:
 ```bash
 looplab run --goal "predict target; data is in ~/proj/data"   # Genesis authors the whole task
 looplab run config.yaml                          # one file: task + settings + out
-looplab run task.json --max-nodes 20             # a bare task file + flags (legacy)
+looplab run task.json --max-nodes 20             # a bare task file + flags (legacy; needs a live endpoint)
 looplab run --kind dataset --goal "..." -s backend=llm        # pin the kind, Genesis fills the rest
 ```
 
@@ -130,11 +130,15 @@ from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.
 
 **Examples**
 
+Every example below that does **not** pass `--backend toy` needs a reachable LLM endpoint: `backend`
+defaults to `llm`, and the [endpoint preflight](llm-and-agents.md#endpoint-preflight-before-a-run-starts)
+refuses the run with an `LLMError` before the run directory is created if the model is not there.
+
 ```bash
 looplab init && looplab run looplab.yaml                  # scaffold a config, edit, run
 looplab run --no-genesis --kind quadratic --goal "minimize x^2+y^2" --direction min --backend toy   # no file, no LLM
-looplab run examples/toy_task.json --out runs/demo --max-nodes 14
-looplab run examples/toy_task.json -s policy=asha -s n_seeds=5            # --set any setting
+looplab run examples/toy_task.json --out runs/demo --max-nodes 14 --backend toy
+looplab run examples/toy_task.json -s policy=asha -s n_seeds=5 --backend toy   # --set any setting
 looplab run examples/code_regression_task.json --backend llm --max-nodes 6
 looplab run examples/regression_task.json --backend llm \
     --knowledge-dir examples/knowledge --max-nodes 6
@@ -165,9 +169,34 @@ dropped. Seven comparison/selection fields (`card_driven_selection`, `speculatio
 `holdout_select`, `select_verifier`, `select_verifier_samples`, `verifier_ci_tie`) are then restored
 from the folded `run_started` record;
 `trust_gate_changed` owns later trust-gate edits. Those event-pinned semantics win over a stale or hand-edited
-snapshot. A positive-depth run additionally pins the exact quality-receipt digest; resume fails closed if
-the configured receipt is absent, stale, bound to different raw evidence/hardware/code, or has a different
-digest.
+snapshot.
+
+**A positive-depth run pins its speculation LANE, not a receipt.** On any workload other than the shipped
+quadratic Toy adapter the run takes the **product lane**: `run_started` pins the search *treatment*
+(`card_driven_selection`, the resolved `speculation_depth`, the `greedy` policy scope) plus a lane token,
+and deliberately **not** the whole-source implementation digest — that digest hashes every shipped `.py`
+file, so a comment edit or a `pip install -U` would otherwise make a half-finished run permanently
+unresumable. Resume compares the lane, so a product-lane run stays resumable across source changes.
+
+- **Do not add `speculation_gate_receipt` to a resume command to make it work.** Off the calibration lane a
+  receipt authorizes nothing and pins nothing: a valid one is accepted and ignored, an invalid one is
+  *declined* (the run proceeds in the product lane) rather than raising. Adding or dropping it changes
+  nothing about whether the resume succeeds.
+- Runs started by an older build that *did* record a receipt's identity on a product-lane workload are
+  **adopted** on resume — that precise legacy shape (no calibration fields, no runtime-scope pin, same
+  depth and policy scope) keeps working instead of being stranded forever.
+- Only a **receipt-carrying replay of the Toy calibration workload** binds a receipt. There resume pins the
+  receipt's self-digest, the implementation digest and the runtime-scope digest, and fails closed on an
+  absent/stale/forged receipt or a changed Settings/roles/sandbox envelope. Re-measuring that lane costs
+  minutes, which is why it can afford the strict pin.
+- A resume that *does* fail closed names the specific pin that moved, and refuses **without writing
+  anything** to the log it declined to trust. Re-run with the launch settings the log pinned rather than
+  editing them on the resume command.
+
+**Grandfathering.** `resume`/`finalize` re-validate the run's own `task.snapshot.json`, and a run that
+already exists must stay resumable even when its recorded spec is one a newer validator would refuse at
+submit. Those refusals are printed as `warning: …` on stderr instead — the diagnosis survives, only the
+refusal is dropped (see the `eval.metric.path` note in [Tasks](tasks.md)).
 
 ---
 
@@ -243,7 +272,12 @@ looplab replay RUN_DIR
 
 ## `speculation-gate`
 
-Build the mandatory local rollout receipt for positive-depth Card speculation. Supply alternating
+Build the **optional** local rollout receipt for positive-depth Card speculation. It is a maintainer's
+BENCHMARK — it re-measures scorer fidelity, hit/divergence rate and normalized regret on the shipped
+quadratic Toy adapter — **not a licence**: positive `speculation_depth` runs on any task without one
+(see `speculation_gate_receipt` in [Configuration](configuration.md#backend-roles)), and every run gets
+the cheap per-run substitute for free in its `budget` receipt. Do not spend these six real-GPU runs to
+unlock speculation; spend them only to re-measure the benchmark itself. Supply alternating
 depth-0 baseline and positive-depth treatment directories: exactly three pairs, in fixed seed order
 `0`, `1`, `2` (six directories total). All six runs use the same `max_nodes`; every treatment uses the
 same positive depth. Evidence runs must be created in fresh directories by the source-owned offline
@@ -967,7 +1001,7 @@ looplab ui [--run-root DIR] [--host HOST] [--port PORT] [--root-path PATH] [--bu
 | `--host HOST` | `127.0.0.1` | Bind host |
 | `--port PORT` | `8765` | Bind port |
 | `--root-path PATH` | `""` | ASGI `root_path` for a non-prefix-stripping proxy; auto-derived from `JUPYTERHUB_SERVICE_PREFIX` when unset |
-| `--build` / `--no-build` | `--build` | Verify/rebuild a missing, unstamped or stale default bundle (needs Node/npm); `--no-build` explicitly serves the existing prebuilt/stale bundle without freshness checks. Both first repair a publish an earlier process was killed mid-swap, which needs no toolchain |
+| `--build` / `--no-build` | `--build` | Verify/rebuild a missing, unstamped or stale default bundle (needs Node/npm); `--no-build` explicitly serves the existing prebuilt/stale bundle without freshness checks. A publish an earlier process was killed mid-swap is repaired **first, under every flag** (`--build`, `--no-build` and `--rebuild` alike), which needs no toolchain |
 | `--rebuild` | off | Force a fresh `npm run build` even if a bundle already exists |
 
 Dependency install plus Vite output are serialized by a required source-root interprocess lock. Freshness is

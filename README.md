@@ -92,7 +92,8 @@ looplab run looplab.yaml
 looplab run --kind dataset --goal "predict target, data in data.csv" -s max_nodes=20
 
 # d) A bare task file + flags (the original style still works):
-looplab run examples/toy_task.json --max-nodes 14
+#    `backend` defaults to `llm`, so drop `--backend toy` only if a live endpoint is reachable:
+looplab run examples/toy_task.json --max-nodes 14 --backend toy
 ```
 
 When you pass `--goal`, **Genesis** (the same "New run" planner the Web UI uses) authors the task for
@@ -179,10 +180,12 @@ from the durable frontier. External paid calls and pre-append side effects use t
 see [Concepts](docs/guide/concepts.md#authoritative-command-lifecycle) for the exact ambiguity boundaries:
 
 ```bash
-looplab run examples/toy_task.json --out runs/c --max-nodes 12 --crash-after 3
+looplab run examples/toy_task.json --out runs/c --max-nodes 12 --crash-after 3 --backend toy
 #   -> hard-exits (code 137) mid-run, like kill -9
 looplab resume runs/c --task-file examples/toy_task.json --max-nodes 12
 #   -> replays the log, continues from the frontier, finishes cleanly
+#   (`--backend toy` keeps this offline; without it the run needs a reachable LLM endpoint, which
+#    the pre-run preflight checks before the run directory is even created)
 ```
 
 ## Docker is optional

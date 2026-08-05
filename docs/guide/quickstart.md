@@ -49,8 +49,12 @@ runs/demo/
 
 ## 3. Run a real ML task
 
+Still offline — `--backend toy` again, because you have not pointed LoopLab at a model yet (that is
+step 4). Without it the run is **refused before it starts** with an `LLMError` from the endpoint
+preflight, since `backend` defaults to `llm`:
+
 ```bash
-looplab run examples/regression_task.json --out runs/reg --max-nodes 14
+looplab run examples/regression_task.json --out runs/reg --max-nodes 14 --backend toy
 ```
 
 This selects a polynomial degree + ridge λ by 5-fold cross-validation. The loop discovers the right
@@ -81,6 +85,10 @@ export LOOPLAB_LLM_MODEL=qwen3:8b
 # export LOOPLAB_LLM_API_KEY=sk-...                       # for hosted endpoints
 ```
 
+From here on you can drop `--backend toy`. LoopLab probes each configured endpoint once before a run
+starts and refuses the run outright if it is unreachable, rather than degrading to empty fallback
+proposals that report success — see [endpoint preflight](llm-and-agents.md#endpoint-preflight-before-a-run-starts).
+
 See [LLM & coding agents](llm-and-agents.md) for hosted models, per-role models, and delegating the
 Developer to an external coding agent.
 
@@ -89,11 +97,14 @@ Developer to an external coding agent.
 The event log makes a run resilient to a hard kill — it continues from the durable replay frontier:
 
 ```bash
-looplab run examples/toy_task.json --out runs/c --max-nodes 12 --crash-after 3
+looplab run examples/toy_task.json --out runs/c --max-nodes 12 --crash-after 3 --backend toy
 #   -> hard-exits mid-run (like kill -9)
 looplab resume runs/c --task-file examples/toy_task.json --max-nodes 12
 #   -> replays the complete event prefix; recorded fulfillment receipts are not served twice
 ```
+
+`resume` restores the launch settings from `config.snapshot.json`, so it stays offline without
+repeating `--backend toy`.
 
 `resume` can read the task from the run's own `task.snapshot.json`, so `--task-file` is optional
 when resuming a run started by `looplab run`.
