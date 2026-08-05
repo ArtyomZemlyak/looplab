@@ -3,7 +3,26 @@ eval-seconds-to-result, and reward-hack flags — a regression test for *capabil
 still solve these?), not just code. Seeded from `tools/e2e_report.py`; exposed as `looplab bench`.
 
 Pure orchestration over the existing engine builder, so it benchmarks exactly what `looplab run`
-does. Deterministic for the toy backend; offline by default.
+does. Offline by default.
+
+REPRODUCIBILITY, stated as measured rather than as advertised. On the toy backend every SCIENTIFIC
+field of `benchmark.json` — champion, `best_metric`, `nodes`/`evaluated`/`failed`, `reward_hack_flags`,
+`stop_reason` — is identical run to run, and so is the folded `RunState`. Two narrower claims that
+used to be spelled as one blanket "deterministic for the toy backend", and are not:
+
+* `benchmark.json` is NOT byte-identical, ever: `eval_seconds` and `wall_seconds` are wall-clock
+  measurements. (Measured over 8 identical suites: 8 distinct files, ONE distinct projection once
+  those two fields are dropped.)
+* The event log's BYTE ORDER is deterministic only for a run whose cross-run memory store is in the
+  same state. It is CLAUDE.md engine invariant #1 that makes the log byte-reproducible at a settled
+  build width of 1 — and that holds here, since AUTO settles a toy build to 1 — but the run's CONTENT
+  still depends on what it reads: the FIRST run into an empty `LOOPLAB_MEMORY_DIR` has no prior
+  lessons to reconcile and therefore lacks one `lessons_reconciled` event that every later run has.
+  Measured over 8 suites sharing one initially-empty memory dir: exactly 2 order signatures per task,
+  split 1/7, diverging at index 5 on exactly that event; 8 suites with a per-suite memory dir give 1.
+  That is cross-run LEARNING working, not a defect, and it is deliberately not suppressed here — the
+  harness exists to benchmark what `looplab run` actually does. Pin `LOOPLAB_MEMORY_DIR` to a fresh
+  directory per suite (or to a pre-warmed one) when you need log-byte comparability across suites.
 """
 from __future__ import annotations
 

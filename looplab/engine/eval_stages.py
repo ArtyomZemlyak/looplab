@@ -326,7 +326,15 @@ class EvalStagesMixin:
         objective = (str(_ms.get("pattern") or _ms.get("key") or "").split("(")[0].strip()
                      or "the objective metric")
 
-        @in_llm_lane("enrichment")
+        # EVAL-PATH, not background (`core/llm_broker.py::BACKGROUND_LANE_PRODUCERS`). This ran in
+        # the capped `enrichment` lane beside the two live-log watchdogs, but it is the opposite kind
+        # of producer: the eval worker BLOCKS on it between stages (see the docstring above), there is
+        # one per concurrent eval, and the whole batch inherits its latency. Once the background caps
+        # were unwelded from the global total, N evals' stage checks serialized at one and each queued
+        # behind whichever watchdog held the permit — measured at 4 concurrent evals: peak 1, 4x the
+        # wall time. `engine` is where its eval-path siblings already live (the repair loop reaches it
+        # as the fallback lane), and it stays governed by a finite total when the operator sets one.
+        @in_llm_lane("engine")
         def _check(stage_name, tail):
             msgs = [{"role": "system", "content":
                      "You are a SANITY checker for ONE stage of an ML eval pipeline, run BEFORE the next "

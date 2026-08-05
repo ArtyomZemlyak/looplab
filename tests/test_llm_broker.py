@@ -1,18 +1,21 @@
 """Layer-2 shared LLM broker: atomic limits, fairness, transport wiring and compatibility."""
 from __future__ import annotations
 
+import re
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
 from looplab.adapters.toytask import ToyTask
 from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.llm import CostAccountant, LiteLLMClient, OpenAICompatibleClient
-from looplab.core.llm_broker import (LLMConcurrencyBroker, current_llm_lane,
-                                     default_llm_lane_limits, llm_broker_scope,
+from looplab.core.llm_broker import (BACKGROUND_LANE_PRODUCERS, LLMConcurrencyBroker,
+                                     current_llm_lane, default_llm_lane_limits, llm_broker_scope,
                                      llm_lane_scope, llm_request_permit,
                                      normalize_llm_lane_limits)
+import looplab.engine.orchestrator as _orch
 from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
@@ -458,3 +461,115 @@ def test_lane_allocation_validation_is_closed_and_typed():
     for bad in ({"unknown": 1}, {"build": 0}, {"build": True}, {"build": "2"}):
         with pytest.raises(ValueError):
             normalize_llm_lane_limits(bad)
+
+
+# --------------------------------------------------------------------------- #
+# BACKGROUND_LANE_PRODUCERS — the capped lanes' two-way registry
+# --------------------------------------------------------------------------- #
+
+_ENGINE_DIR = Path(_orch.__file__).parent
+# `@in_llm_lane("<lane>")` immediately above a (possibly async) def — the only way a producer joins a
+# lane by hand. Everything else reaches the uncapped `engine` fallback through `normalize_llm_lane`.
+_LANE_DECL = re.compile(
+    r'@in_llm_lane\(\s*"([a-z_]+)"\s*\)\s*\n\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)')
+
+
+def _declared_lane_producers() -> dict[str, set[str]]:
+    found: dict[str, set[str]] = {}
+    for path in sorted(_ENGINE_DIR.glob("*.py")):
+        for lane, name in _LANE_DECL.findall(path.read_text(encoding="utf-8")):
+            found.setdefault(lane, set()).add(f"{path.name}::{name}")
+    return found
+
+
+def test_every_capped_lane_producer_is_registered():
+    """A producer may not join a lane capped at ONE concurrent request without being declared.
+
+    The cap is a claim about WHERE a producer runs — beside the main task, with nobody blocked on its
+    latency — and a lane is a bare string, so the only thing standing between that claim and a
+    foreground producer is this registry. It was not standing there when the caps were unwelded from
+    the global total: `eval_stages.py::_stage_check_fn::_check` is a per-eval inter-stage gate whose
+    own docstring says it "Runs inside the eval worker thread, so complete_text blocks there", and it
+    had declared `enrichment`. N concurrent evals' stage checks then serialized at one and each
+    queued behind whichever watchdog held the permit (measured at 4 evals: peak 1, 4x the wall time).
+    """
+    declared = _declared_lane_producers()
+    for lane, registered in BACKGROUND_LANE_PRODUCERS.items():
+        found = declared.get(lane, set())
+        # Guard the guard: an emptied scan would make both directions pass vacuously.
+        assert found, f"the source scan found no `@in_llm_lane({lane!r})` producers at all"
+        unregistered = found - set(registered)
+        assert not unregistered, (
+            f"{sorted(unregistered)} declare the CAPPED lane {lane!r} without being registered in "
+            "core/llm_broker.py::BACKGROUND_LANE_PRODUCERS. Register it only if it runs BESIDE the "
+            "main task with nothing blocked on its latency; a producer the eval or build path waits "
+            "on belongs in the uncapped `engine` lane.")
+
+
+def test_no_registered_background_producer_has_left_its_lane():
+    declared = _declared_lane_producers()
+    for lane, registered in BACKGROUND_LANE_PRODUCERS.items():
+        orphaned = set(registered) - declared.get(lane, set())
+        assert not orphaned, (
+            f"registered background producer(s) {sorted(orphaned)} no longer declare lane {lane!r} — "
+            "a rename or a removed decorator (which silently sends the producer to the UNBOUNDED "
+            "`engine` fallback); update BACKGROUND_LANE_PRODUCERS in the same change.")
+
+
+def test_the_capped_lanes_are_exactly_the_registered_ones():
+    assert set(BACKGROUND_LANE_PRODUCERS) == {
+        lane for lane, limit in default_llm_lane_limits(None).items() if limit is not None}
+
+
+def test_the_per_eval_stage_check_is_not_in_a_capped_lane():
+    """The eval-path producer this registry was written for, pinned by name.
+
+    `_check` is created inside `_stage_check_fn`, so it is a CLOSURE, not an Engine attribute — the
+    registry scan above sees it, but a behavioural test cannot reach it without running an eval. Pin
+    the source declaration instead, and pin the reason: its lane must be one with no background cap,
+    or every concurrent eval's inter-stage gate queues behind every other one.
+    """
+    source = (_ENGINE_DIR / "eval_stages.py").read_text(encoding="utf-8")
+    lane = _LANE_DECL.search(source)
+    assert lane is not None and lane.group(2) == "_check"
+    assert lane.group(1) not in BACKGROUND_LANE_PRODUCERS, (
+        f"the per-eval inter-stage check declares the capped lane {lane.group(1)!r}")
+    assert default_llm_lane_limits(None)[lane.group(1)] is None
+
+
+def test_a_capped_lane_serializes_what_an_uncapped_one_overlaps():
+    """The measurement behind the move, through the real admission path.
+
+    Four concurrent eval workers each run one stage check. In the lane the check used to declare the
+    peak is 1; in the lane it declares now it is 4.
+    """
+    def peak_for(lane: str) -> int:
+        broker = LLMConcurrencyBroker(total=None, lane_limits=default_llm_lane_limits(None))
+        live = peak = 0
+        lock = threading.Lock()
+        entered = threading.Semaphore(0)
+        release = threading.Event()
+
+        def eval_worker() -> None:
+            nonlocal live, peak
+            with llm_broker_scope(broker), llm_lane_scope(lane), llm_request_permit():
+                with lock:
+                    live += 1
+                    peak = max(peak, live)
+                entered.release()
+                release.wait(5)
+                with lock:
+                    live -= 1
+
+        threads = [threading.Thread(target=eval_worker, daemon=True) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for _ in range(4):
+            if not entered.acquire(timeout=0.75):
+                break
+        release.set()
+        _join(threads)
+        return peak
+
+    assert peak_for("enrichment") == 1
+    assert peak_for("engine") == 4

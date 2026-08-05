@@ -143,6 +143,45 @@ def test_clamp_fill_leaves_swept_dims_to_the_grid():
     assert "degree" not in out2.params and out2.params["lam"] == 5.0
 
 
+def test_clamp_fill_never_leaves_an_idea_outside_its_own_space():
+    """A bounds clamp on a SWEPT key used to break the Idea's fixed-point property, and that killed runs.
+
+    `_clamp_fill` mutates `idea.params` directly, which bypasses `Idea._clamp_params_to_space`. When
+    the Researcher's sweep grid lies outside the task bounds, clamping the same key to the bounds wrote
+    a `params` value its own `space` forbids — so rebuilding the Idea from the durable Card re-ran the
+    space clamp and produced a DIFFERENT number. Every Card's ownership digest is minted from those
+    params and re-derived on claim, so such a Card could never be claimed again: the create lane
+    re-selected it, re-refused it, and spun. Measured live (`/tmp/ll-s1/spec`, blob_classification,
+    `iters` bound (10, 500)): the Researcher proposed `space.iters=[1000,5000]`, the Card stored
+    `params.iters=500`, reconstruction said 1000, and the run burned 74 loop turns in one second before
+    dying "stuck: 1 action(s) planned … without creating a node" at 2 of 8 nodes.
+
+    The property this pins is the general one, not the one instance: whatever `_clamp_fill` returns
+    must survive `Idea` revalidation unchanged."""
+    from looplab.agents.roles import _clamp_fill
+    from looplab.core.models import Idea
+    bounds = {"lr": (0.001, 1.0), "l2": (0.0, 1.0), "iters": (10.0, 500.0)}   # classification.py
+    live = Idea(operator="draft", params={"lr": 0.5, "l2": 0.001, "iters": 5000.0},
+                space={"lr": [0.1, 0.5, 1.0], "iters": [1000.0, 5000.0]})
+    out = _clamp_fill(live, bounds)
+    assert out.params["iters"] == 5000.0        # the grid owns a swept dim, not the task bounds
+    assert out.params["l2"] == 0.001            # a non-swept param is still bounds-clamped
+    # THE property: revalidating the Idea (what every Card claim does) must not move anything.
+    assert Idea.model_validate(out.model_dump()).params == out.params
+
+    # The SECOND independent live reproduction, `/tmp/ll-s4/run` card-0 — a different task run, a
+    # different grid, the identical failure. Both battery runs that died "stuck" carry exactly one
+    # such Card and no other run does, which is the perfect correlation the report noticed from the
+    # other end (`producer_failed` forces the serial claim, and the serial claim can never succeed).
+    second = Idea(operator="draft",
+                  params={"lr": 0.3, "l2": 0.001, "iters": 2000.0, "degree": 2.0},
+                  space={"lr": [0.05, 0.1, 0.3, 0.5], "l2": [0.0001, 0.001, 0.01, 0.1],
+                         "iters": [1000.0, 2000.0]})
+    out2 = _clamp_fill(second, bounds)
+    assert out2.params["degree"] == 2.0         # an unbounded param is untouched either way
+    assert Idea.model_validate(out2.model_dump()).params == out2.params
+
+
 def test_emit_survives_a_non_json_value_after_every_trial_trained(capsys):
     """The final `json.dumps` runs AFTER all training — a TypeError there destroys the whole sweep.
 

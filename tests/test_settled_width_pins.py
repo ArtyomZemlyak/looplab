@@ -27,24 +27,32 @@ H-2  Both live-log watchdogs are `@in_llm_lane("enrichment")`, capped at 1 by
 """
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 
 import anyio
 import pytest
+from typer.testing import CliRunner
 
+import looplab.cli.run_cmds as _run_cmds
 import looplab.engine.orchestrator as _orch
+import looplab.engine.resources as _resources
 from looplab.adapters.toytask import ToyTask
 from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.llm_broker import (default_llm_lane_limits, llm_broker_scope, llm_lane_scope,
                                      llm_request_permit)
 from looplab.core.models import RunState
+from looplab.cli import app as _app
 from looplab.engine.orchestrator import Engine, RunStartPinError, SettledWidthPinError
+from looplab.engine.widths import settled_width_refusal
+from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search.policy import GreedyTree
 
 _ENGINE_DIR = Path(_orch.__file__).parent
+_runner = CliRunner()
 
 
 def _gpu_capable(monkeypatch) -> None:
@@ -408,3 +416,204 @@ def test_both_live_log_watchdogs_are_still_in_the_capped_lane():
     for module in ("train_monitor.py", "asha_monitor.py"):
         source = (_ENGINE_DIR / module).read_text(encoding="utf-8")
         assert '@in_llm_lane("enrichment")' in source, f"{module} left the capped lane"
+
+
+# --------------------------------------------------------------------------- #
+# H-7b — the refusal is a CLI PREFLIGHT, so it cannot mutate what it refuses
+# --------------------------------------------------------------------------- #
+
+def _pinned_run(tmp_path, name: str, width: int) -> Path:
+    """A finished toy run whose `run_started` pins `eval_parallel=width`, via the real CLI."""
+    out = tmp_path / name
+    result = _runner.invoke(_app, [
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "min (x-3)^2", "--direction", "min",
+        "--backend", "toy", "--out", str(out),
+        "-s", f"eval_parallel={width}", "-s", "max_nodes=2", "-s", "n_seeds=2"])
+    assert result.exit_code == 0, result.output
+    assert fold(EventStore(out / "events.jsonl").read_all()).eval_parallel == width
+    return out
+
+
+def _run_dir_bytes(out: Path) -> tuple[bytes, bytes]:
+    return ((out / "events.jsonl").read_bytes(), (out / "config.snapshot.json").read_bytes())
+
+
+def test_run_refuses_a_disagreeing_width_before_the_snapshot_and_reopen_writes(tmp_path):
+    """`RunStartPinError`'s whole point — untouched on refusal — did not hold for the width pin.
+
+    The receipt has a CLI preflight; the width check existed only inside `Engine.run`, which `run`
+    reaches AFTER `_publish_run_snapshots` and the `run_reopened` append. Measured on a real run dir
+    before the fix: `config.snapshot.json` 2 -> 3, events 38 -> 39, THEN the refusal — whose remedy
+    told the operator to restore the value in the file it had just clobbered.
+    """
+    out = _pinned_run(tmp_path, "pinned", 2)
+    before = _run_dir_bytes(out)
+    result = _runner.invoke(_app, [
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "min (x-3)^2", "--direction", "min",
+        "--backend", "toy", "--out", str(out),
+        "-s", "eval_parallel=3", "-s", "max_nodes=2", "-s", "n_seeds=2"])
+    assert isinstance(result.exception, SettledWidthPinError)
+    assert _run_dir_bytes(out) == before
+
+
+def test_resume_refuses_a_disagreeing_width_before_lifting_the_run(tmp_path):
+    """The lift is the append that made the byte-unchanged property vacuous.
+
+    `resume` on a FINISHED (or paused) run appends `resume` first, so the refusal that followed had
+    already changed the log. A second identical `resume` then looked byte-clean only because the run
+    was no longer in a liftable state — i.e. exactly not the case an operator hits.
+    """
+    out = _pinned_run(tmp_path, "lift", 2)
+    snapshot = out / "config.snapshot.json"
+    snapshot.write_text(json.dumps({**json.loads(snapshot.read_text()), "eval_parallel": 3}))
+    before = (out / "events.jsonl").read_bytes()
+
+    for _ in range(2):                       # the FIRST attempt must already be byte-clean
+        result = _runner.invoke(_app, ["resume", str(out)])
+        assert isinstance(result.exception, SettledWidthPinError)
+        assert (out / "events.jsonl").read_bytes() == before
+
+
+def test_an_agreeing_width_still_reopens_and_does_work(tmp_path):
+    """The control: the preflight refuses a CHANGED treatment, it does not block re-entry."""
+    out = _pinned_run(tmp_path, "agree", 2)
+    before = len(EventStore(out / "events.jsonl").read_all())
+    result = _runner.invoke(_app, [
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "min (x-3)^2", "--direction", "min",
+        "--backend", "toy", "--out", str(out),
+        "-s", "eval_parallel=2", "-s", "max_nodes=3", "-s", "n_seeds=2"])
+    assert result.exit_code == 0, result.output
+    assert len(EventStore(out / "events.jsonl").read_all()) > before
+
+
+def test_the_width_preflight_runs_before_every_write_its_command_owns():
+    """Source-order guard, because the property is ORDERING and a passing call proves nothing.
+
+    Moving `_preflight_settled_widths` one line down — below `_publish_run_snapshots` or below the
+    `EV_RESUME` append — restores the exact defect with every behavioural test above still green on
+    the *other* command. Both call sites are checked against the write they must precede.
+    """
+    import ast
+
+    tree = ast.parse(Path(_run_cmds.__file__).read_text(encoding="utf-8"))
+    commands = {node.name: node for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef)}
+
+    def lines_of(command: str, predicate) -> list[int]:
+        return sorted(node.lineno for node in ast.walk(commands[command])
+                      if isinstance(node, ast.Call) and predicate(node))
+
+    def named(name: str):
+        return lambda node: isinstance(node.func, ast.Name) and node.func.id == name
+
+    def appends(event: str):
+        return lambda node: (isinstance(node.func, ast.Attribute) and node.func.attr == "append"
+                             and any(isinstance(a, ast.Name) and a.id == event for a in node.args))
+
+    for command, write_name, write_predicate in (
+            ("run", "_publish_run_snapshots", named("_publish_run_snapshots")),
+            ("resume", "the EV_RESUME append", appends("EV_RESUME"))):
+        guards = lines_of(command, named("_preflight_settled_widths"))
+        writes = lines_of(command, write_predicate)
+        assert guards, f"`{command}` no longer calls _preflight_settled_widths at all"
+        assert writes, f"`{command}` no longer contains {write_name} — re-point this guard"
+        assert max(guards) < min(writes), (
+            f"in `{command}`, _preflight_settled_widths no longer precedes {write_name} — the "
+            "refusal mutates the log it refuses to trust")
+
+
+def test_the_refusal_names_the_knob_the_command_actually_reads():
+    """`run` never READS config.snapshot.json — it writes it from the launch settings.
+
+    So the original single remedy ("put it back in this run's config.snapshot.json / launch
+    settings") sent half of its readers to edit a file with no effect on the command they ran.
+    """
+    run_text = settled_width_refusal("eval_parallel", resolved=3, recorded=2, source="run")
+    resume_text = settled_width_refusal("eval_parallel", resolved=3, recorded=2, source="resume")
+    assert "-s eval_parallel=" in run_text and "LOOPLAB_EVAL_PARALLEL" in run_text
+    assert "never reads it back" in run_text
+    assert "config.snapshot.json, which `resume` restores" in resume_text
+    # `null` is the natural JSON spelling of "no opinion" and is NOT AUTO — it is the legacy
+    # fallback, so it resolves to `max_parallel` (1) and refuses again. Say so in the refusal.
+    for text in (run_text, resume_text):
+        assert "`null` is NOT AUTO" in text
+
+
+def test_a_null_width_is_the_legacy_fallback_not_auto(tmp_path, monkeypatch):
+    monkeypatch.setattr(_orch, "_detect_gpu_ids", lambda: [0, 1])
+    _gpu_capable(monkeypatch)
+    engine = _engine(tmp_path / "null", eval_parallel=None, llm_parallel=None, llm_backed=True)
+    # `None` means "use max_parallel/parallel_build", whose defaults are 1 — an EXPLICIT 1, not AUTO.
+    assert (engine._eval_parallel, engine._llm_parallel) == (1, 1)
+    assert engine._eval_parallel_startup_auto is False
+    with pytest.raises(SettledWidthPinError, match=r"`null` is NOT AUTO"):
+        engine._repin_settled_widths(_entry(eval_parallel=2))
+
+
+# --------------------------------------------------------------------------- #
+# H-7c — AUTO derives the width from what CUDA will actually expose
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("fence,expected", [
+    # A typo'd fence naming devices a two-GPU box does not have. CUDA parses an ordinal list left to
+    # right and stops at the first index that does not exist, so this exposes TWO devices — verified
+    # against `torch.cuda.device_count()` on the box that produced this test. Counting the tokens
+    # made AUTO derive 8, and `run_started` then pinned that 8 permanently, so a transient env typo
+    # became the durable treatment every later resume ADOPTS.
+    ("0,1,2,3,4,5,6,7", ["0", "1"]),
+    ("0,1", ["0", "1"]),
+    ("1", ["1"]),
+    ("7", []),                       # CUDA: 0 visible devices, not one device named `7`
+    ("", []),
+    ("-1", []),
+    ("0,0,0", []),
+    # Opaque selectors are left EXACTLY as spelled: nvidia-smi's numeric index cannot bound a
+    # UUID/MIG token, and a MIG fence legitimately names more instances than there are GPUs.
+    ("GPU-aaa,GPU-bbb,GPU-ccc", ["GPU-aaa", "GPU-bbb", "GPU-ccc"]),
+])
+def test_an_ordinal_fence_is_truncated_the_way_cuda_truncates_it(monkeypatch, fence, expected):
+    monkeypatch.setattr(_resources, "detect_gpus",
+                        lambda: [{"index": 0, "mem_free_mib": 1}, {"index": 1, "mem_free_mib": 1}])
+    assert _resources.schedulable_cuda_tokens(
+        _resources.cuda_visible_device_tokens(fence)) == expected
+
+
+def test_an_unprobeable_box_keeps_the_fence_exactly_as_spelled(monkeypatch):
+    """Fail-open, always. Truncating on a probe that cannot answer would INVENT a smaller box."""
+    for broken in (lambda: (_ for _ in ()).throw(OSError("no nvidia-smi")),   # probe raises
+                   lambda: [],                                                # no inventory
+                   lambda: [{"index": 3, "mem_free_mib": 1}]):                # not the 0..n-1 space
+        monkeypatch.setattr(_resources, "detect_gpus", broken)
+        assert _resources.schedulable_cuda_tokens(["0", "1", "2", "9"]) == ["0", "1", "2", "9"]
+
+
+def test_auto_width_follows_the_truncated_fence_end_to_end(tmp_path, monkeypatch):
+    monkeypatch.setattr(_resources, "detect_gpus",
+                        lambda: [{"index": 0, "mem_free_mib": 1}, {"index": 1, "mem_free_mib": 1}])
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+    _gpu_capable(monkeypatch)
+    engine = _engine(tmp_path / "typo", eval_parallel=0, llm_parallel=0, llm_backed=True)
+    assert engine._gpu_ids == [0, 1]
+    assert (engine._eval_parallel, engine._llm_parallel) == (2, 2)
+    # The physical map must survive the truncation, or every pinned reservation fails closed.
+    assert engine._gpu_physical_ids == {0: "0", 1: "1"}
+
+
+def test_a_mid_run_gpu_count_change_cannot_move_the_pin(tmp_path, monkeypatch):
+    """AUTO reads the box ONCE, at construction — never again while the log is being written.
+
+    The control for the whole pin: if any later decision re-derived the width, the run would change
+    execution treatment part-way through its own log with nothing recording it, which is the defect
+    the `run_started` pin exists to make impossible. Nothing between construction and the terminal is
+    allowed to notice that the box grew.
+    """
+    monkeypatch.setattr(_orch, "_detect_gpu_ids", lambda: [0, 1])
+    _gpu_capable(monkeypatch)
+    engine = _engine(tmp_path / "grow", eval_parallel=0, llm_parallel=0, llm_backed=True)
+    assert (engine._eval_parallel, engine._llm_parallel) == (2, 2)
+
+    monkeypatch.setattr(_orch, "_detect_gpu_ids", lambda: [0, 1, 2, 3])   # the box "grows" mid-run
+    anyio.run(engine.run)
+    assert (engine._eval_parallel, engine._llm_parallel) == (2, 2)
+    data = _run_started(engine)
+    assert (data["eval_parallel"], data["llm_parallel"]) == (2, 2)
