@@ -4375,6 +4375,83 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 
 *Recommendation:* Adopt the fix the file's own comment proposes: a versioned semantic/runtime manifest (or explicit rollout protocol version) instead of raw-byte whole-package hashing. Extract the finalization/setup 'expected event shape' constants into the engine writer modules (finalize.py, orchestrator setup) and import them, so writer and validator share one spelling instead of two hand-synced copies. Cache/receipt the revalidation instead of full recomputation per check.
 
+*Resolution (2026-08-05) — the finding's headline evidence is STALE; its three mirror claims are REAL,
+and the recommendation's destination is wrong.*
+
+**STALE: "hashes RAW BYTES of every shipped .py, so comments and formatting revoke every receipt."**
+This was the finding's most-quoted evidence and it no longer exists — doc 25 XP-07 landed
+`_semantic_source`, which hashes `ast.dump(ast.parse(raw))`. Comments never reach the AST, and
+`ast.dump` without attributes carries no line or column numbers, so blank lines, rewrapping and
+line-ending conversion vanish. `_manifest_entry` sizes the PARSED body too, which closes the hole
+where sizing `raw` beside a hash of the tree would have smuggled byte sensitivity back in through the
+other field. Re-verified rather than taken on trust: a throwaway tree with a comment inserted into
+`engine/finalize.py`, and a second with a blank line inserted mid-function, each produced **0 changed
+leaves out of 1155** measured; changing `_COST_REFRESH_MAX_ATTEMPTS = 3` to `4` in the same file
+produced exactly **2** — the implementation digest and that file's one manifest row. The inline
+comment the finding quotes is gone with the defect. What remains true, and is not a defect, is that a
+REAL semantic change to any shipped module still revokes every receipt: that is the digest's contract,
+and this change revokes them too (seven files moved).
+
+**REAL: `_validate_calibration_terminal` hardcodes the finalization suffix and the payload dicts.**
+Confirmed at the shifted line numbers — `expected_types` (a literal 12-tuple), `expected_tail_data`
+(seven literal payload dicts), the literal `budget` field set, and `{"scope": scope, "step":
+"budget"}`. **REAL: `_validate_calibration_setup` re-derives `Engine._setup_phase`'s
+config_hash/setup_manifest.** The finding did not say how sharp this one is: the two derivations
+differ by ONE orjson option — `run_started.config_hash` dumps the task payload UNSORTED, the
+manifest's inner config hash dumps the same payload SORTED — and a copy made from memory that gets
+that backwards produces a self-consistent digest no honest run yields. **REAL:
+`validated_speculation_gate_receipt` recomputes the entire gate**, and worse than stated: it derived
+the whole-source implementation digest and the environment fingerprint, then called
+`speculation_quality_gate`, which derived both AGAIN. One validation parsed every shipped `.py` twice.
+
+**Where the shared constants had to go, and why not where the recommendation says.** "Extract them
+into the engine writer modules and import them" is not available: `search` may not import `engine`,
+and `tests/test_calibration_profile_home.py::test_the_search_to_engine_edge_is_gone` asserts that
+edge at ZERO — doc 25 XP-07 moved the finalize-scope read side DOWN into `events/` for exactly this
+reason. So the constants moved DOWN, not up: `events/finalize_protocol.py` (the step-name vocabulary,
+`FINALIZE_BUDGET_FIELDS` + the `budget_receipt` constructor that mints the payload, and
+`QUIET_FINALIZATION_SUFFIX`) and `core/setup_identity.py` (the two run-start digests). `engine/finalize.py`
+and `engine/orchestrator.py` write through them; `events/finalize_scope.py` and
+`search/speculation_quality.py` read through them.
+
+**A shared constant is not the fix on its own.** Relocating a hand-copied table only renames the
+problem unless something proves the table is still TRUE of the writer. So `tests/test_finalize_protocol.py`
+drives a REAL toy run to completion and compares the suffix the engine actually appended against
+`QUIET_FINALIZATION_SUFFIX`, and asserts the real run's `config_hash`/`setup_finished.manifest`
+against the shared derivation. That is the test the old arrangement could not have: the gate's own
+suite builds its evidence with a hand-written fixture — a THIRD copy — which is deliberately kept
+independent (deriving it from the shared table would make `test_speculation_quality_gate` pass
+tautologically) and therefore cannot notice the writer changing. Teeth-tested by commenting out the
+`case` step marker in the writer: the driven test reddens and **nothing else in the gate's own 124
+tests does**, which is precisely the silent-lockstep failure the finding describes.
+
+**Recomputation: removed rather than cached.** The two hoists above make one validation derive the
+implementation digest and environment fingerprint ONCE instead of twice, and the `speculation-gate`
+CLI now publishes the body it already computed (`publish_speculation_gate_receipt`) instead of
+re-entering `write_speculation_gate_receipt`, which re-ran the whole gate — six run directories
+re-parsed, the scorer matrix re-executed — purely to reproduce bytes the frame was holding. A CACHE
+was considered and rejected on the merits: `validated_speculation_gate_receipt` is called ONCE per
+`Engine` construction and once per CLI invocation, so after the double-work is gone there is nothing
+to amortize, and a sound key would have to cover every byte the gate reads — six run directories'
+`events.jsonl`/`config.snapshot.json`/`task.snapshot.json` — via stat tuples for evidence this gate
+exists to distrust. Trading a fail-closed recomputation for a stat-tuple cache with no repeated call
+to pay for it is a worse gate, not a faster one.
+
+**Digest safety.** Every digest was measured against a fixed six-run corpus before and after:
+**1155 leaves compared, 15 differ**, and all 15 are implementation-manifest rows for the seven files
+this change touches plus the aggregate digest. The calibration-profile digest, task-profile digest,
+both product-authority digests, the runtime-scope digest, the environment digest, the scorer-fidelity
+report, both setup identities, all six per-run analyses (which embed every source digest and the
+semantic execution trajectory), the whole gate body and the receipt's `self_digest` are BYTE-IDENTICAL,
+and the corpus still validates. The harness was teeth-checked in both directions first: an unmodified
+copy of the tree produced 0 diffs, and six injected mutations — comment-only, blank-line, a real code
+change, a renamed writer step, an extra budget field, a bent setup hash — were each detected.
+
+**Not done.** The finding's framing that ~3,450 lines "exist solely to admit one Settings knob" is
+left standing: since 2026-08-04 a receipt no longer gates ordinary runs at all (the node-budget refund
+replaced it), so the stack is a benchmark plus a calibrated-replay lane, and shrinking it is a
+scope-of-the-benchmark question rather than a modularity one.
+
 #### SE-02 · MEDIUM · mergeable-entities · effort: medium
 
 **Three researcher-wrapper classes solve the same delegation problem three different ways, each with its own history of forwarding bugs**

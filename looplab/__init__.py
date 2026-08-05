@@ -126,6 +126,7 @@ _LAYOUT = {
     "evaluate": "engine",
     "engine_proc": "serve",
     "finalize_scope": "events",   # the finalize-scope read side (doc 25 XP-07)
+    "finalize_protocol": "events",  # finalize step/suffix vocabulary, writer+readers (doc 25 SE-01)
     "finalize": "engine",
     "foresight": "search",
     "gate": "trust",
@@ -236,6 +237,7 @@ _LAYOUT = {
     "serve_prompts": "serve",   # UI-server prompt strings ("prompts" is taken by core/prompts.py)
     "server": "serve",
     "settings_store": "serve",
+    "setup_identity": "core",   # run-start config_hash / setup manifest digests (doc 25 SE-01)
     "shell_tools": "tools",
     "span_index": "events",   # derived light span index behind the UI trace views (perf)
     "shared": "engine",     # cross-cluster Engine members (doc 25 ES-14)

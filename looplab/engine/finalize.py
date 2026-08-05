@@ -30,6 +30,22 @@ from looplab.events.eventstore import EventStoreConcurrencyError
 from looplab.events.finalize_scope import (  # noqa: F401
     _adjacent_claim, _finalize_begun, _scope_has_step, finalize_scope_quiescent,
     incomplete_finalize_scope)
+# The step vocabulary and the `budget` receipt shape are the PROTOCOL, shared with every reader —
+# `search/speculation_quality.py` refuses calibration evidence whose finalization does not match it
+# exactly, and `search` may not import the engine (doc 25 SE-01).
+from looplab.events.finalize_protocol import (
+    FINALIZE_STEP_ABANDONED,
+    FINALIZE_STEP_BUDGET,
+    FINALIZE_STEP_CASE,
+    FINALIZE_STEP_COMPLETE,
+    FINALIZE_STEP_DIVERSITY,
+    FINALIZE_STEP_LLM_COST,
+    FINALIZE_STEP_REFLECTION,
+    FINALIZE_STEP_REFLECTION_BEGUN,
+    FINALIZE_STEP_REPORT,
+    FINALIZE_STEP_REPORT_BEGUN,
+    budget_receipt,
+)
 from looplab.events.htmlview import render_html
 from looplab.events.readmodel import build_readmodel
 from looplab.events.replay import fold, run_wall_clock_seconds
@@ -242,7 +258,7 @@ def _llm_cost_rollup_stale(events, scope: str, finish_seq: int) -> bool:
         if (
             event.type == EV_FINALIZE_STEP
             and data.get("scope") == scope
-            and data.get("step") == "llm_cost"
+            and data.get("step") == FINALIZE_STEP_LLM_COST
         ):
             boundary = max(boundary, seq)
             continue
@@ -295,17 +311,17 @@ def _resolve_existing_finish_report_attempt(
     """Return a terminal answer for an existing plan/attempt, or None when dispatch is still needed."""
     if not _finish_report_planned(events, scope):
         return True
-    if _scope_has_step(events, scope, "report"):
+    if _scope_has_step(events, scope, FINALIZE_STEP_REPORT):
         return True
     if scoped_finish_report(events, scope) is not None:
         return True
-    if _scope_has_step(events, scope, "report_begun"):
+    if _scope_has_step(events, scope, FINALIZE_STEP_REPORT_BEGUN):
         if not close_ambiguous:
             return None  # it may belong to the live process currently holding paid_effect_guard
         _mark_finalize_step(
             engine,
             scope,
-            "report",
+            FINALIZE_STEP_REPORT,
             outcome="prior_attempt_incomplete_not_replayed",
         )
         return True
@@ -333,7 +349,7 @@ def ensure_finish_report(engine: "Engine", events, scope: str, *, state=None) ->
     if resolved is not None:
         return resolved
     if not writer_available:
-        if not _scope_has_step(current, scope, "report_begun"):
+        if not _scope_has_step(current, scope, FINALIZE_STEP_REPORT_BEGUN):
             # PLANNED but never dispatched, and THIS process has no writer. Deliberately unresolved
             # (False) rather than closed: a writer-less process must not retire a paid step it
             # cannot perform, because the reachable population is "a writer-equipped process planned
@@ -374,13 +390,13 @@ def ensure_finish_report(engine: "Engine", events, scope: str, *, state=None) ->
         if state is None:
             anchor = begun.seq if begun is not None else -1
             state = fold([event for event in current if event.seq is None or event.seq < anchor])
-        _claim_paid_finalize_step(engine, scope, "report_begun")
+        _claim_paid_finalize_step(engine, scope, FINALIZE_STEP_REPORT_BEGUN)
         engine._write_report(state, trigger="finish", finalize_scope=scope)
         if scoped_finish_report(engine.store.read_all(), scope) is None:
             _mark_finalize_step(
                 engine,
                 scope,
-                "report",
+                FINALIZE_STEP_REPORT,
                 outcome="attempt_returned_without_durable_report",
             )
         return True
@@ -407,37 +423,37 @@ def ensure_finalize_reflection(engine: "Engine", scope: str, finish_seq: int) ->
     """Run one reflection attempt, or close an already-ambiguous attempt without replay."""
     del finish_seq  # scope is the legacy-compatible durable identity for reflection markers
     events = engine.store.read_all()
-    if _scope_has_step(events, scope, "reflection"):
+    if _scope_has_step(events, scope, FINALIZE_STEP_REFLECTION):
         return
     if not _reflection_can_write(engine):
         with engine.store.paid_effect_guard(required=False):
             events = engine.store.read_all()
-            if _scope_has_step(events, scope, "reflection"):
+            if _scope_has_step(events, scope, FINALIZE_STEP_REFLECTION):
                 return
-            if _scope_has_step(events, scope, "reflection_begun"):
+            if _scope_has_step(events, scope, FINALIZE_STEP_REFLECTION_BEGUN):
                 _mark_finalize_step(
                     engine,
                     scope,
-                    "reflection",
+                    FINALIZE_STEP_REFLECTION,
                     outcome="prior_attempt_incomplete_not_replayed",
                 )
                 return
             # the real reflection implementation immediately returns for these configs.
             # Keep free finalization compatible with filesystems that cannot provide strict locking;
             # ordinary legacy-shaped markers are sufficient because no paid/shared write can happen.
-            _mark_finalize_step(engine, scope, "reflection_begun", outcome="disabled")
-            _mark_finalize_step(engine, scope, "reflection", outcome="disabled")
+            _mark_finalize_step(engine, scope, FINALIZE_STEP_REFLECTION_BEGUN, outcome="disabled")
+            _mark_finalize_step(engine, scope, FINALIZE_STEP_REFLECTION, outcome="disabled")
             return
 
     with engine.store.paid_effect_guard():
         events = engine.store.read_all()
-        if _scope_has_step(events, scope, "reflection"):
+        if _scope_has_step(events, scope, FINALIZE_STEP_REFLECTION):
             return
-        if _scope_has_step(events, scope, "reflection_begun"):
+        if _scope_has_step(events, scope, FINALIZE_STEP_REFLECTION_BEGUN):
             _mark_finalize_step(
                 engine,
                 scope,
-                "reflection",
+                FINALIZE_STEP_REFLECTION,
                 outcome="prior_attempt_incomplete_not_replayed",
             )
             return
@@ -445,17 +461,18 @@ def ensure_finalize_reflection(engine: "Engine", scope: str, finish_seq: int) ->
         # Freeze the exact pre-claim state.  Diagnostics appended while the provider is running must
         # not silently change the reflection input selected by this finalization boundary.
         final = fold(events)
-        _claim_paid_finalize_step(engine, scope, "reflection_begun")
+        _claim_paid_finalize_step(engine, scope, FINALIZE_STEP_REFLECTION_BEGUN)
         engine._write_reflection_note(final)
-        _mark_finalize_step(engine, scope, "reflection")
+        _mark_finalize_step(engine, scope, FINALIZE_STEP_REFLECTION)
 
 
 def mark_finish_report_complete(engine: "Engine", scope: str) -> None:
     events = engine.store.read_all()
-    if not _finish_report_planned(events, scope) or _scope_has_step(events, scope, "report"):
+    if (not _finish_report_planned(events, scope)
+            or _scope_has_step(events, scope, FINALIZE_STEP_REPORT)):
         return
     if scoped_finish_report(events, scope) is not None:
-        _mark_finalize_step(engine, scope, "report", outcome="completed")
+        _mark_finalize_step(engine, scope, FINALIZE_STEP_REPORT, outcome="completed")
 
 
 def _build_readmodel_atomic(events, path: Path) -> RunState:
@@ -518,10 +535,11 @@ def _recover_scoped_terminal(engine: "Engine", events, state: RunState, scope: s
             except Exception:  # noqa: BLE001 - the open scope retries the same close on re-entry
                 pass
         latest = engine.store.read_all()
-        if not (_scope_has_step(latest, scope, "complete")
-                or _scope_has_step(latest, scope, "abandoned")):
+        if not (_scope_has_step(latest, scope, FINALIZE_STEP_COMPLETE)
+                or _scope_has_step(latest, scope, FINALIZE_STEP_ABANDONED)):
             try:
-                _mark_finalize_step(engine, scope, "abandoned", outcome="error_terminal")
+                _mark_finalize_step(
+                    engine, scope, FINALIZE_STEP_ABANDONED, outcome="error_terminal")
             except Exception:  # noqa: BLE001 - retried on re-entry while the scope stays open
                 pass
         refreshed = engine.store.read_all()
@@ -586,9 +604,9 @@ def _publish_completion(engine: "Engine", scope: str, finish_seq: int) -> bool:
         except Exception:  # noqa: BLE001 - exact-finish marker remains retryable
             return False
     events = engine.store.read_all()
-    if not _scope_has_step(events, scope, "complete"):
+    if not _scope_has_step(events, scope, FINALIZE_STEP_COMPLETE):
         try:
-            _mark_finalize_step(engine, scope, "complete")
+            _mark_finalize_step(engine, scope, FINALIZE_STEP_COMPLETE)
         except Exception:  # noqa: BLE001 - the open scope retries the same checklist on re-entry
             return False
     return True
@@ -630,7 +648,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         scope, finish_seq = _finalize_scope(events, completed)
 
         events = engine.store.read_all()
-        if not _finalize_step_done(events, scope, finish_seq, "budget", EV_BUDGET):
+        if not _finalize_step_done(events, scope, finish_seq, FINALIZE_STEP_BUDGET, EV_BUDGET):
             # `speculation` answers "did the Card prefetch cost this run real experiment
             # budget?" — `charged_discards` is 0 while the L5 refund holds and positive the
             # moment a prefetch spends a slot the run got nothing for. It replaces the pre-run
@@ -660,25 +678,30 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
             # silent. Both are total (no raise) — see the paragraph above about the append's `try`.
             process_s = max(0.0, time.time() - start_time)
             wall_clock_s = run_wall_clock_seconds(events)
-            budget_payload = {
+            # Minted through the shared constructor, not a local dict literal: the quality reader
+            # recomputes this receipt field for field and rejects any key set that is not exactly
+            # `FINALIZE_BUDGET_FIELDS`, so the payload shape and its rounding are one spelling in
+            # `events/finalize_protocol.py` rather than two hand-synced ones (doc 25 SE-01).
+            budget_payload = budget_receipt(
                 # None only for a log whose rows carry no usable `ts` at all (synthetic/hand-built) —
                 # fall back to the process measurement rather than publishing a confident 0.0.
-                "elapsed_s": round(process_s if wall_clock_s is None else wall_clock_s, 3),
-                "process_s": round(process_s, 3),
-                "eval_s": round(completed.total_eval_seconds, 3),
-                "nodes": len(completed.nodes),
-                "speculation": speculation_budget_observation(completed),
-                "finalize_scope": scope,
-                "finish_seq": finish_seq,
-            }
+                elapsed_s=process_s if wall_clock_s is None else wall_clock_s,
+                process_s=process_s,
+                eval_s=completed.total_eval_seconds,
+                nodes=len(completed.nodes),
+                speculation=speculation_budget_observation(completed),
+                finalize_scope=scope,
+                finish_seq=finish_seq,
+            )
             try:
                 engine.store.append(EV_BUDGET, budget_payload)
-                _mark_finalize_step(engine, scope, "budget")
+                _mark_finalize_step(engine, scope, FINALIZE_STEP_BUDGET)
             except Exception:  # noqa: BLE001 - exact effect/marker detection makes retry safe
                 pass
 
         events = engine.store.read_all()
-        if not _finalize_step_done(events, scope, finish_seq, "diversity", EV_DIVERSITY_ARCHIVE):
+        if not _finalize_step_done(
+                events, scope, finish_seq, FINALIZE_STEP_DIVERSITY, EV_DIVERSITY_ARCHIVE):
             try:
                 archive = dict(DiversityArchive(engine.archive_resolution).summary(completed))
                 engine.store.append(EV_DIVERSITY_ARCHIVE, {
@@ -686,12 +709,12 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                     "finalize_scope": scope,
                     "finish_seq": finish_seq,
                 })
-                _mark_finalize_step(engine, scope, "diversity")
+                _mark_finalize_step(engine, scope, FINALIZE_STEP_DIVERSITY)
             except Exception:  # noqa: BLE001 - retry missing deterministic step later
                 pass
 
         events = engine.store.read_all()
-        if not _finalize_step_done(events, scope, finish_seq, "case"):
+        if not _finalize_step_done(events, scope, finish_seq, FINALIZE_STEP_CASE):
             try:
                 final = fold(events)
                 engine._store_case(final)
@@ -702,7 +725,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                     store_research(final)
                 if getattr(engine, "_cross_run_concepts", False):    # §21.20 Step 2: cross-run concept capsule
                     engine._store_concept_capsule(final)             # idempotent upsert, sibling of the case
-                _mark_finalize_step(engine, scope, "case")
+                _mark_finalize_step(engine, scope, FINALIZE_STEP_CASE)
             except Exception:  # noqa: BLE001 - case store is an idempotent upsert
                 pass
 
@@ -779,7 +802,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
 
         events = engine.store.read_all()
         cost_step_done = _finalize_step_done(
-            events, scope, finish_seq, "llm_cost", EV_LLM_COST)
+            events, scope, finish_seq, FINALIZE_STEP_LLM_COST, EV_LLM_COST)
         # a legacy roll-up marker is not proof that newly-added steward usage was
         # presented.  Refresh only when a later exact usage delta exists; the new roll-up then becomes
         # the boundary, so repeated recovery remains idempotent.
@@ -793,7 +816,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                 finish_seq=finish_seq,
             )
             if cost_refresh_ok and not cost_step_done:
-                _mark_finalize_step(engine, scope, "llm_cost")
+                _mark_finalize_step(engine, scope, FINALIZE_STEP_LLM_COST)
             elif not cost_refresh_ok:
                 # BOUNDED, DISCLOSED degradation. Blocking completion on the refresh is right for a
                 # transient outbox/append conflict, but some failures never self-heal: `_drain_outbox`
@@ -813,7 +836,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                 _mark_finalize_step(engine, scope, "llm_cost_refresh_failed", attempt=_attempts)
                 if _attempts >= _COST_REFRESH_MAX_ATTEMPTS:
                     _mark_finalize_step(
-                        engine, scope, "llm_cost",
+                        engine, scope, FINALIZE_STEP_LLM_COST,
                         degraded="usage reconcile did not converge; the roll-up may under-count "
                                  "spend still stranded in .llm-usage-outbox",
                         attempts=_attempts)
@@ -823,20 +846,21 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         requirements = (
             (
                 not _finish_report_planned(latest_events, scope)
-                or _finalize_step_done(latest_events, scope, finish_seq, "report")
+                or _finalize_step_done(latest_events, scope, finish_seq, FINALIZE_STEP_REPORT)
             ),
-            _finalize_step_done(latest_events, scope, finish_seq, "budget", EV_BUDGET),
+            _finalize_step_done(latest_events, scope, finish_seq, FINALIZE_STEP_BUDGET, EV_BUDGET),
             _finalize_step_done(
-                latest_events, scope, finish_seq, "diversity", EV_DIVERSITY_ARCHIVE),
-            _finalize_step_done(latest_events, scope, finish_seq, "case"),
-            _finalize_step_done(latest_events, scope, finish_seq, "reflection"),
+                latest_events, scope, finish_seq, FINALIZE_STEP_DIVERSITY, EV_DIVERSITY_ARCHIVE),
+            _finalize_step_done(latest_events, scope, finish_seq, FINALIZE_STEP_CASE),
+            _finalize_step_done(latest_events, scope, finish_seq, FINALIZE_STEP_REFLECTION),
             # A NEEDED cost refresh that failed to reconcile must block completion, preserving the initial
             # cost step's "block until durable" guarantee. The step marker persists from a prior pass
             # (cost_step_done), so without this a stale-refresh whose emit_llm_cost returns False would
             # still read "done" and the run would publish completion with an un-folded usage delta stranded
             # in the outbox — a silent cost under-count on a run that reports itself finalized. The next
             # finalize pass re-emits; a transient outbox/append conflict clears without a wedge.
-            _finalize_step_done(latest_events, scope, finish_seq, "llm_cost", EV_LLM_COST)
+            _finalize_step_done(
+                latest_events, scope, finish_seq, FINALIZE_STEP_LLM_COST, EV_LLM_COST)
             and (not cost_refresh_needed or cost_refresh_ok),
         )
         requirements_complete = all(requirements)

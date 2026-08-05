@@ -58,8 +58,8 @@ def speculation_gate(
         raise typer.Exit(2)
 
     from looplab.search.speculation_quality import (
+        publish_speculation_gate_receipt,
         speculation_quality_gate,
-        write_speculation_gate_receipt,
     )
 
     pairs = list(zip(run_dirs[0::2], run_dirs[1::2]))
@@ -69,11 +69,11 @@ def speculation_gate(
         typer.echo("speculation quality gate failed; no receipt was written", err=True)
         raise typer.Exit(2)
     try:
-        receipt = write_speculation_gate_receipt(
-            output,
-            pairs,
-            require_gpu=True,
-        )
+        # PUBLISH the report just computed rather than calling `write_speculation_gate_receipt`,
+        # which would run the whole gate a second time — six run directories re-parsed and the
+        # scorer matrix re-executed, purely to reproduce a body this frame is already holding
+        # (doc 25 SE-01). The published bytes are byte-identical either way.
+        receipt = publish_speculation_gate_receipt(output, report)
     except (OSError, ValueError) as exc:
         typer.echo(f"could not publish speculation gate receipt: {exc}", err=True)
         raise typer.Exit(2) from exc

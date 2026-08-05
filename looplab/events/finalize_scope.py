@@ -11,6 +11,11 @@ unchanged; it remains where the finalization WRITER lives, and this is only the 
 """
 from __future__ import annotations
 
+from looplab.events.finalize_protocol import (
+    FINALIZE_STEP_ABANDONED,
+    FINALIZE_STEP_BEGUN,
+    FINALIZE_STEP_COMPLETE,
+)
 from looplab.events.types import (
     EV_BUDGET,
     EV_CARD_ENRICHED,
@@ -50,7 +55,7 @@ def _finalize_begun(events, scope: str):
             for event in reversed(events)
             if event.type == EV_FINALIZE_STEP
             and (event.data or {}).get("scope") == scope
-            and (event.data or {}).get("step") == "begun"
+            and (event.data or {}).get("step") == FINALIZE_STEP_BEGUN
             and _adjacent_claim(event)
         ),
         None,
@@ -129,7 +134,7 @@ def incomplete_finalize_scope(events) -> str | None:
         data = event.data or {}
         is_begun = (
             event.type == EV_FINALIZE_STEP
-            and data.get("step") == "begun"
+            and data.get("step") == FINALIZE_STEP_BEGUN
             and _adjacent_claim(event)
         )
         is_finished = (
@@ -143,6 +148,7 @@ def incomplete_finalize_scope(events) -> str | None:
     if candidate is None:
         return None
     _, scope = candidate
-    if _scope_has_step(events, scope, "complete") or _scope_has_step(events, scope, "abandoned"):
+    if (_scope_has_step(events, scope, FINALIZE_STEP_COMPLETE)
+            or _scope_has_step(events, scope, FINALIZE_STEP_ABANDONED)):
         return None
     return scope if finalize_scope_quiescent(events, scope) else None
