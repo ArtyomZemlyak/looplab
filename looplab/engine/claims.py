@@ -48,6 +48,7 @@ from looplab.engine.claims_health import (  # noqa: F401
     _CLAIM_SOURCE_ROW_MAX_CHARS,
     _CLAIM_SOURCE_ROW_MAX_TOTAL_ITEMS,
     _CLAIM_SOURCE_SEMANTIC_FIELDS,
+    ClaimEvidenceSources,
     _ClaimAssessmentRows,
     _ClaimSourceRows,
     _LESSON_OUTCOMES,
@@ -112,6 +113,7 @@ from looplab.engine.claims_health import (  # noqa: F401
     # Core utilities that `claims_health` imports, re-exported for the same reason `_CLAIM_WORD`
     # above is: the barrel's contract is that BOTH spellings name the same object, and it is checked
     # over every name the leaf module carries, not only the ones it defines.
+    ReceiptRows,
     bounded_receipt_count,
     valid_digest_ref,
 )
@@ -355,10 +357,10 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
                 research_snapshot = load_research_claims(memory_dir)
                 evidence_snapshot = claim_assessments(
                     lessons_snapshot, research_claims=research_snapshot,
-                    decisions=governance["decisions"], structured=True)
-                evidence_snapshot.lessons_snapshot = lessons_snapshot
-                evidence_snapshot.research_claims_snapshot = research_snapshot
-                evidence_snapshot.decisions_snapshot = governance["decisions"]
+                    decisions=governance["decisions"], structured=True,
+                ).with_evidence_sources(
+                    lessons=lessons_snapshot, research_claims=research_snapshot,
+                    decisions=governance["decisions"])
                 validate_evidence(evidence_snapshot)
             stored = {**rec, "revision": current + 1}
             try:
@@ -424,16 +426,17 @@ def record_observed_claim_decision(
         # narrowing the digest to scope-invariant fields: dropping the source receipt would let a
         # decision taken over a quarantined/partial source survive that source becoming complete, which
         # is the freshness fence this whole call exists to enforce.
+        sources = evidence_snapshot.evidence_sources
         current_projection = claims_for_memory(
-            memory_dir, lessons=evidence_snapshot.lessons_snapshot,
-            research_claims=evidence_snapshot.research_claims_snapshot,
-            decisions=evidence_snapshot.decisions_snapshot,
+            memory_dir, lessons=sources.lessons,
+            research_claims=sources.research_claims,
+            decisions=sources.decisions,
             scope_task=scope, structured=True,
         )
         current = next((candidate for candidate in current_projection
                         if candidate.get("claim_uid") == observed_uid), None)
         if decision == "clear":
-            decisions = evidence_snapshot.decisions_snapshot
+            decisions = sources.decisions
             if observed_uid in decisions:
                 return
             active = (current or {}).get("decision") or {}
@@ -698,9 +701,8 @@ def load_research_claims(memory_dir) -> list[dict]:
     if not memory_dir:
         return _ClaimSourceRows()
     path = Path(memory_dir) / "research_claims.jsonl"
-    rows = _load_claim_source_path(path, research=True)
-    projected = []
-    for row in rows:
+
+    def _durable_projection(row):
         # Keep every schema-bounded field consumed by claim identity, evidence and source digest while
         # dropping unrelated legacy extensions before they can exhaust the redaction budget. Outward claim
         # projections remain capped separately; this internal snapshot must retain an allowed 65th..256th
@@ -708,11 +710,14 @@ def load_research_claims(memory_dir) -> list[dict]:
         durable = _claim_source_semantic_projection(row)
         # Missing version in a persisted file is not the direct pure-API snapshot compatibility case.
         durable.setdefault("v", 0)
-        projected.append(sanitize_cross_run_projection(
+        return sanitize_cross_run_projection(
             durable, max_chars=_CLAIM_SOURCE_ROW_MAX_CHARS,
             max_items=_MAX_SOURCE_EVIDENCE,
-            max_total_items=_CLAIM_SOURCE_ROW_MAX_TOTAL_ITEMS))
-    return _ClaimSourceRows(projected, read_health=rows.read_health)
+            max_total_items=_CLAIM_SOURCE_ROW_MAX_TOTAL_ITEMS)
+
+    # `map`, not a comprehension re-wrapped by hand: a row-shape projection must not be able to lose
+    # the read receipt this store was read with (doc 25 EM-09).
+    return _load_claim_source_path(path, research=True).map(_durable_projection)
 
 
 def load_claim_lessons(memory_dir) -> list[dict]:

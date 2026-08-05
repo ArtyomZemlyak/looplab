@@ -1710,6 +1710,94 @@ import contract (`tests/test_claims.py` asserts the re-export set). The import i
 
 *Recommendation:* Introduce one small generic Snapshot dataclass (rows + typed receipt + optional attachments) or a single shared ReceiptList base with an explicit .filter()/.map() API, and migrate the three types onto it; make the evidence-snapshot attachments explicit fields instead of monkey-set attributes.
 
+*Resolution (2026-08-05).* `core/receipts.ReceiptRows` is now the one place that decides how a health
+receipt survives a projection of the rows it describes, and the three types are its only subclasses.
+What it shares is exactly the CARRYING and nothing else: a `CARRIED_FIELDS` registry, `filter`,
+`map`, and a slice-preserving `__getitem__`. Each type keeps its own sanitizing `__init__`, its own
+inherit rule and its own absent-receipt default, verbatim.
+
+That restraint is the finding's one wrong instruction, and it is the part that would have done
+damage. "Migrate the three types onto one Snapshot dataclass (rows + typed receipt)" reads as though
+the three receipts are the same thing under three names. They are not, and the disagreement is
+load-bearing. Measured on the shipped code before touching it: `_ClaimSourceRows()` with no receipt
+defaults to a complete-and-empty `read_health` (`read_complete: true`) because a plain caller-supplied
+list is an explicit caller snapshot, which `_research_source_summary`'s docstring already says;
+`_CapsuleRows()` defaults to `source_store_complete: true` but `_capsule_rows` additionally derives
+`source_rows_total` from `len(origin)`, which the claim side never does; and `_ClaimAssessmentRows()`
+defaults its two summaries to `None`, which is not a default receipt at all but a THIRD state —
+`claims_retrieval._claim_claim_source_summary` reads `None` as "no aggregate was carried, fall back to
+the per-row `claim_source`/`research_source` copies", and only if those disagree does it return
+`_unknown_claim_source_summary()`, i.e. fail-CLOSED. One shared default would have collapsed "the
+store is complete", "we could not read the store" and "look at the rows" into whichever one was
+picked. The inherit rules diverge just as concretely: `_claim_source_rows` re-validates and
+conservatively ADDS newly visible schema failures to a carried receipt (measured: filtering
+`[valid, invalid]` under a carried `{quarantined 2, total 4}` yields `{quarantined 3, total 5}`),
+while `_dedup_valid_capsules` takes a per-field `max` against the duplicates it discovers itself.
+Neither is a copy, and neither belongs in a base class.
+
+Three other parts of the finding were stale or wrong against the live tree. The locations are all
+pre-split: `_ClaimSourceRows`/`_ClaimAssessmentRows` moved to `claims_health.py` (EM-01) and
+`_CapsuleRows` to `concept_capsules.py` (EM-10), so none of the five cited line numbers points at the
+code. `locked_claim_evidence_snapshot` does not exist anywhere in the repo — there is exactly ONE
+stashing site, `record_claim_decision._persist`, read by `record_observed_claim_decision`'s
+`_validate_target`. And `sorted()` is named in the hazard but has no caller: these snapshots are
+always sorted as the plain list they are built FROM, before wrapping, so a `.sorted()` sibling would
+be an unused projection API. `filter`/`map`/slicing each have a real call site; that is why they
+exist and `sorted` does not.
+
+The attachment half is done as the finding asked, with one change of shape. The three snapshots are
+now ONE declared field, `evidence_sources`, holding a `ClaimEvidenceSources` (`lessons`,
+`research_claims`, `decisions`) attached through `with_evidence_sources`. One field rather than three
+because the loudness has to be preserved: today an unattached snapshot raises `AttributeError` on the
+missing attribute, and three fields defaulting to `None` would instead have handed
+`claims_for_memory(lessons=None, decisions=None)` a licence to RE-READ the very files the
+policy-then-evidence lock chain exists to freeze — a silent defeat of the fence, dressed as a
+successful validation. Dereferencing `None.lessons` raises exactly as before. The sources are
+deliberately not sanitized on the way in, unlike every receipt beside them, because the operator's
+digest was computed over precisely those objects.
+
+`__slots__` is what actually retires the monkey-setting rather than merely discouraging it: an
+attribute a snapshot type does not declare can no longer be set on an instance at all. It is bound to
+`CARRIED_FIELDS` in each subclass, so the two cannot drift apart in the direction that fails
+silently — dropping a name from both raises at construction, and the guard covers the other
+direction.
+
+Equivalence was proved rather than assumed: a 22-probe harness over all three types (empty defaults,
+carried receipts, filter results and rows, plain-list ingest, invalid-row escalation, non-list input,
+unknown-key passthrough) produced byte-identical JSON before and after. It also surfaced one
+pre-existing oddity that this change deliberately did NOT fix, because touching a receipt rule is not
+a refactor: `_safe_research_source_summary` normalizes a LEGACY producer-only receipt by filling
+`read_health_v: 0`, and then rejects its own output on a second pass. Any re-sanitizing projection
+therefore drops a legacy aggregate to `None`. It is unreachable in production — `_research_source_summary`
+always stamps the current version — and it predates this work; it is recorded here and in the test
+fixture's comment so the next reader does not rediscover it as a regression.
+
+The guard is `tests/test_receipt_rows.py` (17 tests). It drives the property rather than pinning
+text: every snapshot is built with an UNHEALTHY receipt, so "the receipt survived" is distinguishable
+from "a fresh default was synthesized" — on a healthy source those two are identical, which is why a
+naive version of this test would pass against every break below. It checks `filter`/`map`/slice/empty
+-filter carry, reading the instance by its `__slots__` rather than by `CARRIED_FIELDS` so a field that
+was slotted and assigned but never registered is still caught; that `__slots__` refuses a stashed
+attribute; a two-way AST pin (`CARRIED_FIELDS` == the `self.x =` assignments in `__init__` ==
+`__slots__` ⊆ the keyword-only parameters) using `ast`, not substrings; the subclass registry itself;
+and an end-to-end read of a real `research_claims.jsonl` with one unparseable line, through the load
+projection, the scope filter and the assessment, asserting the answer still says the source was not
+completely read.
+
+Teeth-tested against seven breaks, each applied to the live file by a script that asserts its anchor
+is unique, then restored. B1 `_filter_claim_source_rows` narrows with a comprehension →
+`test_scoping_claim_source_rows_keeps_the_quarantine` and the end-to-end test fail on
+`read_complete is False`. B2 delete the slice branch of `__getitem__` → all three parametrizations of
+`test_filter_map_and_slice_carry_every_receipt` fail on the slice's type. B3 slot and assign
+`evidence_sources` but leave it out of `CARRIED_FIELDS` → the AST pin, the projection test and the
+decision-validator test fail (dropping it from BOTH raises at construction instead, which is the
+loud direction). B4 remove `_CapsuleRows.__slots__` → the AST pin, the projection test and the
+stash-refusal test fail. B5 `load_research_claims` rebuilds by comprehension instead of `map` → the
+end-to-end test fails with `malformed_rows == 0`. B6 drop `with_evidence_sources` → the
+decision-validator test plus six pre-existing `test_claim_decide_scope_parity` tests fail. B7
+`_filter_capsule_rows` narrows with a comprehension → `test_scoping_capsule_rows_keeps_the_quarantine`
+fails with the quarantine counters zeroed.
+
 #### EM-10 · MEDIUM · under-decomposition · effort: medium
 
 **memory.py mixes five unrelated subsystems in 1600 lines**
