@@ -107,7 +107,7 @@ from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.
 | `--genesis / --no-genesis` | on | With `--goal`, let the LLM author the task (pinning to `--kind` if given, and reading data locations from your words). `--no-genesis` builds it from `--kind`/`--set` alone. |
 | `--direction min\|max` | — | Optimization direction |
 | `--data PATH` | — | Shortcut for a **dataset**'s data path or a **repo**'s path (rejected for other kinds); under Genesis you can instead name the location(s) in `--goal` |
-| `-s, --set KEY=VALUE` | — | Override an engine setting (repeatable); same keys as `settings:` / `LOOPLAB_*`. **Not quite "any"**: the credential fields `llm_api_key` / `llm_api_key_base_url` are refused, so a secret never lands in shell history or the resolved snapshot — set them via `LOOPLAB_*` env or the secret store |
+| `-s, --set KEY=VALUE` | — | Override an engine setting (repeatable); same keys as `settings:` / `LOOPLAB_*`. **Not quite "any"**: the credential fields `llm_api_key` / `llm_api_key_base_url` are refused, so a secret never lands in shell history or the resolved snapshot — set them via `LOOPLAB_*` env or the secret store. Because of that split, `-s llm_base_url=…` moves the endpoint but **cannot** move the key with it: set `LOOPLAB_LLM_API_KEY` + `LOOPLAB_LLM_API_KEY_BASE_URL` to match, or the run refuses (see [moving a run to a different endpoint](llm-and-agents.md#moving-a-run-to-a-different-endpoint)) |
 | `--out DIR` | the file's `out:` or `runs/run_local` | Run directory (created if missing) |
 | `--max-nodes N` | `8` | Node (candidate) budget for the search |
 | `--backend toy\|llm` | `llm` | Role backend: offline optimizer or a live LLM. **Default changed toy→llm on 2026-08-04** (operator decision, `core/config.py:927`) — pass `--backend toy` for an offline run |
@@ -292,13 +292,25 @@ to prevent: exit 1, not one artifact, and the run stuck at `finalization_pending
 stranded in `.llm-usage-outbox`. It now warns on exactly the same boundaries:
 
 ```
-⚠ LLM credential unusable while wrapping up: the default target: LLM credential source contains an
-  incomplete key+endpoint pair; …
+⚠ LLM credential unusable while wrapping up: LOOPLAB_LLM_BASE_URL was overridden without its
+  credential.
+    this target would call: https://new-endpoint/v1
+    but LOOPLAB_LLM_API_KEY (from the .env file) is bound to: https://old-endpoint/v1
+    Why this is refused rather than retargeted for you: …
+    Fix: move the credential with the endpoint — …
+  This one cause is why all 7 of these fail; they share the credential configuration and are not
+  7 separate problems: the default target, implement, pilot, propose, repair, researcher, strategy.
   This run is over, so no proposal can degrade — wrapping it up anyway. What the missing model costs:
     …
   The wrap-up below runs with NO credential at all rather than sending this one somewhere it
   is not bound to, so any call it does attempt is refused by the provider, not silently mis-sent.
 ```
+
+**One root cause is diagnosed once.** Seven roles resolve the same shared credential, so a single
+wrong variable used to print seven copies of one sentence — which told you nothing the first copy did
+not, and hid *which knob* was wrong behind the repetition. The refusal now names the action you took
+(not the state it left behind), the endpoint each side is pointing at, why the key+endpoint pair is
+atomic, the exact variables to set together — and lists the affected roles once, underneath.
 
 That last line is the one difference between the two gates. A dead endpoint still lets every client be
 *built* (it fails at request time), while an unusable credential fails while the client is being

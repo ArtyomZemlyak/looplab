@@ -43,7 +43,8 @@ from looplab.core.llm_broker import llm_request_permit
 # Re-exported for backward compatibility: dozens of importers (and tests) do
 # `from looplab.core.llm import LLMError / BudgetExceeded`. The definitions live in
 # `looplab.core.errors` so `parse` can import them without importing this module.
-from looplab.core.errors import BudgetExceeded, LLMError  # noqa: F401
+from looplab.core.errors import (  # noqa: F401
+    BudgetExceeded, LLMCredentialError, LLMError, credential_cause)
 # Safe top-level import (no cycle): parse imports only from looplab.core.errors now.
 from looplab.core.parse import split_think  # noqa: F401  (also a re-export)
 # Split siblings (docs/15 §P5.2): retry/backoff + error classification (`llm_transient`), the
@@ -128,6 +129,21 @@ def normalize_llm_base_url(value: str) -> str:
     return urlunsplit((scheme, authority, path, "", ""))
 
 
+def normalize_llm_base_url_or_none(value) -> str | None:
+    """`normalize_llm_base_url`, but None instead of raising — for COMPARING, never for connecting.
+
+    Diagnosis-only. A refusal that wants to say "and this variable is what moved the endpoint" has to
+    compare two spellings of a URL, and an unset/garbage variable is simply not the knob rather than
+    a second error to report on top of the one being explained.
+    """
+    if not value:
+        return None
+    try:
+        return normalize_llm_base_url(value)
+    except LLMError:
+        return None
+
+
 class _NoCredential:
     """Internal sentinel: an endpoint override deliberately gets no shared credential fallback."""
 
@@ -147,24 +163,147 @@ def _secret_value(value) -> str:
         return str(value)
 
 
-def _ambient_shared_pair() -> tuple[str, str]:
+# The variables an operator actually types. Named constants because every refusal below quotes them
+# verbatim, and a refusal that names the WRONG variable leaves the operator worse off than silence.
+SHARED_KEY_ENV = "LOOPLAB_LLM_API_KEY"
+SHARED_BINDING_ENV = "LOOPLAB_LLM_API_KEY_BASE_URL"
+SHARED_ENDPOINT_ENV = "LOOPLAB_LLM_BASE_URL"
+
+# Where a resolved key+binding pair came from. The SOURCE is part of the diagnosis, not decoration:
+# the failure this text exists for is "I overrode one half HERE and expected the other half from
+# THERE to still apply", so the operator has to be told which source actually won.
+_SOURCE_PROCESS = "the process environment"
+_SOURCE_DOTENV = "the .env file"
+_SOURCE_SETTINGS = "this run's resolved settings"
+_SOURCE_SUPPLIED = "the credential supplied for this target"
+
+
+class _AmbientCredential(NamedTuple):
+    """A shared key+binding pair AND the provenance its refusal messages need.
+
+    `source` and `shadowed` exist only to be printed. They are resolved here rather than re-derived
+    at the raise site because this function IS the tier decision: a second reader of `os.environ`
+    /`.env` could disagree with it, and would then describe a selection that never happened.
+    """
+    key: str
+    binding: str
+    source: str                  # a _SOURCE_* label, or "" when neither name was declared anywhere
+    shadowed: tuple[str, ...]    # the half the LOSING source still has, dropped by the atomic rule
+
+
+def _dotenv_pair() -> dict[str, str]:
+    """The two shared-credential names as the repo-root `.env` declares them (upper-cased)."""
+    try:
+        from dotenv import dotenv_values
+        return {str(name).upper(): ("" if value is None else str(value))
+                for name, value in dotenv_values(".env").items()}
+    except Exception:  # noqa: BLE001 - absent/unreadable dotenv is no credential source
+        return {}
+
+
+def _ambient_credential() -> _AmbientCredential:
     """Resolve process env pair, else dotenv pair, without cross-source field merging."""
     names = {
-        "key": "LOOPLAB_LLM_API_KEY",
-        "binding": "LOOPLAB_LLM_API_KEY_BASE_URL",
+        "key": SHARED_KEY_ENV,
+        "binding": SHARED_BINDING_ENV,
     }
     process = {str(name).upper(): str(value) for name, value in os.environ.items()}
     if any(name in process for name in names.values()):
-        return process.get(names["key"], ""), process.get(names["binding"], "")
-    try:
-        from dotenv import dotenv_values
-        dotenv = {str(name).upper(): ("" if value is None else str(value))
-                  for name, value in dotenv_values(".env").items()}
-    except Exception:  # noqa: BLE001 - absent/unreadable dotenv is no credential source
-        dotenv = {}
+        key, binding = process.get(names["key"], ""), process.get(names["binding"], "")
+        shadowed: tuple[str, ...] = ()
+        if bool(key) != bool(binding):
+            # ONLY on the failing path, so the happy path keeps reading exactly one source. "I set
+            # the key in my shell and left its binding in .env" is the single most common way to
+            # reach this refusal, and the dropped half is invisible to the operator — the `.env`
+            # they are looking at plainly contains it. Say that it was dropped, and why.
+            missing = names["binding"] if key else names["key"]
+            shadowed = (missing,) if _dotenv_pair().get(missing) else ()
+        return _AmbientCredential(key, binding, _SOURCE_PROCESS, shadowed)
+    dotenv = _dotenv_pair()
     if any(name in dotenv for name in names.values()):
-        return dotenv.get(names["key"], ""), dotenv.get(names["binding"], "")
-    return "", ""
+        return _AmbientCredential(dotenv.get(names["key"], ""), dotenv.get(names["binding"], ""),
+                                  _SOURCE_DOTENV, ())
+    return _AmbientCredential("", "", "", ())
+
+
+def _ambient_shared_pair() -> tuple[str, str]:
+    """The historical 2-tuple view of `_ambient_credential` — ONE resolution, two shapes.
+
+    Kept because the pair-without-provenance is what most readers want, and because a second
+    implementation of the tier rule is exactly the drift this module's other shared definitions
+    (`pathsafe`, `jsonutil`) are factored to avoid.
+    """
+    resolved = _ambient_credential()
+    return resolved.key, resolved.binding
+
+
+def _atomic_pair_rule(key_env: str, binding_env: str, *, tiered: bool) -> str:
+    """The one sentence explaining WHY a half-override is refused instead of being completed.
+
+    Every credential refusal below ends up quoting this, because in every one of them the operator's
+    next question is the same: "the other half is right there, why did you not use it?". `tiered` is
+    the shared pair, which reselects one whole source; a profile pair is read from the environment
+    only and has no lower tier to be surprised by.
+    """
+    return (
+        f"{key_env} and {binding_env} are ONE atomic credential: the key is usable only at the "
+        "endpoint it is bound to, and LoopLab refuses rather than putting a secret issued for one "
+        "host into an Authorization header aimed at another."
+        + (f" They are reselected from a SINGLE source ({_SOURCE_PROCESS} first, else "
+           f"{_SOURCE_DOTENV}), so overriding one half does not merge with the other half from a "
+           "lower source — it replaces the pair." if tiered else ""))
+
+
+def incomplete_pair_refusal(*, key_env: str, binding_env: str, have_key: bool, source: str,
+                            shadowed: bool = False, tiered: bool = True) -> str:
+    """Name the half-override behind ``bool(key) != bool(binding)``, and the exact fix.
+
+    Hoisted and named (CLAUDE.md "make the rule statable") because the sentence the operator reads is
+    the entire product of this refusal, and it is decided by inputs no call site reaches directly:
+    WHICH half is present, WHICH source won, and whether the losing source still holds the other
+    half. `tests/test_credential_diagnosis.py` pins the truth table.
+
+    It leads with the ACTION that caused the state, not the state. "An incomplete key+endpoint pair"
+    is true and useless: it describes what LoopLab found, leaving the operator to work backwards to
+    what they typed. What they typed is the only thing they can change.
+    """
+    present, missing = ((key_env, binding_env) if have_key else (binding_env, key_env))
+    where = f" in {source}" if source else ""
+    return (
+        f"{present} was set without {missing}.\n"
+        f"    set{where}: {present}\n"
+        f"    missing there: {missing}"
+        + (f"  — it IS set in {_SOURCE_DOTENV}, and was deliberately NOT merged in"
+           if shadowed else "")
+        + "\n    Why this is refused rather than completed for you: "
+        + _atomic_pair_rule(key_env, binding_env, tiered=tiered)
+        + f"\n    Fix: set BOTH {key_env} and {binding_env}{where}, with {binding_env} equal to the "
+          f"exact endpoint {key_env} was issued for"
+        + (f";\n         or unset {present}{where} and let the complete pair from the lower source "
+           "apply as a whole." if tiered else "."))
+
+
+def misbound_credential_refusal(*, key_env: str, binding_env: str, target: str, binding: str,
+                                source: str, endpoint_knob: str = "", tiered: bool = True) -> str:
+    """Name the OTHER half-override — the endpoint moved and the credential stayed behind.
+
+    The `bound != target` refusal. Same defect as `incomplete_pair_refusal`, reached from the other
+    direction and by far the more common one: pointing a run at a different endpoint is a one-word
+    change, and nothing about it suggests the key has to move too. Says which endpoint the request
+    would go to, which one the key is for, which knob moved it, and which variables to set together.
+    """
+    moved = (f"{endpoint_knob} was overridden without its credential." if endpoint_knob
+             else f"The endpoint was overridden without its credential ({SHARED_ENDPOINT_ENV}, "
+                  "`-s llm_base_url=...`, or `llm_base_url` in a config file / .env).")
+    return (
+        f"{moved}\n"
+        f"    this target would call: {target}\n"
+        f"    but {key_env} (from {source}) is bound to: {binding}\n"
+        f"    Why this is refused rather than retargeted for you: "
+        + _atomic_pair_rule(key_env, binding_env, tiered=tiered)
+        + f"\n    Fix: move the credential with the endpoint — set {key_env} and {binding_env} "
+          f"together in one\n         source, with {binding_env}={target}. If {target} takes no "
+          "key, unset both.")
 
 
 def bound_api_key_for(settings, base_url: str, *, api_key=None,
@@ -173,31 +312,47 @@ def bound_api_key_for(settings, base_url: str, *, api_key=None,
     target = normalize_llm_base_url(base_url)
     if api_key is NO_CREDENTIAL:
         return "x"
+    shadowed: tuple[str, ...] = ()
     if api_key is None:
         if getattr(settings, "_llm_credential_pair_trusted", False):
             key = _secret_value(getattr(settings, "llm_api_key", None))
             binding = getattr(settings, "llm_api_key_base_url", None)
+            source = _SOURCE_SETTINGS
         else:
             # Never infer provenance from already-merged Settings fields. Plain Settings instances
             # may have combined init/file/env/dotenv values; reselect one atomic ambient tier here.
-            key, binding = _ambient_shared_pair()
+            key, binding, source, shadowed = _ambient_credential()
+            source = source or _SOURCE_PROCESS   # nothing declared: still the tier we would read
     else:
         key = _secret_value(api_key)
         binding = api_key_base_url
+        source = _SOURCE_SUPPLIED
     if bool(key) != bool(binding):
-        raise LLMError("LLM credential source contains an incomplete key+endpoint pair")
+        raise LLMCredentialError(incomplete_pair_refusal(
+            key_env=SHARED_KEY_ENV, binding_env=SHARED_BINDING_ENV, have_key=bool(key),
+            source=source, shadowed=bool(shadowed)))
     if not key:
         return "local"
     if not binding:
-        raise LLMError(
+        raise LLMCredentialError(
             "LLM credential is unbound; set its exact endpoint binding before network use")
     try:
         bound = normalize_llm_base_url(binding)
     except LLMError as exc:
-        raise LLMError("LLM credential has an invalid endpoint binding") from exc
+        raise LLMCredentialError(
+            f"{SHARED_BINDING_ENV} (from {source}) is not a usable endpoint: {exc}. It must be the "
+            f"exact absolute http(s) endpoint {SHARED_KEY_ENV} was issued for — the value is "
+            "compared against the endpoint the request would go to, so it cannot be approximate."
+        ) from exc
     if bound != target:
-        raise LLMError(
-            "LLM credential is bound to a different endpoint; refusing to construct transport")
+        # `resolve_llm_target` hands this function a "shared" target only when the endpoint IS
+        # `settings.llm_base_url`, so the endpoint that moved is always the shared one. Name the env
+        # var when it is demonstrably the knob that moved it; otherwise the refusal enumerates the
+        # spellings that could have, rather than guessing one and sending the operator to the wrong file.
+        moved_by_env = normalize_llm_base_url_or_none(os.environ.get(SHARED_ENDPOINT_ENV)) == target
+        raise LLMCredentialError(misbound_credential_refusal(
+            key_env=SHARED_KEY_ENV, binding_env=SHARED_BINDING_ENV, target=target, binding=bound,
+            source=source, endpoint_knob=SHARED_ENDPOINT_ENV if moved_by_env else ""))
     return key
 
 # Provider usage is untrusted JSON.  A signed 64-bit ceiling is far above any real context/call
@@ -1749,26 +1904,41 @@ def client_kwargs_for(target: LlmTarget, *, role: str | None = None,
     kwargs: dict = {"model": target.model, "base_url": target.base_url,
                     "temperature": target.temperature, "timeout": timeout}
     if target.api_key_env:
-        if target.api_key_env in {"LOOPLAB_LLM_API_KEY", "LOOPLAB_LLM_API_KEY_BASE_URL"}:
-            raise LLMError(
+        # Every refusal below carries a role-neutral `cause_detail` alongside its role-named message.
+        # A profile is shared BY roles, so one unset variable is one mistake however many roles read
+        # it — `validate_bound_profiles` groups on the cause and prints it once. See
+        # `core/errors.py::LLMCredentialError`.
+        named = f"role {role!r} "
+        binding_env = f"{target.api_key_env}_BASE_URL"
+        if target.api_key_env in {SHARED_KEY_ENV, SHARED_BINDING_ENV}:
+            raise LLMCredentialError(
                 f"profile api_key_env {target.api_key_env} aliases the shared credential; "
                 "use the shared target or a dedicated profile variable")
         value = os.environ.get(target.api_key_env)
         if not value:
-            raise LLMError(
-                f"role {role!r} is bound to a connection profile whose api_key_env "
+            raise LLMCredentialError(
+                f"{named}is bound to a connection profile whose api_key_env "
                 f"{target.api_key_env} is unset or empty (endpoint {target.base_url}). Set that "
-                "environment variable, or drop the binding.")
-        binding_env = f"{target.api_key_env}_BASE_URL"
+                "environment variable, or drop the binding.",
+                cause_detail=(
+                    f"connection-profile credential {target.api_key_env} is unset or empty in "
+                    f"{_SOURCE_PROCESS} (endpoint {target.base_url}). Set that environment "
+                    f"variable — together with its binding {binding_env} — or drop api_key_env "
+                    "from that profile."))
         binding = os.environ.get(binding_env)
         if not binding:
-            raise LLMError(
-                f"role {role!r} profile credential {target.api_key_env} is missing its "
-                f"same-source endpoint binding {binding_env}")
+            # The profile tier's spelling of the shared tier's headline defect: half a pair.
+            detail = incomplete_pair_refusal(
+                key_env=target.api_key_env, binding_env=binding_env, have_key=True,
+                source=_SOURCE_PROCESS, tiered=False)
+            raise LLMCredentialError(f"{named}profile credential: {detail}", cause_detail=detail)
         if normalize_llm_base_url(binding) != normalize_llm_base_url(target.base_url):
-            raise LLMError(
-                f"role {role!r} profile credential {target.api_key_env} is bound to a different "
-                "endpoint")
+            detail = misbound_credential_refusal(
+                key_env=target.api_key_env, binding_env=binding_env,
+                target=normalize_llm_base_url(target.base_url),
+                binding=normalize_llm_base_url(binding), source=_SOURCE_PROCESS,
+                endpoint_knob="That profile's `base_url`", tiered=False)
+            raise LLMCredentialError(f"{named}profile credential: {detail}", cause_detail=detail)
         kwargs["api_key"] = value
         kwargs["api_key_base_url"] = binding
     elif target.credential_mode == "none":
@@ -1833,12 +2003,49 @@ def llm_optional_credential_consumers(settings) -> set[str | None]:
     return roles
 
 
+def render_credential_failures(causes: dict[str, list[str]]) -> str:
+    """Render {root cause -> roles it breaks} as ONE diagnosis per cause. Order-preserving.
+
+    The counting rule this function exists for: a run has one credential configuration, so N roles
+    failing to resolve it is N symptoms of ONE mistake, not N mistakes. Printing it once per role
+    (which is what `"; ".join(failures)` did, seven times over, because the role prefix made every
+    string distinct and defeated the `dict.fromkeys` dedup) buries the diagnosis under its own
+    repetitions and tells the operator nothing about which knob is wrong.
+    """
+    if len(causes) == 1:
+        detail, roles = next(iter(causes.items()))
+        named = list(dict.fromkeys(roles))
+        if not named:
+            return detail
+        if len(named) == 1:                       # one role: nothing was collapsed, say it plainly
+            return f"{detail}\n  Affects: {named[0]}."
+        return (f"{detail}\n  This one cause is why all {len(named)} of these fail; they share the "
+                f"credential configuration and are not {len(named)} separate problems: "
+                + ", ".join(named) + ".")
+    lines = [f"{len(causes)} distinct problems."]
+    for index, (detail, roles) in enumerate(causes.items(), start=1):
+        lines.append(f"  [{index}] {detail}")
+        if roles:
+            lines.append(f"      Affects: {', '.join(dict.fromkeys(roles))}.")
+    return "\n".join(lines)
+
+
 def validate_bound_profiles(settings) -> None:
-    """Fail before engine construction when an active credential target is unusable."""
+    """Fail before engine construction when an active credential target is unusable.
+
+    Collects by ROOT CAUSE rather than by role (`core/errors.py::LLMCredentialError.cause_detail`),
+    so one wrong variable produces one diagnosis naming every role it breaks — see
+    `render_credential_failures` for the counting rule and what it replaced.
+    """
     shared_active, checked = llm_credential_consumers(settings)
     if not shared_active and not checked:
         return
-    failures = []
+    # Insertion-ordered {role-neutral cause -> the role labels it breaks}.
+    failures: dict[str, list[str]] = {}
+
+    def _record(exc: BaseException, role_label: str | None = None) -> None:
+        failures.setdefault(credential_cause(exc), []).extend(
+            [role_label] if role_label else [])
     # External coding-agent processes are deliberately launched with every secret-looking
     # environment variable removed. They may use their own local credential store, but a
     # LoopLab-managed shared/profile key can never reach them. Reject that contradictory setup
@@ -1854,32 +2061,33 @@ def validate_bound_profiles(settings) -> None:
             # forbids. A shared key may legitimately serve the in-process validation fallback while
             # the coding tool authenticates from its own store, so do not reject that combination.
             if target.api_key_env:
-                failures.append(
+                failures.setdefault(
                     f"external developer backend {settings.developer_backend!r} cannot use the "
-                    f"LoopLab-managed credential selected for {role!r}; external coding tools are "
+                    "LoopLab-managed credential selected for it; external coding tools are "
                     "launched without inherited secrets. Remove api_key_env from that role's "
                     "profile, then use a credentialless/local endpoint or configure the coding "
-                    "tool's own credential store.")
+                    "tool's own credential store.", []).append(role)
     if shared_active:
         try:
             # Compatibility path for an explicitly declared raw shared client.
             bound_api_key_for(settings, settings.llm_base_url)
         except LLMError as exc:
-            failures.append(f"the shared target: {exc}")
+            _record(exc, "the shared target")
     for role in sorted(checked, key=lambda item: item or ""):
+        label = role or "the default target"
         target = resolve_llm_target(settings, role=role)
         env = target.api_key_env
         if env:
             try:
                 client_kwargs_for(target, role=role)
             except LLMError as exc:
-                failures.append(str(exc))
+                _record(exc, label)
             continue
         if target.credential_mode == "shared":
             try:
                 bound_api_key_for(settings, target.base_url)
             except LLMError as exc:
-                failures.append(f"{role or 'the default target'}: {exc}")
+                _record(exc, label)
         elif target.credential_mode == "none":
             # `resolve_llm_target` deliberately drops api_key_env after an endpoint override. Keep
             # the original profile intent in the preflight decision: otherwise a profile key bound
@@ -1887,11 +2095,12 @@ def validate_bound_profiles(settings) -> None:
             # spawned the engine, and only then made an unauthenticated request to B.
             configured_profile_env = role_profile(settings, role).get("api_key_env")
             if configured_profile_env:
-                failures.append(
-                    f"{role or 'the default target'} overrides the endpoint of profile credential "
-                    f"{configured_profile_env}; bind that role to a matching profile")
+                failures.setdefault(
+                    f"the endpoint of profile credential {configured_profile_env} is overridden "
+                    "for this role; bind that role to a matching profile", []).append(label)
     if failures:
-        raise LLMError("LLM credential preflight failed: " + "; ".join(dict.fromkeys(failures)))
+        raise LLMCredentialError(
+            "LLM credential preflight failed: " + render_credential_failures(failures))
 
 
 def make_llm_client(settings, *, model: str | None = None,
