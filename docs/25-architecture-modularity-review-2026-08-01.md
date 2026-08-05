@@ -2304,6 +2304,41 @@ test now pins both behaviours rather than trusting the docstrings that describe 
 
 *Recommendation:* Keep the fold handlers (old logs must replay), but isolate the hypothesis-shadow merging into an explicit adapter step at the top of the card derivation (normalize hypotheses_added/merged/ranking into synthetic card-shaped rows once), so the 800-line derivation reasons over one input family instead of interleaving both throughout.
 
+*Resolution (2026-08-05):* The shared part is extracted; the recommendation's premise is REJECTED
+with the reason, and the invariant it was really protecting now has a test it did not have.
+
+What was actually duplicated is the ORDERING, not the row shape. Both phases that walk the two
+families depend on one rule — native rows FIRST, because dedup is first-wins, so a hypothesis twin
+that claims the id first makes the real `card_added` row hit `if cid in cards: continue` and its
+receipt (rationale, snapshot, footprint, action ownership) vanishes. That rule was written out as a
+literal list concatenation at each site: one invariant, two places to drift. It is now
+`_native_first(native, shadow)`, and the argument order IS the precedence.
+
+REJECTED: "normalize hypotheses into synthetic card-shaped rows once, so the derivation reasons over
+one input family". The two families are not one family in different clothes, and the `native` flag
+cannot be normalized away. Only a native row can carry an ownership receipt — `_card_added_snapshot`
+and `_card_added_ownership` are meaningless on a hypothesis row, which must resolve to
+`receipt_valid=False`; only a SHADOW row is excluded by `ambiguous_seeds` (both at the id and at each
+alias in the merge phase); and the two produce different `card_origins` provenance
+(`card_added_unbound` vs `hypothesis_shadow`). A synthetic row that made a hypothesis LOOK native
+would have to carry a "not really native" bit anyway — the same flag, one layer further from the
+branch that reads it, which is worse than the flag.
+
+The finding's own framing already conceded this is documented back-compat rather than a defect, and
+the genuine risk it names — "every card change must be reasoned against the shadow family too" — is
+the ordering rule, which is now stated once and guarded.
+
+`tests/test_card_native_first.py` (6). It drives a real log where a `hypothesis_added` and a
+`card_added` name the same statement, in BOTH log orders, and asserts the native receipt survives —
+plus an AST pin that both phases take their order from the helper with the native family first.
+Nothing covered this before: flipping the two concatenation arms on a scratch copy fails 3 of the new
+tests and leaves all 239 other replay/card tests GREEN, which is the measurement of how exposed the
+invariant was. Re-growing a hand-written concatenation at one site fails the AST pin.
+
+Not done: the ranking fallback (`st.card_ranking or st.hypothesis_ranking`) stays inline — it is a
+single scalar fallback, not a row family, and routing it through a shared helper would be one call
+site pretending to be a pattern.
+
 
 ### 4.5 Core
 

@@ -4975,6 +4975,28 @@ def _card_node_concept_projection(st: RunState, node: Node) -> tuple[list[str], 
     return tags, source
 
 
+def _native_first(native: list, shadow: list) -> list[tuple[bool, dict]]:
+    """Pair every Card-family row with whether it is NATIVE, native rows FIRST (doc 25 EV-13).
+
+    `st.cards` subsumes the removed hypothesis board, so each card event has a frozen hypothesis twin
+    that old logs still replay. Two phases of the derivation therefore walk both families, and both
+    depend on the SAME ordering rule: dedup is first-wins, so a real `card_added` must precede its
+    hypothesis twin or the twin claims the id and the native receipt is lost. That rule was spelled
+    out as a literal concatenation at each site, which is two places for one invariant to drift.
+
+    The `native` FLAG is deliberately NOT normalized away, and this is where EV-13's framing —
+    "normalize hypotheses into synthetic card-shaped rows once, so the derivation reasons over one
+    input family" — does not survive contact with the code. The two families are not one family in
+    different clothes: only a native row can carry an ownership receipt (`_card_added_snapshot` /
+    `_card_added_ownership` are meaningless on a hypothesis row and a shadow row must resolve to
+    `receipt_valid=False`), only a shadow row is excluded by `ambiguous_seeds`, and the two produce
+    different `card_origins` provenance. A synthetic row that made a hypothesis LOOK native would
+    have to carry a "not really native" bit anyway — the same flag, one layer further from the branch
+    that reads it. So what is shared is the ORDERING, and that is what this owns.
+    """
+    return [(True, row) for row in native] + [(False, row) for row in shadow]
+
+
 def _derive_cards(st: RunState) -> None:
     """Build the derived Card ledger from native receipts and compatibility shadows.
 
@@ -5103,9 +5125,7 @@ def _derive_cards(st: RunState) -> None:
     #    still becomes a card — `st.cards` now SUBSUMES the removed `st.hypotheses` board (its cards-only
     #    replacement). `card_*` first so a real card_added (explicit id/source) wins the id over its
     #    hypothesis twin (dedup = first wins).
-    for native_row, d in (
-            [(True, row) for row in st.cards_added]
-            + [(False, row) for row in st.hypotheses_added]):
+    for native_row, d in _native_first(st.cards_added, st.hypotheses_added):
         try:
             stmt = str(d.get("statement", "")).strip()
             seed_id = hypothesis_id(stmt) if stmt else ""
@@ -5243,9 +5263,7 @@ def _derive_cards(st: RunState) -> None:
     # write site: last-write-wins there made `fold(perm(events))` differ, breaking invariant 5.
     merge_alias: dict[str, str] = {}
     merged_stmt: dict[str, str] = {}
-    for native_merge, d in (
-            [(True, row) for row in st.cards_merged]
-            + [(False, row) for row in st.hypotheses_merged]):
+    for native_merge, d in _native_first(st.cards_merged, st.hypotheses_merged):
         try:
             raw_canonical = d.get("canonical")
             raw_aliases = d.get("aliases")
