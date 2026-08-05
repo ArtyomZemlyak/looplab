@@ -43,7 +43,7 @@ from looplab.trust.cross_run import (
     sanitize_cross_run_projection,
 )
 from looplab.core.jsonutil import valid_digest_ref
-from looplab.core.receipts import bounded_receipt_count
+from looplab.core.receipts import ReceiptRows, bounded_receipt_count
 
 _MAX_SOURCE_STATEMENT = 4000
 # Shared with the governance ledger and the assessment projections: one bound on the metric
@@ -142,8 +142,11 @@ def _safe_claim_read_health(raw) -> Optional[dict]:
     }
 
 
-class _ClaimSourceRows(list):
+class _ClaimSourceRows(ReceiptRows):
     """List-compatible evidence snapshot carrying file/schema health through scope filters."""
+
+    CARRIED_FIELDS = ("read_health",)
+    __slots__ = CARRIED_FIELDS
 
     def __init__(self, rows=(), *, read_health: Optional[dict] = None):
         super().__init__(rows)
@@ -189,9 +192,9 @@ def _claim_source_rows(rows, *, research: bool) -> _ClaimSourceRows:
 
 
 def _filter_claim_source_rows(rows, predicate, *, research: bool) -> _ClaimSourceRows:
-    source = _claim_source_rows(rows, research=research)
-    return _ClaimSourceRows(
-        (row for row in source if predicate(row)), read_health=source.read_health)
+    # Validate/inherit FIRST (that is where a carried receipt is escalated), then narrow through the
+    # shared receipt-preserving projection rather than a comprehension that would drop it (EM-09).
+    return _claim_source_rows(rows, research=research).filter(predicate)
 
 
 def scope_cross_run_sources(*, task_id: str, lessons=None, capsules=None, research=None):
@@ -879,23 +882,70 @@ def _unknown_claim_source_summary() -> dict:
     }
 
 
-class _ClaimAssessmentRows(list):
+class ClaimEvidenceSources:
+    """The EXACT source snapshots a claim projection was computed from, pinned to that projection.
+
+    `record_claim_decision` validates an operator's evidence digest against a projection it builds
+    inside the policy-then-evidence lock chain, and the validator then has to re-project the SAME
+    inputs under a decision-specific scope. Those three snapshots used to be stashed on the returned
+    assessment list as ad-hoc attributes (`lessons_snapshot` / `research_claims_snapshot` /
+    `decisions_snapshot`); doc 25 EM-09 named that hazard, because a plain list operation anywhere in
+    between would have dropped them silently and the re-projection would then have re-READ the files
+    the lock chain exists to freeze.
+
+    Deliberately NOT sanitized on the way in, unlike every receipt beside it: these are the caller's
+    own in-process snapshots taken moments earlier under the lock, and the digest the operator is
+    judged against was computed over exactly these objects. Re-validating them here would mean the
+    validator checks a different projection than the one the fence committed to.
+    """
+
+    __slots__ = ("lessons", "research_claims", "decisions")
+
+    def __init__(self, *, lessons, research_claims, decisions):
+        self.lessons = lessons
+        self.research_claims = research_claims
+        self.decisions = decisions
+
+
+class _ClaimAssessmentRows(ReceiptRows):
     """Claim projection retaining aggregate source authority even when zero rows survive filters."""
 
+    CARRIED_FIELDS = ("claim_source", "research_source", "evidence_sources")
+    __slots__ = CARRIED_FIELDS
+
     def __init__(self, rows=(), *, claim_source: Optional[dict] = None,
-                 research_source: Optional[dict] = None):
+                 research_source: Optional[dict] = None,
+                 evidence_sources: Optional[ClaimEvidenceSources] = None):
         super().__init__(rows)
         self.claim_source = _safe_claim_source_summary(claim_source)
         self.research_source = _safe_research_source_summary(research_source)
+        # None means "nothing was attached", and every reader dereferences it without a guard on
+        # purpose: an unattached snapshot must raise here rather than fall through to a re-read of
+        # the durable files, which is what a `None`-tolerant caller would silently do.
+        self.evidence_sources = evidence_sources
+
+    def with_evidence_sources(self, *, lessons, research_claims,
+                              decisions) -> "_ClaimAssessmentRows":
+        """This projection, pinned to the exact snapshots it was computed from."""
+        return _ClaimAssessmentRows(self, **{
+            **self.carried(),
+            "evidence_sources": ClaimEvidenceSources(
+                lessons=lessons, research_claims=research_claims, decisions=decisions),
+        })
 
 
 def _filter_claim_assessments(rows, predicate) -> _ClaimAssessmentRows:
     source = rows if isinstance(rows, (list, tuple)) else []
-    return _ClaimAssessmentRows(
-        (row for row in source if predicate(row)),
-        claim_source=getattr(source, "claim_source", None),
-        research_source=getattr(source, "research_source", None),
-    )
+    if not isinstance(source, _ClaimAssessmentRows):
+        # A plain list carries no aggregate. `None` is the honest answer, NOT a synthesized
+        # complete receipt: `_claim_claim_source_summary` reads it as "look at the per-row copies".
+        source = _ClaimAssessmentRows(
+            source,
+            claim_source=getattr(source, "claim_source", None),
+            research_source=getattr(source, "research_source", None),
+            evidence_sources=getattr(source, "evidence_sources", None),
+        )
+    return source.filter(predicate)
 
 
 def _source_guarded_epistemic(support, oppose, claim_source: dict) -> str:
