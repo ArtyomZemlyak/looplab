@@ -1,7 +1,7 @@
 """A native Card row outranks its frozen hypothesis twin for the same statement (doc 25 EV-13).
 
 `st.cards` subsumes the removed hypothesis board, so every card event has a hypothesis twin that old
-logs still replay, and two phases of `_derive_cards` walk BOTH families. Dedup is first-wins, so the
+logs still replay, and two phases of `card_ledger.derive_cards` walk BOTH families. Dedup is first-wins, so the
 concatenation ORDER is the whole invariant: put the shadow family first and the twin claims the id,
 after which the real `card_added`'s own row is skipped by `if cid in cards: continue` and its receipt
 — rationale, snapshot, footprint, action ownership — is silently gone.
@@ -16,7 +16,7 @@ from __future__ import annotations
 import ast
 import inspect
 
-from looplab.events import replay
+from looplab.events import card_ledger
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 
@@ -89,29 +89,44 @@ def test_a_hypothesis_with_no_native_twin_still_becomes_a_card(tmp_path):
 
 def test_both_phases_take_their_row_order_from_the_one_helper():
     """The de-duplication itself. Two phases walk both families; a second hand-written concatenation
-    is the drift this replaces."""
-    tree = ast.parse(inspect.getsource(replay._derive_cards).lstrip())
+    is the drift this replaces.
+
+    Scanned over the WHOLE ledger module rather than one function since doc 25 EV-01 split the
+    derivation into its numbered phases: the seeding phase and the merge-alias phase are separate
+    functions now, and a per-function pin would go vacuously green the moment one of them moved
+    again."""
+    tree = ast.parse(inspect.getsource(card_ledger))
     calls = [node for node in ast.walk(tree)
              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
              and node.func.id == "_native_first"]
-    assert len(calls) == 2, f"_derive_cards calls _native_first {len(calls)} times, expected 2"
+    assert len(calls) == 2, f"card_ledger calls _native_first {len(calls)} times, expected 2"
     for call in calls:
         assert len(call.args) == 2 and not call.keywords, "positional (native, shadow) only"
         native, shadow = call.args
         assert isinstance(native, ast.Attribute) and native.attr.startswith("cards_"), (
             "the FIRST argument must be the native family — the argument order IS the precedence")
         assert isinstance(shadow, ast.Attribute) and shadow.attr.startswith("hypotheses_")
+    # …and the two calls are in DIFFERENT phase functions, which is what "both phases" means once
+    # the derivation is decomposed. One function calling it twice would satisfy the count above.
+    owners = {
+        fn.name
+        for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef)
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "_native_first"
+    }
+    assert len(owners) == 2, f"both _native_first calls live in {owners}"
 
 
 def test_the_helper_puts_native_rows_first():
     """A unit check on the rule itself, so the two source pins above are anchored to a behaviour."""
-    paired = replay._native_first([{"n": 1}, {"n": 2}], [{"h": 1}])
+    paired = card_ledger._native_first([{"n": 1}, {"n": 2}], [{"h": 1}])
 
     assert [flag for flag, _row in paired] == [True, True, False]
     assert [row for _flag, row in paired] == [{"n": 1}, {"n": 2}, {"h": 1}]
 
 
 def test_the_helper_is_total_on_empty_families():
-    assert replay._native_first([], []) == []
-    assert replay._native_first([], [{"h": 1}]) == [(False, {"h": 1})]
-    assert replay._native_first([{"n": 1}], []) == [(True, {"n": 1})]
+    assert card_ledger._native_first([], []) == []
+    assert card_ledger._native_first([], [{"h": 1}]) == [(False, {"h": 1})]
+    assert card_ledger._native_first([{"n": 1}], []) == [(True, {"n": 1})]

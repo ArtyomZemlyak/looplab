@@ -10,7 +10,8 @@ Node/Hypothesis/Card)."""
 from __future__ import annotations
 
 from looplab.core.models import Event, hypothesis_id
-from looplab.events.replay import _evidence_verdict, _record_setter_ids, fold
+from looplab.events.card_ledger import _evidence_verdict, _record_setter_ids
+from looplab.events.replay import fold
 
 
 def _mk(evs):

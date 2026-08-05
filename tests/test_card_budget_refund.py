@@ -388,16 +388,16 @@ def test_the_refund_predicate_is_one_object_under_every_name_it_is_reachable_by(
     hours. The unit that has to be one object is the PREDICATE, not the leaf of its proof.
     """
     from looplab.core import models
-    from looplab.events import replay
+    from looplab.events import card_ledger
     from looplab.search import card_selection, speculation_quality
 
     assert (card_selection.is_unevaluated_speculative_discard
             is models.is_unevaluated_speculative_discard
-            is replay.is_unevaluated_speculative_discard
+            is card_ledger.is_unevaluated_speculative_discard
             is speculation_quality.is_unevaluated_speculative_discard)
     assert (card_selection.node_counts_toward_card_budget
             is models.node_counts_toward_card_budget
-            is replay.node_counts_toward_card_budget
+            is card_ledger.node_counts_toward_card_budget
             is speculation_quality.node_counts_toward_card_budget)
     assert (card_selection._durable_speculative_lifecycle
             is models._durable_speculative_lifecycle)
@@ -411,7 +411,7 @@ def test_the_budget_view_and_the_fold_agree_on_what_a_discard_costs():
     replay's debug anchor still counted it as a child of the node it was going to repair — so the
     policy kept proposing `debug` on that node and the lane authored a permanently unselectable Card
     every loop turn. Both halves now read this one predicate."""
-    from looplab.events.replay import _card_debug_leaf_children, _card_debuggable_leaf_ids
+    from looplab.events.card_ledger import _card_debug_leaf_children, _card_debuggable_leaf_ids
 
     failed_parent = Node(
         id=0, operator="draft", idea=Idea(operator="draft", card_id="card-parent"),

@@ -124,6 +124,36 @@ def normalize_extra_metrics(value, *, max_items: int = 256) -> dict[str, float]:
 
 MAX_LESSON_NODE_COUNT = (1 << 31) - 1
 
+
+def coerce_node_id(d: dict, key: str = "node_id"):
+    """Coerce a raw event `node_id` to an int for a fold KEY/membership op, or None if it isn't a usable
+    node id. Several sanctioned /control events (`approval_granted`, `annotation`) are appended VERBATIM,
+    so a forged `{"node_id":[999]}` (unhashable) / bool / non-numeric id must be rejected BEFORE it
+    reaches a dict/set hash — else the fold raises `TypeError: unhashable` and bricks every replay. Rejects
+    a bool (subclasses int, so int(True)==1 would spuriously match node 1) and anything non-coercible
+    (incl. a non-finite float -> OverflowError). A missing/None id also returns None; each handler decides
+    whether that means accept (a bare grant) or drop."""
+    # Lives here rather than in `events/replay.py` (its historical home, still reachable as
+    # `replay._coerce_node_id`) because the Card ledger extracted to `events/card_ledger.py` bounds
+    # the same untrusted ids and `events` modules must not import each other in a cycle to do it —
+    # the same reason `is_unevaluated_speculative_discard` sits beside `Node` instead of in `search`.
+    v = d.get(key)
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        # Never truncate 3.9 into node 3 at an approval/control boundary. JSON frontends may
+        # legitimately encode an integer as 3.0, so accept only finite integral floats.
+        return int(v) if math.isfinite(v) and v.is_integer() else None
+    if not isinstance(v, str):
+        return None
+    try:
+        return int(v.strip())
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 # Stable replay-derived trust labels for ``RunState.node_concept_provenance``.  Keep these strings
 # boring and explicit: the novelty admission path compares them exactly and treats every future /
 # malformed / missing value as untrusted until that producer is reviewed.
@@ -142,6 +172,25 @@ NODE_CONCEPT_PROVENANCE_UNTRUSTED = "untrusted-source"
 # as independent classifier EVIDENCE (classifier_verified_node_concepts stays classifier-only), so a human
 # curation edit never silently becomes cross-run/novelty evidence without its own review.
 NODE_CONCEPT_PROVENANCE_OPERATOR = "operator-edited"
+
+# The provenance tiers whose concept set is an EXACT membership statement, and therefore the ones a
+# child may inherit through (doc 25 EV-11). An explicit full-set producer may be low-trust display
+# taxonomy and still define inheritance (offline heuristic), but an unknown/future producer or a
+# missing provenance is not an exact set — those force the delta unavailable rather than guessing.
+#
+# Spelled ONCE because `_materialize_concept_deltas` consults it from two passes over the same log:
+# the Kahn topological walk and the cycle fallback. If those two disagree about which tiers are
+# inheritable, the same event log folds to different concept memberships depending only on whether
+# the node graph happened to contain a cycle — a replay-determinism break with no error anywhere.
+# It sits beside the tier constants (rather than in `events/replay.py`, its historical home) because
+# the Card ledger in `events/card_ledger.py` derives its own display set from it, and the two
+# `events` modules must not import each other in a cycle to share one frozenset.
+INHERITABLE_CONCEPT_PROVENANCE = frozenset({
+    NODE_CONCEPT_PROVENANCE_AUTHORED,
+    NODE_CONCEPT_PROVENANCE_CLASSIFIER,
+    NODE_CONCEPT_PROVENANCE_OPERATOR,
+    NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
+})
 
 # A folded concept membership can be deliberately empty (an honest, known-empty set) or empty because
 # replay could not materialize an invalid delta dependency graph.  Keep that distinction in a typed,

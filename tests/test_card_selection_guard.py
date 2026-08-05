@@ -808,7 +808,7 @@ def test_a_debug_card_whose_parent_gained_a_REAL_sibling_child_still_closes():
     assert card.selection_ready is False
 
     # …and the parent is not a debuggable leaf for anyone.
-    from looplab.events.replay import _card_debuggable_leaf_ids
+    from looplab.events.card_ledger import _card_debuggable_leaf_ids
     assert 2 not in _card_debuggable_leaf_ids(state)
 
 
@@ -818,7 +818,7 @@ def test_a_discarded_prefetch_is_not_a_child_for_the_debug_anchor():
     proposing `debug` on the crashed parent and the lane authored a fresh unselectable Card every
     turn. Both views now read the SAME predicate."""
     from looplab.core.models import is_unevaluated_speculative_discard
-    from looplab.events.replay import _card_debuggable_leaf_ids
+    from looplab.events.card_ledger import _card_debuggable_leaf_ids
 
     rows = [
         *_failed_node_2(),
@@ -841,7 +841,7 @@ def test_an_ordinary_superseded_child_still_closes_the_debug_anchor():
     """Only a PROVEN discard is skipped. An ordinary build/reset race uses the same
     `reason='superseded'` and keeps its slot, so it is still a real child."""
     from looplab.core.models import is_unevaluated_speculative_discard
-    from looplab.events.replay import _card_debuggable_leaf_ids
+    from looplab.events.card_ledger import _card_debuggable_leaf_ids
 
     rows = [
         *_failed_node_2(),
@@ -918,7 +918,7 @@ def test_a_child_the_policy_view_hides_leaves_the_debug_anchor_open(child_class)
     """Each class on its own. The policy proposes `debug` on the crashed parent; before the fix the
     fold refused the resulting Card forever, which is the runaway."""
     from looplab.core.models import node_counts_toward_card_budget
-    from looplab.events.replay import _card_debug_leaf_children, _card_debuggable_leaf_ids
+    from looplab.events.card_ledger import _card_debug_leaf_children, _card_debuggable_leaf_ids
     from looplab.search.card_selection import _effective_policy_state
     from looplab.search.policy import debug_action
 
@@ -941,7 +941,7 @@ def test_a_child_the_policy_view_KEEPS_still_closes_the_debug_anchor(child_class
     """The boundary in the other direction: closing the divergence must open no hole. A child that
     spent budget still ends its failed parent's life as a debuggable leaf, in BOTH views."""
     from looplab.core.models import node_counts_toward_card_budget
-    from looplab.events.replay import _card_debug_leaf_children, _card_debuggable_leaf_ids
+    from looplab.events.card_ledger import _card_debug_leaf_children, _card_debuggable_leaf_ids
     from looplab.search.card_selection import _effective_policy_state
     from looplab.search.policy import debug_action
 
@@ -966,7 +966,7 @@ def test_the_folds_child_map_is_exactly_the_policy_views_child_map():
     a future edit to the predicate move both halves together instead of reopening this defect on
     whatever class is added next.
     """
-    from looplab.events.replay import _card_debug_leaf_children
+    from looplab.events.card_ledger import _card_debug_leaf_children
     from looplab.search.card_selection import _effective_policy_state
 
     rows = [
@@ -1080,7 +1080,7 @@ def test_a_gated_failed_PARENT_stays_a_replay_leaf_and_fails_closed_at_the_claim
     proposes such a parent, so nothing re-authors a Card — and `eligible_cards` rechecks every ready
     debug Card against the live `debug_action` before it can be claimed, which is where it closes.
     """
-    from looplab.events.replay import _card_debuggable_leaf_ids
+    from looplab.events.card_ledger import _card_debuggable_leaf_ids
     from looplab.search.card_selection import _effective_policy_state
     from looplab.search.policy import debug_action
 

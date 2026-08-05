@@ -27,7 +27,7 @@ from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED,
                                  NODE_CONCEPT_PROVENANCE_UNTRUSTED)
 from looplab.core.text import WORD_RE, normalize_text, tokenize
 from looplab.engine.claims_health import _node_ids, _parse_node_id, _valid_node_source
-from looplab.events import replay
+from looplab.events import card_ledger, replay
 
 
 # ------------------------------------------------------------------ EV-11: inheritable provenance
@@ -45,13 +45,13 @@ def test_untrusted_is_NOT_inheritable_but_IS_displayable():
     """The one tier where the two sets legitimately differ. A low-trust display taxonomy may be shown
     on a card; inheriting a child's membership through it would launder it into an exact statement."""
     assert NODE_CONCEPT_PROVENANCE_UNTRUSTED not in replay._INHERITABLE_CONCEPT_PROVENANCE
-    assert NODE_CONCEPT_PROVENANCE_UNTRUSTED in replay._CARD_NODE_CONCEPT_PROVENANCE
+    assert NODE_CONCEPT_PROVENANCE_UNTRUSTED in card_ledger._CARD_NODE_CONCEPT_PROVENANCE
 
 
 def test_the_card_set_is_DERIVED_from_the_inheritable_one():
     """Not merely equal today — derived, so a new tier added to the inheritable set cannot be
     forgotten on the display side."""
-    assert replay._CARD_NODE_CONCEPT_PROVENANCE == (
+    assert card_ledger._CARD_NODE_CONCEPT_PROVENANCE == (
         replay._INHERITABLE_CONCEPT_PROVENANCE | {NODE_CONCEPT_PROVENANCE_UNTRUSTED})
 
 
