@@ -8,6 +8,7 @@ import LazyBoundary from './LazyBoundary.jsx'
 import ThemeSwitcher from './ThemeSwitcher.jsx'
 import EnergyToggle from './EnergyToggle.jsx'
 import DensityToggle from './DensityToggle.jsx'
+import GlobalMenu from './GlobalMenu.jsx'
 import { OpIcon } from './icons.jsx'
 import {
   ALL_RUNS as ALL, UNASSIGNED_RUNS as UNASSIGNED, filterRuns, indexProjects,
@@ -31,6 +32,9 @@ import {
 const MapView = lazy(() => import('./MapView.jsx'))
 const ScopeReport = lazy(() => import('./ScopeReport.jsx'))
 const RunCompare = lazy(() => import('./RunCompare.jsx'))
+// App writes `looplab` when the operator leaves through the LoopLab menu; `settings` is the value
+// already persisted in older history entries and returns focus to the same control.
+const returnsToGlobalMenu = control => control === 'looplab' || control === 'settings'
 const SAVED_VIEWS_KEY = 'll.portfolioViews'
 const COMPARE_COLUMNS_KEY = 'll.compareColumns'
 const LIST_READ_TIMEOUT_MS = 12_000
@@ -1019,7 +1023,7 @@ function SuperTaskModal({ supertasks, state, onRetry, onCreate, onRename, onDele
   </Modal>
 }
 
-export default function RunList({ onOpen, onSettings, onResearchAtlas,
+export default function RunList({ onOpen, onGlobalNavigate,
   initialNavigationState = null, restoreFocusRunId = null, restoreFocusControl = null,
   onNavigationStateChange = null, onNavigationRestored = null }) {
   const initialNavigationRef = useRef()
@@ -1040,7 +1044,9 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   const [menuBusy, setMenuBusy] = useState(false)
   const projectRenameReturnRef = useRef(null)
   const runsMainRef = useRef(null)
-  const settingsButtonRef = useRef(null)
+  // Return-focus target for every LoopLab destination. Was the Settings button; the LoopLab menu is
+  // now the single control the operator left the list FROM, so it is where focus comes back to.
+  const globalMenuButtonRef = useRef(null)
   const projectsAllRef = useRef(null)
   const [dragRun, setDragRun] = useState(null)
   const compareDragGuardRef = useRef(null)
@@ -1544,21 +1550,18 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   const openRun = useCallback((id, href = null) => {
     onOpen?.(id, publishNavigationState(), href)
   }, [onOpen, publishNavigationState])
-  const openSettings = useCallback(() => {
-    onSettings?.(publishNavigationState())
-  }, [onSettings, publishNavigationState])
-  const openResearchAtlas = useCallback(() => {
-    onResearchAtlas?.(publishNavigationState())
-  }, [onResearchAtlas, publishNavigationState])
+  const openGlobal = useCallback(hash => {
+    onGlobalNavigate?.(hash, publishNavigationState())
+  }, [onGlobalNavigate, publishNavigationState])
 
   useLayoutEffect(() => {
     if (!initialNavigationState) return
     const active = document.activeElement
     if (!active || active === document.body || active === document.documentElement) {
-      const controlTarget = !restoreFocusRunId && restoreFocusControl === 'settings'
-        && settingsButtonRef.current?.isConnected && settingsButtonRef.current.getClientRects().length
-        && !settingsButtonRef.current.matches(':disabled')
-        ? settingsButtonRef.current : null
+      const controlTarget = !restoreFocusRunId && returnsToGlobalMenu(restoreFocusControl)
+        && globalMenuButtonRef.current?.isConnected && globalMenuButtonRef.current.getClientRects().length
+        && !globalMenuButtonRef.current.matches(':disabled')
+        ? globalMenuButtonRef.current : null
       ;(controlTarget || runsMainRef.current)?.focus({ preventScroll: true })
     }
   }, [initialNavigationState, restoreFocusControl, restoreFocusRunId])
@@ -1593,12 +1596,12 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
             && element.getClientRects().length && element.getAttribute('aria-disabled') !== 'true'
             && !element.matches(':disabled'))
         : null
-      const controlTarget = !restoreFocusRunId && restoreFocusControl === 'settings'
-        && settingsButtonRef.current?.isConnected && settingsButtonRef.current.getClientRects().length
-        && !settingsButtonRef.current.matches(':disabled')
-        ? settingsButtonRef.current : null
+      const controlTarget = !restoreFocusRunId && returnsToGlobalMenu(restoreFocusControl)
+        && globalMenuButtonRef.current?.isConnected && globalMenuButtonRef.current.getClientRects().length
+        && !globalMenuButtonRef.current.matches(':disabled')
+        ? globalMenuButtonRef.current : null
       const target = runTarget || controlTarget
-      const controlExpected = !restoreFocusRunId && restoreFocusControl === 'settings'
+      const controlExpected = !restoreFocusRunId && returnsToGlobalMenu(restoreFocusControl)
       if (!target && (restoreFocusRunId || controlExpected) && attempts < 20) {
         attempts += 1
         frame = requestAnimationFrame(restoreFocus)
@@ -2122,14 +2125,11 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
           <DensityToggle />
           <ThemeSwitcher />
           <EnergyToggle />
-          <button type="button" className="btn sm ghost" disabled={navigationBusy} title="Read the experimental bounded portfolio preview"
-                  aria-label="Open Research Atlas preview" onClick={openResearchAtlas}>
-            <OpIcon name="compass" className="t-ic" /> Atlas preview
-          </button>
-          <button ref={settingsButtonRef} className="btn sm ghost" disabled={navigationBusy}
-            title="settings" onClick={openSettings}>
-            <OpIcon name="gear" className="t-ic" /> Settings
-          </button>
+          {/* Atlas preview and Settings used to be two loose buttons here and nowhere else, which is
+              why cross-run memory, authored knowledge and the host's GPUs ended up hiding in a RUN's
+              menu instead. They are all one menu now, and it is the same menu inside a run. */}
+          <GlobalMenu current="list" disabled={navigationBusy}
+            buttonRef={globalMenuButtonRef} onNavigate={openGlobal} />
         </div>
       </div>
       {missingStartOverRecoveries.map(item => <div key={item.runId}

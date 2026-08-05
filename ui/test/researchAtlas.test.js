@@ -1179,29 +1179,36 @@ test('mounted Atlas settles sources progressively and fences timed-out or supers
 })
 
 test('Atlas has a discoverable owner-only route and complete resource states', async () => {
-  const [app, runList, atlas, api, css] = await Promise.all([
+  const [app, runList, atlas, api, css, globalMenu] = await Promise.all([
     source('App.jsx'), source('RunList.jsx'), source('ResearchAtlas.jsx'), source('api.js'),
-    source('research-atlas.css'),
+    source('research-atlas.css'), source('GlobalMenu.jsx'),
   ])
+  const { GLOBAL_DESTINATIONS } = await import('../src/globalNav.js')
 
   assert.match(app, /lazy\(\(\) => import\('\.\/ResearchAtlas\.jsx'\)\)/)
   assert.match(app, /h === '#\/research-atlas'[\s\S]*canonicalHash: '#\/atlas'/)
-  // The route helpers now go through `navigateWithListState`, which preserves the run-list scroll
-  // and selection across the round trip; assigning `location.hash` directly was the old spelling and
-  // the assertion below it (the owner gate) never ran once this stopped matching. What matters is
-  // that Atlas navigates to the canonical hash the same way its sibling routes do.
-  assert.match(app, /const researchAtlas = useCallback\(snapshot => \{\s*navigateWithListState\('#\/atlas', snapshot, null\)/)
-  // The sibling gained a fourth argument (a focus target for the Settings route). The property is
-  // that BOTH go through `navigateWithListState` to their canonical hash — a private mechanism on
-  // either would lose the run-list scroll and selection across the round trip.
-  assert.match(app, /const settings = useCallback\(snapshot => \{\s*navigateWithListState\('#\/settings', snapshot, null/,
+  // The route helpers go through `navigateWithListState`, which preserves the run-list scroll and
+  // selection across the round trip; assigning `location.hash` directly was the old spelling and the
+  // assertion below it (the owner gate) never ran once this stopped matching. Atlas, Settings and
+  // the installation surfaces now share ONE departure — the property is unchanged and now holds for
+  // every LoopLab destination rather than only for the two that remembered to opt in.
+  assert.match(app, /const globalNavigate = useCallback\(\(hash, snapshot\) => \{\s*navigateWithListState\(hash, snapshot, null, 'looplab'\)/,
     'Atlas must navigate like its sibling owner routes, not by a private mechanism')
   assert.match(app, /history\.replaceState\(history\.state, '', route\.canonicalHash\)/)
   assert.match(app, /route\.view === 'research-atlas'/)
-  assert.match(app, /onResearchAtlas=\{researchAtlas\}/)
+  assert.match(app, /onGlobalNavigate=\{globalNavigate\}/)
   assert.ok(app.lastIndexOf("route.view === 'research-atlas'") < app.indexOf('<OwnerAuth label={routeLabel}>'),
     'Atlas content must be wrapped by the owner authentication gate')
-  assert.match(runList, /aria-label="Open Research Atlas preview"/)
+  // Discoverability moved from a loose header button into the LoopLab menu the run list renders.
+  // Assert the whole chain — the list mounts the menu, the menu renders the shared destination list,
+  // and that list still contains the canonical Atlas hash — so removing any link fails here.
+  assert.match(runList, /<GlobalMenu current="list"[\s\S]*onNavigate=\{openGlobal\}/)
+  assert.match(globalMenu, /GLOBAL_DESTINATIONS\.map\(entry =>/)
+  assert.deepEqual(
+    GLOBAL_DESTINATIONS.filter(entry => entry.key === 'research-atlas')
+      .map(entry => [entry.hash, entry.label]),
+    [['#/atlas', 'Research Atlas']],
+    'the Atlas must stay a canonical, labelled LoopLab destination')
   assert.match(atlas, /requestedSources\.forEach/)
   for (const state of [/Loading Atlas/, /Research Atlas couldn.t load/,
     /No cross-run evidence/, /Some sources unavailable\./]) assert.match(atlas, state)

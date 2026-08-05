@@ -838,6 +838,11 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .panel-h .panel-close { flex: none; }
 .panel-b { padding: 12px 14px; }
+/* A panel reached as a LoopLab DESTINATION (#/memory, #/knowledge, #/gpu) is the whole screen, not
+   an overlay over a run — it keeps the panel's own chrome but drops the dialog's centring, cap and
+   drop shadow so it reads as a page and its route header stays reachable. */
+.installation-page { flex: 1; overflow: auto; padding: 22px; max-width: 1100px; margin: 0 auto; width: 100%; }
+.panel.panel-page { width: 100%; max-height: none; box-shadow: none; overflow: visible; }
 /* Deep-research drawer (panels.jsx ResearchPanel): memos with actionable directions. */
 .rsch-memo { padding: 10px 0; border-bottom: 1px solid var(--line); }
 .rsch-memo:last-child { border-bottom: 0; }
@@ -1222,6 +1227,11 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 /* Run-view "More ▾" overflow: anchor the shared .run-menu dropdown below-left of the More button. */
 .more-wrap { position: relative; display: inline-flex; }
 .more-menu { left: 0; right: auto; top: 30px; min-width: 168px; }
+/* The LoopLab menu (GlobalMenu.jsx) is the run panel bar's twin one scope up: same dropdown
+   mechanics, anchored on the brand instead of the panel bar, so the two menus read as two scopes of
+   one system. Only the width differs — its labels name whole surfaces, not panels. */
+.global-menu-wrap { flex: none; }
+.global-menu-wrap .more-menu { min-width: 214px; }
 
 /* super-task: distinct from the project pill (a different organizational axis) */
 .pill.st-pill { border-color: color-mix(in srgb, var(--accent) 45%, var(--line-2));

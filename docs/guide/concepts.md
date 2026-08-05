@@ -636,7 +636,8 @@ historical prefixes retain them and remain non-authoritative.
 `invalid_consolidation_map`, invalid membership input, `invalid_concept_id`, `rename_cycle`, and
 `rename_hop_cap`. Cap receipts expose a deterministic safe subset; corruption receipts mean that missing
 membership cannot be interpreted as absence. These are read receipts over durable run state, so refreshing
-the same frame does not repair them. Inspect **Lab → Events** and **Authoring** to identify the broken
+the same frame does not repair them. Inspect the run's **Lab → Events** and **LoopLab → Knowledge &
+prompts** to identify the broken
 delta/consolidation source, then use a supported operator re-tag where appropriate or fork and replay a
 corrected run. Preserve the event log as the audit source; do not hand-edit a derived projection/cache.
 

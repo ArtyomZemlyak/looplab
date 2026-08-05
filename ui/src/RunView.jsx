@@ -10,6 +10,7 @@ import { deadlineGet, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isS
   storageGet, storageSet, runApiPath } from './util.js'
 import { computeGroups, autoCollapseSet } from './grouping.js'
 import EnergyToggle from './EnergyToggle.jsx'
+import GlobalMenu from './GlobalMenu.jsx'
 import { OpIcon } from './icons.jsx'
 import LazyBoundary from './LazyBoundary.jsx'
 import WhyStrip from './WhyStrip.jsx'
@@ -134,11 +135,22 @@ const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
 // Panel IA consolidated into 4 hubs (was 7 inline + a 12-item "More" overflow). Each hub is a
 // dropdown of related panels; the hub button lights when its open panel is active. Report + Overview
 // stay in the view-toggle above; Settings stays a dedicated button — both are one-click essentials.
+// This bar is THIS RUN's menu. Everything in it answers a question about this run's event log — its
+// queue, its cards, its trust gates, its files, its comments, its raw events. Three entries used to
+// sit in `Lab` and did not: Memory (`/api/memory` + `/api/knowledge`), Authoring (`/api/{kind}` —
+// the prompts/skills/knowledge every run shares) and GPU (`/api/gpu` — this host's cards). None of
+// them takes a run id, so opening them from a run implied a scope they never had. They now live in
+// the LoopLab menu (globalNav.js::GLOBAL_DESTINATIONS) beside Runs, Atlas and Settings, which is
+// reachable from this header too — the split is about which QUESTION each menu answers, not about
+// making the operator leave the run to ask it. The panel components still mount below for old
+// `?panel=memory|authoring|gpu` links; they are simply not offered here.
+// Cross-run and Registry stay: both are anchored on THIS run (its task id, its champion and
+// promotions) and read the run list only as context for it.
 const HUBS = [
   ['Progress', [['queue', 'Queue'], ['hypotheses', 'Cards'], ['research', 'Research'], ['failures', 'Failures']]],
   ['Trust', [['trust', 'Trust'], ['pareto', 'Pareto / diversity'], ['data', 'Data quality']]],
   ['Analysis', [['compare', 'Compare'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['crossrun', 'Cross-run']]],
-  ['Lab', [['artifacts', 'Files'], ['registry', 'Registry'], ['memory', 'Memory'], ['collab', 'Comments & sharing'], ['authoring', 'Authoring'], ['events', 'Events'], ['gpu', 'GPU']]],
+  ['Lab', [['artifacts', 'Files'], ['registry', 'Registry'], ['collab', 'Comments & sharing'], ['events', 'Events']]],
 ]
 const HUB_OF = Object.fromEntries(HUBS.flatMap(([label, items]) => items.map(([k]) => [k, label])))
 // Historical overlays must derive only from the exact folded snapshot. Panels that fetch current
@@ -2563,6 +2575,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       <h1 className="sr-only">{workspaceRouteLabel}</h1>
       <div className="topbar run-head">
         <span className="brand"><span className="dot">◉</span> LoopLab</span>
+        {/* The LoopLab menu is deliberately absent in review mode: that route is public (it bypasses
+            OwnerAuth) and must not advertise, let alone reach, installation-wide owner surfaces. */}
+        {!reviewMode && <GlobalMenu />}
         {onBack ? <button className="btn sm ghost" onClick={leaveRetainedPanelRoute}>← runs</button>
           : <span className="pill">read-only review</span>}
         <button type="button" className="btn sm ghost copy-view-btn" onClick={copyViewLink}
@@ -2832,9 +2847,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             </div>)}
           </div>
           <span className="panel-sep" />
+          {/* "Run settings" in full: this edits THIS run's live config, while the LoopLab menu's
+              Settings edits the engine defaults for every future run. Two buttons both labelled
+              "Settings", one screen apart, was the sharpest edge of the same conflation. */}
           <button className={'btn sm ghost settings-panel-btn' + (panel === 'config' ? ' on' : '')}
-                  disabled={mutationReadOnlyMode}
-                  onClick={event => { setOpenHub(null); panelReturnFocusRef.current = event.currentTarget; setPanel('config') }}>Settings</button>
+                  disabled={mutationReadOnlyMode} title="Budgets and knobs for this run only"
+                  onClick={event => { setOpenHub(null); panelReturnFocusRef.current = event.currentTarget; setPanel('config') }}>Run settings</button>
         </div>
       </div>
 

@@ -9,6 +9,7 @@ import {
   isValidAtlasSourceEnvelope, reconcileAtlasSourceStatuses, researchAtlasPayloadPortfolioId,
 } from './researchAtlasModel.js'
 import './research-atlas.css'
+import GlobalMenu from './GlobalMenu.jsx'
 import { deadlineRequest } from './requestDeadline.js'
 
 const SOURCES = [
@@ -359,6 +360,7 @@ export default function ResearchAtlas({ onBack }) {
   return <div className="app atlas-route">
     <div className="topbar">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
+      <GlobalMenu current="research-atlas" />
       <button type="button" className="btn sm ghost" aria-label="Back to runs" onClick={onBack}>← runs</button>
       <span className="ttl">Research Atlas preview</span>
       <span className="chip xs warn">Experimental · bounded · read-only</span>
