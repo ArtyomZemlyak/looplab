@@ -4,8 +4,11 @@ One `AppState` is built by `serve/server.py::make_app` and handed to every
 `serve/routers/*.build_router(srv)`; handlers stay closures over it, exactly as they were closures
 over `make_app`'s locals. Helper bodies (`run_dir`/`events`/`state_payload`/`phase`) are verbatim
 moves of the former closures. Two callables are LATE-BOUND to break the route-calls-route cycles
-(`list_runs_fn` is set by the runs router and read by the scope reports; `list_tasks_fn` is set by
-the misc router and read by genesis).
+(`list_tasks_fn` is set by the misc router and read by genesis; `list_runs_fn` is set by the runs
+router and, since doc 25 SR-12 gave the scope reports their own `run_membership()` method, read by
+nothing in production). Both are rows in `serve/router_wiring.py`, which is where the producer, the
+consumers and the mount-time check that they line up are written down — an assignment or a read
+that is not in that registry fails the suite.
 
 `make_llm_client` deliberately resolves through the `looplab.serve.server` module attribute AT CALL
 TIME: the test suite (and any operator tooling) monkeypatches `looplab.server.make_llm_client`, and
@@ -131,15 +134,15 @@ class AppState:
         # (slow) span read + build below.
         self._trace_view_lock = threading.Lock()
         self.reports_dir = root / "reports"
-        # Late-bound route callables (set by their owning router's build_router; see module docstring).
+        # Late-bound route callables (set by their owning router's build_router; see module docstring
+        # and the `serve/router_wiring.py` registry that enumerates producer + consumers).
         # `list_runs_fn` remains for the LIVE-fact overlay only (the runs router's own route body,
         # which probes engine liveness); the two SIDE-EFFECT-FREE projections are methods below
         # (doc 25 SR-12), so a reader no longer depends on which build_router calls have run.
         self.list_runs_fn: Optional[Callable[[], list]] = None
-        # The membership-only projection of the same list: run_id -> task/project/supertask, with
-        # NO engine-liveness lock probe and NO durable-resume reconciler. Scope reports need only
-        # those columns, and calling the full handler for them made a report READ probe every run's
-        # lock and potentially SPAWN an engine process.
+        # The runnable-task catalogue `GET /api/tasks` returns, late-bound for the genesis boss, which
+        # grounds its proposed run spec on the same list. Reading it back off this bag is what keeps
+        # `routers/genesis.py` and `routers/misc.py` independent leaves — neither imports the other.
         self.list_tasks_fn: Optional[Callable[[], dict]] = None
 
     def run_summaries(self) -> list:

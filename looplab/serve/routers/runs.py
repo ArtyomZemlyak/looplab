@@ -857,8 +857,11 @@ def build_router(srv) -> APIRouter:
                  "engine_running": _alive(
                      root / s["run_id"], bool(s.get("resume_pending")))} for s in out]
 
-    # Late-bind the runs list for the cross-run scope reports (`_scope_run_ids`), breaking the
-    # route-calls-route dependency between this router and `routers/reports.py`.
+    # Late-bind the runs list WITH its live-fact overlay. The cross-run scope reports it was bound
+    # for read `srv.run_membership()` now — a report GET must not probe every run's lock (doc 25
+    # SR-12) — so this has no production consumer left; `serve/router_wiring.py` records that as an
+    # explicit empty consumer tuple, and its source scan turns a NEW reader into a registry update
+    # rather than another unwritten cross-router protocol.
     srv.list_runs_fn = list_runs
 
     # ------------------------------------------------------------------ state + time-travel

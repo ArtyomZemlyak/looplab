@@ -364,15 +364,9 @@ def _warm_route_matching(app: "FastAPI") -> None:
 def make_app(run_root: str | os.PathLike) -> "FastAPI":
     if FastAPI is None:
         raise _ui_extra_error("fastapi")
-    from looplab.serve import jobs as _jobs_router
     from looplab.serve.appstate import AppState
     from looplab.serve.jobs import JobRegistry
-    from looplab.serve.routers import (
-        assistant as _assistant_router, attention as _attention_router,
-        boss as _boss_router, collaboration as _collaboration_router,
-        control as _control_router, cross_run as _cross_run_router,
-        genesis as _genesis_router, misc as _misc_router, org as _org_router,
-        reports as _reports_router, reviews as _reviews_router, runs as _runs_router)
+    from looplab.serve.router_wiring import mount_routers
 
     root = Path(run_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -663,30 +657,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         # When auth is enabled the middleware has already validated the owner header.
         return {"ok": True, "required": bool(ui_token)}
 
-    # Router include ORDER (load-bearing for the overlapping patterns — see routers/__init__.py):
-    #   1. runs      — the runs list + per-run read model (also late-binds srv.list_runs_fn)
-    #   2. attention — owner-only redacted event/liveness projection (observation-only)
-    #   3. collaboration — owner-only bounded comment current/history projections
-    #   4. reviews   — owner link management + the token-scoped reviewer manifest
-    #   5. org       — projects / super-tasks / label / delete-run
-    #   6. control   — /control appends + resume/reset//api/start engine spawns
-    #   7. genesis   — /api/research + /api/genesis (reads srv.list_tasks_fn at request time)
-    #   8. assistant — sessions + the HITL permission registry
-    #   9. boss      — chat-log / chat / suggest / command / report_refresh
-    #  10. jobs      — GET /api/jobs/{id} over the shared JobRegistry
-    #  11. reports   — cross-run scope reports (reads srv.list_runs_fn at request time)
-    #  12. misc      — settings/secret/tasks/health/gpu, then the generic `GET /api/{kind}`
-    #                  authoring route, which MUST register after every other /api route it would
-    #                  otherwise shadow (and before /api/memory, preserving the original order).
-    # The static mounts + the SPA catch-all `GET /{path:path}` come after ALL /api routers.
-    for _build in (_runs_router.build_router, _attention_router.build_router,
-                   _collaboration_router.build_router,
-                   _reviews_router.build_router, _org_router.build_router,
-                   _control_router.build_router, _genesis_router.build_router,
-                   _assistant_router.build_router, _boss_router.build_router,
-                   _jobs_router.build_router, _reports_router.build_router,
-                   _cross_run_router.build_router, _misc_router.build_router):
-        app.include_router(_build(srv))
+    # The mount ORDER (load-bearing for the overlapping patterns) and the registry of late-bound
+    # cross-router callables both live in `serve/router_wiring.py` (doc 25 XP-05), which mounts and
+    # then REFUSES an app whose `srv.*_fn` contract is not satisfied — a producing router dropped
+    # from the list used to surface as a 500 on one endpoint, at request time, in the consumer.
+    mount_routers(app, srv)
     _warm_route_matching(app)
 
     # ------------------------------------------------------------------ static React app

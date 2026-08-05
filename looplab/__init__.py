@@ -236,6 +236,7 @@ _LAYOUT = {
     "run_commands": "serve",
     "run_files": "serve",
     "run_projections": "serve",   # the run-list projections AppState now owns (doc 25 SR-12)
+    "router_wiring": "serve",   # router mount order + the late-bound `srv.*_fn` registry (doc 25 XP-05)
     "run_deletion": "core",
     "run_reset": "core",
     "run_tools": "tools",

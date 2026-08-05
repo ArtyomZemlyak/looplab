@@ -105,7 +105,12 @@ def run_summaries(srv) -> list:
 
 
 def run_membership(srv) -> list:
-    """Only the columns `reports._scope_run_ids` joins on. Side-effect free by construction."""
+    """Only the columns `reports._scope_run_ids` joins on. Side-effect free by construction.
+
+    The membership-only projection of the same list: run_id -> task/project/supertask, with NO
+    engine-liveness lock probe and NO durable-resume reconciler. Scope reports need only those
+    columns, and calling the full handler for them made a report READ probe every run's lock and
+    potentially SPAWN an engine process."""
     pdata = srv.projects.load()
     assignments = pdata["assignments"]
     st_assign = pdata.get("supertask_assignments", {})
