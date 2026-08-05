@@ -6343,6 +6343,81 @@ server answered, no rethrow out of an event handler, plus source guards that the
 
 *Recommendation:* Merge NARR/NARR_VALID into one table of {validate?, render} entries and move it (with GROUPS/kindOf/eventNarration) into timelineModel.js or a new narration.js so it gains direct unit-test coverage and Dock returns to being a component.
 
+*Resolution (2026-08-05):* Merged and moved to a NEW `ui/src/narration.js` — one entry per event type
+carrying both halves (`{validate?, render}`), plus `GROUPS`/`TYPE2GROUP`/`GROUP_GLYPH`/`TYPE_GLYPH`/
+`kindOf`, the `isCuratedType` allow-list and `eventNarration`. `Dock.jsx` imports all of it and drops
+from 1,684 to 1,358 lines.
+
+**`timelineModel.js` was rejected as the destination, by measurement.** `test/timelineModel.test.js`
+imports it with a PLAIN node ESM import (`from '../src/timelineModel.js'`), and the narration
+renderers need `stripMd`, which lives in `markdown.jsx`. Node refuses a `.jsx` file outright —
+`ERR_UNKNOWN_FILE_EXTENSION` for `src/markdown.jsx`, confirmed by running it — so folding narration
+into `timelineModel.js` would have broken that test at load time and dragged React into every
+`timelineModel` consumer (`useTimeline.js`, `panels.jsx`). `narration.js` therefore keeps the same
+loading contract the narration code already had: its tests reach it through `vite.ssrLoadModule`,
+exactly as `dockNarration.test.js` already did.
+
+The finding's numbers are all stale: `NARR` holds **97** render entries (not 94), `NARR_VALID` **65**
+validators (not 64), `Dock.jsx` is **1,684** lines (not 1,605), and each of the four cited line ranges
+is 15–40 lines short. The coverage claim is wrong too — `eventNarration` was ALREADY exported from
+`Dock.jsx` and directly unit-tested by `test/dockNarration.test.js`. What genuinely had no coverage is
+the agreement BETWEEN the tables, which is what the new guard adds.
+
+"Must be updated in tandem" also overstates the old coupling in one direction and understates it in the
+other. A validator is optional — only 65 of 97 types have one — so key identity was never required.
+The real hazard runs the other way: a validator keyed to a type with NO renderer is silently DEAD,
+because `eventNarration` consults `validate` only once a `render` exists. Zero such entries exist today
+(measured), and the merged shape makes such an entry visible rather than impossible — so the guard is
+what actually closes it.
+
+The table keeps the name `NARR` rather than becoming `NARRATION`, so the comments that name it
+("Promoting a type into the feed = giving it a NARR entry above") stay literally true instead of being
+reworded around a rename. The only comment edited is `eventNarration`'s own prototype-key note, which
+named `NARR_VALID`; the merge collapses its two own-property reads into one, since both halves now hang
+off the same entry. `EventRow`'s `!NARR[e.type]` raw-bracket read is preserved character-for-character:
+entries are objects rather than functions but are equally truthy, and that read is deliberately NOT
+own-property guarded.
+
+Behaviour was verified differentially against `HEAD:ui/src/Dock.jsx` (a scratch copy with `export`
+prefixes added and nothing else changed) loaded alongside the new module: **144,125 comparisons over
+108 event types** — the 97 narrated types plus forward-compat and prototype-key hostile spellings
+(`constructor`, `toString`, `__proto__`, `hasOwnProperty`, `''`) — covering `eventNarration` over
+seeded-random payloads drawn from the field names harvested from the renderers themselves, four
+envelope shapes each (including a truncated `_log_page`), every validator called directly, `kindOf`,
+`isCuratedType`, `!NARR[type]`, and the four kind tables. Zero differences. The harness was proven
+non-vacuous by injecting a one-character mutation into `node_evaluated`'s renderer (`→` to `->`),
+which it reported immediately. The one intended difference is declaration ORDER: `NARR_VALID` declared
+the three watchdog validators near its top while `NARR` declares those renderers near its bottom, and
+the merged table follows `NARR`'s order — the validator SET is identical.
+
+The guard is `ui/test/narrationModel.test.js` (6 tests). It drives the model rather than reading it:
+every entry must carry a callable `render` — argued by ADDING a `{validate}`-only entry at runtime and
+showing `eventNarration` ignores it, which is the dead-validator case written down as an executable
+fact; every one of the 65 validators must reject `{}` AND its type must then fall back to the generic
+line (the second assertion is what proves `validate` is wired into `eventNarration` at all, the first
+is what stops it going vacuous if a validator ever turns permissive); no renderer may be reached with a
+non-object payload; the kind tables must cover EXACTLY the narrated types in both directions, with no
+type claimed by two groups and no orphan glyph override; the allow-list is the table itself, prototype
+keys included. The Dock↔model edge is read from vite's resolved module graph, not from the text, so a
+commented-out import cannot satisfy it. Only the "a second copy must not come back" assertions are
+substrings, which is what the repo reserves negative pins for.
+
+Each guard was proven to bite by mutating the tree and watching WHICH assertion fired: deleting the
+`if (render && entry.validate && !entry.validate(data))` block failed test 2 at line 62 (the fallback
+assertion) while line 60 stayed green, exactly as intended; adding a narrated `brand_new_event` with no
+`GROUPS` membership failed test 4 on "a narrated event type has no kind group"; adding a
+`half_entry: { validate }` with no renderer failed test 1 on "half_entry must carry a callable render";
+and replacing Dock's `import … from './narration.js'` with a COMMENT carrying the same text failed test
+6 on the module-graph edge, listing Dock's twelve remaining imports.
+
+Two tests moved with the contract: `dockNarration.test.js` now loads `/src/narration.js`, and
+`timelineSemantics.test.js`'s two source pins (the `isCuratedType` definition and the omission-notice
+literal) were re-pointed at `narration.js`, with the Dock-side inline omission receipt pinned separately
+so both halves of that property stay covered. Suite: 690 tests, 688 pass, 2 fail. Both failures are
+pre-existing and unrelated — `dockNarration.test.js:70` (an `asha_verdict` row with no `status`, which
+its own validator rejects) and `settingsSchemaResource.test.js:16` (162 !== 158) fail identically on a
+`git archive HEAD` copy of the tree, which scores 684 tests / 682 pass / 2 fail.
+
 #### UI-09 · MEDIUM · under-decomposition · effort: large
 
 **useRunState: one 330-line useEffect interleaving three connection state machines; Inspector.Trace is a ~510-line function**
