@@ -28,6 +28,7 @@ import { shareActionBlock, shareActionFailure, shareSnapshotAudience } from './a
 import {
   sessionDeleteBlock, sessionDeleteFailure, sessionReadSuperseded,
 } from './assistantSessionModel.js'
+import { foldControl, newChatGate } from './assistantChromeModel.js'
 import {
   assistantRecoveryFailure, assistantRecoveryPayload, assistantReplyCompletesTurn, assistantTurnIndex,
   danglingAssistantTurn,
@@ -3751,6 +3752,24 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     onClick={() => fileRef.current?.click()}>
     <OpIcon name="clip" size={14} /></button>
 
+  // ── chrome the side and full views SHARE ──
+  // Doc 25 UI-05. Both layouts offer "new chat" and "fold to the bar"; the full view offers the fold
+  // twice. Each copy used to carry its own gate and its own explanation ladder, so the two halves of
+  // one decision could drift apart in one view and not the other. `assistantChromeModel.js` returns
+  // them together; only the per-position wording stays an argument, because "collapse to the bar" and
+  // "fold back to the bar" are different sentences about different places on screen.
+  const newChatButton = (cls, label, idleTitle) => {
+    const gate = newChatGate({ turnStarting, retryChecking, directConfirm }, idleTitle)
+    return <button className={cls} aria-label="Start a new Assistant chat"
+      title={gate.title} disabled={gate.disabled} onClick={newChat}>{label}</button>
+  }
+  const foldToBarButton = (cls, idleTitle) => {
+    const fold = foldControl(directConfirm, idleTitle)
+    return <button className={cls} title={fold.title}
+      onClick={fold.action === 'cancel' ? cancelDirectConfirmation : collapseToBar}>
+      {fold.label}</button>
+  }
+
   // mode selector row — placed BELOW the input in the side + full composers.
   const modeRow = <div className="asst-moderow">
     <div className="asst-modes">
@@ -3977,20 +3996,18 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     arm()
     return () => { cancelled = true; if (timer != null) window.clearTimeout(timer) }
   }, [sid, shareCopy, clearShareCopy, setShareUnknown, refreshSessions])
-  return <>
-    {hiddenFileInput}
-    <output className="sr-only" aria-live="polite" aria-atomic="true">
-      {sessionOpening ? view === 'bar' ? 'Opening Assistant chat.' : ''
-        : retryChecking ? 'Checking saved Assistant turn.'
-          : turnStarting ? 'Starting Assistant response.'
-            : busy ? 'Assistant is responding.' : replyAnnouncement}
-    </output>
-    <div id="assistant-share-status" className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-      {shareStatusMessage}
-    </div>
+  // ── the three layouts ──
+  // Doc 25 UI-05. One conversation, three views (see the header note). Each is named here so the
+  // component's `return` shows the SHAPE of the surface instead of 350 lines of one view's chrome
+  // interleaved with another's. They stay render functions rather than sibling components on purpose,
+  // measured on 2026-08-05: between them they read 136 distinct names off this closure (80 / 42 / 83,
+  // with only 18 common to all three). A props bundle that size has no registry guard, and a missing
+  // prop arrives as `undefined` — which for `disabled={shareBusy || …}` silently ENABLES a mutation
+  // gate rather than failing. The decisions actually worth sharing were lifted into
+  // `assistantChromeModel.js` instead, where they can be stated and driven.
 
-    {/* ── bottom bar — ONLY in bar view (moves into the side panel otherwise) ── */}
-    {view === 'bar' && <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (sessionOpening || retryChecking || turnStarting || busy || commandBusy || forkingCurrentSession ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
+  // ── bottom bar — ONLY in bar view (moves into the side panel otherwise) ──
+  const barView = () => <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (sessionOpening || retryChecking || turnStarting || busy || commandBusy || forkingCurrentSession ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
       <button className="cmdbar-ic" aria-label="Open full Assistant" title="open the full assistant" onClick={openFull}>✦</button>
       {launchRecoveryButton}
       <button type="button" className={`cmdbar-mode mode-${mode}`}
@@ -4133,12 +4150,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       <button className="cmdbar-drawer-btn" aria-label="Open Assistant in side view"
         title="open chat on the right (side view)" onClick={openSide}><OpIcon name="chat" size={13} /></button>
       {visibleToast && <div className="cmdbar-toast" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
-    </div></div>}
+    </div></div>
 
-    {/* ── right side panel (resizable) — the composer lives INSIDE it; no bottom bar while open ── */}
-    {view === 'side' && compactAssistant && <div className="asst-side-backdrop" aria-hidden="true"
+  // ── right side panel (resizable) — the composer lives INSIDE it; no bottom bar while open ──
+  const sideView = () => <>
+    {compactAssistant && <div className="asst-side-backdrop" aria-hidden="true"
       onPointerDown={collapseToBar} />}
-    {view === 'side' && <aside ref={sideDialogRef} className="asst-side-panel" aria-label="Assistant"
+    <aside ref={sideDialogRef} className="asst-side-panel" aria-label="Assistant"
       role={compactAssistant ? 'dialog' : undefined} aria-modal={compactAssistant ? 'true' : undefined}
       aria-hidden={deleteConfirm ? 'true' : undefined} inert={deleteConfirm ? '' : undefined}
       tabIndex={compactAssistant ? -1 : undefined} style={{ width: sideW }}>
@@ -4161,40 +4179,27 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         <span className="spacer" style={{ flex: 1 }} />
         {compactAssistant && attentionIndicator.active && <AttentionLauncher
           indicator={attentionIndicator} embedded onClick={openAttentionCenter} />}
-        <button className="btn sm ghost" aria-label="Start a new Assistant chat"
-          title={turnStarting ? 'Wait for the new Assistant chat to finish starting'
-            : retryChecking ? 'Wait for the saved turn check to finish'
-              : directConfirm ? 'Resolve the run-command confirmation first' : 'new chat'}
-          disabled={turnStarting || retryChecking || !!directConfirm} onClick={newChat}>＋ Chat</button>
+        {newChatButton('btn sm ghost', '＋ Chat', 'new chat')}
         <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
-        <button className="btn sm ghost"
-          title={directConfirm ? 'Cancel the run-command confirmation and keep the draft' : 'collapse to the bar'}
-          onClick={directConfirm ? cancelDirectConfirmation : collapseToBar}>
-          {directConfirm ? 'Cancel command' : '▾ bar'}</button>
+        {foldToBarButton('btn sm ghost', 'collapse to the bar')}
       </div>
       <div className="asst-drawer-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
         aria-live="off" aria-busy={busy} tabIndex={0}
         onScroll={onFeedScroll}>{renderThread()}</div>
       {composer('Message the assistant…  (/ for commands · Enter to send)')}
       {visibleToast && <div className="cmdbar-toast side" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
-    </aside>}
+    </aside>
+  </>
 
-    {/* ── full page — dedicated OPAQUE view (sessions · thread · composer) ── */}
-    {view === 'full' && <div ref={fullDialogRef} className="asst-view asst-full" role="dialog"
+  // ── full page — dedicated OPAQUE view (sessions · thread · composer) ──
+  const fullView = () => <div ref={fullDialogRef} className="asst-view asst-full" role="dialog"
       aria-modal="true" aria-label="Assistant" aria-hidden={deleteConfirm ? 'true' : undefined}
       inert={deleteConfirm ? '' : undefined} tabIndex={-1}>
       <div className="asst-side">
         <div className="asst-side-h">
-          <button className="btn sm"
-            title={directConfirm ? 'Cancel the run-command confirmation and keep the draft' : 'fold back to the bar'}
-            onClick={directConfirm ? cancelDirectConfirmation : collapseToBar}>
-            {directConfirm ? 'Cancel command' : '▾ bar'}</button>
+          {foldToBarButton('btn sm', 'fold back to the bar')}
           <span className="ttl" style={{ flex: 1 }}>Assistant</span>
-          <button className="btn sm primary" aria-label="Start a new Assistant chat"
-            title={turnStarting ? 'Wait for the new Assistant chat to finish starting'
-              : retryChecking ? 'Wait for the saved turn check to finish'
-                : directConfirm ? 'Resolve the run-command confirmation first' : undefined}
-            disabled={turnStarting || retryChecking || !!directConfirm} onClick={newChat}>+ Chat</button>
+          {newChatButton('btn sm primary', '+ Chat', undefined)}
         </div>
         <div ref={sessionsRef} className="asst-sessions"
           aria-busy={sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}>
@@ -4319,10 +4324,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               onClick={revokeCurrentShares}>{shareBusySid === sid ? 'working…'
                 : `⤫ ${shareUnknown ? 'revoke pending' : 'unshare'}`}</button>}
           <button className="btn sm ghost" title="dock to the right" onClick={openSide}>▧ side</button>
-          <button className="btn sm ghost"
-            title={directConfirm ? 'Cancel the run-command confirmation and keep the draft' : 'fold to the bar'}
-            onClick={directConfirm ? cancelDirectConfirmation : collapseToBar}>
-            {directConfirm ? 'Cancel command' : '▾ bar'}</button>
+          {foldToBarButton('btn sm ghost', 'fold to the bar')}
         </div>
         {shareCopy && <div className="copy-link-fallback" role="status">
           <label htmlFor={`assistant-share-fallback-${sid}`}>
@@ -4341,8 +4343,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {composer('Message the assistant…  (/ for commands · Enter to send)')}
         {visibleToast && <div className="cmdbar-toast side" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
       </div>
-    </div>}
-    {deleteConfirm && <div className="overlay assistant-delete-overlay"
+    </div>
+
+  const deleteConfirmDialog = () => <div className="overlay assistant-delete-overlay"
       onPointerDown={event => {
         if (!deleteConfirmBusy && event.target === event.currentTarget) closeDeleteConfirm()
       }}>
@@ -4373,6 +4376,23 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           </div>
         </div>
       </section>
-    </div>}
+    </div>
+
+  return <>
+    {hiddenFileInput}
+    <output className="sr-only" aria-live="polite" aria-atomic="true">
+      {sessionOpening ? view === 'bar' ? 'Opening Assistant chat.' : ''
+        : retryChecking ? 'Checking saved Assistant turn.'
+          : turnStarting ? 'Starting Assistant response.'
+            : busy ? 'Assistant is responding.' : replyAnnouncement}
+    </output>
+    <div id="assistant-share-status" className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+      {shareStatusMessage}
+    </div>
+
+    {view === 'bar' && barView()}
+    {view === 'side' && sideView()}
+    {view === 'full' && fullView()}
+    {deleteConfirm && deleteConfirmDialog()}
   </>
 }

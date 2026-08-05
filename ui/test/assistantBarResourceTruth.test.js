@@ -1,10 +1,34 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import { createServer } from 'vite'
 import { sessionReadSuperseded } from '../src/assistantSessionModel.js'
+import { newChatGate } from '../src/assistantChromeModel.js'
 
 const assistantSource = () => readFile(new URL('../src/AssistantBar.jsx', import.meta.url), 'utf8')
 const section = (source, start, end) => source.slice(source.indexOf(start), source.indexOf(end))
+
+// Every other assertion in this file reads AssistantBar.jsx as TEXT. That was the whole of its
+// coverage, and text cannot see whether the file is still valid JSX: during doc 25 UI-05 the three
+// view layouts were lifted into named render functions, one fragment lost a closing brace, and all
+// 767 tests stayed green against a tree that `vite build` refused outright. Nothing else in the suite
+// loads this module, so nothing else would have caught it. Parsing is cheap; a real mount is not
+// (AssistantBar reaches storage, timers and ~20 API calls at first render), so this guards the
+// property the near-miss actually violated — the module compiles and its import graph resolves.
+test('AssistantBar is still a module that compiles', async () => {
+  const vite = await createServer({
+    root: fileURLToPath(new URL('..', import.meta.url)),
+    configFile: false, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
+  })
+  try {
+    const module = await vite.ssrLoadModule('/src/AssistantBar.jsx')
+    assert.equal(typeof module.default, 'function')
+    assert.equal(module.default.name, 'AssistantBar')
+  } finally {
+    await vite.close()
+  }
+})
 
 test('session selection commits only a current, bounded read and preserves the prior transcript on failure', async () => {
   const source = await assistantSource()
@@ -84,11 +108,21 @@ test('session creation and send are single-flight while a failed create preserve
     'the shared Send surface must gate both mutation preflights synchronously')
   // Additional guards may be added (a pending run-command confirmation now blocks it too); these
   // two must never be dropped, because either one means an unsent first turn would be orphaned.
-  for (const match of source.matchAll(/disabled=\{([^}]*)\} onClick=\{newChat\}/g)) {
-    assert.match(match[1], /turnStarting/, 'a first-turn session create must not be orphaned')
-    assert.match(match[1], /retryChecking/, 'a saved-turn check must not be orphaned either')
-  }
-  assert.ok([...source.matchAll(/onClick=\{newChat\}/g)].length >= 2, 'both new-chat buttons')
+  // Doc 25 UI-05: the gate was written out once per view, so this used to loop over the copies. It is
+  // ONE decision now (`assistantChromeModel.js::newChatGate`), driven rather than pattern-matched —
+  // and looping over copies that no longer exist is how a guard test goes quietly vacuous.
+  assert.equal(newChatGate({ turnStarting: true }).disabled, true,
+    'a first-turn session create must not be orphaned')
+  assert.equal(newChatGate({ retryChecking: true }).disabled, true,
+    'a saved-turn check must not be orphaned either')
+  assert.equal(newChatGate({ directConfirm: {} }).disabled, true)
+  assert.equal(newChatGate({}, 'new chat').disabled, false)
+  // Every view must reach that decision — a fourth button written by hand is the regression.
+  assert.equal([...source.matchAll(/onClick=\{newChat\}/g)].length, 1,
+    'exactly one new-chat button element, shared by both views that offer it')
+  assert.equal([...source.matchAll(/\{newChatButton\(/g)].length, 2, 'both new-chat buttons')
+  assert.match(source, /const newChatButton = \(cls, label, idleTitle\) => \{\s*\n\s*const gate = newChatGate\(\{ turnStarting, retryChecking, directConfirm \}, idleTitle\)\s*\n\s*return <button[\s\S]{0,160}?title=\{gate\.title\} disabled=\{gate\.disabled\} onClick=\{newChat\}>/,
+    'the gate and the reason it shows must come from the same decision, not two expressions')
   assert.doesNotMatch(normalSend, /setInput\(''\)/)
   assert.match(normalSend, /clearComposer: true/)
 })
