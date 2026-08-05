@@ -207,17 +207,35 @@ def test_the_guard_admits_the_real_calibrated_pair():
 
 # ------------------------------------------------------------------ still wired to __init__
 
-def test_the_engine_calls_the_extracted_envelope_at_both_entry_points():
-    """AST, not substrings: the envelope is only load-bearing if `__init__` still reaches it, and
-    both lanes (bootstrap admission and calibrated replay) must reach the SAME one."""
-    tree = ast.parse(inspect.getsource(orchestrator))
-    called = [n.func.id for n in ast.walk(tree)
-              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+def _calls(module) -> list[str]:
+    return [n.func.id for n in ast.walk(ast.parse(inspect.getsource(module)))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+
+
+def test_both_lanes_consult_the_same_envelope():
+    """AST, not substrings: the envelope is only load-bearing if both lanes still reach it.
+
+    Re-pointed when doc 25 XP-06 moved the lane DECISION down beside the envelope: the two call
+    sites used to be in `Engine.__init__` and are now in `admit_speculation_lane`. The property is
+    unchanged and is still the one that matters — bootstrap admission and calibrated replay must
+    validate against the SAME narrow envelope, or the replay lane silently accepts a runtime the
+    bootstrap would have refused."""
+    called = _calls(speculation_gate)
     assert called.count("narrow_runtime_envelope_errors") == 2, called.count(
         "narrow_runtime_envelope_errors")
     assert called.count("guard_calibrated_role_factory") == 2
+
+
+def test_the_engine_still_reaches_the_lane_decision_exactly_once():
+    """...and the constructor's whole remaining share of it: build the record, hand it over once.
+
+    Twice would mean a second admission stamping the ten `_speculation_*` identities over the
+    first's; zero would mean the gate is not consulted at all and every construction is unadmitted.
+    """
+    called = _calls(orchestrator)
     assert called.count("CalibrationRuntime") == 1, (
         "the runtime record is built once, where the closures used to be defined")
+    assert called.count("admit_speculation_lane") == 1, called.count("admit_speculation_lane")
 
 
 def test_the_runtime_record_carries_every_local_the_closures_captured():
