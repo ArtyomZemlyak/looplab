@@ -4,7 +4,7 @@ import { deadlineGet, get, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTR
   getAuthoringOperation, putAuthoringOperation, validAuthoringName, validAuthoringTargetRootId,
   getRunArtifactContent, getRunArtifactInventory, submitCommand,
 } from './util.js'
-import { usePoll } from './hooks.js'
+import { usePoll, useScopedResource } from './hooks.js'
 import { Bars, ParallelCoords, Scatter } from './charts.jsx'
 import { hyperImportance } from './report.js'
 import Markdown, { stripMd } from './markdown.jsx'
@@ -323,57 +323,21 @@ function gpuPayload(value) {
 
 // A poll and a manual retry share one synchronous lock: interval ticks skip an active request, while
 // Retry starts immediately when idle. A failed refresh retains last-good data and marks it stale.
+// Those rules are now the shared machine's (doc 25 UI-06); what stays here is the panel dialect —
+// the normalize step that runs INSIDE the deadline so a malformed HTTP 200 fails the read, and the
+// tuple shape the panels destructure. Panels never render a server message, so no failure classifier
+// is passed and `resource.error` stays ''.
 function usePanelResource(loader, normalize = value => value, key = '', pollMs = null) {
-  const [value, setValue] = useState({ key, state: 'loading', data: null, pending: null })
-  const flight = useRef(null)
-  const startRef = useRef(null)
-  useEffect(() => {
-    let alive = true
-    const owner = {}
-    const start = (intent = 'refresh') => {
-      if (flight.current) return false
-      const timed = deadlineRequest(signal => Promise.resolve().then(() => loader(signal)).then(normalize),
-        PANEL_REQUEST_TIMEOUT_MS)
-      const request = { owner, controller: timed.controller }
-      flight.current = request
-      setValue(previous => previous.key !== key
-        ? { key, state: 'loading', data: null, pending: null }
-        : (intent === 'retry' || ['error', 'stale'].includes(previous.state))
-          ? { ...previous, pending: intent } : previous)
-      const finish = (ok, data = null) => {
-        if (flight.current !== request) return
-        flight.current = null
-        if (!alive) return
-        setValue(previous => {
-          const lastGood = previous.key === key ? previous.data : null
-          return ok ? { key, state: 'ready', data, pending: null }
-            : { key, state: lastGood == null ? 'error' : 'stale', data: lastGood, pending: null }
-        })
-      }
-      timed.promise.then(data => finish(true, data), () => finish(false))
-      return true
-    }
-    startRef.current = start
-    start('load')
-    const timer = pollMs == null ? null : setInterval(start, pollMs)
-    return () => {
-      alive = false
-      if (timer != null) clearInterval(timer)
-      if (startRef.current === start) startRef.current = null
-      if (flight.current?.owner === owner) {
-        flight.current.controller.abort()
-        flight.current = null
-      }
-    }
-  }, [key, pollMs])
-  const resource = value.key === key ? value : { key, state: 'loading', data: null, pending: null }
-  return [resource, () => startRef.current?.('retry') || false]
+  const resource = useScopedResource(
+    signal => Promise.resolve().then(() => loader(signal)).then(normalize),
+    { scope: key, timeout: PANEL_REQUEST_TIMEOUT_MS, pollMs })
+  return [resource, () => Boolean(resource.retry())]
 }
 
 function PanelResourceNotice({ resource, label, onRetry }) {
-  if (resource.state === 'ready') return null
-  if (resource.state === 'loading') return <div className="muted" role="status">Loading {label}…</div>
-  const stale = resource.state === 'stale'
+  if (resource.status === 'ready') return null
+  if (resource.status === 'loading') return <div className="muted" role="status">Loading {label}…</div>
+  const stale = resource.status === 'stale'
   return <div className={'report-inline-state' + (stale ? '' : ' error')} role={stale ? 'status' : 'alert'}>
     <OpIcon name="alert" size={14} />
     <span>{label}: {resource.pending
@@ -512,16 +476,18 @@ function TrustState({ value, action = null }) {
 }
 
 export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly = false }) {
-  const [configResource, setConfigResource] = useState({ status: 'loading', data: null, error: null })
-  const [configNonce, setConfigNonce] = useState(0)
-  useEffect(() => {
-    let alive = true
-    setConfigResource({ status: 'loading', data: null, error: null })
-    get(runApiPath(runId, '/config'))
-      .then(data => { if (alive) setConfigResource({ status: 'ready', data, error: null }) })
-      .catch(error => { if (alive) setConfigResource({ status: 'error', data: null, error: error.message || 'Request failed' }) })
-    return () => { alive = false }
-  }, [runId, configNonce])
+  // Trust coverage is only verifiable against the detector config, so this panel DOES render the
+  // failure message — hence its own classifier. It bounds the read at the panel deadline like every
+  // sibling panel: before doc 25 UI-06 this was the one config read with no deadline at all, and a
+  // hung /config left "Loading detector configuration" on screen forever with no way to retry.
+  const configResource = useScopedResource(signal => get(runApiPath(runId, '/config'), { signal }), {
+    scope: runId, timeout: PANEL_REQUEST_TIMEOUT_MS,
+    classifyFailure: ({ error }) => ({ error: error?.message || 'Request failed' }),
+  })
+  // An in-flight read is what the operator is waiting on whether it started as the first load or as
+  // a retry, and a retry here always starts from `error` (the Retry control only exists there), so
+  // there is never last-good config to keep: both read as "loading", exactly as before.
+  const configLoading = configResource.status === 'loading' || !!configResource.pending
   const cfg = configResource.data
   const quarantine = async (id) => {   // U6: act on a flagged node — remove it from the search
     await submitCommand(CONTROL.nodeAbort(runId, id, state.nodes?.[id]?.attempt), {
@@ -541,14 +507,14 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
   return (
     <Panel title="Trust & rigor" sub="evidence and coverage" onClose={onClose} wide>
       <div className="trust-panel-body">
-      {configResource.status === 'loading' && <TrustState value={{ tone: 'loading', label: 'Loading detector configuration', detail: 'Checking which trust controls were actually enabled for this run.' }} />}
-      {configResource.status === 'error' && <TrustState
+      {configLoading && <TrustState value={{ tone: 'loading', label: 'Loading detector configuration', detail: 'Checking which trust controls were actually enabled for this run.' }} />}
+      {configResource.status === 'error' && !configLoading && <TrustState
         value={{ tone: 'unknown', label: 'Detector configuration unavailable', detail: `Coverage cannot be verified: ${configResource.error}` }}
-        action={<button className="btn sm" onClick={() => setConfigNonce(n => n + 1)}>Retry</button>} />}
+        action={<button className="btn sm" onClick={() => configResource.retry()}>Retry</button>} />}
 
       <div className="cardgrid">
-        <Stat n={cfg?.trust_mode || (configResource.status === 'loading' ? 'Loading…' : 'Unknown')} l="sandbox tier" />
-        <Stat n={cfg?.eval_trust_mode || (configResource.status === 'loading' ? 'Loading…' : 'Unknown')} l="eval trust mode" />
+        <Stat n={cfg?.trust_mode || (configLoading ? 'Loading…' : 'Unknown')} l="sandbox tier" />
+        <Stat n={cfg?.eval_trust_mode || (configLoading ? 'Loading…' : 'Unknown')} l="eval trust mode" />
         <Stat n={state.host_grading ? 'host-side' : 'self-reported'} l="metric scoring" />
         <Stat n={state.workspace_changed ? 'changed' : 'no change flag'} l="workspace drift" />
       </div>
@@ -856,7 +822,7 @@ export function AuthoringPanel({
     }
   }, [])
   useEffect(() => {
-    if (source.state !== 'ready') {
+    if (source.status !== 'ready') {
       setReconciledSource(null)
       return
     }
@@ -973,9 +939,9 @@ export function AuthoringPanel({
       setReconciledSource(current => current?.kind === kind && current?.data === source.data
         ? current : { kind, data: source.data })
     }
-  }, [kind, source.state, source.data, uncertainSaves])
+  }, [kind, source.status, source.data, uncertainSaves])
   const selected = selectedScope ? documents[selectedScope] || null : null
-  const sourceReconciled = source.state === 'ready'
+  const sourceReconciled = source.status === 'ready'
     && reconciledSource?.kind === kind && reconciledSource?.data === source.data
   const selectedSourceReconciled = sourceReconciled && selected?.kind === kind
   const selectedUncertainSave = selectedScope ? uncertainSaves[selectedScope] || null : null
@@ -1635,8 +1601,8 @@ export function AuthoringPanel({
       <div className="toolbar" style={{ marginBottom: 10 }}>
         {['prompts', 'skills', 'knowledge'].map(k => <button key={k} className={'btn sm' + (k === kind ? ' primary' : '')}
           onClick={() => chooseKind(k)}>{k}{dirtyByKind(k) ? ` (${dirtyByKind(k)} unsaved)` : ''}</button>)}
-        {source.state === 'ready' && <span className="muted">{data.dir || `no ${kind} dir configured (set LOOPLAB_${kind.toUpperCase()}_DIR)`}</span>}
-        {source.state === 'ready' && data.truncatedFiles > 0
+        {source.status === 'ready' && <span className="muted">{data.dir || `no ${kind} dir configured (set LOOPLAB_${kind.toUpperCase()}_DIR)`}</span>}
+        {source.status === 'ready' && data.truncatedFiles > 0
           && <span className="muted">{data.truncatedFiles} more file{data.truncatedFiles === 1 ? '' : 's'} omitted</span>}
       </div>
       <PanelResourceNotice resource={source} label={`${kind} files`} onRetry={retry} />
@@ -1693,7 +1659,7 @@ export function AuthoringPanel({
             onClick={() => chooseFile(f)}>{f.name}
             {documents[scopeFor(kind, f.name)]?.draftText !== documents[scopeFor(kind, f.name)]?.savedText
               ? ' • unsaved' : ''}{uncertainSaves[scopeFor(kind, f.name)] ? ' • recovery' : ''}</button>)}
-          {source.state === 'ready' && fileRows.length === 0 && <div className="muted">no files</div>}
+          {source.status === 'ready' && fileRows.length === 0 && <div className="muted">no files</div>}
         </div>
         <div className="authoring-editor">
           {selected ? <>
@@ -1725,7 +1691,7 @@ export function AuthoringPanel({
                 || !AUTHORING_REVISION_RE.test(selected.observedRevision || '')
                 || selected.draftText === selected.savedText}>
               {saveState && !saveState.reconcile ? `Saving ${saveState.name}…` : 'Save'}</button>
-          </> : source.state === 'ready' && <div className="muted">select a file to edit</div>}
+          </> : source.status === 'ready' && <div className="muted">select a file to edit</div>}
         </div>
       </div>
     </Panel>
@@ -1805,11 +1771,11 @@ export function MemoryPanel({ onClose }) {
       </div>
       <PanelResourceNotice resource={selectedResource} label={tab === 'knowledge' ? 'Knowledge notes' : 'Cross-run memory'}
         onRetry={tab === 'knowledge' ? retryKnowledge : retryMemory} />
-      {tab !== 'knowledge' && memory.state === 'ready' && selectedReceiptIncomplete
+      {tab !== 'knowledge' && memory.status === 'ready' && selectedReceiptIncomplete
         && <MemoryCompletenessNotice resource={memory} onRetry={retryMemory} error={selectedReceipt.unavailable}>
           <b>{selectedTierLabel} data is incomplete.</b>{' '}{selectedReceiptIssues.join(' ')}
         </MemoryCompletenessNotice>}
-      {tab === 'knowledge' && knowledge.state === 'ready' && knowledgeIncomplete
+      {tab === 'knowledge' && knowledge.status === 'ready' && knowledgeIncomplete
         && <MemoryCompletenessNotice resource={knowledge} onRetry={retryKnowledge}>
           <b>Knowledge notes are incomplete.</b>{' '}
           {kb.truncatedFiles > 0 && `${kb.truncatedFiles} Markdown ${kb.truncatedFiles === 1 ? 'entry was' : 'entries were'} not returned. `}
@@ -1846,7 +1812,7 @@ export function MemoryPanel({ onClose }) {
                 {l.task_id && <span className="muted" style={{ fontSize: 11 }}>· {l.task_id}</span>}
               </div>
             </div>)
-          : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.lessons,
+          : memory.status === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.lessons,
             `${lessonRole === 'all' ? '' : lessonRole + ' '}lessons`,
             lessonRole !== 'all' && mem.lessons.length > 0
               ? `No ${lessonRole} lessons match the loaded lessons.`
@@ -1857,18 +1823,18 @@ export function MemoryPanel({ onClose }) {
           {mem.cases.map((c, i) => <tr key={i}><td>{c.task_id}</td><td className="muted">{c.goal}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}
             {c.params_truncated && <span title="Only a bounded parameter projection was returned"
               aria-label="parameters truncated"> · partial</span>}</td></tr>)}</tbody></table></DataTable>
-        : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.cases,
+        : memory.status === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.cases,
           'cases', 'No cases stored.')}</div>)}
       {tab === 'notes' && ((mem.notes || []).length
         ? mem.notes.map((n, i) => <div key={i} className="mem-card">
             {n.task_id && <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>{n.task_id}</div>}
             <Markdown text={n.note || n.statement || JSON.stringify(n)} /></div>)
-        : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.notes,
+        : memory.status === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.notes,
           'meta-notes', 'No meta-notes yet.')}</div>)}
       {tab === 'knowledge' && (kbFiles.length
         ? <><div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>{kb.dir} — agents save + retrieve these via kb_search</div>
           {kbFiles.map((n, i) => <KbNote key={i} note={n} />)}</>
-        : knowledge.state === 'ready' && <div className="muted">{kb.dir == null
+        : knowledge.status === 'ready' && <div className="muted">{kb.dir == null
           ? 'No knowledge directory is configured.'
           : knowledgeIncomplete ? 'No knowledge notes are visible in the loaded subset.'
             : `No knowledge notes yet (${kb.dir}).`}</div>)}
@@ -1914,7 +1880,7 @@ export function RegistryPanel({ state, onClose }) {
       {runs.length > 0 && <DataTable caption="Cross-run best metric per run" card={false}><table className="tbl"><thead><tr><th>run</th><th>task</th><th>phase</th><th>best</th><th>nodes</th></tr></thead><tbody>
         {rankedRuns.map(r => <tr key={r.run_id}><td>{r.run_id}</td><td className="muted">{r.task_id}</td><td>{r.phase}</td><td>{fmt(r.best_confirmed ?? r.best_metric)}</td><td>{r.nodes}</td></tr>)}
       </tbody></table></DataTable>}
-      {resource.state === 'ready' && !runs.length && <div className="muted">No runs in the registry yet.</div>}
+      {resource.status === 'ready' && !runs.length && <div className="muted">No runs in the registry yet.</div>}
     </Panel>
   )
 }
@@ -2032,7 +1998,7 @@ export function CrossRunPanel({ state, onClose }) {
               <td className="muted">{r.direction}</td><td className="muted">{r.nodes}</td>
               <td className="muted">{r.phase || (r.finished ? 'finished' : '—')}</td></tr>)}
           </tbody></table></DataTable>
-        : resource.state === 'ready' && task
+        : resource.status === 'ready' && task
           && <div className="muted">No per-run metric observations for this task ID yet.</div>}
       {hidden > 0 && <div className="muted" style={{ marginTop: 8 }}>
         {hidden} additional observation{hidden === 1 ? '' : 's'} omitted by the client render limit.
