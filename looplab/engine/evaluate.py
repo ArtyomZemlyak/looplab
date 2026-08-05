@@ -1,11 +1,23 @@
-"""The eval task (`_evaluate` — the engine's single largest method: materialize -> eval ->
-trust scans -> inline repair loop -> ONE terminal event) — extracted from orchestrator.py as a
+"""The eval task (`_evaluate`: materialize -> eval -> trust scans -> inline repair loop -> ONE
+terminal event) — extracted from orchestrator.py as a
 MIXIN: `class Engine(EvaluateMixin, …)` inherits it unchanged, so there is ZERO call-site churn
 and `self` here IS the engine. The body is a verbatim move and reads engine attributes freely
 (~30 of them: `_write_lock`, `proxy_scorer`, `_inline_repair*`, `sandbox`, trust knobs, …); its
 helpers (`_materialize`/`_run_eval`/`_triage_crash`/`_repair`/`_safe_reuse_start`/
 `_audit_workdir_writes`/…) resolve through `self` — onto the sibling mixins or the Engine
 class itself (`_materialize`/`_write_node_files` stay in orchestrator.py).
+
+`_evaluate` was the engine's single largest method until 2026-08-05 (doc 25 ES-03), which named the
+decisions its attempt loop was making inline — the intervention watcher (`_eval_intervention_seen`
+/`_watch_for_intervention`), the trust surface and its findings (`_trust_scan_surface`
+/`_trust_scan_signals`), and the inline-repair pipeline's five verdicts (`_eval_failure_text`,
+`_repaired_footprint`, and the module-level `_repair_provider_failure`/`_repair_change_set`
+/`_repair_forces_full_retrain`). 946 -> 727 lines, the attempt loop 602 -> 420, with every append,
+fold, write-lock point and branch order left exactly where it was. What made those blocks worth
+naming is not their size: each was reachable ONLY by driving a real sandboxed evaluation that failed
+in exactly the right way, so `tests/test_evaluate_named_rules.py` is the first coverage several of
+their branches have had. The residue is genuinely a driver — the one-terminal invariant, the
+attempt loop's control flow, and the loop-local counters those rules round-trip through.
 
 `fold` is imported from its canonical home here (the orchestrator's module-global `fold` seam —
 monkeypatched by two tests — does not reach `_evaluate`: those patches gate node CREATION).
@@ -118,6 +130,123 @@ def _workdir_manifest_digest(node) -> str:
         {"attempt": node.attempt, "code": node.code,
          "files": node.files or {}, "deleted": sorted(node.deleted or [])},
         option=orjson.OPT_SORT_KEYS)).hexdigest()
+
+
+def _repair_provider_failure(node_code: str, new_code, repaired_files, repaired_deleted,
+                             unparseable_repairs: int) -> tuple[Optional[str], int]:
+    """Did the repair CALL fail at the provider, and how many not-Python answers has it given?
+
+    A pure rule with a name (doc 25 ES-03) because the property it decides has already cost a real
+    run: as ~50 lines in the middle of `_evaluate`'s attempt loop, the only way to observe any of
+    its four branches was to drive a whole sandboxed eval against a dead endpoint. It returns the
+    provider-failure message (or None) and the UPDATED unparseable counter — the counter round-trips
+    through the return value rather than being mutated in place, so a caller that forgets to carry
+    it back is a name the caller has to bind, not a silently-frozen count.
+    """
+    # DOES THE ARTIFACT LOOK LIKE THE THING IT REPLACES? Only asked when the whole-file
+    # `code` really is what this repair shipped: a repo/multi-file repair returns "" and
+    # carries its work in `files`/`deleted`, and a node whose own code is empty never had
+    # a whole-file artifact to begin with. `engine/triage.py::repair_artifact_defect`
+    # documents the two answers and why they are treated differently.
+    _artifact_defect = ""
+    if not repaired_files and not repaired_deleted and (node_code or "").strip():
+        _artifact_defect = repair_artifact_defect(new_code)
+    # A REPAIR THAT DID NOT PRODUCE A REPAIR. The Developer returns the in-band
+    # "(developer error: …)" sentinel when its OWN session failed — an unreachable
+    # endpoint, a 401, a 402 "out of credits" — so `new_code` is a provider/transport
+    # error message, not code. Nothing downstream could tell the difference: the sentinel
+    # was committed as the node's code by `node_repaired`, re-materialized into the
+    # workdir, and re-evaluated; the eval then failed with a fresh error, so the loop
+    # simply asked again. A dead OpenRouter account produced 2343 such "repairs" on ONE
+    # node at ~11/min for 3.5 h, each one a full re-eval.
+    #
+    # A provider failure is not a code defect, so it must not drive the code-repair loop.
+    # No `node_repaired`, no attempt spent, no files written — the loop breaks here and
+    # the node terminalizes ONCE below with reason="developer_crash" naming the provider
+    # failure, and the run-level circuit breaker fires. (Deliberately NOT committing the
+    # sentinel as node.code also keeps the recovery sweep's `_developer_sentinel` scan,
+    # which keys on exactly that, from later re-terminalizing this node.)
+    #
+    # `is_developer_error` recognises exactly ONE shape of this, LoopLab's own sentinel,
+    # produced by `adapters/repo_developer.py` alone. Two more shapes reach here:
+    #   * a repair that RAISED — normalized into the sentinel at the call above, so it
+    #     arrives here already wearing the shape this branch understands;
+    #   * a repair that answered with PROSE. When the prose PARSES — a comment-only or
+    #     docstring-only answer — the eval exits 0 with no metric, and the node used to
+    #     terminalize as `no_metric`, telling the operator "the command printed no metric"
+    #     about a provider that is dead, with no pause. `"no_code"` is the engine's own
+    #     proof of the same fact the sentinel asserts: an artifact whose module body can
+    #     never execute cannot be a repair, whoever wrote it.
+    #
+    # The remaining answer, `"unparseable"`, keeps today's behaviour of committing the
+    # artifact and letting the next eval's SyntaxError inform the next repair — which is
+    # how a TRUNCATED generation recovers, and stopping a node on one truncation would be
+    # a regression. It is counted DIRECTLY (not inferred from the error text, which can
+    # carry a varying provider request id and so looks new every time) and becomes the
+    # provider verdict once a repair call has answered with something that is not Python
+    # `_UNPARSEABLE_REPAIR_LIMIT` times on one node.
+    if _artifact_defect == "unparseable":
+        unparseable_repairs += 1
+    _dev_err = None
+    if is_developer_error(new_code):
+        _dev_err = str(new_code)[:400]
+    elif _artifact_defect == "no_code":
+        _dev_err = ("the repair returned no executable code, only text: "
+                    + " ".join(str(new_code).split())[:200])
+    elif unparseable_repairs >= _UNPARSEABLE_REPAIR_LIMIT:
+        _dev_err = (f"the repair has now returned something that is not valid Python "
+                    f"{unparseable_repairs}x — the last one began: "
+                    + " ".join(str(new_code).split())[:160])
+    return _dev_err, unparseable_repairs
+
+
+def _repair_change_set(prev_files, prev_deleted, repaired_files,
+                       repaired_deleted) -> tuple[set, list]:
+    """THIS repair's real change set: files whose content moved, plus its own deletions.
+
+    Named (doc 25 ES-03) because both halves are DELTAS against the pre-repair node and the reason
+    is not visible from the expression — a cumulative read of either silently disables checkpoint
+    reuse for the rest of the node's life, which is a cost regression no test of the repair loop's
+    outcome would notice.
+    """
+    # The repair's REAL change set = files whose content actually differs from the pre-repair
+    # node (last_files is cumulative — see prev_files above), plus THIS repair's deletions.
+    changed = {f for f, c in repaired_files.items() if prev_files.get(f) != c}
+    # Deletions likewise get the delta, not the cumulative set: a deletion that predates
+    # the completed train stage cannot invalidate its checkpoint — the stage already ran
+    # (and passed) without that file on disk. Blocking on the cumulative `repaired_deleted`
+    # (seeded from node.deleted at repair_from) would permanently disable stage reuse for
+    # any node whose implement ever deleted a file; only THIS repair's deletions can
+    # invalidate the checkpoint, so only they enter the reuse decision.
+    new_deleted = [d for d in repaired_deleted if d not in prev_deleted]
+    changed |= set(new_deleted)
+    return changed, new_deleted
+
+
+def _repair_forces_full_retrain(res, next_start) -> bool:
+    """Does this repair discard completed EARLIER-stage work, i.e. does it count against the cap?
+
+    Three conditions with one meaning, which is why they are a named rule (doc 25 ES-03) rather
+    than a compound `if` carrying fifteen lines of comment in the middle of the attempt loop.
+    """
+    # Count a full re-train against the cap ONLY when completed EARLIER-stage work is being
+    # discarded: a LATER stage failed yet reuse was refused because the repair could
+    # have changed an earlier stage. A first-stage failure (nothing to reuse) or a single-
+    # command eval is an ordinary retry, bounded by the attempt budget like any other — NOT the
+    # retrain cap (mirrors config.py: "only a repair that changes an EARLIER stage's code
+    # forces a full re-train ... counted"). The CALLER checks this BEFORE incrementing so cap=N
+    # runs exactly N.
+    # First-vs-later is judged from the PRE-repair `res.stages` (one record per stage that
+    # ran, in order, the failed stage always LAST) — never from the failed stage's index in
+    # the POST-repair `_stages`: a repair that renames/drops the failed stage (or a
+    # _resolved_stages exception fallback to []) loses that index (-1) for FIRST- and
+    # LATER-stage failures alike. A renamed LATER stage still discards completed
+    # earlier-stage work on the forced full re-run, so it keeps consuming the cap (the
+    # point of counting the renamed case at all — leaving it uncounted let a
+    # stage-renaming repair burn unlimited full trains); a renamed FIRST stage never had
+    # earlier work to discard, so it must stay an ordinary retry.
+    was_first = len(res.stages or []) <= 1
+    return bool(res.failed_stage) and not was_first and next_start is None
 
 
 class SpeculativeEvaluationInvariantError(AssertionError):
@@ -279,6 +408,242 @@ class EvaluateMixin:
             sigs += critic_findings(node.idea, scan_src,
                                     submission_file=self._graded_output_name())
         return sigs
+
+    def _trust_scan_surface(self, node) -> str:
+        """The exact bytes every trust detector reads for one node — and the bytes `code_digest`
+        commits to. A rule with a name because the two are the SAME string by construction: a
+        caller that re-derived the surface for the digest could hash something the scans never saw.
+        """
+        # Scan the WHOLE solution surface, not just solution.py — a patch-gated multi-file
+        # agent can hide answer-key access / leakage / the real computation in an in-surface
+        # helper module that solution.py imports. Concatenate node.files so the reward-hack /
+        # leakage / critic scans cover the imported code too (not only the clean entrypoint).
+        return node.code + "".join(
+            f"\n\n# --- {fn} ---\n{src}" for fn, src in (node.files or {}).items()
+            if str(fn).replace("\\", "/").lower() != "solution.py")
+
+    def _trust_scan_signals(self, node, res, state, workdir, scan_src: str) -> list[dict]:
+        """Every trust finding for one evaluated node, in the order the union event carries them.
+
+        The reward-hack half (detectors + the hardened exploit suite + the workdir write audit)
+        followed by `_trust_gate_signals`' leakage/critic half. Extracted from `_evaluate` (doc 25
+        ES-03) for the reason its sibling was: as ~45 inline lines inside the terminal's
+        `_write_lock` block, the only way to observe that any of it ran was to drive a whole run.
+
+        ORDER IS PART OF THE CONTRACT — the reward-hack signals concatenate AHEAD of the gate
+        signals, and one `reward_hack_suspected` carries the union, so a reader of the stored
+        evidence sees the same sequence it always did.
+
+        Returns the findings; it does NOT append. The caller owns the event, because the payload
+        also binds the schema version and the digest of `scan_src` (see the call site).
+        """
+        sigs: list[dict] = []
+        if self.reward_hack_detect:
+            from looplab.trust.reward_hack import detect_reward_hacks
+            protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
+            # The grader-IMPORT waiver keys on the task genuinely MATERIALIZING
+            # grader.py (an ASSET → calling `grader.score(...)` is the documented
+            # grading contract, e.g. the in-workdir mlebench brief). Pass it explicitly
+            # instead of letting the detector infer it from `protected`: that union also
+            # carries the operator's protect list, and a merely-PROTECTED grader.py
+            # (protect=["grader.py"], no asset) means "hands off", not "import me" —
+            # inference from the union would wrongly waive the import tells for it.
+            sigs += detect_reward_hacks(
+                scan_src, res.metric, state.direction,
+                protected_names=protected, stdout=res.stdout,
+                # Match the asset key NORMALIZED (path separators + case), exactly like
+                # the detector normalizes `protected_names` — the inference this call
+                # replaced got that normalization for free, so 'Grader.py' or a
+                # backslashed key must keep sanctioning the import here too.
+                grader_import_ok=any(str(a).replace("\\", "/").lower() == "grader.py"
+                                     for a in (self._assets or ())))
+            # 4.3: also apply the hardened exploit ruleset grown by `looplab harden`
+            # (hacker-fixer-solver) — each previously-discovered exploit stays guarded.
+            if self._exploit_suite is not None:
+                sigs += self._exploit_suite.scan(scan_src)
+            # 4.4 sandbox instrumentation (RewardHackingAgents recipe): flag RUNTIME
+            # writes to protected/frozen files — behavioral evidence a static scan of the
+            # code can miss (a write via a helper, os.system, a template). Compares the
+            # workdir against the assets/protected set the engine placed there.
+            if self._workdir_audit:
+                sigs += self._audit_workdir_writes(workdir, protected)
+        # …and the leakage + critic gates, which are a NAMED rule (`_trust_gate_signals`)
+        # rather than two more `sigs +=` lines: as inline concatenations, silencing them
+        # was invisible to every trust test that does not drive a whole run. See that
+        # method's docstring.
+        sigs += self._trust_gate_signals(node, scan_src)
+        return sigs
+
+    def _eval_intervention_seen(self, node_id: int, generation: int, start_seq: int,
+                                card_id) -> str | None:
+        """The ONE post-start intervention this eval's watcher has seen, or None.
+
+        A method rather than a closure inside `_evaluate` (doc 25 ES-03): it needs only the
+        lifecycle it is watching, and as a closure it was 58 lines in the middle of the attempt
+        loop where nothing could call it directly. `card_id` is passed in rather than read off
+        `node` because the caller holds the node — within one attempt `node` is not rebound until
+        after the task group closes, so reading it once up front is the same value the closure saw.
+
+        Runs in a worker THREAD (`_watch_for_intervention`'s tick), so it only reads.
+        """
+        intervention = None
+        current_events = self.store.read_all()
+        operator_drop_ids: list[str] = []
+        for e in current_events:
+            if e.seq <= start_seq:
+                continue
+            if e.type == EV_CARD_DROPPED:
+                # Only the explicit operator stop affordance is an active cancel.
+                # Engine/freshness drops deliberately burn to terminal as evidence.
+                drop_id = e.data.get("id")
+                if (isinstance(drop_id, str) and drop_id
+                        and e.data.get("dropped_by") == "operator"):
+                    operator_drop_ids.append(drop_id)
+                continue
+            if e.data.get("node_id") != node_id:
+                continue
+            raw_generation = e.data.get("generation")
+            # Controls name the lifecycle they intend to mutate. Missing stamps are
+            # legacy generation-0 only; a stale gen-0 click must never cancel a gen-1
+            # worker merely because the numeric node id was reused after reset.
+            if raw_generation is None:
+                if generation != 0:
+                    continue
+            else:
+                if isinstance(raw_generation, bool):
+                    continue
+                try:
+                    event_generation = int(raw_generation)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if (isinstance(raw_generation, float)
+                        and not raw_generation.is_integer()):
+                    continue
+                if event_generation != generation:
+                    continue
+            if e.type == EV_NODE_RESET:
+                return "reset"
+            if e.type == EV_NODE_ABORT:
+                intervention = "abort"
+        if (intervention is None and operator_drop_ids
+                and isinstance(card_id, str) and card_id):
+            # Fold only once an explicit post-start operator drop exists AND this node
+            # actually carries a Card identity to match — a card-less worker can never
+            # be a drop target (`_card_identity_spellings` returns nothing for a missing
+            # id), so skipping the fold there is behaviour-preserving, not just cheaper.
+            # This follows merge chains added before or during the eval without making
+            # every 300 ms watcher poll replay the complete run. Any corrupt/ambiguous
+            # ownership is deliberately a no-op rather than a kill of the wrong worker.
+            try:
+                active_spellings = _card_identity_spellings(
+                    fold(current_events), card_id)
+            except Exception:  # noqa: BLE001 - active cancellation must fail closed
+                active_spellings = frozenset()
+            if any(drop_id in active_spellings for drop_id in operator_drop_ids):
+                intervention = "card_drop"
+        return intervention
+
+    async def _watch_for_intervention(self, node_id: int, generation: int, start_seq: int,
+                                      card_id, cancel, seen: dict) -> None:
+        """Poll for a mid-eval intervention and, on the first one, cancel the in-flight eval.
+
+        The verdict travels back to `_evaluate` in `seen["kind"]` rather than through `nonlocal`,
+        which is what lets this be a method at all (doc 25 ES-03). Same shape as the watchdogs'
+        `kill_signal`, and for the same reason: a sibling task in the eval's task group cannot
+        rebind the driver's locals, so the ONE thing it decides is handed over in a dict the driver
+        reads after the group closes. Writes `kind` at most once — the loop returns on the first
+        non-None verdict — so the driver never has to reconcile two.
+        """
+        while True:
+            await anyio.sleep(0.3)
+            if cancel.is_set():
+                return
+            # Its OWN limiter, never anyio's shared default. Every `run_sync` in the
+            # engine draws on that shared 40-token pool, and each in-flight eval's
+            # `_run_eval` worker holds a token for the eval's whole (often multi-hour)
+            # duration — so at `eval_parallel` near or above 40 (the config allows up
+            # to 1024; 0 = AUTO = GPU count) the evals pin every token and this tick
+            # queues BEHIND them. Operator abort/reset and both watchdog kills then go
+            # blind until an eval finishes on its own, and over-admitted evals sit on
+            # reserved GPUs while queued. A tick is a short poll, so a small dedicated
+            # pool is always immediately available for it.
+            intervention = await anyio.to_thread.run_sync(
+                self._eval_intervention_seen, node_id, generation, start_seq, card_id,
+                limiter=_watch_limiter())
+            if intervention is not None:
+                seen["kind"] = intervention
+                cancel.set()
+                return
+
+    def _eval_failure_text(self, res) -> str:
+        """The ONE description of a failed eval — the repair prompt, `node_repaired.error_in`, the
+        judge's history rows and the terminal's `error` field are all this string.
+
+        A named rule (doc 25 ES-03) because it is the engine's only account of what went wrong, and
+        both of the branches below were retrofitted after a run had already been misdiagnosed by
+        the text they replaced. As inline lines in the attempt loop neither could be exercised
+        without a real sandbox producing exactly the right stderr.
+        """
+        # A clean run (exit 0) with no parseable metric is the most confusing failure for the
+        # repair agent — the terse "no_metric" gave it nothing to fix, so the debug node just
+        # re-ran and failed again. Tell it EXACTLY what the eval reads (the configured metric
+        # key + the one line it must print), so a no-metric node can actually be repaired.
+        _ms = (self._eval_spec.get("metric") or {}) if isinstance(self._eval_spec, dict) else {}
+        _mk = _ms.get("key", "metric")
+        _no_metric_hint = (
+            f" — the command ran cleanly (exit 0) but printed NO parseable metric. The eval reads"
+            f" a stdout JSON line for key {_mk!r}; the entrypoint MUST print exactly one line like"
+            f" print(json.dumps({{{_mk!r}: <float>}})) as its last stdout."
+            if _ms.get("kind", "stdout_json") == "stdout_json"
+            else " — ran cleanly but produced no parseable metric (check the eval's metric reader).")
+        # BLANK-BUT-TRUTHY stderr takes the fallback too. `"  \n \t "` is truthy, so it used
+        # to survive this `or` and become the node's WHOLE diagnosis: the repair prompt, the
+        # `node_repaired.error_in` audit row and the terminal's `error` field were all
+        # whitespace. (It also normalized to the empty error signature, which the anti-stuck
+        # guard of the time read as an unconditional exemption — 1055 repairs in a 60 s wall
+        # with no terminal. That guard is gone, but a failure the engine cannot describe is
+        # still the worst thing to hand a judge that decides on the failure text.) Deciding on
+        # the STRIPPED text while keeping the unstripped bytes when there is content leaves
+        # every non-blank tail byte-identical.
+        _stderr_tail = self._redact(res.stderr[-500:])
+        return (_stderr_tail if _stderr_tail.strip() else "") or (
+            f"metric drift: {res.drift}" if res.drift is not None else
+            f"exit={res.exit_code} timed_out={res.timed_out} no_metric{_no_metric_hint}"
+        )
+
+    def _repaired_footprint(self, node, new_code, repaired_files, reservation):
+        """The repaired artifact's resource declaration, clamped to the devices already held.
+
+        A named rule (doc 25 ES-03): the property is a SAFETY one — a repair must never grow onto a
+        sibling's GPU — and inline it was reachable only from a repo-task repair inside a live
+        multi-GPU reservation, which no test drives. Returns None when the artifact declares
+        nothing, exactly as `developer_artifact_footprint` does.
+        """
+        repaired_footprint = developer_artifact_footprint(
+            node.idea.footprint, new_code, repaired_files)
+        if repaired_footprint is not None:
+            repaired_footprint = (
+                self._clamp_resource_footprint(repaired_footprint)
+                or repaired_footprint)
+            # A repair keeps the dispatcher's lifecycle reservation.  It may refine the
+            # declaration within those already-held devices, but cannot grow onto GPUs owned
+            # by a sibling while the retry loop is live.
+            if ((reservation or {}).get("cpu_only")
+                    and "gpus" in repaired_footprint):
+                repaired_footprint["gpus"] = 0
+            elif ((reservation or {}).get("pin")
+                  and "gpus" in repaired_footprint):
+                repaired_footprint["gpus"] = min(
+                    repaired_footprint["gpus"],
+                    int(reservation.get("count", 0) or 0))
+            held_ids = ((reservation or {}).get("gpu_ids") or [])
+            held_mem = [getattr(self, "_gpu_mem", {}).get(gpu)
+                        for gpu in held_ids]
+            held_mem = [value for value in held_mem if type(value) is int]
+            if (held_mem and isinstance(repaired_footprint.get("gpu_mem_mib"), int)):
+                repaired_footprint["gpu_mem_mib"] = min(
+                    repaired_footprint["gpu_mem_mib"], min(held_mem))
+        return repaired_footprint
 
     async def _evaluate(self, node_id: int, limiter: anyio.CapacityLimiter,
                         max_es: Optional[float] = None) -> None:
@@ -528,93 +893,18 @@ class EvaluateMixin:
                 # Event, which tree-kills the in-flight subprocess (sandbox._run_argv). The pre-eval
                 # skip only catches not-yet-started nodes — this kills a running one.
                 cancel = threading.Event()
-                aborted = False
-                superseded = False
-                operator_card_dropped = False
+                # The watcher's verdict, handed back through a dict because a sibling task in the
+                # group cannot rebind this frame's locals (see `_watch_for_intervention`). Read
+                # into `aborted`/`superseded`/`operator_card_dropped` once the group has closed;
+                # nothing inside it consults them.
+                _seen: dict = {}
                 kill_signal: dict = {}       # filled by the training monitor if it kills a broken run (Phase 3)
+                # The Card identity this worker can be dropped through, read while `node` is still
+                # the fold this attempt started from — it is not rebound until after the group.
+                _card_id = getattr(getattr(node, "idea", None), "card_id", None)
                 async with anyio.create_task_group() as _tg:
-                    def _intervention_seen() -> str | None:
-                        intervention = None
-                        card_id = getattr(getattr(node, "idea", None), "card_id", None)
-                        current_events = self.store.read_all()
-                        operator_drop_ids: list[str] = []
-                        for e in current_events:
-                            if e.seq <= start_seq:
-                                continue
-                            if e.type == EV_CARD_DROPPED:
-                                # Only the explicit operator stop affordance is an active cancel.
-                                # Engine/freshness drops deliberately burn to terminal as evidence.
-                                drop_id = e.data.get("id")
-                                if (isinstance(drop_id, str) and drop_id
-                                        and e.data.get("dropped_by") == "operator"):
-                                    operator_drop_ids.append(drop_id)
-                                continue
-                            if e.data.get("node_id") != node_id:
-                                continue
-                            raw_generation = e.data.get("generation")
-                            # Controls name the lifecycle they intend to mutate. Missing stamps are
-                            # legacy generation-0 only; a stale gen-0 click must never cancel a gen-1
-                            # worker merely because the numeric node id was reused after reset.
-                            if raw_generation is None:
-                                if generation != 0:
-                                    continue
-                            else:
-                                if isinstance(raw_generation, bool):
-                                    continue
-                                try:
-                                    event_generation = int(raw_generation)
-                                except (TypeError, ValueError, OverflowError):
-                                    continue
-                                if (isinstance(raw_generation, float)
-                                        and not raw_generation.is_integer()):
-                                    continue
-                                if event_generation != generation:
-                                    continue
-                            if e.type == EV_NODE_RESET:
-                                return "reset"
-                            if e.type == EV_NODE_ABORT:
-                                intervention = "abort"
-                        if (intervention is None and operator_drop_ids
-                                and isinstance(card_id, str) and card_id):
-                            # Fold only once an explicit post-start operator drop exists AND this node
-                            # actually carries a Card identity to match — a card-less worker can never
-                            # be a drop target (`_card_identity_spellings` returns nothing for a missing
-                            # id), so skipping the fold there is behaviour-preserving, not just cheaper.
-                            # This follows merge chains added before or during the eval without making
-                            # every 300 ms watcher poll replay the complete run. Any corrupt/ambiguous
-                            # ownership is deliberately a no-op rather than a kill of the wrong worker.
-                            try:
-                                active_spellings = _card_identity_spellings(
-                                    fold(current_events), card_id)
-                            except Exception:  # noqa: BLE001 - active cancellation must fail closed
-                                active_spellings = frozenset()
-                            if any(drop_id in active_spellings for drop_id in operator_drop_ids):
-                                intervention = "card_drop"
-                        return intervention
-                    async def _watch():
-                        nonlocal aborted, operator_card_dropped, superseded
-                        while True:
-                            await anyio.sleep(0.3)
-                            if cancel.is_set():
-                                return
-                            # Its OWN limiter, never anyio's shared default. Every `run_sync` in the
-                            # engine draws on that shared 40-token pool, and each in-flight eval's
-                            # `_run_eval` worker holds a token for the eval's whole (often multi-hour)
-                            # duration — so at `eval_parallel` near or above 40 (the config allows up
-                            # to 1024; 0 = AUTO = GPU count) the evals pin every token and this tick
-                            # queues BEHIND them. Operator abort/reset and both watchdog kills then go
-                            # blind until an eval finishes on its own, and over-admitted evals sit on
-                            # reserved GPUs while queued. A tick is a short poll, so a small dedicated
-                            # pool is always immediately available for it.
-                            intervention = await anyio.to_thread.run_sync(
-                                _intervention_seen, limiter=_watch_limiter())
-                            if intervention is not None:
-                                superseded = intervention == "reset"
-                                operator_card_dropped = intervention == "card_drop"
-                                aborted = intervention in {"abort", "card_drop"}
-                                cancel.set()
-                                return
-                    _tg.start_soon(_watch)
+                    _tg.start_soon(self._watch_for_intervention, node_id, generation, start_seq,
+                                   _card_id, cancel, _seen)
                     # Training-log monitor (ON by default in the product Settings since 2026-08-04;
                     # still off in a bare `Engine(...)`/`EngineOptions`): a sibling task that tails this eval's live
                     # training log on a timer while it runs in the worker thread, asks the Developer to
@@ -680,6 +970,13 @@ class EvaluateMixin:
                         return
                     cancel.set()                  # eval finished on its own …
                     _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
+                # Settle the watcher's ONE verdict now the group has closed. Same three questions the
+                # watcher used to answer by assigning three `nonlocal`s; asking them here keeps the
+                # branch order below (`superseded` -> `aborted` -> watchdog kill) unchanged.
+                _intervention = _seen.get("kind")
+                superseded = _intervention == "reset"
+                operator_card_dropped = _intervention == "card_drop"
+                aborted = _intervention in {"abort", "card_drop"}
                 total_eval = round(total_eval + (time.time() - _t0), 3)   # cumulative eval cost (#2)
                 # STALL SALVAGE: a stage the stall-watchdog tree-killed AFTER it had already printed its
                 # metric (a completed train+eval that only hung on teardown — a distributed finalize
@@ -725,32 +1022,9 @@ class EvaluateMixin:
                 if ok:
                     break
                 reason = _failure_reason(res)
-                # A clean run (exit 0) with no parseable metric is the most confusing failure for the
-                # repair agent — the terse "no_metric" gave it nothing to fix, so the debug node just
-                # re-ran and failed again. Tell it EXACTLY what the eval reads (the configured metric
-                # key + the one line it must print), so a no-metric node can actually be repaired.
-                _ms = (self._eval_spec.get("metric") or {}) if isinstance(self._eval_spec, dict) else {}
-                _mk = _ms.get("key", "metric")
-                _no_metric_hint = (
-                    f" — the command ran cleanly (exit 0) but printed NO parseable metric. The eval reads"
-                    f" a stdout JSON line for key {_mk!r}; the entrypoint MUST print exactly one line like"
-                    f" print(json.dumps({{{_mk!r}: <float>}})) as its last stdout."
-                    if _ms.get("kind", "stdout_json") == "stdout_json"
-                    else " — ran cleanly but produced no parseable metric (check the eval's metric reader).")
-                # BLANK-BUT-TRUTHY stderr takes the fallback too. `"  \n \t "` is truthy, so it used
-                # to survive this `or` and become the node's WHOLE diagnosis: the repair prompt, the
-                # `node_repaired.error_in` audit row and the terminal's `error` field were all
-                # whitespace. (It also normalized to the empty error signature, which the anti-stuck
-                # guard of the time read as an unconditional exemption — 1055 repairs in a 60 s wall
-                # with no terminal. That guard is gone, but a failure the engine cannot describe is
-                # still the worst thing to hand a judge that decides on the failure text.) Deciding on
-                # the STRIPPED text while keeping the unstripped bytes when there is content leaves
-                # every non-blank tail byte-identical.
-                _stderr_tail = self._redact(res.stderr[-500:])
-                err = (_stderr_tail if _stderr_tail.strip() else "") or (
-                    f"metric drift: {res.drift}" if res.drift is not None else
-                    f"exit={res.exit_code} timed_out={res.timed_out} no_metric{_no_metric_hint}"
-                )
+                # The node's whole account of what went wrong — see `_eval_failure_text`, which is
+                # where the no-metric hint and the blank-stderr fallback now live.
+                err = self._eval_failure_text(res)
                 # Environment self-prep (deps.py): a crash that is purely a missing KNOWN library is
                 # not a bad idea — install it (trusted_local only) and re-run BEFORE the crash-triage
                 # agent can reject the idea. This is what lets torch/XGBoost/CatBoost (e.g. a GRU
@@ -925,60 +1199,12 @@ class EvaluateMixin:
                 # even IS this repair's artifact.
                 repaired_files = dict(getattr(self.developer, "last_files", {}) or {})
                 repaired_deleted = list(getattr(self.developer, "last_deleted", []) or [])
-                # DOES THE ARTIFACT LOOK LIKE THE THING IT REPLACES? Only asked when the whole-file
-                # `code` really is what this repair shipped: a repo/multi-file repair returns "" and
-                # carries its work in `files`/`deleted`, and a node whose own code is empty never had
-                # a whole-file artifact to begin with. `engine/triage.py::repair_artifact_defect`
-                # documents the two answers and why they are treated differently.
-                _artifact_defect = ""
-                if not repaired_files and not repaired_deleted and (node.code or "").strip():
-                    _artifact_defect = repair_artifact_defect(new_code)
-                # A REPAIR THAT DID NOT PRODUCE A REPAIR. The Developer returns the in-band
-                # "(developer error: …)" sentinel when its OWN session failed — an unreachable
-                # endpoint, a 401, a 402 "out of credits" — so `new_code` is a provider/transport
-                # error message, not code. Nothing downstream could tell the difference: the sentinel
-                # was committed as the node's code by `node_repaired`, re-materialized into the
-                # workdir, and re-evaluated; the eval then failed with a fresh error, so the loop
-                # simply asked again. A dead OpenRouter account produced 2343 such "repairs" on ONE
-                # node at ~11/min for 3.5 h, each one a full re-eval.
-                #
-                # A provider failure is not a code defect, so it must not drive the code-repair loop.
-                # No `node_repaired`, no attempt spent, no files written — the loop breaks here and
-                # the node terminalizes ONCE below with reason="developer_crash" naming the provider
-                # failure, and the run-level circuit breaker fires. (Deliberately NOT committing the
-                # sentinel as node.code also keeps the recovery sweep's `_developer_sentinel` scan,
-                # which keys on exactly that, from later re-terminalizing this node.)
-                #
-                # `is_developer_error` recognises exactly ONE shape of this, LoopLab's own sentinel,
-                # produced by `adapters/repo_developer.py` alone. Two more shapes reach here:
-                #   * a repair that RAISED — normalized into the sentinel at the call above, so it
-                #     arrives here already wearing the shape this branch understands;
-                #   * a repair that answered with PROSE. When the prose PARSES — a comment-only or
-                #     docstring-only answer — the eval exits 0 with no metric, and the node used to
-                #     terminalize as `no_metric`, telling the operator "the command printed no metric"
-                #     about a provider that is dead, with no pause. `"no_code"` is the engine's own
-                #     proof of the same fact the sentinel asserts: an artifact whose module body can
-                #     never execute cannot be a repair, whoever wrote it.
-                #
-                # The remaining answer, `"unparseable"`, keeps today's behaviour of committing the
-                # artifact and letting the next eval's SyntaxError inform the next repair — which is
-                # how a TRUNCATED generation recovers, and stopping a node on one truncation would be
-                # a regression. It is counted DIRECTLY (not inferred from the error text, which can
-                # carry a varying provider request id and so looks new every time) and becomes the
-                # provider verdict once a repair call has answered with something that is not Python
-                # `_UNPARSEABLE_REPAIR_LIMIT` times on one node.
-                if _artifact_defect == "unparseable":
-                    unparseable_repairs += 1
-                _dev_err = None
-                if is_developer_error(new_code):
-                    _dev_err = str(new_code)[:400]
-                elif _artifact_defect == "no_code":
-                    _dev_err = ("the repair returned no executable code, only text: "
-                                + " ".join(str(new_code).split())[:200])
-                elif unparseable_repairs >= _UNPARSEABLE_REPAIR_LIMIT:
-                    _dev_err = (f"the repair has now returned something that is not valid Python "
-                                f"{unparseable_repairs}x — the last one began: "
-                                + " ".join(str(new_code).split())[:160])
+                # WAS THIS A REPAIR AT ALL, OR A DEAD PROVIDER? The four answers and the incident
+                # each one was retrofitted for live in `_repair_provider_failure`. The unparseable
+                # counter round-trips through the return value — it is per-NODE, not per-attempt, so
+                # losing it here would silently restore the unbounded loop it bounds.
+                _dev_err, unparseable_repairs = _repair_provider_failure(
+                    node.code, new_code, repaired_files, repaired_deleted, unparseable_repairs)
                 if _dev_err is not None:
                     triage_outcome = ("abandon", "the repair CALL failed at the provider — no "
                                                  "repaired code was produced")
@@ -989,30 +1215,8 @@ class EvaluateMixin:
                         "the Developer's LLM provider failed while repairing node "
                         f"{node_id}, so the repair returned an error instead of code — {_dev_err}")
                     break
-                repaired_footprint = developer_artifact_footprint(
-                    node.idea.footprint, new_code, repaired_files)
-                if repaired_footprint is not None:
-                    repaired_footprint = (
-                        self._clamp_resource_footprint(repaired_footprint)
-                        or repaired_footprint)
-                    # A repair keeps the dispatcher's lifecycle reservation.  It may refine the
-                    # declaration within those already-held devices, but cannot grow onto GPUs owned
-                    # by a sibling while the retry loop is live.
-                    if ((_resource_reservation or {}).get("cpu_only")
-                            and "gpus" in repaired_footprint):
-                        repaired_footprint["gpus"] = 0
-                    elif ((_resource_reservation or {}).get("pin")
-                          and "gpus" in repaired_footprint):
-                        repaired_footprint["gpus"] = min(
-                            repaired_footprint["gpus"],
-                            int(_resource_reservation.get("count", 0) or 0))
-                    held_ids = ((_resource_reservation or {}).get("gpu_ids") or [])
-                    held_mem = [getattr(self, "_gpu_mem", {}).get(gpu)
-                                for gpu in held_ids]
-                    held_mem = [value for value in held_mem if type(value) is int]
-                    if (held_mem and isinstance(repaired_footprint.get("gpu_mem_mib"), int)):
-                        repaired_footprint["gpu_mem_mib"] = min(
-                            repaired_footprint["gpu_mem_mib"], min(held_mem))
+                repaired_footprint = self._repaired_footprint(
+                    node, new_code, repaired_files, _resource_reservation)
                 attempt += 1
                 async with self._write_lock:
                     repair_payload = {
@@ -1051,17 +1255,10 @@ class EvaluateMixin:
                 # training code can't burn many full trains (the attempt budget bounds the COUNT of
                 # repairs, not their cost). The workdir persists across attempts, so a reused
                 # checkpoint is valid.
-                # The repair's REAL change set = files whose content actually differs from the pre-repair
-                # node (last_files is cumulative — see prev_files above), plus THIS repair's deletions.
-                changed = {f for f, c in repaired_files.items() if prev_files.get(f) != c}
-                # Deletions likewise get the delta, not the cumulative set: a deletion that predates
-                # the completed train stage cannot invalidate its checkpoint — the stage already ran
-                # (and passed) without that file on disk. Blocking on the cumulative `repaired_deleted`
-                # (seeded from node.deleted at repair_from) would permanently disable stage reuse for
-                # any node whose implement ever deleted a file; only THIS repair's deletions can
-                # invalidate the checkpoint, so only they enter the reuse decision.
-                new_deleted = [d for d in repaired_deleted if d not in prev_deleted]
-                changed |= set(new_deleted)
+                # Both halves are DELTAS against the pre-repair node, never the cumulative sets the
+                # developer hands back — see `_repair_change_set`.
+                changed, new_deleted = _repair_change_set(
+                    prev_files, prev_deleted, repaired_files, repaired_deleted)
                 # THE ROW THE JUDGE WILL READ on the next attempt. Appended here, after `changed` is
                 # known, because "which files this fix actually touched" is the column that separates
                 # a repair chain that is working from one that is rewriting the same lines: the
@@ -1082,23 +1279,9 @@ class EvaluateMixin:
                     _stages, res.failed_stage, changed, workdir,
                     deleted=new_deleted,
                     cwd=(self._eval_spec or {}).get("cwd") if isinstance(self._eval_spec, dict) else None)
-                # Count a full re-train against the cap ONLY when completed EARLIER-stage work is being
-                # discarded: a LATER stage failed yet reuse was refused because the repair could
-                # have changed an earlier stage. A first-stage failure (nothing to reuse) or a single-
-                # command eval is an ordinary retry, bounded by the attempt budget like any other — NOT the
-                # retrain cap (mirrors config.py: "only a repair that changes an EARLIER stage's code
-                # forces a full re-train ... counted"). Check BEFORE incrementing so cap=N runs exactly N.
-                # First-vs-later is judged from the PRE-repair `res.stages` (one record per stage that
-                # ran, in order, the failed stage always LAST) — never from the failed stage's index in
-                # the POST-repair `_stages`: a repair that renames/drops the failed stage (or a
-                # _resolved_stages exception fallback to []) loses that index (-1) for FIRST- and
-                # LATER-stage failures alike. A renamed LATER stage still discards completed
-                # earlier-stage work on the forced full re-run, so it keeps consuming the cap (the
-                # point of counting the renamed case at all — leaving it uncounted let a
-                # stage-renaming repair burn unlimited full trains); a renamed FIRST stage never had
-                # earlier work to discard, so it must stay an ordinary retry.
-                was_first = len(res.stages or []) <= 1
-                if res.failed_stage and not was_first and next_start is None:   # forces a full (expensive) re-train
+                # Which repairs count against the retrain cap, and why a renamed stage still does, is
+                # `_repair_forces_full_retrain`. Asked BEFORE incrementing so cap=N runs exactly N.
+                if _repair_forces_full_retrain(res, next_start):   # forces a full (expensive) re-train
                     if (self._inline_repair_retrain_cap
                             and full_retrains >= self._inline_repair_retrain_cap):
                         triage_outcome = ("abandon",
@@ -1156,48 +1339,11 @@ class EvaluateMixin:
                     # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
                     # emission does not rewrite the metric, but the folded trust_gate policy
                     # can exclude high-precision signals from champion/breeding under gate/block.
-                    sigs = []
-                    # Scan the WHOLE solution surface, not just solution.py — a patch-gated multi-file
-                    # agent can hide answer-key access / leakage / the real computation in an in-surface
-                    # helper module that solution.py imports. Concatenate node.files so the reward-hack /
-                    # leakage / critic scans cover the imported code too (not only the clean entrypoint).
-                    scan_src = node.code + "".join(
-                        f"\n\n# --- {fn} ---\n{src}" for fn, src in (node.files or {}).items()
-                        if str(fn).replace("\\", "/").lower() != "solution.py")
-                    if self.reward_hack_detect:
-                        from looplab.trust.reward_hack import detect_reward_hacks
-                        protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
-                        # The grader-IMPORT waiver keys on the task genuinely MATERIALIZING
-                        # grader.py (an ASSET → calling `grader.score(...)` is the documented
-                        # grading contract, e.g. the in-workdir mlebench brief). Pass it explicitly
-                        # instead of letting the detector infer it from `protected`: that union also
-                        # carries the operator's protect list, and a merely-PROTECTED grader.py
-                        # (protect=["grader.py"], no asset) means "hands off", not "import me" —
-                        # inference from the union would wrongly waive the import tells for it.
-                        sigs += detect_reward_hacks(
-                            scan_src, res.metric, state.direction,
-                            protected_names=protected, stdout=res.stdout,
-                            # Match the asset key NORMALIZED (path separators + case), exactly like
-                            # the detector normalizes `protected_names` — the inference this call
-                            # replaced got that normalization for free, so 'Grader.py' or a
-                            # backslashed key must keep sanctioning the import here too.
-                            grader_import_ok=any(str(a).replace("\\", "/").lower() == "grader.py"
-                                                 for a in (self._assets or ())))
-                        # 4.3: also apply the hardened exploit ruleset grown by `looplab harden`
-                        # (hacker-fixer-solver) — each previously-discovered exploit stays guarded.
-                        if self._exploit_suite is not None:
-                            sigs += self._exploit_suite.scan(scan_src)
-                        # 4.4 sandbox instrumentation (RewardHackingAgents recipe): flag RUNTIME
-                        # writes to protected/frozen files — behavioral evidence a static scan of the
-                        # code can miss (a write via a helper, os.system, a template). Compares the
-                        # workdir against the assets/protected set the engine placed there.
-                        if self._workdir_audit:
-                            sigs += self._audit_workdir_writes(workdir, protected)
-                    # …and the leakage + critic gates, which are a NAMED rule (`_trust_gate_signals`)
-                    # rather than two more `sigs +=` lines: as inline concatenations, silencing them
-                    # was invisible to every trust test that does not drive a whole run. See that
-                    # method's docstring.
-                    sigs += self._trust_gate_signals(node, scan_src)
+                    # Both the surface and the findings over it are NAMED rules (doc 25 ES-03) — the
+                    # `code_digest` below must be the digest of the exact bytes that were scanned, so
+                    # the surface is read once, here, and handed to the scan.
+                    scan_src = self._trust_scan_surface(node)
+                    sigs = self._trust_scan_signals(node, res, state, workdir, scan_src)
                     if sigs:
                         # P1-7 versioned TrustEvidence: bind the evidence to a schema version + a digest
                         # of the exact scanned surface (provenance — which bytes produced these signals),
