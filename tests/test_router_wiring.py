@@ -57,7 +57,7 @@ def test_a_consumer_router_mounted_without_its_producer_really_does_fail_at_requ
     Without this test the refusal below is a rule with no cost attached — it could be guarding a
     combination that would have worked fine, and nobody would know."""
     row = _row("list_tasks_fn")
-    consumer = row.consumers[0]
+    consumer = row.router_consumers[0]
 
     app = FastAPI()
     srv = make_app(tmp_path).state.looplab          # a fully-built AppState, then re-wired by hand
@@ -86,7 +86,8 @@ def test_mount_routers_refuses_an_app_whose_producing_router_is_missing(tmp_path
         mount_routers(FastAPI(), srv, builders=deficient)
 
     message = str(excinfo.value)
-    assert row.name in message and row.producer in message and row.consumers[0] in message, message
+    assert row.name in message and row.producer in message, message
+    assert row.router_consumers[0] in message, message
 
 
 def test_mount_routers_refuses_a_producer_that_stopped_assigning(tmp_path):
@@ -108,12 +109,74 @@ def test_a_row_with_no_consumers_is_still_checked_against_its_producer(tmp_path)
     method). "Nothing reads it today" is a fact about this revision, not a licence for the
     assignment to rot — so a mounted producer that stops assigning is still a refusal."""
     row = _row("list_runs_fn")
-    assert row.consumers == (), "this test is about the empty-consumer branch specifically"
+    assert row.router_consumers == () and row.service_consumers == (), (
+        "this test is about the empty-consumer branch specifically")
 
     srv = make_app(tmp_path).state.looplab
     srv.list_runs_fn = None
     with pytest.raises(RuntimeError, match=row.name):
         assert_router_wiring(srv, router_builders())
+
+
+def test_a_service_consumer_keeps_a_row_live_with_no_router_reading_it(tmp_path):
+    """`flush_pending_run_costs` is read only by `serve/` SERVICES — the deletion service, the reset
+    route and the command lifecycle. None of them is mounted; all of them are imported. A check that
+    asked "is a consuming ROUTER mounted?" would find none and pass the deficient mount."""
+    row = _row("flush_pending_run_costs")
+    assert row.router_consumers == () and row.service_consumers, row
+
+    srv = make_app(tmp_path).state.looplab
+    deficient = [b for b in router_builders() if _stem(b) != row.producer]
+    with pytest.raises(RuntimeError) as excinfo:
+        assert_router_wiring(srv, deficient)
+    assert row.name in str(excinfo.value) and row.producer in str(excinfo.value)
+
+
+def test_the_two_cost_flushes_really_do_differ_on_absence(tmp_path):
+    """The reason both rows exist rather than one summarising "the cost flushes".
+
+    With the attribute gone, the DURABLE flush's consumers fail closed — a reset refuses. The
+    PENDING flush's consumers probe with `getattr(..., None)` and skip, so the destructive path runs
+    to completion with a paid call still awaiting durable accounting and no signal anywhere. That
+    silent branch is the whole reason a mount-time check is worth having here: for this row the
+    fallback IS the failure, and nothing downstream reports it."""
+    from looplab.serve import reset_route
+
+    srv = make_app(tmp_path).state.looplab
+    rd = tmp_path / "demo"
+    rd.mkdir(exist_ok=True)
+
+    # Durable: absent -> refuse. Present but reporting "pending" -> also refuse, so the check below
+    # is reading absence and not merely a helper that always raises.
+    with pytest.raises(Exception) as absent:
+        reset_route._flush_reset_cost_evidence(_without(srv, "flush_durable_run_costs"), rd)
+    assert getattr(absent.value, "status_code", None) == 503, absent.value
+
+    # Pending: absent -> the pre-sequence hook returns without flushing anything, silently.
+    calls: list = []
+    srv.flush_pending_run_costs = lambda run_dir: (calls.append(run_dir), True)[1]
+    reset_route._flush_retained_paid_activity(srv, rd, None, None)
+    assert calls == [rd], "precondition: the hook calls the flush when it is present"
+    reset_route._flush_retained_paid_activity(_without(srv, "flush_pending_run_costs"), rd, None, None)
+    assert calls == [rd], (
+        "the pending-cost hook raised or recorded something when the attribute was absent — if it "
+        "now fails closed, this row's `why` is wrong and the asymmetry it documents is gone")
+
+
+class _without:
+    """A read-through view of *srv* with one attribute missing, i.e. its producer never mounted.
+
+    `delattr` is not available: `AppState.__init__` sets these to `None`, so deleting leaves the
+    class attribute or an AttributeError depending on the name — and `None` is not the same state
+    as absent for a `getattr(srv, name, None)` probe's SECOND argument to be reached."""
+
+    def __init__(self, srv, missing: str):
+        self._srv, self._missing = srv, missing
+
+    def __getattr__(self, name):
+        if name == self._missing:
+            raise AttributeError(name)
+        return getattr(self._srv, name)
 
 
 def test_the_real_app_satisfies_its_own_registry(tmp_path):
@@ -137,51 +200,92 @@ def test_dropping_a_row_from_the_registry_is_not_how_a_deficient_mount_passes(tm
 # The source scan: registry vs what the routers actually do
 # --------------------------------------------------------------------------------------------
 
-def _router_trees():
-    """Every module that defines a top-level `build_router` — the routers plus `serve/jobs.py`."""
+def _serve_trees():
+    """Every `serve/` module, with a flag for whether it defines a top-level `build_router`."""
     for path, tree in iter_trees():
-        if any(isinstance(n, ast.FunctionDef) and n.name == "build_router" for n in tree.body):
-            yield path.stem, tree
+        if path.parent.name == "serve" or path.parent.parent.name == "serve":
+            is_router = any(isinstance(n, ast.FunctionDef) and n.name == "build_router"
+                            for n in tree.body)
+            yield path.stem, is_router, tree
 
 
-def _srv_fn_accesses(tree):
-    """`srv.<name>_fn` split into the ones ASSIGNED and the ones READ.
+def _srv_assignments(tree) -> set:
+    """Every `srv.<name>` ASSIGNED, under any name.
 
-    On the AST because a substring scan cannot tell an assignment from a read, and telling them
-    apart IS the registry's content — a name that flips from produced to consumed is exactly the
-    change that must not pass silently.
+    Deliberately NOT filtered by an `_fn` suffix: two of the four rows are `flush_*_run_costs`, and
+    those are the ones whose absence is silent rather than a 500. A scan keyed on a spelling
+    convention would have declared the registry complete while missing exactly the edges that cost
+    something.
     """
-    assigned, read = set(), set()
+    assigned = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
-                        and target.value.id == "srv" and target.attr.endswith("_fn")):
-                    assigned.add(target.attr)
-        elif (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)
-                and isinstance(node.value, ast.Name) and node.value.id == "srv"
-                and node.attr.endswith("_fn")):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+                    and target.value.id == "srv"):
+                assigned.add(target.attr)
+    return assigned
+
+
+def _srv_reads(tree, names: set) -> set:
+    """Every read of one of *names* off `srv` / `self.srv`, in either spelling.
+
+    `getattr(srv, "<name>", None)` is a Call with a string literal, not an `ast.Attribute`, and it
+    is the spelling ALL THREE service consumers use — a scan that only walked attribute loads would
+    see none of them and conclude nothing reads the cost flushes.
+    """
+    read = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)
+                and node.attr in names and _is_srv(node.value)):
             read.add(node.attr)
-    return assigned, read
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr" and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant) and node.args[1].value in names
+                and _is_srv(node.args[0])):
+            read.add(node.args[1].value)
+    return read
+
+
+def _is_srv(node) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == "srv"
+    return isinstance(node, ast.Attribute) and node.attr == "srv"
 
 
 def test_every_late_bound_assignment_in_a_router_has_a_registry_row():
-    actual = {(name, stem) for stem, tree in _router_trees()
-              for name in _srv_fn_accesses(tree)[0]}
+    actual = {(name, stem) for stem, is_router, tree in _serve_trees() if is_router
+              for name in _srv_assignments(tree)}
     declared = {(row.name, row.producer) for row in LATE_BOUND_ROUTER_CALLABLES}
     assert actual == declared, (
         f"routers assign {sorted(actual - declared)} with no registry row, and the registry claims "
         f"{sorted(declared - actual)} that no router assigns")
 
 
-def test_every_late_bound_read_in_a_router_has_a_registry_row():
-    actual = {(name, stem) for stem, tree in _router_trees()
-              for name in _srv_fn_accesses(tree)[1]}
-    declared = {(row.name, consumer)
-                for row in LATE_BOUND_ROUTER_CALLABLES for consumer in row.consumers}
+def test_every_read_of_a_router_produced_name_has_a_registry_row():
+    """Both consumer kinds at once, across ALL of `serve/` — the readers of the cost flushes are the
+    deletion service, the reset route and the command lifecycle, none of which is a router."""
+    produced = {row.name for row in LATE_BOUND_ROUTER_CALLABLES}
+    producers = {row.name: row.producer for row in LATE_BOUND_ROUTER_CALLABLES}
+
+    actual = {(name, stem) for stem, _is_router, tree in _serve_trees()
+              for name in _srv_reads(tree, produced) if producers[name] != stem}
+    declared = {(row.name, consumer) for row in LATE_BOUND_ROUTER_CALLABLES
+                for consumer in row.router_consumers + row.service_consumers}
     assert actual == declared, (
-        f"routers read {sorted(actual - declared)} with no registry row, and the registry claims "
-        f"{sorted(declared - actual)} that no router reads")
+        f"{sorted(actual - declared)} read a router-produced name with no registry row, and the "
+        f"registry claims {sorted(declared - actual)} that nothing reads")
+
+
+def test_the_registry_splits_router_consumers_from_service_consumers_correctly():
+    """The split decides liveness, so getting it backwards is the whole check silently weakening: a
+    service listed as a router consumer is never in `mounted`, so its row never fires."""
+    routers = {stem for stem, is_router, _t in _serve_trees() if is_router}
+    for row in LATE_BOUND_ROUTER_CALLABLES:
+        assert row.producer in routers, (row.name, row.producer, sorted(routers))
+        assert set(row.router_consumers) <= routers, (row.name, row.router_consumers)
+        assert not set(row.service_consumers) & routers, (row.name, row.service_consumers)
 
 
 def test_the_registry_names_routers_that_are_actually_mounted():
@@ -190,7 +294,7 @@ def test_the_registry_names_routers_that_are_actually_mounted():
     mounted = {_stem(b) for b in router_builders()}
     for row in LATE_BOUND_ROUTER_CALLABLES:
         assert row.producer in mounted, (row.name, row.producer, sorted(mounted))
-        assert set(row.consumers) <= mounted, (row.name, row.consumers, sorted(mounted))
+        assert set(row.router_consumers) <= mounted, (row.name, row.router_consumers, sorted(mounted))
 
 
 def test_the_wiring_module_imports_no_router_at_module_level():
