@@ -2,10 +2,15 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import { get, fmt, workingId, getRunCommand, retryRunCommand, runCommand,
   commandFeedback, commandErrorMessage, commandFailureRecord, commandCanRetry, createIdempotencyKey,
   commandActionForEvent, commandRecordMatchesAction, commandEventForAction,
-  loadRunTransport, saveRunTransport, clearRunTransport, isTransientCommandReadError,
+  loadRunTransport, saveRunTransport, clearRunTransport,
   clearRunCommandLock, loadRunCommandLock, saveRunCommandLock, subscribeRunCommandLock,
   COMMAND_SUCCEEDED, COMMAND_FAILED, storageGet, storageSet, runApiPath, runNodeApiPath } from './util.js'
-import { usePoll } from './hooks.js'
+import { useCommandStatusPoll, usePoll } from './hooks.js'
+import {
+  commandIntentPreserved, commandLockIdentity, commandLockMismatch, commandStorageUnavailableRecord,
+  foreignCommandLock, interruptedCommandRecovery, observeCommandError, protocolCommandRecord,
+  restoredCommandRecord, settledCommandFailure,
+} from './runCommandMachine.js'
 import Markdown from './markdown.jsx'
 import { NodeTrace, TraceUnavailable } from './Inspector.jsx'
 import { OpIcon } from './icons.jsx'
@@ -525,37 +530,27 @@ const recoveryForRun = (runId) => {
     statusUnavailable: true, observationKind: 'protocol', protocolInvalid: true,
     canResubmit: false, lastError: 'Stored command recovery data is invalid.',
   }, failure: null }
-  const storedRecord = saved.record || (saved.commandId
-    ? { id: saved.commandId, status: 'accepted' }
-    : { status: 'submitting' })
-  const record = saved.commandId && !storedRecord.id ? { ...storedRecord, id: saved.commandId } : storedRecord
+  const record = restoredCommandRecord(saved)
   if (COMMAND_SUCCEEDED.has(record.status)) {
     clearRunTransport(runId)
     return { pending: null, failure: null }
   }
   const knownStatus = record.status === 'accepted' || record.status === 'executing'
     || COMMAND_FAILED.has(record.status)
-  const needsObservation = !knownStatus || !record.id || !!saved.retrying || !!saved.checking
+  const needsObservation = !knownStatus || !record.id || interruptedCommandRecovery(saved)
   const entry = {
     action: saved.action, idempotencyKey: saved.idempotencyKey, record,
     expectedGeneration: saved.expectedGeneration,
     statusUnavailable: !!saved.statusUnavailable || needsObservation,
     observationKind: saved.observationKind || (!knownStatus && record.id ? 'protocol'
       : (needsObservation ? 'transport' : null)),
-    lastError: saved.retrying || saved.checking
+    lastError: interruptedCommandRecovery(saved)
       ? 'The page reloaded while recovery was in progress; check the durable command status.'
       : !knownStatus ? 'Stored command state needs to be checked against the server.' : '',
   }
-  return COMMAND_FAILED.has(record.status) && !saved.statusUnavailable && !saved.retrying && !saved.checking
+  return settledCommandFailure(saved, record)
     ? { pending: null, failure: entry }
     : { pending: entry, failure: null }
-}
-
-const observationKind = error => {
-  if (error?.status === 401 || error?.status === 403) return 'access'
-  if (error?.code === 'COMMAND_PROTOCOL_ERROR') return 'protocol'
-  if (error?.status === 404) return 'missing'
-  return isTransientCommandReadError(error) ? 'transport' : 'request'
 }
 
 // Round-9: the per-run "boss" chat moved to the single persistent assistant, so the Dock is purely
@@ -618,17 +613,16 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   useEffect(() => {
     const restored = recoveryForRun(runId)
     const lock = loadRunCommandLock(runId)
-    if (lock && lock.source !== 'dock' && (restored.pending || restored.failure)) {
+    if (foreignCommandLock(lock, 'dock') && (restored.pending || restored.failure)) {
       clearRunTransport(runId)
       setTransportPending(null); setTransportFailure(null)
     } else {
       let pending = restored.pending
       const entry = restored.pending || restored.failure
-      const lockMismatch = lock?.source === 'dock' && entry && (
-        lock.idempotencyKey !== entry.idempotencyKey || lock.action !== entry.action
-        || lock.expectedGeneration !== entry.expectedGeneration
-        || (lock.commandId && entry.record?.id && lock.commandId !== entry.record.id)
-      )
+      const lockMismatch = commandLockMismatch(lock, 'dock', entry && {
+        idempotencyKey: entry.idempotencyKey, action: entry.action,
+        expectedGeneration: entry.expectedGeneration, commandId: entry.record?.id,
+      })
       if (lockMismatch) pending = { ...entry, statusUnavailable: true, observationKind: 'protocol',
         protocolInvalid: true, canResubmit: false, lockIdentity: lock,
         lastError: 'Stored command identity does not match the active recovery lock.' }
@@ -818,10 +812,9 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   }
   const protocolTransportState = (action, idempotencyKey, record, message, lockIdentity = null,
     boundGeneration = transportPending?.expectedGeneration || lockIdentity?.expectedGeneration || '') => {
-    const commandId = /^cmd_[0-9a-f]{32}$/.test(String(record?.id || '')) ? String(record.id) : ''
     const entry = { action: action || 'unknown', idempotencyKey,
       expectedGeneration: boundGeneration,
-      record: commandId ? { id: commandId, status: 'accepted' } : { status: 'submitting' },
+      record: protocolCommandRecord(record).record,
       statusUnavailable: true, observationKind: 'protocol', protocolInvalid: true,
       canResubmit: false, lastError: message, lockIdentity }
     saveRunCommandLock(runId, { ...entry, source: 'dock' })
@@ -829,11 +822,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
     return entry
   }
   const storageTransportFailure = (action, idempotencyKey, boundGeneration) => {
-    const record = { status: 'rejected', error: {
-      code: 'command_storage_unavailable',
-      message: 'The command was not sent because durable tab storage is unavailable.',
-      remediation: 'Enable session storage or free browser storage, then try again.', retryable: false,
-    } }
+    const record = commandStorageUnavailableRecord()
     const entry = { action, idempotencyKey, expectedGeneration: boundGeneration, record }
     setTransportPending(null); setTransportFailure(entry)
     onToast?.('Command not sent — durable recovery storage is unavailable')
@@ -846,11 +835,8 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
       'Command identity does not match the requested action', pendingState?.lockIdentity,
       boundGeneration)
     if (pendingState?.protocolInvalid) {
-      const identity = pendingState.lockIdentity || {
-        source: 'dock', idempotencyKey: pendingState.idempotencyKey,
-        action: pendingState.action, expectedGeneration: pendingState.expectedGeneration,
-        commandId: pendingState.record?.id || '',
-      }
+      const identity = pendingState.lockIdentity
+        || commandLockIdentity('dock', pendingState.action, pendingState)
       clearRunCommandLock(runId, identity)
     }
     const feedback = commandFeedback(record, transportLabels(actualAction))
@@ -877,7 +863,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
     }
   }
   const unavailableTransport = (action, idempotencyKey, boundGeneration, record, error, extra = {}) => {
-    const kind = observationKind(error)
+    const kind = observeCommandError(error)
     let recoveryRecord = record || { status: 'submitting' }
     if (recoveryRecord.id && !recoveryRecord.event_type && TRANSPORT_INTENTS[action]) {
       recoveryRecord = { ...recoveryRecord, event_type: commandEventForAction(action, 'dock') }
@@ -936,8 +922,8 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
     } catch (error) {
       const record = error?.commandRecord || (error?.commandId
         ? { id: error.commandId, status: 'accepted' } : null)
-      const kind = observationKind(error)
-      if (error?.commandUnknown || (record?.id && ['transport', 'access', 'protocol'].includes(kind))) {
+      const kind = observeCommandError(error)
+      if (error?.commandUnknown || (record?.id && commandIntentPreserved(kind))) {
         unavailableTransport(action, idempotencyKey, generation, record, error)
         onToast?.(`${transportLabels(action).failure}: command status unavailable; the same intent was preserved`)
       } else failTransport(action, idempotencyKey, generation, error, record)
@@ -971,8 +957,8 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
       })
       acceptTransportRecord(action, next, idempotencyKey, boundGeneration)
     } catch (error) {
-      const kind = observationKind(error)
-      if (['transport', 'access', 'protocol'].includes(kind)) {
+      const kind = observeCommandError(error)
+      if (commandIntentPreserved(kind)) {
         unavailableTransport(action, idempotencyKey, boundGeneration,
           error?.commandRecord || record, error)
       } else failTransport(action, idempotencyKey, boundGeneration,
@@ -1003,62 +989,40 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
       acceptTransportRecord(pending.action, record, pending.idempotencyKey,
         pending.expectedGeneration)
     } catch (error) {
-      const kind = observationKind(error)
+      const kind = observeCommandError(error)
       if (pending.protocolInvalid) {
         protocolTransportState(pending.action, pending.idempotencyKey, pending.record,
           error?.message || 'Stored command could not be verified', pending.lockIdentity,
           pending.expectedGeneration)
-      } else if (['transport', 'access', 'protocol'].includes(kind)) {
+      } else if (commandIntentPreserved(kind)) {
         unavailableTransport(pending.action, pending.idempotencyKey, pending.expectedGeneration,
           pending.record, error)
       } else failTransport(pending.action, pending.idempotencyKey, pending.expectedGeneration,
         error, pending.record)
     }
   }
-  useEffect(() => {
-    const command = transportPending?.record
-    if (transportPending?.statusUnavailable || transportPending?.retrying || transportPending?.checking
-        || !command?.id || (command.status !== 'accepted' && command.status !== 'executing')) return
-    let active = true, timer = null
-    let transientFailures = 0
-    const { action, idempotencyKey, expectedGeneration: boundGeneration } = transportPending
-    const schedule = delay => { if (active) timer = setTimeout(poll, delay) }
-    const poll = async () => {
-      try {
-        const record = await getRunCommand(runId, command.id)
-        if (!active) return
-        transientFailures = 0
-        if (COMMAND_SUCCEEDED.has(record.status) || COMMAND_FAILED.has(record.status)) {
-          acceptTransportRecord(action, record, idempotencyKey, boundGeneration)
-          return
-        }
-        const entry = { action, idempotencyKey, expectedGeneration: boundGeneration,
-          record, statusUnavailable: false }
-        persistTransport(entry); setTransportPending(entry)
-        schedule(1500)
-        return
-      } catch (error) {
-        if (!active) return
-        const kind = observationKind(error)
-        if (kind === 'transport') {
-          transientFailures += 1
-          if (transientFailures < 3) {
-            schedule(Math.max(Number(error.retryAfterMs) || 0, Math.min(6000, 750 * (2 ** transientFailures))))
-            return
-          }
-          unavailableTransport(action, idempotencyKey, boundGeneration, command, error)
-          return
-        }
-        if (kind === 'access' || kind === 'protocol') {
-          unavailableTransport(action, idempotencyKey, boundGeneration, command, error); return
-        }
-        failTransport(action, idempotencyKey, boundGeneration, error, command); return
+  const { action: polledAction, idempotencyKey: polledKey,
+    expectedGeneration: polledGeneration } = transportPending || {}
+  useCommandStatusPoll({
+    runId, command: transportPending?.record,
+    paused: transportPending?.statusUnavailable || transportPending?.retrying
+      || transportPending?.checking,
+    observe: command => getRunCommand(runId, command.id),
+    onRecord: record => {
+      if (COMMAND_SUCCEEDED.has(record.status) || COMMAND_FAILED.has(record.status)) {
+        acceptTransportRecord(polledAction, record, polledKey, polledGeneration)
+        return false
       }
-    }
-    timer = setTimeout(poll, 1000)
-    return () => { active = false; clearTimeout(timer) }
-  }, [runId, transportPending?.record?.id, transportPending?.statusUnavailable,
-    transportPending?.retrying, transportPending?.checking])
+      const entry = { action: polledAction, idempotencyKey: polledKey,
+        expectedGeneration: polledGeneration, record, statusUnavailable: false }
+      persistTransport(entry); setTransportPending(entry)
+      return true
+    },
+    onUnobservable: (error, kind, command) =>
+      unavailableTransport(polledAction, polledKey, polledGeneration, command, error),
+    onFailed: (error, kind, command) =>
+      failTransport(polledAction, polledKey, polledGeneration, error, command),
+  })
   const canRetryTransport = commandCanRetry(transportFailure?.record)
   const failedCommandId = transportFailure?.record?.id
   const conflictingCommandId = transportFailure?.record?.error?.existing_command_id
@@ -1076,11 +1040,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
     const pending = transportPending
     if (!pending?.protocolInvalid) return
     clearRunTransport(runId)
-    const identity = pending.lockIdentity || {
-      source: 'dock', idempotencyKey: pending.idempotencyKey,
-      action: pending.action, expectedGeneration: pending.expectedGeneration,
-      commandId: pending.record?.id || '',
-    }
+    const identity = pending.lockIdentity || commandLockIdentity('dock', pending.action, pending)
     clearRunCommandLock(runId, identity)
     setTransportPending(null)
   }

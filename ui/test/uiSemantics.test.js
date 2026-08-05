@@ -394,7 +394,7 @@ test('collapsed recovery actions are not clipped and retain a 44px touch target'
 })
 
 test('Assistant unmount cleanup clears its toast timer and every command poll clears its timer', async () => {
-  const assistant = await source('AssistantBar.jsx')
+  const [assistant, hooks] = await Promise.all([source('AssistantBar.jsx'), source('hooks.js')])
   // The toast timer's teardown moved into the shared `useToast` hook (doc 25 UI-13), which owns both
   // halves of the guard; `toastTimerDiscipline.test.js` pins it there. What must stay true HERE is
   // that the bar takes its toast from that hook rather than re-arming a timer of its own, and that
@@ -402,7 +402,14 @@ test('Assistant unmount cleanup clears its toast timer and every command poll cl
   assert.match(assistant, /import \{ useToast \} from '\.\/useToast\.js'/)
   assert.doesNotMatch(assistant, /setTimeout\([^\n]*setToast\(null\)/,
     'the Assistant bar re-grew its own toast timer')
-  assert.match(assistant, /return \(\) => \{ active = false; clearTimeout\(timer\) \}/)
+  // The command poll's timer teardown moved the same way (doc 25 UI-01): it was byte-identical to
+  // Dock's, so it now lives once in `hooks.js::useCommandStatusPoll` and the bar drives it. The
+  // property is unchanged and `runCommandMachine.test.js` drives it — a real unmount must leave no
+  // armed timer — so what is pinned here is only that the bar has not re-grown a poll of its own.
+  assert.match(assistant, /useCommandStatusPoll\(\{/)
+  assert.doesNotMatch(assistant, /timer = setTimeout\(poll,/,
+    'the Assistant bar re-grew its own command-status poll loop')
+  assert.match(hooks, /return \(\) => \{ active = false; clearTimeout\(timer\) \}/)
 })
 
 test('direct command presentation is guarded by currentRunId while durable cleanup remains unconditional', async () => {

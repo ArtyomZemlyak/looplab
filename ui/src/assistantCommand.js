@@ -1,4 +1,4 @@
-import { getRunCommand, isTransientCommandReadError, runCommand } from './api.js'
+import { getRunCommand, runCommand } from './api.js'
 
 const INTENTS = {
   stop: () => ({ type: 'pause', data: {} }),
@@ -67,12 +67,9 @@ export function pollAssistantDirectOnce(runId, record, { observe = getRunCommand
   return observe(runId, record.id)
 }
 
-export function assistantDirectObservationKind(error) {
-  if (error?.status === 401 || error?.status === 403) return 'access'
-  if (error?.code === 'COMMAND_PROTOCOL_ERROR') return 'protocol'
-  if (error?.status === 404) return 'missing'
-  return isTransientCommandReadError(error) ? 'transport' : 'request'
-}
+// The observation classifier moved to ./runCommandMachine.js::observeCommandError (doc 25 UI-01): it
+// was byte-identical to Dock's private copy, and the two surfaces must agree on which failures leave
+// a command's outcome UNKNOWN or the shared per-run lock stops meaning the same thing on both sides.
 
 export function assistantDirectStatus(entry) {
   if (!entry) return ''

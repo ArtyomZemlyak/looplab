@@ -6897,6 +6897,132 @@ Scope: `ui/src/` + `ui/test/`.
 
 *Recommendation:* Extract one useDurableRunCommand(source, runId, {labels, onToast}) hook (or a pure state-machine module driven by both components) over the already-shared api.js envelope layer; the DIRECT/TRANSPORT_INTENTS action tables and label maps become the only per-surface inputs.
 
+*Resolution (2026-08-05) — the shared RULES were extracted and the one genuinely duplicated effect was
+merged; the `useDurableRunCommand` hook was REJECTED on a measurement, and each rejection is recorded
+with the behaviour that would have been lost.*
+
+**The "near-identical, ~350 lines, pairwise-parallel" premise does not survive being measured.** Take
+Dock's machine (`persistTransport` through the poll effect, 252 non-blank lines) and the Assistant's
+(`persistDirect` through its poll effect, 477 non-blank lines), α-rename every one of the finding's
+nine pairs plus `transportPending`/`directPending`, `transportFailure`/`directFailure`, the four
+storage calls and the source string, and diff: **71 lines match, 28% of the smaller side.** Strip the
+structural residue (`}`, `try {`, `return`) and what is left is four substantive runs — the
+`command_storage_unavailable` record, the `error?.commandRecord || error?.commandId` submit-catch
+preamble, the `['transport','access','protocol']` test, and the poll loop. The two "byte-similar
+restore-on-mount effects" are the sharper miss: **7 of 66 lines match and all 7 are closing braces.**
+They implement the same decision *table* and share no code.
+
+The divergences are not incidental, and a hook parameterized by `(source, runId, {labels, onToast})`
+would have had to pick a winner for each:
+
+* `failTransport` vs `failDirectObservation` — the Assistant deletes `record.error.message` and
+  `.remediation` off the failure record before storing it, so `commandErrorMessage` falls back to
+  api.js's client-owned copy. Dock keeps the server text. **Assistant's redaction is the better rule
+  and Dock's is arguably a leak, but changing it changes what Dock renders, which this change is not.**
+  Kept separate, both spellings intact.
+* `unavailableTransport` vs `unavailableDirect` — same split: Dock stores `lastError: error?.message
+  || String(error)`, the Assistant stores the fixed `'Command status could not be verified.'`. Neither
+  matters visually: `lastError` is written at twelve sites across the two files (5 in Dock, 7 in the
+  bar) and **read at none** — no `.lastError` read exists in `ui/src`, it is in neither component's
+  markup, and `saveCommandTransport` builds its payload field-by-field so it never reaches storage
+  either (`commandLifecycle.test.js` pins exactly that). Left as found; deleting dead state is a
+  different diff.
+* `acceptTransportRecord` vs `acceptDirectRecord` — when the post-accept persist fails, Dock escalates
+  to `protocolInvalid` (`canResubmit: false`, only Dismiss clears it) while the Assistant degrades to
+  `observationKind: 'transport'` (still checkable). Both are defensible; merging silently picks one.
+* the restore effects — the Assistant **auto-resubmits** an id-less recovery on mount
+  (`executeDirect(restored, { recovery: true })`); Dock marks it unavailable and waits for the operator
+  to press Check. The two also order their branches differently: for a SUCCEEDED envelope under a
+  mismatched lock, Dock clears silently and the Assistant raises protocol-invalid recovery.
+* every Assistant setState is fenced on `mountedRef.current` and on `currentRunIdRef.current` matching
+  the entry's own `runId` (the bar outlives navigation; Dock is mounted per run), and its entries carry
+  `name`/`spec`/`arg`/`nodeGeneration` where Dock's carry a single `action` against a fixed
+  three-entry `TRANSPORT_INTENTS`.
+
+A hook spanning that would need roughly ten injected callbacks — and the callbacks are exactly where
+the divergence lives, so the "shared" body would be a call-forwarding shell over ten per-surface
+functions. What shipped instead:
+
+`ui/src/runCommandMachine.js` (103 lines, pure) holds the rules that are provably the same on both
+sides, each verified line-by-line before moving: `observeCommandError` (Dock's private
+`observationKind` and `assistantCommand.js::assistantDirectObservationKind` were **byte-identical**;
+one is now gone and the other renamed), `commandIntentPreserved` over the intent-preserving
+observation set (8 call sites, spelled three different ways — `.includes`, a `||` chain, and a
+narrowed `access||protocol` after an early `transport` return, all equivalent),
+`protocolCommandRecord` (2), `commandStorageUnavailableRecord` (2), `commandLockIdentity` (4),
+`foreignCommandLock` and `commandLockMismatch` (the cross-surface fence, 2 each),
+`interruptedCommandRecovery` and `settledCommandFailure` (the failed-vs-unknown rule, 5 open-coded
+copies between them), `restoredCommandRecord` (2), and the poll cadence. `restoredCommandRecord` is Dock's two-step spelling,
+which is a strict superset of the Assistant's: the extra id-backfill branch cannot fire, because
+`loadCommandTransport` already refuses any envelope where `!!commandId !== !!record.id` — noted in the
+comment so nobody re-derives the narrower one.
+
+`hooks.js::useCommandStatusPoll` is the one React duplication that was real, and it is now one effect
+instead of two. The surfaces hand in `observe` / `onRecord` (returns keep-polling) / `onUnobservable` /
+`onFailed`; the hook owns the accepted-or-executing gate, the `active` latch, the three-strike
+transient budget and the cadence. Two details had to be preserved deliberately rather than tidied:
+(1) the five-entry dependency list collapses to `!!paused`, which is safe only because the effect body
+is inert whenever `paused` is true and all its constituents are false whenever it is live — written
+down as a comment, since it is not obvious; (2) the callbacks are snapshotted **once at effect start**
+(`const bound = handlers.current`), reproducing the frozen closures of the hand-written effects.
+Reading the ref per tick would be latest-render semantics — a different machine, in which a re-render
+mid-flight silently re-targets an in-flight observation. There is a test for that specific difference.
+
+**Nothing either component renders changed**, and that is verified rather than asserted: every line in
+Dock.jsx and AssistantBar.jsx matching a JSX marker (`<Tag`, `</`, `/>`, `className=`, `role=`,
+`aria-`) is byte-identical to HEAD — 269 and 386 lines respectively — and no `+`/`-` line in the diff
+of either file contains one.
+
+The guard is `ui/test/runCommandMachine.test.js` (19 tests). It drives the protocol rather than
+reading source for the parts that matter: the three durable states are staged through the REAL
+`saveRunTransport`/`saveAssistantRunTransport`, reloaded through the real loaders (a reload IS
+"everything in memory is gone, re-read sessionStorage"), and classified — an accepted command whose
+status read failed, a terminal FAILED record written while `statusUnavailable` was set, and a reload
+mid-check/mid-retry all stay observable, while a clean terminal failure settles. The cross-surface
+fence is driven the same way: a staged Dock envelope is invisible to `loadAssistantRunTransport`, and
+the shared lock is caught by `foreignCommandLock` — the test also pins that `commandLockMismatch`
+returns **false** there, because the mismatch rule is own-source only and a surface that checked only
+for a mismatch would sail straight past. The poll runs in a real React render against a recording
+`setTimeout`: 1s first read, 1.5s repeat, exactly three reads at 1s/+1.5s/+3s before the unknown
+verdict, no retry budget spent on access/protocol, `missing`/`request` settling as failures, silence
+while paused, an unmount that leaves no armed timer and lets no late response commit, and the
+handler-snapshot semantics above. The cadence numbers are ALSO pinned as literals in their own test,
+because every other assertion is written in terms of the exported constants and would widen with them.
+
+Verified by mutation on a throwaway copy of the tree (each break applied by a script that asserts its
+anchor appears exactly once; scratch baseline 720/720):
+
+* Drop `!saved?.statusUnavailable` from `settledCommandFailure`, so an unverified terminal record
+  settles → 2 failures, both `an unknown command outcome survives a reload instead of settling as
+  failed` (dock and assistant). Nothing else in 720 tests notices.
+* Point `commandTransportKey` at Dock's namespace for both sources → 5 failures: this file's
+  `the two surfaces cannot read each other's staged command`, plus four in `commandLifecycle.test.js`.
+* Move the handler snapshot inside `poll` (latest-render semantics) → 3 failures, including
+  `a running poll keeps the callbacks from the render that started it`.
+* `COMMAND_POLL_MAX_TRANSIENT = 4` → 2 failures. **This one initially passed** — the transient test
+  looped over the constant, so widening the budget widened the test. The literal-cadence test and the
+  hard-coded three-read assertion were added in response; they are the reason it bites now.
+* Delete the command-id clause from `commandLockMismatch` → 1 failure, the identity-fence test.
+* Re-grow a `timer = setTimeout(poll, 1000)` in Dock → 1 failure, the negative pins.
+
+One existing pin had to move with the code: `uiSemantics.test.js`'s "every command poll clears its
+timer" matched `return () => { active = false; clearTimeout(timer) }` in AssistantBar.jsx, where the
+teardown no longer lives. It now reads `hooks.js` for the teardown and AssistantBar for the fact that
+it drives the shared hook and has not re-grown a poll of its own — the same treatment the toast timer
+got under UI-13, and the property itself is now driven behaviourally by the unmount test.
+
+Left separate on purpose, beyond the divergences above: `assistantCommand.js`'s `INTENTS` table and
+the `submitAssistantDirect` in-flight dedup map (assistant-only), Dock's `TRANSPORT_INTENTS` and
+`verifiedTransportAction` / the Assistant's `verifiedDirectEntry` (they resolve different entry
+shapes against different action vocabularies), and both label maps. `CommentsThread.jsx` keeps its own
+`COMMAND_ID_RE` — it is a different feature's recovery journal, not this protocol.
+
+Costs: 720 tests pass (was 701), `npm run build` exits 0, and `npm run check:bundle` reports the same
+13 pre-existing violations as HEAD — same categories, including the manifest static-import cycle that
+was already there under a different chunk pair — with byte deltas only: total JS gzip 473,199 →
+473,457 B (+258 B), owner run DAG route 357,643 → 357,890 B (+247 B). Dock.jsx lost 40 net lines,
+AssistantBar.jsx 30.
+
 #### UI-02 · HIGH · over-engineering · effort: large
 
 **api.js re-accreted into a 2,216-line god-module of 8 distinct concerns**
