@@ -42,15 +42,16 @@ test('a non-string run id is coerced before encoding, not after', () => {
 })
 
 test('no module builds a per-run path by hand', async () => {
-  // The grep guard the finding asked for. `api.js` line 18 IS the constructor, and a comment that
-  // merely mentions the URL shape is not a call site.
+  // The grep guard the finding asked for. `apiClient.js` line 18 IS the constructor, and a comment
+  // that merely mentions the URL shape is not a call site. (The constructor moved out of api.js with
+  // the rest of the fetch client — doc 25 UI-02 — so the one exemption moved with it.)
   const files = (await readdir(SRC)).filter(name => name.endsWith('.js') || name.endsWith('.jsx'))
   const offenders = []
   for (const name of files) {
     const source = await readFile(SRC + name, 'utf8')
     source.split('\n').forEach((line, index) => {
       if (!line.includes('`/api/runs/${')) return
-      if (name === 'api.js' && line.includes('${suffix}')) return   // the constructor itself
+      if (name === 'apiClient.js' && line.includes('${suffix}')) return   // the constructor itself
       offenders.push(`${name}:${index + 1}`)
     })
   }
@@ -59,7 +60,7 @@ test('no module builds a per-run path by hand', async () => {
 })
 
 test('the constructor is the only place the run segment is encoded', async () => {
-  const api = await readFile(SRC + 'api.js', 'utf8')
+  const api = await readFile(SRC + 'apiClient.js', 'utf8')
   const constructor = api.slice(api.indexOf('export const runApiPath'),
                                 api.indexOf('export function isReviewLocation'))
   assert.match(constructor, /encodeURIComponent\(String\(runId\)\)/)
