@@ -172,7 +172,8 @@ resume after a repair retries the seeds) and resets whenever a seed actually run
 `::test_confirm_refusal_streak_resets_when_a_seed_actually_runs`.
 (4) RESOLVED 2026-07-23 — producer-failed Card ids are now unioned into every counterfactual-election
 exclusion set that previously omitted them: `_claim_requested_card_build` (union then discard the exact
-claimed id), `_drop_stale_speculation`, and the pre-GPU freshness recheck in `_run_card_session`, matching
+claimed id), `_drop_stale_speculation`, and the pre-GPU freshness recheck in `_card_phase_admit_evals`
+(`_run_card_session`'s admission phase until doc 25 EC-02 split the turn body), matching
 `_request_card_build`'s election set. The raw-proposal lane (`speculative_raw_actions`) deliberately still
 keeps producer-failed ids IN — such a card owns that counterfactual and must fall through to the serial
 builder, not restage as an unbuildable raw action. Teeth-tested in
