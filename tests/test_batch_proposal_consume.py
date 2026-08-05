@@ -162,8 +162,11 @@ def test_a_junk_row_does_not_stop_the_valid_ones_after_it():
 
 # ------------------------------------------------------------------ both call sites, and the trap
 
-# `run` is a thin broker wrapper; the concurrent-build chunk lives in `_run_with_llm_broker`.
-_CALL_SITES = ("_run_with_llm_broker", "_stage_card_creates")
+# `run` is a thin broker wrapper, and the concurrent-build chunk moved out of
+# `_run_with_llm_broker` into the `_handle_create_actions` phase helper (doc 25 ES-05). Re-pointed
+# rather than dropped: the property is "whichever method owns the chunk goes through the shared
+# consume", so it follows the code instead of naming a location that has already moved once.
+_CALL_SITES = ("_handle_create_actions", "_stage_card_creates")
 
 
 @pytest.mark.parametrize("method", _CALL_SITES)

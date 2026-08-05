@@ -581,6 +581,12 @@ The finding's inner helpers (`_run_parallel_build_chunks`, `_run_serial_creates`
 Both mutate the same counter and share the batch-drop bookkeeping, so splitting them means threading
 that state through two more boundaries — the same hazard again, for less gain than the outer lift.
 
+Two source-scan guards in `test_batch_proposal_consume` named `_run_with_llm_broker` as the method
+that must route through the shared `_consume_batch_proposal`; the chunk they were watching is now in
+the helper, so they are re-pointed in the same change. Re-pointed rather than deleted: the property
+is "whichever method owns the chunk goes through the shared consume", and it follows the code instead
+of naming a location that has now moved once.
+
 #### ES-06 · MEDIUM · duplication · effort: medium
 
 **Serial and parallel eval-dispatch branches triplicate the admission fence (terminal-gate + lifecycle_current + reservation release)**
