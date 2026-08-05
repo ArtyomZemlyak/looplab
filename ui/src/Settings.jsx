@@ -8,6 +8,7 @@ import {
   validateSecretSaveAck, validateSettingsResource, validateSettingsSaveAck,
 } from './settingsModel.js'
 import SettingsForm from './SettingsForm.jsx'
+import GlobalMenu from './GlobalMenu.jsx'
 import { OpIcon } from './icons.jsx'
 import { deadlineRequest } from './requestDeadline.js'
 import { installNavigationLossGuard } from './navigationLossGuard.js'
@@ -1267,6 +1268,7 @@ export default function Settings({ onBack }) {
   return <div className="app">
     <div className="topbar">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
+      <GlobalMenu current="settings" />
       <button className="btn sm ghost" onClick={requestBack}>← runs</button>
       <span className="ttl" style={{ fontWeight: 700, fontSize: 15 }}>Settings</span>
       <span className="muted">engine defaults for new runs</span>

@@ -1,0 +1,72 @@
+{
+  "task": {
+    "kind": "repo",
+    "id": "rubert_dr_0804",
+    "goal": "Maximize test recall@100 on the ESCI e-commerce dense-retrieval benchmark in this repo. Backbone to fine-tune: /home/jovyan/data/embedder/sergeyzh/rubert-tiny-lite (SentenceTransformer format). Data: /home/jovyan/data/datasets/dense-retrieval/rubertlite/ . Your trained checkpoint must end up in models/rubertlite_run so looplab_eval.py can score it. Train on exactly ONE GPU per experiment: two experiments run side by side, one per card, and only your own card is visible through CUDA_VISIBLE_DEVICES. Print one JSON line per epoch to stdout shaped {\"epoch\": N, \"recall@100\": X} so the live early-stop watchdog can rank your curve against sibling experiments at the same epoch. Read the repo before changing anything.",
+    "direction": "max",
+    "editable_path": "/home/jovyan/data/vectorizer/dense-retrieval",
+    "edit_surface": [
+      "**/*"
+    ],
+    "protect": [
+      "looplab_eval.py"
+    ],
+    "data": {
+      "datasets": {
+        "path": "/home/jovyan/data/datasets/dense-retrieval/rubertlite",
+        "mount": true,
+        "edit": false
+      },
+      "model": {
+        "path": "/home/jovyan/data/embedder/sergeyzh/rubert-tiny-lite",
+        "mount": true,
+        "edit": false
+      }
+    },
+    "eval": {
+      "command": [
+        "python",
+        "looplab_eval.py",
+        "--save_path",
+        "models/rubertlite_run",
+        "--gpus",
+        "1"
+      ],
+      "cwd": ".",
+      "metric": {
+        "kind": "stdout_regex",
+        "pattern": "RECALL@100: ([0-9.]+)"
+      },
+      "timeout": 14400.0,
+      "setup_timeout": 1800.0,
+      "run_setup_timeout": 3600.0
+    }
+  },
+  "settings": {
+    "backend": "llm",
+    "max_nodes": 12,
+    "n_seeds": 1,
+    "trust_mode": "trusted_local",
+    "auto_install_deps": true,
+    "dep_install_timeout": 2400.0,
+    "timeout": 14400.0,
+    "eval_stall_timeout_s": 3600.0,
+    "eval_parallel": 0,
+    "llm_parallel": 3,
+    "card_driven_selection": true,
+    "asha_live": true,
+    "asha_live_kill": true,
+    "asha_live_min_siblings": 3,
+    "train_monitor": true,
+    "train_monitor_interval_s": 600.0,
+    "train_monitor_kill": true,
+    "inline_repair": true,
+    "inline_repair_attempts": 0,
+    "deep_repair": true,
+    "failure_reflection": true,
+    "watchdog_reflection": true,
+    "policy": "greedy",
+    "speculation_depth": -1
+  },
+  "out": "runs/rubert-dr-0804"
+}

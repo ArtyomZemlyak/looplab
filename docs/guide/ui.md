@@ -272,6 +272,50 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   refreshes authoritative state, and never replays the mutation automatically. Omitting a token remains a
   legacy API compatibility path, not the browser's save contract.
 
+## Two menus: this run, and LoopLab
+
+There are exactly two navigation scopes, and every screen belongs to one of them.
+
+**The run menu** is the hub bar inside a run workspace (`#/run/<id>`). Everything in it is a question
+about *that run's event log*, and every panel behind it reads `/api/runs/<id>/…`:
+
+| Hub | Panels |
+|---|---|
+| **Progress** | Queue · Cards · Research · Failures |
+| **Trust** | Trust · Pareto / diversity · Data quality |
+| **Analysis** | Compare · Sensitivity · Importance · Cross-run |
+| **Lab** | Files · Registry · Comments & sharing · Events |
+| **Run settings** | budgets and knobs for **this run only** |
+
+**The LoopLab menu** (`LoopLab ▾`, beside the ◉ mark) is the same on every owner screen — including
+inside a run, so you never leave a run to ask an installation-wide question. Everything in it is true
+for the whole installation no matter which run is open, and every surface behind it reads a bare
+`/api/…` with no run id:
+
+| Destination | Route | What it is |
+|---|---|---|
+| **Runs** | `#/` | Every run: list, map, portfolio comparison, projects |
+| **Research Atlas** | `#/atlas` | Experimental cross-run portfolio evidence (concepts, claims, steward log) |
+| **Cross-run memory** | `#/memory` | Lessons, solved-task cases and meta-notes carried *between* runs (`/api/memory`) |
+| **Knowledge & prompts** | `#/knowledge` | The authored prompts / skills / knowledge every run shares (`/api/{kind}`) |
+| **Host & GPU** | `#/gpu` | Live `nvidia-smi` for the machine the server runs on (`/api/gpu`) |
+| **Settings** | `#/settings` | Engine **defaults for every new run** — not this run's config |
+
+The dividing rule is the run id: a surface is run-scoped when its content is a function of one run's
+event log, and installation-scoped when the same screen is true whichever run — or no run — is open.
+The last three LoopLab destinations used to be reachable *only* from inside a run's `Lab` hub even
+though none of them takes a run id, and the run's own config editor was labelled `Settings` one
+screen away from the engine-defaults `Settings`. Both are fixed above.
+
+**Deep links still work.** `#/run/<id>?panel=memory`, `?panel=authoring` and `?panel=gpu` continue to
+open those panels inside the run workspace exactly as before; they are simply no longer *offered*
+there, and the panel subtitles now name their real scope (`every run`, `this host`). Nothing about
+the run-route query grammar changed, and everything remains a URL **fragment**, so all of it survives
+a path-mounting proxy (see [Behind a path-mounting proxy](#behind-a-path-mounting-proxy-jupyterhub-reverse-proxy-subpath)).
+
+A **read-only review link** never renders the LoopLab menu: that route is public, and installation
+surfaces are owner-only.
+
 ## Which graph am I looking at?
 
 LoopLab has two graph surfaces and one separate experimental portfolio summary. They answer different
@@ -281,7 +325,7 @@ questions; the Atlas preview is deliberately **not** another force/DAG graph:
 |---|---|---|
 | **Runs → Map** | Run cards packed inside operator-created **Project** folders; `seeded_from` links show when one run was seeded from another. The current filters and project scope are shared with List view. | It is not a theme, concept, evidence, or claim graph. A card may summarize up to four run themes, but themes do not determine the map topology. |
 | **Run → Search** | The experiment DAG for one run. `group by` can project current nodes into **primary concept axis**, operator, metric-tercile or parameter-`niche` regions. The concept chip bar is breadcrumb-navigable and multi-select (OR); chips stay in canonical-ID order while counts change, and a drilled exact-level membership remains a trailing “· here” target. Search previews and then pins the same subtree selection. Filters and collapsed cards use active-lifecycle members only: tombstoned/aborted attempts remain in audit history but not current counts; filtered aggregates show matched/total, dim zero matches and compute best/status only over the matched eligible subset. An experiment whose membership could not be materialized is withheld from the chips ROW-WISE and disclosed as `PARTIAL · N withheld` — its siblings stay filterable and the counts become a lower bound; only a run-scoped integrity failure (degraded run base, malformed receipt store) refuses the whole bar as `UNAVAILABLE`. The separate **Concepts** view is a bounded generation/sequence-fenced tree/table with exact attempt refs, descriptive rollups and a **Projection lens**. Its dynamic relationship copy persists across loading/recoverable error, counts **displayed concept nodes**, exposes additional projected parents through expandable `+N links`, and labels bulk controls **Expand/Collapse concept rows**; `co_occurs` is identified as membership-derived rather than a recorded edge claim. It also states objective orientation, missing metric name/unit and normalized Δ semantics. Both quick-searches are client-side over validated loaded state. | The primary concept axis is a lossy compatibility slot, not a Direction entity. A folded `node_concepts` row wins: memberships are alias-canonicalized and the lexicographically first top-level axis is chosen; an explicit empty row stays untagged. Only a genuinely missing folded row may fall back to legacy `idea.theme`, then the first authored concept axis. On mixed-era data that fallback may still group Search while Concepts remains honestly empty until folded membership exists. Additional memberships/deeper paths are omitted. The Concepts view is not the complete Research Space, a primary-axis×Concept matrix, release-pinned taxonomy/assignment graph or portfolio Atlas. |
-| **Runs → Atlas preview** | An owner-only, read-only `#/atlas` summary over four independent live projections. It shows bounded concept observations/run links, concepts observed in one run, mixed-evidence claim records, bounded evidence references and recent steward proposals/outcomes; exact backend per-section totals drive visible omitted-count notes, while capsule-source completeness is shown separately. Every response carries an opaque replacement-sensitive `portfolio_id`; the client never combines different identities, a source-local retry retains the prior portfolio, and only a full refresh can atomically discard all old slices and enter a replacement portfolio. Claim/evidence projections also carry combined lessons/research read health plus v3 D8 producer/read-health receipts. The client permits one-sided claim labels only when every visible row and both current claim endpoints share one validated `claim_source` snapshot digest; a mismatch fails both slices closed while retained mixed evidence remains visible. Partial endpoint failure is labelled as degraded/stale and last-good failed slices are retained. A raw primary-objective value is preceded by visible task/scope, non-comparability, missing-name/unit and orientation context; without comparison context or orientation the value is hidden with a visible reason. | It is an **Experimental portfolio diagnostic**, not the complete canonical Research Atlas specified in doc 18. A common `portfolio_id` proves storage identity, not one atomic content snapshot across four independently fetched endpoints. “Observed in one run” does not mean untried; evidence balance is not a proposition/applicability verdict; the steward log is not current governance state. There is no Saved Scope, CoverageFrame, compatible comparison, complete exploration pagination/coverage denominator, interactive concept topology or governance workbench. |
+| **Run → Search** | The experiment DAG for one run. `group by` can project current nodes into **primary concept axis**, operator, metric-tercile or parameter-`niche` regions. The concept chip bar is breadcrumb-navigable and multi-select (OR); chips stay in canonical-ID order while counts change, and a drilled exact-level membership remains a trailing “· here” target. Search previews and then pins the same subtree selection. Filters and collapsed cards use active-lifecycle members only: tombstoned/aborted attempts remain in audit history but not current counts; filtered aggregates show matched/total, dim zero matches and compute best/status only over the matched eligible subset. The separate **Concepts** view is a bounded generation/sequence-fenced tree/table with exact attempt refs, descriptive rollups and a **Projection lens**. Its dynamic relationship copy persists across loading/recoverable error, counts **displayed concept nodes**, exposes additional projected parents through expandable `+N links`, and labels bulk controls **Expand/Collapse concept rows**; `co_occurs` is identified as membership-derived rather than a recorded edge claim. It also states objective orientation, missing metric name/unit and normalized Δ semantics. Both quick-searches are client-side over validated loaded state. | The primary concept axis is a lossy compatibility slot, not a Direction entity. A folded `node_concepts` row wins: memberships are alias-canonicalized and the lexicographically first top-level axis is chosen; an explicit empty row stays untagged. Only a genuinely missing folded row may fall back to legacy `idea.theme`, then the first authored concept axis. On mixed-era data that fallback may still group Search while Concepts remains honestly empty until folded membership exists. Additional memberships/deeper paths are omitted. The Concepts view is not the complete Research Space, a primary-axis×Concept matrix, release-pinned taxonomy/assignment graph or portfolio Atlas. |
 
 The run workspace's legacy **Analysis → Cross-run** panel is likewise not a scientific comparison surface.
 It retains bounded same-task-ID navigation and per-run objective observations, but does not rank, crown, draw

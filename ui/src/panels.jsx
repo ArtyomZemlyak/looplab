@@ -2424,8 +2424,9 @@ export function AuthoringPanel({
     }
   }
   return (
-    <Panel title="Authoring — what you give the scientist" sub="your inputs · hot-reloaded next run"
-      onClose={requestClose} wide>
+    {/* Scope in the subtitle: this edits the prompts/skills/knowledge EVERY run shares (`/api/{kind}`),
+        not anything belonging to whichever run a legacy `?panel=authoring` link was opened from. */}
+    <Panel title="Authoring — configure the scientist" sub="every run · hot-reloaded next run" onClose={requestClose} wide>
       <div className="toolbar" style={{ marginBottom: 10 }}>
         {['prompts', 'skills', 'knowledge'].map(k => <button key={k} className={'btn sm' + (k === kind ? ' primary' : '')}
           onClick={() => chooseKind(k)}>{k}{dirtyByKind(k) ? ` (${dirtyByKind(k)} unsaved)` : ''}</button>)}
@@ -2916,7 +2917,7 @@ export function GpuPanel({ onClose }) {
   const [resource, retry] = usePanelResource(signal => get('/api/gpu', { signal }), gpuPayload, '', 2000)
   const data = resource.data
   return (
-    <Panel title="GPU monitor" sub="nvidia-smi · live" onClose={onClose} wide>
+    <Panel title="GPU monitor" sub="this host · nvidia-smi · live" onClose={onClose} wide>
       <PanelResourceNotice resource={resource} label="GPU telemetry" onRetry={retry} />
       {data && !data.available
         ? <div className="notice">No GPU / nvidia-smi not available on the server host.</div>
