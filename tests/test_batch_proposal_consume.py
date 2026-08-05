@@ -162,12 +162,12 @@ def test_a_junk_row_does_not_stop_the_valid_ones_after_it():
 
 # ------------------------------------------------------------------ both call sites, and the trap
 
-# `run` is a thin broker wrapper, and doc 25 ES-05 lifted the whole `creates` branch out of
-# `_run_with_llm_broker` again — so the concurrent-build chunk now lives in `_handle_create_actions`.
-# This tuple must MOVE with it. Scanning the method the chunk has left is not a weaker guard, it is
-# no guard at all, and re-pointing it is only legitimate after re-checking that the property still
-# holds where the code went (it does: that helper calls both shared owners and hand-reads neither
-# attribute).
+# `run` is a thin broker wrapper, and the concurrent-build chunk moved out of
+# `_run_with_llm_broker` into the `_handle_create_actions` phase helper (doc 25 ES-05). Re-pointed
+# rather than dropped: the property is "whichever method owns the chunk goes through the shared
+# consume", so it follows the code instead of naming a location that has already moved once.
+# Re-pointing is only legitimate after re-checking the property where the code WENT — scanning a
+# method the chunk has left is not a weaker guard, it is no guard at all.
 _CALL_SITES = ("_handle_create_actions", "_stage_card_creates")
 
 

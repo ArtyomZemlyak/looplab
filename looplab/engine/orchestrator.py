@@ -416,17 +416,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         asha_live_quantile = _opt("asha_live_quantile")
         asha_live_min_siblings = _opt("asha_live_min_siblings")
         asha_live_kill_confidence = _opt("asha_live_kill_confidence")
-        timeout = _opt("timeout")
         sweep_timeout_mult = _opt("sweep_timeout_mult")
         eval_stall_timeout_s = _opt("eval_stall_timeout_s")
-        confirm_top_k = _opt("confirm_top_k")
-        confirm_seeds = _opt("confirm_seeds")
         confirm_seed_base = _opt("confirm_seed_base")
-        max_seconds = _opt("max_seconds")
-        max_eval_seconds = _opt("max_eval_seconds")
-        memory_dir = _opt("memory_dir")
-        require_approval = _opt("require_approval")
-        archive_resolution = _opt("archive_resolution")
         coverage_context = _opt("coverage_context")
         concept_pivot = _opt("concept_pivot")
         graded_novelty = _opt("graded_novelty")
@@ -440,20 +432,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         cross_run_curation_auto = _opt("cross_run_curation_auto")
         cross_run_read_tools = _opt("cross_run_read_tools")
         phase_handoff_summary = _opt("phase_handoff_summary")
-        eval_trust_mode = _opt("eval_trust_mode")
         trust_mode = _opt("trust_mode")
-        docker_image = _opt("docker_image")
-        sandbox_memory = _opt("sandbox_memory")
-        sandbox_cpus = _opt("sandbox_cpus")
         seed_mode = _opt("seed_mode")
-        n_seeds = _opt("n_seeds")
         max_nodes = _opt("max_nodes")
         policy_name = _opt("policy_name")
         ablate_every = _opt("ablate_every")
         strategist_every = _opt("strategist_every")
         concept_retag_every = _opt("concept_retag_every")
         deep_research_every = _opt("deep_research_every")
-        concurrent_research = _opt("concurrent_research")
         concurrent_research_repeat = _opt("concurrent_research_repeat")
         concurrent_research_interval_s = _opt("concurrent_research_interval_s")
         concurrent_research_max_calls = _opt("concurrent_research_max_calls")
@@ -468,8 +454,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         localize_faults = _opt("localize_faults")
         feature_engineering = _opt("feature_engineering")
         ablate_code_blocks = _opt("ablate_code_blocks")
-        proxy_kill_fraction = _opt("proxy_kill_fraction")
-        reward_hack_detect = _opt("reward_hack_detect")
         trust_gate = _opt("trust_gate")
         code_leakage_detect = _opt("code_leakage_detect")
         critic_check = _opt("critic_check")
@@ -526,7 +510,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.policy = policy
         # A7 Strategist: the policy is now hot-swappable, so the engine keeps the knobs needed to
         # rebuild it (n_seeds/max_nodes/ablate_every) + the meta-controller + operator-mix state.
-        self.n_seeds = n_seeds
+        self.n_seeds = _opt("n_seeds")
         self.max_nodes = max_nodes
         # The policy's OWN node budget is the base a live add_nodes override extends — NOT self.max_nodes
         # (the engine default can differ from a passed-in policy's, e.g. in tests). Tracked separately so
@@ -545,7 +529,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.concept_retag_every = max(1, concept_retag_every)
         self.deep_researcher = deep_researcher
         self.deep_research_every = max(0, deep_research_every)
-        self.concurrent_research = concurrent_research
+        self.concurrent_research = _opt("concurrent_research")
         # Repeated concurrent research (don't idle a multi-day eval): the overlapped think re-runs on
         # an adaptive time cadence for the whole window instead of once. Off in the library default
         # (one-shot == today); the product turns it on. Interval floors the budget-derived pace;
@@ -622,8 +606,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._feature_engineering = feature_engineering
         self._ablate_code_blocks = ablate_code_blocks
         self.proxy_scorer = proxy_scorer
-        self.proxy_kill_fraction = proxy_kill_fraction
-        self.reward_hack_detect = reward_hack_detect
+        self.proxy_kill_fraction = _opt("proxy_kill_fraction")
+        self.reward_hack_detect = _opt("reward_hack_detect")
         if trust_gate not in ("audit", "gate", "block"):
             # A security control must fail LOUDLY: silently coercing a typo ("Gate") to "audit"
             # would run with no enforcement while the caller believes the gate is on.
@@ -1119,7 +1103,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._gpu_condition = threading.Condition(self._gpu_lock)
         self._gpu_epoch = 0
         self._eval_gpu_reservations: dict[tuple[int, int], dict] = {}
-        self.timeout = timeout
+        self.timeout = _opt("timeout")
         self.max_eval_timeout = _opt("max_eval_timeout")
         # Eval stall watchdog cap (seconds); 0 disables. Threaded into command_eval and surfaced to the
         # Developer so its code can emit periodic progress to avoid a false silence-kill.
@@ -1138,11 +1122,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._asha_live_kill_confidence = asha_live_kill_confidence
         self.sweep_timeout_mult = max(1.0, sweep_timeout_mult)
         self.crash_after = crash_after
-        self.confirm_top_k = confirm_top_k
-        self.confirm_seeds = confirm_seeds
-        self.max_seconds = max_seconds
-        self.max_eval_seconds = max_eval_seconds
-        self.memory_dir = memory_dir
+        self.confirm_top_k = _opt("confirm_top_k")
+        self.confirm_seeds = _opt("confirm_seeds")
+        self.max_seconds = _opt("max_seconds")
+        self.max_eval_seconds = _opt("max_eval_seconds")
+        self.memory_dir = _opt("memory_dir")
         # 4.3: load the hardened exploit ruleset grown by `looplab harden` (hacker-fixer-solver)
         # from <memory_dir>/exploits.jsonl — merged into the reward-hack scan so every
         # previously-discovered exploit stays guarded on later runs. None => built-in detector only.
@@ -1154,21 +1138,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     self._exploit_suite = ExploitSuite.load(_ep)
                 except Exception:  # noqa: BLE001
                     self._exploit_suite = None
-        self.require_approval = require_approval
-        self.archive_resolution = archive_resolution
+        self.require_approval = _opt("require_approval")
+        self.archive_resolution = _opt("archive_resolution")
         # RepoTask onboarding (Phase 3): `onboarder()` -> a proposed {eval_spec,
         # adapter_files, goal}; ratified per `eval_trust_mode` then frozen+trusted.
         self.onboarder = onboarder
-        self.eval_trust_mode = eval_trust_mode
+        self.eval_trust_mode = _opt("eval_trust_mode")
         # Sandbox tier for the command-eval path (ADR-13, Phase 4): "untrusted" wraps each
         # eval in `docker run --network none` (real isolation for an arbitrary framework);
         # "trusted_local" runs it directly. The solution.py path uses self.sandbox instead.
         self.trust_mode = trust_mode
-        self.docker_image = docker_image
+        self.docker_image = _opt("docker_image")
         # Resource caps for the untrusted/hostile command-eval Docker tier (make_docker_wrap).
         # Mirror the solution.py DockerSandbox tier so both untrusted tiers bound memory/cpu.
-        self.sandbox_memory = sandbox_memory
-        self.sandbox_cpus = sandbox_cpus
+        self.sandbox_memory = _opt("sandbox_memory")
+        self.sandbox_cpus = _opt("sandbox_cpus")
         self._seed_mode = seed_mode or "auto"   # run-wide fallback for per-editable seeding
         self._run_setup_done = False             # run-level (once) dependency setup guard
         self._run_setup_lock = _threading.Lock()   # _run_eval runs on parallel worker threads; the
