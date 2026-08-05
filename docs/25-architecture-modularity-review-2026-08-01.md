@@ -555,6 +555,32 @@ pinned. Verified to have teeth by making the inject path keep two emits and drop
 
 *Recommendation:* Extract `_handle_create_actions(creates, state, ...) -> bool` (and within it `_run_parallel_build_chunks` and `_run_serial_creates`) as further §4 phase helpers, keeping every append and fold exactly in place, so the spine loop returns to gate-per-line readability.
 
+*Resolution (2026-08-05):* `_handle_create_actions` is extracted; `_run_with_llm_broker` drops from
+537 to 327 lines and the spine's `creates` arm is now four lines. Every append, fold, `_write_lock`
+point and gate moved verbatim.
+
+The extraction contract was computed with AST rather than read off the screen, and that is what made
+it safe. Two facts decided the signature:
+
+* Nine of the fourteen `break`/`continue` statements targeted the OUTER `while` and cannot cross a
+  function boundary, so they return a `"break"`/`"continue"` signal; the five that target loops
+  INSIDE the branch are untouched. The branch never fell through — it always continued or broke — so
+  the caller acts on the signal unconditionally.
+* `_created_no_terminal` must ROUND-TRIP. It is the runaway counter: seeded before the loop, reset
+  only when a node reaches terminal, and both incremented and decremented inside this branch. Passed
+  by value it would lose every mutation, the "node creation not converging" guard would never trip,
+  and a spinning run would loop forever instead of finishing.
+
+That second one was a real defect in this change's first draft — my free-variable analysis subtracted
+it because the branch also ASSIGNS it, so it looked local. `pyflakes` caught it as an undefined name
+before any test ran, and `test_creation_runaway_guard_terminates` independently fails when the
+round-trip is removed (verified by breaking it). No new test: that existing one already guards the
+property exactly.
+
+The finding's inner helpers (`_run_parallel_build_chunks`, `_run_serial_creates`) are NOT split out.
+Both mutate the same counter and share the batch-drop bookkeeping, so splitting them means threading
+that state through two more boundaries — the same hazard again, for less gain than the outer lift.
+
 #### ES-06 · MEDIUM · duplication · effort: medium
 
 **Serial and parallel eval-dispatch branches triplicate the admission fence (terminal-gate + lifecycle_current + reservation release)**
