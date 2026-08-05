@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from looplab.agents.roles import forward_hints
+from looplab.agents.roles import WrapsResearcher, forward_hints
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.numeric import euclidean, knn_idw, numeric_params
 
@@ -40,16 +40,12 @@ def _predict(params: dict, hist: list[tuple[dict, float]], bounds, k: int = 3) -
     return None if pred != pred else pred
 
 
-class PanelResearcher:
+class PanelResearcher(WrapsResearcher):
     def __init__(self, base, k: int = 3, bounds=None, warmup: int = 3):
         self.base = base
         self.k = max(1, k)
         self.bounds = bounds if bounds is not None else getattr(base, "bounds", None)
         self.warmup = max(1, warmup)
-
-    @property
-    def space_hint(self) -> str:
-        return getattr(self.base, "space_hint", "")
 
     # Lightweight read-throughs to the wrapped base (mirroring ForesightPanelResearcher's ctor
     # inheritance): chain-walkers like `engine/lessons.py::_merge_prompt_opts` / `reflect_client`

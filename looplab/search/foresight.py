@@ -33,7 +33,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from looplab.agents.roles import forward_hints
+from looplab.agents.roles import WrapsResearcher, forward_hints
 from looplab.core.config import MAX_FORESIGHT_VERIFY_SAMPLES
 from looplab.core.models import NodeStatus
 from looplab.core.parse import parse_structured
@@ -313,7 +313,7 @@ def _memory_brief(state, parent) -> str:
         return ""
 
 
-class ForesightPanelResearcher:
+class ForesightPanelResearcher(WrapsResearcher):
     """FOREAGENT-adapted predict-before-execute panel for HYPOTHESES / ideas. Generate K candidate
     ideas from the wrapped Researcher, then predict — WITHOUT executing — which will most improve the
     objective, using the LLM as an implicit world model primed with a Verified Data Analysis Report
@@ -397,9 +397,6 @@ class ForesightPanelResearcher:
             raise AttributeError(name)
         return getattr(object.__getattribute__(self, "base"), name)
 
-    @property
-    def space_hint(self) -> str:
-        return getattr(self.base, "space_hint", "")
 
     def _forward_hints(self) -> None:
         """Mirror the engine-set steering hints onto the base Researcher so the panel stays

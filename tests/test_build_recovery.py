@@ -6,7 +6,6 @@ from pathlib import Path
 import anyio
 
 import looplab.engine.orchestrator as orchestrator
-from looplab.adapters.toytask import ToyTask
 from looplab.engine.orchestrator import Engine
 from looplab.core.models import card_ownership_receipt
 from looplab.events.replay import fold
@@ -20,8 +19,7 @@ from looplab.events.types import (
     EV_RUN_FINISHED,
     EV_RUN_STARTED,
 )
-from looplab.runtime.sandbox import SubprocessSandbox
-from looplab.search.policy import GreedyTree
+from factories import make_engine
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,18 +28,7 @@ _IDEA = {"operator": "draft", "params": {}, "rationale": "recovery test"}
 
 
 def _engine(run_dir: Path) -> Engine:
-    task = ToyTask.load(TASK_FILE)
-    researcher, developer = task.build_roles()
-    return Engine(
-        run_dir,
-        task=task,
-        researcher=researcher,
-        developer=developer,
-        sandbox=SubprocessSandbox(),
-        policy=GreedyTree(n_seeds=1, max_nodes=1),
-        n_seeds=1,
-        max_nodes=1,
-    )
+    return make_engine(run_dir, n_seeds=1, max_nodes=1)
 
 
 def test_reentry_terminalizes_all_interrupted_builds_before_setup(tmp_path, monkeypatch):

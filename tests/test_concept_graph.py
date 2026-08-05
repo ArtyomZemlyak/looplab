@@ -980,3 +980,36 @@ def test_depth_of_survives_a_curated_cross_link_cycle_and_a_dense_dag():
     plain = ConceptGraph(task_type="dense-retrieval")
     plain.ensure("loss/contrastive/dcl/dclx")
     assert plain.depth_of("loss/contrastive/dcl/dclx") == 3 and plain.depth_of("loss") == 0
+
+
+# --- SE-10: the consolidation prompt is overridable, and its default is unchanged ----------------
+
+def test_the_consolidation_prompt_is_registered_and_overridable():
+    """Every other agent prompt in the codebase routes through the PromptStore; this one was inline
+    and unoverridable (doc 25 SE-10). It gets its OWN key rather than reusing `merge_system`:
+    consolidating an axis/slug vocabulary is a different job from the generic item merge, and
+    collapsing the two would have swapped the shipped text for a paid agent."""
+    from looplab.core.prompts import PROMPT_KEYS
+
+    assert "concept_consolidate_system" in PROMPT_KEYS
+
+
+def test_rendering_the_default_returns_the_shipped_text_byte_for_byte():
+    """The property that makes this a refactor and not a behaviour change.
+
+    `render` with no store runs the default through `string.Template.safe_substitute`. An unknown
+    `$name` passes through untouched — that is what "safe" means — so the hazard is not a bare `$`
+    but a DOUBLED one: `$$` collapses to `$`, silently rewriting the text a paid agent receives."""
+    import inspect
+    import re
+
+    from looplab.core.prompts import render
+    from looplab.search import concept_graph
+
+    source = inspect.getsource(concept_graph.consolidate_concepts)
+    match = re.search(r"_CONSOLIDATE_SYSTEM = \(\n(.*?)\n            \)", source, re.S)
+    assert match, "the consolidation prompt literal moved; re-point this guard"
+    shipped = "".join(re.findall(r'"(.*?)"\n', match.group(1) + "\n"))
+    assert "You consolidate a machine-learning experiment CONCEPT vocabulary" in shipped
+    assert render(None, "concept_consolidate_system", shipped) == shipped, (
+        "the default no longer survives Template substitution; a `$` entered the prompt text")

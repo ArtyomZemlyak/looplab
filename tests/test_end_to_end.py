@@ -13,28 +13,15 @@ from pathlib import Path
 import anyio
 
 from looplab.events.eventstore import EventStore
-from looplab.engine.orchestrator import Engine
-from looplab.search.policy import GreedyTree
+from factories import make_engine
 from looplab.events.replay import fold
-from looplab.runtime.sandbox import SubprocessSandbox
-from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FILE = ROOT / "examples" / "toy_task.json"
 
 
 def _engine(run_dir, max_nodes=8, crash_after=None):
-    task = ToyTask.load(TASK_FILE)
-    researcher, developer = task.build_roles()
-    return Engine(
-        run_dir,
-        task=task,
-        researcher=researcher,
-        developer=developer,
-        sandbox=SubprocessSandbox(),
-        policy=GreedyTree(n_seeds=3, max_nodes=max_nodes),
-        max_parallel=4,
-    )
+    return make_engine(run_dir, n_seeds=3, max_nodes=max_nodes, max_parallel=4)
 
 
 def test_full_run_optimizes(tmp_path):

@@ -134,6 +134,7 @@ _LAYOUT = {
     "htmlview": "events",
     "http": "serve",             # the shared control-plane JSON body parser (doc 25 SR-05)
     "jobs": "serve",
+    "jsonlio": "core",          # generic JSONL store I/O (doc 25 EV-12)
     "jsonutil": "core",         # canonical JSON bytes for receipt preimages (doc 25 SE-08)
     "jupyter": "serve",
     "kaggle_dl": "adapters",

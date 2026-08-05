@@ -88,3 +88,33 @@ def test_the_named_file_readers_are_deliberately_left_alone():
     source = (TESTS / "test_signal_delivery.py").read_text(encoding="utf-8-sig")
     assert "route.call_sites" in source
     assert "_source_scan" not in source
+
+
+# --- XP-11: one canonical Engine construction for the suite --------------------------------------
+
+def test_the_engine_factory_passes_overrides_straight_through():
+    """`make_engine` must never become a second, LAGGING spelling of Engine's keyword API — which is
+    exactly what 29 private `_engine` factories already were (doc 25 XP-11). Anything it does not
+    name itself goes to `Engine` untouched, so a new knob needs no change here."""
+    import inspect
+
+    from factories import make_engine
+
+    params = inspect.signature(make_engine).parameters
+    assert any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()), (
+        "make_engine stopped forwarding **overrides; it now hides part of Engine's API")
+    named = {n for n, p in params.items() if p.kind is not inspect.Parameter.VAR_KEYWORD}
+    assert named == {"run_dir", "task_file", "task", "researcher", "developer", "sandbox",
+                     "policy", "n_seeds", "max_nodes"}, (
+        f"make_engine grew/lost a named parameter ({named}); each one it names is a knob a caller "
+        "can no longer express in Engine's own vocabulary")
+
+
+def test_the_engine_factory_builds_a_real_engine(tmp_path):
+    from looplab.engine.orchestrator import Engine
+
+    from factories import make_engine
+
+    engine = make_engine(tmp_path / "run", n_seeds=1, max_nodes=1)
+    assert isinstance(engine, Engine)
+    assert engine.task is not None and engine.researcher is not None

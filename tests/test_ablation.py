@@ -6,21 +6,16 @@ from pathlib import Path
 import anyio
 
 from looplab.events.eventstore import EventStore
-from looplab.engine.orchestrator import Engine
+from factories import make_engine
 from looplab.search.policy import GreedyTree
-from looplab.runtime.sandbox import SubprocessSandbox
-from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
 
 
 def _engine(rd, ablate_every):
-    task = ToyTask.load(TASK)
-    r, d = task.build_roles()
-    return Engine(rd, task=task, researcher=r, developer=d, sandbox=SubprocessSandbox(),
-                  policy=GreedyTree(n_seeds=3, max_nodes=12, ablate_every=ablate_every,
-                                    enable_merge=False))
+    return make_engine(rd, policy=GreedyTree(n_seeds=3, max_nodes=12, ablate_every=ablate_every,
+                                             enable_merge=False))
 
 
 def test_ablation_produces_refine_block_and_impacts(tmp_path):

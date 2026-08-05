@@ -2021,6 +2021,29 @@ BOTH passes still read the constant and that no inline set literal came back.
 
 *Recommendation:* Move knn_idw/numeric_params/param_distance to core (e.g. core/similarity.py) and the mutable-store JSONL helpers to core (e.g. core/jsonlio.py), keeping re-export shims in the old locations (the repo already has the _LAYOUT meta-path shim pattern for exactly this). Low urgency; do it opportunistically when touching those helpers.
 
+*Resolution (2026-08-05):* Both halves done, one of them already.
+
+The kNN/similarity half had been closed earlier: `numeric_params`/`knn_idw` live in `core/numeric.py`
+and `events/digest.py` imports them downward. `param_distance` deliberately STAYED in digest — it is a
+run-similarity projection, not a generic primitive, and that module's docstring says so.
+
+The JSONL half is closed here. Eight names — `JsonlRecordInvalid`, `decode_jsonl_line`,
+`scan_jsonl_region`, `iter_jsonl`, `read_jsonl_lenient`, `read_jsonl_lenient_with_health`,
+`write_jsonl_atomic`, `replace_jsonl_rows_atomic_preserving_quarantine` — moved verbatim to
+`core/jsonlio.py`. An AST check confirmed first that none of them referenced anything else in
+`eventstore`, so the move is a relocation rather than a rewrite. `eventstore` re-exports all eight and
+`_LAYOUT` registers the module, so both spellings and the flat `looplab.jsonlio` alias resolve to the
+SAME objects.
+
+The identity is guarded, not assumed: a test replaces the re-export with a forwarding wrapper and the
+guard fails. That is the star-import-by-value hazard CT-09 was about — a copy satisfies every name
+lookup while monkeypatching the original silently stops reaching the code under test.
+
+The distinction worth protecting through a move like this is `iter_jsonl` STOPS at the first bad line
+(append-only: a bad line is a torn tail, so everything after it is unproven) while `read_jsonl_lenient`
+SKIPS and continues (a store rewritten in place must not let one damaged line hide the rest). A driven
+test now pins both behaviours rather than trusting the docstrings that describe them.
+
 #### EV-13 · LOW · mergeable-entities · effort: medium
 
 **Parallel legacy hypothesis board duplicates the Card event family end to end**
@@ -3575,6 +3598,29 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 
 *Recommendation:* Introduce one WrapsResearcher base (parity with WrapsDeveloper) owning the delegation contract (parser/prompts/client/bounds/space_hint pass-through, hint forwarding, telemetry attrs) and have all three wrappers extend it, so a forwarding rule is fixed once.
 
+*Resolution (2026-08-05) — the base is added; its membership is NOT what the recommendation lists.*
+
+`agents/roles.WrapsResearcher` now sits beside `WrapsDeveloper` and all three wrappers extend it. It
+owns exactly two members — the `_delegate` handle and `space_hint`. That is thin on purpose, and the
+rest of the recommendation is not an oversight but a rejection with evidence.
+
+`client` pass-through in a shared base would be a BUG. `cli/__init__.py:435` gates foresight wiring on
+``getattr(researcher, "client", None) is not None``, so a bare `SurrogateResearcher` must fall through
+to None — its own comment says a catch-all delegate "would surface the fallback's client and flip that
+gate". Meanwhile `PanelResearcher` MUST forward `client`, because a missing attr there silently
+shadowed the run's configured PromptStore/parser/client behind the defaults. Both wrappers are right;
+one shared rule cannot be. `parser`/`prompts` follow `client` for the same reason.
+
+`ForesightPanelResearcher`'s catch-all `__getattr__` likewise stays: it exists so the panel can wrap a
+UNIFIED agent, where the researcher IS the developer and the whole developer surface must pass through
+the SAME object. A per-attr base cannot express that and must not fight it.
+
+So the finding's real content — "each wrapper has its own history of forwarding bugs" — is true, but
+the cure is not one delegation contract. Three of the four guards added here pin the DIVERGENCES
+rather than the sharing, including one that pins the base's own surface: if `WrapsResearcher` ever
+grows `client`, the surrogate's fall-through breaks silently. Applying the recommendation literally
+(adding `client` to the base) is the teeth-test, and it fails two guards.
+
 #### SE-03 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **ASHA survivor-retirement logic duplicated between policy and card_selection, with no fidelity guard covering ASHA**
@@ -3810,6 +3856,33 @@ Covered by `tests/test_json_and_metric_contracts.py` (30).avoid the name collisi
 *Evidence:* hybrid_merge.agent_merge is documented as 'the quality core shared by every place LoopLab used to merge similar items', yet consolidate_concepts' client path (:1519-1552) mints its own _Pair/_Out schema and 'You consolidate a... CONCEPT vocabulary' prompt instead of reusing agent_merge, using hybrid_merge only as the no-client fallback (:1554-1563). Meanwhile engine/concept_registry.py implements a third merge system (cross-run alias/purge/split ledgers with its own normalize_key). Rename-chain resolution alone has three spellings: consolidate_concepts._final (:1574-1582, transitive with cycle fail-safe), core.concepts.resolve_concept (bounded hop-cap used by concept_projection), and concept_registry's resolver. Per-run vs cross-run separation is deliberate and documented, but three chain-resolvers and two merge-adjudication prompts is drift surface.
 
 *Recommendation:* Route consolidate_concepts' LLM path through agent_merge (kind='concepts') or at minimum share one rename-chain resolver (core.concepts.resolve_concept) across all three sites.
+
+*Resolution (2026-08-05):* The fallback clause was already done; the primary clause is DECLINED with
+a reason, and the real inconsistency underneath it is fixed instead.
+
+The shared rename-chain resolver exists: `concept_graph` imports `resolve_concept` /
+`normalized_concept_renames` from `core.concepts`, and `_canonical_with_rename` walks the chain
+through them. (`concept_registry.resolve_slug` is a different thing — alias resolution over the
+governance ledger, not consolidation renames — and correctly stays separate.)
+
+Routing `consolidate_concepts` through `agent_merge` is NOT a refactor. `agent_merge` renders
+`merge_system`; `consolidate_concepts` ships its own "You consolidate a machine-learning experiment
+CONCEPT vocabulary" text. Re-pointing one at the other SWAPS the prompt a paid agent receives, which
+CLAUDE.md forbids as part of a refactor: "Prompt strings are contracts. Changes to prompt text alter
+agent behavior — never 'clean up' prompt wording as part of a refactor." Consolidating an axis/slug
+vocabulary is also a genuinely different job from merging generic items, so one prompt for both would
+be worse even done deliberately.
+
+What WAS wrong is that this prompt alone was inline and unoverridable while every other agent prompt
+routes through the PromptStore. It now renders through `concept_consolidate_system` — its own key in
+`PROMPT_KEYS`, with the shipped text as the byte-for-byte default, and `prompts` threaded through
+`consolidate_concepts`.
+
+A guard pins that the default survives rendering unchanged. Writing it surfaced a mistake in my own
+first draft: I claimed a stray `$` would rewrite the text, and the break proved otherwise — an unknown
+`$name` passes through untouched, which is what "safe" in `safe_substitute` means. The actual hazard
+is a DOUBLED `$$`, which collapses to `$`. The docstring and the teeth-test now describe the real
+failure.
 
 #### SE-11 · MEDIUM · other · effort: medium
 
@@ -5720,6 +5793,26 @@ wiring line exists in one specific file. A test pins that exclusion so it reads 
 *Evidence:* 29 test files each define a private `_engine(...)` factory around Engine(...); there are 153 direct Engine( constructions across 78 files (204 counting subclass-named stub engines), and 17 files define their own scripted Researcher/Developer stub classes (12 distinct `class _*Developer` names, 13 distinct `class _*Researcher` names — with _Researcher/_BatchResearcher/_SeqResearcher re-defined in 11/6/4 files respectively). CLAUDE.md acknowledges the symptom — 'Engine tests construct Engine(...) directly (~100 call sites) — keep its keyword API stable' — i.e. the production constructor API is frozen specifically because the test-side factory was never centralized.
 
 *Recommendation:* Add a tests/factories.py (or conftest fixtures) with a canonical make_engine(run_dir, **overrides) plus the common scripted-role stubs; migrate opportunistically. This directly reduces the cost of ever evolving Engine's keyword API.
+
+*Resolution (2026-08-05):* `tests/factories.py` ships `make_engine(run_dir, **overrides)` — load the
+toy task, build its roles, hand the engine a subprocess sandbox and a `GreedyTree` — which is the
+shape all 29 private `_engine` factories already had. `test_ablation`, `test_build_recovery` and
+`test_end_to_end` are migrated as proof it is usable rather than merely present; the rest stay, as the
+finding says, opportunistic.
+
+The design constraint worth naming: `make_engine` must never become a SECOND, LAGGING spelling of
+`Engine`'s keyword API, which is exactly what those 29 factories collectively were. So it names only
+the parameters it actually shapes and forwards `**overrides` untouched — a new engine knob needs no
+change here. A guard pins both halves of that (the `**kwargs` forwarding, and the exact named set, so
+that adding a parameter is a deliberate act), and removing the forwarding fails it.
+
+Deliberately a plain function, not a fixture: these constructions happen inside helper functions and
+parametrized bodies as often as at test top level, and the resume/crash-recovery tests build a SECOND
+engine over the same run dir, which a fixture would force them to work around.
+
+The scripted-role stubs the finding also mentions are NOT included. The 12 `_*Developer` and 13
+`_*Researcher` classes differ in what they script — that is the content of the test, not boilerplate —
+and a shared stub would either grow a flag per caller or quietly change what a test asserts.
 
 #### XP-12 · LOW · layering · effort: small
 

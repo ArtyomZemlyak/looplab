@@ -13,7 +13,7 @@ from __future__ import annotations
 import random
 from typing import Optional
 
-from looplab.agents.roles import forward_hints
+from looplab.agents.roles import WrapsResearcher, forward_hints
 from looplab.core.models import Idea, Node, RunState
 # Module scope, like every other search module that needs the digest primitives
 # (`search/coverage.py`, `search/panel.py`). These three used to be function-local, annotated
@@ -42,7 +42,7 @@ def _fallback_telemetry(name: str) -> property:
     return property(_get, _set)
 
 
-class SurrogateResearcher:
+class SurrogateResearcher(WrapsResearcher):
     def __init__(self, bounds: dict, fallback=None, *, seed: int = 0,
                  n_candidates: int = 96, explore: float = 0.1, warmup: int = 4, k: int = 3,
                  infer_bounds: bool = True):
@@ -60,10 +60,10 @@ class SurrogateResearcher:
         self.warmup = max(2, warmup)
         self.k = max(1, k)
 
-    # forward the hooks make_roles / prompt store poke at, to the fallback
     @property
-    def space_hint(self) -> str:
-        return getattr(self.fallback, "space_hint", "")
+    def _delegate(self):
+        # The wrapped researcher is `fallback` here, not `base` — and it may legitimately be None.
+        return self.fallback
 
     # Outbound predictive telemetry reads (and consume-writes) through to the wrapped fallback —
     # see _fallback_telemetry for why these are explicit properties and not a generic __getattr__.

@@ -878,6 +878,40 @@ class LLMDeveloper:
 # --------------------------------------------------------------------------- #
 
 
+class WrapsResearcher:
+    """Forwarding half of the Researcher-WRAPPER contract (`PanelResearcher`, `SurrogateResearcher`,
+    `ForesightPanelResearcher`) — the parity sibling of `WrapsDeveloper` below (doc 25 SE-02).
+
+    Only what all three genuinely share lives here: the delegate handle and `space_hint`. The three
+    wrappers were each written with their own forwarding strategy and each carries a comment
+    recording a bug that strategy once caused, so the temptation is to merge all of it. That would be
+    wrong, and the divergences are load-bearing rather than accidental:
+
+    * `client` is NOT forwarded here. `SurrogateResearcher` deliberately does not surface its
+      fallback's client, because `cli/__init__.py` gates foresight wiring on
+      ``getattr(researcher, "client", None) is not None`` — a bare surrogate wrapper must fall
+      through to None or that gate flips on. `PanelResearcher` DOES forward it, because a missing
+      attr there silently shadowed the run's configured client behind the defaults. Both are right
+      for their wrapper; one shared rule cannot be.
+    * `parser` / `prompts` are forwarded by `PanelResearcher` for that same shadowing reason and are
+      left to the wrapper for the same reason `client` is.
+    * `ForesightPanelResearcher` delegates everything else through a catch-all ``__getattr__`` so it
+      can wrap a UNIFIED agent, where the researcher IS the developer and the whole developer surface
+      must pass through the same object. A per-attr base cannot express that and must not fight it.
+
+    Delegation target: `_delegate` (defaults to `base`). `SurrogateResearcher` overrides it — its
+    wrapped researcher is `fallback`, and it may legitimately be None.
+    """
+
+    @property
+    def _delegate(self):
+        return getattr(self, "base", None)
+
+    @property
+    def space_hint(self) -> str:
+        return getattr(self._delegate, "space_hint", "")
+
+
 class WrapsDeveloper:
     """Forwarding half of the Developer-WRAPPER contract (`ValidatingDeveloper`,
     `BestOfNDeveloper`, `UnifiedAgent`). A wrapper composes an inner Developer and must stay

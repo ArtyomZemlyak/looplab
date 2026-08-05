@@ -73,3 +73,64 @@ def test_the_rule_is_written_where_a_maintainer_will_look():
     claude_md = (_PKG.parent / "CLAUDE.md").read_text(encoding="utf-8")
     assert "`search` may import `agents` at" in claude_md and "deferred" in claude_md, (
         "the agents<->search direction is no longer stated in CLAUDE.md's layering rule")
+
+
+# --- SE-02: one researcher-wrapper base, and the divergences it must NOT absorb ------------------
+
+def test_all_three_researcher_wrappers_share_the_base():
+    from looplab.agents.roles import WrapsResearcher
+    from looplab.search.foresight import ForesightPanelResearcher
+    from looplab.search.panel import PanelResearcher
+    from looplab.search.surrogate import SurrogateResearcher
+
+    for cls in (PanelResearcher, SurrogateResearcher, ForesightPanelResearcher):
+        assert issubclass(cls, WrapsResearcher), f"{cls.__name__} left the wrapper contract"
+
+
+def test_a_bare_surrogate_wrapper_still_hides_its_fallback_client():
+    """The divergence a shared `client` pass-through would have destroyed, and the reason doc 25
+    SE-02's recommendation could not be implemented literally.
+
+    `cli/__init__.py` gates foresight wiring on `getattr(researcher, "client", None) is not None`.
+    A surrogate wrapping a client-bearing fallback must still read None, or that gate flips on for a
+    run that never configured foresight."""
+    from looplab.search.surrogate import SurrogateResearcher
+
+    class _Fallback:
+        client = object()
+        space_hint = "sh"
+
+    wrapper = SurrogateResearcher({}, fallback=_Fallback())
+    assert getattr(wrapper, "client", None) is None, (
+        "the surrogate wrapper surfaced its fallback's client; the foresight gate in cli/__init__ "
+        "now turns on for runs that never asked for it")
+    assert wrapper.space_hint == "sh", "space_hint IS shared and must still forward"
+
+
+def test_the_panel_wrapper_still_forwards_the_configured_client():
+    """The opposite divergence, equally load-bearing: chain-walkers getattr `client`/`prompts`/
+    `parser` off the ACTIVE researcher, which may be this wrapper, and a missing attr silently
+    shadowed the run's configured PromptStore/parser/client behind the defaults."""
+    from looplab.search.panel import PanelResearcher
+
+    class _Base:
+        client, prompts, parser = object(), object(), object()
+        space_hint = "sh"
+
+    base = _Base()
+    wrapper = PanelResearcher.__new__(PanelResearcher)
+    wrapper.base = base
+    for attr in ("client", "prompts", "parser"):
+        assert getattr(wrapper, attr) is getattr(base, attr), f"panel stopped forwarding {attr}"
+    assert wrapper.space_hint == "sh"
+
+
+def test_the_shared_base_forwards_nothing_it_should_not():
+    """The base is deliberately thin. If it ever grows `client`/`prompts`/`parser`, the surrogate's
+    fall-through breaks silently — so the base's own surface is pinned here."""
+    from looplab.agents.roles import WrapsResearcher
+
+    owned = {n for n in vars(WrapsResearcher) if not n.startswith("__")}
+    assert owned == {"_delegate", "space_hint"}, (
+        f"WrapsResearcher grew {owned - {'_delegate', 'space_hint'}}; a member here applies to all "
+        "three wrappers, and their client/parser/prompts rules genuinely differ")
