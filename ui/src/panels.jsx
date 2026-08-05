@@ -1497,6 +1497,43 @@ export function ConfigPanel({
   )
 }
 
+// What each authoring kind IS. All three are plain Markdown in a directory you point at, and the
+// panel used to name them with three bare lowercase words — which is why "why are skills and prompts
+// not in Memory?" is a fair question: they ARE the durable knowledge you write, they are just on the
+// other panel because a different party writes them. Each entry says what a file here DOES.
+// `disclosure` is the honest footnote: what the engine reads that this editor cannot show.
+// The env var that configures each kind's directory. NOT `LOOPLAB_${kind.toUpperCase()}_DIR`: the
+// settings field is `prompt_dir`, singular, and `LOOPLAB_* ` env names map 1:1 onto flat field names
+// — so the derived `LOOPLAB_PROMPTS_DIR` this panel used to print is a variable nothing reads. An
+// operator who followed that hint set it, saw the tab stay empty, and concluded prompts do not exist.
+const AUTHORING_KIND_ENV = { prompts: 'LOOPLAB_PROMPTS_DIR', skills: 'LOOPLAB_SKILLS_DIR', knowledge: 'LOOPLAB_KNOWLEDGE_DIR' }
+
+const AUTHORING_KIND_PURPOSE = {
+  prompts: {
+    what: <><b>Role prompt overrides.</b> A file named <code>&lt;prompt key&gt;.md</code> REPLACES the
+      built-in system prompt for that role, and is re-read on every call — an edit lands on the next
+      agent turn with no restart.</>,
+    disclosure: <>A file whose name is not a known prompt key is never looked up: the built-in default
+      keeps running, silently. The key list is <code>looplab/core/prompts.py::PROMPT_KEYS</code>.</>,
+  },
+  skills: {
+    what: <><b>Reusable techniques</b> the Researcher can <code>list_skills</code> /{' '}
+      <code>use_skill</code> mid-run — a named recipe plus the code that implemented it.</>,
+    disclosure: <>Two things the engine reads that this editor does not list: skills packaged as{' '}
+      <code>&lt;folder&gt;/SKILL.md</code> (only root-level <code>*.md</code> is shown), and the ones a
+      run distils for ITSELF into <code>&lt;memory dir&gt;/skills/</code> from a card it supported with
+      a positive Δ. Those carry a <code>candidate</code>/<code>promoted</code> status that no reader
+      parses, so a candidate is offered to the model exactly like a promoted one.</>,
+  },
+  knowledge: {
+    what: <><b>Free-form notes</b> for the agents to retrieve with <code>kb_search</code> — anything
+      worth keeping that is not a per-run finding.</>,
+    disclosure: <>The same directory the agents write to with their own <code>remember</code> tool, and
+      the same files Lab → Memory → Knowledge shows read-only. So this is the one kind BOTH you and
+      the runs write.</>,
+  },
+}
+
 export function AuthoringPanel({
   onClose, onToast, draftStore: sharedDraftStore = null, navigationGuardOwner = 'panel',
   publishNavigationGuard = null,
@@ -2345,13 +2382,26 @@ export function AuthoringPanel({
     }
   }
   return (
-    <Panel title="Authoring — configure the scientist" sub="hot-reloaded next run" onClose={requestClose} wide>
+    <Panel title="Authoring — what you give the scientist" sub="your inputs · hot-reloaded next run"
+      onClose={requestClose} wide>
       <div className="toolbar" style={{ marginBottom: 10 }}>
         {['prompts', 'skills', 'knowledge'].map(k => <button key={k} className={'btn sm' + (k === kind ? ' primary' : '')}
           onClick={() => chooseKind(k)}>{k}{dirtyByKind(k) ? ` (${dirtyByKind(k)} unsaved)` : ''}</button>)}
-        {source.state === 'ready' && <span className="muted">{data.dir || `no ${kind} dir configured (set LOOPLAB_${kind.toUpperCase()}_DIR)`}</span>}
+        {source.state === 'ready' && <span className="muted">{data.dir || `no ${kind} dir configured (set ${AUTHORING_KIND_ENV[kind]}, or the ${kind === 'prompts' ? 'Prompt' : kind === 'skills' ? 'Skills' : 'Knowledge'} dir in Settings)`}</span>}
         {source.state === 'ready' && data.truncatedFiles > 0
           && <span className="muted">{data.truncatedFiles} more file{data.truncatedFiles === 1 ? '' : 's'} omitted</span>}
+      </div>
+      {/* The Authoring / Memory boundary is DIRECTION, not subject matter: both hold durable
+          knowledge, this one is the half a human writes. Saying so on both panels is the whole
+          answer to "what is the difference between authoring and memory". */}
+      <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
+        Written <b>by you</b>, read by the agents during a run. What the <b>runs</b> write back —
+        lessons, cases, meta-notes — is Lab → <b>Memory</b>. Each kind below is one directory of
+        Markdown, and <b>prompts</b> and <b>skills</b> have no default location: until you point them
+        somewhere those tabs read “no dir configured”, which is not the same as the feature missing.
+      </div>
+      <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
+        {AUTHORING_KIND_PURPOSE[kind]?.what}{' '}{AUTHORING_KIND_PURPOSE[kind]?.disclosure}
       </div>
       <PanelResourceNotice resource={source} label={`${kind} files`} onRetry={retry} />
       {dirtyCount > 0 && <div className="notice" role="status" style={{ marginBottom: 10 }}>
@@ -2446,6 +2496,32 @@ export function AuthoringPanel({
   )
 }
 
+// What each memory tier is FOR, in the operator's terms: who WRITES it, WHEN, and what actually
+// changes because the row exists. The four tabs are not four views of one store — they behave
+// differently in the one way that matters (whether a future run's PROMPT contains them), and until
+// now the whole explanation for all four was a single shared "cross-run memory reused to guide
+// future runs" sentence. That sentence is true of exactly two of them.
+// Verified against the code, not the docs: `engine/lessons_priors.py::_scan_prior_context` reads
+// meta_notes.jsonl + lessons.jsonl and NOTHING else, so cases reach an agent only if it calls
+// `kb_search` (`agents/factory.py` passes cases.jsonl into KnowledgeTools' shared `kb` index).
+const MEMORY_TAB_PURPOSE = {
+  lessons: <><b>What generalizes.</b> One distilled claim per theme — a verdict
+    (supported / tested / failed) plus the nodes it came from — written by the run's own reflection
+    when the run ends. <b>This is the tier that changes the next run</b>: the best fingerprint
+    matches are pasted straight into the next Researcher / Developer prompt.</>,
+  cases: <><b>The single best config per task.</b> The winning params, the metric they reached and
+    the rationale that proposed them. Upserted at run end and only when the metric BEATS the stored
+    one, so there is exactly one row per task — a leaderboard, not a history.{' '}
+    <b>Not pasted into any prompt</b>: an agent sees a case only if it calls <code>kb_search</code>,
+    where cases share one top-3 index with the knowledge notes.</>,
+  notes: <><b>One line per finished run</b> — what won, and (when the model was reachable) why it may
+    have won. Injected verbatim into the next run of the <b>same</b> task, last 3. This is the prose
+    twin of a case: same win, written as a sentence instead of as params.</>,
+  knowledge: <><b>Free-form Markdown</b> — the only tier a human writes directly. Edit it under
+    Lab → Authoring → knowledge; the agents also write here through their own <code>remember</code>{' '}
+    tool. Read back through <code>kb_search</code>, alongside cases.</>,
+}
+
 function MemoryCompletenessNotice({ resource, onRetry, error = false, children }) {
   const action = error ? 'Retry' : 'Refresh'
   return <div className={'report-inline-state' + (error ? ' error' : '')} role={error ? 'alert' : 'status'}>
@@ -2529,14 +2605,23 @@ export function MemoryPanel({ onClose }) {
           {kb.truncatedFiles > 0 && `${kb.truncatedFiles} Markdown ${kb.truncatedFiles === 1 ? 'entry was' : 'entries were'} not returned. `}
           {truncatedKnowledgePreviews > 0 && `${truncatedKnowledgePreviews} loaded ${truncatedKnowledgePreviews === 1 ? 'preview contains' : 'previews contain'} only a prefix.`}
         </MemoryCompletenessNotice>}
-      {/* General orientation shown on every tab; the role-split detail (§role-split) is lessons-only. */}
+      {/* Orientation shown on every tab. The three durable-knowledge surfaces are easy to mistake for
+          each other, so each one says what the OTHER two are: this panel is what the RUNS wrote,
+          Authoring is what YOU write, the Atlas is the portfolio roll-up over several runs. */}
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
-        Cross-run memory reused to guide future runs. Cases, notes and the knowledge base are shared;
-        {' '}<b>lessons are split by role</b>.
+        Written <b>by the runs</b>, at run end — read-only here. What <b>you</b> give a run before it
+        starts (role prompts, skills, knowledge notes) is Lab → <b>Authoring</b>. Concepts and claims
+        rolled up across the whole portfolio are the <b>Research Atlas</b> (Runs → Atlas preview).
+      </div>
+      {/* Per-tab purpose: the four tiers differ in who reads them back, which is the only difference
+          an operator can act on. */}
+      <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
+        {MEMORY_TAB_PURPOSE[tab]}
       </div>
       {tab === 'lessons' && <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
-        The <b>Researcher</b> gets R&D / “what technique to try” lessons; the <b>Developer</b> gets only
-        its own “what code change fixed a crash” lessons (untagged/legacy lessons are shared).
+        Split by role (§role-split): the <b>Researcher</b> gets R&D / “what technique to try” lessons;
+        the <b>Developer</b> gets only its own “what code change fixed a crash” lessons
+        (untagged/legacy lessons are shared). Cases, notes and the knowledge base are not split.
       </div>}
       {tab === 'lessons' && <div className="conv-toggle memory-role-tabs" style={{ marginBottom: 8 }}>
         {[['all', 'All'], ['researcher', 'Researcher'], ['developer', 'Developer']].map(([r, label]) =>
