@@ -7,6 +7,10 @@ import { DEFAULT_REQUEST_TIMEOUT_MS, deadlineRequest } from './requestDeadline.j
 import {
   resourceBegin, resourceCancel, resourceGated, resourceInitial, resourceSettle, resourceView,
 } from './resourceModel.js'
+import {
+  COMMAND_POLL_MAX_TRANSIENT, COMMAND_POLL_REPEAT_MS, COMMAND_POLL_START_MS,
+  commandIntentPreserved, commandPollBackoffMs, observeCommandError,
+} from './runCommandMachine.js'
 
 // Keep responsive behavior in React aligned with the CSS breakpoints.  The workspace uses this to
 // switch persistent desktop panes into temporary drawers on smaller screens; listening to the media
@@ -84,6 +88,67 @@ export function usePoll(fn, ms, deps = [], { pauseHidden = false, immediate = tr
     }
     // deps come from the caller (they list what their fn reads), mirroring the effects this replaces
   }, deps)
+}
+
+// The ONE durable-command status poll (doc 25 UI-01), replacing the two byte-identical effects Dock
+// and AssistantBar each carried for the run transport / direct commands. It owns exactly what was the
+// same on both sides: the accepted-or-executing gate, the per-effect `active` latch, the transient
+// failure budget, and the cadence in ./runCommandMachine.js. What it deliberately does NOT own is what
+// a tick MEANS — the two surfaces accept a record, preserve an unknown outcome and settle a failure
+// differently, so each hands in its own three callbacks.
+//
+//   command        — the record being observed. Polling runs only while it is accepted/executing.
+//   paused         — the surface's own "do not observe" state (an unavailable/retrying/checking entry).
+//   observe(cmd)   — the status read. Rejections are classified, never rendered raw.
+//   onRecord(rec)  — commit a fresh record; return truthy to keep polling, falsy to stop (terminal).
+//   onUnobservable — the outcome is UNKNOWN (transport budget exhausted, or access/protocol). The
+//                    durable intent must survive; this is never the same thing as a failure.
+//   onFailed       — an authoritative failure for this client ('missing'/'request').
+export function useCommandStatusPoll({ runId, command, paused, observe, onRecord,
+  onUnobservable, onFailed }) {
+  // The callbacks close over the surface's render state, and the effect below must use the ones from
+  // the render that STARTED it — exactly like the hand-written effects, whose closures were frozen at
+  // effect time and kept for the life of that poll. Reading the ref per tick would silently upgrade
+  // that to latest-render semantics, which is a different (and untested) machine.
+  const handlers = useRef(null)
+  handlers.current = { observe, onRecord, onUnobservable, onFailed }
+  useEffect(() => {
+    if (paused || !command?.id
+        || (command.status !== 'accepted' && command.status !== 'executing')) return
+    const bound = handlers.current
+    let active = true, timer = null
+    let transientFailures = 0
+    const schedule = delay => { if (active) timer = setTimeout(poll, delay) }
+    const poll = async () => {
+      try {
+        const record = await bound.observe(command)
+        if (!active) return
+        transientFailures = 0
+        if (!bound.onRecord(record)) return
+        schedule(COMMAND_POLL_REPEAT_MS)
+      } catch (error) {
+        if (!active) return
+        const kind = observeCommandError(error)
+        if (kind === 'transport') {
+          transientFailures += 1
+          if (transientFailures < COMMAND_POLL_MAX_TRANSIENT) {
+            schedule(commandPollBackoffMs(error, transientFailures))
+            return
+          }
+          bound.onUnobservable(error, kind, command)
+          return
+        }
+        if (commandIntentPreserved(kind)) { bound.onUnobservable(error, kind, command); return }
+        bound.onFailed(error, kind, command)
+      }
+    }
+    timer = setTimeout(poll, COMMAND_POLL_START_MS)
+    return () => { active = false; clearTimeout(timer) }
+    // `paused` stands in for the surface's individual pending flags: whenever the effect is LIVE they
+    // are all false, so any change to one of them flips `paused` and restarts the effect exactly as
+    // the per-flag dependency lists did. A change between two paused states restarts nothing, and
+    // could not have mattered — the body returns immediately while paused.
+  }, [runId, command?.id, !!paused])
 }
 
 // The React half of the shared resource machine (doc 25 UI-06); the transitions themselves are in

@@ -1,7 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
 import { OpIcon } from './icons.jsx'
-import { useMediaQuery, usePoll } from './hooks.js'
+import { useCommandStatusPoll, useMediaQuery, usePoll } from './hooks.js'
+import {
+  commandIntentPreserved, commandLockIdentity, commandLockMismatch, commandStorageUnavailableRecord,
+  foreignCommandLock, interruptedCommandRecovery, observeCommandError, protocolCommandRecord,
+  restoredCommandRecord, settledCommandFailure,
+} from './runCommandMachine.js'
 import { useToast } from './useToast.js'
 import { getRunAccess } from './runMode.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
@@ -14,7 +19,7 @@ import {
 } from './launchDraftStore.js'
 import { proposalLaunchChat } from './launchProvenance.js'
 import {
-  assistantDirectObservationKind, assistantDirectStatus, assistantRunChanged,
+  assistantDirectStatus, assistantRunChanged,
   assistantStorageFailureOwnsLock, pollAssistantDirectOnce,
   presentAssistantCommandResult, restoreAssistantDirectEntry, submitAssistantDirect,
 } from './assistantCommand.js'
@@ -1898,11 +1903,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       && (lockCleared || !assistantStorageFailureOwnsLock(entry, remainingLock))
   }
   const localStorageFailure = entry => {
-    const failure = { ...entry, record: { status: 'rejected', error: {
-      code: 'command_storage_unavailable',
-      message: 'The command was not sent because durable tab storage is unavailable.',
-      remediation: 'Enable session storage or free browser storage, then try again.', retryable: false,
-    } } }
+    const failure = { ...entry, record: commandStorageUnavailableRecord() }
     // No POST happened. Best-effort removal keeps this tab immediately usable; if storage refuses the
     // cleanup, exact own-lock detection above keeps this failure + Dismiss visible instead of showing
     // a fake generic pending state. The staged envelope remains quarantined and cannot auto-submit.
@@ -1922,8 +1923,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       canResubmit: true, retrying: false }
   }
   const protocolDirect = (entry, record = entry.record, message = 'Invalid command response') => {
-    const commandId = /^cmd_[0-9a-f]{32}$/.test(String(record?.id || '')) ? String(record.id) : ''
-    const next = { ...entry, record: commandId ? { id: commandId, status: 'accepted' } : { status: 'submitting' },
+    const { commandId, record: protocolRecord } = protocolCommandRecord(record)
+    const next = { ...entry, record: protocolRecord,
       statusUnavailable: true, observationKind: 'protocol', checking: false, retrying: false,
       protocolInvalid: true, canResubmit: false, lastError: message }
     saveRunCommandLock(entry.runId, {
@@ -1942,11 +1943,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const verified = verifiedDirectEntry(entry, record)
     if (!verified) return protocolDirect(entry, record, 'Command identity does not match the requested action')
     if (entry.protocolInvalid) {
-      const identity = entry.lockIdentity || {
-        source: 'assistant', idempotencyKey: entry.idempotencyKey,
-        action: entry.name || 'unknown', expectedGeneration: entry.expectedGeneration,
-        commandId: entry.record?.id || '',
-      }
+      const identity = entry.lockIdentity
+        || commandLockIdentity('assistant', entry.name || 'unknown', entry)
       clearRunCommandLock(entry.runId, identity)
     }
     const feedback = commandFeedback(record, directLabels(verified))
@@ -1987,7 +1985,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       recoveryRecord = { ...recoveryRecord, event_type: commandEventForAction(entry.name, 'assistant') }
     }
     const next = { ...entry, record: recoveryRecord, statusUnavailable: true,
-      observationKind: assistantDirectObservationKind(error), checking: false,
+      observationKind: observeCommandError(error), checking: false,
       lastError: 'Command status could not be verified.' }
     if (!persistDirect(next)) {
       saveRunCommandLock(entry.runId, { ...next, source: 'assistant' })
@@ -2036,9 +2034,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     } catch (error) {
       const record = error?.commandRecord || (error?.commandId
         ? { id: error.commandId, status: 'accepted' } : null)
-      const kind = assistantDirectObservationKind(error)
+      const kind = observeCommandError(error)
       if (error?.commandUnknown || error?.submissionMayHaveSucceeded
-          || (record?.id && ['transport', 'access', 'protocol'].includes(kind))) {
+          || (record?.id && commandIntentPreserved(kind))) {
         unavailableDirect(bound, error, record)
         flashDirect(bound, `/${bound.name}: status unavailable; intent preserved`)
       } else if (error?.code === 'run_generation_changed'
@@ -2166,10 +2164,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       const record = await getRunCommand(entry.runId, entry.record.id)
       acceptDirectRecord(entry, record)
     } catch (error) {
-      const kind = assistantDirectObservationKind(error)
+      const kind = observeCommandError(error)
       if (entry.protocolInvalid) {
         protocolDirect(entry, entry.record, 'Stored command could not be verified')
-      } else if (kind === 'transport' || kind === 'access' || kind === 'protocol') {
+      } else if (commandIntentPreserved(kind)) {
         unavailableDirect(entry, error, entry.record)
       } else failDirectObservation(entry, error)
     }
@@ -2206,8 +2204,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       })
       acceptDirectRecord(failure, record)
     } catch (error) {
-      const kind = assistantDirectObservationKind(error)
-      if (['transport', 'access', 'protocol'].includes(kind)) {
+      const kind = observeCommandError(error)
+      if (commandIntentPreserved(kind)) {
         unavailableDirect(failure, error, error?.commandRecord || failure.record)
       } else {
         const restored = { ...failure, retrying: false }
@@ -2247,11 +2245,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       return
     }
     clearAssistantRunTransport(pending.runId, undefined, { idempotencyKey: pending.idempotencyKey })
-    const identity = pending.lockIdentity || {
-      source: 'assistant', idempotencyKey: pending.idempotencyKey,
-      action: pending.name || 'unknown', expectedGeneration: pending.expectedGeneration,
-      commandId: pending.record?.id || '',
-    }
+    const identity = pending.lockIdentity
+      || commandLockIdentity('assistant', pending.name || 'unknown', pending)
     clearRunCommandLock(pending.runId, identity)
     setDirectPending(null)
     requestAnimationFrame(() => inputRef.current?.focus())
@@ -2267,16 +2262,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       })
       return
     }
-    if (lock && lock.source !== 'assistant') {
+    if (foreignCommandLock(lock, 'assistant')) {
       clearAssistantRunTransport(runId, undefined, { idempotencyKey: saved.idempotencyKey })
       return
     }
     const spec = directSpec(saved.action) || UNKNOWN_DIRECT_SPEC
-    const lockMismatch = lock?.source === 'assistant' && (
-      lock.idempotencyKey !== saved.idempotencyKey || lock.action !== saved.action
-      || lock.expectedGeneration !== saved.expectedGeneration
-      || (lock.commandId && saved.commandId && lock.commandId !== saved.commandId)
-    )
+    const lockMismatch = commandLockMismatch(lock, 'assistant', saved)
     if (saved.protocolInvalid || lockMismatch) {
       const restored = restoreAssistantDirectEntry(saved, spec, runId, { record: saved.record,
         statusUnavailable: true, observationKind: 'protocol', checking: false, retrying: false,
@@ -2291,11 +2282,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       return
     }
     const restored = restoreAssistantDirectEntry(saved, spec, runId, {
-      record: saved.record || (saved.commandId ? { id: saved.commandId, status: 'accepted' } : { status: 'submitting' }),
+      record: restoredCommandRecord(saved),
       statusUnavailable: !!saved.statusUnavailable, observationKind: saved.observationKind,
       checking: false, retrying: !!saved.retrying, lastError: '' })
-    if (COMMAND_FAILED.has(saved.record?.status) && !saved.statusUnavailable
-        && !saved.retrying && !saved.checking) {
+    if (settledCommandFailure(saved, saved.record)) {
       clearRunCommandLock(runId, {
         source: 'assistant', idempotencyKey: saved.idempotencyKey,
         action: saved.action, expectedGeneration: saved.expectedGeneration,
@@ -2304,7 +2294,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       setDirectFailure(restored)
       return
     }
-    if (saved.retrying || saved.checking) {
+    if (interruptedCommandRecovery(saved)) {
       const uncertain = { ...restored, retrying: false, statusUnavailable: true,
         observationKind: 'transport', lastError: 'Recovery was interrupted; check the same command.' }
       persistDirect(uncertain); setDirectPending(uncertain)
@@ -2314,39 +2304,19 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     setDirectPending(restored)
     if (!restored.record?.id) executeDirect(restored, { recovery: true })
   }, [runId])
-  useEffect(() => {
-    const entry = directPending
-    const command = entry?.record
-    if (entry?.statusUnavailable || entry?.checking || !command?.id
-        || (command.status !== 'accepted' && command.status !== 'executing')) return
-    let active = true, timer = null, transientFailures = 0
-    const schedule = delay => { if (active) timer = setTimeout(poll, delay) }
-    const poll = async () => {
-      try {
-        const record = await pollAssistantDirectOnce(entry.runId, command)
-        if (!active) return
-        transientFailures = 0
-        const terminal = COMMAND_SUCCEEDED.has(record?.status) || COMMAND_FAILED.has(record?.status)
-        const feedback = acceptDirectRecord(entry, record, { announce: terminal })
-        if (feedback?.terminal || !verifiedDirectEntry(entry, record)) return
-        schedule(1500)
-      } catch (error) {
-        if (!active) return
-        const kind = assistantDirectObservationKind(error)
-        if (kind === 'transport') {
-          if (++transientFailures < 3) {
-            schedule(Math.max(Number(error.retryAfterMs) || 0, Math.min(6000, 750 * (2 ** transientFailures))))
-            return
-          }
-          unavailableDirect(entry, error, command); return
-        }
-        if (kind === 'access' || kind === 'protocol') unavailableDirect(entry, error, command)
-        else failDirectObservation(entry, error)
-      }
-    }
-    timer = setTimeout(poll, 1000)
-    return () => { active = false; clearTimeout(timer) }
-  }, [runId, directPending?.record?.id, directPending?.statusUnavailable, directPending?.checking])
+  const polledEntry = directPending
+  useCommandStatusPoll({
+    runId, command: polledEntry?.record,
+    paused: polledEntry?.statusUnavailable || polledEntry?.checking,
+    observe: command => pollAssistantDirectOnce(polledEntry.runId, command),
+    onRecord: record => {
+      const terminal = COMMAND_SUCCEEDED.has(record?.status) || COMMAND_FAILED.has(record?.status)
+      const feedback = acceptDirectRecord(polledEntry, record, { announce: terminal })
+      return !(feedback?.terminal || !verifiedDirectEntry(polledEntry, record))
+    },
+    onUnobservable: (error, kind, command) => unavailableDirect(polledEntry, error, command),
+    onFailed: error => failDirectObservation(polledEntry, error),
+  })
 
   // ── attached files ──
   const onFiles = async (list) => {
