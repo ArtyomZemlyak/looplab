@@ -2021,6 +2021,29 @@ BOTH passes still read the constant and that no inline set literal came back.
 
 *Recommendation:* Move knn_idw/numeric_params/param_distance to core (e.g. core/similarity.py) and the mutable-store JSONL helpers to core (e.g. core/jsonlio.py), keeping re-export shims in the old locations (the repo already has the _LAYOUT meta-path shim pattern for exactly this). Low urgency; do it opportunistically when touching those helpers.
 
+*Resolution (2026-08-05):* Both halves done, one of them already.
+
+The kNN/similarity half had been closed earlier: `numeric_params`/`knn_idw` live in `core/numeric.py`
+and `events/digest.py` imports them downward. `param_distance` deliberately STAYED in digest — it is a
+run-similarity projection, not a generic primitive, and that module's docstring says so.
+
+The JSONL half is closed here. Eight names — `JsonlRecordInvalid`, `decode_jsonl_line`,
+`scan_jsonl_region`, `iter_jsonl`, `read_jsonl_lenient`, `read_jsonl_lenient_with_health`,
+`write_jsonl_atomic`, `replace_jsonl_rows_atomic_preserving_quarantine` — moved verbatim to
+`core/jsonlio.py`. An AST check confirmed first that none of them referenced anything else in
+`eventstore`, so the move is a relocation rather than a rewrite. `eventstore` re-exports all eight and
+`_LAYOUT` registers the module, so both spellings and the flat `looplab.jsonlio` alias resolve to the
+SAME objects.
+
+The identity is guarded, not assumed: a test replaces the re-export with a forwarding wrapper and the
+guard fails. That is the star-import-by-value hazard CT-09 was about — a copy satisfies every name
+lookup while monkeypatching the original silently stops reaching the code under test.
+
+The distinction worth protecting through a move like this is `iter_jsonl` STOPS at the first bad line
+(append-only: a bad line is a torn tail, so everything after it is unproven) while `read_jsonl_lenient`
+SKIPS and continues (a store rewritten in place must not let one damaged line hide the rest). A driven
+test now pins both behaviours rather than trusting the docstrings that describe them.
+
 #### EV-13 · LOW · mergeable-entities · effort: medium
 
 **Parallel legacy hypothesis board duplicates the Card event family end to end**

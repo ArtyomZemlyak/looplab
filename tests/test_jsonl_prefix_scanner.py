@@ -176,3 +176,66 @@ def test_the_source_guard_can_actually_see_an_inlined_stop():
     assert not _INLINED_STOP.search(
         "        except (OSError, ValueError, orjson.JSONDecodeError) as exc:\n"
         "            raise Boom() from exc\n")
+
+
+# --- EV-12: generic JSONL store I/O lives in core, not in the event package ----------------------
+
+def test_the_generic_jsonl_helpers_live_in_core():
+    """`events/eventstore.py` hosted the mutable-store readers/writers because it was the module that
+    needed them first. Nothing about them is event-related, and subsystems that only want to read a
+    JSONL file (lessons, memory, the knowledge tools, trust/harden, the spans reader) should not have
+    to import `events` to do it (doc 25 EV-12)."""
+    from looplab.core import jsonlio
+
+    for name in ("JsonlRecordInvalid", "decode_jsonl_line", "scan_jsonl_region", "iter_jsonl",
+                 "read_jsonl_lenient", "read_jsonl_lenient_with_health", "write_jsonl_atomic",
+                 "replace_jsonl_rows_atomic_preserving_quarantine"):
+        assert hasattr(jsonlio, name), f"core.jsonlio lost {name}"
+
+
+def test_both_spellings_are_the_same_objects():
+    """The re-export contract: every existing `from looplab.events.eventstore import ...` and every
+    monkeypatch seam through it must keep working, which requires object IDENTITY, not just a name
+    that resolves. A star-import copy would satisfy the name and silently break the patch."""
+    from looplab.core import jsonlio
+    from looplab.events import eventstore
+
+    for name in ("JsonlRecordInvalid", "decode_jsonl_line", "scan_jsonl_region", "iter_jsonl",
+                 "read_jsonl_lenient", "read_jsonl_lenient_with_health", "write_jsonl_atomic",
+                 "replace_jsonl_rows_atomic_preserving_quarantine"):
+        assert getattr(eventstore, name) is getattr(jsonlio, name), f"{name} is a COPY, not a re-export"
+
+
+def test_the_core_home_does_not_import_the_event_package():
+    """`core` imports nothing above itself (CLAUDE.md layering). If the moved helpers had dragged an
+    `events` import along, the move would have bought nothing."""
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "looplab" / "core" / "jsonlio.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    upward = []
+    for node in ast.walk(tree):
+        module = node.module if isinstance(node, ast.ImportFrom) else None
+        names = ([module] if module else
+                 [a.name for a in node.names] if isinstance(node, ast.Import) else [])
+        for name in names:
+            if name and name.startswith("looplab.") and not name.startswith("looplab.core"):
+                upward.append(f"line {node.lineno}: {name}")
+    assert not upward, f"core/jsonlio reaches outside core: {upward}"
+
+
+def test_the_stop_versus_skip_distinction_survived_the_move():
+    """The load-bearing part. `iter_jsonl` STOPS at the first bad line (append-only: a bad line is a
+    torn tail); `read_jsonl_lenient` SKIPS and continues (a rewritten store must not let one damaged
+    line hide everything after it). Picking the wrong one is a durable correctness bug."""
+    import tempfile
+    from pathlib import Path as _P
+
+    from looplab.core.jsonlio import iter_jsonl, read_jsonl_lenient
+
+    with tempfile.TemporaryDirectory() as d:
+        path = _P(d) / "s.jsonl"
+        path.write_bytes(b'{"a":1}\nnot json\n{"a":2}\n')
+        assert [r["a"] for r in iter_jsonl(path)] == [1], "iter_jsonl must STOP at the damage"
+        assert [r["a"] for r in read_jsonl_lenient(path)] == [1, 2], "lenient must SKIP and continue"
