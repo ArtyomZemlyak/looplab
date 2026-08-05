@@ -7515,6 +7515,87 @@ entry, and a fresh upward import from `core/parse.py`.
 
 *Recommendation:* Extract endpoint bodies to module-level functions taking srv (or a typed protocol) explicitly and register them in a thin build_router; replace the late-bound srv.*_fn attributes with an explicit shared-services object constructed before any router, so the inter-router contract is typed and import-checkable.
 
+*Resolution (2026-08-05) — the DI half is done and guarded; the extraction half is measured and
+deferred with numbers. The finding's evidence is largely stale, and the part that survived is not
+the part it leads with.*
+
+**Adjudication first, because most of the evidence no longer describes the tree.**
+
+| Claim | Verdict | Measured |
+|---|---|---|
+| 13 `build_router(srv)` factories | CONFIRMED | exactly 13 — 12 in `routers/` + `serve/jobs.py` |
+| "three exceeding 1300 lines" | STALE | two: runs 2130, assistant 1357 |
+| runs.py `build_router` = 2146 | CONFIRMED | 2130 (drift 16) |
+| reports.py = 1549 | STALE | 1072 — SR-12 shed ~1 400 lines into `scope_report_store.py` |
+| control.py = 1327 | STALE | 838 — SC-01 shed `control_validation.py` |
+| assistant.py = 757 | FALSE | 1357. It GREW ~80% and is now the second-largest factory |
+| `_summary_cache` is a nested closure | STALE | `AppState.summary_cache`, a real attribute (SR-12) |
+| `concept_core_cache` is a nested closure | CONFIRMED | `routers/runs.py:754`, local to `build_router` |
+| runs.py sets `srv.list_runs_membership_fn` | FALSE | deleted by SR-12; `AppState.run_membership()` |
+| `reports.py` reads a `srv.*_fn` at request time | FALSE | reads `srv.run_membership()`; SR-12 |
+| runs.py sets `srv.list_runs_fn` | CONFIRMED | `routers/runs.py:862` |
+| misc.py sets `srv.list_tasks_fn`, genesis reads it | CONFIRMED | `misc.py:1297` → `genesis.py:195` |
+| "no static guarantee the producer router was mounted" | CONFIRMED | and this is the finding |
+
+An AST scan for `srv.<x>_fn` assignments and loads across `looplab/serve/` returns two producers and
+ONE consumer — not the three-edge mesh the finding describes. Half of that mesh was closed by SR-12
+the day before. What is left is one live edge and one attribute nothing production reads.
+
+**Done: the contract is enumerable and checked at mount time.** `serve/router_wiring.py` holds the
+mount ORDER (moved verbatim out of `make_app`, minus two parentheticals SR-12 had falsified) and
+`LATE_BOUND_ROUTER_CALLABLES`; `mount_routers` includes every router and then refuses an app that
+does not satisfy it. Two shapes, both previously silent until a request arrived: a CONSUMER mounted
+without its PRODUCER, and a producer mounted that no longer assigns (the assignment moved behind a
+condition, or lost its name in a rename). Note the mount order does not establish the contract by
+itself and never did — genesis mounts 7th and its producer misc 12th, which works only because the
+read is at request time. That is precisely why it has to be checked rather than argued from the list.
+
+`RuntimeError`, deliberately not an `OperatorRefusal`: a mount list that does not satisfy its own
+registry is a defect in this package, not a mistake in something the operator typed.
+
+**Rejected: the shared-services object.** With one live edge it is scaffolding for a single wire,
+and the two survivors are route BODIES — `list_tasks` reads the on-disk catalogue relative to the
+repo, `list_runs` overlays engine-liveness facts with a best-effort resume re-spawn. Promoting
+either into `AppState` puts HTTP concerns in the state bag, which is what SR-12 declined one day
+earlier for the same reason. Overturning that without new evidence would be churn.
+
+`list_runs_fn`'s row carries an EMPTY consumer tuple, which is the finding's most interesting
+casualty: SR-12 gave the scope reports their own `run_membership()` because a report GET must not
+probe every run's lock, so the attribute the finding cites as a cross-router dependency now has no
+production reader at all. It is not deleted — it is the handle
+`test_report.py::test_a_scope_report_read_never_probes_liveness_or_spawns_an_engine` uses to assert
+the runs list still DOES probe, the contrast that makes SR-12's split mean anything (verified by
+breaking the probe: that test fails at "only the report projection skips the probe"). So the empty
+tuple is a measured fact, and the scan fails if a production reader ever appears without a row.
+
+**Repaired en route:** four comments SR-12 left stale, one of them actively misleading — the
+rationale "the membership-only projection … NO engine-liveness lock probe and NO durable-resume
+reconciler" had re-attached itself to `list_tasks_fn`, the task CATALOGUE, describing a different
+thing entirely. It moves to `run_projections.run_membership`, which is what it was written about.
+
+**Deferred, with numbers: extracting the endpoint bodies.** The 13 factories hold ~8 300 lines and
+313 nested defs. The property the extraction would buy is "an endpoint can be imported and
+unit-tested in isolation", and nothing in the suite is currently blocked on it — every route is
+already driven end-to-end through `TestClient`, which exercises the dependency wiring an extracted
+call would skip. Against that: each moved body is a monkeypatch seam, and the failure mode is not a
+red test. It is the one measured on this tree today — a by-value break under which three
+pre-existing patch tests stayed GREEN while reaching nothing. A 8 300-line mechanical move with that
+failure mode and no property to show for it is a worse trade than leaving the closures alone. The
+one sub-claim still true (`concept_core_cache` local to `runs.py::build_router`) is a per-request
+cache with no cross-router reader, so it is not the defect class this finding is about.
+
+The honest measurement is also that the finding's premise has inverted since it was written:
+`assistant.py::build_router` grew from 757 to 1357 lines while `reports.py` and `control.py` shrank
+by a third each. Whoever picks the extraction up should re-derive the targets rather than trust the
+table above — including this row.
+
+Pinned by `tests/test_router_wiring.py` (11): the deficient mount really does 500 at request time
+when the check is bypassed (so the refusal below has a cost attached), `mount_routers` refusing both
+shapes, the empty-consumer branch, and the two-way AST scan tying every `srv.*_fn` assignment and
+read in a router back to a registry row. Teeth-tested against 5 breaks, all biting — including the
+two written to be comment-satisfiable (`pass  # srv.list_tasks_fn = list_tasks` and a commented-out
+`mount_routers(app, srv)` beside a hand include loop), which the AST checks ignore as they should.
+
 #### XP-06 · MEDIUM · under-decomposition · effort: large
 
 **The largest module in each package still contains one 500-800-line function**
