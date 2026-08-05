@@ -33,6 +33,7 @@ from looplab.serve.appstate import (
     _DELETE_FENCE_PREFIX, _DELETE_QUARANTINE_PREFIX, _DELETE_RECEIPT_PREFIX,
     _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
+from looplab.serve.durable_op import refuse_unless_quiescent
 from looplab.serve.http import json_object
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
 from looplab.serve.reset_transaction import (
@@ -621,15 +622,20 @@ def _admit_destructive_reset(
     """
     # Same checks as destructive_guard, expressed under the already-owned sequencer so two
     # simultaneous copies of the SAME operation rejoin instead of the loser seeing a stale claim.
+    # The probe set and its order are `durable_op.refuse_unless_quiescent`'s (doc 25 SC-06); the
+    # wording is Replay's own, because these strings are what the UI shows an operator.
     if receipt is None or receipt["phase"] == "prepared":
-        active = srv.commands._active_command_ids(rd)
-        if active:
-            raise HTTPException(
-                409, "cannot reset run: active command(s) " + ", ".join(active[:3]))
-        if srv.commands._recent_spawn_claim(rd):
-            raise HTTPException(409, "cannot reset run: an engine start is unresolved")
-        if srv.commands._finalize_incomplete(rd):
-            raise HTTPException(409, "cannot reset run: terminal projections are incomplete")
+        refuse_unless_quiescent(
+            srv.commands, rd,
+            active_command=lambda active: HTTPException(
+                409, "cannot reset run: active command(s) " + ", ".join(active[:3])),
+            engine_start=lambda: HTTPException(
+                409, "cannot reset run: an engine start is unresolved"),
+            finalize_incomplete=lambda: HTTPException(
+                409, "cannot reset run: terminal projections are incomplete"))
+        # NOT part of the shared ladder, and deliberately so: re-deriving the canonical run path is
+        # also how Replay re-checks the DELETION fence under the sequencer — `srv.run_dir` refuses a
+        # fenced run with 410 — which is why this route has no deletion probe of its own.
         canonical = srv.run_dir(run_id)
         if canonical != rd:
             raise HTTPException(409, "run path changed during Replay validation")

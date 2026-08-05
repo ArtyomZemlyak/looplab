@@ -119,6 +119,7 @@ _LAYOUT = {
     "deletion_service": "serve",
     "deletion_transaction": "serve",
     "digest": "events",
+    "durable_op": "serve",     # the shared reset/deletion receipt + quiescence kit (doc 25 SC-06)
     "edit_match": "tools",
     "env_inspect": "tools",
     "errors": "core",
