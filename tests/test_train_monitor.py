@@ -12,6 +12,7 @@ import pytest
 
 from looplab.core.tracing import JsonlSpanExporter, Tracer
 from looplab.core.models import Event
+from looplab.engine import train_monitor as _tm
 from looplab.engine.train_monitor import (
     TrainingMonitorMixin,
     active_training_log,
@@ -152,7 +153,7 @@ def test_monitor_cancellation_joins_the_paid_verdict_worker(tmp_path):
         host = _MonitorStub(tracer, interval=0.02)
         host._monitor_cadence = lambda: 0.0
 
-        def _blocking_verdict(digest, context):
+        def _blocking_verdict(digest, context, stage_context=""):
             started.set()
             release.wait()
             worker_finished.set()
@@ -282,8 +283,16 @@ class _FakeStore:
 _MONITOR_SETTLE_TIMEOUT_S = 15.0
 
 
+# The stage plan these workdirs correspond to: they all write `train.log`, which in a resolved
+# pipeline is a work stage (the engine's protected `score` scorer is always appended last). Kill
+# authority requires an IDENTIFIED training stage, so any test asserting about the kill must say which
+# pipeline it is running — a bare `*.log` could be a scorer's or a pip install's.
+_TRAIN_PLAN = _tm.eval_log_plan([{"name": "train", "command": ["python", "train.py"]},
+                                 {"name": "score", "command": ["python", "score.py"]}])
+
+
 def _run_verdict_monitor(tmp_path, *, workdir, developer, hold_s=0.22, redact=None,
-                         kill=False, kill_confidence=0.8, prior_events=(), until=None):
+                         kill=False, kill_confidence=0.8, prior_events=(), until=None, plan=None):
     tracer = Tracer(JsonlSpanExporter(tmp_path / "spans.jsonl"))
     host = _VerdictHost(tracer, developer, interval=0.05, redact=redact,
                         kill=kill, kill_confidence=kill_confidence)
@@ -291,7 +300,8 @@ def _run_verdict_monitor(tmp_path, *, workdir, developer, hold_s=0.22, redact=No
 
     async def drive():
         async with anyio.create_task_group() as tg:
-            tg.start_soon(host._monitor_training, 0, 0, str(workdir), host.cancel, "ctx", host.kill_signal)
+            tg.start_soon(host._monitor_training, 0, 0, str(workdir), host.cancel, "ctx",
+                          host.kill_signal, None, plan)
             if until is None:
                 await anyio.sleep(hold_s)
             else:
@@ -447,6 +457,7 @@ def test_non_finite_broken_confidence_stays_observable_but_cannot_kill(tmp_path,
         developer=_FakeDeveloper(client),
         kill=True,
         kill_confidence=0.0,
+        plan=_TRAIN_PLAN,          # an identified training stage: nothing but the confidence blocks it
     )
 
     # A zero action threshold proves invalid confidence is rejected by validity, not merely mapped below
@@ -530,7 +541,17 @@ class _CadenceHost(TrainingMonitorMixin):
 
 # --------------------------------------------------------------------------- Phase 3: gated early kill
 def test_should_monitor_kill_decision():
-    from looplab.engine.train_monitor import TrainingVerdict, should_monitor_kill as kill
+    from looplab.engine.train_monitor import (
+        LOG_ROLE_SCORE, LOG_ROLE_SETUP, LOG_ROLE_TRAINING, LOG_ROLE_UNKNOWN,
+        TrainingVerdict, should_monitor_kill)
+
+    def kill(verdict, **kw):
+        # The verdict-quality half of the gate. The stage-scope and confirmation halves are held at
+        # their ACTING values here and exercised on their own below, so each conjunct has its own case.
+        kw.setdefault("log_role", LOG_ROLE_TRAINING)
+        kw.setdefault("broken_streak", 2)
+        return should_monitor_kill(verdict, **kw)
+
     broken = TrainingVerdict(status="broken", reason="loss nan", confidence=0.9)
     watch = TrainingVerdict(status="watch", reason="slow", confidence=0.99)
     healthy = TrainingVerdict(status="healthy", reason="ok", confidence=0.99)
@@ -539,11 +560,30 @@ def test_should_monitor_kill_decision():
                 enabled=True, threshold=0.8) is True                 # inclusive configured boundary
     assert kill(TrainingVerdict(status="broken", reason="below", confidence=0.799999),
                 enabled=True, threshold=0.8) is False
-    assert kill(broken, enabled=False, threshold=0.8) is False        # opt-in: off by default
+    assert kill(broken, enabled=False, threshold=0.8) is False        # opt-in
     assert kill(broken, enabled=True, threshold=0.95) is False        # below the confidence bar
     assert kill(watch, enabled=True, threshold=0.5) is False          # a plateau/'watch' is never killed
     assert kill(healthy, enabled=True, threshold=0.5) is False
     assert kill(None, enabled=True, threshold=0.5) is False
+
+    # STAGE SCOPE: the same confident verdict may only act about an identified TRAINING stage. The
+    # monitor lives across setup -> stages -> the always-appended `score` stage, so a verdict formed
+    # about any other phase — or about a log nothing could attribute — is evidence, never authority.
+    for role in (LOG_ROLE_UNKNOWN, LOG_ROLE_SETUP, LOG_ROLE_SCORE):
+        assert should_monitor_kill(broken, enabled=True, threshold=0.8,
+                                   log_role=role, broken_streak=9) is False
+    # ... and the default is the fail-closed one, so a caller that cannot say cannot kill.
+    assert should_monitor_kill(broken, enabled=True, threshold=0.8, broken_streak=9) is False
+
+    # CONFIRMATION: one confident tick arms, the second acts.
+    assert should_monitor_kill(broken, enabled=True, threshold=0.8,
+                               log_role=LOG_ROLE_TRAINING, broken_streak=1) is False
+    assert should_monitor_kill(broken, enabled=True, threshold=0.8,
+                               log_role=LOG_ROLE_TRAINING, broken_streak=2) is True
+    # A caller cannot disable the requirement by asking for zero/negative confirmations.
+    for degenerate in (0, -1, "two", None):
+        assert should_monitor_kill(broken, enabled=True, threshold=0.8, log_role=LOG_ROLE_TRAINING,
+                                   broken_streak=0, confirm_ticks=degenerate) is False
 
 
 @pytest.mark.parametrize(
@@ -552,10 +592,14 @@ def test_should_monitor_kill_decision():
     ids=["nan", "positive-infinity", "negative-infinity"],
 )
 def test_should_monitor_kill_rejects_non_finite_confidence_at_zero_threshold(confidence):
-    from looplab.engine.train_monitor import TrainingVerdict, should_monitor_kill
+    from looplab.engine.train_monitor import (
+        LOG_ROLE_TRAINING, TrainingVerdict, should_monitor_kill)
 
     verdict = TrainingVerdict(status="broken", reason="invalid model confidence", confidence=confidence)
-    assert should_monitor_kill(verdict, enabled=True, threshold=0.0) is False
+    # Every OTHER conjunct is held open (identified training stage, confirmed streak, zero bar) so the
+    # False can only come from the confidence being INVALID — the property this test guards.
+    assert should_monitor_kill(verdict, enabled=True, threshold=0.0,
+                               log_role=LOG_ROLE_TRAINING, broken_streak=2) is False
 
 
 def test_watchdog_kill_claim_is_first_writer_wins():
@@ -583,7 +627,12 @@ def test_broken_verdict_fires_kill_when_enabled(tmp_path):
     (wd / "train.log").write_text("Using device: cpu\nRuntimeError in dataloader\nloss: nan\n")
     client = _FakeClient({"status": "broken", "reason": "silent CPU fallback + nan loss",
                           "confidence": 0.95})
-    host, _ = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), kill=True)
+    # `plan` names the pipeline this workdir belongs to, so `train.log` is an identified TRAINING stage
+    # (without it the verdict is advisory — see test_watchdog_stage_scope.py). The kill needs the
+    # verdict CONFIRMED, so it lands on the second consecutive broken tick, not the first.
+    host, _ = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), kill=True,
+                                   plan=_TRAIN_PLAN,
+                                   until=lambda h: h.kill_signal.get("kill"))
 
     assert host.kill_signal.get("kill") is True                       # kill decision recorded for _evaluate
     assert "CPU" in host.kill_signal.get("reason", "")
@@ -598,7 +647,8 @@ def test_broken_verdict_does_not_kill_when_disabled(tmp_path):
     wd.mkdir()
     (wd / "train.log").write_text("loss: nan\n")
     client = _FakeClient({"status": "broken", "reason": "nan", "confidence": 0.99})
-    host, _ = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), kill=False)
+    host, _ = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), kill=False,
+                                   plan=_TRAIN_PLAN)   # only the opt-in is missing
 
     assert host.kill_signal.get("kill") is None and not host.cancel.is_set()   # observe-only default
     assert any(t == EV_TRAIN_MONITOR_ALERT for (t, _d) in host.store.events)    # but still flagged

@@ -321,6 +321,9 @@ EV_RUN_SETUP_FINISHED = "run_setup_finished"
 # monitor appends it), so it cannot directly change lifecycle, ranking, or replay. The raw
 # event may still enter a later Researcher prompt through watchdog_reflection; it also feeds owner
 # attention + audit. Healthy verdicts stay trace-only except for a recovery transition after an alert.
+# When the monitor DECIDES to stop the run it also stamps the kill-attribution pair described on
+# EV_ASHA_VERDICT below (`stop_decided` + `kill`, plus `kill_superseded_by` when a sibling watchdog won
+# the claim); those fields are absent on an ordinary advisory row.
 EV_TRAIN_MONITOR_ALERT = "train_monitor_alert"
 # ASHA live-curve watchdog (engine/asha_monitor.py): a node whose latest INTERMEDIATE metric ranks below
 # completed endpoints and/or comparable same-resource observations. New rows distinguish those verdicts;
@@ -332,8 +335,15 @@ EV_ASHA_RANK = "asha_rank"
 # The ASHA watchdog's LLM STOP DECISION (engine/asha_monitor.py). The deterministic rank test above is
 # only the EVIDENCE; when it fires past the grace window a judge sees the live curve, the same-resource
 # sibling distribution + bar, the other metrics the run prints, and the training monitor's latest health
-# verdict, and answers continue|watch|stop (`status`; "unavailable" when no client answered). `kill`
-# records whether the node was actually stopped. DIAGNOSTIC / fold-ignored for the same reason as
+# verdict, and answers continue|watch|stop (`status`; "unavailable" when no client answered).
+# Kill attribution is TWO bits, neither of which is "the node stopped" — that is knowable only from the
+# node's own terminal, and this row is written before it exists: `stop_decided` is what this watchdog
+# decided, and `kill` whether it then WON the shared per-eval claim (`train_monitor.claim_watchdog_kill`)
+# and therefore owns the terminal's reason; `kill_superseded_by` names the sibling that won instead.
+# `kill: true` still does not prove a stop, because `engine/evaluate.py` converts a claim into a
+# terminal only `if kill_signal.get("kill") and not ok` — a kill claimed against an eval that had
+# already produced a usable result ends in `node_evaluated`. Join to the node's single terminal for the
+# outcome; these fields answer "which watchdog decided/claimed what". DIAGNOSTIC / fold-ignored as
 # EV_ASHA_RANK: the judge runs in a concurrent per-eval task, so its splice position is thread-dependent
 # and must not reach folded state — the stop itself is recorded by the node's single `node_failed`
 # terminal (reason=asha_underperforming), which is what replay reads instead of re-invoking the LLM.

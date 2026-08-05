@@ -44,6 +44,12 @@ _BUDGET_REASONS = {
 }
 _FAILED_FINISH_REASONS = {"error", "leakage", "no_eligible_candidate"}
 _STOPPED_FINISH_REASONS = {"aborted", "finalized"}
+# Terminal reasons a LIVE watchdog writes when it ends a node itself (`engine/evaluate.py` maps
+# `kill_signal["terminal_reason"]` onto the node's single `node_failed`). A node that terminated this
+# way is the one case where the watchdog's own attention item must OUTLIVE the node's pending status —
+# see `_watchdog_stopped` for why.
+_TRAIN_MONITOR_KILL_REASON = "monitor_broken"
+_ASHA_KILL_REASON = "asha_underperforming"
 
 # Canonical owner-inbox priority taxonomy.  Keep this on the projection side so the feed router
 # orders the COMPLETE collection before it slices a page; a client-side reorder cannot recover an
@@ -248,6 +254,30 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
             if opened and visible and anchor is not None
         }
 
+    def _watchdog_stopped(nid: int, gen: int, kill_reason: str) -> bool:
+        """Did a live watchdog END this exact node lifecycle with `kill_reason`?
+
+        The lifecycle guards below exist because a finished node's live-log alert is stale — the node
+        kept running for hours and nothing about the alert is actionable any more. That reasoning held
+        only while the watchdogs were ADVISORY. With `train_monitor_kill` / `asha_live_kill` on, the
+        watchdog's own `node_failed` follows its alert within SECONDS: the item and its one-time desktop
+        notification were filtered out long before any realistic 8-second poll could see them, so the
+        operator got a killed experiment (no repair, no retry, its `max_nodes` slot spent) and no signal
+        at all — the feed went quiet exactly when it had the most to say.
+
+        A watchdog kill is therefore not a stale alert but the alert's CONSEQUENCE, and it stays
+        visible. Bounded by construction: one item per killed node lifecycle, keyed like every other
+        episode, and only for the node's CURRENT attempt — a reset/retry drops it as before.
+        """
+        current = state.nodes.get(nid)
+        if (current is None or current.attempt != gen or current.tombstoned
+                or nid in state.aborted_nodes or current.status is not NodeStatus.failed):
+            return False
+        terminal = accepted_event(current.terminal_event_seq, EV_NODE_FAILED)
+        if terminal is None:
+            return False
+        return str((terminal.data or {}).get("reason") or "").strip().lower() == kill_reason
+
     def classify_train_monitor(data: dict) -> str:
         status = str(data.get("status") or "").strip().lower()
         if status == "broken":
@@ -275,10 +305,14 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
     )
     rid = _run_id(run_id)
     for (nid, gen), (episode_number, anchor) in sorted(monitor_episodes.items()):
-        # Only while THIS lifecycle is still evaluating (pending): a finished/failed/aborted/tombstoned
-        # node's broken alert is stale and not actionable. Mirrors the failure-spike lifecycle guard.
+        # While THIS lifecycle is still evaluating (pending) — a finished/aborted/tombstoned node's
+        # broken alert is stale and not actionable (mirrors the failure-spike lifecycle guard) — OR
+        # once the monitor itself STOPPED this lifecycle, which is the alert's consequence rather than
+        # a stale echo of it (`_watchdog_stopped`).
         cur = state.nodes.get(nid)
-        if (cur is None or cur.attempt != gen or cur.status is not NodeStatus.pending
+        stopped_by_monitor = _watchdog_stopped(nid, gen, _TRAIN_MONITOR_KILL_REASON)
+        if not stopped_by_monitor and (
+                cur is None or cur.attempt != gen or cur.status is not NodeStatus.pending
                 or cur.tombstoned or nid in state.aborted_nodes):
             continue
         anchor_seq = _integer(anchor.seq)
@@ -298,9 +332,17 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
             ),
             "kind": "train_monitor",
             "severity": "warning",
-            "title": "Training looks broken",
-            "detail": (f"Experiment #{nid}: the live-log monitor judged the training likely wasted. "
-                       "Open the run to inspect the training log and the monitor verdict."),
+            # The web client renders from its own COPY table keyed by `kind` (attentionModel.js), so
+            # these strings are the API-shape sentences, not the rendered text — and the kind stays
+            # `train_monitor` because a new one would be dropped by the client's ATTENTION_KINDS gate.
+            "title": ("Training stopped by the monitor" if stopped_by_monitor
+                      else "Training looks broken"),
+            "detail": (f"Experiment #{nid}: the live-log monitor "
+                       + ("stopped this experiment early. Open the run to inspect the training log "
+                          "and the monitor verdict."
+                          if stopped_by_monitor else
+                          "judged the training likely wasted. Open the run to inspect the training "
+                          "log and the monitor verdict.")),
             "run_id": rid,
             "generation": generation,
             "seq": anchor_seq,
@@ -328,10 +370,14 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
         EV_ASHA_RANK, classify_asha,
     )
     for (nid, gen), (episode_number, anchor) in sorted(asha_episodes.items()):
-        # Only while THIS lifecycle is still evaluating (pending): a finished/failed/aborted/tombstoned
-        # node's rank flag is stale. Mirrors the training-monitor + failure-spike lifecycle guard.
+        # While THIS lifecycle is still evaluating (pending) — a finished/aborted/tombstoned node's rank
+        # flag is stale — OR once this watchdog STOPPED the lifecycle itself. Same reasoning as the
+        # training-monitor guard above: with `asha_live_kill` on, the kill terminal lands seconds after
+        # the rank row, so the only signal the operator ever gets would be filtered before any poll.
         cur = state.nodes.get(nid)
-        if (cur is None or cur.attempt != gen or cur.status is not NodeStatus.pending
+        stopped_by_asha = _watchdog_stopped(nid, gen, _ASHA_KILL_REASON)
+        if not stopped_by_asha and (
+                cur is None or cur.attempt != gen or cur.status is not NodeStatus.pending
                 or cur.tombstoned or nid in state.aborted_nodes):
             continue
         anchor_seq = _integer(anchor.seq)
@@ -349,9 +395,11 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
             ),
             "kind": "asha",
             "severity": "warning",
-            "title": "ASHA rank warning",
-            "detail": (f"Inspect experiment #{nid}'s live curve. Automatic stopping requires peers "
-                       "at the same declared progress."),
+            "title": ("ASHA stopped an experiment" if stopped_by_asha else "ASHA rank warning"),
+            "detail": (f"Inspect experiment #{nid}'s live curve. "
+                       + ("The rank watchdog stopped it early."
+                          if stopped_by_asha else
+                          "Automatic stopping requires peers at the same declared progress.")),
             "run_id": rid,
             "generation": generation,
             "seq": anchor_seq,

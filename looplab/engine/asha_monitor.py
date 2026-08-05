@@ -570,13 +570,19 @@ class AshaMonitorMixin:
     @in_llm_lane("enrichment")
     async def _monitor_asha(self, node_id: int, generation: int, workdir, cancel,
                             metric_spec: dict, direction: str,
-                            kill_signal: Optional[dict] = None, log_snapshot=None) -> None:
+                            kill_signal: Optional[dict] = None, log_snapshot=None,
+                            log_plan=None) -> None:
         """Tail the live log on a timer, extract the intermediate objective metric, rank it against the
         completed sibling endpoints for diagnostics, and record advisory `EV_ASHA_RANK` transitions.
         Opt-in tree-kill requires persistent underperformance against enough sibling observations at the
         same declared resource AND a confident `stop` from the LLM judge, which sees that evidence plus
         the live curve, the run's other metrics and the training monitor's latest health verdict. Exits
-        with the eval; a per-tick hiccup skips only that tick."""
+        with the eval; a per-tick hiccup skips only that tick.
+
+        `log_plan` (from `train_monitor.eval_log_plan`) confines the read to the stage logs that carry
+        the LIVE curve: the dep install writes no metrics, and the final scorer's log carries the run's
+        FINAL value, which is not an intermediate and must never be ranked against sibling mid-training
+        checkpoints."""
         # Local: `evaluate` imports this module, so a module-level import would be a cycle.
         from looplab.engine.evaluate import _watch_limiter
         import anyio
@@ -634,7 +640,7 @@ class AshaMonitorMixin:
                 return
             try:
                 tail = await anyio.to_thread.run_sync(
-                    lambda: read_training_tail_raw(workdir, snapshot=log_snapshot),
+                    lambda: read_training_tail_raw(workdir, snapshot=log_snapshot, plan=log_plan),
                     limiter=_watch_limiter())
                 sample = latest_intermediate_sample(tail, workdir, metric_spec)
                 if sample is None:
@@ -715,7 +721,7 @@ class AshaMonitorMixin:
                     # would have stopped; it can never reach a node the rank test spared. The judge sees
                     # what the quantile comparison threw away — the curve's shape, the peer spread, the
                     # other metrics, the training monitor's health verdict — and decides.
-                    verdict, kill = None, False
+                    verdict, kill, stop_decided = None, False, False
                     with self.tracer.span("asha_judge", node_id=node_id) as sp:
                         sp.set_many(generation=generation, intermediate=round(value, 6),
                                     quantile=round(quantile, 3), under_streak=under_streak,
@@ -726,6 +732,17 @@ class AshaMonitorMixin:
                             # silent cap would read as "the judge keeps sparing this node" when in fact
                             # nobody is asking any more.
                             sp.set("llm_capped", True)
+                        elif cancel.is_set():
+                            # The node is already ending — the eval finished, an operator aborted, or the
+                            # SIBLING training monitor claimed the kill while this tick was reading the
+                            # log and folding. `cancel` was only re-checked at the top of the loop, so a
+                            # loser could still start a judge call here; because the call is deliberately
+                            # un-abandonable below, `_evaluate`'s task-group cancel then had to WAIT a
+                            # whole endpoint timeout for a verdict about a dead node — and pay for it.
+                            # Node teardown was bounded by the endpoint timeout twice over, once per
+                            # watchdog. Nothing is decided or recorded on this tick.
+                            sp.set("cancelled_before_call", True)
+                            return
                         else:
                             context = asha_judge_context(
                                 node_id=node_id, generation=generation, direction=direction,
@@ -752,36 +769,17 @@ class AshaMonitorMixin:
                         # "unavailable" is NOT one of the model's three statuses: it records that nobody
                         # answered (no client / endpoint failure / cap), which is why the node lives on.
                         status = getattr(verdict, "status", None) or "unavailable"
-                        kill = should_asha_kill(
+                        stop_decided = should_asha_kill(
                             verdict, enabled=getattr(self, "_asha_live_kill", False),
                             threshold=kill_confidence, rank_underperforming=comparable_under)
-                        sp.set_many(status=status, confidence=round(conf, 3), kill=kill,
-                                    reason=reason[:200])
-                        if not confidence_valid:
-                            sp.set("confidence_valid", False)
-                        # DURABLE record of the decision (fold-IGNORED, like EV_ASHA_RANK): the rank rows
-                        # say a node was behind, this says what was decided about it and why — including
-                        # the far more common "the rank test fired and the judge kept the run alive",
-                        # which otherwise leaves no trace at all.
-                        assert EV_ASHA_VERDICT in DIAGNOSTIC_EVENTS
-                        decision = {
-                            "node_id": node_id, "generation": generation, "status": status,
-                            "reason": reason, "confidence": round(conf, 3), "kill": kill,
-                            "intermediate": round(value, 6), "quantile": round(quantile, 3),
-                            "direction": str(direction), "under_streak": under_streak,
-                            "comparable_population": len(comparable_population),
-                        }
-                        if not confidence_valid:
-                            decision["confidence_valid"] = False
-                        if sample.resource_key is not None and sample.resource is not None:
-                            decision.update({"resource_key": sample.resource_key,
-                                             "resource": sample.resource})
-                        if train_verdict:
-                            decision["train_monitor_status"] = train_verdict.get("status")
-                        async with self._write_lock:
-                            self.store.append(EV_ASHA_VERDICT, decision)
-                    if kill:
-                        claim_watchdog_kill(
+                        # CLAIM BEFORE RECORDING, so the durable row can state what happened to the NODE
+                        # rather than what this watchdog wanted. The claim used to run after the append,
+                        # with its return value discarded: when the sibling training monitor won the race
+                        # the terminal said `monitor_broken` while an `asha_verdict{kill:true}` row sat
+                        # beside it, and any audit of "which watchdog stopped what" over-counted ASHA.
+                        # The guard->update inside `claim_watchdog_kill` is await-free, so `kill` below
+                        # is the exact outcome, not a prediction.
+                        kill = stop_decided and claim_watchdog_kill(
                             kill_signal, cancel,
                             reason=(
                                 (reason + " — " if reason else "")
@@ -792,7 +790,57 @@ class AshaMonitorMixin:
                             )[:400],
                             terminal_reason="asha_underperforming",
                             confidence=round(conf, 3))
-                        return
+                        sp.set_many(status=status, confidence=round(conf, 3), kill=kill,
+                                    reason=reason[:200])
+                        if stop_decided and not kill:
+                            sp.set("kill_superseded", True)
+                        if not confidence_valid:
+                            sp.set("confidence_valid", False)
+                        # DURABLE record of the decision (fold-IGNORED, like EV_ASHA_RANK): the rank rows
+                        # say a node was behind, this says what was decided about it and why — including
+                        # the far more common "the rank test fired and the judge kept the run alive",
+                        # which otherwise leaves no trace at all.
+                        assert EV_ASHA_VERDICT in DIAGNOSTIC_EVENTS
+                        # TWO separate bits, because they answer different questions and CAN differ:
+                        #   `stop_decided` — what this watchdog decided (the judge's confident `stop`);
+                        #   `kill`         — whether it then WON the shared per-eval claim, i.e. whether
+                        #                    its reason is the one `_evaluate` will terminalize with.
+                        # Neither is "the node stopped": `_evaluate` converts a claim into a terminal
+                        # only `if kill_signal.get("kill") and not ok`, so a kill claimed against an eval
+                        # that had ALREADY produced a usable result still ends in `node_evaluated`. That
+                        # outcome is not knowable here (it is decided after this task is cancelled), so
+                        # the row records what it can prove and the node's single terminal stays the
+                        # authority on what happened — see the EV_ASHA_VERDICT note in `events/types.py`.
+                        decision = {
+                            "node_id": node_id, "generation": generation, "status": status,
+                            "reason": reason, "confidence": round(conf, 3),
+                            "stop_decided": bool(stop_decided), "kill": kill,
+                            "intermediate": round(value, 6), "quantile": round(quantile, 3),
+                            "direction": str(direction), "under_streak": under_streak,
+                            "comparable_population": len(comparable_population),
+                        }
+                        if not confidence_valid:
+                            decision["confidence_valid"] = False
+                        if stop_decided and not kill:
+                            # The judge said stop and the claim LOST: the sibling watchdog owns the
+                            # terminal. Naming its reason means attribution needs no guesswork.
+                            decision["kill_superseded_by"] = str(
+                                kill_signal.get("terminal_reason") or "")[:64]
+                        if sample.resource_key is not None and sample.resource is not None:
+                            decision.update({"resource_key": sample.resource_key,
+                                             "resource": sample.resource})
+                        if train_verdict:
+                            decision["train_monitor_status"] = train_verdict.get("status")
+                        # A decided stop means cancellation is already in flight (this claim or the
+                        # sibling's), and `self._write_lock` is the next cancellation checkpoint — an
+                        # unshielded append would be preempted and the ONLY durable record of the
+                        # decision lost. Bounded (one append); same shielding `_evaluate` uses for its
+                        # own promised terminal. A spared verdict keeps the plain best-effort append.
+                        with anyio.CancelScope(shield=stop_decided):
+                            async with self._write_lock:
+                                self.store.append(EV_ASHA_VERDICT, decision)
+                    if stop_decided:
+                        return              # won or lost, this node is ending — stop watching it
                     # SPARED: re-arm the whole grace window instead of re-judging on the very next tick.
                     # The rank flag persists for as long as the node is behind, so without this the judge
                     # would be asked again every cadence — paying for the same question and pressing a

@@ -21,12 +21,12 @@ from typing import Optional
 import anyio
 import orjson
 
-from looplab.core.models import (NodeStatus, developer_artifact_footprint,
+from looplab.core.models import (NodeStatus, developer_artifact_footprint, is_developer_error,
                                  normalize_extra_metrics)
 from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.engine.asha_monitor import extract_resource_curve
 from looplab.engine.options import _UNSET
-from looplab.engine.train_monitor import snapshot_training_logs
+from looplab.engine.train_monitor import eval_log_plan, snapshot_training_logs
 
 # Watchdog/monitor ticks get their OWN thread pool, separate from anyio's shared 40-token default.
 # Every `to_thread.run_sync` in the engine draws on that default, and an in-flight eval holds a token
@@ -50,7 +50,8 @@ from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.events.types import (EV_CARD_DROPPED, EV_DEPS_INSTALLED, EV_NODE_ABORT,
                                   EV_NODE_EVAL_STARTED,
                                   EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
-                                  EV_NODE_RESET, EV_PROXY_SCORED, EV_REWARD_HACK_SUSPECTED,
+                                  EV_NODE_RESET, EV_PAUSE, EV_PROXY_SCORED,
+                                  EV_REWARD_HACK_SUSPECTED,
                                   EV_SPEC_DRIFT, EV_STAGE_FINISHED)
 
 
@@ -380,7 +381,10 @@ class EvaluateMixin:
             triage_outcome = None            # ("abandon"|"reject_idea", rationale) for the terminal event
             err = ""
             reason = "crash"
-            stuck_sig = None                 # anti-stuck: consecutive identical-error signatures
+            # Anti-stuck ledger: how many times each normalized error signature has been seen in
+            # THIS node's repair loop. Was a consecutive-streak counter (`stuck_sig`/`stuck_n`); see
+            # the comment at the update site for why a streak is the wrong shape.
+            stuck_seen: dict = {}
             stuck_n = 0
             # Multi-stage reuse across repair attempts: `next_start` is the stage to run FROM on the next
             # eval — _UNSET on the first eval (derives node.rerun_stage), then set by the safe-reuse
@@ -400,6 +404,13 @@ class EvaluateMixin:
                     (getattr(self, "_train_monitor", False) and bool(_eval_spec))
                     or (getattr(self, "_asha_live", False) and isinstance(_eval_spec, dict)))
                 _log_snapshot = snapshot_training_logs(workdir) if _watching_logs else None
+                # Which log each phase of THIS attempt writes. Both watchdogs live across the WHOLE
+                # eval — setup, every stage, and the ALWAYS-appended `score` stage — so without the
+                # resolved pipeline they can only guess whose bytes they are reading, and the freshest
+                # `*.log` is `setup.log` during a pip install and `score.log` after the training has
+                # already SUCCEEDED. `_resolved_stages` re-resolves exactly what `_run_eval` will run
+                # ([] = the single-command path, whose `eval.log` IS the training log).
+                _log_plan = eval_log_plan(self._resolved_stages(node, workdir)) if _watching_logs else None
                 # Mid-eval intervention: a watcher polls while the eval runs in a worker thread. An
                 # exact node lifecycle mutation or operator drop of THIS node's Card sets the cancel
                 # Event, which tree-kills the in-flight subprocess (sandbox._run_argv). The pre-eval
@@ -506,14 +517,14 @@ class EvaluateMixin:
                         _mon_ctx = f"Optimizing metric {_mkey!r}." + (
                             f" Experiment: {_rationale}" if _rationale else "")
                         _tg.start_soon(self._monitor_training, node_id, generation, workdir, cancel,
-                                       _mon_ctx, kill_signal, _log_snapshot)
+                                       _mon_ctx, kill_signal, _log_snapshot, _log_plan)
                     # ASHA live-curve rank watchdog (off by default): a sibling task that reads the live
                     # log's latest INTERMEDIATE metric and ranks it against finished siblings; advisory
                     # unless asha_live_kill. Same command-eval gate (needs a live log + the metric spec).
                     if getattr(self, "_asha_live", False) and isinstance(getattr(self, "_eval_spec", None), dict):
                         _mspec = self._eval_spec.get("metric") or {}
                         _tg.start_soon(self._monitor_asha, node_id, generation, workdir, cancel,
-                                       _mspec, state.direction, kill_signal, _log_snapshot)
+                                       _mspec, state.direction, kill_signal, _log_snapshot, _log_plan)
                     # The lifecycle reservation selected by the dispatcher stays unchanged through this
                     # retry. CUDA_VISIBLE_DEVICES contains physical ids (logical→physical remap), while
                     # an unspecified serial eval keeps eval_env=None and sees the whole box as before.
@@ -635,9 +646,24 @@ class EvaluateMixin:
                 # repair) so the agent doesn't loop forever on an unfixable failure.
                 # T10: NORMALIZED signature — the same semantic error with different line numbers /
                 # sizes / paths counts as "stuck" too (exact-match compare missed those loops).
+                #
+                # Counted PER SIGNATURE over the whole node, not as a consecutive streak. A streak
+                # counter is defeated by ANY interleaving: an oscillating repair (fix A breaks B, fix
+                # B breaks A) and a failure that cycles through variants both keep resetting it to 1
+                # and it never reaches the threshold. That is precisely the shape of the 3.5 h
+                # runaway — 2345 failures, longest identical run 2, threshold 4, guard never fired —
+                # and with `inline_repair_attempts = 0` (UNLIMITED, an operator decision) this guard
+                # is the ONLY bound on the loop, so it must not be defeatable by re-ordering.
+                # Seeing one signature `inline_repair_stuck_repeat` times inside a single node is not
+                # progress under any reading, consecutive or not. The normalizer (engine/triage.py)
+                # documents which variation it absorbs and which it deliberately keeps distinct, so a
+                # node whose error genuinely MOVES as it is fixed still mints fresh signatures and
+                # keeps every attempt it is entitled to.
                 _sig = _normalize_error_sig(err)
-                stuck_n = (stuck_n + 1) if _sig and _sig == stuck_sig else 1
-                stuck_sig = _sig
+                if _sig:
+                    stuck_seen[_sig] = stuck_n = stuck_seen.get(_sig, 0) + 1
+                else:
+                    stuck_n = 1                  # an empty signature carries no evidence either way
                 # Eval-budget stop: the inline-repair loop re-runs FULL evals with no budget check
                 # between attempts — the loop-top / per-eval guards only see `total_eval_seconds` from
                 # TERMINAL events, and no terminal is emitted mid-repair, so an LLM whose repairs vary
@@ -665,7 +691,8 @@ class EvaluateMixin:
                         or not callable(getattr(self.developer, "repair", None))
                         or not (node.code or node.files or self._repo_spec)):
                     if stuck_n >= self._inline_repair_stuck_repeat and self._inline_repair:
-                        triage_outcome = ("abandon", f"same error repeated {stuck_n}x — stuck, abandoning")
+                        triage_outcome = ("abandon", f"the same error signature has now failed this "
+                                                     f"node {stuck_n}x — stuck, abandoning")
                     break
                 triage = self._triage_crash(state, node, err, attempt + 1, reason=reason)
                 action = triage.get("action", "repair")
@@ -693,6 +720,53 @@ class EvaluateMixin:
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
                     new_code = self._repair(
                         node, self._repair_error_context(reason, err, state=state, node=node), state)
+                # A REPAIR THAT DID NOT PRODUCE A REPAIR. The Developer returns the in-band
+                # "(developer error: …)" sentinel when its OWN session failed — an unreachable
+                # endpoint, a 401, a 402 "out of credits" — so `new_code` is a provider/transport
+                # error message, not code. Nothing downstream can tell the difference: the sentinel
+                # was committed as the node's code by `node_repaired`, re-materialized into the
+                # workdir, and re-evaluated; the eval then failed with a fresh error, so the loop
+                # simply asked again. A dead OpenRouter account produced 2343 such "repairs" on ONE
+                # node at ~11/min for 3.5 h, each one a full re-eval, every attempt counted as normal
+                # and every stuck counter reset — unbounded, because `inline_repair_attempts = 0`
+                # means UNLIMITED (an operator decision) and the anti-stuck guard was the only bound.
+                #
+                # A provider failure is not a code defect, so it must not drive the code-repair loop.
+                # No `node_repaired`, no attempt spent, no files written, no stuck counter touched —
+                # the loop breaks here and the node terminalizes ONCE below with
+                # reason="developer_crash" naming the provider failure. (Deliberately NOT committing
+                # the sentinel as node.code also keeps the recovery sweep's `_developer_sentinel`
+                # scan, which keys on exactly that, from later re-terminalizing this node.)
+                #
+                # It is ALSO a RUN-level condition — every other node reaches the same dead endpoint,
+                # so continuing just re-spends the node budget on nodes that cannot be built. Mirror
+                # the build path's "PAUSE on the FIRST developer_crash" circuit-breaker
+                # (`_create_node`) so the operator learns "your endpoint is out of credits" from one
+                # pause reason instead of by reading thousands of repair events. The pause is
+                # RUN-level (no node_id): the fix is to the provider, not to this node, so it must
+                # not be clearable by a node reset — and a run-level pause folds as a monotone latch
+                # (`replay.py::_on_pause`), which keeps it order-tolerant against every sibling eval
+                # appending concurrently. Appended under `_write_lock` with the same
+                # already-halting re-check `confirm_phase.py::_pace_confirm_refusal` uses for its own
+                # auto-pause, so a run that is already paused/finished/stopping gets no second one.
+                if is_developer_error(new_code):
+                    _dev_err = str(new_code)[:400]
+                    triage_outcome = ("abandon", "the repair CALL failed at the provider — no "
+                                                 "repaired code was produced")
+                    reason = "developer_crash"
+                    err = (f"{_dev_err}\n[the Developer's own session failed, so this node was never "
+                           f"repaired. Its last eval error was: {err[-200:]}]")
+                    if not self._run_halt_intent():
+                        async with self._write_lock:
+                            if not self._run_halt_intent():
+                                self.store.append(EV_PAUSE, {
+                                    "reason": "auto-paused: the Developer's LLM provider failed "
+                                              f"while repairing node {node_id}, so the repair "
+                                              f"returned an error instead of code — {_dev_err}. "
+                                              "Every other node reaches the same endpoint; fix it "
+                                              "(credits, key, base URL, or the endpoint itself) and "
+                                              "resume."})
+                    break
                 # Snapshot the developer's per-call audit state IMMEDIATELY, before any `await`: under
                 # max_parallel>1 the developer instance is SHARED across concurrent _evaluate tasks,
                 # and `async with self._write_lock` below is a checkpoint — a sibling task's repair()

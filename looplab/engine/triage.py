@@ -107,17 +107,54 @@ def _failure_reason(res) -> str:
     return "no_metric"          # exit 0 but no parseable metric emitted
 
 
+# A bare or dotted Python identifier, as it appears INSIDE quotes in an exception message
+# (`'ColPaliProcessor'`, `'models.glm4v.processing_glm4v'`). Written against the ALREADY-normalized
+# text, so the digit-collapsing rule above it has turned `glm4v` into `glmNv` — `N` is a letter, so
+# the class still matches. Deliberately anchored to identifier shape: quoted PROSE, a quoted command
+# line or a quoted path (already `/PATH`, which cannot start an identifier) is left alone.
+_QUOTED_IDENT = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+
+
 def _normalize_error_sig(err: str) -> str:
     """T10: normalize an error before the anti-stuck compare — strip memory addresses, line
     numbers, absolute paths and numeric literals so two SEMANTICALLY-identical errors (same
     exception, same message shape) match even when incidental details differ. The exact-match
-    compare missed e.g. the same shape-mismatch recurring with different tensor sizes."""
+    compare missed e.g. the same shape-mismatch recurring with different tensor sizes.
+
+    The identity of a failure is (exception class, message template, where it failed). Everything
+    this function erases is an incidental OPERAND of that failure; everything it keeps is part of
+    the identity. Concretely —
+
+    ABSORBED: memory addresses; line numbers; filesystem paths and URLs; numeric literals; and —
+    added after a live 3.5 h runaway — QUOTED IDENTIFIERS, i.e. the module / attribute / symbol /
+    column name a message quotes. A `transformers` install left in a broken state failed every eval
+    inside its lazy-import registry naming a DIFFERENT symbol each time
+    (`'processing_llava_next'`, `'GraniteSpeechProcessor'`, `'ColPaliProcessor'`,
+    `'MarkupLMProcessor'`, `'SplitModulelist'`, …). Those 2345 failures minted 369 distinct
+    signatures with a longest identical RUN of 2, so the anti-stuck counter reset on nearly every
+    attempt and never reached `inline_repair_stuck_repeat`; the node emitted 2345 `node_repaired`
+    events over 3.5 h. Normalized this way the same 2345 collapse to 3 signatures.
+
+    DELIBERATELY STILL DISTINGUISHED, so a node whose error genuinely moves because the agent is
+    fixing it keeps its attempts:
+      * the exception CLASS — `ModuleNotFoundError` / `ImportError` / `TypeError` are unquoted;
+      * the message TEMPLATE — "No module named" vs "cannot import name … from" vs "object has no
+        attribute" is unquoted prose and survives verbatim;
+      * WHERE it failed — the 160-char tail keeps the last frames' function names (`in __getattr__`,
+        `in <module>`, `in _dtensor_from_local_like`), so a repair that moves the failure into a
+        different frame mints a NEW signature and the node keeps repairing;
+      * quoted text that is not identifier-shaped (a quoted sentence, a quoted command line).
+    """
     import re
     s = " ".join((err or "").strip().split())
     s = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", s)
     s = re.sub(r"line \d+", "line N", s)
     s = re.sub(r"(?:[A-Za-z]:)?[/\\][^\s'\":,)]+", "/PATH", s)
     s = re.sub(r"\d+(?:\.\d+)?(?:e[+-]?\d+)?", "N", s)
+    # LAST, so every rule above sees its historical input and the pre-existing normalization of
+    # unquoted text is byte-identical.
+    s = re.sub(f"'{_QUOTED_IDENT}'", "'ID'", s)
+    s = re.sub(f'"{_QUOTED_IDENT}"', '"ID"', s)
     return s[-160:]
 
 

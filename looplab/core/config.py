@@ -574,8 +574,15 @@ class Settings(BaseSettings):
     # (`inline_repair_stuck_repeat`): when the SAME error signature repeats with no progress, or the
     # agent's crash-triage says "abandon", the node fails. Set a positive N to cap the retries instead.
     inline_repair_attempts: int = Field(default=0, ge=0)
-    # Anti-stuck: abandon in-node repair when the SAME error recurs this many times in a row (no
-    # progress). Keeps "unlimited" repair from looping forever on an unfixable error.
+    # Anti-stuck: abandon in-node repair once ONE normalized error signature has failed this node
+    # this many times (no progress). Keeps "unlimited" repair from looping forever on an unfixable
+    # error — with inline_repair_attempts=0 this guard is the ONLY bound on the loop, so it is
+    # counted PER SIGNATURE over the whole node rather than as a consecutive streak (a streak is
+    # defeated by any interleaving: an oscillating repair, or a failure that cycles through
+    # variants). What counts as "the same" error is `engine/triage.py::_normalize_error_sig`, which
+    # documents the variation it absorbs (addresses/line numbers/paths/numbers/quoted identifiers)
+    # and the variation it deliberately still distinguishes (exception class, message template,
+    # failing frame) so a crash that genuinely moves as it is fixed keeps its attempts.
     inline_repair_stuck_repeat: int = Field(default=4, ge=2)
     # Which failure reasons (_failure_reason: crash|timeout|oom|setup|no_metric|drift) are eligible for
     # inline repair. Default: mechanical crashes, timeouts AND OOM-kills — a timeout/OOM means the code

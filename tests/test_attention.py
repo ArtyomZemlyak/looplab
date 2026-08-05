@@ -490,8 +490,11 @@ def test_broken_training_monitor_alert_surfaces_a_stable_node_keyed_item(tmp_pat
         "node_id": 0, "generation": 0, "status": "broken",
         "reason": "regressed again", "confidence": 0.98})
 
-    # Once the node reaches a terminal (no longer pending), the stale alert drops from the inbox.
-    store.append(EV_NODE_FAILED, {"node_id": 0, "generation": 0, "reason": "monitor_broken",
+    # Once the node reaches a terminal for a reason OTHER than this watchdog's own kill, the alert is
+    # stale (the node ran to its own end) and drops from the inbox. The one exception — a terminal the
+    # monitor itself caused, where the alert is the kill's only signal — is pinned in
+    # tests/test_watchdog_stage_scope.py::test_h5_a_monitor_killed_node_keeps_its_attention_item.
+    store.append(EV_NODE_FAILED, {"node_id": 0, "generation": 0, "reason": "crash",
                                   "error": "stopped", "eval_seconds": 1.0})
     done = project_run_attention("demo", store.read_all(), engine_running=True)
     assert "train_monitor" not in _kinds(done)
