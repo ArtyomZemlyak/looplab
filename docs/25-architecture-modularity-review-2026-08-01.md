@@ -3742,8 +3742,11 @@ reading them. What the diff says, per helper:
 | `save_*_receipt` | 23 | 41 | 22 |
 | `*_receipts_for_run` | 12 | 11 | 13 |
 
-So the shared machinery is real — ~90 of ~575 combined lines, and the first helper is *byte-identical*
-after renaming. Three of the finding's sub-claims are not:
+So the shared machinery is real — ~90 of ~500 combined CODE lines, and the first helper is
+*byte-identical* after renaming. Extracting it is not a line-count win (499 code lines became 502:
+~91 lines that existed twice became 94 that exist once, carrying the parameterisation and the
+reasoning); it is a single-copy win, which is the same trade `core/fence.py` made.
+Three of the finding's sub-claims are not accurate:
 
 * **`_is_reparse` is stale.** SC-03 (`cea97c35`, 2026-08-02) already moved it to `core/pathsafe.py`;
   both modules imported it at the time this was implemented. The stated line ranges (`1-324`, `1-265`)

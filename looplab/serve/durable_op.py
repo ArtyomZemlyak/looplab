@@ -11,8 +11,9 @@ This is the RECEIPT tier of the same split `core/fence.py` made one layer down f
 `reset_transaction.py` and `deletion_transaction.py` are two receipts with genuinely different
 schemas, phase lattices, error types and size budgets — but they implemented the same paranoid
 read-then-verify load and the same validate/immutable/transition/publish/confirm save twice. A
-normalized diff of the two put the shared machinery at ~90 of ~575 combined lines, and two of the
-three shared helpers were *byte-identical* after renaming.
+rename-normalising diff of the two put the shared machinery at ~90 of ~500 combined code lines. The
+regular-file probe was *byte-identical* after renaming (0 differing lines); the loads differed by
+exactly the drift below; only the saves differed for a reason.
 
 That is the wrong half to duplicate, and CO-01 already recorded what it costs: the deletion fence had
 re-derived `atomicio.file_identity` as a local six-field lambda while importing the canonical one two
