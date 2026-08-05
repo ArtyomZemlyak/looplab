@@ -321,9 +321,12 @@ def test_the_bound_is_inclusive_and_non_negative(value, maximum, expected):
     assert bounded_receipt_count(value, maximum) is expected
 
 
+# The capsule validators moved to their own module (doc 25 EM-10); the registry follows the code.
+# This drift-check earned its keep: the move fired the "no longer defines" assertion below rather
+# than silently leaving two of the four validators unguarded.
 _RECEIPT_VALIDATORS = {
     "claims_health.py": ("_safe_claim_read_segment",),
-    "memory.py": ("_capsule_concept_evidence_completeness", "_capsule_completeness"),
+    "concept_capsules.py": ("_capsule_concept_evidence_completeness", "_capsule_completeness"),
     "concept_steward.py": ("_concept_source_receipt",),
 }
 
