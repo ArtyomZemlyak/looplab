@@ -276,6 +276,33 @@ def _normalize_usage(usage) -> dict[str, int | float]:
     }
 
 
+def _stream_envelope_is_billable(*, usage_observed: bool, delegated_to_fallback: bool,
+                                 stream_completed: bool, produced_content: bool) -> bool:
+    """Does `complete_text_stream`'s own envelope go into the durable ledger? (doc 25 CO-04)
+
+    Three inputs, one money rule, stated once so it can be read and tested as a rule rather than
+    inferred from a boolean expression buried in a `finally`:
+
+      * `usage_observed` — the provider REPORTED usage for this envelope, so it is real spend
+        whatever happened afterwards. Wins over everything else, including a later delegation:
+        `_account_keepalive_stall` exists because the mirror-image omission (a billable envelope
+        that was never recorded) drifted a run's recorded spend arbitrarily far BELOW the invoice.
+      * `delegated_to_fallback` — this stream handed the answer to `complete_text`, which makes its
+        OWN provider call and accounts for it. Charging the abandoned envelope on top of that is the
+        opposite drift: recorded spend above the invoice. No site reaches this row today (all three
+        delegations sit under `if not pieces:`, so `produced_content` is False there anyway) — it is
+        the guard for the FOURTH site, one that delegates after already yielding content.
+      * `stream_completed` / `produced_content` — a clean stream is one logical call even when usage
+        is absent, and once content was yielded a consumer close/cancel still records the call it
+        made (unknown cost/tokens stay zero rather than pretending it was free).
+    """
+    if usage_observed:
+        return True
+    if delegated_to_fallback:
+        return False
+    return stream_completed or produced_content
+
+
 def _stream_usage(value) -> dict:
     """Best-effort mapping extraction for an SDK streaming usage object."""
     if isinstance(value, dict):
@@ -1221,13 +1248,15 @@ class OpenAICompatibleClient:
                             return
                         break
             finally:
-                # A clean stream is one logical call even if usage is absent. Once content was
-                # yielded, a consumer close/cancel also records the known call even when this
-                # provider sends usage only in an unread final chunk; its unknown cost/tokens remain
-                # zero rather than pretending the partial generation was free or fully measured.
-                # A blocking fallback owns its own successful provider call.
-                account_here = usage_observed or (
-                    not delegated_to_fallback and (stream_completed or bool(pieces)))
+                # The money rule lives in `_stream_envelope_is_billable` — one named rule with its
+                # own truth table, because the clause that stops a DELEGATED stream being billed on
+                # top of the fallback's own call is unreachable from here today and an inline
+                # expression made it look like dead code.
+                account_here = _stream_envelope_is_billable(
+                    usage_observed=usage_observed,
+                    delegated_to_fallback=delegated_to_fallback,
+                    stream_completed=stream_completed,
+                    produced_content=bool(pieces))
                 if account_here:
                     self.accountant.add(usage["cost"], usage=usage)
                     self._last_usage = usage

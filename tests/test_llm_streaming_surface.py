@@ -16,6 +16,9 @@ from __future__ import annotations
 import inspect
 import re
 
+import openai
+
+from _source_scan import called_names
 from looplab.core import llm, llm_streaming
 
 # The exact names the legacy path owned. Re-adding one means re-adding a second streaming path, and
@@ -68,35 +71,107 @@ def test_no_module_docstring_still_promises_two_sse_paths():
 
 # --------------------------------------------------- the contracts the deletion had to preserve
 
-def test_the_live_path_still_owns_the_stall_kill_the_legacy_watchdog_carried():
-    """The legacy watchdog's reason for existing: a server that trickles keepalive bytes without
-    completing a message resets every per-read timeout forever, so only `socket.shutdown()`
-    interrupts the wedged recv. That contract must not have left with the code.
+def test_the_idle_guard_kills_a_stream_that_goes_silent_on_a_REAL_socket():
+    """The stall-kill, driven against a real blocked `recv()` — the module docstring's promised
+    "real-socketpair test", which did not exist until 2026-08-05.
 
-    It is EXERCISED by `test_stream_idle_guard_kills_keepalive_trickle` in test_openai_client.py,
-    against a stream that blocks until the watchdog shuts its socket. Re-driving a real socketpair
-    here would be a second, more fragile copy of that test — so what is checked here is that the
-    live helper still contains the mechanism, which is what the deletion could plausibly have taken
-    with it.
+    Both tests that looked like they covered this drive a MOCK socket whose `shutdown()` merely sets
+    an Event (and, in `test_assistant_mega_review.py`, whose `close()` sets the SAME event) — so they
+    assert that a method was called, which is a weaker claim than "the wedged read came back". A
+    mutation audit confirmed the gap: deleting `sock.shutdown(_socket.SHUT_RDWR)` from
+    `_stream_with_idle_guard` leaves the streaming/client surface green apart from one mock-level
+    call assertion, while the idle guard's entire purpose — BOUNDING a silent stream — is gone.
+
+    Here the stream really blocks in the kernel and `resp.close()` really cannot help, which is the
+    live lesson `_stream_raw_socket`'s docstring records. `shutdown(SHUT_RDWR)` makes the blocked
+    `recv` return EOF; without it this generator never ends.
     """
-    body = inspect.getsource(llm_streaming._stream_with_idle_guard)
-    # The CALL, not the word: the function's prose mentions shutdown either way, so a bare
-    # substring check stays green with `sock.shutdown(...)` swapped for `sock.close()` — which is
-    # exactly the regression, since close() does not unblock a recv() wedged in the kernel.
-    assert "sock.shutdown(" in body, "the idle guard no longer shuts the socket down"
-    assert "_chunk_has_content" in body, (
+    import socket as _socket
+    import threading
+
+    ours, peer = _socket.socketpair()                  # `peer` never sends: a black-holed body
+    closed = []
+
+    class _NetworkStream:
+        def get_extra_info(self, _key):
+            return ours
+
+    class _Resp:
+        request = None
+        extensions = {"network_stream": _NetworkStream()}
+
+        def close(self):
+            # A real httpx response close does NOT interrupt a recv() another thread is already
+            # blocked inside; recording the call is all it may do here, or this test would prove
+            # nothing about which of the two mechanisms unblocked the read.
+            closed.append(True)
+
+    class _SilentBody:
+        response = _Resp()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if not ours.recv(4096):                    # blocks until SHUT_RDWR makes it return b""
+                raise StopIteration
+            return type("Ev", (), {"choices": [], "usage": None})()
+
+    outcome: list = []
+    drain = threading.Thread(
+        target=lambda: outcome.append(
+            _run_to_completion(llm_streaming._stream_with_idle_guard(_SilentBody(), 0.3))),
+        daemon=True)
+    try:
+        drain.start()
+        # Bounded join, because the REGRESSION is a hang: an in-line drain would wedge the suite
+        # instead of reporting a failure (the same reason test_assistant_mega_review.py joins).
+        drain.join(timeout=10)
+        assert not drain.is_alive(), (
+            "the idle guard could not kill a silent stream — resp.close() does not unblock a recv() "
+            "already blocked in the kernel, so this run would hang rather than degrade")
+        assert isinstance(outcome[0], openai.APITimeoutError), (
+            f"the stall must surface as APITimeoutError for `_post` to degrade+retry; got {outcome[0]!r}")
+    finally:
+        try:
+            ours.shutdown(_socket.SHUT_RDWR)           # release the worker if the assert above failed
+        except OSError:
+            pass
+        ours.close()
+        peer.close()
+
+
+def _run_to_completion(generator):
+    """Drain *generator*, returning the exception it ended with (or None). Returned rather than
+    raised because this runs on a worker thread, where an exception would be lost."""
+    try:
+        for _event in generator:
+            pass
+    except BaseException as error:  # noqa: BLE001 - the outcome IS the assertion
+        return error
+    return None
+
+
+def test_the_live_path_still_owns_the_stall_kill_the_legacy_watchdog_carried():
+    """The mechanism, alongside the behavioural test above: which call the guard reaches for.
+
+    Through the AST, not `"sock.shutdown(" in body`: the pin this replaces is satisfied by
+    `pass  # sock.shutdown(_socket.SHUT_RDWR)`, i.e. by the exact mutation it exists to catch. The
+    distinction it was reaching for is still the point — `close()` does not unblock a recv() wedged
+    in the kernel — so the assertion is that `shutdown` is really called on the socket handle.
+    """
+    calls = called_names(llm_streaming._stream_with_idle_guard)
+    assert "sock.shutdown" in calls, "the idle guard no longer shuts the socket down"
+    assert "_chunk_has_content" in calls, (
         "the idle clock is no longer reset by REAL content only — keepalives would defeat it")
+    assert "_stream_raw_socket" in calls, "the guard no longer resolves the socket to shut down"
     assert "idle_limit" in inspect.signature(llm_streaming._stream_with_idle_guard).parameters
 
 
-def test_the_covering_stall_test_still_exists_and_targets_the_live_helper():
-    """A cross-reference with teeth: if that test is renamed or deleted, the contract above becomes
-    unexercised and this file is the only place that would notice."""
-    from pathlib import Path as _Path
-
-    covering = (_Path(__file__).parent / "test_openai_client.py").read_text(encoding="utf-8")
-    assert "def test_stream_idle_guard_kills_keepalive_trickle(" in covering
-    assert "_stream_with_idle_guard(_Stream(), idle_limit=0.3)" in covering
+def test_the_pool_teardown_shuts_sockets_down_for_the_same_reason():
+    """`_shutdown_pool_sockets`'s docstring says it mirrors the stream path. Same AST check, because
+    the same comment mutation applies and this one bounds worker threads wedged in `create()`."""
+    assert "sock.shutdown" in called_names(llm_streaming._shutdown_pool_sockets)
 
 
 def test_the_live_path_still_reassembles_a_stream_into_one_chat_body():

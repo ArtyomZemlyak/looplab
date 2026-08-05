@@ -15,6 +15,7 @@ duplication that stops being synchronised.
 """
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 import os
@@ -24,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from _source_scan import function_tree
 from looplab.core import run_deletion, run_reset
 from looplab.core.fence import (
     FENCE_GENERATION_RE, FENCE_MAX_BYTES, FENCE_OPERATION_RE,
@@ -139,14 +141,65 @@ def test_an_oversized_fence_is_refused_before_it_is_read(tmp_path, build):
     assert opened == [], "the oversized marker was opened; the pre-read size guard is gone"
 
 
-def test_both_size_guards_are_present_because_a_file_can_grow_under_the_read():
-    """The post-read guard is unreachable in a normal test — it needs the file to grow between the
-    lstat and the read — so it is pinned structurally rather than left unguarded."""
+def test_an_oversized_marker_is_refused_even_when_the_lstat_under_reported_its_size(tmp_path):
+    """The POST-read half of the size guard, driven — the time-of-check/time-of-use hole itself.
+
+    The pre-read check asks `st_size`. `st_size` is not a promise about what the following `read()`
+    returns: the file can grow between the two calls, and on an attribute-caching filesystem the
+    stat can simply be stale. Both lstats are made to report a small REGULAR file (so the identity
+    comparison also agrees — which is what stops the second lstat from catching this) while the bytes
+    on disk are over the cap. What refuses is then the post-read `len(raw)` check, and nothing else.
+
+    The payload is a complete JSON document followed by padding, because the truncated prefix a
+    bounded read returns is otherwise undecodable BY ACCIDENT and the refusal would look the same
+    with the guard deleted. `{"version": 1}` + whitespace parses fine at any truncation point, so
+    without the post-read check this oversized marker is ACCEPTED — the guard is the only thing
+    between a 9 KiB fence and a fence the caller acts on.
+
+    This replaces `assert "len(raw) > max_bytes" in inspect.getsource(...)`, which a mutation audit
+    on 2026-08-05 walked straight through: moving the check into a comment kept the substring and
+    left six fence/identity test files green.
+    """
+    class _Boom(RuntimeError):
+        pass
+
+    path = tmp_path / "marker.json"
+    path.write_text(json.dumps({"version": 1}) + " " * FENCE_MAX_BYTES, encoding="utf-8")
+    assert path.stat().st_size > FENCE_MAX_BYTES
+
+    decoy = tmp_path / "small.json"                      # a real, regular, in-bounds stat to report
+    decoy.write_text(json.dumps({"version": 1}), encoding="utf-8")
+    real_lstat = Path.lstat
+    stale = real_lstat(decoy)
+    assert stale.st_size <= FENCE_MAX_BYTES
+
+    Path.lstat = lambda self: stale if self == path else real_lstat(self)
+    try:
+        with pytest.raises(_Boom, match="exceeds its safety limit"):
+            load_bounded_json_marker(path, label="marker", error_cls=_Boom,
+                                     validate=lambda value: True)
+    finally:
+        Path.lstat = real_lstat
+
+
+def test_both_size_guards_are_present_and_the_pre_read_one_comes_first():
+    """Order, which neither behavioural case can show: the post-read guard refuses the same file,
+    so a test that only asserts "it raised" is green with the PRE-read guard deleted — after doing
+    the very unbounded read that guard exists to prevent.
+
+    Structural, but through the AST rather than `"len(raw) > max_bytes" in body`: comments are not
+    AST nodes, so `# if len(raw) > max_bytes` cannot satisfy this (see `_source_scan`).
+    """
     from looplab.core import fence
 
-    body = inspect.getsource(fence.load_bounded_json_marker)
-    assert "before.st_size > max_bytes" in body, "the pre-read size guard is gone"
-    assert "len(raw) > max_bytes" in body, "the post-read size guard is gone"
+    tree = function_tree(fence.load_bounded_json_marker)
+    compares = [node for node in ast.walk(tree)
+                if isinstance(node, ast.Compare) and isinstance(node.ops[0], ast.Gt)
+                and any(getattr(comparator, "id", None) == "max_bytes"
+                        for comparator in node.comparators)]
+    guarded = [ast.unparse(node.left) for node in sorted(compares, key=lambda n: n.lineno)]
+    assert guarded[:2] == ["before.st_size", "len(raw)"], (
+        f"the two size guards, pre-read then post-read, are not both there in order: {guarded}")
 
 
 @FENCES
