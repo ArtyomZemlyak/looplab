@@ -30,7 +30,8 @@ from typing import Optional
 
 from looplab.core.models import Idea, NodeStatus, RunState
 from looplab.search.concept_graph import ConceptGraph
-from looplab.search.concept_tagging import (experiment_nodes, tag_nodes_heuristic, tag_text, tag_text_llm)
+from looplab.search.concept_tagging import (experiment_nodes, tag_nodes_heuristic, tag_text,
+                                            tag_text_llm)
 
 
 # --------------------------------------------------------------------------- #

@@ -6,7 +6,7 @@ are deterministic alias matchers, `tag_nodes_llm`/`tag_text_llm` ask a model. Ev
 (`concept_analytics.py`) is pure over whatever this returns, which is exactly where the boundary is
 drawn.
 
-`experiment_nodes` and `node_text` are PUBLIC (they were `experiment_nodes`/`node_text`): four
+`experiment_nodes` and `node_text` are PUBLIC (they were underscore-private): four
 modules outside this file import them — `search/graded_novelty.py`, `search/lock_in.py`,
 `search/novelty_recall.py` and `engine/novelty.py` — and the last of those crosses a PACKAGE
 boundary, which `tests/test_cross_package_private_seams.py` had to carry as a declared debt. A name

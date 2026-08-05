@@ -21,7 +21,8 @@ from looplab.core.models import RunState
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.search.concept_analytics import concept_coverage, concept_report, uncovered_regions
-from looplab.search.concept_graph import (Concept, ConceptGraph, dense_retrieval_skeleton, skeleton_for)
+from looplab.search.concept_graph import (Concept, ConceptGraph, dense_retrieval_skeleton,
+                                          skeleton_for)
 from looplab.search.concept_tagging import tag_nodes_heuristic, tag_nodes_llm
 
 
