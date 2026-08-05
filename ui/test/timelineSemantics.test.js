@@ -54,8 +54,11 @@ test('generation-scoped event counts flow from run state into exact timeline lag
     source('hooks.js'), source('RunView.jsx'), source('useTimeline.js'),
   ])
   assert.match(hooks, /const eventCount = eventCountState\.runId === runId/)
-  assert.match(hooks, /const identityChanged = next =>[\s\S]*?next\[3\] !== lastEventCount/)
-  assert.match(hooks, /\[lastSeq, lastAlive, lastGeneration, lastEventCount\] = next[\s\S]*?setEventCountState/)
+  // The identity rule itself moved into ./src/runStateModel.js (doc 25 UI-09) and is now DRIVEN in
+  // runStateModel.test.js — including the part this pin used to stand for: that a frame whose only
+  // change is `event_count` publishes a new snapshot. What has to stay true HERE is the join: the
+  // effect consults the shared rule and commits the event count that the timeline below reads.
+  assert.match(hooks, /if \(!identityChanged\(last, next\)\) return next[\s\S]*?setEventCountState\(\{ runId, value: next\[3\] \}\)/)
   assert.match(hooks, /return \{ live, seq, generation, eventCount, connected/)
   assert.match(runView, /eventCount: liveEventCount/)
   assert.match(runView, /liveSeq: seq, liveEventCount, expectedGeneration: generation/)
