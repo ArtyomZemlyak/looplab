@@ -1999,18 +1999,24 @@ class RunCommandService:
             return {"ok": True, "resolved": True, "reason": "operator_verified_unknown_claim"}
 
     @contextmanager
-    def sequence(self, rd: Path):
+    def sequence(self, rd: Path, *, timeout: Optional[float] = None):
         """Serialize one run's decision→intent→spawn boundary across threads/processes.
 
         The OS lock is cross-process on ordinary Windows/POSIX filesystems. Contention uses bounded
         non-blocking retries; unsupported locking or acquisition timeout fails closed, never entering
         thread-only while another process may own the run. Lock files live outside the run directory
         so delete/reset can hold the guard while moving or removing the run itself.
+
+        `timeout` shortens (or lengthens) the acquisition budget for ONE caller without changing the
+        service-wide `lock_acquire_timeout`. It exists for `_report_worker_crash`, which runs during
+        worker teardown and holds the `.executing` claim while it waits; see that method for why
+        giving up early is the safe direction there. Every ordinary caller omits it.
         """
         key = _lock_identity(rd)
         with self._local_lock:
             local = self._run_locks.setdefault(key, threading.RLock())
-        deadline = time.monotonic() + self.lock_acquire_timeout
+        budget = self.lock_acquire_timeout if timeout is None else max(0.0, float(timeout))
+        deadline = time.monotonic() + budget
         if not local.acquire(timeout=max(0.0, deadline - time.monotonic())):
             raise HTTPException(503, "timed out waiting for the in-process run command sequencer")
         try:
@@ -3479,10 +3485,34 @@ class RunCommandService:
                 return False
         return True
 
-    def _release_execution(self, rd: Path, command_id: str) -> None:
+    def _release_execution(self, rd: Path, command_id: str, *,
+                           record_path: Optional[Path] = None) -> None:
+        """Drop this worker's `.executing` claim. Best-effort, and it must never raise.
+
+        OSError was not the only way this fails. `_exec_path` → `_directory` → `validate_paths`
+        raises HTTPException — 404 once the run's `events.jsonl` has vanished under a delete/reset,
+        409 for a sidecar that turned into a symlink — and both halves of that hurt:
+
+        * it escaped `_execute`'s `finally`, ending the worker thread mid-teardown; on the
+          synchronous `get`/`retry` call paths, which run `_execute` inline for collaboration events,
+          it also replaced the command record with a bare 404;
+        * and the claim survived. `_active_command_ids` counts a `.executing` file whose owner PID is
+          still alive as an ACTIVE command, so a claim this server can no longer address goes on
+          blocking every later reset/delete of that run until the process exits.
+
+        `record_path` closes the second half without a second copy of the path policy — the divergence
+        `_scan_command_records` exists to remove. The claim is the record file's sibling, and the
+        caller's record path was already resolved through `validate_paths`; only the event-log
+        existence check, which has nothing to do with removing our own claim, is skipped. Callers that
+        hold that path pass it; the rest keep the lookup.
+        """
         try:
-            self._exec_path(rd, command_id).unlink()
-        except OSError:
+            claim = (self._exec_path(rd, command_id) if record_path is None
+                     else record_path.with_name(f".{command_id}.executing"))
+            if claim.is_symlink():      # `_exec_path`'s own refusal, kept for the sibling spelling
+                return
+            claim.unlink()
+        except (OSError, ValueError, HTTPException):
             pass
 
     def _heartbeat_execution(self, rd: Path, command_id: str) -> None:
@@ -3502,7 +3532,7 @@ class RunCommandService:
             thread.start()
         except BaseException:
             # A live-owner claim with no worker would otherwise block recovery until PID reuse/death.
-            self._release_execution(rd, command_id)
+            self._release_execution(rd, command_id, record_path=path)
             raise
 
     def _observe(self, rd: Path) -> CommandObservation:
@@ -4176,6 +4206,53 @@ class RunCommandService:
             time.sleep(self.poll_interval)
         self._terminalize_expired(rd, path, record, command_id, spec)
 
+    def _report_worker_crash(self, rd: Path, path: Path, exc: BaseException) -> None:
+        """`_execute`'s crash report: make a worker crash OBSERVABLE without re-deciding a durable
+        outcome.
+
+        `record` in the caller is the PRE-ADMISSION copy: `_admit` persists the outcome and the
+        bookkeeping (`event_seq`, `baseline_seq`, the spawn lease) that `/retry` and reconciliation
+        read to find the marked intent. So the report must be written against the DURABLE record and
+        never that copy — a failure record that dropped `event_seq`/`baseline_seq` reads as a command
+        that never appended an intent, the one state operators are told not to auto-retry. What looks
+        like a single line (`current = self._load(path) or record`) is four separate decisions, and
+        that spelling got each of them wrong:
+
+        1. ABSENT vs UNREADABLE. `_load` returns `None` for both, so a record this worker merely
+           could not read fell back to the pre-admission copy and the terminal check then ran against
+           the wrong record — demoting a durable `succeeded` to `failed`. Not theoretical: `_save`'s
+           own retry loop documents this same contention from the WRITE side (Windows denies access
+           for the milliseconds another thread holds the record open for a GET, and observation
+           traffic can therefore "turn an otherwise-correct command into `command_worker_failed`").
+           `_read_existing` is the read-side twin that already retries it; use it.
+        2. `or` vs `is not None`. `{}` is the one falsy dict, so a readable-but-EMPTY record took the
+           same wrong fallback. A record we can read is the durable answer, empty or not.
+        3. ABSENT means gone, not "start over". `_terminal` → `_save` re-creates missing parents, so
+           writing here resurrects `.commands/cmd_*.json` inside a namespace delete/reset removed —
+           and resurrects it without the bookkeeping. There is nothing to report against: return.
+        4. CHECK-THEN-WRITE must be SERIALIZED. Every other terminal writer takes `self.sequence(rd)`
+           — `_admit`, `_terminalize_expired` (whose docstring names exactly this hazard), `get`,
+           `retry`. Unserialized, a concurrent GET verdict landing between the read and the write is
+           overwritten: `command_intent_missing`/`run_generation_changed` (retryable=False) becomes
+           `command_worker_failed` (retryable=True), inverting the one bit an operator acts on.
+
+        The wait is BOUNDED because this is teardown: `_execute`'s `finally` does not release the
+        `.executing` claim until this returns, and a `_terminalize_expired` that already spent the
+        full budget on the same sequencer would otherwise make the worker pay it twice. Giving up is
+        the safe direction — on timeout, or any other failure, the caller writes NOTHING, which leaves
+        the record NONTERMINAL, and a nonterminal record is exactly what GET's crash-recovery path
+        re-drives. The crash still becomes observable; it does not become a wrong answer.
+        """
+        with self.sequence(rd, timeout=min(self.lock_acquire_timeout,
+                                           max(1.0, self.startup_timeout * 2 + 1))):
+            current = self._read_existing(path)
+            if current is None or current.get("status") in TERMINAL_STATUSES:
+                return
+            self._terminal(path, current, "failed", error=_error(
+                "command_worker_failed", str(exc),
+                "correct the cause, then POST this command id's /retry endpoint",
+                retryable=True))
+
     def _execute(self, rd: Path, path: Path, initial: dict, *, claimed: bool) -> None:
         record = self._load(path) or dict(initial)
         command_id = str(record.get("id") or "")
@@ -4189,22 +4266,9 @@ class RunCommandService:
                 self._monitor(rd, path, record, command_id, spec)
         except Exception as exc:  # noqa: BLE001 - worker failures must become observable records
             try:
-                # Re-read before writing. `record` here is the PRE-ADMISSION copy: `_admit` persists
-                # the outcome and the bookkeeping (`event_seq`, `baseline_seq`, the spawn lease) that
-                # `/retry` and reconciliation read to find the marked intent, and this handler must
-                # not lose either. Two things follow. A record that is already terminal on disk is
-                # the durable answer — this handler exists to make a crash OBSERVABLE, never to
-                # demote a command whose effect landed. And a genuine crash is reported against what
-                # admission wrote, so the failure still points at its intent instead of reading as a
-                # command that never appended one (the one state operators must not auto-retry).
-                current = self._load(path) or record
-                if current.get("status") not in TERMINAL_STATUSES:
-                    self._terminal(path, current, "failed", error=_error(
-                        "command_worker_failed", str(exc),
-                        "correct the cause, then POST this command id's /retry endpoint",
-                        retryable=True))
-            except Exception:
+                self._report_worker_crash(rd, path, exc)
+            except Exception:  # noqa: BLE001 - a best-effort report; see the helper's last paragraph
                 pass
         finally:
             if claimed:
-                self._release_execution(rd, command_id)
+                self._release_execution(rd, command_id, record_path=path)

@@ -17,6 +17,13 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: tests/test_merge_history_integrity.py scans every merge for the shape that
+          # silently deleted two commits (and their guarding tests) from this repo TWICE — a merge
+          # whose tree equals one parent's while another parent carries commits it lacks. Under the
+          # default shallow fetch there is no history to scan and those tests skip cleanly, i.e. the
+          # guard is present and inert, which is the worst of both.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

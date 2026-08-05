@@ -15,8 +15,13 @@ than as an intermittent double-spawn under a monitor loop.
 from __future__ import annotations
 
 import ast
+import errno
 import inspect
+import shutil
 import textwrap
+import threading
+import time
+from pathlib import Path
 
 import pytest
 
@@ -424,3 +429,257 @@ def test_a_worker_crash_reports_failure_against_the_admitted_record(tmp_path):
     assert final["status"] == "failed", final
     assert final["error"]["code"] == "command_worker_failed", final
     assert (final.get("event_seq"), final.get("baseline_seq")) == (7, 3), final
+
+
+# --- the four decisions hiding inside the catch-all's one line --------------------------------
+#
+# The guard above was `current = self._load(path) or record`. That looks like one decision and is
+# four, and an adversarial pass got past it four ways: `_load` returns None for a record it merely
+# could not READ as well as for one that is absent; `or` treats a readable-but-empty `{}` the same
+# way; a write against an ABSENT record re-creates it (`_save` makes its parents) in a namespace
+# delete/reset removed; and the check and the write were not serialized with the other terminal
+# writers, all of which take `self.sequence(rd)`. Each one ends with the same durable damage as the
+# bug the guard was restored to fix — a command whose effect landed reported as one that failed, and
+# a failure record missing the `event_seq`/`baseline_seq` that make it retryable at all.
+
+
+def test_a_worker_crash_does_not_demote_a_record_it_only_failed_to_read(tmp_path, monkeypatch):
+    """`_load` swallows OSError and returns None, which the `or` then read as "no record".
+
+    This is the contention `_save`'s own retry loop already documents from the WRITE side — Windows
+    denies access for the milliseconds another thread holds the record open for a GET, and that,
+    says the comment there, "can turn an otherwise-correct command into `command_worker_failed`".
+    The read side of the same window had no retry and landed straight in the catch-all: a durable
+    `succeeded` carrying `event_seq`/`baseline_seq` came back `failed` with both gone.
+    """
+    svc, rd = _service(tmp_path)
+    path, record = _record(svc, rd)
+    denials = {"left": 0}
+
+    def _admit_then_crash(_rd, _path, current, _command_id):
+        svc._succeeded(_rd, _path, {**current, "event_seq": 7, "baseline_seq": 3})
+        denials["left"] = 1                      # the very next read of this record is denied
+        raise RuntimeError("boom")
+
+    real_read_text = Path.read_text
+
+    def flaky_read_text(self, *args, **kwargs):
+        if self == path and denials["left"] > 0:
+            denials["left"] -= 1
+            raise PermissionError(errno.EACCES, "another thread holds the record open")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+    svc._admit = _admit_then_crash
+    svc._execute(rd, path, dict(record), claimed=False)
+
+    final = RunCommandService._load(path)
+    assert final["status"] == "succeeded", final
+    assert final["error"] is None, final
+    assert (final.get("event_seq"), final.get("baseline_seq")) == (7, 3), final
+
+
+def test_a_readable_but_empty_record_is_not_treated_as_an_absent_one(tmp_path):
+    """`{}` is the one falsy dict, so `or` took the same fallback for a record that was right there.
+
+    The damage is not the empty record, it is the substitution: the crash gets reported against the
+    caller's PRE-ADMISSION copy, republishing fields the durable record no longer carries as though
+    they were current. A record we can read is the durable answer, empty or not — `is not None`.
+    """
+    svc, rd = _service(tmp_path)
+    path, record = _record(svc, rd)
+
+    def _admit_then_crash(_rd, _path, _current, _command_id):
+        _path.write_text("{}", encoding="utf-8")     # valid JSON object, no fields
+        raise RuntimeError("boom")
+
+    svc._admit = _admit_then_crash
+    svc._execute(rd, path, dict(record), claimed=False)
+
+    final = svc._load(path)
+    assert final["status"] == "failed", final
+    assert final["error"]["code"] == "command_worker_failed", final
+    assert "event_type" not in final and "postcondition" not in final, (
+        f"the pre-admission copy's fields were republished over the durable record: {final}")
+
+
+def test_a_worker_crash_does_not_resurrect_a_deleted_command_record(tmp_path):
+    """`_terminal` → `_save` does `mkdir(parents=True)`, so writing an ABSENT record re-creates the
+    whole `.commands` namespace a delete/reset had removed — and re-creates it holding a
+    `command_worker_failed` with no `event_seq`/`baseline_seq`, i.e. the exact shape an operator is
+    told never to auto-retry, for a command that no longer exists."""
+    svc, rd = _service(tmp_path)
+    path, record = _record(svc, rd)
+
+    def _admit_then_crash(_rd, _path, _current, _command_id):
+        shutil.rmtree(_path.parent)                  # the run's command namespace is removed
+        raise RuntimeError("boom")
+
+    svc._admit = _admit_then_crash
+    svc._execute(rd, path, dict(record), claimed=False)
+
+    assert not path.exists(), f"a deleted record came back: {svc._load(path)}"
+    assert not path.parent.exists(), "the deleted `.commands` directory was re-created"
+
+
+def test_a_concurrent_get_verdict_cannot_be_overwritten_by_the_crash_report(tmp_path):
+    """Hole four, as a real race rather than a stand-in: two threads, and the GET is the shipped
+    `svc.get`, which reaches its verdict under the run sequencer.
+
+    `_terminalize_expired` names this hazard in its own docstring for the deadline exit — "a
+    completion arriving at the deadline could be promoted to succeeded by GET and then overwritten
+    by this worker's stale timed_out write" — and takes `self.sequence(rd)` because of it. So do
+    `_admit`, `get` and `retry`. The catch-all was the one terminal writer that did not, so a GET
+    verdict landing between its read and its write was simply overwritten. The direction matters:
+    GET's verdicts here (`command_intent_missing`, `run_generation_changed`) are retryable=FALSE, and
+    `command_worker_failed` is retryable=TRUE, so losing this race flips a command an operator must
+    inspect by hand into one the UI will happily retry.
+    """
+    svc, rd = _service(tmp_path)
+    path, record = _record(svc, rd)
+    record["run_generation"] = svc.run_generation(rd)     # so GET reconciles instead of refusing
+    svc._save(path, record)
+
+    at_write, release, get_returned = (threading.Event(), threading.Event(), threading.Event())
+    worker = {}
+    real_terminal = svc._terminal
+
+    def gated_terminal(target, current, status, **kwargs):
+        # Hold the worker exactly where the old code was unprotected: after its read, before its
+        # write. Under the fix this is inside the sequencer, so the GET cannot get in.
+        if threading.get_ident() == worker.get("ident"):
+            at_write.set()
+            release.wait(30.0)
+        return real_terminal(target, current, status, **kwargs)
+
+    def _admit_then_crash(_rd, _path, current, _command_id):
+        # A marked intent at a seq this log does not contain: exactly what GET calls missing.
+        svc._save(_path, {**current, "event_seq": 999, "baseline_seq": 3})
+        raise RuntimeError("boom")
+
+    svc._admit, svc._terminal = _admit_then_crash, gated_terminal
+
+    def run_worker():
+        worker["ident"] = threading.get_ident()
+        svc._execute(rd, path, dict(record), claimed=False)
+
+    def run_get():
+        try:
+            svc.get(rd, COMMAND_ID)
+        finally:
+            get_returned.set()
+
+    crashing = threading.Thread(target=run_worker, daemon=True)
+    crashing.start()
+    assert at_write.wait(30.0), "the crash report never reached its terminal write"
+    observing = threading.Thread(target=run_get, daemon=True)
+    observing.start()
+    landed_inside = get_returned.wait(0.5)
+    release.set()
+    crashing.join(30.0)
+    observing.join(30.0)
+    assert not crashing.is_alive() and not observing.is_alive()
+
+    assert not landed_inside, (
+        "a GET verdict landed inside the crash report's read->write window; the window is supposed "
+        "to be closed by the run sequencer")
+    final = RunCommandService._load(path)
+    assert final["error"]["code"] == "command_intent_missing", final
+    assert final["error"]["retryable"] is False, final
+
+
+def test_the_crash_report_gives_up_the_sequencer_rather_than_hanging_the_teardown(tmp_path):
+    """Serializing the crash path costs a wait, and this is the one path where a wait is expensive:
+    `_execute`'s `finally` does not release the `.executing` claim until the report returns, and a
+    `_terminalize_expired` that already spent the full budget on the same sequencer would make the
+    worker pay it a second time. So the budget is bounded well below `lock_acquire_timeout`.
+
+    Giving up writes NOTHING, which is the safe direction: the record stays NONTERMINAL, and a
+    nonterminal record is precisely what GET's crash-recovery path restarts a worker for.
+    """
+    svc, rd = _service(tmp_path)
+    svc.lock_acquire_timeout = 30.0
+    path, record = _record(svc, rd)
+    contender = RunCommandService(svc.srv, lock_acquire_timeout=30.0, poll_interval=0.01)
+
+    def _admit_then_crash(_rd, _path, _current, _command_id):
+        raise RuntimeError("boom")
+
+    svc._admit = _admit_then_crash
+    assert svc._claim_execution(rd, COMMAND_ID)
+    claim = svc._exec_path(rd, COMMAND_ID)
+
+    with contender.sequence(rd):                 # another writer owns the run for the whole call
+        started = time.monotonic()
+        svc._execute(rd, path, dict(record), claimed=True)
+        elapsed = time.monotonic() - started
+
+    assert elapsed < svc.lock_acquire_timeout / 2, (
+        f"the crash report waited {elapsed:.1f}s of a {svc.lock_acquire_timeout}s budget")
+    assert svc._load(path)["status"] == "executing", (
+        "a report that could not be serialized wrote anyway")
+    assert not claim.exists(), "the worker teardown did not release its execution claim"
+
+
+def test_the_crash_report_is_one_serialized_scope_and_never_reads_through__load():
+    """Structurally, because none of the four failures is visible from outside until it is
+    load-bearing. A `_load` reappearing here re-conflates unreadable with absent; a dropped
+    `self.sequence(...)` only shows up as a lost race; a dropped `timeout=` only shows up as a worker
+    teardown that stalls for the full lock budget. And `_execute` must delegate rather than grow the
+    handler back inline — the spine is a spine (see the ceiling test above)."""
+    report = _body(RunCommandService._report_worker_crash)
+    body = [n for n in report.body if not isinstance(n, ast.Expr)]       # drop the docstring
+    assert len(body) == 1 and isinstance(body[0], ast.With), (
+        "the crash report is no longer ONE lock scope")
+    assert len(body[0].items) == 1, "the crash report acquired a second context manager"
+    scope = body[0].items[0].context_expr
+    assert (isinstance(scope, ast.Call) and isinstance(scope.func, ast.Attribute)
+            and scope.func.attr == "sequence"
+            and isinstance(scope.func.value, ast.Name) and scope.func.value.id == "self"
+            and [getattr(arg, "id", None) for arg in scope.args] == ["rd"]), (
+        f"the crash report's ONE scope is `{ast.unparse(scope)}`, not `self.sequence(rd, ...)`")
+    assert [kw.arg for kw in scope.keywords] == ["timeout"], (
+        f"the crash report's sequencer wait is unbounded: `{ast.unparse(scope)}`")
+
+    assert _self_calls(RunCommandService._report_worker_crash, "_load") == [], (
+        "the crash report reads through `_load`, which cannot tell unreadable from absent")
+    assert len(_self_calls(RunCommandService._report_worker_crash, "_read_existing")) == 1
+
+    assert len(_self_calls(RunCommandService._execute, "_report_worker_crash")) == 1
+    assert _self_calls(RunCommandService._execute, "_terminal") == [], (
+        "`_execute` writes a terminal record itself again, outside the sequencer")
+
+
+# --- releasing the execution claim ------------------------------------------------------------
+
+def test_a_vanished_event_log_neither_kills_the_worker_nor_leaks_its_claim(tmp_path):
+    """`_release_execution` caught only OSError, but `_exec_path` → `validate_paths` raises
+    HTTPException(404) once the run's `events.jsonl` is gone under a delete/reset. It runs in
+    `_execute`'s `finally`, so that escaped the worker thread — and left the `.executing` claim,
+    which `_active_command_ids` counts as an ACTIVE command for as long as its owner PID is alive,
+    blocking every later reset/delete of the run."""
+    svc, rd = _service(tmp_path)
+    path, record = _record(svc, rd)
+    assert svc._claim_execution(rd, COMMAND_ID)
+    claim = svc._exec_path(rd, COMMAND_ID)
+    assert claim.exists()
+
+    def _admit_then_the_run_vanishes(_rd, _path, _current, _command_id):
+        (rd / "events.jsonl").unlink()
+        raise RuntimeError("boom")
+
+    svc._admit = _admit_then_the_run_vanishes
+    escaped: list = []
+
+    def run_worker():
+        try:
+            svc._execute(rd, path, dict(record), claimed=True)
+        except BaseException as exc:            # noqa: BLE001 - asserted below
+            escaped.append(exc)
+
+    thread = threading.Thread(target=run_worker, daemon=True)
+    thread.start()
+    thread.join(30.0)
+
+    assert not thread.is_alive() and not escaped, f"the worker thread died with {escaped}"
+    assert not claim.exists(), "the `.executing` claim outlived the worker that held it"
