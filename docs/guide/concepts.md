@@ -907,6 +907,7 @@ Where each concept lives in the code:
 | Operators (merge/ensemble, sweep) | `search/operators.py`, `sweep.py` |
 | Control loop + crash-resume | `engine/orchestrator.py` |
 | Authoritative server command lifecycle + leases | `serve/run_commands.py` |
+| HTTP control-payload validation (`normalize_control` + the five per-event tables) | `serve/control_validation.py` |
 | Durable whole-run Replay/deletion receipts + the destructive-quiescence ladder | `serve/durable_op.py`, `serve/reset_transaction.py`, `serve/deletion_transaction.py` |
 | Variance gate + multi-seed confirmation | `trust/gate.py`, `trust/confirm.py` |
 | CV harness, K-fold, purged walk-forward | `trust/cv.py` |

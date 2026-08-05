@@ -1684,7 +1684,7 @@ def _on_run_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # and this branch requires it, so a malformed row with NO established base still produces the
         # bare `delta_dependency_missing_run_base` receipt: already maximally degraded, and "invalid id"
         # would misdescribe a payload that carried no ids at all.
-        # Unreachable via the sanctioned writers (serve/run_commands.py rejects a non-list with 400 and
+        # Unreachable via the sanctioned writers (serve/control_validation.py rejects a non-list with 400 and
         # engine/strategy.py always appends a list); this is the forged/hand-edited-log path the rest of
         # these integrity receipts exist for.
         ctx.run_base_invalid = True

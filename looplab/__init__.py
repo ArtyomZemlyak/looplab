@@ -108,6 +108,9 @@ _LAYOUT = {
     "confirm": "trust",
     "confirm_phase": "engine",   # engine confirm mixin ("confirm" is taken by trust/confirm.py)
     "context_budget": "core",
+    # the HTTP control-payload validator `run_commands.py` shed (doc 25 SC-01) — registered so the
+    # package-layout audit sees it and the flat `looplab.control_validation` alias resolves
+    "control_validation": "serve",
     "costs": "engine",
     "critic": "trust",
     "cross_run": "trust",   # cross-run identity/scope-boundary checks among the trust monitors

@@ -41,7 +41,7 @@ from looplab.serve.launch import (
 )
 from looplab.serve.protocol import (
     COLLABORATION_EVENTS, CONTROL_EVENTS, EXPECTED_RUN_GENERATION_FIELD, GENESIS_CHAT_SEQ_BASE)
-from looplab.serve.run_commands import normalize_control
+from looplab.serve.control_validation import normalize_control
 from looplab.serve.reset_route import durable_reset_run
 from looplab.serve.settings_store import SettingsRevisionConflict
 from looplab.serve.trace_clear import durable_clear_node_trace
