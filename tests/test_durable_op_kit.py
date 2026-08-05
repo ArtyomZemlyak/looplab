@@ -564,7 +564,8 @@ class _FakeCommands:
         return self._finalize
 
 
-def _refusals(seen: list[str]):
+def _refusals() -> dict:
+    """One builder per rung, each carrying a detail that identifies WHICH rung refused."""
     return {
         "active_command": lambda active: HTTPException(409, ("active", tuple(active))),
         "engine_start": lambda: HTTPException(409, "spawn"),
@@ -588,12 +589,11 @@ def test_the_ladder_probes_in_one_order_and_stops_at_the_first_refusal(
     happened to answer first.
     """
     commands = _FakeCommands(**state)
-    seen: list[str] = []
     if expect_detail is None:
-        refuse_unless_quiescent(commands, tmp_path, **_refusals(seen))
+        refuse_unless_quiescent(commands, tmp_path, **_refusals())
     else:
         with pytest.raises(HTTPException) as caught:
-            refuse_unless_quiescent(commands, tmp_path, **_refusals(seen))
+            refuse_unless_quiescent(commands, tmp_path, **_refusals())
         assert caught.value.status_code == 409
         assert caught.value.detail == expect_detail
     assert commands.calls == expect_probes
@@ -607,7 +607,7 @@ def test_every_rung_demands_its_own_refusal_from_every_caller(missing, tmp_path)
     does not supply a refusal for it fails at the call, loudly, instead of silently skipping the
     check on one destructive path. That is the failure this extraction exists to prevent.
     """
-    kwargs = _refusals([])
+    kwargs = _refusals()
     kwargs.pop(missing)
     with pytest.raises(TypeError, match=missing):
         refuse_unless_quiescent(_FakeCommands(), tmp_path, **kwargs)
