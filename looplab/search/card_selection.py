@@ -792,8 +792,12 @@ def _foresight_signal(confidence: float, priority: float, confidence_weight: flo
     which is what the finding's own alternative asked for.
 
     Setting `confidence_weight` to 0.65 restores the historical blend exactly, which is why the shape
-    is a weight rather than a deletion: the escape hatch has to be able to express the old behaviour
-    for anyone who wants to A/B it.
+    is a weight rather than a deletion: the old behaviour has to stay expressible for anyone who wants
+    to A/B it. It is reachable through the public `card_score(..., scoring=...)` hook ONLY —
+    `Engine._card_scoring` is assigned solely from `strategist.py::validate_card_scoring`, whose
+    exact-set match rejects a map naming this field. That closes the operator's `set_strategy` path
+    along with the Strategist's, because one validator serves both; re-opening it for operators means
+    a second validated path, not a wider `_CARD_SCORING_FIELDS`.
     """
     return confidence_weight * confidence + (1.0 - confidence_weight) * priority
 

@@ -549,9 +549,16 @@ are written by the candidate itself:
   lifts the cap and restores the full `0..1` range.
 * **Confidence** is the foresight ranker's self-assessment of its own board ordering, measured at
   Pearson≈0 with realized outcome (§21.12). The foresight term is now the ranker's chosen RANK
-  alone; confidence remains a tie-break. `CardScoring.confidence_weight` (a scorer field, **not** a
-  Strategist-proposable one — an LLM must not be able to restore its own self-report's weight)
-  defaults to `0.0`; setting it to `0.65` reproduces the historical blend exactly.
+  alone; confidence remains a tie-break. `CardScoring.confidence_weight` defaults to `0.0`, and
+  `0.65` reproduces the historical blend exactly.
+
+  That weight is **not** part of the `card_scoring` treatment above, and therefore not settable by
+  the Strategist *or* by an operator's `set_strategy` — `validate_card_scoring` rejects any map
+  naming it, whole. It is a code-level knob on the public `card_score(..., scoring=...)` hook, for
+  an explicit A/B of the old weighting. The asymmetry is deliberate: an LLM Strategist must not be
+  able to hand its own self-report back its majority share of an active selection signal, and the
+  one validator serves both callers, so the operator path is closed with it. Re-opening it for
+  operators means a second validated path, not a wider `_CARD_SCORING_FIELDS`.
 
 ## Evaluation rigor & confirmation
 
