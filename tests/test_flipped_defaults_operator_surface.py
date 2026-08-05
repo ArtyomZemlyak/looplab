@@ -52,14 +52,20 @@ def test_every_flipped_default_is_described_as_shipped_not_as_an_opt_in():
         assert "0 = AUTO at launch" in rows[key]["help"] and "DEFAULT" in rows[key]["help"], key
     assert Settings.model_fields["backend"].default == "llm"
     assert "llm is the DEFAULT" in rows["backend"]["help"]
-    # Speculation was the ONE flip this test's premise was written for that has NOT shipped:
-    # `card_driven_selection` shipping True buys nothing for SELECTION while depth stays 0, but the
-    # flip is blocked on the Card debug-anchor defect documented at the field in `core/config.py`.
-    # Pinned here so the row and the code cannot drift apart while it waits.
-    assert Settings.model_fields["speculation_depth"].default == 0
+    # Speculation was the one flip this test's premise was written for that had NOT shipped, because
+    # the Card debug-anchor defect made every debug prefetch superseded on sight. That was fixed on
+    # 2026-08-05 and AUTO shipped with it, so it is now held to the same bar as the flips above —
+    # and it is what finally makes `card_driven_selection` shipping True mean anything for SELECTION,
+    # since Layer 3 needs both.
+    assert Settings.model_fields["speculation_depth"].default == -1
     spec_help = rows["speculation_depth"]["help"]
-    assert "-1 = AUTO at launch" in spec_help
+    assert "Opt in" not in spec_help and "Opt-in" not in spec_help
+    assert "AUTO and is the DEFAULT" in spec_help
     assert "0 = off" in spec_help
+    # The row must also say what AUTO does NOT do, because "on by default" without the settle-to-off
+    # cases reads as "every run now prefetches", which is false and is the sentence an operator would
+    # act on when their non-greedy or toy-backend run shows no speculation at all.
+    assert "settles itself back to OFF" in spec_help
 
 
 def test_the_asha_kill_row_describes_the_judge_that_replaced_the_quantile():

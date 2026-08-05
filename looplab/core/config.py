@@ -573,6 +573,28 @@ class Settings(BaseSettings):
     # node just to retry. Runaway is prevented not by a count but by the anti-stuck guard
     # (`inline_repair_stuck_repeat`): when the SAME error signature repeats with no progress, or the
     # agent's crash-triage says "abandon", the node fails. Set a positive N to cap the retries instead.
+    #
+    # N is APPORTIONED, not a single pool: it bounds EACH of two ledgers separately, because two
+    # equally "mechanical" repairs can be completely different resources. A repair that only
+    # reconciles the authored code with the INSTALLED libraries (a moved import, a removed/renamed
+    # API, a major-version migration, a symbol an absent optional dependency left undefined) draws on
+    # the ENVIRONMENT ledger; everything else — the node's own logic, a modelling decision, a run
+    # that was too slow or too big — draws on the EXPERIMENT ledger, which is what an operator is
+    # really budgeting. So the worst case per node is 2N repairs, and one number still controls it.
+    # Deliberately no second knob: the two ledgers are not independently tunable quantities, they are
+    # the same allowance charged to whoever incurred the cost.
+    # WHY: measured on `runs/rubert-dr-0805` node 0 with `inline_repair_attempts: 6` — all six
+    # attempts went on PyTorch-Lightning-2.x / transformers / accelerate migrations of a repo whose
+    # pinned deps were a year stale (every triage rationale said "mechanical"), and the first genuine
+    # research question, a DDP `find_unused_parameters` modelling decision, arrived with the budget
+    # exhausted. Under one pool such a repo can NEVER reach its own research question: every node
+    # re-pays the same migration.
+    # The environment ledger cannot become a second runaway: an exemption additionally requires the
+    # agent's structured `repair_class`, the ENGINE's own reading of the traceback
+    # (`engine/triage.py::_environment_failure`) and FORWARD PROGRESS (a never-before-seen normalized
+    # error signature, or a later pipeline stage reached) to agree — so the 2345-repair incident,
+    # whose failures all normalize to one signature, buys exactly one exempt attempt and still stops
+    # at `inline_repair_stuck_repeat`. Anything that disagrees is charged to the experiment budget.
     inline_repair_attempts: int = Field(default=0, ge=0)
     # Anti-stuck: abandon in-node repair once ONE normalized error signature has failed this node
     # this many times (no progress). Keeps "unlimited" repair from looping forever on an unfixable
@@ -1097,32 +1119,45 @@ class Settings(BaseSettings):
     #        The resolution happens once, in `Engine.__init__`, and it is the RESOLVED integer that is
     #        pinned by run_started, so replay/resume never re-derive a treatment from a different box.
     #    0 = off.  1..64 = that exact backlog cap (an explicit value always overrides AUTO).
-    # THE DEFAULT STAYS 0, AND THAT IS A BLOCKED CHANGE, NOT A PREFERENCE (2026-08-05). Flipping it
-    # to -1 (AUTO) is the operator's standing request and everything around it is ready — AUTO
-    # resolution, the run_started pin, the node-budget refund, and the three AUTO settle-to-off rules
-    # in `Engine._resolve_speculation_depth`. What blocks it is a defect in the Card DEBUG anchor that
-    # only a default could make everyone's problem:
+    # THE DEFAULT STAYS 0 — but as of 2026-08-05 that is a SEPARATE STEP, no longer a blocked one.
+    # Flipping it to -1 (AUTO) is the operator's standing request and everything around it is ready:
+    # AUTO resolution, the run_started pin, the node-budget refund, and the three AUTO settle-to-off
+    # rules in `Engine._resolve_speculation_depth`. What used to block it was a defect in the Card
+    # DEBUG anchor that only a default could make everyone's problem:
     #
-    #   `events/replay.py::_card_debuggable_leaf_ids` disqualifies a failed node the moment it has ANY
+    #   `events/replay.py::_card_debuggable_leaf_ids` disqualified a failed node the moment it had ANY
     #   child. A receipt-bound `debug` Card's own work item IS such a child, so the instant its node
-    #   exists the Card's anchor dies and it folds to `action_receipt_incomplete`. Nothing noticed
+    #   existed the Card's anchor died and it folded to `action_receipt_incomplete`. Nothing noticed
     #   while speculation was off, because the ordinary lane never re-checks a Card after its node
     #   exists. The L5 freshness gate does — that is its whole job — so EVERY speculative debug
-    #   prefetch is superseded on sight, and the lane then authors a fresh unselectable Card per loop
-    #   turn until the runaway guard trips with "node creation not converging".
+    #   prefetch was superseded on sight, and the lane then authored a fresh unselectable Card per
+    #   loop turn until the runaway guard tripped with "node creation not converging".
     #
     # Measured on a real 2-GPU run (`runs/rubert-dr-0805`, launched at AUTO): 2 nodes of a 12-node
     # budget, then stuck. Reproduced offline at depth 1 on a task whose first node crashes: 2 nodes
     # and 88 dead Cards, where the identical task with speculation off runs 12/12. Any run whose node
-    # FAILS reaches this, which on a real repo task is routine — so as a default it ends healthy runs
-    # early and blames the wrong thing.
+    # FAILED reached this, which on a real repo task is routine.
     #
-    # Fix the anchor first: a Card's own evidence nodes must not disqualify its own parent, and a
-    # discarded prefetch (`search/card_selection.py::is_unevaluated_speculative_discard` — already the
-    # run's single answer to "did this node spend budget") must not count as a child at all, since the
-    # Card lane's own policy view already hides it. Then flip this to -1.
-    #    -1 = AUTO. 0 = off (the default).  1..64 = that exact backlog cap.
-    speculation_depth: int = Field(default=0, ge=-1, le=64)
+    # FIXED in two halves that must agree with each other:
+    #   (a) a Card's own work item no longer disqualifies its own parent, and ONLY its own — a failed
+    #       node with any other child is still closed exactly as before;
+    #   (b) a discarded prefetch is not counted as a child at all, because it never spent budget. The
+    #       fold reads `core/models.py::is_unevaluated_speculative_discard` — the run's SINGLE answer
+    #       to "did this node spend budget", which the Card lane's policy view already reads through
+    #       `node_counts_toward_card_budget`. It lives in `core` (re-exported from
+    #       `search/card_selection.py`, its historical home) precisely so replay can reach it: a
+    #       second copy on the events side is how the two views came to disagree in the first place.
+    # Same offline reproduction after the fix: 16 minted / 12 charged / 11 evaluated / normal finish.
+    # The flip itself is intentionally NOT part of that change — land it on its own.
+    #    -1 = AUTO (the default).  0 = off.  1..64 = that exact backlog cap.
+    # AUTO ships as the default from 2026-08-05, once that fix made a `debug` prefetch survivable.
+    # It resolves ONCE at startup to the settled `eval_parallel` and pins the RESOLVED integer, and
+    # it settles itself back to OFF wherever a prefetch cannot pay for itself: a build whose roles
+    # call no LLM (there is no provider latency to overlap, and fan-out would cost the offline smoke
+    # its byte-reproducible event order), a policy other than `greedy`, and a run with no id.
+    # `EngineOptions` deliberately keeps `0` — see `engine/options.py`; a bare Engine must not gain a
+    # background LLM producer and the superseded/refund lifecycle just by being constructed.
+    speculation_depth: int = Field(default=-1, ge=-1, le=64)
     # Local evidence receipt produced by ``looplab speculation-gate``.  OPTIONAL, and deliberately
     # absent from the curated Settings UI.  It is the calibration BENCHMARK's receipt (scorer
     # fidelity, hit rate, divergence and normalized regret measured on the shipped quadratic toy),

@@ -408,6 +408,11 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
 - **debug / repair** — on a crash, hand the failing code + stderr back to fix it. Mechanical crashes
   can be repaired **in place** within the same eval (`inline_repair`), which doesn't consume the
   node budget; deeper failures get a structured "reproduce then fix" directive (`deep_repair`).
+  In-place repairs are **apportioned into two ledgers**: reconciling the code with the *installed*
+  libraries (a moved import, a removed API, a version migration) is a different resource from
+  changing the experiment, and `inline_repair_attempts` bounds each — otherwise a repo with a
+  year-stale `requirements.txt` spends every node's whole allowance re-paying the same migration
+  and never reaches its own research question.
 - **ablation-driven refinement** — neutralize a parameter (or a whole code block with
   `ablate_code_blocks`) to find the highest-impact lever, then refine it (`ablate_every`).
 - **merge / ensemble** — recombine two parents: a param mean, or a code-recombination ensemble
@@ -569,9 +574,10 @@ untrusted tier.
   `card_driven_selection` alone does not buy: speculation needs both, and at depth `0` nothing
   pre-builds. A prediction that misses is discarded *before* it reaches a sandbox — a
   `node_failed(reason=superseded)` with zero eval seconds — and its node-budget slot is refunded when
-  it can prove it never ran. **It is not on by default yet**, and that is a blocked change rather than
-  a preference: see
-  [Why speculation is not on by default yet](configuration.md#why-speculation-is-not-on-by-default-yet).
+  it can prove it never ran. **It is on by default** since 2026-08-05 (`speculation_depth` ships `-1` = AUTO), and settles
+  itself back to off where a prefetch cannot pay for itself — a build that calls no LLM, a
+  policy other than `greedy`, a run with no id: see
+  [what blocked speculation from being the default](configuration.md#what-blocked-speculation-from-being-the-default-fixed-2026-08-05).
 - **Unified agent** (`unified_agent`, on by default) — one LLM identity plays Researcher +
   Developer (+ Strategist) across stages, choosing its model/toolset per stage and driving the next
   macro action within a *pure legal-action gate* that keeps pipeline discipline. Set

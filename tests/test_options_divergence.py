@@ -58,6 +58,13 @@ EXPECTED = {
     # library keeps the legacy policy/unified-pilot action path, so a toy `Engine(...)` still runs the
     # historical spine. The value is pinned in `run_started`, so a resume cannot mix two treatments.
     "card_driven_selection": (True, False),
+    # Speculative Card prefetch (2026-08-05): the product surface ships `-1` = AUTO, resolved once at
+    # startup to the settled `eval_parallel` and pinned as the RESOLVED integer; the bare library keeps
+    # `0` = off. Same reasoning as the two watchdog kills and `card_driven_selection` above — a direct
+    # `Engine(...)` must not acquire a background LLM producer, a second leased role pair, or the
+    # superseded/refund lifecycle merely by being constructed. Ints, so the direction rule below cannot
+    # check this one mechanically either.
+    "speculation_depth": (-1, 0),
     # Layer-2 parallelism (2026-08-04): the product surface ships startup AUTO (`0` = one experiment per
     # detected GPU, and an LLM/build width derived from that settled eval width); the bare library keeps
     # `None`, which falls back to the legacy `max_parallel`/`parallel_build` (both 1) and is therefore
