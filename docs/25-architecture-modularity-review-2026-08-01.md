@@ -1626,7 +1626,23 @@ module never imports back into `memory` — the break for the second one surface
 ERROR rather than a test failure, which is worth stating because a harness filtering only on `FAILED`
 reads it as green.
 
-The `concept_capsules.py` half is NOT done; it is the larger of the two and wants its own pass.
+The `concept_capsules.py` half is NOT done, and the extraction analysis found the recommendation
+incomplete rather than merely large. Recorded here so the next pass starts from the obstacle:
+
+The capsule band is 16 defs / ~739 lines (`_CapsuleRows` through `portfolio_concept_graph`). It needs
+19 names from `memory`: 17 are capsule/graph bound constants that belong WITH the capsules and move
+freely. The other two are the problem — `fingerprint_similarity` and `_is_finite_metric`. This
+finding says fingerprints stay in `memory.py`, but `memory` must import the new module to re-export
+it, so "capsules import fingerprints from memory" is a CYCLE, not a layering.
+
+It resolves cleanly because both blockers are tiny and pure: `fingerprint_similarity` is six lines of
+Jaccard over two token lists, and `_is_finite_metric` is a finiteness predicate. They belong BELOW
+both modules, in `core` — and `core/fitness.py` is already the established home for "what counts as a
+usable metric" (that is exactly what CO-09 settled). Moving those two down first turns this half into
+the same verbatim-move-plus-shim that the lesson-hygiene half already is.
+
+Attempting the capsule move WITHOUT that step would either introduce the cycle or force a
+function-local import to hide it, which is the smell this finding exists to remove.
 
 #### EM-11 · MEDIUM · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
