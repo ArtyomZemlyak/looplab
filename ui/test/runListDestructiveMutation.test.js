@@ -123,8 +123,18 @@ test('the list mutation guard bounds hung writes and reconciliation without late
       if (!hangReconcile) { reads.push(null); return Promise.resolve() }
       return new Promise(resolve => reads.push(resolve))
     }
+    // Every state this harness renders, in order. The busy assertion below reads THIS rather than the
+    // live DOM, because the DOM only shows the CURRENT state and `actionTimeout` is 25ms: under a
+    // loaded full-suite run the `act` block that dispatches the clicks can itself outlast that
+    // deadline, so by the time the assertion ran the row had already moved on to its timeout error
+    // and `[role="status"]` was empty. Observed once at 694 tests, passing 3/3 in isolation and in
+    // three earlier full runs — a wall-clock race, not a behaviour change. The recorded sequence
+    // answers the same question ("did the mutation go busy with its label") without depending on how
+    // much of the 25ms budget the scheduler ate.
+    const renders = []
     function Harness() {
       const [state, mutate, clear] = useListMutation({ actionTimeout: 25, reconcileTimeout: 25 })
+      renders.push(state)
       return React.createElement(React.Fragment, null,
         React.createElement('button', { onClick: () => mutate('delete-run', 'Deleting run…', write, reconcile) }, 'Delete'),
         state?.busy && React.createElement('div', { role: 'status' }, state.label),
@@ -140,7 +150,8 @@ test('the list mutation guard bounds hung writes and reconciliation without late
       await Promise.resolve()
     })
     assert.equal(writes.length, 1, 'double activation sends one destructive intent')
-    assert.match(document.querySelector('[role="status"]')?.textContent || '', /Deleting run/)
+    assert.ok(renders.some(state => state?.busy && /Deleting run/.test(state.label || '')),
+      'the mutation renders a busy row carrying its own label')
 
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 70)) })
     assert.equal(reads.length, 1)
