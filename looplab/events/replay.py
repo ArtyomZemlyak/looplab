@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import heapq
 import math
+from collections.abc import Collection, Mapping
 from typing import Iterable, Literal, Optional
 
 from looplab.core.concepts import (
@@ -41,7 +42,8 @@ from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGES
                      transitional_card_action_digest_v1,
                      transitional_card_ownership_receipt_v1,
                      hypothesis_id, hypothesis_statement_digest,
-                     idea_proposal_digest, normalize_extra_metrics, normalize_researcher_footprint,
+                     idea_proposal_digest, is_unevaluated_speculative_discard,
+                     normalize_extra_metrics, normalize_researcher_footprint,
                      normalize_steering_context,
                      run_setup_key, valid_card_action_digest, valid_researcher_footprint)
 from looplab.events.comment_projection import apply_comment_event
@@ -4477,18 +4479,38 @@ def _card_action_from_projection(card: Card) -> dict:
     }
 
 
-def _card_debuggable_leaf_ids(st: RunState) -> set[int]:
-    """Failed leaves that may still anchor one inter-node debug action.
+def _card_debug_leaf_children(st: RunState) -> dict[int, frozenset[int]]:
+    """Child node ids that END a failed node's life as a debuggable leaf, keyed by parent id.
 
-    Failed nodes are deliberately absent from ``RunState.breedable_nodes()``.  Treating ``debug``
-    like ``improve`` therefore made every receipt-bound debug Card permanently incomplete.  Keep
-    this replay-side shape gate aligned with the policy's non-depth-specific eligibility rules; the
-    policy-specific depth bound and deterministic first-leaf choice are rechecked by the Layer-3
-    selector before an existing Card is claimed.
+    A node with a child is no longer a leaf — EXCEPT for a child that never spent budget.  A
+    discarded speculative prefetch (``is_unevaluated_speculative_discard``) is exactly that: the
+    freshness gate terminalized it before any dispatch, it cost one Developer call and no sandbox
+    at all, and the Card lane's OWN policy view already erases it (``_effective_policy_state``
+    filters ``state.nodes`` through ``node_counts_toward_card_budget``, which is that same
+    predicate).  Counting it here made the two views disagree about whether the failed parent still
+    had work available: the policy kept proposing ``debug`` on it while replay kept folding the
+    resulting Card to ``action_receipt_incomplete``, so the lane authored a fresh permanently
+    unselectable Card every loop turn until the runaway guard tripped.  Reusing the run's SINGLE
+    answer to "did this node spend budget" makes the two views agree by construction rather than by
+    a second rule that can drift.  (That predicate lives in ``core/models.py`` precisely so the fold
+    can reach it — ``events`` may not import ``search``.)
     """
-    has_child: set[int] = set()
+    children: dict[int, set[int]] = {}
     for node in st.nodes.values():
-        has_child.update(node.parent_ids)
+        if is_unevaluated_speculative_discard(st, node):
+            continue
+        for parent_id in node.parent_ids:
+            children.setdefault(parent_id, set()).add(node.id)
+    return {parent_id: frozenset(ids) for parent_id, ids in children.items()}
+
+
+def _card_debuggable_leaf_candidate_ids(st: RunState) -> set[int]:
+    """Failed nodes a debug action may anchor on, BEFORE the has-a-child leaf test.
+
+    Split out of ``_card_debuggable_leaf_ids`` so the one narrow own-work-item exemption in
+    ``_card_action_has_live_anchors`` cannot accidentally revive a node that failed a DIFFERENT
+    gate (reset, aborted, tombstoned, triage-rejected, or never failed at all).
+    """
     return {
         node.id
         for node in st.nodes.values()
@@ -4496,18 +4518,50 @@ def _card_debuggable_leaf_ids(st: RunState) -> set[int]:
             node.status is NodeStatus.failed
             and not node.tombstoned
             and node.id not in st.aborted_nodes
-            and node.id not in has_child
             and node.error_reason not in {"idea_rejected", "card_dropped"}
         )
     }
+
+
+def _card_debuggable_leaf_ids(
+    st: RunState,
+    *,
+    candidate_ids: Collection[int] | None = None,
+    leaf_children: Mapping[int, Collection[int]] | None = None,
+) -> set[int]:
+    """Failed leaves that may still anchor one inter-node debug action.
+
+    Failed nodes are deliberately absent from ``RunState.breedable_nodes()``.  Treating ``debug``
+    like ``improve`` therefore made every receipt-bound debug Card permanently incomplete.  Keep
+    this replay-side shape gate aligned with the policy's non-depth-specific eligibility rules; the
+    policy-specific depth bound and deterministic first-leaf choice are rechecked by the Layer-3
+    selector before an existing Card is claimed.
+
+    Both halves are accepted precomputed so ``_derive_cards`` — which needs them separately for the
+    own-work-item exemption — has exactly ONE spelling of this set rather than an inlined copy.
+    """
+    if candidate_ids is None:
+        candidate_ids = _card_debuggable_leaf_candidate_ids(st)
+    if leaf_children is None:
+        leaf_children = _card_debug_leaf_children(st)
+    return {node_id for node_id in candidate_ids if not leaf_children.get(node_id)}
 
 
 def _card_action_has_live_anchors(
     card: Card,
     breedable_node_ids: set[int],
     debuggable_leaf_ids: set[int],
+    *,
+    debuggable_leaf_candidate_ids: Collection[int] = (),
+    debuggable_leaf_children: Mapping[int, Collection[int]] | None = None,
+    own_work_item_ids: Collection[int] = (),
 ) -> bool:
-    """Whether the bounded action has one executable operator/parent shape right now."""
+    """Whether the bounded action has one executable operator/parent shape right now.
+
+    The three keyword arguments carry the ONE exemption a debug Card is owed against its own work
+    item (see the ``debug`` branch).  They default to empty, so a caller that supplies only the
+    three positional sets gets exactly the historical answer.
+    """
     operator = card.operator
     parent_ids = list(card.parent_ids or [])
     if card.parent_id is not None:
@@ -4526,7 +4580,24 @@ def _card_action_has_live_anchors(
         # failed leaf; once reset, aborted, rejected by triage, tombstoned, or given a child, replay
         # closes this Card again.  Layer 3 further narrows this set to the policy's first eligible
         # failed leaf under its configured debug-depth bound.
-        return len(parent_ids) == 1 and parent_ids[0] in debuggable_leaf_ids
+        if len(parent_ids) != 1:
+            return False
+        parent_id = parent_ids[0]
+        if parent_id in debuggable_leaf_ids:
+            return True
+        # …with ONE exemption, and it is the whole reason speculation could not be turned on: a
+        # receipt-bound debug Card's OWN work item is a child of the node it debugs.  So the instant
+        # that node existed, this Card's own anchor died and it folded to
+        # `action_receipt_incomplete`.  Nothing noticed while speculation was off, because the
+        # ordinary lane never re-checks a Card after its node exists; the L5 freshness gate does —
+        # that is its whole job — so every speculative debug prefetch was superseded on sight.  A
+        # Card's own work item must not disqualify its own parent.  EVERY OTHER child still does,
+        # and the parent must still be a live failed node in its own right, so this opens no hole:
+        # a debug Card whose parent has a real sibling child stays closed exactly as before.
+        if debuggable_leaf_children is None or parent_id not in debuggable_leaf_candidate_ids:
+            return False
+        blocking = set(debuggable_leaf_children.get(parent_id, ())) - set(own_work_item_ids)
+        return not blocking
     if operator == "merge":
         return len(parent_ids) == 2 and all(
             parent_id in breedable_node_ids for parent_id in parent_ids
@@ -5487,7 +5558,20 @@ def _derive_cards(st: RunState) -> None:
     # legacy hash joins, unbound card_added rows, and node-only card ids remain visible but can never
     # become selection-ready.
     breedable_card_parent_ids = {node.id for node in st.breedable_nodes()}
-    debuggable_card_parent_ids = _card_debuggable_leaf_ids(st)
+    debuggable_leaf_children = _card_debug_leaf_children(st)
+    debuggable_leaf_candidate_ids = _card_debuggable_leaf_candidate_ids(st)
+    debuggable_card_parent_ids = _card_debuggable_leaf_ids(
+        st, candidate_ids=debuggable_leaf_candidate_ids,
+        leaf_children=debuggable_leaf_children)
+    # The nodes each Card OWNS, keyed by the CANONICAL card id. `Card.evidence` alone is not enough
+    # for the debug exemption below: `card_merged` folds an alias's evidence into its canonical, so
+    # evidence can name a node this Card never authored. Intersecting the two makes "its own work
+    # item" provable from the node row itself.
+    own_work_items_by_card: dict[str, set[int]] = {}
+    for node in st.nodes.values():
+        owner_card_id = node.idea.card_id
+        if isinstance(owner_card_id, str) and owner_card_id:
+            own_work_items_by_card.setdefault(_canon(owner_card_id), set()).add(node.id)
     for cid, c in cards.items():
         registration = card_registrations.get(cid, {})
         if (registration.get("count") == 1 and registration.get("valid_count") == 1
@@ -5530,7 +5614,12 @@ def _derive_cards(st: RunState) -> None:
             and c.identity.kind == "native"
             and projected_digest == c.identity.action_digest
             and _card_action_has_live_anchors(
-                c, breedable_card_parent_ids, debuggable_card_parent_ids)
+                c, breedable_card_parent_ids, debuggable_card_parent_ids,
+                debuggable_leaf_candidate_ids=debuggable_leaf_candidate_ids,
+                debuggable_leaf_children=debuggable_leaf_children,
+                own_work_item_ids=(
+                    set(c.evidence) & own_work_items_by_card.get(cid, set())),
+            )
         )
         freshness = _card_action_freshness(st, c)
 

@@ -36,7 +36,7 @@ from looplab.events.types import (
     EV_INJECT_DONE, EV_INJECT_FAILED,
     EV_FINALIZE_STEP,
     EV_LESSONS_STORE_UNAVAILABLE,
-    EV_NODE_BUILDING,
+    EV_NODE_BUILDING, EV_NODE_CREATED,
     EV_HYPOTHESIS_MERGED, EV_NODE_FAILED, EV_PAUSE,
     EV_NOVELTY_REJECTED,
     EV_POLICY_DECISION,
@@ -954,7 +954,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # baseline evaluated 12/12 nodes while the depth-1 treatment evaluated 9/12 with three
             # `superseded` discards and finished ~2.6% worse. That 2.6% IS the `normalized_regret` the
             # calibration gate bounds — the gate protected the EXPERIMENT BUDGET, not search
-            # correctness. `search/card_selection.py::is_unevaluated_speculative_discard` now refunds
+            # correctness. `core/models.py::is_unevaluated_speculative_discard` now refunds
             # exactly that slot (and `_hard_node_reservation_limit` refunds the matching physical
             # reservation), so the harm the evidence measured is gone and demanding per-workload
             # evidence that "the harm is small" is ceremony.
@@ -1536,8 +1536,26 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # `_create_node` re-mint id 0 forever (the 184MB node_created(0) spin). The eval loop has its
         # own anti-stuck guard, but node CREATION had none. Local counters (not replayed) → on trip we
         # append run_finished (which IS replayed), so resume sees a cleanly-finished run.
+        #
+        # It charges nodes actually MINTED, counted from the LOG (`node_created` rows), not from the
+        # planned `len(creates)` and not from `len(state.nodes)`. Both alternatives were wrong, in
+        # opposite directions:
+        #   * planned creates over-charge a lane that plans work and mints nothing — the Card lane
+        #     stages/elects per turn, so a Card-side stall was reported as "node creation not
+        #     converging" when not one node had been created. That is the misdiagnosis this counter
+        #     caused for the whole speculation-depth defect, and the reason the message is now split;
+        #   * folded `nodes` under-charges to zero in the exact spin the guard exists for: the
+        #     empty-nodes fold that re-mints id 0 forever leaves `len(state.nodes)` at 0 every turn.
+        # The log is the one view that sees both. `_no_mint_turns` is the companion bound for the
+        # other half — a create lane that keeps planning work and minting nothing — because a
+        # mint-only charge on its own would turn that stall into an unbounded loop.
         _created_no_terminal = 0
         _prev_terminal = -1
+        # `None` until the first observation: on RESUME the log already holds every earlier
+        # `node_created`, and charging that history to this process's guard would false-trip a long
+        # healthy run on its first loop turn. Only rows minted from here on are this loop's spin.
+        _minted_charged: Optional[int] = None
+        _no_mint_turns = 0
         while True:
             decision_events = self.store.read_all()
             state = fold(decision_events)
@@ -1627,10 +1645,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # abort can change the rest while it is building; never process a stale whole batch.
                 self._rerun_node(_resets[0], state)
                 continue
+            # Charge the runaway guard for what the log says was MINTED since the previous turn. Read
+            # off the events rather than the fold so the empty-nodes spin (which folds to no nodes at
+            # all while appending a `node_created` per turn) is still counted — see `_minted_charged`.
+            _minted_now = sum(1 for _e in decision_events if _e.type == EV_NODE_CREATED)
+            if _minted_charged is None:
+                _minted_charged = _minted_now
+            elif _minted_now != _minted_charged:
+                _created_no_terminal += max(0, _minted_now - _minted_charged)
+                _minted_charged = _minted_now
+                _no_mint_turns = 0                   # a mint IS creation progress
             _terminal_now = sum(1 for _n in state.nodes.values()
                                 if _n.status is not NodeStatus.pending)
             if _terminal_now != _prev_terminal:      # a node reached terminal (progress) -> reset
                 _created_no_terminal = 0
+                _no_mint_turns = 0
                 _prev_terminal = _terminal_now
             # Onboarding pre-phase (Phase 3, ADR-7): the agent proposes a trusted eval
             # spec + metric adapter; a human ratifies it once (or autonomous auto-confirms);
@@ -1804,16 +1833,31 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                        if a["kind"] in ("draft", "improve", "debug", "merge")]
 
             if creates:
-                # Runaway trip: created too many nodes with ZERO reaching terminal since the last
-                # progress. A healthy run creates a batch then evaluates it (which resets the counter);
-                # only a spin (empty-nodes fold re-minting the same id) grows this unbounded. Cap
-                # generously so operator injects / wide seed batches never false-trip. (Phase 2 may build
-                # FEWER than len(creates) when the batch can't diversify to full width — counting the
-                # planned width here only makes the guard trip marginally sooner, i.e. fails safe.)
-                _created_no_terminal += len(creates)
-                if _created_no_terminal > max(self.policy.max_nodes, 4) * 3 + 50:
+                # Runaway trip: MINTED too many nodes with ZERO reaching terminal since the last
+                # progress (charged at the top of the loop from the log). A healthy run creates a batch
+                # then evaluates it (which resets the counter); only a spin (empty-nodes fold re-minting
+                # the same id) grows this unbounded. Cap generously so operator injects / wide seed
+                # batches never false-trip.
+                _runaway_cap = max(self.policy.max_nodes, 4) * 3 + 50
+                if _created_no_terminal > _runaway_cap:
                     if self._finish_with_report_if_quiescent(state, {
                             "reason": "stuck: node creation not converging (no node reached terminal)"},
+                            after_seq=decision_seq):
+                        break
+                    continue
+                # …and its companion: a create lane that keeps PLANNING work and minting nothing. The
+                # Card lane can legitimately spend a turn without a node (authoring a work item, losing
+                # a build CAS, refusing a mixed-authority batch), so this cannot be one turn — but it
+                # must still be bounded, or the same stall that used to end the run with the wrong
+                # message would simply never end it at all. Same generous cap, counted in CONSECUTIVE
+                # turns and reset by any mint or any terminal, so only a genuine no-progress spin
+                # reaches it. The reason names what actually happened instead of blaming node creation.
+                _no_mint_turns += 1
+                if _no_mint_turns > _runaway_cap:
+                    if self._finish_with_report_if_quiescent(state, {
+                            "reason": (
+                                f"stuck: {len(creates)} action(s) planned for "
+                                f"{_no_mint_turns} consecutive loop turns without creating a node")},
                             after_seq=decision_seq):
                         break
                     continue
@@ -1824,7 +1868,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # One turn has one authority. A mixed lane could stage new work while claiming a
                     # stale selection snapshot, so retain the serial spine's existing fail-closed rule.
                     if any(receipt_owned) and not all(receipt_owned):
-                        _created_no_terminal -= len(creates)
                         continue
 
                     if not any(receipt_owned):
@@ -1845,7 +1888,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # steady-state proposer while eval runs; staging an unreserved wide seed
                             # batch here only creates stale inventory if the first fast eval moves best.
                             one = stageable[:1]
-                            _created_no_terminal -= max(0, len(creates) - len(one))
                             if self._stage_card_creates(one, state):
                                 continue
                             # A rejected staging attempt gets one ordinary serial compatibility try;
@@ -1883,11 +1925,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # A Card lane is one authority decision. Mixing receipt-owned and proposer-owned
                     # work in it would make the score-to-claim fence ambiguous, so fail closed.
                     if not all(META_CARD_ID in action for action in creates):
-                        _created_no_terminal -= len(creates)
                         continue
                     _card_reservations = self._claim_existing_card_builds(creates)
                     if _card_reservations is None:
-                        _created_no_terminal -= len(creates)
                         continue
                 _card_reservation_by_id = {
                     reservation.card_id: reservation

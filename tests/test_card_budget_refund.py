@@ -372,3 +372,60 @@ def test_crash_interrupted_speculative_eval_is_never_refunded(tmp_path, monkeypa
     assert refunded_card_budget_node_ids(after) == frozenset()
     assert card_budget_used(after) == 1
     assert resumed._hard_node_reservation_limit(after) == resumed._base_max_nodes
+
+
+# ------------------------------------------------- (5) one predicate, one answer, in both views
+
+def test_the_refund_predicate_is_one_object_under_every_name_it_is_reachable_by():
+    """It moved DOWN to `core/models.py` on 2026-08-05 so the FOLD could reuse it (`events` may not
+    import `search`). The old spellings are re-exports, not copies — a second definition is exactly
+    the drift this predicate exists to prevent, and a monkeypatch on the historical path would
+    silently miss the fold."""
+    from looplab.core import models
+    from looplab.events import replay
+    from looplab.search import card_selection, speculation_quality
+
+    assert (card_selection.is_unevaluated_speculative_discard
+            is models.is_unevaluated_speculative_discard
+            is replay.is_unevaluated_speculative_discard
+            is speculation_quality.is_unevaluated_speculative_discard)
+    assert (card_selection._durable_speculative_lifecycle
+            is models._durable_speculative_lifecycle)
+    assert (card_selection.CARD_FRESHNESS_SUPERSEDED_ERROR
+            == models.CARD_FRESHNESS_SUPERSEDED_ERROR
+            == "superseded by Card freshness gate")
+
+
+def test_the_budget_view_and_the_fold_agree_on_what_a_discard_costs():
+    """The disagreement that broke Card speculation: the L3 budget refunded the discard while
+    replay's debug anchor still counted it as a child of the node it was going to repair — so the
+    policy kept proposing `debug` on that node and the lane authored a permanently unselectable Card
+    every loop turn. Both halves now read this one predicate."""
+    from looplab.events.replay import _card_debug_leaf_children, _card_debuggable_leaf_ids
+
+    failed_parent = Node(
+        id=0, operator="draft", idea=Idea(operator="draft", card_id="card-parent"),
+        status=NodeStatus.failed)
+    failed_parent.error_reason = "crash"
+    discarded_child = _spec_node(1, card_id="card-child")
+    discarded_child.parent_ids = [0]
+    state = _state(failed_parent, discarded_child)
+
+    assert is_unevaluated_speculative_discard(state, discarded_child) is True
+    assert node_counts_toward_card_budget(state, discarded_child) is False
+    assert card_budget_used(state) == 1                       # only the crashed parent
+    assert refunded_card_budget_node_ids(state) == frozenset({1})
+    # …and the fold's child map agrees: a node that spent no budget is not a child that ends a
+    # failed node's life as a debuggable leaf.
+    assert _card_debug_leaf_children(state) == {}
+    assert 0 in _card_debuggable_leaf_ids(state)
+
+    # A speculative child that DID evaluate is a real experiment: it keeps its slot in BOTH views.
+    ran = _spec_node(2, card_id="card-ran", status=NodeStatus.evaluated, never_evaluated=False,
+                     eval_started=True, eval_seconds=12.0)
+    ran.parent_ids = [0]
+    with_real_child = _state(failed_parent, ran)
+    assert is_unevaluated_speculative_discard(with_real_child, ran) is False
+    assert node_counts_toward_card_budget(with_real_child, ran) is True
+    assert _card_debug_leaf_children(with_real_child) == {0: frozenset({2})}
+    assert 0 not in _card_debuggable_leaf_ids(with_real_child)

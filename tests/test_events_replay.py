@@ -3252,3 +3252,142 @@ def test_neither_stage_re_derives_the_shared_card_coercions():
         assert "math.isfinite" not in source, f"{name} still coerces numbers inline"
     snapshot_source = textwrap.dedent(inspect.getsource(replay_module._card_added_snapshot))
     assert "_bounded_card_action_space(" in snapshot_source, "the snapshot re-derives the space bound"
+
+
+# --- invariant 5 for the discard-aware debug anchor (2026-08-05) ----------------------------------
+#
+# `_card_debuggable_leaf_ids` now SKIPS a child that is an unevaluated speculative discard, and
+# `_card_action_has_live_anchors` spares a debug Card's own work item. Both read fold-internal
+# receipts written by three different events (`node_created`, `card_build_done`, `node_failed`), so
+# the answer must not depend on where in the log those rows landed relative to an independent lane.
+
+
+def _discard_lane_rows():
+    """head rows (fixed), the discard's terminal (movable), and an INDEPENDENT lane's rows."""
+    from tests.test_card_selection_guard import (
+        _discarded, _failed_node_2, _native_operator_card_added, _speculative_build)
+
+    head = [
+        *_failed_node_2(),
+        _native_operator_card_added("debug-later", "repair the failed candidate", "debug", [2]),
+        _native_operator_card_added("debug-thrown", "an earlier repair attempt", "debug", [2]),
+        *_speculative_build(3, "debug-thrown", "debug", [2]),
+    ]
+    independent = [
+        ("node_created", {"node_id": 4, "parent_ids": [1], "operator": "improve",
+                          "idea": {"operator": "improve", "hypothesis": "an unrelated branch"}}),
+        ("node_evaluated", {"node_id": 4, "metric": 0.9, "violations": []}),
+    ]
+    return head, _discarded(3), independent
+
+
+def _selection_projection(rows):
+    from looplab.events.replay import _card_debuggable_leaf_ids
+    from looplab.search.card_selection import card_budget_used, refunded_card_budget_node_ids
+
+    state = fold([Event(seq=i, type=k, data=d) for i, (k, d) in enumerate(rows)])
+    return (
+        tuple(sorted(_card_debuggable_leaf_ids(state))),
+        tuple((cid, c.selection_ready, tuple(c.selection_blockers),
+               c.selection_provenance.action_complete)
+              for cid, c in sorted(state.cards.items())),
+        tuple(sorted((n.id, n.status.value, tuple(n.parent_ids)) for n in state.nodes.values())),
+        card_budget_used(state),
+        tuple(sorted(refunded_card_budget_node_ids(state))),
+    )
+
+
+def test_the_discard_terminal_folds_the_same_from_every_splice_position():
+    """Invariant 5. The discard's `node_failed` is written by the freshness gate while an unrelated
+    lane is evaluating, so its byte position relative to that lane is schedule-dependent."""
+    head, discard, independent = _discard_lane_rows()
+    base = [*head, *independent]
+    seen = {
+        pos: _selection_projection([*base[:pos], discard, *base[pos:]])
+        # every position from immediately after its own `node_created` to the end of the log
+        for pos in range(len(head), len(base) + 1)
+    }
+    assert len(seen) >= 3
+    assert len(set(seen.values())) == 1, (
+        "the folded selection state depends on where the discard terminal landed: "
+        + repr({pos: proj for pos, proj in seen.items()}))
+    leaves, cards, _, budget, refunded = next(iter(seen.values()))
+    assert 2 in leaves and refunded == (3,) and budget == 3
+    # …and it is invariantly the RIGHT answer, not just a stable one: the anchor is live from every
+    # splice position. (`debug-later` is not selection_ready here only because the independent lane's
+    # evaluation moved `best`, which stales its own scored-against fence — a different gate.)
+    blockers = dict((cid, set(items)) for cid, _, items, _ in cards)["debug-later"]
+    assert "action_receipt_incomplete" not in blockers, blockers
+
+
+def test_the_whole_discarded_lifecycle_folds_the_same_wherever_it_is_spliced():
+    """The same property for the four-row build lifecycle as a BLOCK: its receipts are what prove
+    the discard, and a worker-written block can land anywhere among an independent lane's rows."""
+    from tests.test_card_selection_guard import (
+        _discarded, _failed_node_2, _native_operator_card_added, _speculative_build)
+
+    fixed = [
+        *_failed_node_2(),
+        _native_operator_card_added("debug-later", "repair the failed candidate", "debug", [2]),
+        _native_operator_card_added("debug-thrown", "an earlier repair attempt", "debug", [2]),
+    ]
+    block = [*_speculative_build(3, "debug-thrown", "debug", [2]), _discarded(3)]
+    independent = [
+        ("node_created", {"node_id": 4, "parent_ids": [1], "operator": "improve",
+                          "idea": {"operator": "improve", "hypothesis": "an unrelated branch"}}),
+        ("node_evaluated", {"node_id": 4, "metric": 0.9, "violations": []}),
+        ("coverage_snapshot", {"at_node": 5, "nodes": 5, "themes": 0}),
+    ]
+    seen = {
+        pos: _selection_projection([*fixed, *independent[:pos], *block, *independent[pos:]])
+        for pos in range(len(independent) + 1)
+    }
+    assert len(seen) == len(independent) + 1
+    assert len(set(seen.values())) == 1, "the discard lifecycle block is splice-sensitive"
+
+
+def test_a_pre_speculation_log_keeps_every_selection_decision():
+    """Reader-side only, additive: the change reads no new event field. A log written with
+    speculation OFF has no discard receipts at all, so its child map is byte-identical to the old
+    one — and the one thing the own-work-item exemption does change (a debug Card that owns its node
+    drops `action_receipt_incomplete`) can never flip `selection_ready`, because such a Card is held
+    by `work_in_flight` while its node runs and by `work_terminal` once it finishes."""
+    from tests.test_card_selection_guard import (
+        _failed_node_2, _native_operator_card_added, _speculative_build)
+
+    rows = [
+        *_failed_node_2(),
+        _native_operator_card_added("debug-own", "repair the failed candidate", "debug", [2]),
+        # an OLD log: no `speculative` marker, no build generation, no eval-start boundary promise
+        ("node_created", {"node_id": 3, "parent_ids": [2], "operator": "debug",
+                          "idea": {"operator": "debug", "params": {}, "card_id": "debug-own"},
+                          "parent_generations": {"2": 0}}),
+    ]
+    running = fold([Event(seq=i, type=k, data=d) for i, (k, d) in enumerate(rows)])
+    assert running.cards["debug-own"].selection_ready is False
+    assert running.cards["debug-own"].selection_blockers == ["work_in_flight"]
+
+    done = fold([Event(seq=i, type=k, data=d) for i, (k, d) in enumerate(
+        [*rows, ("node_failed", {"node_id": 3, "reason": "crash", "eval_seconds": 4.0})])])
+    assert done.cards["debug-own"].selection_ready is False
+    assert "work_terminal" in done.cards["debug-own"].selection_blockers
+    # …and the ordinary failed child still ends its parent's life as a debuggable leaf, exactly as
+    # before: nothing in this log proves a build that never ran.
+    from looplab.core.models import is_unevaluated_speculative_discard
+    from looplab.events.replay import _card_debuggable_leaf_ids
+    assert is_unevaluated_speculative_discard(done, done.nodes[3]) is False
+    assert 2 not in _card_debuggable_leaf_ids(done)
+
+    # The speculative build lifecycle written by an engine that never had the discard receipts is
+    # refused a skip for the same reason (fail closed: silence is not evidence).
+    legacy_spec = [
+        *_failed_node_2(),
+        _native_operator_card_added("debug-later", "repair the failed candidate", "debug", [2]),
+        _native_operator_card_added("debug-thrown", "an earlier repair attempt", "debug", [2]),
+        *_speculative_build(3, "debug-thrown", "debug", [2]),
+        ("node_failed", {"node_id": 3, "reason": "superseded",
+                         "error": "speculative build became stale before commit",
+                         "eval_seconds": 0.0}),          # no `never_evaluated`, no freshness receipt
+    ]
+    state = fold([Event(seq=i, type=k, data=d) for i, (k, d) in enumerate(legacy_spec)])
+    assert 2 not in _card_debuggable_leaf_ids(state)

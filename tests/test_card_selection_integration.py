@@ -11,7 +11,7 @@ import looplab.search.speculation_quality as speculation_quality
 from looplab.adapters.toytask import ToyTask
 from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.config import Settings
-from looplab.core.models import Idea, RunState
+from looplab.core.models import Idea, NodeStatus, RunState
 from looplab.engine.options import EngineOptions
 from looplab.engine.orchestrator import (
     Engine,
@@ -441,3 +441,83 @@ def test_resume_restores_card_mode_before_reapplying_recorded_scoring(tmp_path):
     engine._reentry_repin()
     assert engine.card_driven_selection is True
     assert engine._card_scoring == treatment
+
+
+# --- the whole defect, end to end (2026-08-05) ----------------------------------------------------
+
+
+class _ClientMarker:
+    """Only has to exist: `_build_calls_an_llm` reads `client is not None`, which is what makes the
+    isolated producer role pair eligible and puts the run on the speculative build path."""
+
+
+class _CrashFirstDeveloper(ToyObjectiveDeveloper):
+    """A task whose FIRST node fails to build. That is all it takes — on a real repo task it is
+    routine, and it is what every run that hit this defect had in common."""
+
+    client = _ClientMarker()
+
+    def __init__(self):
+        super().__init__()
+        self.made = 0
+
+    def implement(self, idea):
+        code = super().implement(idea)
+        self.made += 1
+        if self.made == 1:
+            return "raise SystemExit('injected build failure')\n"
+        return code
+
+
+class _SpeculationResearcher(ToyResearcher):
+    client = _ClientMarker()
+
+
+@pytest.mark.parametrize("depth", [0, 1])
+def test_a_run_whose_first_node_crashes_finishes_at_every_speculation_depth(tmp_path, depth):
+    """The regression the whole change exists for.
+
+    At depth 1 this used to die after TWO nodes of a twelve-node budget with
+    `stuck: node creation not converging`: node 0 crashed, the `debug` Card authored to repair it
+    owned a node, that node was its own parent's child, so the anchor died, the freshness gate saw a
+    blocker set beyond `{work_in_flight}` and superseded every prefetch on sight — and the lane
+    authored a fresh permanently-unselectable Card every loop turn (88 of them) until the runaway
+    guard tripped. Speculation OFF is the control: it completes the same budget.
+    """
+    task = ToyTask()
+
+    def _roles():
+        base, _ = ToyTask().build_roles()
+        return (_SpeculationResearcher(base.bounds, seed=base.seed, step=base.step),
+                _CrashFirstDeveloper())
+
+    researcher, developer = _roles()
+    engine = Engine(
+        tmp_path / f"crash-first-{depth}", task=task, researcher=researcher, developer=developer,
+        sandbox=SubprocessSandbox(),
+        policy=GreedyTree(n_seeds=1, max_nodes=12), policy_name="greedy",
+        role_factory=_roles, card_driven_selection=True, speculation_depth=depth,
+        eval_parallel=1, llm_parallel=1, max_nodes=12, n_seeds=1, inline_repair=False,
+    )
+
+    async def _bounded():
+        with anyio.move_on_after(180):
+            await engine.run()
+
+    anyio.run(_bounded)
+
+    state = fold(engine.store.read_all())
+    reasons = [event.data.get("reason", "") for event in engine.store.read_all()
+               if event.type == "run_finished"]
+    assert reasons and not any("stuck" in str(reason) for reason in reasons), reasons
+    assert state.finished is True
+
+    from looplab.search.card_selection import card_budget_used
+    evaluated = [node for node in state.nodes.values() if node.status is NodeStatus.evaluated]
+    assert len(evaluated) >= 10, f"depth={depth} evaluated only {len(evaluated)}"
+    assert state.best_node_id is not None
+    # The crash was repaired rather than abandoned: something bred from node 0.
+    assert any(0 in node.parent_ids for node in state.nodes.values())
+    # Every discarded prefetch was refunded, so the budget denominator matches the off-run exactly.
+    assert card_budget_used(state) == 12, sorted(
+        (node.id, node.status.value, node.error_reason) for node in state.nodes.values())

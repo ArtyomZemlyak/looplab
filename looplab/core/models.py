@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 from enum import Enum
 from typing import Any, Literal, Optional
 
@@ -1157,7 +1158,7 @@ class Node(BaseModel):
     # Durable "this lifecycle was terminalized BEFORE any evaluation was dispatched" receipt, stamped
     # by the writer on the node's single `node_failed` terminal (additive data field, reader-defaulted
     # -> old logs fold to False and every budget number is byte-identical). It is what lets the L3/L5
-    # node-budget REFUND (search/card_selection.py::is_unevaluated_speculative_discard) be proven from
+    # node-budget REFUND (`is_unevaluated_speculative_discard`, at the foot of this module) be proven from
     # the event log rather than inferred from the absence of a workdir on disk, which replay cannot see.
     # Fold-internal like its two speculative siblings: no public boundary distinguishes a discarded
     # build from any other failed node. It rides the terminal itself, so "first terminal wins" already
@@ -2191,3 +2192,90 @@ class RunState(BaseModel):
         # Delegates to the single comparator owner (core/fitness.py) so "better" has ONE spelling
         # across the fold, the policies and this convenience primitive (R1/SearchFitness).
         return _is_better(self.direction, a, b)
+
+
+# ---------------------------------------------------------------- the discarded-prefetch predicate
+# These three lived in `search/card_selection.py` until 2026-08-05 and are re-exported from there
+# (the SAME objects, so every existing import site and patch seam still resolves to one definition).
+# They moved DOWN to core because the FOLD needs them: `events/replay.py`'s Card anchor gate must not
+# treat a discarded speculative prefetch as a child of the node it was going to debug, and `events`
+# may not import `search` (CLAUDE.md layering). Duplicating the predicate replay-side would have made
+# "did this node spend budget" answerable two ways, which is the exact class of disagreement the
+# original defect was: replay counted the discard, the Card lane's policy view did not, and the lane
+# re-authored a permanently unselectable Card every loop turn. One definition, one answer.
+
+
+CARD_FRESHNESS_SUPERSEDED_ERROR = "superseded by Card freshness gate"
+
+
+def _durable_speculative_lifecycle(state: "RunState", node: Node) -> bool:
+    """Whether BOTH durable Layer-5 receipts bind this exact attempt-zero lifecycle to its Card.
+
+    The Node's own ``speculative``/``card_build_generation`` marker (from ``node_created``) and the
+    matching committed ``card_build_done`` link (``state.speculative_nodes``) must agree on the Card
+    id AND the request epoch.  Either receipt alone is forgeable by an unrelated build of the same
+    Card; together they name one producer result.
+    """
+
+    link = getattr(state, "speculative_nodes", {}).get(node.id)
+    generation = getattr(node, "card_build_generation", None)
+    return bool(
+        node.attempt == 0
+        and getattr(node, "speculative", False) is True
+        and isinstance(link, Mapping)
+        and link.get("card_id") == node.idea.card_id
+        and type(generation) is int
+        and type(link.get("generation")) is int
+        and link.get("generation") == generation
+    )
+
+
+def is_unevaluated_speculative_discard(state: "RunState", node: Node) -> bool:
+    """Prove the Layer-5 budget refund for a speculative build that NEVER RAN, from folded receipts.
+
+    A speculative build that turns out not to match the next selection is thrown away before it is
+    ever dispatched: it costs exactly one Developer call and touches no sandbox/GPU.  Charging it a
+    node-budget slot is budget THEFT from the experiments the run still has to execute, so the slot
+    is refunded.  A speculative node that DID consume an evaluation is a real experiment and keeps
+    its slot, whatever its outcome.
+
+    "Never ran" is proven, never inferred.  Four independent durable facts must agree:
+
+    * both speculative receipts bind this attempt-zero lifecycle to one committed producer result
+      (``_durable_speculative_lifecycle``) — an ordinary node can therefore never be refunded;
+    * the node's creator PROMISED a durable eval-start boundary (``Node.eval_start_boundary``, from
+      ``node_created``) and no such boundary was ever appended (``Node.eval_started`` is False).
+      This pair is the load-bearing one, and it is why the promise exists at all: without it the
+      absence of a boundary is not evidence, merely silence — a log written before the boundary
+      existed says exactly the same nothing about a node whose sandbox ran for forty minutes before
+      the process was killed.  FAIL CLOSED: no promise, no refund;
+    * the terminal itself carries the writer's pre-dispatch marker ``Node.never_evaluated`` (the
+      additive ``node_failed`` field), OR the exact zero-cost freshness receipt that was the original
+      narrow refund;
+    * the folded execution evidence CORROBORATES it: zero charged eval seconds and no
+      ``stage_finished`` row.  Any evidence that the sandbox actually started outvotes the marker.
+      (Kept, though it is now the WEAK half of the proof: a killed evaluation charges no seconds and
+      appends no stage row — ``stage_finished`` is written inside the terminal's own write-lock block
+      and cost is charged only by a terminal — so this pair alone can never see an interrupted eval.
+      It still catches a writer that stamps the marker on a node the log shows really ran.)
+
+    Deliberately NOT keyed on ``reason='superseded'`` alone: ordinary build/reset races use the same
+    reason and remain charged.  Absence of a node workdir on disk is not evidence at all — replay
+    cannot see the filesystem, and the refund must be a pure function of the event log.
+    """
+
+    return bool(
+        node.status is NodeStatus.failed
+        and _durable_speculative_lifecycle(state, node)
+        and getattr(node, "eval_start_boundary", False) is True
+        and getattr(node, "eval_started", False) is not True
+        and node.eval_seconds == 0
+        and not getattr(node, "stages", None)
+        and (
+            getattr(node, "never_evaluated", False) is True
+            or (
+                node.error_reason == "superseded"
+                and node.error == CARD_FRESHNESS_SUPERSEDED_ERROR
+            )
+        )
+    )

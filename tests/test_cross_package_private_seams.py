@@ -71,6 +71,17 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
         "looplab.search.concept_graph": ("_experiment_nodes",),
         "looplab.tools.vectorstore": ("_cosine",),
     },
+    "search": {
+        # The discarded-prefetch predicate moved DOWN to `core/models.py` on 2026-08-05 so the FOLD
+        # could reuse it (`events` may not import `search`, and a second replay-side copy of "did
+        # this node spend budget" is exactly the disagreement that broke Card speculation).
+        # `card_selection` re-exports all three names it used to define; this is the private one, and
+        # the re-export is kept rather than dropped because the name was spellable through
+        # `card_selection` yesterday and a monkeypatch on the old path must not become a silent
+        # no-op. Declared, not promoted: it is `is_unevaluated_speculative_discard`'s internal proof
+        # step, not an API.
+        "looplab.core.models": ("_durable_speculative_lifecycle",),
+    },
     "serve": {
         "looplab.agents.roles": ("_CONCEPT_AUTHORING_GUIDANCE",),
         # `_windows_move_write_through` left this list when doc 25 SC-05 moved the durable

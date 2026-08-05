@@ -17,11 +17,14 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from looplab.core.models import (
+    CARD_FRESHNESS_SUPERSEDED_ERROR,
     Card,
     Node,
     NodeStatus,
     RunState,
+    _durable_speculative_lifecycle,
     effective_card_footprint,
+    is_unevaluated_speculative_discard,
     normalize_researcher_footprint,
 )
 from looplab.search.concept_projection import (
@@ -31,7 +34,16 @@ from looplab.search.policy import (META_RUNG, asha_expansion, debug_action,
 
 
 META_CARD_ID = "_card_id"
-CARD_FRESHNESS_SUPERSEDED_ERROR = "superseded by Card freshness gate"
+# BACK-COMPAT re-export seam. `CARD_FRESHNESS_SUPERSEDED_ERROR`, `_durable_speculative_lifecycle` and
+# `is_unevaluated_speculative_discard` were defined HERE until 2026-08-05 and moved DOWN to
+# `core/models.py` so the FOLD could reuse the discard predicate (`events` may not import `search`).
+# They are imported above rather than reimplemented, so `card_selection.<name>` and
+# `core.models.<name>` are the SAME object and every existing import site / patch seam keeps working.
+# (Do not "clean up" the unused-looking `_durable_speculative_lifecycle` import. It has no caller in
+# this module any more, and that is exactly why it is here: it was spellable as
+# `card_selection._durable_speculative_lifecycle` yesterday, so dropping it would turn a monkeypatch
+# on the historical path into a silent no-op instead of an AttributeError. The edge is declared in
+# `tests/test_cross_package_private_seams.py` and pinned by `tests/test_card_budget_refund.py`.)
 
 Action = dict[str, Any]
 CardScore = tuple[float, tuple[float, ...]]
@@ -206,79 +218,6 @@ def normalize_card_scoring(value: CardScoring | Mapping[str, object] | None) -> 
         stance=stance,
         novelty_weight=_unit_float(raw_novelty, 0.5),
         coverage_weight=_unit_float(raw_coverage, 0.5),
-    )
-
-
-def _durable_speculative_lifecycle(state: RunState, node: Node) -> bool:
-    """Whether BOTH durable Layer-5 receipts bind this exact attempt-zero lifecycle to its Card.
-
-    The Node's own ``speculative``/``card_build_generation`` marker (from ``node_created``) and the
-    matching committed ``card_build_done`` link (``state.speculative_nodes``) must agree on the Card
-    id AND the request epoch.  Either receipt alone is forgeable by an unrelated build of the same
-    Card; together they name one producer result.
-    """
-
-    link = getattr(state, "speculative_nodes", {}).get(node.id)
-    generation = getattr(node, "card_build_generation", None)
-    return bool(
-        node.attempt == 0
-        and getattr(node, "speculative", False) is True
-        and isinstance(link, Mapping)
-        and link.get("card_id") == node.idea.card_id
-        and type(generation) is int
-        and type(link.get("generation")) is int
-        and link.get("generation") == generation
-    )
-
-
-def is_unevaluated_speculative_discard(state: RunState, node: Node) -> bool:
-    """Prove the Layer-5 budget refund for a speculative build that NEVER RAN, from folded receipts.
-
-    A speculative build that turns out not to match the next selection is thrown away before it is
-    ever dispatched: it costs exactly one Developer call and touches no sandbox/GPU.  Charging it a
-    node-budget slot is budget THEFT from the experiments the run still has to execute, so the slot
-    is refunded.  A speculative node that DID consume an evaluation is a real experiment and keeps
-    its slot, whatever its outcome.
-
-    "Never ran" is proven, never inferred.  Four independent durable facts must agree:
-
-    * both speculative receipts bind this attempt-zero lifecycle to one committed producer result
-      (``_durable_speculative_lifecycle``) — an ordinary node can therefore never be refunded;
-    * the node's creator PROMISED a durable eval-start boundary (``Node.eval_start_boundary``, from
-      ``node_created``) and no such boundary was ever appended (``Node.eval_started`` is False).
-      This pair is the load-bearing one, and it is why the promise exists at all: without it the
-      absence of a boundary is not evidence, merely silence — a log written before the boundary
-      existed says exactly the same nothing about a node whose sandbox ran for forty minutes before
-      the process was killed.  FAIL CLOSED: no promise, no refund;
-    * the terminal itself carries the writer's pre-dispatch marker ``Node.never_evaluated`` (the
-      additive ``node_failed`` field), OR the exact zero-cost freshness receipt that was the original
-      narrow refund;
-    * the folded execution evidence CORROBORATES it: zero charged eval seconds and no
-      ``stage_finished`` row.  Any evidence that the sandbox actually started outvotes the marker.
-      (Kept, though it is now the WEAK half of the proof: a killed evaluation charges no seconds and
-      appends no stage row — ``stage_finished`` is written inside the terminal's own write-lock block
-      and cost is charged only by a terminal — so this pair alone can never see an interrupted eval.
-      It still catches a writer that stamps the marker on a node the log shows really ran.)
-
-    Deliberately NOT keyed on ``reason='superseded'`` alone: ordinary build/reset races use the same
-    reason and remain charged.  Absence of a node workdir on disk is not evidence at all — replay
-    cannot see the filesystem, and the refund must be a pure function of the event log.
-    """
-
-    return bool(
-        node.status is NodeStatus.failed
-        and _durable_speculative_lifecycle(state, node)
-        and getattr(node, "eval_start_boundary", False) is True
-        and getattr(node, "eval_started", False) is not True
-        and node.eval_seconds == 0
-        and not getattr(node, "stages", None)
-        and (
-            getattr(node, "never_evaluated", False) is True
-            or (
-                node.error_reason == "superseded"
-                and node.error == CARD_FRESHNESS_SUPERSEDED_ERROR
-            )
-        )
     )
 
 

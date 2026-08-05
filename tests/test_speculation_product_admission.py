@@ -3,7 +3,8 @@
 The public positive-depth path used to require `workload_scope == "quadratic_toy"` AND
 `type(task) is ToyTask`, so every Dataset/Repo/Command workload was refused at `Engine.__init__` and
 the shipped knob only ever replayed its own benchmark. The node-budget refund
-(`search/card_selection.py::is_unevaluated_speculative_discard`) removed the cost that fence was
+(`core/models.py::is_unevaluated_speculative_discard`, re-exported from `search/card_selection.py`,
+its home until 2026-08-05) removed the cost that fence was
 protecting, so the fence is gone. What these tests pin is what replaced it:
 
 * any TaskAdapter admits positive depth, with no receipt at all;

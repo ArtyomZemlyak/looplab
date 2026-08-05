@@ -717,3 +717,138 @@ def test_an_outstanding_build_request_leaves_its_card_claimable_by_the_head_serv
     assert "work_in_flight" in owned.selection_blockers
     assert owned.selection_ready is False
     assert owned.status == "building"
+
+
+# --- the debug anchor vs. the Card's OWN work item (2026-08-05) -----------------------------------
+#
+# `_card_debuggable_leaf_ids` disqualified a failed node the moment it had ANY child — and a
+# receipt-bound `debug` Card's own work item IS such a child. So the instant that node existed the
+# Card's own anchor died and it folded to `action_receipt_incomplete`. The ordinary lane never
+# noticed (it does not re-check a Card after its node exists); the L5 freshness gate did, refused any
+# blocker set beyond `{work_in_flight}`, and superseded every speculative `debug` prefetch on sight.
+# The lane then authored a fresh permanently-unselectable Card per loop turn until the runaway guard
+# ended the run. These pin the exemption AND its exact boundary.
+
+
+def _speculative_build(node_id: int, card_id: str, operator: str, parent_ids: list[int]):
+    """The four-row durable lifecycle a Layer-5 build writes for one Card."""
+    return [
+        ("card_build_requested", {"card_id": card_id, "generation": 0}),
+        ("node_building", {"node_id": node_id, "operator": operator, "parent_ids": parent_ids,
+                           "card_id": card_id, "speculative": True, "card_build_generation": 0}),
+        ("node_created", {
+            "node_id": node_id, "parent_ids": parent_ids, "operator": operator,
+            "idea": {"operator": operator, "params": {}, "card_id": card_id},
+            "parent_generations": {str(parent): 0 for parent in parent_ids},
+            "speculative": True, "card_build_generation": 0, "eval_start_boundary": True}),
+        ("card_build_done", {"card_id": card_id, "generation": 0, "node_id": node_id,
+                             "speculative": True}),
+    ]
+
+
+def _discarded(node_id: int):
+    """The freshness gate's zero-cost terminal — the receipt `is_unevaluated_speculative_discard`
+    reads to prove the build never ran."""
+    return ("node_failed", {
+        "node_id": node_id, "generation": 0, "error": "superseded by Card freshness gate",
+        "reason": "superseded", "eval_seconds": 0.0, "never_evaluated": True})
+
+
+def _failed_node_2():
+    return [
+        *_baseline(),
+        ("node_created", {
+            "node_id": 2, "operator": "improve", "parent_ids": [1],
+            "idea": {"operator": "improve", "hypothesis": "broken candidate"}}),
+        ("node_failed", {"node_id": 2, "reason": "crash", "eval_seconds": 0.0}),
+    ]
+
+
+def test_a_debug_cards_own_work_item_does_not_close_its_own_anchor():
+    """The load-bearing half. Its own node must leave the Card's blockers at exactly
+    `{work_in_flight}` — the ONE set the L5 freshness counterfactual accepts."""
+    rows = [
+        *_failed_node_2(),
+        _native_operator_card_added("debug-own", "repair the failed candidate", "debug", [2]),
+    ]
+    before = fold(_events(rows))
+    assert before.cards["debug-own"].selection_ready is True
+
+    owned = fold(_events([*rows, *_speculative_build(3, "debug-own", "debug", [2])]))
+    card = owned.cards["debug-own"]
+    assert card.evidence == [3], "its own work item"
+    assert card.selection_blockers == ["work_in_flight"], (
+        "a Card's own node must not revoke its own anchor — `action_receipt_incomplete` here is what "
+        "made every speculative debug prefetch superseded on sight")
+    assert card.selection_provenance.action_complete is True
+
+
+def test_a_debug_card_whose_parent_gained_a_REAL_sibling_child_still_closes():
+    """The exemption's boundary, and the proof it opens no hole: the Card's OWN node is spared,
+    every other child of the same failed parent still disqualifies it."""
+    rows = [
+        *_failed_node_2(),
+        _native_operator_card_added("debug-own", "repair the failed candidate", "debug", [2]),
+        *_speculative_build(3, "debug-own", "debug", [2]),
+    ]
+    # A second, unrelated node bred from the same failed parent — an ordinary evaluated child, not a
+    # discarded prefetch. Node 2 is no longer a leaf by any reading.
+    sibling = ("node_created", {
+        "node_id": 4, "operator": "debug", "parent_ids": [2],
+        "idea": {"operator": "debug", "hypothesis": "someone else's repair"}})
+    state = fold(_events([*rows, sibling]))
+    card = state.cards["debug-own"]
+    assert card.selection_provenance.action_complete is False
+    assert "action_receipt_incomplete" in card.selection_blockers
+    assert card.selection_ready is False
+
+    # …and the parent is not a debuggable leaf for anyone.
+    from looplab.events.replay import _card_debuggable_leaf_ids
+    assert 2 not in _card_debuggable_leaf_ids(state)
+
+
+def test_a_discarded_prefetch_is_not_a_child_for_the_debug_anchor():
+    """The second-order half. Replay counted the discard as a child while the Card lane's policy
+    view (`_effective_policy_state` -> `node_counts_toward_card_budget`) hid it, so the policy kept
+    proposing `debug` on the crashed parent and the lane authored a fresh unselectable Card every
+    turn. Both views now read the SAME predicate."""
+    from looplab.core.models import is_unevaluated_speculative_discard
+    from looplab.events.replay import _card_debuggable_leaf_ids
+
+    rows = [
+        *_failed_node_2(),
+        _native_operator_card_added("debug-later", "repair the failed candidate", "debug", [2]),
+        # a prefetch on the same failed parent that the freshness gate threw away before dispatch
+        _native_operator_card_added("debug-thrown", "an earlier repair attempt", "debug", [2]),
+        *_speculative_build(3, "debug-thrown", "debug", [2]),
+        _discarded(3),
+    ]
+    state = fold(_events(rows))
+    assert is_unevaluated_speculative_discard(state, state.nodes[3]) is True
+    assert 2 in _card_debuggable_leaf_ids(state), (
+        "a build that never ran spent no budget and must not end its parent's life as a leaf")
+    assert state.cards["debug-later"].selection_ready is True
+    assert card_action(state.cards["debug-later"]) == {
+        "kind": "debug", "parent_id": 2, "_card_id": "debug-later"}
+
+
+def test_an_ordinary_superseded_child_still_closes_the_debug_anchor():
+    """Only a PROVEN discard is skipped. An ordinary build/reset race uses the same
+    `reason='superseded'` and keeps its slot, so it is still a real child."""
+    from looplab.core.models import is_unevaluated_speculative_discard
+    from looplab.events.replay import _card_debuggable_leaf_ids
+
+    rows = [
+        *_failed_node_2(),
+        _native_operator_card_added("debug-later", "repair the failed candidate", "debug", [2]),
+        _native_operator_card_added("debug-raced", "a raced repair attempt", "debug", [2]),
+        *_speculative_build(3, "debug-raced", "debug", [2]),
+        # no `never_evaluated`, no freshness receipt: the log does not prove this one never ran
+        ("node_failed", {"node_id": 3, "generation": 0, "error": "lost the build race",
+                         "reason": "superseded", "eval_seconds": 0.0}),
+    ]
+    state = fold(_events(rows))
+    assert is_unevaluated_speculative_discard(state, state.nodes[3]) is False
+    assert 2 not in _card_debuggable_leaf_ids(state)
+    assert state.cards["debug-later"].selection_ready is False
+    assert "action_receipt_incomplete" in state.cards["debug-later"].selection_blockers
