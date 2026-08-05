@@ -108,14 +108,3 @@ def credential_cause(exc: BaseException) -> str:
     silently merging it with an unrelated one.
     """
     return str(getattr(exc, "cause_detail", None) or exc)
-=======
-    it like any other bad response and the run degrades to a safe default rather than crashing.
-
-    Carries `OperatorRefusal` because every one of its ~35 raise sites is a hand-written,
-    operator-facing sentence — the credential/endpoint preflights in `agents/preflight.py` and
-    `core/llm.py` are outright REFUSALS ("Refusing to start: the roles would degrade to empty
-    fallback proposals"), and the transport ones name the URL and the remedy. When one of these
-    escapes to the CLI it is never a Python slip, so its message is the whole story; the frames
-    that produced it are `urllib`/`httpx` boilerplate. `LOOPLAB_TRACEBACK=1` brings them back.
-    """
->>>>>>> worktree-agent-ac68c5ffdbb84e2b8
