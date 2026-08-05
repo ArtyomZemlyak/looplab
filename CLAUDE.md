@@ -19,7 +19,8 @@ looplab run --no-genesis --kind quadratic --goal "min (x-3)^2" --direction min -
 #  --backend toy is now REQUIRED for an offline run: the `backend` default was changed from
 #  "toy" to "llm" on 2026-08-04, so without it this command hits the LLM endpoint preflight.)
 looplab replay runs/demo          # rebuild state from the event log (reproducibility check)
-looplab timings runs/demo         # per-node wall-clock: LLM / eval / repair / tools (from spans.jsonl)
+looplab timings runs/demo         # wall-clock: per node + run-level (from spans.jsonl), reconciled
+                                  # against the run's duration (events.jsonl first->last ts), residual named
 looplab ui                        # FastAPI server + React UI (see looplab/serve/)
 ```
 

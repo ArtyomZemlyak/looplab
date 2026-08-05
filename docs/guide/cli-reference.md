@@ -13,7 +13,7 @@ looplab repair-log      Repair a mid-file-corrupted event log (FUSE/NFS/S3)
 looplab inspect         Show the raw launch snapshot + current folded best result
 looplab replay          Pure fold of the event log → state (read-only)
 looplab speculation-gate Validate paired Card-speculation evidence and publish the rollout receipt
-looplab timings         Per-node wall-clock breakdown (LLM / eval / repair / tools)
+looplab timings         Wall-clock breakdown per node + run-level, reconciled against the run's duration
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
 looplab lock-in         Action-space lock-in detector (PART IV D7)
@@ -412,10 +412,11 @@ Python comments, the packaged settings schema and `pyproject.toml`) or any bound
 
 ## `timings`
 
-Show where a run's wall-clock actually went, **per node** — LLM generations vs eval vs repair vs
-tools — computed from the `duration_s` of each span in `spans.jsonl`. Answers "what is this run
-spending its time on right now" at a glance. Needs tracing on (the default); errors on a run with no
-`spans.jsonl`.
+Show where a run's wall-clock actually went — LLM generations vs eval vs repair vs tools, computed
+from the `duration_s` of each span in `spans.jsonl` — **per node**, then **run-level**, then
+reconciled against the run's real duration. Answers "what is this run spending its time on" at a
+glance. Needs tracing on (the default) for the breakdown; without `spans.jsonl` it still reports the
+run's duration, then exits 2.
 
 ```bash
 looplab timings RUN_DIR [--node N]
@@ -423,8 +424,78 @@ looplab timings RUN_DIR [--node N]
 
 | Option | Default | Description |
 |---|---|---|
-| `RUN_DIR` | *(required)* | Run directory (reads its `spans.jsonl`) |
-| `--node N` | all nodes | Restrict the breakdown to a single node id |
+| `RUN_DIR` | *(required)* | Run directory (reads its `events.jsonl` and `spans.jsonl`) |
+| `--node N` | all nodes | Restrict the breakdown to a single node id (run-level work and the reconciliation are run-scope, so they are omitted under it) |
+
+```
+run wall clock 27.9 min (1673.8 s, events.jsonl first -> last timestamp)
+
+node 0 — 0.8 min:
+  op:score      0.8 min  (1 spans, 93%)
+  LLM           0.1 min  (1 spans, 7%)
+  …
+run-level — 8.7 min:   (no node owns it: researcher / strategist / card producer / wrap-up)
+  LLM           8.5 min  (49 spans, 98%)
+  op:propose    0.2 min  (5 spans, 2%)
+  …
+
+reconciliation vs 27.9 min wall clock:
+  attributed   11.3 min  (41%)  sum of the rows above; overlaps under concurrency
+  traced        9.9 min  (35%)  wall clock with at least one span open
+  untraced     18.0 min  (65%)  no span open — not attributable from spans.jsonl
+```
+
+**Three sections, and why.**
+
+* **Per node** — unchanged: each node's `create_node` / `evaluate` / `repair` work. An operation
+  span's recorded duration includes every nested span, so each row is charged its **self** time
+  (duration minus its direct children) and leaf generations/tools keep their full duration.
+* **Run-level** — work that belongs to the run rather than to any one node, and therefore carries no
+  `node_id`: the Researcher's `propose`, the Strategist consult, foresight ranking, the lesson
+  distill/refresh/reconcile passes, the run report, and the **Card-build producer** (whose node does
+  not exist yet, which is exactly why per-node attribution is the wrong home for it). These spans
+  used to be dropped entirely — on a real 28-minute run that hid 143 of 174 spans.
+* **Reconciliation** — the denominator is the run's own wall clock, read from `events.jsonl`'s first
+  and last timestamps (see [the `budget` receipt](#the-budget-receipt) below). `attributed` is the
+  sum of the rows above and can exceed 100% when the engine works concurrently; `traced` is the
+  wall clock during which at least one span was open (a union, so it never can); `untraced` is the
+  remainder — work with no span at all, engine bookkeeping, provider waits, and the idle gap while a
+  stopped run waits for someone to finalize it. It is reported rather than hidden: a residual you
+  can see is a residual you can go and instrument.
+
+When a run also carries a `budget` receipt, its `elapsed_s` is printed alongside the computed wall
+clock, flagged when the two differ by more than a second. On a run finalized before LoopLab
+2026-08-05 they can differ by orders of magnitude — see below. On a current run they differ only by
+the tail finalization appends *after* the budget row (diversity/case/steward/cost steps), which the
+receipt cannot have seen and this command can.
+
+`spans.jsonl` is a high-volume sidecar (the reason `events/span_index.py` exists) and may be
+truncated or absent. Damaged lines are stepped over and **counted** in the output, so a short report
+is never mistaken for an idle run; the file is read whole, so peak memory tracks its size (the
+accelerated index is deliberately not used — building it would write `spans.index.jsonl`, and this
+command is read-only).
+
+### The `budget` receipt
+
+Finalization appends one durable `budget` event per terminal boundary. Its fields:
+
+| Field | Meaning |
+|---|---|
+| `elapsed_s` | **How long the run took**: the event log's last timestamp minus its first. Read from the log because that is the only record spanning a stop-then-`finalize` process boundary. |
+| `process_s` | What the *process that wrote the receipt* measured — the engine loop when the run finished in one process, the wrap-up alone when it did not. |
+| `eval_s` | Total evaluation seconds from the fold (`RunState.total_eval_seconds`). |
+| `nodes` | Node count in the folded state. |
+| `speculation` | The Card-prefetch cost observation (`requested`/`committed`/`discarded`/`charged_discards`, …). |
+| `finalize_scope`, `finish_seq` | The finalization scope gate this receipt belongs to. |
+
+Before 2026-08-05 `elapsed_s` was `time.time() - start_time` in the finalizing process, so any run
+stopped and wrapped up later — the normal shape for a long GPU run, and the shape the whole wrap-up
+policy exists for — reported the duration of its *wrap-up*: a measured ~4.6-minute run published
+`"elapsed_s": 0.027`. **Old logs keep the number they were written with**, but every reader can
+recompute the truth from the log itself (`looplab timings` does, and prints both when they differ) —
+`ts` has been on every event row since the first version of the envelope, so nothing had to be
+recorded for it. `elapsed_s` deliberately *includes* the idle gap of a stopped run: that gap is part
+of how long the run took, and `timings` names the untraced share of it.
 
 ---
 

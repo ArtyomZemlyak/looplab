@@ -828,10 +828,17 @@ def _validate_calibration_terminal(events: Sequence[Event], state) -> None:
     if (
         not isinstance(suffix[2].data, dict)
         or set(budget) != {
-            "elapsed_s", "eval_s", "nodes", "speculation", "finalize_scope", "finish_seq",
+            # `elapsed_s` is the RUN's wall clock, read from the log's own first/last `ts` so it is
+            # correct across a stop-then-`finalize` process boundary; `process_s` is the measurement
+            # the finalizing PROCESS made. Both are checked for shape only — a wall clock is not
+            # reproducible from a fold, unlike every other field here.
+            "elapsed_s", "process_s", "eval_s", "nodes", "speculation",
+            "finalize_scope", "finish_seq",
         }
         or _finite_metric(budget.get("elapsed_s")) is None
         or float(budget["elapsed_s"]) < 0.0
+        or _finite_metric(budget.get("process_s")) is None
+        or float(budget["process_s"]) < 0.0
         or _finite_metric(budget.get("eval_s")) != expected_eval_s
         or type(budget.get("nodes")) is not int
         or budget["nodes"] != len(state.nodes)

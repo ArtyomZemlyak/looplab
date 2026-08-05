@@ -32,7 +32,7 @@ from looplab.events.finalize_scope import (  # noqa: F401
     incomplete_finalize_scope)
 from looplab.events.htmlview import render_html
 from looplab.events.readmodel import build_readmodel
-from looplab.events.replay import fold
+from looplab.events.replay import fold, run_wall_clock_seconds
 from looplab.events.traceview import build_trace_view, hydrate_inputs, load_spans
 from looplab.events.types import (
     EV_BUDGET,
@@ -647,8 +647,24 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
             # now total AND the deterministic part of the payload is built before the try, where a
             # defect surfaces as an error instead of an unfinishable run.
             from looplab.search.speculation_quality import speculation_budget_observation
+            # `elapsed_s` is the RUN's duration and is therefore read from the LOG, not from this
+            # process's clock. A run that is stopped and wrapped up later by `looplab finalize` is
+            # finalized in a DIFFERENT process, so `time.time() - start_time` there measures the
+            # wrap-up: measured on a real ~4.6-minute run finalized separately, it published
+            # `elapsed_s: 0.027`. That is the NORMAL shape for a long GPU run — the whole wrap-up
+            # policy exists for it — so the durable receipt has to be correct for it. `ts` is on
+            # every row of every log version, so this is exact on OLD logs too.
+            # `process_s` keeps what the field used to hold, now under a name that says what it
+            # measures: the engine loop when the run finished in one process, the wrap-up alone when
+            # it did not. The two side by side are what makes a re-divergence visible instead of
+            # silent. Both are total (no raise) — see the paragraph above about the append's `try`.
+            process_s = max(0.0, time.time() - start_time)
+            wall_clock_s = run_wall_clock_seconds(events)
             budget_payload = {
-                "elapsed_s": round(time.time() - start_time, 3),
+                # None only for a log whose rows carry no usable `ts` at all (synthetic/hand-built) —
+                # fall back to the process measurement rather than publishing a confident 0.0.
+                "elapsed_s": round(process_s if wall_clock_s is None else wall_clock_s, 3),
+                "process_s": round(process_s, 3),
                 "eval_s": round(completed.total_eval_seconds, 3),
                 "nodes": len(completed.nodes),
                 "speculation": speculation_budget_observation(completed),

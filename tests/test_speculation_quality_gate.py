@@ -690,6 +690,7 @@ def _make_run(
             terminal_state = fold(store.read_all())
             store.append("budget", {
                 "elapsed_s": 1.0,
+                "process_s": 1.0,
                 "eval_s": round(terminal_state.total_eval_seconds, 3),
                 "nodes": len(terminal_state.nodes),
                 # The run's speculation-cost observation, recomputed by the reader from this same
