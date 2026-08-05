@@ -61,10 +61,14 @@ def test_accountant_normalizes_every_usage_field_before_one_commit(usage, expect
     assert observed == [{
         "cost": 0.0,
         "calls": 1,
+        # NaN is not a stated amount and none of these payloads carries a `usage.cost`, so this call
+        # is UNPRICED. `cost: 0.0` alone cannot say that — see `llm.cost_is_reported`.
+        "priced_calls": 0,
         "prompt_tokens": expected[0],
         "completion_tokens": expected[1],
         "total_tokens": expected[2],
     }]
+    assert acc.priced_calls == 0
 
 
 def test_accountant_sink_observes_committed_decimal_delta_and_failure_is_nonfatal():
@@ -80,6 +84,9 @@ def test_accountant_sink_observes_committed_decimal_delta_and_failure_is_nonfata
     }) == pytest.approx(0.0123)
     assert snapshots == [({
         "cost": pytest.approx(0.0123), "calls": 1,
+        # The payload carries no `cost` key, so the ARGUMENT is this call's only price channel and
+        # a usable Decimal in it IS the provider stating an amount (`llm._call_is_priced`).
+        "priced_calls": 1,
         "prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5,
     }, pytest.approx(0.0123), 1, 5)]
 
@@ -101,7 +108,7 @@ def test_accountant_sink_runs_once_before_budget_exception():
 
     # Provider accounting was committed and delivered once even though enforcement aborts afterward.
     assert acc.calls == 1 and acc.spent == pytest.approx(0.2)
-    assert deltas == [{"cost": 0.2, "calls": 1, "prompt_tokens": 0,
+    assert deltas == [{"cost": 0.2, "calls": 1, "priced_calls": 1, "prompt_tokens": 0,
                        "completion_tokens": 0, "total_tokens": 0}]
 
 
@@ -131,8 +138,11 @@ def test_success_without_valid_usage_is_still_one_logical_provider_call(monkeypa
     assert client.complete_text([{"role": "user", "content": "go"}]) == "ok"
     assert (client.accountant.calls, client.accountant.total_tokens) == (1, 0)
     assert client._last_usage == {
-        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0,
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0, "priced": 0,
     }
+    # One real provider call whose price nobody stated. The ledger must be able to say that later,
+    # instead of rolling it up as a call that was free.
+    assert client.accountant.priced_calls == 0
 
 
 def test_no_choices_response_with_known_usage_is_accounted_before_error(monkeypatch):
@@ -151,8 +161,9 @@ def test_no_choices_response_with_known_usage_is_accounted_before_error(monkeypa
     assert (client.accountant.calls, client.accountant.prompt_tokens,
             client.accountant.completion_tokens, client.accountant.total_tokens) == (1, 8, 2, 10)
     assert client._last_usage == {
-        "prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10, "cost": .012,
+        "prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10, "cost": .012, "priced": 1,
     }
+    assert client.accountant.priced_calls == 1
 
 
 def test_cache_hit_keeps_zero_usage_and_emits_no_second_delta(monkeypatch):
@@ -171,7 +182,7 @@ def test_cache_hit_keeps_zero_usage_and_emits_no_second_delta(monkeypatch):
     assert client.complete_text(messages) == client.complete_text(messages) == "cached"
     assert len(requests) == 1 and accountant.calls == 1 and len(deltas) == 1
     assert client._last_usage == {
-        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0,
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0, "priced": 0,
     }
 
 
@@ -210,7 +221,7 @@ def test_partial_stream_closed_after_content_counts_unknown_call_once(monkeypatc
             client.accountant.completion_tokens, client.accountant.total_tokens,
             client.accountant.spent) == (1, 0, 0, 0, 0.0)
     assert client._last_usage == {
-        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0,
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0, "priced": 0,
     }
 
 

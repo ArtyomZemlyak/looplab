@@ -25,12 +25,20 @@ from typing import Any
 import orjson
 
 from looplab.core.atomicio import atomic_write_bytes
+from looplab.core.llm import inferred_priced_calls
 from looplab.events.types import EV_LLM_USAGE
 
 
 _MAX_COUNTER = (1 << 63) - 1
 _MAX_COST = sys.float_info.max
-_COUNTER_KEYS = ("calls", "prompt_tokens", "completion_tokens", "total_tokens")
+_COUNTER_KEYS = ("calls", "priced_calls", "prompt_tokens", "completion_tokens", "total_tokens")
+# The delta shape written before `priced_calls` existed. An outbox record is PENDING PAID USAGE
+# left by a process that already died, so it has to stay decodable across the upgrade that added
+# the counter — rejecting it would fail finalization closed on exactly the deltas whose whole
+# purpose is to survive a crash. Missing means "we do not know whether that call was priced", which
+# the reader-side default of 0 states correctly: it can only make a total look LESS complete.
+_LEGACY_DELTA_KEYS = frozenset(
+    {"cost", "calls", "prompt_tokens", "completion_tokens", "total_tokens"})
 _OUTBOX_DIRNAME = ".llm-usage-outbox"
 _OUTBOX_VERSION = 1
 _ROOT_ATTRS = ("researcher", "developer", "strategist", "deep_researcher",
@@ -74,6 +82,9 @@ def sanitize_usage_delta(data: Any) -> dict[str, int | float]:
     return {
         "cost": _safe_cost(raw.get("cost")),
         "calls": _safe_counter(raw.get("calls")),
+        # How many of `calls` the provider actually priced. `cost` is a complete amount only when
+        # these are equal; below that it is a floor over an UNKNOWN remainder, not a free run.
+        "priced_calls": _safe_counter(raw.get("priced_calls")),
         "prompt_tokens": _safe_counter(raw.get("prompt_tokens")),
         "completion_tokens": _safe_counter(raw.get("completion_tokens")),
         "total_tokens": _safe_counter(raw.get("total_tokens")),
@@ -82,13 +93,21 @@ def sanitize_usage_delta(data: Any) -> dict[str, int | float]:
 
 def _snapshot(accountant: object) -> dict[str, int | float]:
     def read() -> dict[str, int | float]:
-        return sanitize_usage_delta({
+        priced = getattr(accountant, "priced_calls", None)
+        clean = sanitize_usage_delta({
             "cost": getattr(accountant, "spent", 0.0),
             "calls": getattr(accountant, "calls", 0),
+            "priced_calls": priced,
             "prompt_tokens": getattr(accountant, "prompt_tokens", 0),
             "completion_tokens": getattr(accountant, "completion_tokens", 0),
             "total_tokens": getattr(accountant, "total_tokens", 0),
         })
+        if priced is None:
+            # A legacy/third-party accountant has no such counter, and `sanitize_usage_delta` would
+            # give it a bare 0 — which then rolls up its REAL spend as unpriced. Same record shape,
+            # same inference as an old event row.
+            clean["priced_calls"] = inferred_priced_calls(clean["cost"], clean["calls"])
+        return clean
 
     # CostAccountant commits all counters under this lock. Read them under the same lock when
     # available so reconciliation cannot manufacture a torn cross-field delta mid-call.
@@ -103,8 +122,7 @@ def _snapshot(accountant: object) -> dict[str, int | float]:
 
 
 def _zero() -> dict[str, int | float]:
-    return {"cost": 0.0, "calls": 0, "prompt_tokens": 0,
-            "completion_tokens": 0, "total_tokens": 0}
+    return {"cost": 0.0, **{key: 0 for key in _COUNTER_KEYS}}
 
 
 def _children(obj: object) -> Iterable[object]:
@@ -213,16 +231,20 @@ def _decode_outbox(path: Path) -> tuple[str, dict[str, int | float]]:
     if path.name != f"{usage_id}.json":
         raise ValueError("usage outbox filename does not match its identity")
     delta = raw.get("delta")
-    if not isinstance(delta, dict) or set(delta) != {"cost", *_COUNTER_KEYS}:
+    if not isinstance(delta, dict) or set(delta) not in (
+            {"cost", *_COUNTER_KEYS}, set(_LEGACY_DELTA_KEYS)):
         raise ValueError("invalid usage outbox delta")
+    # Only the keys this record actually carries are held to the exact-value rule; the legacy shape
+    # is short exactly `priced_calls`, which then takes `sanitize_usage_delta`'s reader-side 0.
+    present = tuple(key for key in _COUNTER_KEYS if key in delta)
     # Reject rather than coerce a damaged record. These are locally-written values, so any
     # difference from the sanitizer means the exact known delta can no longer be proven.
     clean = sanitize_usage_delta(delta)
     if (isinstance(delta.get("cost"), bool)
             or not isinstance(delta.get("cost"), (int, float))
             or any(isinstance(delta.get(key), bool) or not isinstance(delta.get(key), int)
-                   for key in _COUNTER_KEYS)
-            or any(delta.get(key) != clean[key] for key in ("cost", *_COUNTER_KEYS))):
+                   for key in present)
+            or any(delta.get(key) != clean[key] for key in ("cost", *present))):
         raise ValueError("unsafe usage outbox values")
     return usage_id, clean
 

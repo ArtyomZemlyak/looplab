@@ -2867,7 +2867,15 @@ def build_router(srv) -> APIRouter:
     @router.get("/api/runs/{run_id}/cost")
     def run_cost(run_id: str):
         st = srv.state(_run_dir(run_id))
-        return st.llm_cost or {"cost": 0.0, "calls": 0, "total_tokens": 0}
+        if st.llm_cost is None:
+            # No roll-up exists yet (offline/toy run, or one that has not finalized). The historical
+            # body was this zero-filled dict alone, which a client cannot tell from a finished run
+            # that genuinely spent nothing — the same "absent is not zero" confusion `priced_calls`
+            # fixes one level down. `recorded` says which it is; the zeros stay, so any existing
+            # arithmetic client is byte-for-byte unaffected.
+            return {"cost": 0.0, "calls": 0, "priced_calls": 0, "total_tokens": 0,
+                    "recorded": False}
+        return {**st.llm_cost, "recorded": True}
 
     @router.get("/api/runs/{run_id}/agents_md", deprecated=True)
     def agents_md(run_id: str):

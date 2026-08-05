@@ -72,7 +72,10 @@ def test_fold_uses_latest_legacy_summary_as_base_then_only_durable_deltas():
     ]
 
     total = fold(events).llm_cost
-    assert total == {"cost": 2.25, "calls": 3, "prompt_tokens": 23,
+    # `priced_calls` is absent from every row here (these are pre-counter shapes), so each one takes
+    # the reader-side default in `_row_priced_calls`: the seq-1 legacy base contributes its 2 calls
+    # because it carries a nonzero cost, the seq-2 delta its 1, and the NaN-cost seq-4 delta none.
+    assert total == {"cost": 2.25, "calls": 3, "priced_calls": 3, "prompt_tokens": 23,
                      "completion_tokens": 6, "total_tokens": 29}
 
 
@@ -92,7 +95,7 @@ def test_fold_treats_usage_id_as_first_write_wins():
     ]
 
     assert fold(events).llm_cost == {
-        "cost": .75, "calls": 2, "prompt_tokens": 7,
+        "cost": .75, "calls": 2, "priced_calls": 2, "prompt_tokens": 7,
         "completion_tokens": 3, "total_tokens": 10,
     }
 
@@ -194,7 +197,7 @@ def test_dynamic_developer_swap_binds_replacement_before_first_call(tmp_path):
     usage = [event.data for event in eng.store.read_all() if event.type == EV_LLM_USAGE]
     assert len(usage) == 1
     assert usage[0].pop("usage_id")
-    assert usage == [{"cost": .4, "calls": 1, "prompt_tokens": 4,
+    assert usage == [{"cost": .4, "calls": 1, "priced_calls": 1, "prompt_tokens": 4,
                       "completion_tokens": 1, "total_tokens": 5}]
 
 
@@ -274,7 +277,7 @@ def test_failed_sink_is_caught_up_without_repeating_the_paid_call(tmp_path):
     usage = [event.data for event in eng.store.read_all() if event.type == EV_LLM_USAGE]
     assert len(usage) == 1
     assert usage[0].pop("usage_id")
-    assert usage == [{"cost": .6, "calls": 1, "prompt_tokens": 6,
+    assert usage == [{"cost": .6, "calls": 1, "priced_calls": 1, "prompt_tokens": 6,
                       "completion_tokens": 2, "total_tokens": 8}]
     total = fold(eng.store.read_all()).llm_cost
     assert total["cost"] == pytest.approx(.6)
@@ -645,6 +648,7 @@ def test_legacy_snapshot_retry_reserves_pending_delta_instead_of_duplicating_it(
     assert fold(eng.store.read_all()).llm_cost == {
         "cost": .5,
         "calls": 1,
+        "priced_calls": 1,
         "prompt_tokens": 4,
         "completion_tokens": 1,
         "total_tokens": 5,

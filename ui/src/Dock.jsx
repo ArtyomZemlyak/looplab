@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { get, fmt, workingId, getRunCommand, retryRunCommand, runCommand,
+import { get, fmt, fmtCost, workingId, getRunCommand, retryRunCommand, runCommand,
   commandFeedback, commandErrorMessage, commandFailureRecord, commandCanRetry, createIdempotencyKey,
   commandActionForEvent, commandRecordMatchesAction, commandEventForAction,
   loadRunTransport, saveRunTransport, clearRunTransport, isTransientCommandReadError,
@@ -44,6 +44,25 @@ const strategySummary = (strategy = {}) => {
   return bits.join(' / ') || 'no change'
 }
 
+// The speculation tail of a `budget` checkpoint, or '' when the receipt does not carry one.
+// ABSENT and ZERO are different claims here: a receipt written before the observation existed has no
+// `speculation` key, and printing "0 discarded" for it would invent a measurement. `depth: 0` means
+// speculation was OFF, which is worth saying once and is not the same as "on and it discarded
+// nothing". Only integers are interpolated, so a partial payload degrades to silence, not "undefined".
+const budgetSpeculation = (s) => {
+  if (s === null || typeof s !== 'object' || Array.isArray(s)) return ''
+  const n = (key) => (Number.isSafeInteger(s[key]) ? s[key] : null)
+  const depth = n('depth')
+  if (depth === 0) return ' · speculation off'
+  const [committed, discarded, charged] = [n('committed'), n('discarded'), n('charged_discards')]
+  if (committed === null) return ''
+  const bits = [`speculation depth ${depth ?? '?'}`, `${committed} committed`]
+  if (discarded !== null) bits.push(`${discarded} discarded`)
+  // The only one that costs the operator something, so name the cost rather than the count alone.
+  if (charged) bits.push(`${charged} charged to the node budget`)
+  return ' · ' + bits.join(', ')
+}
+
 const NARR = {
   run_started: (d) => `run started — ${d.goal || d.task_id} (${d.direction})`,
   node_building: (d) => `building node #${d.node_id} via ${d.operator || 'improve'}…`,
@@ -85,7 +104,7 @@ const NARR = {
   foresight_selected: (d) => `foresight picked ${d.kind === 'solution' ? 'implementation' : 'idea'} ${(d.chosen ?? 0) + 1} of ${d.n || (d.order || []).length}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}${note(d.reason, 70)}`,
   run_finished: (d) => (d?.reason === 'aborted' || d?.reason === 'finalized') ? 'run finalized (wrapped up)'
     : `run finished${d.reason ? ' (' + d.reason + ')' : ''}`,
-  llm_cost: (d) => `LLM: ${d.total_tokens} tokens, $${fmt(d.cost)}`,
+  llm_cost: (d) => `LLM: ${d.total_tokens} tokens, ${fmtCost(d)}`,
   // --- operator/boss control INTENTS + their engine confirmations. Every event the agentic boss can
   // produce gets a plain-English line here, so an action never shows in the feed as a raw-JSON blob. ---
   force_confirm: (d) => `requested a multi-seed confirm of #${d.node_id}`,
@@ -126,7 +145,14 @@ const NARR = {
   host_grading: (d) => `host-side grading active${d.scorer ? ' (' + d.scorer + ')' : ''}${d.competition ? ' · ' + d.competition : ''}`,
   diversity_archive: () => 'diversity archive updated',
   workspace_changed: () => 'workspace changed since the last run — re-grounding',
-  budget: (d) => `checkpoint — ${d.nodes} node${d.nodes === 1 ? '' : 's'}, ${fmt(d.elapsed_s, 3)}s elapsed`,
+  // The `speculation` half of this receipt (engine/finalize.py -> speculation_budget_observation)
+  // was computed, written and then read by nobody: `charged_discards` is the ONE number that says
+  // prefetching cost the run node budget it did not get back, and the feed rendered the checkpoint
+  // without it. Only mention the counters when the payload actually carries them — a legacy receipt
+  // has no `speculation` key at all, and "0 discarded" would be a claim about a run that never
+  // reported one (see `budgetSpeculation`).
+  budget: (d) => `checkpoint — ${d.nodes} node${d.nodes === 1 ? '' : 's'}, `
+    + `${fmt(d.elapsed_s, 3)}s elapsed${budgetSpeculation(d.speculation)}`,
   // Meaningful events that previously LEAKED as raw JSON (no narration + not hidden). Narrated here so
   // they read cleanly. The high-volume / internal read-model events (node_concepts and the rest of the
   // concept-cadence sidecars, verifier scores, resume/restart plumbing) are deliberately left WITHOUT a

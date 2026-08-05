@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react'
-import { deadlineGet, get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL,
+import { costPricing, deadlineGet, get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL,
   clearNodeTrace, commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
   retryRunCommand, runNodeApiPath, submitCommand } from './util.js'
 import { usePoll } from './hooks.js'
@@ -2183,9 +2183,15 @@ function Trust({ n, drifts = [] }) {
 function Cost({ state }) {
   const c = state.llm_cost
   if (!c) return <div className="muted">No LLM cost recorded (offline/toy run, or run not finished).</div>
+  // "$ spent" used to be `fmt(c.cost)`, which printed `0` for a run whose provider never priced a
+  // single call — indistinguishable from a run that really cost nothing. `costPricing` owns that
+  // distinction; the priced/total call split below is the evidence for whichever answer it gives.
+  const pricing = costPricing(c)
   return <div className="kv">
-    <KV k="$ spent" v={fmt(c.cost)} />
+    <KV k="$ spent" v={<span title={pricing.title}>{pricing.text}</span>} />
     <KV k="calls" v={fmtInt(c.calls)} />
+    <KV k="priced by provider" v={<span title={pricing.title}>
+      {fmtInt(c.priced_calls ?? 0)} of {fmtInt(c.calls)}</span>} />
     <KV k="prompt tokens" v={fmtInt(c.prompt_tokens)} />
     <KV k="completion tokens" v={fmtInt(c.completion_tokens)} />
     <KV k="total tokens" v={fmtInt(c.total_tokens)} />

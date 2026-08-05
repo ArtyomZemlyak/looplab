@@ -437,7 +437,11 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
   const evidenceRuns = count(c?.coverage?.prompt_runs) ?? count(c?.coverage?.model_runs)
   const sourceRuns = count(c?.coverage?.source_runs)
   const label = text(data?.label) || text(data?.scope?.label) || text(scope.label) || `${scope.type} ${scope.id}`
-  const runCount = count(data?.run_count) ?? 0
+  // `count` already returns null for anything that is not a non-negative integer, so `?? 0` was
+  // converting an UNKNOWN membership into the authoritative-looking claim "0 runs are currently in
+  // this scope" — and, because the generate button gates on it, silently disabling generation as if
+  // the scope were empty. Keep null and let the two render sites say "unknown".
+  const runCount = count(data?.run_count)
   const headline = text(c?.headline)
   const verdict = text(c?.verdict)
   const formatUpgrade = data?.stale === true && data?.stale_reason === 'report_format_upgrade'
@@ -479,7 +483,9 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
             confirmed. Generating a replacement starts a new paid action and may incur additional provider
             cost.
           </div>
-          <div className="muted"><b>{runCount}</b> runs are currently in this scope.</div>
+          <div className="muted">{runCount === null
+            ? 'The number of runs in this scope could not be read, so generation stays disabled.'
+            : <><b>{runCount}</b> runs are currently in this scope.</>}</div>
           <button className="btn primary" disabled={busy || uncertain || !runCount}
             onClick={generateReplacement}>
             {uncertain ? '… outcome unknown' : busy
@@ -487,8 +493,9 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
         </div>}
 
         {data && !data.exists && !publicationUnconfirmed && <div className="sr-empty">
-          <div className="muted">
-            No report — <b>{runCount}</b> runs. Evidence is bounded.
+          <div className="muted">{runCount === null
+            ? 'No report. The number of runs in this scope could not be read, so generation stays disabled.'
+            : <>No report — <b>{runCount}</b> runs. Evidence is bounded.</>}
           </div>
           <button className="btn primary" disabled={busy || uncertain || !runCount}
             onClick={generateWithConfirmation}>
