@@ -39,7 +39,11 @@ test('ConceptChipBar renders nothing when the run carries no concepts', async ()
   }
 })
 
-test('ConceptChipBar distinguishes partial and unavailable membership from an empty run', async () => {
+// A materialization receipt is minted PER NODE, so it withholds ONE row. This used to collapse to a
+// run-wide verdict that blanked the bar entirely: `runs/b2-validate` reported "UNAVAILABLE — Membership
+// unavailable; not empty." over 21 exact memberships across 6 clean experiments because a single delta
+// node's parent was never tagged. Only a run-SCOPED failure may refuse the whole control.
+test('ConceptChipBar withholds the degraded row and keeps the rest of the run filterable', async () => {
   const vite = await createServer({
     root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
     server: { middlewareMode: true },
@@ -49,19 +53,36 @@ test('ConceptChipBar distinguishes partial and unavailable membership from an em
     const render = state => new JSDOM(renderToStaticMarkup(React.createElement(ConceptChipBar, {
       state, onHighlight() {},
     }))).window.document
-    const partial = render({ ...STATE, node_concept_materialization_receipts: {
-      0: { status: 'partial', reasons: ['concepts_per_node_cap'] },
-    } })
-    assert.equal(partial.querySelector('.concept-bar')?.getAttribute('role'), 'status')
-    assert.match(partial.body.textContent, /PARTIAL.*display-only.*filters off/s)
-    assert.equal(partial.querySelector('.cb-chip'), null)
-    assert.equal(partial.querySelector('[aria-label="Search concepts"]'), null)
+    // Node 0 is the only row carrying `architecture/moe`, and the only row with a receipt.
+    for (const receipt of [{ status: 'partial', reasons: ['concepts_per_node_cap'] },
+      { status: 'unavailable', reasons: ['delta_dependency_unknown_parent_membership'] }]) {
+      const degraded = render({ ...STATE, node_concept_materialization_receipts: { 0: receipt } })
+      assert.equal(degraded.querySelector('.concept-bar')?.getAttribute('role'), 'group')
+      const names = [...degraded.querySelectorAll('.cb-chip .cb-name')].map(node => node.textContent)
+      assert.deepEqual(names, ['data', 'loss'], 'the four exact rows still drive chips')
+      assert.ok(!names.includes('architecture'), 'the withheld row reaches no chip, count or filter')
+      assert.match(degraded.body.textContent, /PARTIAL.*1 withheld/s)
+      assert.ok(degraded.querySelector('[aria-label="Search concepts"]'), 'search stays reachable')
+    }
 
+    // Every row withheld is not the same fact as a run with no concepts: stay visible and say so.
+    const allWithheld = render({
+      nodes: { 0: { id: 0 } }, node_concepts: { 0: [] },
+      node_concept_materialization_receipts: {
+        0: { status: 'unavailable', reasons: ['delta_dependency_cycle'] },
+      },
+    })
+    assert.equal(allWithheld.querySelector('.concept-bar')?.getAttribute('role'), 'status')
+    assert.match(allWithheld.body.textContent, /withheld for all 1 tagged experiment.*not empty/s)
+    assert.equal(allWithheld.querySelector('.cb-chip'), null)
+
+    // The run-SCOPED refusal is unchanged: a degraded run base taints the whole projection.
     const unavailable = render({ nodes: {}, node_concepts: {}, run_base_concept_receipt: {
       status: 'unavailable', reasons: ['delta_dependency_cycle'],
     } })
     assert.equal(unavailable.querySelector('.concept-bar')?.getAttribute('role'), 'alert')
     assert.match(unavailable.body.textContent, /UNAVAILABLE.*not empty/s)
+    assert.equal(unavailable.querySelector('.cb-chip'), null)
   } finally {
     await vite.close()
   }
@@ -184,16 +205,23 @@ test('selecting a chip pushes the matching node set to onHighlight; clear resets
     assert.deepEqual([...document.querySelectorAll('.cb-pill-label')].map(node => node.textContent),
       ['objective/contrastive'])
 
-    // A partial live receipt keeps its warning visible but atomically removes authoritative filters.
+    // A partial live receipt withholds ITS row from the live filter while the control stays usable.
+    // The property this replaces -- "partial membership cannot strand an authoritative DAG filter" --
+    // used to be met by tearing the whole bar down (highlight forced to null). Withholding the row meets
+    // it more directly: the filter keeps running, over authoritative rows only, and the visible Clear
+    // control is never removed, so the graph can never be left dimmed by something unreachable.
     await act(async () => root.render(React.createElement(ConceptChipBar, {
       state: { ...STATE, node_concept_materialization_receipts: {
         0: { status: 'partial', reasons: ['concepts_per_node_cap'] },
       } },
       onHighlight: v => calls.push(v),
     })))
-    assert.match(document.querySelector('[role="status"]').textContent, /PARTIAL/)
-    assert.equal(document.querySelector('.cb-chip'), null)
-    assert.equal(calls.at(-1), null, 'partial membership cannot strand an authoritative DAG filter')
+    assert.match(document.querySelector('[role="group"]').textContent, /PARTIAL.*1 withheld/s)
+    assert.ok(document.querySelector('.cb-chip'), 'the exact rows keep their chips')
+    assert.deepEqual([...calls.at(-1)].sort((a, b) => a - b), [1],
+      'the withheld node leaves the highlight; its membership can no longer be claimed')
+    assert.ok([...document.querySelectorAll('button')].some(node => /^clear \(/.test(node.textContent)),
+      'the filter stays clearable, so the DAG can never be stranded dimmed')
 
     await act(async () => root.render(React.createElement(ConceptChipBar, {
       state: STATE, onHighlight: v => calls.push(v),

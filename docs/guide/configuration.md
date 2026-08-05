@@ -571,11 +571,21 @@ separate authority explicitly. -->
 | `cross_run_curation_auto` | `LOOPLAB_CROSS_RUN_CURATION_AUTO` | `false` | **Deprecated compatibility input; it does not auto-apply.** Retained so old environment/config snapshots still load. When `cross_run_curation` is enabled, finalize records the request as `auto_requested` in the proposal audit row but remains fail-closed and performs no governance write. An operator must review the exact proposal and apply selected changes through typed concept/claim CLI or owner HTTP governance. Default off; otherwise inert |
 | `capability_expansion` | `LOOPLAB_CAPABILITY_EXPANSION` | `false` | PART IV Phase 2b (D7). With `concept_pivot`, action-space lock-in on an explore stance changes the proposal directive toward new capability/infrastructure. The resulting idea is stamped `operator="expand"` and competes normally under SearchFitness, so yield is measurable; the flag does not itself guarantee a capability was built or helped. Keep opt-in and show the dependency/effective state |
 
-The secondary DAG concept UI follows the same materialization truth as `ConceptFrame`.
-`run_base_concept_receipt` or an active entry in `node_concept_materialization_receipts` marks retained
-IDs as `PARTIAL`/display-only: they never drive theme grouping, chips, search, or graph filters.
+The secondary DAG concept UI follows the same materialization truth as `ConceptFrame`, and — since
+2026-08-05 — at the same GRANULARITY. A materialization receipt is keyed by node, so an active entry in
+`node_concept_materialization_receipts` withholds THAT experiment's row: its retained IDs stay
+display-only on its own card and never drive theme grouping, chip counts, search or graph filters, while
+every experiment without a receipt keeps its exact membership and remains filterable. The chip bar
+discloses the withheld count (`PARTIAL · N withheld`) and its counts are then a lower bound. Only a
+run-SCOPED failure refuses the whole control: a degraded or malformed `run_base_concept_receipt`, or a
+`node_concept_materialization_receipts` store that is not a map, still shows `UNAVAILABLE`. Withholding
+every tagged row also stays visible, because fail-closed emptiness is not an empty concept set.
 `UNAVAILABLE` is shown as an integrity state, never as an empty concept set. Receipts retained only for
 tombstoned or aborted nodes do not make the current projection partial.
+Before that change the bar collapsed the per-node receipts to one run-wide verdict and dropped every
+row with them, so a single unresolvable delta node reported `UNAVAILABLE` over a run whose other
+experiments carried exact, complete membership — while `ConceptFrame` served those same memberships as
+a `partial` frame, which is what the two surfaces now agree on.
 
 Concept owner HTTP mutations use two concurrency tokens: the per-ledger `expected_revision` and the required
 cross-alias/split `expected_governance_revision`. Both are strict non-negative integers. Mutation receipts and

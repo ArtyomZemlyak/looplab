@@ -2,7 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { canonicalId, normalizeConceptId, conceptMap, nodeTheme } from '../src/conceptId.js'
-import { conceptMaterializationStatus } from '../src/nodeProjection.js'
+import { authoritativeNodeConcepts, conceptMaterializationStatus } from '../src/nodeProjection.js'
 
 test('canonicalId applies the rename map', () => {
   assert.equal(canonicalId('raw', { raw: 'loss/x' }), 'loss/x')
@@ -126,6 +126,58 @@ test('materialization receipts gate every authoritative concept projection', () 
   assert.equal(conceptMaterializationStatus({ ...basePartial,
     node_concept_materialization_receipts: { 2: unavailable },
   }, 2), 'unavailable', 'an unavailable node wins over a partial run base')
+})
+
+// The shape of `runs/b2-validate`, which is what this pins: one delta node whose parent was never
+// tagged is unresolvable, six siblings carry exact membership. The run-level answer to "do we know the
+// concepts" is "partially", not "no" -- answering "no" is what put UNAVAILABLE over 21 real memberships.
+test('one unresolvable node degrades its own row, not the whole run', () => {
+  const nodes = Object.fromEntries([0, 1, 2, 3, 4].map(id => [id, { id }]))
+  const unavailable = { status: 'unavailable',
+    reasons: ['delta_dependency_unknown_parent_membership'] }
+  const state = {
+    nodes,
+    node_concepts: { 0: ['feature/polynomial'], 1: ['optimization/lr'], 2: ['feature/polynomial'],
+      4: [] },
+    node_concept_materialization_receipts: { 4: unavailable },
+  }
+  assert.equal(conceptMaterializationStatus(state), 'partial',
+    'a receipt keyed by node cannot answer for the run')
+  assert.equal(conceptMaterializationStatus(state, 4), 'unavailable', 'the node itself still fails closed')
+  assert.equal(conceptMaterializationStatus(state, 0), 'complete', 'a clean sibling stays exact')
+
+  const view = authoritativeNodeConcepts(state)
+  assert.deepEqual(Object.keys(view.concepts).sort(), ['0', '1', '2'])
+  assert.equal(view.withheld, 1, 'the withheld row is counted, never silently dropped')
+
+  // Emptiness fabricated by fail-closed materialization must stay distinguishable from a run that
+  // simply has no concepts: every row withheld is NOT the same fact as no rows existing.
+  const allWithheld = authoritativeNodeConcepts({
+    nodes, node_concepts: { 4: [] }, node_concept_materialization_receipts: { 4: unavailable },
+  })
+  assert.deepEqual(allWithheld.concepts, {})
+  assert.equal(allWithheld.withheld, 1)
+  assert.deepEqual(authoritativeNodeConcepts({ nodes, node_concepts: {} }), { concepts: {}, withheld: 0 })
+
+  // Lifecycle deletion is applied first, so a tombstoned/aborted row is neither shown nor counted as
+  // withheld -- it is not part of the current projection at all.
+  const deleted = authoritativeNodeConcepts({
+    nodes: { ...nodes, 3: { id: 3, tombstoned: true } },
+    node_concepts: { 0: ['feature/polynomial'], 3: ['old/deleted'], 4: ['old/aborted'] },
+    node_concept_materialization_receipts: { 4: unavailable },
+    aborted_nodes: [4],
+  })
+  assert.deepEqual(Object.keys(deleted.concepts), ['0'])
+  assert.equal(deleted.withheld, 0)
+
+  // A run-SCOPED failure is the one thing that still answers for the whole projection.
+  assert.equal(conceptMaterializationStatus({ ...state, run_base_concept_receipt: unavailable }),
+    'unavailable', 'a degraded run base is a statement about the whole projection')
+  assert.equal(conceptMaterializationStatus({ ...state,
+    node_concept_materialization_receipts: [] }), 'unavailable', 'a malformed store is structural')
+  const corrupt = authoritativeNodeConcepts({ ...state, node_concept_materialization_receipts: [] })
+  assert.deepEqual(corrupt.concepts, {}, 'a corrupt store withholds every row on its own')
+  assert.equal(corrupt.withheld, 4)
 })
 
 test('materialization receipt parsing fails closed without rejecting future partial reasons', () => {

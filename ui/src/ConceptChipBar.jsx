@@ -4,7 +4,7 @@ import { addConceptSelection, chipsAtPath, breadcrumb, matchingNodeIds,
 import { searchConcepts } from './conceptSearch.js'
 import { Marked } from './Highlight.jsx'
 import { canonicalId } from './conceptId.js'
-import { activeNodeConcepts, conceptMaterializationStatus } from './nodeProjection.js'
+import { authoritativeNodeConcepts, conceptMaterializationStatus } from './nodeProjection.js'
 import { OpIcon } from './icons.jsx'
 
 const SEARCH_RESULTS = 8   // dropdown cap; the pure model ranks globally, this trims the visible list
@@ -20,10 +20,17 @@ const SEARCH_RESULTS = 8   // dropdown cap; the pure model ranks globally, this 
 // this component is only wiring + markup.
 export default function ConceptChipBar({ state, onHighlight }) {
   // partial rows may be rendered on their node, but absence within them is not truth.
-  // Keep them out of chip counts, search, selection and DAG filtering as one indivisible gate.
-  const [materialization, nodeConcepts] = useMemo(() => {
+  // Keep THEM out of chip counts, search, selection and DAG filtering -- them, the degraded rows, not
+  // the run. Receipts are per node; withholding one node's row is what that rule asks for, and dropping
+  // every OTHER experiment's exact membership alongside it is what made this bar report UNAVAILABLE on
+  // runs whose concepts were sitting in plain sight on the node cards and in the Concepts tab.
+  const [materialization, nodeConcepts, withheld] = useMemo(() => {
     const status = conceptMaterializationStatus(state)
-    return [status, status === 'complete' ? activeNodeConcepts(state) : {}]
+    // A run-scoped failure (degraded run base / malformed receipt store) says nothing in the projection
+    // is trustworthy, so nothing is shown. Per-node failures leave the clean rows authoritative.
+    if (status === 'unavailable') return [status, {}, 0]
+    const { concepts, withheld: hidden } = authoritativeNodeConcepts(state)
+    return [status, concepts, hidden]
   }, [state?.run_base_concept_receipt, state?.node_concept_materialization_receipts,
     state?.node_concepts, state?.nodes, state?.aborted_nodes])
   const rename = state?.concept_consolidation || {}
@@ -123,13 +130,17 @@ export default function ConceptChipBar({ state, onHighlight }) {
     else if (event.key === 'Escape') { event.preventDefault(); query ? setQuery('') : closeSearch() }
   }
 
-  if (materialization !== 'complete') return (
+  // Two refusals, and they mean different things. Run-scoped: the whole projection is untrustworthy.
+  // Row-scoped-but-total: every tagged experiment was withheld, so there is nothing exact to draw --
+  // which is NOT the same as a run that never tagged anything, and must not render as one.
+  if (materialization === 'unavailable' || (!hasConcepts && withheld > 0)) return (
     <div className="concept-bar" role={materialization === 'unavailable' ? 'alert' : 'status'}>
       <div className="cb-head">
-        <strong>Concepts</strong><span className="chip xs warn">{materialization.toUpperCase()}</span>
-        <span className="muted">{materialization === 'partial'
-          ? 'Retained IDs are display-only; filters off.'
-          : 'Membership unavailable; not empty.'}</span>
+        <strong>Concepts</strong>
+        <span className="chip xs warn">{materialization.toUpperCase()}</span>
+        <span className="muted">{materialization === 'unavailable'
+          ? 'Membership unavailable; not empty.'
+          : `Membership withheld for all ${withheld} tagged experiment${withheld === 1 ? '' : 's'}; not empty.`}</span>
       </div>
     </div>
   )
@@ -143,6 +154,12 @@ export default function ConceptChipBar({ state, onHighlight }) {
     <div className="concept-bar" role="group" aria-label="Concept filter">
       <div className="cb-head">
         <strong>Concepts</strong>
+        {/* Counts below are a LOWER BOUND while any row is withheld: the withheld experiments may or may
+            not carry these concepts, and the graph filter cannot reach them. Say so rather than letting
+            a silently short count read as the whole run. */}
+        {withheld > 0 &&
+          <span className="chip xs warn" title={`${withheld} experiment${withheld === 1 ? "'s" : "s'"} membership could not be materialized; counts are a lower bound and these experiments never match a filter.`}>
+            PARTIAL · {withheld} withheld</span>}
         <nav className="cb-crumbs" aria-label="Concept breadcrumb">
           <button type="button" className={'cb-crumb' + (path ? '' : ' on')}
             onClick={() => setPath('')} aria-current={path ? undefined : 'true'}>All</button>
