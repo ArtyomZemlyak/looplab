@@ -125,3 +125,45 @@ def test_null_effect_does_not_merge_with_negative_effect():
     # helps vs harm and helps vs not-helps still surface as contradictions (opposite net polarity, same subj)
     assert helps["contra_key"] == harm["contra_key"] == null["contra_key"]
     assert helps["polarity"] == 1
+
+
+# --- EM-06: the three identity modes, and the overlay key each one uses --------------------------
+
+def test_the_three_modes_are_documented_where_a_reviewer_reads_them():
+    """doc 25 EM-06's concrete cost is "operator decisions must overlay correctly across all three
+    modes", and nothing stated which overlay key guards which mode. The table lives at
+    `claim_assessments` because that is the function whose two flags select between them."""
+    import inspect
+
+    from looplab.engine.claims_assessments import claim_assessments
+
+    # Check the TABLE, not the function text: the first draft grepped the whole source, and every
+    # needle also occurs in the body, so deleting a table row left it green.
+    src = inspect.getsource(claim_assessments)
+    assert "THE THREE MODES" in src, "the mode table is gone"
+    table = [l for l in src.split("\n")
+             if l.lstrip().startswith("#") and "  " in l
+             and ("normalize_statement grouping" in l or "token-Jaccard" in l
+                  or "claim_key.claim_signature" in l)]
+    assert len(table) == 3, (
+        f"the mode table lists {len(table)} of the 3 identity modes; a caller flag combination is "
+        "now undocumented, which is exactly how an operator decision overlays the wrong claim")
+    assert any("_scoped_key" in l for l in src.split("\n") if "THE THREE MODES" in src), (
+        "the table must still name the legacy overlay key")
+
+
+def test_structured_still_wins_over_fuzzy():
+    """The one precedence rule the table asserts. If these ever became independent, a caller passing
+    both would silently get whichever branch happened to be tested first."""
+    import inspect
+
+    from looplab.engine.claims_assessments import claim_assessments
+
+    src = inspect.getsource(claim_assessments)
+    assert "structured wins" in src
+    lessons = [{"statement": "dropout helps", "outcome": "supported", "node_ids": [1],
+                "run_id": "r", "task_id": "t", "direction": "min"}]
+    both = claim_assessments(lessons, fuzzy=True, structured=True)
+    only = claim_assessments(lessons, structured=True)
+    assert [c.get("claim_uid") for c in both] == [c.get("claim_uid") for c in only], (
+        "passing fuzzy alongside structured changed the projection; structured must win")

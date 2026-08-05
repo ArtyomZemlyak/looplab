@@ -1543,6 +1543,26 @@ carries the fail-closed guarantee that the deleted branches used to duplicate.
 
 *Recommendation:* Make structured the default projection, keep lean/fuzzy as explicitly-legacy read paths with a deprecation note, and once consumers migrate delete _fuzzy_merge_claims and the _scoped_key/_global_key shadow namespaces. Until then, add a table-of-modes comment at claim_assessments so reviewers know which overlay logic guards which mode.
 
+*Resolution (2026-08-05) — the "until then" clause; the default is NOT flipped.*
+
+All seven cited line numbers were dead: EM-01 moved these projections to `claims_assessments.py`.
+`claim_assessments` now carries the mode table the finding asks for — the three identity modes, the
+precedence rule (`structured` wins over `fuzzy`), and, the part that was nowhere stated, WHICH OVERLAY
+KEY each mode's governance decisions arrive under. That asymmetry is the finding's actual cost: the
+two legacy paths share `_scoped_key`/`_global_key`, the structured path uses a scope-precise
+`claim_uid`, and a decision recorded against a lean key must not silently apply to a structured claim
+from another task.
+
+Making structured the DEFAULT is declined here: it changes which claims merge, so it changes what the
+governance overlay applies to. That is a behaviour change for operator decisions, and it wants an
+evaluation of the existing decision ledger, not a modularity pass. Deleting `_fuzzy_merge_claims` and
+the shadow namespaces stays blocked behind that same migration.
+
+The guard checks the TABLE, not the function text. Its first draft grepped
+`inspect.getsource(claim_assessments)` for the mode names — every one of which also occurs in the
+BODY, so deleting a table row left it green. It now counts the three comment rows; removing one
+fails it.
+
 #### EM-07 · MEDIUM · duplication · effort: small
 
 **Lesson/research evidence-ingestion loops duplicated between structured and lean assessment paths**
