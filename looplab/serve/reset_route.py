@@ -139,6 +139,7 @@ def _frozen_launch(
     if hashlib.sha256(task_bytes).hexdigest() != record["task_digest"]:
         _pending(record, "The task snapshot changed after Replay was committed.")
     try:
+        # STRICT on purpose, and NOT a missing `existing_run=True` (see `_prepare_receipt`).
         load_task(stage)
         replay_settings = settings_from_snapshot(record["effective_config"])
     except Exception as exc:  # noqa: BLE001 - a committed operation remains fail-closed
@@ -287,6 +288,19 @@ def _prepare_receipt(
     # the only unpublished failure that can leave this exact service-owned path behind.
     try:
         strict_atomic_write_bytes(task_stage, task_bytes)
+        # STRICT on purpose — do NOT "fix" this by passing `existing_run=True` (2dd8cfa4).
+        #
+        # These ARE a run's own recorded task bytes, so the grandfathering waiver looks like it
+        # belongs here, and it reads as a bug next to `resume`/`finalize`, which take it. It is not.
+        # Replay does not RE-ENTER this run: `_frozen_launch` spawns `looplab run` against the
+        # frozen stage, and `run` is a fresh submit that validates STRICTLY. Waiving the check here
+        # therefore does not make Replay work — it only moves the identical refusal past a COMMITTED
+        # receipt, turning a clean 409 into a published operation whose spawned engine dies on the
+        # same message. Verified by running `looplab run` on such a stage: it refuses.
+        #
+        # So a legacy run carrying a spec a later rule refuses can `resume` but cannot Replay, by
+        # design. Making Replay work for those runs means changing what it SPAWNS (a re-entry rather
+        # than a submit), not what it validates. `tests/test_eval_reader_paths.py` pins both halves.
         load_task(task_stage)
     except Exception as exc:  # noqa: BLE001
         _discard_unpublished_task_stage(task_stage)

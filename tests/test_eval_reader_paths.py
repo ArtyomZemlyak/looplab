@@ -249,6 +249,112 @@ def test_a_run_that_already_exists_still_resumes(slot, payload, tmp_path):
     assert task.eval_spec()["command"] == ["python", "ttrain.py"]
 
 
+class _StubCommands:
+    def _sequence_path(self, rd):
+        return rd / "commands.seq"
+
+
+class _StubSettings:
+    def ordinary_settings_env(self, launch_settings):
+        return {}
+
+
+class _StubSrv:
+    """`_prepare_receipt` touches `srv` for one derived name; `_frozen_launch` for one env dict."""
+
+    commands = _StubCommands()
+    settings = _StubSettings()
+
+
+def _existing_run_dir(tmp_path: Path) -> Path:
+    """A run dir whose recorded task is WELL-FORMED — the control case. `config.snapshot.json` is
+    written too, so the receipt freezes real settings rather than falling back to defaults."""
+    from looplab.core.config import Settings
+
+    rd = tmp_path / "run"
+    rd.mkdir()
+    (rd / "task.snapshot.json").write_text(
+        json.dumps(_task(cross_check=_WITH_PATH)), encoding="utf-8")
+    (rd / "config.snapshot.json").write_text(
+        json.dumps(Settings().masked_snapshot()), encoding="utf-8")
+    return rd
+
+
+@pytest.mark.parametrize("slot,payload", _LEGACY_SLOTS, ids=[s for s, _ in _LEGACY_SLOTS])
+def test_replay_stays_strict_on_the_runs_own_snapshot_unlike_resume(slot, payload, tmp_path):
+    """The asymmetry is DELIBERATE, and this test exists because it does not look it.
+
+    `resume` and UI Replay read the same bytes — a run's own `task.snapshot.json` — and disagree:
+    resume grandfathers, Replay refuses. That reads exactly like a missed call site, and the reason
+    it isn't lived only in `2dd8cfa4`'s commit message, where nobody hunting the asymmetry will look.
+
+    The reason: Replay does not RE-ENTER the run. `_frozen_launch` spawns `looplab run` against the
+    frozen stage, and `run` is a fresh SUBMIT that validates strictly regardless. So waiving the
+    check in `reset_route` cannot make Replay succeed — it only moves the identical refusal past a
+    committed receipt. The third assertion below is that premise, pinned: if `load_task` ever stops
+    refusing a fresh submit of these bytes, the argument for strictness here has evaporated and this
+    decision must be revisited rather than silently inherited."""
+    from fastapi import HTTPException
+
+    from looplab.serve import reset_route
+
+    rd = tmp_path / "run"
+    rd.mkdir()
+    (rd / "task.snapshot.json").write_text(json.dumps(_task(**payload)), encoding="utf-8")
+
+    load_task(rd / "task.snapshot.json", existing_run=True)  # resume: accepted
+    with pytest.raises(ValueError):                          # Replay's spawned `run`: refused
+        load_task(rd / "task.snapshot.json")
+
+    with pytest.raises(HTTPException) as excinfo:            # so the preflight refuses too, early
+        reset_route._prepare_receipt(
+            _StubSrv(), rd, expected_generation="gen-a", operation_id="op-1")
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["code"] == "replay_task_invalid"
+
+
+def test_replay_refuses_before_it_publishes_anything(tmp_path):
+    """Strictness is only defensible while the refusal lands BEFORE the operation is committed.
+
+    `_prepare_receipt` stages the task last, precisely so a validation error is the one unpublished
+    failure (its own comment says so). If a refusal ever moved after publication it would hit
+    `_frozen_launch`'s 503, whose remediation forbids the only escape — "Inspect the durable receipt;
+    do not create another Replay" — and the committed operation would be stuck with inputs the
+    operator cannot edit. Pin that the staged path is cleaned up and no receipt survives."""
+    from fastapi import HTTPException
+
+    from looplab.serve import reset_route
+
+    rd = tmp_path / "run"
+    rd.mkdir()
+    (rd / "task.snapshot.json").write_text(
+        json.dumps(_task(cross_check=_PATHLESS)), encoding="utf-8")
+
+    before = {p.name for p in rd.iterdir()}
+    with pytest.raises(HTTPException):
+        reset_route._prepare_receipt(
+            _StubSrv(), rd, expected_generation="gen-a", operation_id="op-1")
+    assert {p.name for p in rd.iterdir()} == before, "a refused Replay left a staged task behind"
+
+
+def test_a_valid_snapshot_still_replays(tmp_path):
+    """The other side of the fence: strictness must not refuse a well-formed run. Without this the
+    two tests above would pass just as well if Replay were broken for everyone."""
+    from fastapi import HTTPException
+
+    from looplab.serve import reset_route
+
+    rd = _existing_run_dir(tmp_path)
+    record = reset_route._prepare_receipt(
+        _StubSrv(), rd, expected_generation="gen-a", operation_id="op-1")
+    assert record["task_digest"] and (rd / record["task_stage"]).is_file()
+
+    spawn_args, env, launch_settings = reset_route._frozen_launch(
+        _StubSrv(), rd, record, operation_id="op-1")
+    assert spawn_args[0] == "run" and str(rd) in spawn_args
+    assert isinstance(env, dict) and isinstance(launch_settings, dict)
+
+
 def test_resume_reports_the_refusal_it_waived(tmp_path, monkeypatch, capsys):
     """Grandfathering must not be SILENT: the operator resuming such a run is re-entering the exact
     failure the refusal exists to name, so `resume` prints the same message as a warning."""
