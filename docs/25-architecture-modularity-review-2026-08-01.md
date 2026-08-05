@@ -2131,6 +2131,38 @@ directory-entry publish, uncertain-sync fence) against BOTH appenders.
 
 *Recommendation:* Extract the concept-envelope section into `_fold_node_concept_envelope(st, ctx, n, raw_idea, current, current_provenance)` living next to _on_node_concepts/_on_concept_tag_edited so all concept-membership writers sit together; _on_node_created then reads as lifecycle logic only.
 
+*Resolution (2026-08-05):* Done, with one signature deviation and one subtlety the recommendation
+did not name.
+
+`_fold_node_concept_envelope(st, ctx, n, d, current)` now owns the sub-machine and sits immediately
+before `_on_node_concepts`; `_on_node_created` reads as lifecycle plus one delegation. The block moved
+BYTE-IDENTICALLY (verified by diffing the extracted text against the pre-change file), which matters
+here more than usual: it is the most comment-dense policy in the fold, and the comments carry the
+provenance rules.
+
+Deviation: the recommendation's `raw_idea` and `current_provenance` parameters are derived INSIDE
+instead. Both are one-line derivations from `d` and `st` that no caller has a reason to know about;
+passing them would move two lines up a level and add two ways to call the function wrong.
+
+The subtlety, and why this finding got a test file rather than just a move: `current` — the node this
+event REPLACES — MUST stay a parameter. Receipt protection compares the replaced node's idea against
+the new one, and the caller captures it before `st.nodes[n.id]` is rebound. Re-deriving it inside (the
+inviting "cleanup" now that `st` is in scope) compares the new node with ITSELF, reports every
+replacement as unchanged, and silently preserves a CLASSIFIER receipt describing an idea that no
+longer exists — which then feeds novelty admission and cross-run evidence as verified.
+
+That direction had NO coverage. `test_concept_tag_edited.py` drove the RETAIN half; nothing drove a
+replacement whose idea genuinely changed. `tests/test_node_concept_envelope_fold.py` (8) now pins both
+halves of the truth table plus the exclusion of the proposer's own concept fields from subject
+equality. Verified by applying exactly that cleanup on a scratch copy: it fails the two tests written
+for it and leaves the other 193 replay/concept tests green — which is the measurement of how exposed
+the property was.
+
+`st.nodes[n.id] = n` moved from the MIDDLE of the block to just above the call. Nothing in the block
+reads `st.nodes`, so this is a pure reordering, and a guard asserts it stays true — if the helper ever
+read `st.nodes` it would see the already-rebound node and the hoist would stop being safe, the same
+aliasing that makes re-deriving `current` wrong.
+
 #### EV-09 · LOW · mergeable-entities · effort: small
 
 **Twin handlers and quadruplicated request-queue purges for the force_confirm/force_ablate/fork intent family**

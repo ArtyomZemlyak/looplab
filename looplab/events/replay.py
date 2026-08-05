@@ -577,116 +577,8 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         raise
     except Exception:
         return   # (was `continue` in the loop arm: skip just this event)
-    raw_idea = d.get("idea") if isinstance(d.get("idea"), dict) else {}
-    raw_concept_receipts = {
-        field: bounded_raw_concept_values(raw_idea[field])
-        for field in ("concepts", "concepts_added", "concepts_removed") if field in raw_idea
-    }
-    delta_added = [str(c) for c in (getattr(n.idea, "concepts_added", None) or [])]
-    delta_removed = [str(c) for c in (getattr(n.idea, "concepts_removed", None) or [])]
-    mode_present = "concept_mode" in raw_idea
-    raw_mode = raw_idea.get("concept_mode")
-    recognized_mode = raw_mode if isinstance(raw_mode, str) and raw_mode in ("full", "delta") else None
-    unsupported_mode = mode_present and recognized_mode is None
-    if unsupported_mode:
-        # forward compatibility belongs at the node boundary. Keep the experiment and its
-        # audit Idea, but never guess how a future/malformed envelope changes membership.
-        ctx.concept_mode_untrusted.add(n.id)
-    else:
-        ctx.concept_mode_untrusted.discard(n.id)
-    delta_mode = recognized_mode == "delta"
-    raw_transitional_delta = any(
-        isinstance(raw_idea.get(field), list) and bool(raw_idea.get(field))
-        for field in ("concepts_added", "concepts_removed")
-    )
-    if not mode_present and raw_transitional_delta:
-        # 40a5a94 briefly wrote non-empty delta lists before the discriminator existed.
-        # Preserve those durable rows, but canonicalize the replayed Idea to explicit `delta` so a
-        # subsequent dump round-trips the semantic choice. Modern zero-deltas rely only on the mode.
-        delta_mode = True
-        n.idea.concept_mode = "delta"
-    authoritative_fields = (
-        tuple(raw_concept_receipts)
-        if unsupported_mode else
-        ("concepts_added", "concepts_removed") if delta_mode else ("concepts",)
-    )
-    authoritative_receipts = [raw_concept_receipts[field] for field in authoritative_fields
-                              if field in raw_concept_receipts]
-    input_capped = any(overflow for _values, overflow, _invalid in authoritative_receipts)
-    input_invalid = any(invalid for _values, _overflow, invalid in authoritative_receipts)
-    current_provenance = st.node_concept_provenance.get(n.id)
-    concept_subject_unchanged = bool(
-        current is not None
-        and current.operator == n.operator
-        # The independent tagger reads none of the proposer-authored concept envelope. Excluding every
-        # such field preserves an existing evidence receipt when only the proposer's taxonomy changes.
-        and current.idea.model_dump(exclude={"concept_mode", "concepts", "concepts_added",
-                                             "concepts_removed"})
-        == n.idea.model_dump(exclude={"concept_mode", "concepts", "concepts_added",
-                                      "concepts_removed"})
-    )
-    # A same-idea re-emission (an implement/eval reset re-emits node_created for the UNCHANGED idea) must
-    # NOT downgrade an existing independent CLASSIFIER receipt, an operator's deliberate OPERATOR edit,
-    # or a persisted OFFLINE display receipt — all describe the unchanged idea and stand. Only a subject
-    # CHANGE (a propose reset already cleared the receipt) or a fresh tag event supersedes them. The offline
-    # receipt remains non-evidence and is excluded from the cadence's known-tag cache, so the next classifier
-    # pass upgrades it rather than treating the coarse result as complete.
-    receipt_protected = bool(concept_subject_unchanged and current_provenance in (
-        NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR,
-        NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC))
-    if receipt_protected:
-        # The independent/operator full set owns the membership. A same-subject re-emission may retain
-        # a malformed proposer envelope for audit, but it must not poison the protected classification.
-        ctx.concept_mode_untrusted.discard(n.id)
-    else:
-        if input_capped:
-            ctx.concept_input_capped.add(n.id)
-        else:
-            ctx.concept_input_capped.discard(n.id)
-        if input_invalid:
-            ctx.concept_input_invalid.add(n.id)
-        else:
-            ctx.concept_input_invalid.discard(n.id)
     st.nodes[n.id] = n
-    # Researcher-AUTHORED concepts populate the compatible concept read model at creation, but the
-    # provenance sidecar prevents an admission consumer from mistaking that self-authored taxonomy for
-    # independent classifier evidence. A later `node_concepts` event overrides both, last-write-wins.
-    if current is not None and not concept_subject_unchanged:
-        # a replacement node_created is a new tagging subject even if a malformed writer
-        # skipped the propose reset. Clear every old receipt symmetrically: an authored mapping is just
-        # as stale as a classifier/operator mapping when the replacement Idea carries no concepts of its own.
-        st.node_concepts.pop(n.id, None)
-        st.node_concept_provenance.pop(n.id, None)
-        st.node_concepts_at_vocab.pop(n.id, None)
-        st.node_concept_deltas.pop(n.id, None)
-        ctx.concept_subject_invalidated.add(n.id)
-    if delta_mode and not unsupported_mode and not receipt_protected:
-        # PART V (B): the node authored a DELTA vs the run base + its parents. Store the tolerant reader's
-        # bounded valid operands here; the append-only Event remains the lossless audit source. The fold
-        # post-pass (`_materialize_concept_deltas`) resolves node_concepts topologically over the complete
-        # DAG, so fold stays order-tolerant. Provenance stays `authored` so a classifier/operator event
-        # still wins (the post-pass fills only nodes that keep the authored delta). Empty lists are an
-        # explicit zero delta, so they still create a sidecar and materialized membership.
-        st.node_concept_deltas[n.id] = {"added": delta_added, "removed": delta_removed}
-        st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
-        st.node_concepts_at_vocab.pop(n.id, None)
-    elif (not unsupported_mode and not receipt_protected
-          and (n.idea.concepts or recognized_mode == "full")):
-        # Full is an exact replacement. An explicit `full` + [] is therefore a known-empty membership,
-        # while an old no-mode/no-concepts payload stays genuinely absent for replay compatibility.
-        st.node_concept_deltas.pop(n.id, None)
-        st.node_concepts[n.id] = [str(c) for c in n.idea.concepts]
-        st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
-        st.node_concepts_at_vocab.pop(n.id, None)
-    elif not receipt_protected:
-        # Unknown mode and genuinely absent legacy membership are both non-authoritative. A pending
-        # replacement must not retain a previous authored set merely because classifier-protected
-        # subject equality intentionally ignores the proposer concept envelope.
-        st.node_concept_deltas.pop(n.id, None)
-        if st.node_concept_provenance.get(n.id) == NODE_CONCEPT_PROVENANCE_AUTHORED:
-            st.node_concepts.pop(n.id, None)
-            st.node_concept_provenance.pop(n.id, None)
-            st.node_concepts_at_vocab.pop(n.id, None)
+    _fold_node_concept_envelope(st, ctx, n, d, current)
     if current is None:
         # A holdout score is a disclosed final-exam signal. If a genuinely NEW candidate lands
         # afterwards (an inject/fork/policy action won the finish CAS race), the search has become
@@ -2120,6 +2012,136 @@ def _on_concept_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCt
     # hand-edited or foreign log flowed straight through, aliased into RunState and deep-copied on
     # every FoldCursor snapshot.
     st.concept_coverage_snapshots.append(_coverage_snapshot_row(d))
+
+def _fold_node_concept_envelope(st: RunState, ctx: "_FoldCtx", n: Node, d: dict, current) -> None:
+    """Fold ONE `node_created`'s concept envelope into the membership sidecars.
+
+    Split out of `_on_node_created` (doc 25 EV-08), which interleaved ~110 lines of concept-envelope
+    POLICY into a node LIFECYCLE handler. This is a self-contained sub-machine: it decodes the raw
+    receipts, discriminates delta/full/unsupported mode, canonicalizes the transitional 40a5a94 rows,
+    decides receipt protection across CLASSIFIER/OPERATOR/OFFLINE provenance, and then writes four
+    sidecar maps (`node_concepts`, `node_concept_provenance`, `node_concepts_at_vocab`,
+    `node_concept_deltas`) plus four `_FoldCtx` sets. It lives beside `_on_node_concepts` and
+    `_on_concept_tag_edited` so every concept-membership writer sits together.
+
+    `current` is the node this event REPLACES (None on a first create). The caller captured it before
+    rebinding `st.nodes[n.id]`, and the subject-equality test below needs that OLD idea — so it is a
+    parameter rather than something this function can re-read.
+
+    Called AFTER `st.nodes[n.id] = n`. That write used to sit in the MIDDLE of this block; nothing
+    here reads `st.nodes`, so hoisting it above the call is behaviour-preserving, and it is what lets
+    the block leave the lifecycle handler in one piece.
+    """
+    raw_idea = d.get("idea") if isinstance(d.get("idea"), dict) else {}
+    raw_concept_receipts = {
+        field: bounded_raw_concept_values(raw_idea[field])
+        for field in ("concepts", "concepts_added", "concepts_removed") if field in raw_idea
+    }
+    delta_added = [str(c) for c in (getattr(n.idea, "concepts_added", None) or [])]
+    delta_removed = [str(c) for c in (getattr(n.idea, "concepts_removed", None) or [])]
+    mode_present = "concept_mode" in raw_idea
+    raw_mode = raw_idea.get("concept_mode")
+    recognized_mode = raw_mode if isinstance(raw_mode, str) and raw_mode in ("full", "delta") else None
+    unsupported_mode = mode_present and recognized_mode is None
+    if unsupported_mode:
+        # forward compatibility belongs at the node boundary. Keep the experiment and its
+        # audit Idea, but never guess how a future/malformed envelope changes membership.
+        ctx.concept_mode_untrusted.add(n.id)
+    else:
+        ctx.concept_mode_untrusted.discard(n.id)
+    delta_mode = recognized_mode == "delta"
+    raw_transitional_delta = any(
+        isinstance(raw_idea.get(field), list) and bool(raw_idea.get(field))
+        for field in ("concepts_added", "concepts_removed")
+    )
+    if not mode_present and raw_transitional_delta:
+        # 40a5a94 briefly wrote non-empty delta lists before the discriminator existed.
+        # Preserve those durable rows, but canonicalize the replayed Idea to explicit `delta` so a
+        # subsequent dump round-trips the semantic choice. Modern zero-deltas rely only on the mode.
+        delta_mode = True
+        n.idea.concept_mode = "delta"
+    authoritative_fields = (
+        tuple(raw_concept_receipts)
+        if unsupported_mode else
+        ("concepts_added", "concepts_removed") if delta_mode else ("concepts",)
+    )
+    authoritative_receipts = [raw_concept_receipts[field] for field in authoritative_fields
+                              if field in raw_concept_receipts]
+    input_capped = any(overflow for _values, overflow, _invalid in authoritative_receipts)
+    input_invalid = any(invalid for _values, _overflow, invalid in authoritative_receipts)
+    current_provenance = st.node_concept_provenance.get(n.id)
+    concept_subject_unchanged = bool(
+        current is not None
+        and current.operator == n.operator
+        # The independent tagger reads none of the proposer-authored concept envelope. Excluding every
+        # such field preserves an existing evidence receipt when only the proposer's taxonomy changes.
+        and current.idea.model_dump(exclude={"concept_mode", "concepts", "concepts_added",
+                                             "concepts_removed"})
+        == n.idea.model_dump(exclude={"concept_mode", "concepts", "concepts_added",
+                                      "concepts_removed"})
+    )
+    # A same-idea re-emission (an implement/eval reset re-emits node_created for the UNCHANGED idea) must
+    # NOT downgrade an existing independent CLASSIFIER receipt, an operator's deliberate OPERATOR edit,
+    # or a persisted OFFLINE display receipt — all describe the unchanged idea and stand. Only a subject
+    # CHANGE (a propose reset already cleared the receipt) or a fresh tag event supersedes them. The offline
+    # receipt remains non-evidence and is excluded from the cadence's known-tag cache, so the next classifier
+    # pass upgrades it rather than treating the coarse result as complete.
+    receipt_protected = bool(concept_subject_unchanged and current_provenance in (
+        NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR,
+        NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC))
+    if receipt_protected:
+        # The independent/operator full set owns the membership. A same-subject re-emission may retain
+        # a malformed proposer envelope for audit, but it must not poison the protected classification.
+        ctx.concept_mode_untrusted.discard(n.id)
+    else:
+        if input_capped:
+            ctx.concept_input_capped.add(n.id)
+        else:
+            ctx.concept_input_capped.discard(n.id)
+        if input_invalid:
+            ctx.concept_input_invalid.add(n.id)
+        else:
+            ctx.concept_input_invalid.discard(n.id)
+    # Researcher-AUTHORED concepts populate the compatible concept read model at creation, but the
+    # provenance sidecar prevents an admission consumer from mistaking that self-authored taxonomy for
+    # independent classifier evidence. A later `node_concepts` event overrides both, last-write-wins.
+    if current is not None and not concept_subject_unchanged:
+        # a replacement node_created is a new tagging subject even if a malformed writer
+        # skipped the propose reset. Clear every old receipt symmetrically: an authored mapping is just
+        # as stale as a classifier/operator mapping when the replacement Idea carries no concepts of its own.
+        st.node_concepts.pop(n.id, None)
+        st.node_concept_provenance.pop(n.id, None)
+        st.node_concepts_at_vocab.pop(n.id, None)
+        st.node_concept_deltas.pop(n.id, None)
+        ctx.concept_subject_invalidated.add(n.id)
+    if delta_mode and not unsupported_mode and not receipt_protected:
+        # PART V (B): the node authored a DELTA vs the run base + its parents. Store the tolerant reader's
+        # bounded valid operands here; the append-only Event remains the lossless audit source. The fold
+        # post-pass (`_materialize_concept_deltas`) resolves node_concepts topologically over the complete
+        # DAG, so fold stays order-tolerant. Provenance stays `authored` so a classifier/operator event
+        # still wins (the post-pass fills only nodes that keep the authored delta). Empty lists are an
+        # explicit zero delta, so they still create a sidecar and materialized membership.
+        st.node_concept_deltas[n.id] = {"added": delta_added, "removed": delta_removed}
+        st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
+        st.node_concepts_at_vocab.pop(n.id, None)
+    elif (not unsupported_mode and not receipt_protected
+          and (n.idea.concepts or recognized_mode == "full")):
+        # Full is an exact replacement. An explicit `full` + [] is therefore a known-empty membership,
+        # while an old no-mode/no-concepts payload stays genuinely absent for replay compatibility.
+        st.node_concept_deltas.pop(n.id, None)
+        st.node_concepts[n.id] = [str(c) for c in n.idea.concepts]
+        st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
+        st.node_concepts_at_vocab.pop(n.id, None)
+    elif not receipt_protected:
+        # Unknown mode and genuinely absent legacy membership are both non-authoritative. A pending
+        # replacement must not retain a previous authored set merely because classifier-protected
+        # subject equality intentionally ignores the proposer concept envelope.
+        st.node_concept_deltas.pop(n.id, None)
+        if st.node_concept_provenance.get(n.id) == NODE_CONCEPT_PROVENANCE_AUTHORED:
+            st.node_concepts.pop(n.id, None)
+            st.node_concept_provenance.pop(n.id, None)
+            st.node_concepts_at_vocab.pop(n.id, None)
+
 
 def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV D5 Phase 2c: the LLM tagger's RAW tags for one node, recorded once so later cadences reuse
