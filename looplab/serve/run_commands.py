@@ -4189,10 +4189,20 @@ class RunCommandService:
                 self._monitor(rd, path, record, command_id, spec)
         except Exception as exc:  # noqa: BLE001 - worker failures must become observable records
             try:
-                self._terminal(path, record, "failed", error=_error(
-                    "command_worker_failed", str(exc),
-                    "correct the cause, then POST this command id's /retry endpoint",
-                    retryable=True))
+                # Re-read before writing. `record` here is the PRE-ADMISSION copy: `_admit` persists
+                # the outcome and the bookkeeping (`event_seq`, `baseline_seq`, the spawn lease) that
+                # `/retry` and reconciliation read to find the marked intent, and this handler must
+                # not lose either. Two things follow. A record that is already terminal on disk is
+                # the durable answer — this handler exists to make a crash OBSERVABLE, never to
+                # demote a command whose effect landed. And a genuine crash is reported against what
+                # admission wrote, so the failure still points at its intent instead of reading as a
+                # command that never appended one (the one state operators must not auto-retry).
+                current = self._load(path) or record
+                if current.get("status") not in TERMINAL_STATUSES:
+                    self._terminal(path, current, "failed", error=_error(
+                        "command_worker_failed", str(exc),
+                        "correct the cause, then POST this command id's /retry endpoint",
+                        retryable=True))
             except Exception:
                 pass
         finally:

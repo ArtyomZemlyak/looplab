@@ -62,6 +62,30 @@ def test_every_task_probe_names_a_registered_hook():
         "adapters/tasks.py::TASK_OPTIONAL_HOOKS (register it + document it in the docstring).")
 
 
+def test_every_data_field_probe_names_a_declared_model_field():
+    """The `_DATA_FIELDS` escape hatch must not become the hole the hook registry closed.
+
+    A name listed there is exempt from `TASK_OPTIONAL_HOOKS` precisely because it is a declared
+    field of the task model rather than a behaviour hook — so hold it to that. Otherwise a typo'd
+    probe, or a field renamed on the adapter, goes back to silently reading `None` forever: the
+    `resume` reader warning would simply stop firing, with nothing red anywhere.
+
+    Pydantic v2 keeps fields in `model_fields`, NOT as class attributes, so `dir(cls)` cannot see
+    them — checking the wrong one reports every data field as missing.
+
+    Restored 2026-08-05: this guard was collateral of merge 99438191, which resolved a two-test
+    conflict by taking `ours` across the whole tree. `42b018b0` deliberately declined to restore the
+    `eval` ENTRY (the probe it exempted is gone), which is right and does not extend to the guard."""
+    from looplab.adapters.tasks import _KINDS
+
+    undeclared = {name for name in _DATA_FIELDS
+                  if not any(name in getattr(cls, "model_fields", {}) for cls in _KINDS.values())}
+    assert not undeclared, (
+        f"_DATA_FIELDS name(s) {undeclared} are declared by NO shipped adapter — either the probe "
+        "is typo'd (it silently reads None forever) or the field was renamed; fix the probe or "
+        "move the name to adapters/tasks.py::TASK_OPTIONAL_HOOKS if it became a real hook.")
+
+
 def test_every_registered_hook_has_a_consumer():
     probes = set(_all_probes())
     # Hooks consumed by direct attribute call (after a repo_spec/backend gate) rather than a
