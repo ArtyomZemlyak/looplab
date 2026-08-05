@@ -21,6 +21,16 @@ warning on its own would just move the same `LLMError` one function later, into 
 (measured: `looplab finalize` still exited 1 with zero artifacts). `credential_free_wrap_up_settings`
 is what actually makes the warning true.
 
+BOTH GATES NAME A CAUSE, not just a failure. "there is nothing at that address" and "the endpoint
+is there, answering, and rate-limiting you" reach this module as the same `LLMError` string, and
+until 2026-08-05 they got the same one-line remedy — "start the endpoint, or point
+LOOPLAB_LLM_BASE_URL / --model at one" — which is unfollowable advice for a running endpoint and
+blocked two measured launches against one that was merely at `Current limit: 50`. The endpoint gate
+therefore classifies every probe failure through `core/llm_transient.py::classify_llm_failure` and
+renders one remedy per cause from `_REMEDIES`. The refusal itself is unchanged in strength: a
+throttled endpoint is refused too, because the roles cannot tell a 429 from a dead port either (see
+`preflight_role_endpoints`).
+
 Its own module rather than a function in `factory.py` for two reasons: it is a gate, not a
 composition root (the factory's `test_agent_factory_split.py` line cap is a deliberate reminder of
 what that file is FOR), and a preflight that must run BEFORE any role is built has no business
@@ -30,9 +40,11 @@ LAYERING: same rule as `factory.py` — imports of `agents`/`search`/`tools` sta
 """
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from looplab.core.errors import LLMError
-from looplab.core.llm import (llm_credential_consumers, make_llm_client_for, resolve_llm_target,
-                              validate_bound_profiles)
+from looplab.core.llm import (LLM_FAILURE_CAUSES, classify_llm_failure, llm_credential_consumers,
+                              make_llm_client_for, resolve_llm_target, validate_bound_profiles)
 
 # One bounded, four-token completion — the SAME probe shape, and the same probe-only client controls
 # (no stream, no cache, no reasoning, a whole-call wall guard), that the UI's `/api/llm/health` route
@@ -45,10 +57,27 @@ _PREFLIGHT_MESSAGES = [{"role": "user", "content": "Reply with one word: ready"}
 _PREFLIGHT_MAX_TOKENS = 4
 _PREFLIGHT_MAX_RETRIES = 2
 PREFLIGHT_TIMEOUT_S = 60.0
+# The retries above go through the client's own `_RETRY_POLICY` — this preflight has never bypassed
+# it, and must not: `_policy_throttled` is what honors a `Retry-After` and `_policy_forbidden` is
+# what tells a burst-throttle 403 from a hard one. What the policy does NOT know is that a LAUNCH has
+# a budget. It clamps a server directive to RETRY_AFTER_CAP_S (120 s) and sleeps it, so measured
+# against the team endpoint's real `Retry-After: 60` this preflight sat silent for 121.4 s and then
+# refused anyway — while advertising a 60 s bound. `retry_after_cap` makes an over-budget directive
+# END the retries instead, so the worst case is 2 x 15 s of waiting inside the 60 s wall, and the
+# refusal quotes the server's own number. Under the cap nothing changes: a `Retry-After: 3` blip, and
+# our own 2 s / 4 s backoff when the endpoint sends no directive, are still ridden out. Each wait is
+# narrated at WARNING by `_policy_throttled`, so the operator sees why the launch is pausing.
+_PREFLIGHT_RETRY_AFTER_CAP_S = 15.0
 
 
-def _probe_role_endpoints(settings, *, timeout_s: float) -> list[str]:
-    """Probe every distinct role target once; return one description per unreachable target.
+class _ProbeFailure(NamedTuple):
+    """One target that did not answer usably, and WHY — the unit both policies below render."""
+    cause: str                                  # a member of `LLM_FAILURE_CAUSES`
+    detail: str                                 # operator-facing "<role> (<model> at <url>): <err>"
+
+
+def _probe_role_endpoints(settings, *, timeout_s: float) -> list[_ProbeFailure]:
+    """Probe every distinct role target once; return one classified failure per unusable target.
 
     The shared body of the two policies below. Both need exactly the same measurement — what differs
     is only what a failure MEANS at that entry point, and that decision belongs to the caller.
@@ -78,10 +107,11 @@ def _probe_role_endpoints(settings, *, timeout_s: float) -> list[str]:
     def _probe_factory(_settings, **target_kwargs):
         return make_llm_client(_settings, **target_kwargs, stream=False, cache=False,
                                disable_reasoning=True, max_retries=_PREFLIGHT_MAX_RETRIES,
-                               wall_timeout=timeout_s)
+                               wall_timeout=timeout_s,
+                               retry_after_cap=_PREFLIGHT_RETRY_AFTER_CAP_S)
 
     seen: set = set()
-    failures: list[str] = []
+    failures: list[_ProbeFailure] = []
     for role in sorted(roles, key=lambda item: item or ""):
         try:
             target = resolve_llm_target(settings, role=role)
@@ -94,7 +124,8 @@ def _probe_role_endpoints(settings, *, timeout_s: float) -> list[str]:
             client = make_llm_client_for(
                 settings, role=role, timeout=timeout_s, factory=_probe_factory)
         except Exception as exc:  # noqa: BLE001 — an unbuildable client is a preflight failure too
-            failures.append(f"{role or 'the default target'}: {exc}")
+            failures.append(_ProbeFailure(classify_llm_failure(exc),
+                                          f"{role or 'the default target'}: {exc}"))
             continue
         # `probe` is a capability of the real transport, not of the LLMClient PROTOCOL
         # (`core/parse.py::LLMClient` declares only complete_tool/complete_text). A client that
@@ -107,9 +138,84 @@ def _probe_role_endpoints(settings, *, timeout_s: float) -> list[str]:
         try:
             client.probe(_PREFLIGHT_MESSAGES, max_tokens=_PREFLIGHT_MAX_TOKENS)
         except Exception as exc:  # noqa: BLE001 — every transport/protocol failure is the answer
-            failures.append(
-                f"{role or 'the default target'} ({target.model} at {target.base_url}): {exc}")
-    return list(dict.fromkeys(failures))
+            # WHAT failed and WHY are recorded separately. "the endpoint is not there" and "the
+            # endpoint is there and rate-limiting you" are the same sentence in `str(exc)` — the
+            # difference lives in the SDK error the client raised `from`, which is what
+            # `classify_llm_failure` reads. Every remedy this module can offer hangs off it.
+            failures.append(_ProbeFailure(
+                classify_llm_failure(exc),
+                f"{role or 'the default target'} ({target.model} at {target.base_url}): {exc}"))
+    # Dedupe on the DETAIL: two roles behind one target are already deduped above, and a repeated
+    # detail is the same target reported twice. The cause travels with it and cannot disagree.
+    return list({failure.detail: failure for failure in failures}.values())
+
+
+# One paragraph per member of `LLM_FAILURE_CAUSES`, naming the cause and the remedies that can
+# actually reach it. The reason this is a table and not a sentence: the causes demand OPPOSITE
+# actions. `unreachable` wants the endpoint started or the URL repointed; `throttled` wants exactly
+# NEITHER, because the endpoint is up and correctly configured, and the operator who follows that
+# advice changes a working configuration while chasing a limit. That is not hypothetical — the one
+# sentence below `unreachable` was the ONLY sentence this refusal had, and it blocked two live
+# launches against an endpoint that was merely rate-limiting (`Current limit: 50`).
+_REMEDIES: dict[str, str] = {
+    "throttled":
+        "That endpoint is UP and answering — it is REFUSING this key for now (HTTP 429, or a 403 "
+        "whose body says burst/rate limit). Starting anyway is what this gate exists to stop: every "
+        "role would meet the same limit, and each of them degrades to an empty fallback proposal "
+        "rather than raising. Your options are (1) wait for the limit window to reset and re-run — "
+        "when the message above quotes a wait, that is the server's own estimate of it; (2) lower "
+        "concurrency so the run fits "
+        "inside the limit (`-s eval_parallel=1 -s llm_parallel=1`, and `-s speculation_depth=0`); "
+        "(3) move the throttled role to a DIFFERENT model on the SAME endpoint (`--model`, or "
+        "`-s researcher_model=… -s developer_model=…`) — limits are usually per key per model; "
+        "(4) get the limit raised. Do NOT change LOOPLAB_LLM_BASE_URL: the endpoint is not the "
+        "problem.",
+    "overloaded":
+        "That endpoint is UP and answering, but failing on its own side (HTTP 5xx / 408) — a "
+        "restarting or oversubscribed server, or a gateway between us and it. Nothing in your "
+        "configuration is wrong: wait and re-run, or check the server's logs. Do NOT change "
+        "LOOPLAB_LLM_BASE_URL or the model name.",
+    "unreachable":
+        "Nothing answered at that address (refused connection, DNS failure, TLS error or timeout) — "
+        "start the endpoint, or point LOOPLAB_LLM_BASE_URL / --model at one that is running.",
+    "credential":
+        "That endpoint answered and REFUSED the credential (HTTP 401). The endpoint and the model "
+        "are fine — the key is wrong, expired, or not the one this endpoint issues: fix "
+        "LOOPLAB_LLM_API_KEY (or the profile's `api_key_env`, see `llm_profiles`). Note that a key "
+        "only travels with the endpoint it is bound to, so repointing a role's base_url drops it.",
+    "model":
+        "That endpoint answered and REFUSED the request (HTTP 400/403/404) — its own words are "
+        "quoted above and normally name the model. The endpoint and the credential are fine: fix "
+        "the model id (`--model`, LOOPLAB_LLM_MODEL, or the per-role `*_model` / profile field). "
+        "Use the bare name the endpoint advertises — a tier suffix such as `:max` or `:high` is a "
+        "DIFFERENT id and is refused as an unknown model.",
+    "protocol":
+        "That failure carries no HTTP status we can read, so this gate will NOT guess which of the "
+        "causes above it is — whatever the transport reported is quoted verbatim above. It covers a "
+        "reachable endpoint answering unusably (an empty or non-JSON body, typically a proxy or "
+        "gateway in front of the model) and any transport LoopLab did not build itself. Check that "
+        "LOOPLAB_LLM_BASE_URL ends at an OpenAI-compatible `/v1` root and that the endpoint is up; "
+        "`looplab smoke` issues the same two calls and prints the full error.",
+}
+
+
+def _remedy_text(failures: list[_ProbeFailure]) -> str:
+    """The remedy paragraphs for the causes actually present, in `LLM_FAILURE_CAUSES` order.
+
+    ORDER is fixed by the vocabulary rather than by probe order so that two roles failing two
+    different ways always read the same. A cause with no entry cannot happen silently: the module's
+    own registry check below turns that into an ImportError-time failure, not a run refused with an
+    empty remedy.
+    """
+    present = {failure.cause for failure in failures}
+    return "\n  ".join(_REMEDIES[cause] for cause in LLM_FAILURE_CAUSES if cause in present)
+
+
+# The registry guard, at import time. `_REMEDIES` is keyed by a bare string, so a cause added to
+# `core/llm_transient.py::LLM_FAILURE_CAUSES` without a remedy here would surface as a refusal whose
+# remedy section is simply missing — the silent shape this whole change exists to remove.
+assert set(_REMEDIES) == set(LLM_FAILURE_CAUSES), (
+    "every LLM_FAILURE_CAUSES member needs a remedy paragraph in preflight._REMEDIES")
 
 
 def preflight_role_endpoints(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S) -> None:
@@ -129,17 +235,28 @@ def preflight_role_endpoints(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S
     THE SCOPE OF THAT REASONING IS A RUN THAT IS ABOUT TO DO WORK. Every sentence above is about a
     PROPOSAL; a run that is already over makes none, so this refusal is wrong for a wrap-up entry
     point and `wrap_up_endpoint_warning` is what those call instead.
+
+    A THROTTLED ENDPOINT IS STILL A REFUSAL, and deciding that took the measurement above seriously
+    in both directions. It is tempting to wave a 429 through as transient — the run might well
+    succeed a minute later. But `parse_structured` / `LLMResearcher.propose` / `_fallback` cannot
+    tell a rate limit from a dead port: both arrive as `LLMError`, and a run that starts into a live
+    limit degrades every role exactly the way the dead endpoint did, into the flat `finished=True`
+    lie. The retries are what separate "transient" from "sustained": the probe re-asks after the
+    endpoint's own `Retry-After` (see `_PREFLIGHT_RETRY_AFTER_CAP_S`), so a blip clears and only a
+    limit that is still refusing on the last attempt gets here. What was wrong was never the
+    refusal — it was telling that operator to start an endpoint that is already running.
     """
     failures = _probe_role_endpoints(settings, timeout_s=timeout_s)
     if failures:
         raise LLMError(
-            "LLM endpoint preflight failed: " + "; ".join(failures)
-            + ". The run needs a reachable model for these roles — start the endpoint, or point "
-              "LOOPLAB_LLM_BASE_URL / --model at one. Run offline with `--backend toy` "
-              "(or -s backend=toy). Refusing to start: the roles would degrade to empty fallback "
-              "proposals and the run would report success on a flat, meaningless result. "
-              "(Wrapping up a run that is already over is not refused — `looplab finalize` warns "
-              "and names the artifacts a missing model degrades.)")
+            "LLM endpoint preflight failed: "
+            + "; ".join(f"[{failure.cause}] {failure.detail}" for failure in failures)
+            + ".\n  " + _remedy_text(failures)
+            + "\n  Run offline with `--backend toy` (or -s backend=toy), or check the same "
+              "endpoints without launching anything with `looplab smoke`. Refusing to start: the "
+              "roles would degrade to empty fallback proposals and the run would report success on "
+              "a flat, meaningless result. (Wrapping up a run that is already over is not refused — "
+              "`looplab finalize` warns and names the artifacts a missing model degrades.)")
 
 
 # The one tail both wrap-up policies end with. A missing model costs the same two artifacts whether
@@ -185,7 +302,11 @@ def wrap_up_endpoint_warning(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S
     failures = _probe_role_endpoints(settings, timeout_s=timeout_s)
     if not failures:
         return None
-    return "⚠ LLM endpoint unreachable while wrapping up: " + "; ".join(failures) + _COSTS
+    # "unusable", not "unreachable": this header used to assert a cause it had not measured, and it
+    # was wrong for every throttled/overloaded/mis-credentialed endpoint — all of which are up and
+    # answering. The cause now travels per target, from the same classification the refusal uses.
+    return ("⚠ LLM endpoint unusable while wrapping up: "
+            + "; ".join(f"[{failure.cause}] {failure.detail}" for failure in failures) + _COSTS)
 
 
 def wrap_up_credential_warning(settings) -> str | None:

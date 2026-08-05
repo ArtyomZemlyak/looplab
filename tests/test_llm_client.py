@@ -225,3 +225,158 @@ def test_a_sibling_that_starts_during_the_abort_never_binds_the_doomed_client():
     assert sibling_sdks and sibling_sdks[0] is not wedged, (
         "a call starting during the abort bound the client the teardown was destroying")
     assert isinstance(client._sdk, _FreshSDK)
+
+
+# ------------------------------------------------------- the failure CAUSE, and the retry budget
+def _sdk_status_error(status: int, body: dict):
+    """A real `openai` error of the class the SDK maps `status` to, over a real httpx response."""
+    import httpx
+    import openai
+    request = httpx.Request("POST", "http://x/v1/chat/completions")
+    response = httpx.Response(status, json={"error": body}, request=request,
+                              headers={"retry-after": "60"} if status == 429 else {})
+    # The SDK's own status -> class mapping (`openai._base_client._make_status_error`): an exact
+    # match for the 4xx family, and EVERY 5xx as InternalServerError — whose class attribute reads
+    # 500, so a 502/503 does not match itself. Mirroring the real mapping matters twice over here:
+    # `_RETRY_POLICY` dispatches on the CLASS (so a plain APIStatusError would reach the
+    # unclassified tail and never retry), while `classify_llm_failure` reads the STATUS off the
+    # response — and the two must agree about what a live 503 is.
+    cls = openai.APIStatusError
+    if status >= 500:
+        cls = openai.InternalServerError
+    else:
+        for candidate in (openai.BadRequestError, openai.AuthenticationError,
+                          openai.PermissionDeniedError, openai.NotFoundError, openai.ConflictError,
+                          openai.UnprocessableEntityError, openai.RateLimitError):
+            if getattr(candidate, "status_code", None) == status:
+                cls = candidate
+                break
+    return cls("boom", response=response, body=body)
+
+
+def test_the_failure_cause_truth_table_is_read_off_the_status_not_the_message():
+    """The rule a refusal's remedy hangs off, stated where it can be reviewed (CLAUDE.md guard #2).
+
+    Every row was measured before it was written down: 401 and 403 against the team endpoint
+    (`team_model_access_denied` for a model outside the allow-list, including for a `:max` / `:high`
+    tier suffix), a real 429 carrying `Current limit: 50` and `Retry-After: 60`, 500/502/503 and an
+    empty 200 from a local stub, and a refused connection. The point of the table is that its two
+    ENDS demand opposite actions: "throttled" is an endpoint that is up, correctly configured and
+    answering, so "start the endpoint, or point LOOPLAB_LLM_BASE_URL at one" — the single remedy the
+    refusal used to give ALL of these — is advice that cannot possibly help there.
+    """
+    import httpx
+    import openai
+    from looplab.core.errors import LLMError
+    from looplab.core.llm import LLM_FAILURE_CAUSES, classify_llm_failure
+
+    rows = [
+        (401, {"message": "Invalid proxy server token passed"}, "credential"),
+        (403, {"message": "team not allowed to access model. Tried to access qwen3.5-122b:max"},
+         "model"),
+        (403, {"message": "Access denied by security policy"}, "throttled"),   # a burst throttle
+        (429, {"message": "Rate limit exceeded ... Current limit: 50"}, "throttled"),
+        (500, {"message": "internal server error"}, "overloaded"),
+        (502, {"message": "Bad gateway"}, "overloaded"),
+        (503, {"message": "The model is overloaded"}, "overloaded"),
+        # 408 keeps the 5xx company because it says the same thing to the operator, even though the
+        # SDK gives it no class of its own (so it is a plain APIStatusError the retry policy does NOT
+        # retry — the classification is about the ADVICE, not about retryability).
+        (408, {"message": "Request Timeout"}, "overloaded"),
+        (400, {"message": "model `nope` does not exist"}, "model"),
+        (404, {"message": "The model `nope` does not exist"}, "model"),
+        (409, {"message": "conflict"}, "protocol"),
+    ]
+    for status, body, expected in rows:
+        sdk_error = _sdk_status_error(status, body)
+        assert classify_llm_failure(sdk_error) == expected, status
+        # …and through the wrapper the client actually raises. `_post` raises `LLMError(...) from
+        # exc` at every policy site, so the classification has to survive a hop of wrapping — that
+        # is the ONLY form the preflight ever sees.
+        wrapped = LLMError(f"LLM request to http://x/v1 failed: {sdk_error}")
+        wrapped.__cause__ = sdk_error
+        assert classify_llm_failure(wrapped) == expected, status
+
+    assert classify_llm_failure(
+        openai.APIConnectionError(request=httpx.Request("POST", "http://x/v1"))) == "unreachable"
+    assert classify_llm_failure(
+        openai.APITimeoutError(request=httpx.Request("POST", "http://x/v1"))) == "unreachable"
+    # NOT "unreachable": defaulting an unclassifiable failure to the diagnosis with the loudest
+    # remedy ("start the endpoint") is the whole defect this function was added to remove.
+    assert classify_llm_failure(LLMError("returned an unparseable body")) == "protocol"
+    assert classify_llm_failure(RuntimeError("a custom transport said something")) == "protocol"
+    assert {row[2] for row in rows} | {"unreachable"} <= set(LLM_FAILURE_CAUSES)
+
+
+def test_a_cause_chain_cycle_or_depth_cannot_hang_the_classifier():
+    """`__cause__` is caller-settable, so the walk is bounded and cycle-safe by construction."""
+    from looplab.core.errors import LLMError
+    from looplab.core.llm import classify_llm_failure
+
+    first, second = LLMError("a"), LLMError("b")
+    first.__cause__, second.__cause__ = second, first
+    assert classify_llm_failure(first) == "protocol"
+
+    deep = _sdk_status_error(429, {"message": "rate limited"})
+    for _ in range(20):                       # buried far below the bounded walk
+        wrapper = LLMError("wrapped")
+        wrapper.__cause__ = deep
+        deep = wrapper
+    assert classify_llm_failure(deep) == "protocol"
+
+
+def test_an_over_budget_retry_after_ends_the_retries_instead_of_being_clamped(monkeypatch):
+    """A caller with a wall-clock budget must not silently SERVE a minutes-long Retry-After.
+
+    Measured against the team endpoint's real `Retry-After: 60`: the launch preflight, which
+    advertises a 60 s bound, slept 2 x 60 s and refused anyway — 121.4 s in which it printed nothing
+    at all. Refusing an out-of-range directive rather than clamping it is the same rule
+    `engine/widths.py` settles concurrency widths by, and the refusal quotes the SERVER's number so
+    the operator learns the wait instead of serving it.
+    """
+    import pytest
+    from looplab.core.errors import LLMError
+    from looplab.core.llm import OpenAICompatibleClient
+
+    slept: list[float] = []
+    monkeypatch.setattr("looplab.core.llm.time.sleep", slept.append)
+    throttled = _sdk_status_error(429, {"message": "Current limit: 50"})   # carries Retry-After: 60
+
+    budgeted = OpenAICompatibleClient(base_url="http://x/v1", api_key="k", model="m",
+                                      max_retries=2, retry_after_cap=15.0)
+    with pytest.raises(LLMError) as raised:
+        budgeted._retry_or_raise(throttled, 0, use_stream=False)
+    assert slept == [], "an over-budget directive must not be slept at all"
+    assert "60s" in str(raised.value) and "15s" in str(raised.value)
+    assert raised.value.__cause__ is throttled          # the cause survives -> still "throttled"
+
+    # UNDER the cap the wait is still served, so a short blip is still ridden out…
+    short = _sdk_status_error(503, {"message": "overloaded"})              # no Retry-After header
+    assert budgeted._retry_or_raise(short, 0, use_stream=False) is False
+    assert slept == [2.0], "our own backoff is inside any sane budget and must still be served"
+
+    # …and a caller that declared NO budget keeps the historical clamp-and-sleep behaviour.
+    slept.clear()
+    OpenAICompatibleClient(base_url="http://x/v1", api_key="k", model="m", max_retries=2
+                           )._retry_or_raise(throttled, 0, use_stream=False)
+    assert slept == [60.0]
+
+
+def test_the_throttle_wait_is_narrated_rather_than_silent(monkeypatch, caplog):
+    """A wait nobody can see reads as a hang — the same failure the GPU host-lease notice records.
+
+    WARNING, so it reaches stderr through logging's `lastResort` handler in a CLI run that never
+    configured logging (`engine/resources.py::_note_gpu_host_lease_contention`, same reasoning).
+    """
+    import logging
+
+    from looplab.core.llm import OpenAICompatibleClient
+
+    monkeypatch.setattr("looplab.core.llm.time.sleep", lambda _s: None)
+    client = OpenAICompatibleClient(base_url="http://x/v1", api_key="k", model="m", max_retries=2)
+    with caplog.at_level(logging.WARNING, logger="looplab.core.llm"):
+        client._retry_or_raise(_sdk_status_error(429, {"message": "limit"}), 0, use_stream=False)
+    assert len(caplog.records) == 1 and caplog.records[0].levelno == logging.WARNING
+    said = caplog.records[0].getMessage()
+    assert "http://x/v1" in said and "429" in said and "throttled" in said
+    assert "60s" in said and "attempt 2 of 3" in said       # the wait AND how much is left

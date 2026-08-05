@@ -18,6 +18,7 @@ existing module they belong in.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from typer.testing import CliRunner
@@ -168,13 +169,22 @@ def test_every_settings_backed_bool_on_run_is_tri_state():
 class _DeadClient:
     """Stands in for a client whose endpoint is not there. `probe` is the only method a preflight
     may call — a preflight that reached for anything else would be testing a different code path
-    than the run does."""
+    than the run does.
+
+    It raises `from` a real `openai.APIConnectionError` because the real transport does, and because
+    the CAUSE is load-bearing since 2026-08-05: the refusal's remedy is chosen by
+    `classify_llm_failure`, which reads the SDK error the client raised from rather than the message
+    text. A double raising a bare LLMError doubles a DIFFERENT failure (an unclassifiable one)."""
 
     def __init__(self, *_a, **_kw):
         pass
 
     def probe(self, _messages, **_kw):
-        raise LLMError("LLM request to http://127.0.0.1:9/v1 failed: Connection error.")
+        import httpx
+        import openai
+        refused = openai.APIConnectionError(request=httpx.Request("POST", "http://127.0.0.1:9/v1"))
+        raise LLMError(
+            "LLM request to http://127.0.0.1:9/v1 failed: Connection error.") from refused
 
 
 def test_an_unreachable_endpoint_refuses_to_start_the_run(monkeypatch):
@@ -191,6 +201,9 @@ def test_an_unreachable_endpoint_refuses_to_start_the_run(monkeypatch):
     assert "preflight" in msg
     assert "http://127.0.0.1:9/v1" in msg and "m" in msg    # WHICH endpoint and WHICH model
     assert "backend=toy" in msg                              # and what to do instead
+    # …and THIS failure is the one the historical advice was written for, so it keeps it.
+    assert "[unreachable]" in msg
+    assert "start the endpoint" in msg
 
 
 def test_the_offline_backend_is_never_probed(monkeypatch):
@@ -247,6 +260,12 @@ def test_the_probe_client_is_bounded_and_uncached(monkeypatch):
     assert seen["stream"] is False and seen["cache"] is False
     assert seen["disable_reasoning"] is True
     assert seen["wall_timeout"] == 7.0
+    # "must not be able to hang" needs BOTH halves: `wall_timeout` bounds each attempt, and
+    # `retry_after_cap` bounds the sleeping BETWEEN them. Without the second, a server directive is
+    # clamped to the module-wide 120 s and served once per retry — measured at 121.4 s of silence
+    # inside a preflight whose documented bound is 60 s.
+    assert seen["retry_after_cap"] == preflight._PREFLIGHT_RETRY_AFTER_CAP_S
+    assert seen["max_retries"] * seen["retry_after_cap"] <= preflight.PREFLIGHT_TIMEOUT_S
 
 
 def test_a_client_without_a_probe_is_not_read_as_an_unreachable_endpoint(monkeypatch):
@@ -325,3 +344,205 @@ def test_the_degraded_agentic_proposal_records_why(monkeypatch):
     # The genuinely causeless path (the tool loop ran out of turns) still works with one argument —
     # that is the `drive_tool_loop(fallback=...)` callback contract, which calls `fallback(messages)`.
     assert isinstance(r._fallback([]), type(idea))
+
+
+# ------------------------- 3b. …and an endpoint that IS there, refusing for four different reasons
+# `_probe_role_endpoints` measured all four the same way and reported all four with one sentence —
+# "start the endpoint, or point LOOPLAB_LLM_BASE_URL / --model at one" — which is unfollowable for
+# every case below except a dead port. Measured: it blocked two live launches against an endpoint
+# that was merely rate-limiting (HTTP 429, `Current limit: 50`, `Retry-After: 60`), and it sat
+# SILENT for 121.4 s first because the client clamped that directive to its own 120 s ceiling and
+# slept it twice, inside a preflight advertising a 60 s bound.
+#
+# Driven against a REAL socket rather than a raising double, because everything under test lives
+# BELOW our code: which openai exception class the SDK builds, whether `_RETRY_POLICY` retries it,
+# what `Retry-After` does, and which status the classifier reads. A double asserts our own beliefs
+# about all four back to us.
+_REAL_BODIES = {
+    # The team endpoint's genuine 429 (LiteLLM), captured live by bursting past `Current limit: 50`.
+    429: ({"error": {"message": "Rate limit exceeded for api_key: 8f0b7974a871. Limit type: "
+                                "requests. Current limit: 50, Remaining: 0. Limit resets at: "
+                                "2026-08-05 13:36:39 UTC", "type": "throttling_error",
+                     "code": "429"}}, {"retry-after": "60"}),
+    # …and its genuine 403 for a model outside the team allow-list — the shape a `:max` / `:high`
+    # tier suffix produces, which is why it must read as a MODEL problem and not a credential one.
+    403: ({"error": {"message": "team not allowed to access model. This team can only access "
+                                "models=['qwen3.5-122b', 'qwen3.6-35b', 'qwen3-emb-4b', "
+                                "'deepseek-v4-flash']. Tried to access qwen3.5-122b:max",
+                     "type": "team_model_access_denied", "param": "model", "code": "403"}}, {}),
+    401: ({"error": {"message": "Authentication Error, Invalid proxy server token passed.",
+                     "type": "token_not_found_in_db", "code": "401"}}, {}),
+    503: ({"error": {"message": "The model is overloaded. Please try again later.",
+                     "type": "server_error"}}, {}),
+}
+
+
+def _stub_endpoint(status: int):
+    """Serve `_REAL_BODIES[status]` on a real loopback socket.
+
+    Returns `(base_url, attempt_timestamps, server)` — the timestamps are how the tests below tell a
+    directive that was WAITED OUT from one that was quoted and refused."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    attempts: list[float] = []
+    doc, headers = _REAL_BODIES[status]
+    payload = _json.dumps(doc).encode()
+
+    class _Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *_a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            attempts.append(time.monotonic())
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{server.server_address[1]}/v1", attempts, server
+
+
+def _refusal_for(status: int, monkeypatch, model="deepseek-v4-flash"):
+    """The operator-facing refusal a live endpoint answering `status` produces, end to end."""
+    from looplab.agents import preflight
+    base_url, attempts, server = _stub_endpoint(status)
+    monkeypatch.setenv("NO_PROXY", "*")                 # a corp proxy must not answer for the stub
+    monkeypatch.setenv("no_proxy", "*")
+    settings = Settings(backend="llm", llm_model=model, llm_base_url=base_url,
+                        llm_api_key="sk-stub", llm_api_key_base_url=base_url)
+    settings._llm_credential_pair_trusted = True
+    started = time.monotonic()
+    try:
+        with pytest.raises(LLMError) as ei:
+            preflight.preflight_role_endpoints(settings)
+    finally:
+        server.shutdown()
+    return str(ei.value), attempts, time.monotonic() - started
+
+
+def test_a_throttled_endpoint_is_refused_for_being_throttled_not_for_being_absent(monkeypatch):
+    """The reproduction, and the whole point: the endpoint is UP, correct, and rate-limiting.
+
+    It is still a refusal — a run started into a live limit degrades every role to an empty fallback
+    proposal exactly the way a dead endpoint does, because `parse_structured` / `propose` /
+    `_fallback` cannot tell a 429 from a refused connection either. What must change is the ADVICE.
+    """
+    message, attempts, elapsed = _refusal_for(429, monkeypatch)
+
+    assert "[throttled]" in message
+    assert "Current limit: 50" in message                  # the endpoint's own words, verbatim
+    assert "is UP and answering" in message
+    # The remedies that can actually reach a rate limit.
+    assert "eval_parallel=1" in message and "llm_parallel=1" in message
+    assert "--model" in message and "limit raised" in message
+    # …and the ones that cannot. This is the assertion the defect would fail.
+    assert "start the endpoint" not in message
+    assert "Do NOT change LOOPLAB_LLM_BASE_URL" in message
+    # Bounded: a 60 s directive is quoted, never served. Pre-fix this was 2 x 60 s of silence.
+    assert "asked us to wait 60s" in message and "15s retry budget" in message
+    assert len(attempts) == 1, "an over-budget directive must not be re-asked"
+    assert elapsed < 15.0, f"the refusal served the endpoint's Retry-After ({elapsed:.1f}s)"
+
+
+def test_each_live_refusal_names_its_own_cause_and_offers_only_its_own_remedy(monkeypatch):
+    """Four causes, four remedies, no cross-talk — the property the single sentence could not have.
+
+    A wrong model name reaches us as a 403 from this endpoint (`team_model_access_denied`), NOT a
+    404, so "the credential is bad" and "the endpoint is down" would both be wrong answers to it.
+    """
+    model_msg, _, _ = _refusal_for(403, monkeypatch, model="qwen3.5-122b:max")
+    assert "[model]" in model_msg
+    assert "qwen3.5-122b" in model_msg and "tier suffix" in model_msg
+    assert "start the endpoint" not in model_msg and "LOOPLAB_LLM_API_KEY" not in model_msg
+
+    cred_msg, _, _ = _refusal_for(401, monkeypatch)
+    assert "[credential]" in cred_msg
+    assert "REFUSED the credential" in cred_msg and "LOOPLAB_LLM_API_KEY" in cred_msg
+    assert "start the endpoint" not in cred_msg
+    assert "The endpoint and the model are fine" in cred_msg
+
+    busy_msg, attempts, _ = _refusal_for(503, monkeypatch)
+    assert "[overloaded]" in busy_msg
+    assert "failing on its own side" in busy_msg
+    assert "start the endpoint" not in busy_msg
+    # 5xx carries no Retry-After here, so our own backoff applies and the blip IS ridden out first.
+    assert len(attempts) == 3, "a 5xx must still be re-asked before the run is refused"
+
+    # Every refusal still ends with the offline escape and the reason the gate exists at all.
+    for message in (model_msg, cred_msg, busy_msg):
+        assert "backend=toy" in message and "fallback proposal" in message
+
+
+def test_a_transient_throttle_that_clears_inside_the_retries_is_forgiven(monkeypatch):
+    """The forgiveness the refusal is only correct BECAUSE of: a blip must not refuse a launch.
+
+    `_PREFLIGHT_MAX_RETRIES` is what separates "transient" from "sustained", so only a limit that is
+    still refusing on the last attempt gets to the refusal above. Without this the retry budget
+    added alongside it could have quietly turned every 429 into an instant refusal.
+    """
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from looplab.agents import preflight
+
+    seen: list[int] = []
+    ok = _json.dumps({"id": "x", "choices": [{"index": 0, "finish_reason": "stop",
+                                              "message": {"role": "assistant",
+                                                          "content": "ready"}}]}).encode()
+    limited = _json.dumps(_REAL_BODIES[429][0]).encode()
+
+    class _Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *_a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            seen.append(1)
+            body, status = (ok, 200) if len(seen) > 1 else (limited, 429)
+            self.send_response(status)                  # no Retry-After: our own 2 s backoff applies
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}/v1"
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+    settings = Settings(backend="llm", llm_model="deepseek-v4-flash", llm_base_url=base_url,
+                        llm_api_key="sk-stub", llm_api_key_base_url=base_url)
+    settings._llm_credential_pair_trusted = True
+    try:
+        preflight.preflight_role_endpoints(settings)     # must NOT raise
+    finally:
+        server.shutdown()
+    assert len(seen) == 2, "the blip was not re-asked, so the refusal is no longer bounded by it"
+
+
+def test_every_cause_the_classifier_can_return_has_a_remedy():
+    """The registry guard, from the test side: `_REMEDIES` is keyed by a bare string, so a cause
+    added to `LLM_FAILURE_CAUSES` without one would refuse a run with an EMPTY remedy section —
+    the silent shape this whole gate exists to remove. `preflight` asserts it at import too; this
+    fails with the names rather than an opaque AssertionError inside an import."""
+    from looplab.agents.preflight import _REMEDIES
+    from looplab.core.llm import LLM_FAILURE_CAUSES
+
+    assert set(_REMEDIES) == set(LLM_FAILURE_CAUSES), (
+        f"no remedy for {set(LLM_FAILURE_CAUSES) - set(_REMEDIES)}; "
+        f"orphan remedy for {set(_REMEDIES) - set(LLM_FAILURE_CAUSES)}")
+    for cause, remedy in _REMEDIES.items():
+        assert remedy.strip() and remedy.rstrip().endswith("."), cause

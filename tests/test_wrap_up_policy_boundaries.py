@@ -49,13 +49,22 @@ _TASK_DOC = ('{"id":"t","kind":"quadratic","goal":"g","direction":"min",'
 
 
 class _DeadClient:
-    """A transport whose endpoint is not there (the shape `_probe_role_endpoints` measures)."""
+    """A transport whose endpoint is not there (the shape `_probe_role_endpoints` measures).
+
+    Raises `from` a real `openai.APIConnectionError`, because that is what the real transport does
+    and because the CAUSE is now load-bearing: `classify_llm_failure` reads the SDK error the client
+    raised from, not the message text, so a double that raises a bare LLMError is a double of a
+    DIFFERENT failure (an unclassifiable one) and would be answered with a different remedy.
+    """
 
     def __init__(self, **_kwargs):
         pass
 
     def probe(self, _messages, **_kwargs):
-        raise LLMError(f"LLM request to {_DEAD} failed: Connection error.")
+        import httpx
+        import openai
+        refused = openai.APIConnectionError(request=httpx.Request("POST", _DEAD))
+        raise LLMError(f"LLM request to {_DEAD} failed: Connection error.") from refused
 
 
 @pytest.fixture()
@@ -221,7 +230,11 @@ def test_a_legitimate_wrap_up_resume_still_warns_and_completes(tmp_path, dead_en
     result = CliRunner().invoke(app, ["resume", str(run_dir)])
 
     assert result.exit_code == 0, result.output
-    assert "unreachable while wrapping up" in result.output
+    # The header says "unusable", not "unreachable": it is shared with the throttled/overloaded/
+    # mis-credentialed endpoints, all of which are up and answering, so it must not assert a cause
+    # it did not measure. The measured cause travels per target instead, in brackets.
+    assert "unusable while wrapping up" in result.output
+    assert "[unreachable]" in result.output          # …and this one really IS a dead port
     assert "endpoint preflight failed" not in result.output
     state = fold(store.read_all())
     assert state.finished and not state.finalization_pending()
@@ -249,7 +262,11 @@ def test_a_wrap_up_engine_whose_boundary_moved_never_reaches_the_loop(tmp_path, 
         def __init__(self):
             self.store = EventStore(run_dir / "events.jsonl")
             self.wrap_up_only = True
-            self.wrap_up_degradation_warning = "⚠ LLM endpoint unreachable while wrapping up: …"
+            # The current header spelling. This string is the test's own INPUT (the refusal must
+            # carry whatever warning the engine was annotated with, verbatim), but keeping it in
+            # step with `wrap_up_endpoint_warning` stops it reading as production text that drifted.
+            self.wrap_up_degradation_warning = (
+                "⚠ LLM endpoint unusable while wrapping up: [unreachable] …")
             self.ran = False
 
         async def run(self):
@@ -269,7 +286,7 @@ def test_a_wrap_up_engine_whose_boundary_moved_never_reaches_the_loop(tmp_path, 
     assert "WRAP-UP" in str(raised.value) and "never start new work" in str(raised.value)
     # the operator is told what to type instead, and why the model mattered here
     assert "looplab resume" in str(raised.value) and "looplab finalize" in str(raised.value)
-    assert "unreachable while wrapping up" in str(raised.value)
+    assert "unusable while wrapping up" in str(raised.value)
 
 
 def test_an_engine_built_outside_the_cli_carries_no_promise_to_check():

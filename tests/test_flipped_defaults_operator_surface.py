@@ -228,14 +228,23 @@ _DEAD = "http://127.0.0.1:9/v1"          # the discard port: never listening, re
 
 
 class _DeadClient:
-    """A transport whose endpoint is not there (the shape `_probe_role_endpoints` measures)."""
+    """A transport whose endpoint is not there (the shape `_probe_role_endpoints` measures).
+
+    Raises `from` a real `openai.APIConnectionError`, because that is what the real transport does
+    and because the CAUSE is now load-bearing: `classify_llm_failure` reads the SDK error the client
+    raised from, not the message text, so a double that raises a bare LLMError is a double of a
+    DIFFERENT failure (an unclassifiable one) and would be answered with a different remedy.
+    """
 
     def __init__(self, **_kwargs):
         pass
 
     def probe(self, _messages, **_kwargs):
+        import httpx
+        import openai
         from looplab.core.errors import LLMError
-        raise LLMError(f"LLM request to {_DEAD} failed: Connection error.")
+        refused = openai.APIConnectionError(request=httpx.Request("POST", _DEAD))
+        raise LLMError(f"LLM request to {_DEAD} failed: Connection error.") from refused
 
 
 @pytest.fixture()
@@ -341,7 +350,11 @@ def test_a_finished_run_wraps_up_with_a_dead_endpoint_and_says_what_it_lost(
 
     assert result.exit_code == 0, result.output
     assert "endpoint preflight failed" not in result.output
-    assert "unreachable while wrapping up" in result.output
+    # "unusable", not "unreachable": one header now serves every cause the probe can measure, and
+    # most of them (throttled/overloaded/credential) are endpoints that ARE reachable. The cause
+    # this fixture actually produces is named separately, in brackets.
+    assert "unusable while wrapping up" in result.output
+    assert "[unreachable]" in result.output
     state = fold(EventStore(run_dir / "events.jsonl").read_all())
     assert state.finished and not state.finalization_pending()
     # the wrap-up is not silent about having run without a model

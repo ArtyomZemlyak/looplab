@@ -39,22 +39,24 @@ looplab run examples/code_regression_task.json --backend llm --max-nodes 6
 
 ### Endpoint preflight (before a run starts)
 
-**A run whose endpoint is not reachable is refused before it starts** — no event log, no `run_finished`
+**A run whose endpoint will not serve it is refused before it starts** — no event log, no `run_finished`
 event, nothing to resume. (The run *directory* is created a moment earlier, to take `engine.lock`; the
 refusal leaves it holding nothing but that empty lock file, and `resume` rejects it with
 `no run found … (no events.jsonl)`.) You get one message on stderr and exit code `2` — the
 [refusal code](cli-reference.md#exit-codes-a-refusal-is-not-a-crash), not a traceback:
 
 ```
-Refused: LLM endpoint preflight failed: researcher (qwen3:8b at http://localhost:11434/v1): <transport
-error>. The run needs a reachable model for these roles — start the endpoint, or point
-LOOPLAB_LLM_BASE_URL / --model at one. Run offline with `--backend toy` (or -s backend=toy).
-Refusing to start: the roles would degrade to empty fallback proposals and the run would report
-success on a flat, meaningless result.
+Refused: LLM endpoint preflight failed: [unreachable] researcher (qwen3:8b at http://localhost:11434/v1):
+LLM request to http://localhost:11434/v1 failed: Connection error.
+  Nothing answered at that address (refused connection, DNS failure, TLS error or timeout) — start
+  the endpoint, or point LOOPLAB_LLM_BASE_URL / --model at one that is running.
+  Run offline with `--backend toy` (or -s backend=toy), or check the same endpoints without
+  launching anything with `looplab smoke`. Refusing to start: the roles would degrade to empty
+  fallback proposals and the run would report success on a flat, meaningless result.
 ```
 
 Why it refuses instead of trying: every LLM role degrades on purpose so one flaky answer cannot kill a
-run, and those degradations stack into a lie when the endpoint is simply absent. An unparseable answer
+run, and those degradations stack into a lie when the endpoint will not serve. An unparseable answer
 becomes an empty `Idea`, which becomes a `fallback (agent parse failed)` proposal. A measured
 `looplab run examples/toy_task.json --max-nodes 3` against a dead endpoint produced three **identical**
 `x=0,y=0` nodes, a metric flat at 10.0 and `finished=True` — a confident-looking completed run with no
@@ -66,12 +68,46 @@ What the check actually does (`looplab/agents/preflight.py`):
 |---|---|
 | **When** | In the engine constructor, immediately after the credential check and **before any role is built** — so `run`, `resume`, `finalize` and the UI's spawned engines all go through it. It **refuses** wherever the command can still start work, and **warns** on a wrap-up-only entry point (below) |
 | **Cost** | One four-token completion per **distinct** target, not one per role. The ordinary single-model run pays exactly one; roles that differ only in credential are still probed separately |
-| **Bounds** | A 60 s whole-call wall guard and 2 retries. A refused connection, bad DNS or 401 is not retried at all, so the common failure is instant; the retries only forgive a transient 429/5xx |
+| **Bounds** | A 60 s wall guard **per attempt** (headers + body), 2 retries through the client's own retry policy, and at most 15 s of waiting **between** attempts — so the whole gate is bounded, not just each request. A refused connection, bad DNS, 401, or a hard 403/404 is not retried at all, so the common failure is instant; the retries forgive a transient 429/5xx, and each wait is announced (below) |
 | **Shape** | The same probe (no stream, no cache, no reasoning) that the Web UI's `/api/llm/health` card issues, so a green card and a startable run mean the same thing |
-| **Skipped for** | `--backend toy` — bypassed **entirely**, no probe of any kind. Also the Developer roles when `--developer-backend` is external (those authenticate from the coding tool's own credential store), and any client supplied through the `make_llm_client` seam that has no `probe` method (a test double or a custom transport is not evidence of an unreachable endpoint) |
+| **Skipped for** | `--backend toy` — bypassed **entirely**, no probe of any kind. Also the Developer roles when `--developer-backend` is external (those authenticate from the coding tool's own credential store), and any client supplied through the `make_llm_client` seam that has no `probe` method (a test double or a custom transport is not evidence of a failed endpoint) |
 
-A failure lists **every** unreachable role/target, not just the first, so one restart can fix a
+A failure lists **every** failing role/target, not just the first, so one restart can fix a
 multi-provider setup. Run `looplab smoke` first if you want the same answer without launching anything.
+
+#### It names the cause, because the causes need opposite fixes
+
+`[unreachable]` above is one of six. Until 2026-08-05 it was the *only* one: every failure got the
+sentence "start the endpoint, or point `LOOPLAB_LLM_BASE_URL` / `--model` at one", which is
+unfollowable advice when the endpoint is running and correctly configured. It blocked two measured
+launches against an endpoint that was merely rate-limiting (`HTTP 429 … Current limit: 50`).
+
+The refusal now classifies the probe failure (`core/llm_transient.py::classify_llm_failure`, read off
+the HTTP status the endpoint returned rather than off the message text) and prints one remedy per
+cause present:
+
+| Tag | What the endpoint did | What actually fixes it |
+|---|---|---|
+| `[throttled]` | Answered **429**, or a **403** whose body reads as a burst/rate limit | Wait for the window to reset; lower concurrency (`-s eval_parallel=1 -s llm_parallel=1 -s speculation_depth=0`); move the role to a different model on the **same** endpoint; raise the limit. **Not** a URL change |
+| `[overloaded]` | Answered **5xx / 408** — up, failing on its own side | Wait and re-run, or check the server's logs. Nothing in your configuration is wrong |
+| `[unreachable]` | Nothing answered: refused connection, DNS failure, TLS error, timeout | Start the endpoint, or repoint `LOOPLAB_LLM_BASE_URL` |
+| `[credential]` | Answered **401** | Fix `LOOPLAB_LLM_API_KEY` or the profile's `api_key_env`. The endpoint and model are fine |
+| `[model]` | Answered **400 / 403 / 404**, refusing the request — its own words are quoted, and normally name the model | Fix the model id. Use the bare name the endpoint advertises: a tier suffix like `:max` or `:high` is a *different* id and is refused as unknown |
+| `[protocol]` | No readable HTTP status — an empty/non-JSON body, or a transport LoopLab did not build | Check the base URL really ends at an OpenAI-compatible `/v1` root; `looplab smoke` prints the full error. This gate does **not** guess which of the above it is |
+
+**A throttled endpoint is still refused.** It is tempting to wave a 429 through as transient, but the
+roles cannot tell one from a dead port either — both arrive as `LLMError` — so a run started into a
+live limit degrades into the same flat `finished=True` lie the gate exists to prevent. What separates
+"transient" from "sustained" is the retries: the probe re-asks after the endpoint's own `Retry-After`,
+so a blip clears and only a limit still refusing on the last attempt reaches the refusal.
+
+**And the wait is bounded and audible.** Each backoff is announced at `WARNING` (endpoint, status,
+seconds, `attempt 2 of 3`), so a pausing launch is not mistaken for a hang. A server `Retry-After`
+*longer* than the preflight's 15 s per-wait budget ends the retries instead of being served: the
+refusal quotes the number the server asked for, rather than sleeping it. That bound is the fix for a
+measured 121.4 s of complete silence — two 60 s directives slept in a preflight advertising 60 s —
+followed by advice that could not help. Ordinary run-time requests are unaffected and still ride out a
+directive up to `RETRY_AFTER_CAP_S` (120 s).
 
 **Wrapping up a run that is already over is never refused.** Every sentence of the reasoning above is
 about a *proposal*, and a run past its terminal boundary makes none — it can only turn work already paid
@@ -81,8 +117,10 @@ with its spend stranded in `.llm-usage-outbox`. So `finalize` — and a `run`/`r
 wrap-up boundary — runs the same probe through `wrap_up_endpoint_warning` instead: it proceeds and names
 what the missing model degrades (`(report unavailable)` for the report, nothing model-authored in
 cross-run memory), **before** the wrap-up starts, because those steps are marked complete once attempted
-and a later `finalize` will not redo them. See [`finalize`](cli-reference.md#finalize) for the full
-artifact-by-artifact list.
+and a later `finalize` will not redo them. Its header reads `⚠ LLM endpoint unusable while wrapping
+up`, with the same per-target `[cause]` tags as the refusal — it shares the probe, so it must not
+assert "unreachable" about an endpoint that answered. See [`finalize`](cli-reference.md#finalize) for
+the full artifact-by-artifact list.
 
 **The credential check is softened the same way, and it has to be.** The gate one step earlier
 (`validate_bound_profiles`, below) refuses a run whose key/endpoint pair is unusable, and on a wrap-up
