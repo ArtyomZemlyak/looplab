@@ -632,6 +632,23 @@ of naming a location that has now moved once.
 
 *Recommendation:* Extract `_eval_admission_current(state, node, generation, max_es) -> bool` (and a `_release_and_skip(reservation)` helper) used by all three sites; the parallel branch's getattr-defensive variants can be folded in since RunState always has those attributes.
 
+*Resolution (2026-08-05):* `_eval_admission_current` + `_run_terminal_gate` are module-level in
+`orchestrator.py`; all three dispatch sites call them. The duplication was real and worse than the
+finding says — the third copy is the predicate NEGATED inline, so a reader comparing the branches has
+to invert eight clauses in their head to see they are the same rule.
+
+Two parts of the recommendation declined. `_release_and_skip(reservation)` is not extracted: each
+site's refusal is already one line and they genuinely MEAN different things — skip this eval, drop the
+candidate from the pending list, or stop admitting entirely — so one helper would have to take a mode
+flag that re-splits at the call site anyway. And the `getattr` defaults are KEPT rather than folded
+in: the finding is right that a folded `RunState`/`Node` always carries those fields, so they cannot
+change a live decision, but they are what lets a hand-built test stub exercise the fence without
+raising, and removing them buys nothing.
+
+The guard's real target is a FOURTH copy, so it AST-scans for any other function mentioning
+`aborted_nodes` + `total_eval_seconds` + `tombstoned` together. Teeth: deleting the `aborted_nodes`
+clause fails it.
+
 #### ES-07 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-02)**
 
 **Eight hand-rolled `for _attempt in range(64)` tail-CAS retry loops with no shared helper**
@@ -787,6 +804,39 @@ reverse direction too — a module that DROPS the import has stopped participati
 *Evidence:* Invariant #4 (always re-fold, never cache derived state) is documented design and correct — but the spine folds the same unchanged snapshot repeatedly within one iteration: fold(decision_events) at 1530, a fold inside _mirror_hypothesis_card_merges (4750) even when nothing was written is avoided, but the speculation path folds again at 1693 and 1729, and _run_cadences' sub-steps each re-read/fold. The code itself names the O(total-events) busy-poll cost class three separate times (_defer_for_node_budget 2747-2752 added geometric backoff for it; the serial resource-wait comment 3305-3313 says "gate the re-fold on the tail seq having changed"; the parallel branch folds twice per admission). The mitigations are ad hoc per-site rather than a shared mechanism.
 
 *Recommendation:* Introduce a tail-seq-keyed fold memo on the EventStore or Engine (`fold_cached(events)` returning the previous RunState when the last seq and object identity match, mirroring _ack_commands' existing cursor/identity technique at 1278-1292). This preserves invariant #4 semantics exactly (any append invalidates) while removing the repeated O(n) folds that the comments repeatedly apologize for.
+
+*Resolution (2026-08-05) — REJECTED as specified, with the hazard verified on the code.*
+
+The DIAGNOSIS is right: the spine does re-fold an unchanged snapshot within one iteration, and the
+module's own comments apologise for it. The MECHANISM ships a data race.
+
+A shared `fold_cached` hands ONE `RunState` object to callers that each get their OWN today. Three
+facts, each checked rather than argued:
+
+* `_BuildReservation` (orchestrator.py:237) has `state: RunState` as its first field and its docstring
+  says it is "handed from the main task to one build worker" — folded state crosses a THREAD boundary.
+* `ToolProvider.bind_state` (tools/_base.py:128) hands a state to every provider that wants one.
+* folded state IS mutated outside `replay.py`: `evaluate.py:403` sets `node.rerun_stage = None`.
+
+So "nothing mutates folded state, therefore sharing it is free" is FALSE on this tree. Today each
+consumer holds a private object and that mutation is harmless; behind a memo it becomes a write to an
+object a worker thread is reading. Invariant #4 says never cache derived state across iterations —
+the memo keeps its letter (any append invalidates) while removing the isolation that made the
+invariant survivable. The saving is unmeasured; the failure mode is a heisenbug in the fold.
+
+The narrow variant the code's own comment asks for — a loop-local `_fold_if_tail_moved` in the serial
+resource wait — is also not shipped: it breaks three tests
+(`test_serial_dispatch_refolds_pin_after_bounded_wait_without_gpu_release`,
+`test_serial_dispatch_releases_stale_pin_reservation_before_eval`,
+`test_dispatch_closes_operator_dropped_card_while_waiting_for_gpu`) whose stubs deliberately model a
+pin change with NO append. In production `resource_pin` folds from `EV_CARD_RESOURCE_PINNED`, so the
+tail gate is sound — but shipping it means rewriting three tests written precisely to distrust a
+conditional re-fold, inside the loop whose failure mode is a silent hang. Not a trade worth making
+for a LOW finding.
+
+If revisited: loop-local tail gate only, never a shared memo; re-point those three tests to append the
+re-pin event (the production invariant); and cover the sibling wait loop in `engine/confirm_phase.py`
+in the same change.
 
 #### ES-13 · LOW · excessive-logic · effort: medium
 
@@ -1525,6 +1575,26 @@ carries the fail-closed guarantee that the deleted branches used to duplicate.
 *Evidence:* claim_assessments maintains three selectable identity modes: lean normalize_statement grouping (2008-2112), opt-in fuzzy token-Jaccard merge (_fuzzy_merge_claims 1733-1801), and the structured claim_key signature (_structured_assessments 1804-1978). claim_key.py's own docstring describes the structured key as the 'full-CR' fix for three named failure modes of the lean/fuzzy paths, yet all three remain live behind flags. The cost is concrete: operator decisions must overlay correctly under every mode, so there are three separate resolution mechanisms — _decision_for with a five-candidate UID fallback chain (1889-1911), the lean path's ~30-line scoped/global-key logic with scope-consistency guards (2062-2093), and the loader's control-char-prefixed shadow namespaces _global_key/_scoped_key (1303-1320) that exist only to keep the lean projection correct. Every governance bugfix must be reasoned about three times.
 
 *Recommendation:* Make structured the default projection, keep lean/fuzzy as explicitly-legacy read paths with a deprecation note, and once consumers migrate delete _fuzzy_merge_claims and the _scoped_key/_global_key shadow namespaces. Until then, add a table-of-modes comment at claim_assessments so reviewers know which overlay logic guards which mode.
+
+*Resolution (2026-08-05) — the "until then" clause; the default is NOT flipped.*
+
+All seven cited line numbers were dead: EM-01 moved these projections to `claims_assessments.py`.
+`claim_assessments` now carries the mode table the finding asks for — the three identity modes, the
+precedence rule (`structured` wins over `fuzzy`), and, the part that was nowhere stated, WHICH OVERLAY
+KEY each mode's governance decisions arrive under. That asymmetry is the finding's actual cost: the
+two legacy paths share `_scoped_key`/`_global_key`, the structured path uses a scope-precise
+`claim_uid`, and a decision recorded against a lean key must not silently apply to a structured claim
+from another task.
+
+Making structured the DEFAULT is declined here: it changes which claims merge, so it changes what the
+governance overlay applies to. That is a behaviour change for operator decisions, and it wants an
+evaluation of the existing decision ledger, not a modularity pass. Deleting `_fuzzy_merge_claims` and
+the shadow namespaces stays blocked behind that same migration.
+
+The guard checks the TABLE, not the function text. Its first draft grepped
+`inspect.getsource(claim_assessments)` for the mode names — every one of which also occurs in the
+BODY, so deleting a table row left it green. It now counts the three comment rows; removing one
+fails it.
 
 #### EM-07 · MEDIUM · duplication · effort: small
 
@@ -4022,6 +4092,28 @@ failure.
 
 *Recommendation:* If receipt-embedded proof must stay, shrink the runtime matrix to a digest of the offline test result or a handful of forced-gate cases; keep the full 15-case matrix in tests/ where the fixtures belong.
 
+*Resolution (2026-08-05) — adjudicated: this is a RECEIPT-FORMAT change, not a cleanup.*
+
+The observation is correct — `scorer_fidelity.py` really does ship fixture builders and a 15-case
+matrix as production code. But both halves of the recommendation change the WIRE, and the finding
+does not say so:
+
+`speculation_quality.py:2772` puts `"scorer_fidelity": dict(scorer)` into the receipt body, and
+`_self_digest` hashes that whole body minus its own key. So shrinking the matrix to a digest, OR
+moving it to `tests/` so the receipt stops carrying it, changes `self_digest` for every receipt —
+every already-issued calibration receipt stops verifying, and the gate refuses runs that were
+legitimately calibrated.
+
+That is doable, and this repo has done it deliberately once (XP-07 bumped the implementation digest
+to `/v2` and revoked v1 receipts in one shot). It needs the same treatment: a schema bump, a stated
+one-time revocation, and a guard pinning the new digest. What it must NOT be is a quiet refactor —
+which is how the finding reads, filed under `over-engineering` at LOW severity.
+
+Deliberately not done here. The cost the finding names (a matrix recomputed per gate) is a
+performance concern with no measurement attached; the cost of getting it wrong is a fleet of
+unverifiable receipts. If revisited, do it as an explicit receipt-schema change with its own
+evaluation, not as part of a modularity sweep.
+
 #### SE-13 · LOW · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
 **Dead helper: _explored_concepts is never called**
@@ -5070,6 +5162,27 @@ the five copy-paste skeletons, which the finding itself rates lower priority.
 *Evidence:* _run handles base preload, system-prompt assembly (7 concatenated sections), repair-note assembly, the stages-phase decision tree (operator stages vs protected manifest vs declared vs carried-over parent manifest), the three-way stage_note construction (843-866), plan phase, per-step implement loop with error collection, an exception trap, and last_files/footprint bookkeeping — the latter duplicated byte-for-byte in the except path (908-912) and success path (914-918). 'Tell the model the actual pipeline' is implemented three separate ways: _repair_stage_note (619), the inline fresh-repo notes (848-866), and _stages_user's contract text (656-682). The class plus module-level prompt constants total ~950 lines even after the RepoWriteTools split.
 
 *Recommendation:* Extract the fresh-repo stages/plan/implement orchestration (lines 806-899) into a _run_fresh(idea, write, system, user) method and a _stage_note(op_stages, declared, carried_over, manifest_protected) helper that unifies the three note builders; move the duplicated last_files/footprint epilogue into a finally block or a single _record_result(write, idea) call.
+
+*Resolution (2026-08-05) — the `_stage_note` half.*
+
+The three-way note is extracted VERBATIM. That word matters: this is PROMPT TEXT, so its bytes are
+the contract. CLAUDE.md forbids rewording a prompt as part of a refactor, and this particular wording
+carries a recorded bug — the old prompt asserted a train stage unconditionally, so after an empty
+STAGES phase the model wrote a score-only entrypoint that scored a stale checkpoint. Extraction is
+safe ONLY as a byte-for-byte move, and `tests/test_repo_stage_note.py` now pins all three variants
+plus the precedence rule (operator-declared wins) and the protected-manifest suffix. De-capitalising
+one word inside the prompt fails it.
+
+The first draft of this extraction shipped a defect that `pyflakes` caught before any test ran:
+`stage_note` is read AGAIN twenty lines below (`_run_step(..., stage_note=stage_note)`), so replacing
+the assignment with a bare `user += self._stage_note(...)` left an `UnboundLocalError` on the plan
+path. The binding is kept and the comment says why. This is the third time this session that a
+dropped local survived reading and was caught by pyflakes.
+
+NOT done: `_run_fresh` and the `_record_result` epilogue. Those move control flow rather than a
+string, and `_run`'s exception trap plus the `last_files`/`last_footprint` bookkeeping interact with
+the per-step error collection — that wants its own contract derivation, not the tail of a
+prompt-extraction change.
 
 #### RA-08 · LOW · layering · effort: small
 

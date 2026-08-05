@@ -349,6 +349,22 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
     polarity ("X helps" vs "X never helps") is a CONTRADICTION not a merge, and paraphrase/inflection
     variants collapse by exact structured key (O(n), no transitive over-merge). Mutually exclusive with the
     lean `fuzzy` path (structured wins)."""
+    # THE THREE MODES, and which overlay key each one's governance decisions arrive under — the table
+    # doc 25 EM-06 asks for, because "operator decisions must overlay correctly across all three" is
+    # the whole cost of keeping them, and nothing else states which guards which:
+    #
+    #   flags                 identity                                overlay key
+    #   ------------------    ------------------------------------    -----------------------------
+    #   (neither)             normalize_statement grouping (LEAN)     `_scoped_key` / `_global_key`
+    #   fuzzy=True            + token-Jaccard transitive merge        `_scoped_key` / `_global_key`
+    #   structured=True       claim_key.claim_signature (scope +      structured `claim_uid`
+    #                         polarity safe); WINS over fuzzy
+    #
+    # The two legacy paths share one overlay spelling; the structured path deliberately does NOT —
+    # its key is scope-precise, so a decision recorded against a lean key must not silently apply to
+    # a structured claim from a different task. That asymmetry is why the modes cannot be collapsed
+    # by deleting a branch, and why `structured` is still opt-in: making it the default CHANGES which
+    # claims merge, which is a behaviour change for the governance overlay, not a refactor.
     # DEFERRED for the same reason as `_decision_for` above: `claims.py` imports this module to
     # re-export it, so the ledger half's legacy overlay-key spellings come in per call (EM-01).
     from looplab.engine.claims import _global_key, _scoped_key
