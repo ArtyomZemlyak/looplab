@@ -616,6 +616,38 @@ class LLMRepoDeveloper:
         from looplab.runtime.command_eval import validate_stages
         return validate_stages(ev["stages"])[0] or []
 
+    def _stage_note(self, operator_stages, declared, carried_over, manifest_protected) -> str:
+        """The three-way pipeline note the implement sessions read (doc 25 RA-07).
+
+        Moved VERBATIM out of `_run`'s middle. This is PROMPT TEXT, so the bytes are the contract:
+        CLAUDE.md forbids rewording one as part of a refactor, and the wording here is load-bearing
+        for a reason the comment below records — the old prompt asserted a train stage
+        unconditionally, and after an empty STAGES phase the model wrote a score-only entrypoint that
+        scored a stale checkpoint. `tests/test_repo_stage_note.py` pins all three variants byte-for-
+        byte, so a "tidy-up" of this wording is a red test rather than a silently different agent.
+        """
+        # Tell the implement sessions what pipeline ACTUALLY exists. The old prompt asserted
+        # "your STAGES phase already declared a train stage" unconditionally — after a failed/
+        # empty stages phase the model then wrote a score-only entrypoint that scored a stale
+        # checkpoint (or crashed on a missing one) instead of training.
+        _chain = " → ".join(str(s.get("name")) for s in declared)
+        if operator_stages:
+            return (f"\nPIPELINE for this node (OPERATOR-declared, runs verbatim): "
+                    f"{_chain}. Implement the code those stages run.")
+        if declared:
+            _src = ("carried over from the parent solution — your STAGES phase declared "
+                    "nothing new this node" if carried_over else "declared by your STAGES phase")
+            return (f"\nPIPELINE for this node ({_src}): {_chain} "
+                    "→ score (operator cmd). Implement the code those stages run; the "
+                    "eval entrypoint only SCORES the artifacts the earlier stages produce.")
+        return ("\nNO pipeline stages are declared for this node"
+                + (" (the operator protected looplab_stages.json)"
+                   if manifest_protected else "")
+                + ": the operator's cmd runs ALONE as a single command. The code it "
+                "runs must do ALL the work itself when invoked — train a FRESH model, "
+                "then score it and print the metric (never read a pre-existing "
+                "checkpoint or a static results file).")
+
     def _repair_stage_note(self, op_stages: list, write) -> str:
         """Restate the node's ACTUAL pipeline for a REPAIR session, when it is knowable (P33): the
         system prompt tells the model to trust the task message's pipeline, so a repair message must
@@ -845,24 +877,11 @@ class LLMRepoDeveloper:
                 # "your STAGES phase already declared a train stage" unconditionally — after a failed/
                 # empty stages phase the model then wrote a score-only entrypoint that scored a stale
                 # checkpoint (or crashed on a missing one) instead of training.
-                _chain = " → ".join(str(s.get("name")) for s in declared)
-                if operator_stages:
-                    stage_note = (f"\nPIPELINE for this node (OPERATOR-declared, runs verbatim): "
-                                  f"{_chain}. Implement the code those stages run.")
-                elif declared:
-                    _src = ("carried over from the parent solution — your STAGES phase declared "
-                            "nothing new this node" if carried_over else "declared by your STAGES phase")
-                    stage_note = (f"\nPIPELINE for this node ({_src}): {_chain} "
-                                  "→ score (operator cmd). Implement the code those stages run; the "
-                                  "eval entrypoint only SCORES the artifacts the earlier stages produce.")
-                else:
-                    stage_note = ("\nNO pipeline stages are declared for this node"
-                                  + (" (the operator protected looplab_stages.json)"
-                                     if manifest_protected else "")
-                                  + ": the operator's cmd runs ALONE as a single command. The code it "
-                                  "runs must do ALL the work itself when invoked — train a FRESH model, "
-                                  "then score it and print the metric (never read a pre-existing "
-                                  "checkpoint or a static results file).")
+                # The binding stays: `_run_step` below is passed `stage_note=stage_note`, so
+                # dropping it here would be an UnboundLocalError on the plan path (pyflakes caught
+                # exactly this on the first draft of the extraction).
+                stage_note = self._stage_note(operator_stages, declared, carried_over,
+                                              manifest_protected)
                 user += stage_note
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
             # Compose the write/edit tools with read-only ENVIRONMENT INTROSPECTION (pkg_info / py_api /

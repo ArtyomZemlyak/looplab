@@ -5163,6 +5163,27 @@ the five copy-paste skeletons, which the finding itself rates lower priority.
 
 *Recommendation:* Extract the fresh-repo stages/plan/implement orchestration (lines 806-899) into a _run_fresh(idea, write, system, user) method and a _stage_note(op_stages, declared, carried_over, manifest_protected) helper that unifies the three note builders; move the duplicated last_files/footprint epilogue into a finally block or a single _record_result(write, idea) call.
 
+*Resolution (2026-08-05) — the `_stage_note` half.*
+
+The three-way note is extracted VERBATIM. That word matters: this is PROMPT TEXT, so its bytes are
+the contract. CLAUDE.md forbids rewording a prompt as part of a refactor, and this particular wording
+carries a recorded bug — the old prompt asserted a train stage unconditionally, so after an empty
+STAGES phase the model wrote a score-only entrypoint that scored a stale checkpoint. Extraction is
+safe ONLY as a byte-for-byte move, and `tests/test_repo_stage_note.py` now pins all three variants
+plus the precedence rule (operator-declared wins) and the protected-manifest suffix. De-capitalising
+one word inside the prompt fails it.
+
+The first draft of this extraction shipped a defect that `pyflakes` caught before any test ran:
+`stage_note` is read AGAIN twenty lines below (`_run_step(..., stage_note=stage_note)`), so replacing
+the assignment with a bare `user += self._stage_note(...)` left an `UnboundLocalError` on the plan
+path. The binding is kept and the comment says why. This is the third time this session that a
+dropped local survived reading and was caught by pyflakes.
+
+NOT done: `_run_fresh` and the `_record_result` epilogue. Those move control flow rather than a
+string, and `_run`'s exception trap plus the `last_files`/`last_footprint` bookkeeping interact with
+the per-step error collection — that wants its own contract derivation, not the tail of a
+prompt-extraction change.
+
 #### RA-08 · LOW · layering · effort: small
 
 **runtime/ is a grab-bag: three of eight modules are not runtime-execution code**
