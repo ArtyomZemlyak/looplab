@@ -535,6 +535,65 @@ pinned. Verified to have teeth by making the inject path keep two emits and drop
 
 *Recommendation:* Split along the existing seams without changing event order: (1) an _EvalAttempt dataclass owning the loop-local counters; (2) extract the watcher closures to methods (they only need node_id/generation/start_seq/cancel); (3) extract the trust-scan block (748-810) into a `_trust_scan_signals(node, res, workdir)` helper — it is already side-effect-free until the single append; (4) extract the inline-repair step (558-696). The one-terminal invariant stays in the residual ~150-line driver.
 
+*Resolution (2026-08-05) — (2) and (3) landed as written; (1) is rejected on measurement; (4) is
+adjudicated down from one extraction to the five decisions inside it. Every line number and two of
+the named concerns are stale.*
+
+Re-measured against the tree rather than the finding: `_evaluate` was `evaluate.py:283-1228`, **946
+lines, not ~700**, and its attempt loop 602 lines, not 420 — the numbers describe an earlier tree.
+Two named concerns no longer exist: **anti-stuck signatures and `stuck_sig` are gone** (`stuck_sig`
+appears nowhere under `looplab/` or `tests/` — only in this document), removed with the
+error-signature counter whose incident the loop's own comment still records. It was also no longer "the engine's single
+largest method" by the end of this change: 727 lines against `orchestrator.__init__`'s 908, so the
+docstring claim the finding quotes as evidence was corrected too.
+
+What landed: `_eval_intervention_seen`/`_watch_for_intervention` (the 81-line watcher closure pair),
+`_trust_scan_surface`/`_trust_scan_signals`, and — for (4) — `_eval_failure_text`,
+`_repaired_footprint`, `_repair_provider_failure`, `_repair_change_set`,
+`_repair_forces_full_retrain`. 946 -> 727 lines, attempt loop 602 -> 420. No event, append, fold,
+write-lock point or branch order moved.
+
+**(1) `_EvalAttempt` is rejected.** The seven counters it names are not seven: `stuck_sig` does not
+exist, and the loop-carried set is ten (`attempt`, `dep_rounds`, `next_start`, `full_retrains`,
+`triage_outcome`, `err`, `reason`, `unparseable_repairs`, `best_depth`, `node`) beside six read-only
+locals (`total_eval`, `state`, `workdir`, `generation`, `repair_log`, `_resource_reservation`).
+Boxing them changes ~60 read sites, removes no line, isolates no concern, and does not let the loop
+body move out — which needs `self`, `res`, `cancel` and the reservation besides. It is churn over
+the one method where a silent defect costs a node's terminal.
+
+**(4) as ONE extraction was rejected for the reason ES-05's own resolution records.** Measured on
+the AST rather than read off the screen, the region ES-03 points at is 383 lines that mutate those
+ten loop-carried names across SEVEN `break`s and TWO `continue`s targeting the outer `while`, plus
+two `return`s through `_record_superseded`. ES-05's first draft lost a single counter's round-trip
+and only pyflakes caught it; ten is not the same bet. The five decisions inside it
+extract with no control flow crossing the boundary at all, and each was worth naming for a reason
+size does not capture: **every one was reachable only by driving a real sandboxed evaluation that
+failed in exactly the right way** — a dead endpoint, three truncated repairs in a row, a later stage
+failing inside a multi-GPU reservation — so their branches had no individual coverage.
+`tests/test_evaluate_named_rules.py` is that coverage (25 tests), and the one counter that does
+round-trip (`unparseable_repairs`, which is per-NODE and bounds the 2343-repair incident) returns
+through the return value rather than being mutated in place.
+
+Two guard tests were stranded by the extraction and are re-pointed with the property re-verified,
+not made green: `test_config.py`'s watch-limiter pin followed the tick into
+`_watch_for_intervention` (now an AST pin, since the substring it used was indentation-sensitive),
+and `test_trust_gates_reach_the_ledger.py`'s concatenation pin followed `_trust_gate_signals` into
+`_trust_scan_signals` — plus a new pin on the link the split created, that `_evaluate` still BINDS
+what the scan returns over the same `scan_src` the `code_digest` commits to.
+
+Teeth: 20 breaks over four passes on a throwaway copy, anchors verified unique. Two are worth
+recording. A break that looked right was SILENT — replacing the no-metric hint's `key {_mk!r}`
+sentence left the key visible in the `print(json.dumps(...))` line below it; the real break is
+`_mk = "metric"`. And `test_a_renamed_later_stage_still_consumes_the_cap` has no branch of its own:
+the rule sees only the PRE-repair result, so a renamed stage is indistinguishable there, which IS
+the property — it is held by the signature and by an argument pin on the call site, both broken
+coherently and both bite.
+
+Not done: `_evaluate` remains a 727-line driver. The pre-start fencing (lifecycle, stale
+reservation, proxy, eval-start boundary) and the terminal-emission block are cohesive but read a
+dozen loop-locals each with no round-trip to hide a defect in — a lower-yield, larger-diff lift than
+this one, and best taken on its own.
+
 #### ES-04 · MEDIUM · excessive-logic · effort: medium
 
 **Engine.__init__ is ~770 lines: 110 knob resolutions copied into locals then re-assigned to attributes, plus embedded calibration validation**
