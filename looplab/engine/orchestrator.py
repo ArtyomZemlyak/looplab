@@ -1556,6 +1556,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # `node_created`, and charging that history to this process's guard would false-trip a long
         # healthy run on its first loop turn. Only rows minted from here on are this loop's spin.
         _minted_charged: Optional[int] = None
+        # The REACH of that companion bound, which is narrower than "the loop is bounded".
+        # `_no_mint_turns` is incremented in exactly ONE place, `_handle_create_actions`,
+        # which this loop reaches only through the `if creates:` branch. Every `continue` above it is
+        # outside its reach, and at least two are real lanes: the speculation head-request/`buildings`
+        # session and `_drop_stale_speculation` both restart the turn before `_select_actions` runs.
+        # A loop confined to those advances NEITHER counter — `_created_no_terminal` does not cover
+        # the gap either, because it is charged only when the log gains `node_created` rows and BOTH
+        # counters reset on any node reaching terminal, so a request → build → discard cycle (which
+        # mints and terminalizes every pass) resets them every pass. What bounds that lane is
+        # elsewhere: the refund cap (`search/card_selection.py::refunded_node_reservations`, one whole
+        # operator budget) and the monotonic id ceiling (`_node_id_ceiling`, which never reuses an id).
+        # A new `continue` above the create branch is an unbounded turn unless it carries its own
+        # bound. The AUTO depth ratchet below carries one by being ONE-WAY: it settles the depth to 0,
+        # which switches off `_speculation_enabled()` and with it the branch it returns through.
         _no_mint_turns = 0
         while True:
             decision_events = self.store.read_all()

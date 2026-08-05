@@ -35,7 +35,8 @@ from looplab.core import appconfig
 from looplab.serve.run_files import run_config_write_lock
 from looplab.cli import (_BACKENDS, _DEV_BACKENDS, _TASK_KINDS, _choice, _engine_singleton,
                          _apply_speculation_calibration_profile,
-                         _assert_run_deletion_namespace_available, _load_task, _print_result,
+                         _assert_run_deletion_namespace_available,
+                         _exit_nonzero_if_the_run_produced_nothing, _load_task, _print_result,
                          _require_healthy_log, _require_run_dir, app, load_run_settings)
 
 
@@ -806,6 +807,7 @@ def run(
     _note = wrap_up_degradation_note(eng)
     if _note:
         typer.echo(_note, err=True)
+    _exit_nonzero_if_the_run_produced_nothing(state, out, wrap_up_only=is_wrap_up(prior_kind))
 
 
 @app.command()
@@ -957,6 +959,7 @@ def resume(
     _note = wrap_up_degradation_note(eng)
     if _note:
         typer.echo(_note, err=True)
+    _exit_nonzero_if_the_run_produced_nothing(state, run_dir, wrap_up_only=is_wrap_up(prior_kind))
 
 
 @app.command()

@@ -147,6 +147,34 @@ looplab run examples/regression_task.json --backend llm \
 looplab run examples/repo_task.json --backend llm --developer-backend opencode
 ```
 
+**Exit codes.** `run` and `resume` share them, because a wrapper, a CI step or an `&&` chain reads
+the status and nothing else:
+
+| Code | Meaning |
+|---|---|
+| `0` | The run made progress: it evaluated at least one experiment, or it is **frozen and resumable** — paused by `looplab stop`, by the developer-crash breaker, or by the provider breaker. A pause is not a failure; `looplab resume` picks it up |
+| `1` | The command failed: the run **finished having evaluated nothing** (0 experiments and no champion — see below), the engine aborted with a fatal error (the traceback lands in `engine.stderr.log`), or `resume` gave up waiting for the previous owner's `engine.lock` |
+| `2` | The command was refused before the run started: a bad flag or setting, a run dir that holds a different task, a Genesis goal it could not author a task from |
+
+The "finished having evaluated nothing" case is a real failure that used to be reported as success.
+A run whose first candidate builds all fail — five HTTP 429s from the provider is the measured case —
+finishes cleanly, writes a report whose own text says *"No experiments have been evaluated yet"*, and
+has nothing to report on. It now says so on stderr and exits 1:
+
+```
+run runs/demo finished with no evaluated experiments (reason=time_budget) — there is nothing to
+report on. Check the run's `run_finished` reason and the last `card_build_done` / `node_failed`
+rows in events.jsonl.
+```
+
+Only a **finished** run is judged this way, and only when the command could actually have run
+experiments. Two cases still exit 0 with nothing evaluated:
+
+- a run that **stopped or auto-paused** — the answer is `looplab resume`, not a failed build;
+- a `run`/`resume` that landed on a **wrap-up boundary** and could only complete an existing
+  finalization ([`finalize`](#finalize)). It was forbidden from proposing, so the emptiness belongs
+  to the run that ended earlier; a non-zero exit there means the wrap-up itself was refused.
+
 ---
 
 ## `resume`

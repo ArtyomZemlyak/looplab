@@ -21,15 +21,25 @@ So this file asserts the LEDGER, not the wiring: a node whose code carries a lea
 critic tell produces a `reward_hack_suspected` event carrying both namespaces. Deliberately a
 separate file from the namespace guards, which are about who MINTS the namespace; this is about
 whether anything is emitted at all.
+
+The two concatenations are now the named rule `EvaluateMixin._trust_gate_signals`, so the same
+property is ALSO checkable without driving a run: two of the last three tests call the rule directly
+and die on the identical mutation in milliseconds, and the third pins its concatenation on the AST.
+Both halves stay — the rule proves the findings are produced, the run proves they reach the ledger.
 """
 from __future__ import annotations
+
+import ast
+from types import SimpleNamespace
 
 import anyio
 import pytest
 
+from _source_scan import function_tree
 from factories import make_engine
 from looplab.agents.roles import ToyObjectiveDeveloper
-from looplab.core.models import developer_artifact_footprint
+from looplab.core.models import Idea, developer_artifact_footprint
+from looplab.engine.evaluate import EvaluateMixin
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 
@@ -119,3 +129,62 @@ def test_both_gates_stay_silent_on_an_honest_node(tmp_path):
     assert state.finished
     assert _signals(run_dir) == []
     assert state.reward_hacks == []
+
+
+# ------------------------------------------------- the same property, without driving a whole run
+
+# `_trust_gate_signals` reads exactly one attribute off the node, and saying so here is the point:
+# a rule narrow enough to call with a bare Idea is a rule a reviewer can check.
+_NODE = SimpleNamespace(idea=Idea(operator="draft"))
+
+
+def _gate_engine(tmp_path, **gates):
+    return make_engine(tmp_path / "rule", n_seeds=1, max_nodes=1, **gates)
+
+
+def _namespaces(engine, src=None):
+    return {row["signal"].split(":")[0]
+            for row in engine._trust_gate_signals(_NODE, _LEAKY_SOLUTION if src is None else src)}
+
+
+def test_the_named_rule_produces_both_namespaces(tmp_path):
+    """The mutation the module docstring describes, killed in milliseconds instead of a run.
+
+    Dropping either `sigs +=` inside `_trust_gate_signals` — the exact edit that survives all eight
+    trust/leakage/critic/signal files — drops the namespace from THIS list. That is the whole reason
+    the two concatenations became a named rule: the property is now reachable from a caller."""
+    engine = _gate_engine(tmp_path, code_leakage_detect=True, critic_check=True)
+    signals = {row["signal"] for row in engine._trust_gate_signals(_NODE, _LEAKY_SOLUTION)}
+    assert "data_leakage:fit_on_test" in signals, "the leakage gate contributed nothing"
+    assert "critic:hardcoded_metric" in signals, "the critic gate contributed nothing"
+
+
+def test_the_named_rule_keeps_both_gates_optional(tmp_path):
+    """Each half is opt-in (`code_leakage_detect` / `critic_check`), and the extraction has to keep
+    a gate that is OFF silent — otherwise the rule would start flagging runs that never enabled it."""
+    both = _gate_engine(tmp_path, code_leakage_detect=True, critic_check=True)
+    leakage_only = _gate_engine(tmp_path, code_leakage_detect=True, critic_check=False)
+    critic_only = _gate_engine(tmp_path, code_leakage_detect=False, critic_check=True)
+    neither = _gate_engine(tmp_path, code_leakage_detect=False, critic_check=False)
+    assert _namespaces(leakage_only) == {"data_leakage"}
+    assert _namespaces(critic_only) == {"critic"}
+    assert _namespaces(neither) == set()
+    # …and an empty surface is not something to have an opinion about (both gates test `scan_src`).
+    assert _namespaces(both, src="") == set()
+
+
+def test_the_evaluator_still_concatenates_the_named_rule():
+    """Naming the rule moved one failure mode rather than removing it: `sigs +=
+    self._trust_gate_signals(...)` can lose its `sigs +=` exactly as the two calls it replaced could,
+    and the three unit tests above would not notice. The end-to-end tests at the top of this file are
+    what CATCH that; this states it as well, on the AST — a comment naming the method is not an
+    `ast.AugAssign`, and neither is a bare call whose result is dropped."""
+    concatenations = [
+        node for node in ast.walk(function_tree(EvaluateMixin._evaluate))
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
+        and node.target.id == "sigs" and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "_trust_gate_signals"]
+    assert len(concatenations) == 1, (
+        "`_evaluate` must concatenate `_trust_gate_signals` into `sigs` exactly once — the trust "
+        "gates are computed and dropped otherwise")

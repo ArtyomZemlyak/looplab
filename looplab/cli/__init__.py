@@ -734,6 +734,48 @@ def _print_result(state) -> None:
         typer.echo(f"BEST node {best.id}: metric={ms} params={best.idea.params}")
 
 
+def _exit_nonzero_if_the_run_produced_nothing(state, run_dir, *, wrap_up_only: bool) -> None:
+    """A run that FINISHED having evaluated nothing is a failure, and must not exit 0.
+
+    Measured (`/tmp/ll-s4/run`): five real HTTP 429s during the first card build left the run stuck
+    at 0 nodes in 95 seconds. It printed `finished=True`, wrote a report whose own text said "No
+    experiments have been evaluated yet — the run has 0 nodes", and exited 0 — so every wrapper, CI
+    step and `&&` chain around it read that as success.
+
+    FINISHED only. A paused/stopped run (`looplab stop`, the `developer_crash` breaker, the
+    proposal-path provider breaker) is deliberately excluded: it is resumable, not failed, and those
+    auto-pause paths rely on exit 0 meaning "frozen, come back to it". `finished` is the fold's own
+    `run_finished` flag, which none of them sets — so the exclusion is the predicate, not a second
+    list of reasons to keep in sync. Nor does this touch the fatal-error path: `_run_engine_guarded`
+    re-raises, so a crash never reaches `_print_result` at all.
+
+    A WRAP-UP-ONLY entry point is excluded too, and that one is not free: `run`/`resume` landing on a
+    boundary they may only complete (`run_cmds.is_wrap_up`) are forbidden from proposing at all
+    (`_refuse_wrap_up_engine_that_could_propose`), so "this run evaluated nothing" is a fact about a
+    run that ended before the command started, not about what the command did. Exit 1 there would
+    also collide with the meaning that path already has: a non-zero exit on a wrap-up is "the wrap-up
+    was REFUSED and wrote no artifact", which is exactly the behaviour `7b11e7ad` removed (see
+    docs/guide/cli-reference.md#finalize). Six tests hold that line: five assert `exit_code == 0` on
+    a wrap-up (`test_wrap_up_policy_boundaries`, `test_finalization_recovery`), and
+    `test_stop_finalize_resume` calls `resume` as a plain function, where a `typer.Exit` raised here
+    escapes as an exception rather than an exit status.
+
+    Both signals are checked, and the exit needs BOTH to be empty: `best()` reads `best_node_id`
+    rather than the node table, so a run that somehow published a champion without a live evaluated
+    node still exits 0 rather than calling a reported result a failure.
+    """
+    if wrap_up_only or not getattr(state, "finished", False):
+        return
+    if state.evaluated_nodes() or state.best() is not None:
+        return
+    typer.echo(
+        f"run {run_dir} finished with no evaluated experiments"
+        + (f" (reason={state.stop_reason})" if state.stop_reason else "")
+        + " — there is nothing to report on. Check the run's `run_finished` reason and the last "
+          "`card_build_done` / `node_failed` rows in events.jsonl.", err=True)
+    raise typer.Exit(code=1)
+
+
 # Command registration: importing the command-group modules runs their `@app.command` decorators
 # against the `app` above. This block MUST stay at the bottom — the groups import the shared
 # builders back from this (still-initializing) package, which is safe only because everything they
