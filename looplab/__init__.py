@@ -50,6 +50,7 @@ _LAYOUT = {
     "settings_ui_schema": "serve",
     "asset_brief": "tools",   # PART IV D1 bounded local asset/prior-art brief
     "audit": "engine",   # engine audit/trust-emitter mixin
+    "concept_capsules": "engine",  # durable per-run concept record + portfolio views (doc 25 EM-10)
     "concept_graph": "search",   # PART IV D5 pure concept-graph projection used offline and live
     "concept_projection": "search",  # receipt/lifecycle-aware CURRENT membership boundary
     "coverage": "search",

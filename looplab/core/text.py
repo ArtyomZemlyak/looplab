@@ -39,3 +39,17 @@ def normalize_text(text) -> str:
 def tokenize(text) -> list[str]:
     """`normalize_text` then split into unicode word tokens."""
     return WORD_RE.findall(normalize_text(text))
+
+
+def fingerprint_similarity(a: list[str], b: list[str]) -> float:
+    """Jaccard overlap of two fingerprints in [0,1]. 1.0 = identical token sets.
+
+    Lives here rather than in `engine/memory` (doc 25 EM-10) because it is pure set math over the
+    token lists this module already defines the vocabulary for — and because the concept-capsule
+    split needed it BELOW both modules: capsules import it, memory imports it, and neither may
+    import the other.
+    """
+    sa, sb = set(a or []), set(b or [])
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
