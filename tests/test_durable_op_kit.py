@@ -422,8 +422,9 @@ def test_reset_admits_a_phase_back_edge_that_deletion_must_refuse(reset_owner, d
 
 def test_deletion_refuses_a_skipped_rung_and_reset_has_no_such_rule(reset_owner, deletion_owner,
                                                                     tmp_path):
-    """Deletion advances by exactly one rung; reset's table is not ordered at all, and `prepared` ->
-    `superseded` jumps six positions in the tuple `DELETE_PHASES` happens to be spelled in."""
+    """Deletion advances by exactly one rung and refuses a skip; reset's phases are a frozenset with
+    no order to advance along at all, so `prepared` -> `superseded` is admitted because its adjacency
+    row says so — a rule no index can express, in either direction."""
     deletion_path = _materialise(deletion_owner, tmp_path / "deletion", {
         **deletion_owner.payload, "phase": "fenced", "status": "pending"})
     with pytest.raises(deletion_owner.error, match="invalid deletion receipt transition"):
@@ -462,8 +463,8 @@ def test_deletions_ambiguous_quarantine_is_absorbing_and_reset_has_no_equivalent
 
 def test_the_two_owners_keep_their_own_size_caps(reset_owner, deletion_owner, tmp_path):
     """Three orders of magnitude apart, and for a reason: a reset receipt carries the run's whole
-    `effective_config`, a deletion receipt carries eleven scalars. One shared constant would either
-    let a deletion receipt grow unbounded or refuse every real Replay."""
+    `effective_config` and a nine-row artifact manifest, a deletion receipt carries ten scalars. One
+    shared constant would either let a deletion receipt grow unbounded or refuse every real Replay."""
     assert reset_owner.max_bytes == 64 * 1024 * 1024
     assert deletion_owner.max_bytes == 64 * 1024
     assert reset_transaction._PROTOCOL.max_bytes != deletion_transaction._PROTOCOL.max_bytes
