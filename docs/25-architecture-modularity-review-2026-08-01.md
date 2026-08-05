@@ -4438,14 +4438,28 @@ exists to distrust. Trading a fail-closed recomputation for a stat-tuple cache w
 to pay for it is a worse gate, not a faster one.
 
 **Digest safety.** Every digest was measured against a fixed six-run corpus before and after:
-**1155 leaves compared, 15 differ**, and all 15 are implementation-manifest rows for the seven files
-this change touches plus the aggregate digest. The calibration-profile digest, task-profile digest,
+**1155 leaves compared, 15 differ**, and all 15 are implementation-manifest rows for the eight files
+this change touches — `__init__`, `cli/inspect_cmds`, `core/setup_identity` (new), `engine/finalize`,
+`engine/orchestrator`, `events/finalize_protocol` (new), `events/finalize_scope`,
+`search/speculation_quality` — plus the aggregate digest. The calibration-profile digest, task-profile digest,
 both product-authority digests, the runtime-scope digest, the environment digest, the scorer-fidelity
 report, both setup identities, all six per-run analyses (which embed every source digest and the
 semantic execution trajectory), the whole gate body and the receipt's `self_digest` are BYTE-IDENTICAL,
 and the corpus still validates. The harness was teeth-checked in both directions first: an unmodified
 copy of the tree produced 0 diffs, and six injected mutations — comment-only, blank-line, a real code
 change, a renamed writer step, an extra budget field, a bent setup hash — were each detected.
+The REAL implementation digest does move, necessarily: eight shipped modules changed semantically, so
+this commit revokes every already-issued receipt. That is the digest's contract rather than a defect —
+the alternative is a receipt that survives the implementation it attests to — and it is why the
+byte-identity that matters here is of every OTHER digest and of the gate's verdict on fixed evidence.
+
+**Unrelated flake found while verifying, not caused here.**
+`tests/test_card_budget_refund.py::test_the_refund_is_reachable_end_to_end_on_the_deterministic_backend`
+is load-dependent: it needs an eval to finish and move `best` out from under an in-flight prefetch, and
+under a busy machine the supersede does not happen (`refunded: 0`). Measured 6x on this branch and 6x on
+its unmodified merge-base: it fails on BOTH (1/6 and 3/6 passing respectively, under identical load), so
+it is pre-existing rather than a regression. Left alone deliberately — making it deterministic means
+changing the scheduling it is written to observe, which is a different change from this one.
 
 **One residue of the STALE half, found while re-verifying it and left deliberately.** The manifest has
 three non-module members. `serve/settings_ui_schema.json` turns out to be hashed SEMANTICALLY by
