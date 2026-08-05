@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 from typing import Callable, Optional, Protocol
 
+from looplab.core.errors import ConfigRefusal
 from looplab.core.models import NodeStatus, RunState
 
 # Action kinds (the vocabulary of the action schema above; values are load-bearing in
@@ -735,6 +736,10 @@ def make_policy(name: str = "greedy", *, n_seeds: int, max_nodes: int,
     depth = int(params.get("debug_depth", 1) or 1)
     factory = _REGISTRY.get(name)
     if factory is None:
-        raise ValueError(f"unknown policy: {name!r}")
+        # `Settings.policy` is a free-form string (the registry, not pydantic, is the vocabulary),
+        # so a typo reaches here from `-s policy=…` — an operator input error, not a bug. Name the
+        # accepted values: without them the refusal states the problem and not the fix.
+        raise ConfigRefusal(f"unknown policy: {name!r}; choose one of: "
+                            + ", ".join(available_policies()))
     return factory(n_seeds=n_seeds, max_nodes=max_nodes, ablate_every=ablate_every,
                    depth=depth, params=params)

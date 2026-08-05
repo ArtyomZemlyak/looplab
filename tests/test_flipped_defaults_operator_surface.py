@@ -353,7 +353,7 @@ def test_a_run_that_can_still_do_work_keeps_refusing(tmp_path, dead_endpoint):
     """The softening is scoped to the wrap-up. A `resume` that would LIFT a finished run back into
     the loop can still propose, so the original refusal — and its original reason — stands."""
     from typer.testing import CliRunner
-    from looplab.cli import app
+    from looplab.cli import REFUSAL_EXIT_CODE, app
     from looplab.events.eventstore import EventStore
 
     run_dir = tmp_path / "liftable"
@@ -370,6 +370,9 @@ def test_a_run_that_can_still_do_work_keeps_refusing(tmp_path, dead_endpoint):
 
     result = CliRunner().invoke(app, ["resume", str(run_dir)])
 
-    assert result.exit_code == 1
-    assert "LLM endpoint preflight failed" in str(result.exception)
-    assert "empty fallback proposals" in str(result.exception)
+    # Asserted on the OUTPUT, not on `result.exception`: `LLMError` carries `OperatorRefusal`, so
+    # the preflight refusal now reaches the operator as a message + `REFUSAL_EXIT_CODE` rather than
+    # as a 43-frame traceback. Both sentences the refusal owes are still checked verbatim.
+    assert result.exit_code == REFUSAL_EXIT_CODE, result.output
+    assert "LLM endpoint preflight failed" in result.output
+    assert "empty fallback proposals" in result.output

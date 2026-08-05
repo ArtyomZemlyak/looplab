@@ -52,6 +52,37 @@ from a `LOOPLAB_*` environment variable or the `settings:` block of a config fil
 options such as `--out` are CLI/file concerns, not `Settings` fields. Precedence for engine settings is
 CLI over file over environment. Add `--version` to print the version.
 
+## Exit codes: a refusal is not a crash
+
+| Code | Meaning | What you see |
+|---|---|---|
+| `0` | The command did what you asked | its normal output |
+| `2` | **Refused.** LoopLab declined on purpose — a setting it cannot run, a file it cannot read, a run whose own history contradicts your flags, a model that is not reachable | one message that names the problem *and what to change*, on stderr |
+| `1` | **Crashed.** An unexpected exception reached the top level | the full traceback, which is how the bug gets diagnosed |
+
+A refusal reads like this — the whole output, nothing else:
+
+```console
+$ looplab run examples/toy_task.json --backend toy -s policy=mcts -s speculation_depth=1
+Refused: Card speculation requires policy='greedy', got 'mcts' — set `-s policy=greedy`, or turn
+speculation off with `-s speculation_depth=0`
+$ echo $?
+2
+```
+
+The split is by exception type, not by guesswork: the family is marked with
+`looplab.core.errors.OperatorRefusal`, which is worn only by exceptions raised at a `raise` whose
+job is to refuse, about **your** input, with a message that names the remedy. Anything else keeps
+its traceback, because a bug printed as a tidy one-line message is far worse than a refusal printed
+as a stack dump. Members you are most likely to meet: the
+[endpoint and credential preflights](llm-and-agents.md#endpoint-preflight-before-a-run-starts), the
+run-start pins (`resume`/`run` re-entering a run at a concurrency width or speculation authority its
+own `run_started` did not record), the search-policy / trust-mode / speculation combinations the
+engine cannot execute, and every malformed task file or unknown `-s` key.
+
+Set `LOOPLAB_TRACEBACK=1` to get the frames of a refusal back — useful when a refusal fires and you
+believe it should not. It changes nothing else, and it never suppresses a crash's traceback.
+
 ---
 
 ## `init`
@@ -132,7 +163,8 @@ from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.
 
 Every example below that does **not** pass `--backend toy` needs a reachable LLM endpoint: `backend`
 defaults to `llm`, and the [endpoint preflight](llm-and-agents.md#endpoint-preflight-before-a-run-starts)
-refuses the run with an `LLMError` before the event log exists if the model is not there. (The run
+refuses the run (exit `2`, one message — see [exit codes](#exit-codes-a-refusal-is-not-a-crash))
+before the event log exists if the model is not there. (The run
 directory itself is created first, to take `engine.lock` — but the refusal lands before any event,
 `config.snapshot.json` or `task.snapshot.json` is written, so there is no half-started run to clean up.)
 

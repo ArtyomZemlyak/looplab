@@ -43,7 +43,7 @@ from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.llm_broker import (default_llm_lane_limits, llm_broker_scope, llm_lane_scope,
                                      llm_request_permit)
 from looplab.core.models import RunState
-from looplab.cli import app as _app
+from looplab.cli import REFUSAL_EXIT_CODE, app as _app
 from looplab.engine.orchestrator import Engine, RunStartPinError, SettledWidthPinError
 from looplab.engine.widths import settled_width_refusal
 from looplab.events.eventstore import EventStore
@@ -452,7 +452,11 @@ def test_run_refuses_a_disagreeing_width_before_the_snapshot_and_reopen_writes(t
         "run", "--no-genesis", "--kind", "quadratic", "--goal", "min (x-3)^2", "--direction", "min",
         "--backend", "toy", "--out", str(out),
         "-s", "eval_parallel=3", "-s", "max_nodes=2", "-s", "n_seeds=2"])
-    assert isinstance(result.exception, SettledWidthPinError)
+    # Identified by what the operator sees, not by `result.exception`: `SettledWidthPinError` is an
+    # `OperatorRefusal`, so the CLI boundary turns it into a message + `REFUSAL_EXIT_CODE` and the
+    # escaping exception is now the `SystemExit`. The property under test is the byte-clean run dir.
+    assert result.exit_code == REFUSAL_EXIT_CODE, result.output
+    assert "run_started pinned 2" in result.output
     assert _run_dir_bytes(out) == before
 
 
@@ -470,7 +474,8 @@ def test_resume_refuses_a_disagreeing_width_before_lifting_the_run(tmp_path):
 
     for _ in range(2):                       # the FIRST attempt must already be byte-clean
         result = _runner.invoke(_app, ["resume", str(out)])
-        assert isinstance(result.exception, SettledWidthPinError)
+        assert result.exit_code == REFUSAL_EXIT_CODE, result.output
+        assert "run_started pinned 2" in result.output
         assert (out / "events.jsonl").read_bytes() == before
 
 

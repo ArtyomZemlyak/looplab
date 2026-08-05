@@ -42,11 +42,12 @@ looplab run examples/code_regression_task.json --backend llm --max-nodes 6
 **A run whose endpoint is not reachable is refused before it starts** — no event log, no `run_finished`
 event, nothing to resume. (The run *directory* is created a moment earlier, to take `engine.lock`; the
 refusal leaves it holding nothing but that empty lock file, and `resume` rejects it with
-`no run found … (no events.jsonl)`.) You get an `LLMError` on the command line and a non-zero exit:
+`no run found … (no events.jsonl)`.) You get one message on stderr and exit code `2` — the
+[refusal code](cli-reference.md#exit-codes-a-refusal-is-not-a-crash), not a traceback:
 
 ```
-LLM endpoint preflight failed: researcher (qwen3:8b at http://localhost:11434/v1): <transport error>.
-The run needs a reachable model for these roles — start the endpoint, or point
+Refused: LLM endpoint preflight failed: researcher (qwen3:8b at http://localhost:11434/v1): <transport
+error>. The run needs a reachable model for these roles — start the endpoint, or point
 LOOPLAB_LLM_BASE_URL / --model at one. Run offline with `--backend toy` (or -s backend=toy).
 Refusing to start: the roles would degrade to empty fallback proposals and the run would report
 success on a flat, meaningless result.
