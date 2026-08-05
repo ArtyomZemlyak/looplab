@@ -36,8 +36,9 @@ reword. `emit_retries` is there for the same reason as the callbacks: nothing de
 
 An unknown key is LOUD (`TypeError` naming the key and the valid set) rather than silently carried:
 the bundle used to be a plain dict, so `{"stuck_retries": 3}` — a typo of `stuck_repeat` — travelled
-all the way to `drive_tool_loop` before failing, and the suite's own `emit_loop` fixture used exactly
-that misspelling for years without anything noticing.
+all the way to `drive_tool_loop` before failing. That is not hypothetical. The suite's own
+`emit_loop` fixture used exactly that misspelling, asserted on it by name, and stayed green, because
+the fake driver it fed took `**kwargs`.
 """
 from __future__ import annotations
 
