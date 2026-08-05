@@ -32,6 +32,7 @@ from looplab.engine.lesson_hygiene import (  # noqa: F401
     filter_contradicted,
     lesson_rank_key,
     normalize_statement,
+    prompt_slot_key,
     retrieve_lessons_harmonic,
 )
 
