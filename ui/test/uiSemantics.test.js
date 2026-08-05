@@ -443,17 +443,22 @@ test('live node-detail and per-node building-trace polls gate their setState on 
   // R5-UI: a poll whose callback ignores the alive() predicate lets a slow in-flight response land
   // after the user selected a different node (Inspector) or after building ended (Dock), overwriting
   // fresher state with a stale snapshot. Both must take (alive) and guard the setState with alive().
-  const [inspector, dock] = await Promise.all([source('Inspector.jsx'), source('Dock.jsx')])
+  const [inspector, dock, hooks] = await Promise.all([
+    source('Inspector.jsx'), source('Dock.jsx'), source('hooks.js'),
+  ])
   // Inspector node-detail poll: callback receives (alive), rejects a STALER attempt (accepts fresher),
   // and only then writes. (R7: `>= nodeAttempt`, not exact — the detail endpoint often leads the poll.)
   assert.match(inspector, /const detailMatchesAttempt = value => !Number\.isSafeInteger\(nodeAttempt\)[\s\S]*?value\.attempt >= nodeAttempt/)
   // The poll became an explicit effect with an owned in-flight request, which is a STRONGER form of
   // the same rule: a superseded read is aborted rather than merely ignored, and the identity check
   // (node + generation + attempt) still gates every write. `alive` is the effect's own latch.
+  // That effect is now the SHARED one (doc 25 UI-06, hooks.js::useScopedResource): the abort and the
+  // `alive` latch moved there, while the identity check — the only half that is about node detail —
+  // stayed here as the resource's `validate`. `resourceMachine.test.js` drives both behaviourally.
   assert.match(inspector,
-    /timed\.promise\.then\(value => \{[\s\S]*?const valid = detailMatchesNode\(value\)[\s\S]*?if \(valid && detailMatchesGeneration\(value\) && detailMatchesAttempt\(value\)\)/)
-  assert.match(inspector,
-    /return \(\) => \{\n\s*alive = false[\s\S]*?detailFlightRef\.current\.controller\.abort\(\)/,
+    /validate: value => \{[\s\S]*?const valid = detailMatchesNode\(value\)[\s\S]*?if \(valid && detailMatchesGeneration\(value\) && detailMatchesAttempt\(value\)\)/)
+  assert.match(hooks,
+    /return \(\) => \{\n\s*alive = false[\s\S]*?flight\.current\.controller\.abort\(\)/,
     'unmount/selection change must abort the in-flight detail read, not just discard its result')
   // Dock building-trace poll: the O(node) callback receives alive, and every state write is gated.
   // The error flag is cleared only on SUCCESS (inside the alive() guard), never eagerly per tick, so a

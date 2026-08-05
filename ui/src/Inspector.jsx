@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { deadlineGet, get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL,
   clearNodeTrace, commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
   retryRunCommand, runNodeApiPath, submitCommand } from './util.js'
-import { usePoll } from './hooks.js'
+import { usePoll, useScopedResource } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { themeFilteredGroupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
@@ -28,6 +28,10 @@ const CommentsThread = React.lazy(() => import('./CommentsThread.jsx'))
 const withoutNodeTrace = value => value && typeof value === 'object'
   ? { ...value, trace: { nodes: [] } }
   : value
+
+// `deadlineGet`'s own default, kept as a named bound now that the detail read spells its deadline
+// rather than inheriting one from the helper it no longer calls.
+const DETAIL_REQUEST_TIMEOUT_MS = 8000
 
 const newTraceClearOperationId = () => {
   const token = globalThis.crypto?.randomUUID?.().replace(/-/g, '').toLowerCase()
@@ -132,11 +136,6 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   const nodeAttempt = state?.nodes?.[nodeId]?.attempt
   const detailScope = `${runId}@${expectedGeneration || '?'}:${nodeId ?? '-'}:${nodeAttempt ?? '?'}:${readOnly
     ? historySeq ?? readOnlyReason : 'live'}:${evidenceAvailable ? 1 : 0}`
-  const [detailResource, setDetailResource] = useState({
-    scope: null, status: 'idle', data: null, error: '', pending: null,
-  })
-  const detailCurrent = detailResource.scope === detailScope
-  const detail = detailCurrent ? detailResource.data : null
   // Accept a detail payload whose attempt is >= the summary's: the /nodes endpoint is often FRESHER
   // than the lagging run-state poll (e.g. right after an inline repair bumps `attempt`), and showing
   // the current truth is correct — only a genuinely STALER payload (an old attempt's late response)
@@ -149,15 +148,61 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     && String(value.id) === String(nodeId) && typeof value.status === 'string'
   const detailMatchesGeneration = value => !expectedGeneration
     || value?.run_generation === expectedGeneration
-  const detailStatus = detailCurrent ? detailResource.status
-    : readOnlyReason === 'review' && !evidenceAvailable ? 'restricted' : 'loading'
-  const detailError = detailCurrent ? detailResource.error : ''
-  const detailPending = detailCurrent ? detailResource.pending : null
+  const [traceClearedScopes, setTraceClearedScopes] = useState(() => new Set())
+  const detailQuery = []
+  if (readOnly && historySeq != null) detailQuery.push(`seq=${historySeq}`)
+  if (expectedGeneration) detailQuery.push(`expected_generation=${encodeURIComponent(expectedGeneration)}`)
+  const at = detailQuery.length ? `?${detailQuery.join('&')}` : ''
+  // This machine is the shared one (doc 25 UI-06) — `hooks.js::useScopedResource` over
+  // `resourceModel.js`. It was the superset the shared hook had to be designed for, and every part
+  // of it survives: the scope fence, `supersede`, `mapLastGood`, `onSettled`, and a status that
+  // keeps last-good detail visible-but-stale rather than blanking it. What stays HERE is the part
+  // that is genuinely about node detail: which payloads count as this node's, and how each failure
+  // reads to an operator.
+  const detailResource = useScopedResource(
+    signal => get(runNodeApiPath(runId, nodeId, at), { cache: 'no-store', signal }), {
+      scope: detailScope,
+      timeout: DETAIL_REQUEST_TIMEOUT_MS,
+      // Two gates, and the first wins: with no node selected there is nothing to read, and a
+      // summary-only review withholds the evidence rather than failing to fetch it.
+      gate: nodeId == null ? 'idle'
+        : readOnlyReason === 'review' && !evidenceAvailable ? 'restricted' : null,
+      validate: value => {
+        const valid = detailMatchesNode(value)
+        if (valid && detailMatchesGeneration(value) && detailMatchesAttempt(value)) return null
+        return valid
+          ? 'The experiment attempt changed while details were loading.'
+          : 'Full node details returned an invalid response.'
+      },
+      classifyFailure: ({ transport, message, intent, lastGood }) => ({
+        error: intent === 'reconcile'
+          ? transport
+            ? 'Trace was cleared, but the remaining experiment details could not be refreshed.'
+            : String(message).startsWith('The experiment attempt')
+              ? 'Trace was cleared, but the experiment attempt changed before details could be refreshed.'
+              : 'Trace was cleared, but the detail refresh returned an invalid response.'
+          : transport
+            ? lastGood == null
+              ? 'Full node details could not be loaded.'
+              : 'Experiment details could not be refreshed.'
+            : message,
+      }),
+      onSuccess: scope => setTraceClearedScopes(current => {
+        if (!current.has(scope)) return current
+        const next = new Set(current)
+        next.delete(scope)
+        return next
+      }),
+      // The node's own status is deliberately NOT part of detailScope — a status change must
+      // re-read the SAME scope (that is what fills the Trace tab in place) rather than reset it.
+      deps: [state?.nodes?.[nodeId]?.status],
+    })
+  const detail = detailResource.data
+  const detailStatus = detailResource.status
+  const detailError = detailResource.error
+  const detailPending = detailResource.pending
   const detailPendingLabel = detailPending === 'retry' ? 'Retrying…'
     : ['refresh', 'reconcile'].includes(detailPending) ? 'Refreshing…' : 'Loading…'
-  const [traceClearedScopes, setTraceClearedScopes] = useState(() => new Set())
-  const detailFlightRef = useRef(null)
-  const detailStartRef = useRef(null)
   const detailSurfaceRef = useRef(null)
   const detailFocusScopeRef = useRef(null)
   const fallbackClearStore = useRef(new Map())
@@ -170,10 +215,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
       scope, kind, revision: current.revision + 1,
     }))
   })
-  const requestDetail = (intent = 'refresh', options) => {
-    const current = detailStartRef.current
-    return current?.scope === detailScope ? current.start(intent, options) : false
-  }
+  const requestDetail = (intent = 'refresh', options) => detailResource.request(intent, options)
   const retryDetailWith = (options = {}) => {
     detailFocusScopeRef.current = detailScope
     // An explicit user retry owns freshness over an invisible background refresh. Superseding it
@@ -182,125 +224,6 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     return requestDetail('retry', { supersede: true, ...options })
   }
   const retryDetail = () => retryDetailWith()
-  useEffect(() => {
-    let alive = true
-    const owner = {}
-    if (nodeId == null) {
-      setDetailResource({ scope: detailScope, status: 'idle', data: null, error: '', pending: null })
-      detailStartRef.current = null
-      return () => { alive = false }
-    }
-    if (readOnlyReason === 'review' && !evidenceAvailable) {
-      setDetailResource({
-        scope: detailScope, status: 'restricted', data: null, error: '', pending: null,
-      })
-      detailStartRef.current = null
-      return () => { alive = false }
-    }
-    const query = []
-    if (readOnly && historySeq != null) query.push(`seq=${historySeq}`)
-    if (expectedGeneration) query.push(`expected_generation=${encodeURIComponent(expectedGeneration)}`)
-    const at = query.length ? `?${query.join('&')}` : ''
-    const start = (intent = 'refresh', {
-      supersede = false, mapLastGood = null, onSettled = null,
-    } = {}) => {
-      if (supersede && detailFlightRef.current) {
-        const obsolete = detailFlightRef.current
-        detailFlightRef.current = null
-        obsolete.controller.abort()
-      }
-      if (detailFlightRef.current) return false
-      const timed = deadlineGet(runNodeApiPath(runId, nodeId, at))
-      const request = { owner, controller: timed.controller, promise: timed.promise }
-      detailFlightRef.current = request
-      setDetailResource(previous => {
-        const sameScope = previous.scope === detailScope
-        const loaded = sameScope ? previous.data : null
-        const lastGood = typeof mapLastGood === 'function'
-          ? mapLastGood(loaded)
-          : loaded
-        if (lastGood != null && previous.status === 'ready' && intent === 'refresh') return previous
-        return {
-          scope: detailScope,
-          status: lastGood == null ? (sameScope && previous.status === 'error' ? 'error' : 'loading')
-            : previous.status === 'stale' ? 'stale' : 'ready',
-          data: lastGood,
-          error: sameScope ? previous.error : '',
-          pending: intent,
-        }
-      })
-      const cancel = () => {
-        if (detailFlightRef.current !== request) return
-        detailFlightRef.current = null
-        if (!alive) return
-        setDetailResource(previous => previous.scope === detailScope
-          ? { ...previous, pending: null }
-          : previous)
-      }
-      const finish = (ok, data = null, error = '') => {
-        if (detailFlightRef.current !== request) return
-        detailFlightRef.current = null
-        if (!alive) return
-        if (ok) {
-          setTraceClearedScopes(current => {
-            if (!current.has(detailScope)) return current
-            const next = new Set(current)
-            next.delete(detailScope)
-            return next
-          })
-        }
-        setDetailResource(previous => {
-          const lastGood = previous.scope === detailScope ? previous.data : null
-          const resourceError = intent === 'reconcile'
-            ? error === 'transport'
-              ? 'Trace was cleared, but the remaining experiment details could not be refreshed.'
-              : String(error).startsWith('The experiment attempt')
-                ? 'Trace was cleared, but the experiment attempt changed before details could be refreshed.'
-                : 'Trace was cleared, but the detail refresh returned an invalid response.'
-            : error === 'transport'
-              ? lastGood == null
-                ? 'Full node details could not be loaded.'
-                : 'Experiment details could not be refreshed.'
-              : error
-          return ok
-            ? { scope: detailScope, status: 'ready', data, error: '', pending: null }
-            : {
-              scope: detailScope,
-              status: lastGood == null ? 'error' : 'stale',
-              data: lastGood,
-              error: resourceError,
-              pending: null,
-            }
-        })
-        onSettled?.(ok)
-      }
-      timed.promise.then(value => {
-        const valid = detailMatchesNode(value)
-        if (valid && detailMatchesGeneration(value) && detailMatchesAttempt(value)) {
-          finish(true, value)
-          return
-        }
-        finish(false, null, valid
-          ? 'The experiment attempt changed while details were loading.'
-          : 'Full node details returned an invalid response.')
-      }, error => {
-        if (error?.name === 'AbortError') cancel()
-        else finish(false, null, 'transport')
-      })
-      return request
-    }
-    detailStartRef.current = { scope: detailScope, start }
-    start('load')
-    return () => {
-      alive = false
-      if (detailStartRef.current?.start === start) detailStartRef.current = null
-      if (detailFlightRef.current?.owner === owner) {
-        detailFlightRef.current.controller.abort()
-        detailFlightRef.current = null
-      }
-    }
-  }, [runId, nodeId, nodeAttempt, state?.nodes?.[nodeId]?.status, readOnly, historySeq,
-    expectedGeneration, readOnlyReason, evidenceAvailable, detailScope])
   useEffect(() => {
     if (detailFocusScopeRef.current == null) return
     if (detailFocusScopeRef.current !== detailScope) {

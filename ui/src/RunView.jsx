@@ -1,12 +1,12 @@
 import React, {
   lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
 } from 'react'
-import { useMediaQuery, useRunState } from './hooks.js'
+import { useMediaQuery, useRunState, useScopedResource } from './hooks.js'
 import { useToast } from './useToast.js'
 import { useTimeline } from './useTimeline.js'
 import { takeRunPanelHistoryEntry, useRunRouteState } from './useRunRouteState.js'
 import { reviewInspectorTabs, reviewPanelAllowed, runRouteStateHasTarget } from './runRouteState.js'
-import { deadlineGet, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback, createIdempotencyKey, resetRun,
+import { deadlineGet, get, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback, createIdempotencyKey, resetRun,
   storageGet, storageSet, runApiPath } from './util.js'
 import { computeGroups, autoCollapseSet } from './grouping.js'
 import EnergyToggle from './EnergyToggle.jsx'
@@ -1247,46 +1247,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const configKey = runStatus === 'ready' && !routeFenceBlocked
     ? `${configAuthority}:${generation || 'pending'}`
     : null
-  const [configResource, setConfigResource] = useState({
-    key: null, status: 'idle', data: null, retrying: false,
-  })
-  const [configRetry, setConfigRetry] = useState(0)
-  useEffect(() => {
-    if (!configKey) {
-      setConfigResource({ key: null, status: 'idle', data: null, retrying: false })
-      return undefined
-    }
-    let active = true
-    const request = deadlineGet(
-      runApiPath(runId, '/config'),
-      RUN_CONFIG_REQUEST_TIMEOUT_MS,
-    )
-    setConfigResource(current => {
-      const sameResource = current.key === configKey
-      return {
-        key: configKey,
-        status: 'loading',
-        data: sameResource ? current.data : null,
-        retrying: sameResource && ['error', 'stale'].includes(current.status),
-      }
-    })
-    request.promise.then(value => {
-      if (!active) return
-      setConfigResource({ key: configKey, status: 'ready', data: value, retrying: false })
-    }).catch(error => {
-      if (!active || error?.name === 'AbortError') return
-      setConfigResource(current => {
-        if (current.key !== configKey) return current
-        return current.data
-          ? { ...current, status: 'stale', retrying: false }
-          : { key: configKey, status: 'error', data: null, retrying: false }
-      })
-    })
-    return () => {
-      active = false
-      request.controller.abort()
-    }
-  }, [configKey, configRetry, runId])
+  // The shared resource machine (doc 25 UI-06). The separate `retrying` flag this effect used to
+  // carry is exactly `pending === 'retry'`: the only way to re-read the same config key is the Retry
+  // control below. The notice renders no server text, so no failure classifier is passed.
+  const configResource = useScopedResource(
+    signal => get(runApiPath(runId, '/config'), { cache: 'no-store', signal }),
+    { scope: configKey || '', gate: configKey ? null : 'idle',
+      timeout: RUN_CONFIG_REQUEST_TIMEOUT_MS, deps: [runId] })
   // Auto-land only after terminal write-out genuinely completed. A run_finished(error) during an
   // explicit finalize is recovery state, not a completed report, and a still-live engine may still be
   // writing report/lessons/cost after the terminal event appeared.
@@ -2512,11 +2479,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const state = historyActive ? hist : live
   const displayedPhase = historyActive ? phaseLabel(state) : lifecyclePhaseLabel(live)
   const evalSec = state.total_eval_seconds || 0
-  const activeConfigResource = configResource.key === configKey ? configResource : null
-  const maxEval = activeConfigResource?.data?.max_eval_seconds
-  const configNoticeStatus = activeConfigResource?.status === 'loading' && activeConfigResource.retrying
+  // The hook already fences the resource to the current key, so there is no second `activeResource`
+  // read here. A retry keeps the verdict the operator can see (error stays 'error', stale stays
+  // 'stale') and announces itself through `pending`, which is what this notice reports as "Retrying".
+  const maxEval = configResource.data?.max_eval_seconds
+  const configNoticeStatus = configResource.pending === 'retry'
     ? 'retrying'
-    : ['error', 'stale'].includes(activeConfigResource?.status) ? activeConfigResource.status : null
+    : ['error', 'stale'].includes(configResource.status) ? configResource.status : null
   const cost = state.llm_cost
   const hasInspectorContext = selectedId != null || selectedGroup != null
   const groupDetailsOpen = selectedId == null && selectedGroup != null
@@ -2655,7 +2624,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             : 'Run budget unavailable. Current eval time is visible, but its limit could not be loaded.'}</span>
         <button type="button" className="btn xs"
           disabled={configNoticeStatus === 'retrying'}
-          onClick={() => setConfigRetry(value => value + 1)}>
+          onClick={() => configResource.retry()}>
           {configNoticeStatus === 'retrying' ? 'Retrying…' : 'Retry'}
         </button>
       </div>}

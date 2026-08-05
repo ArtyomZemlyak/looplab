@@ -6759,6 +6759,112 @@ exits 0.
 
 *Recommendation:* Promote one shared hook family into hooks.js — usePanelResource already has the right shape (lock, last-good, retry, optional poll); Inspector's supersede/mapLastGood needs are the superset to design for. Migrate incrementally, starting with the three trivial variants (TrustPanel, RunView config, ReviewRoute).
 
+*Resolution (2026-08-05):* Split into a PURE half and a React half, and **five of the seven converted**.
+`ui/src/resourceModel.js` holds the transitions — `resourceBegin` / `resourceSettle` / `resourceCancel`
+/ `resourceView` / `resourceGated`, no React and no I/O, so the rules can be stated and driven
+directly. `hooks.js::useScopedResource` is the only thing that decides WHEN a transition happens: one
+scope-owned in-flight request, abort on scope change and unmount, an optional poll, and `supersede`
+for a retry that must own freshness over a background refresh. Converted:
+`panels.usePanelResource` (now a six-line adapter carrying only the panel dialect — normalize inside
+the deadline, the tuple shape — with its six call sites untouched), `TrustPanel`, `RunView`'s config
+effect, `App.ReviewRoute`, and `Inspector.detailResource`.
+
+**Inspector's machine won, and usePanelResource's did not.** The recommendation has this backwards.
+Inspector's start rule is a strict SUPERSET of the panel rule on every state a panel can reach,
+checked case by case: same-key refresh over ready data returns the previous object in both (no busy
+flicker on a poll tick); same-key retry, same-key refresh over `error`, and same-key refresh over
+`stale` produce identical `{status, data, pending}`; a scope change differs only in that Inspector
+sets `pending: 'load'` where the panel left it `null`, which is invisible because
+`PanelResourceNotice` returns before it reads `pending` at `loading`. The one case where they truly
+disagree — a same-key `'load'` over ready data, where Inspector announces itself and the panel does
+not — is unreachable for panels, whose effect only re-runs when the key changes; it is reachable and
+load-bearing for Inspector, whose effect also depends on the node's own status. The panel rule also
+has no `error` field at all, so it cannot express TrustPanel or ReviewRoute. `panelResourceTruth.test.js`
+passes unchanged over the shared machine, which is the measurement.
+
+**"The three trivial variants" were not trivial — two of the three each needed a named concept
+first.** TrustPanel had NO deadline (`get(runApiPath(runId, '/config'))`, no signal, no timeout), so
+it needed `timeout`; RunView's separate `retrying` flag is a second spelling of `pending === 'retry'`
+and its `key: null` state is a pre-request GATE, so it needed `gate`; ReviewRoute's `gone` is a
+TERMINAL verdict that must not offer a retry, so it needed `classifyFailure`. Those three options,
+plus `validate` (HTTP 200 is not resource truth) and `onSuccess`, are the whole configuration
+surface, and `gate` pays for itself twice: the status that means "do not read" is also the status a
+render sees for a scope the state does not carry yet, so the gate and the synchronous fence can never
+disagree.
+
+**The finding's inventory is wrong in both directions.** Every line range in *Locations* is stale
+except Inspector's: `RunList.useResource` is 294-316 (not 41-64), `usePanelResource` 326-370 (not
+103-147), `useNodeResource` 2064-2137 (not 2101-2115), TrustPanel's effect 515-524 (not 295-304),
+RunView's 1250-1288 (not 569-608), `ReviewRoute` 117-140 (not 39-61). `grep "status: 'loading'"` hits
+**14** files, not 13 — and three of those (`runMode.js`, `timelineModel.js`, `useTimeline.js`) are
+pure projections that merely carry a `status` field and are not resource machines at all, so the real
+"further variants" count is 11 files. It also UNDERCOUNTS: since the split, `ConfigPanel.jsx:192` runs
+its own `/config` read, an eighth variant the finding never saw. That one is deliberately NOT
+converted and should stay that way — it is an EDITABLE resource whose failure must clear `cfg`
+outright, because keeping last-good config alive would let an edit be submitted against a config the
+server no longer has. Last-good is a hazard there, not a feature.
+
+**Left unconverted, with the measurement.** `RunList.useResource` is not single-flight and must not
+become so: its `load()` is a version-fenced, newest-wins, AWAITED call that returns `{ok, value}`, and
+thirteen lines in `RunList.jsx` invoke it that way — the run-deletion settlement at `RunList.jsx:1906`
+locks its recovery on `!listRead?.ok`. Adding the shared lock to it (measured on a scratch tree) turns
+`runListResourceTruth.test.js:140`'s `assert.equal(pending.length, 2)` into `1 !== 2`: two overlapping
+loads collapse into one request, and every post-mutation `await loadRuns()` that races the 2.5s poll
+returns `false`, which that deletion path reads as "the current run list could not be refreshed".
+`panels.useNodeResource` stays because its failure vocabulary carries a THIRD fact the shared
+`{status, error, data}` verdict deliberately does not model: `retryable`, computed from the error's
+code and HTTP status, gates whether `CmpCol` renders a Retry control at all (`panels.jsx`'s
+`resource.retryable && <button …>` and `if (!resource.retryable) return`). Widening the shared state
+for one caller, or dropping the gate, would each be worse than leaving it. `OwnerAuth`,
+`SharedAssistant`, `ConceptView`, `CollabPanel`, `ResearchAtlas`, `RunCompare`, `Settings` and
+`Report` are untouched; they were never part of the seven and each carries its own lifecycle
+(capability unlock, share revocation, comparison capture) on top of the read.
+
+**Four deliberate behaviour changes, all recorded rather than asserted away.** (1) TrustPanel's
+`/config` read is now bounded at `PANEL_REQUEST_TIMEOUT_MS` like every sibling panel; before, a hung
+request left "Loading detector configuration" on screen forever with no way to retry. (2) TrustPanel,
+RunView and ReviewRoute now get the synchronous scope fence: a `runId` / config-key / token change
+hides the previous scope's payload in the SAME render instead of one render later. Not reachable in
+TrustPanel today (its `runId` is fixed for the life of a mounted panel) — it is precisely the fence
+the finding says does not propagate. (3) ReviewRoute's missing token is a gate, so it reaches `gone`
+on the first render instead of painting "Opening review…" for one frame first. (4) `onSuccess` is
+handed the SETTLING read's scope rather than reading the render's, and the bound callbacks are frozen
+for the lifetime of one request rather than at effect time — so a read, the validation of its response
+and the wording of its failure always come from the same render, and a fence keyed by scope
+(Inspector's trace-clear set) can never release the wrong node's.
+
+The guard is `ui/test/resourceMachine.test.js` (7 tests). It drives the machine rather than reading
+it: a truth table over the pure transitions; the hook in a real React tree with a controllable read,
+taken through load → success, silent refresh, refused second flight, failure → stale with last-good
+kept, retry → recovered, a rejected HTTP 200, supersede, scope change, gate, and a terminal verdict;
+a second hook test for abort-on-unmount and poll ticks that do not stack; and then the converted
+components themselves — TrustPanel's error → retry-in-flight → recovered sequence, Inspector keeping
+its last-good detail across a failed reload and dropping it on a node switch, and the review route's
+gate / terminal / retry arms. The scope fence is asserted from the Probe's RENDER BODY, because the
+property is about the ONE commit between a scope change and the passive effect that services it,
+which `act` would otherwise hide.
+
+Verified by MUTATING a scratch copy (four breaks, each applied by a script that asserts its anchor
+occurs exactly once, then restored; `diff -r` confirms the tree came back). Making a failure blank the
+resource instead of keeping last-good failed 4 tests — the truth table, the hook test, the new
+Inspector test, and the pre-existing `panelResourceTruth`. Dropping the `resourceView` fence failed
+the truth table and the hook's render-body assertion (before the render-body assertion was added it
+failed only the truth table, which is why it is there). Blanking a retry back to `loading` failed the
+truth table, `panelResourceTruth` and `inspectorDetailResource`. The fourth break is the honest
+finding: removing `settle`'s `flight.current !== request` ownership check failed ONLY the source pin
+in `commentsContract.test.js`. That check is defense-in-depth, not a live property — `deadlineRequest`
+rejects with `AbortError` the moment its controller aborts, so a superseded read always lands on the
+abort arm (which has its own fence), and a settled promise's `.then` is a microtask that cannot be
+overtaken by a re-render. It was equally unreachable in the code this replaced; it stays, and the pin
+stays with it.
+
+Three source-pin tests spoke the old implementation and were re-pointed in the same change rather
+than deleted: `commentsContract.test.js` (the scope fence now pinned on `resourceModel.js`, the
+two-outcome ownership check on `hooks.js`), `uiSemantics.test.js` (the identity check on Inspector's
+`validate`, the unmount abort on `hooks.js`), and `runRouteSemantics.test.js` (`detailQuery.push`).
+Each property was re-verified where it now lives, and the two that matter most are additionally
+driven behaviourally by the new guard.
+
 #### UI-07 · MEDIUM · duplication · effort: small
 
 **~15 copy-pasted 'CONTROL.x → commandFeedback(labels) → onToast' blocks across panels/RunView/Inspector**
