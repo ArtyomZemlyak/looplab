@@ -103,6 +103,38 @@ made before the wait can be stale by the time the run is lifted. Both the probe 
 one fold taken after the lock is held, and every command re-checks the promise once more immediately
 before entering the loop.
 
+### Moving a run to a different endpoint
+
+The key and its endpoint binding are **one atomic credential**. Point a run somewhere new and the
+credential has to move with it — LoopLab will not carry a key issued for one host into an
+`Authorization` header aimed at another, and will not quietly complete a half-override from a
+different source. Change all three together:
+
+```bash
+export LOOPLAB_LLM_BASE_URL=https://new-endpoint/v1
+export LOOPLAB_LLM_API_KEY=sk-…                              # the key for THAT endpoint
+export LOOPLAB_LLM_API_KEY_BASE_URL=https://new-endpoint/v1  # must equal the line above
+```
+
+Two rules explain every refusal you can hit here:
+
+- **The pair is selected from ONE source** — the process environment if either name appears there,
+  otherwise `.env`. Exporting only `LOOPLAB_LLM_API_KEY` in your shell does *not* inherit
+  `LOOPLAB_LLM_API_KEY_BASE_URL` from `.env`; it replaces the whole pair with half of one. (The
+  refusal says so explicitly, naming the `.env` half it dropped.)
+- **The binding is checked against the endpoint the request would actually go to.** Overriding
+  `llm_base_url` alone — via `LOOPLAB_LLM_BASE_URL`, `-s llm_base_url=…`, or a config file — leaves
+  the key bound to the old host, and the run refuses before any transport is built.
+
+`--model` is safe on its own: it changes the model id only and never moves an endpoint, so it cannot
+strand a credential.
+
+If the new endpoint needs no key at all (a local Ollama/vLLM), unset **both** names rather than one.
+
+A run refused for either reason names the mistake, both endpoints, and the variables to set together
+— **once**, with the roles it affects listed underneath. Seven roles share one shared credential, so
+one wrong variable is one problem, not seven.
+
 ### Endpoint options
 
 | Endpoint | `LOOPLAB_LLM_BASE_URL` | Notes |

@@ -24,12 +24,13 @@ def _no_dotenv_in_tests(monkeypatch):
 def _no_repo_dotenv_in_tests(monkeypatch):
     """`Settings.model_config["env_file"]` stopped being the only dotenv reader.
 
-    Connection profiles (`core/llm.py::_ambient_shared_pair`) and the UI secret store
-    (`serve/settings_store.py::_dotenv_values`) call `dotenv_values(".env")` DIRECTLY, so the
-    fixture above — which only reaches the pydantic loader — no longer insulates them. The suite
-    runs from the repo root, so a developer's real `.env` becomes a live credential source: ~50
-    tests fail with "LLM credential is bound to a different endpoint; refusing to construct
-    transport", and `test_secret_settings` prints the real API key into its assertion diff.
+    Connection profiles (`core/llm.py::_ambient_credential`, and `_ambient_shared_pair` over it) and
+    the UI secret store (`serve/settings_store.py::_dotenv_values`) call `dotenv_values(".env")`
+    DIRECTLY, so the fixture above — which only reaches the pydantic loader — no longer insulates
+    them. The suite runs from the repo root, so a developer's real `.env` becomes a live credential
+    source: ~50 tests fail with the mis-bound-credential refusal (the endpoint the test points at is
+    not the one the developer's key is bound to), and `test_secret_settings` prints the real API key
+    into its assertion diff.
 
     Neutralize the REPO-ROOT `.env` only. A test that chdirs to a tmp dir and writes its own
     `.env` (`test_dotenv_key_wins_over_stored_secret`) must still see it, so the guard compares

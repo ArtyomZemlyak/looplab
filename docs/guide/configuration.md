@@ -337,8 +337,8 @@ These are no-ops unless `backend=llm`.
 | Setting | Env | Default | Description |
 |---|---|---|---|
 | `llm_model` | `LOOPLAB_LLM_MODEL` | `qwen3:8b` | Model id |
-| `llm_base_url` | `LOOPLAB_LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint (Ollama default) |
-| `llm_api_key` | `LOOPLAB_LLM_API_KEY` | — | Secret; never serialized as a value. Local servers ignore it |
+| `llm_base_url` | `LOOPLAB_LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint (Ollama default). Changing it **alone** is refused when a key is configured — the credential must move with it, see [moving a run to a different endpoint](llm-and-agents.md#moving-a-run-to-a-different-endpoint) |
+| `llm_api_key` | `LOOPLAB_LLM_API_KEY` | — | Secret; never serialized as a value. Local servers ignore it. Atomic with the row below: the pair is reselected from ONE source (process env, else `.env`), so setting this alone does not inherit the binding from the other source |
 | `llm_api_key_base_url` | `LOOPLAB_LLM_API_KEY_BASE_URL` | — | Endpoint the secret above is bound to. A key travels only while the request still goes to this host, so a role/stage endpoint override drops the credential instead of sending it elsewhere. Dropped from config snapshots entirely (not masked) |
 | `llm_temperature` | `LOOPLAB_LLM_TEMPERATURE` | `0.6` | Sampling temperature |
 | `llm_parser` | `LOOPLAB_LLM_PARSER` | `tool_call` | Structured-output strategy (`tool_call`, with text fallback) |

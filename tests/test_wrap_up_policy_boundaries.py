@@ -363,8 +363,10 @@ def test_a_real_resume_process_that_waits_out_a_wrap_up_never_lifts_the_run(tmp_
 def incomplete_credential_pair(monkeypatch):
     """The operator-visible state defect 2 is about: a key whose endpoint binding is gone.
 
-    `bound_api_key_for` calls this "an incomplete key+endpoint pair" and refuses before transport —
-    correctly, for a run that is about to spend money on it.
+    `bound_api_key_for` refuses this before transport — correctly, for a run that is about to spend
+    money on it. It used to call the state "an incomplete key+endpoint pair"; it now names the ACTION
+    that produced the state (`LOOPLAB_LLM_API_KEY` set without `LOOPLAB_LLM_API_KEY_BASE_URL`),
+    because the action is the only part the operator can change.
     """
     monkeypatch.setenv("LOOPLAB_LLM_API_KEY", "sk-orphaned-key")
     monkeypatch.delenv("LOOPLAB_LLM_API_KEY_BASE_URL", raising=False)
@@ -379,11 +381,16 @@ def test_the_credential_gate_warns_where_it_refuses_for_a_run_that_can_still_pro
     settings = Settings(backend="llm", llm_model="m", llm_base_url=_DEAD)
     with pytest.raises(LLMError) as refused:
         validate_bound_profiles(settings)
-    assert "incomplete key+endpoint pair" in str(refused.value)
+    # The diagnosis names the ACTION and the exact fix — not merely the state it left behind.
+    refusal = str(refused.value)
+    assert "LOOPLAB_LLM_API_KEY was set without LOOPLAB_LLM_API_KEY_BASE_URL" in refusal
+    assert "Fix: set BOTH LOOPLAB_LLM_API_KEY and LOOPLAB_LLM_API_KEY_BASE_URL" in refusal
 
     warning = preflight.wrap_up_credential_warning(settings)
     assert warning is not None
-    assert "incomplete key+endpoint pair" in warning
+    # the WARNING carries the same diagnosis: one gate, two policies, one explanation
+    assert "LOOPLAB_LLM_API_KEY was set without LOOPLAB_LLM_API_KEY_BASE_URL" in warning
+    assert "Fix: set BOTH LOOPLAB_LLM_API_KEY and LOOPLAB_LLM_API_KEY_BASE_URL" in warning
     # the refusal's header is replaced, not repeated: this is not a failed preflight any more
     assert "LLM credential preflight failed" not in warning
     # the same tail the endpoint policy prints, so the operator reads one story either way
@@ -423,7 +430,7 @@ def test_warning_alone_would_only_have_moved_the_same_error_into_make_roles(
     task = validate_task(json.loads(_TASK_DOC))
     with pytest.raises(LLMError) as leaked:
         make_roles(task, settings, None)
-    assert "incomplete key+endpoint pair" in str(leaked.value)
+    assert "LOOPLAB_LLM_API_KEY was set without LOOPLAB_LLM_API_KEY_BASE_URL" in str(leaked.value)
 
     degraded = credential_free_wrap_up_settings(settings)
     validate_bound_profiles(degraded)                 # the gate itself is now satisfied…
