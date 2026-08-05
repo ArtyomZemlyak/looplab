@@ -195,7 +195,8 @@ def _retain_smallest(selected: dict, ordered_keys: list, key, value, limit: int,
 
 def bounded_inputs(state, lens_pack: list[dict]) -> dict:
     """Canonical bounded inputs shared by GET projection and paid lens derivation."""
-    from looplab.search.concept_graph import concept_touch_counts, graph_from_node_concepts
+    from looplab.search.concept_lens import concept_touch_counts
+    from looplab.search.concept_tagging import graph_from_node_concepts
 
     registered = {item.get("name"): item for item in lens_pack
                   if isinstance(item, dict) and isinstance(item.get("name"), str)}
@@ -461,7 +462,7 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
 
 def folded_concepts(state):
     """Compatibility seam for pure callers; shares the bounded public materialization rules."""
-    from looplab.search.concept_graph import default_lenses
+    from looplab.search.concept_lens import default_lenses
 
     inputs = bounded_inputs(state, default_lenses())
     return (inputs["memberships"], inputs["concept_ids"], inputs["edges"], inputs["touch"])
@@ -476,7 +477,7 @@ def build_core(state, *, run_id: str, lens_pack: list[dict],
     is bounded by this module's public ConceptFrame limits, so a small process-local snapshot cache can
     retain it without retaining the (potentially much larger) folded ``RunState``.
     """
-    from looplab.search.concept_graph import concept_metrics
+    from looplab.search.concept_analytics import concept_metrics
 
     inputs = bounded_inputs(state, lens_pack)
     memberships = inputs["memberships"]
@@ -580,7 +581,7 @@ def project_frame(core: dict, *, requested_lens: str, lens_pack: list[dict],
                   requested_spec: Optional[dict] = None,
                   lens_registration: str = "shipped") -> dict:
     """Pure lens-specific projection over one immutable-by-convention bounded core."""
-    from looplab.search.concept_graph import project_hierarchy, project_lens
+    from looplab.search.concept_lens import project_hierarchy, project_lens
 
     registered = {item.get("name"): item for item in lens_pack
                   if isinstance(item, dict) and isinstance(item.get("name"), str)}

@@ -5192,6 +5192,81 @@ Covered by `tests/test_json_and_metric_contracts.py` (30).avoid the name collisi
 
 *Recommendation:* Split into concept_graph.py (structure + skeleton), concept_tagging.py (heuristic + LLM taggers), concept_analytics.py (coverage/metrics/alarms), and move the lens/hierarchy projections next to the other UI projections (events/ per the package map, or serve/). Promote _experiment_nodes/_node_text to public names since three sibling modules import them.
 
+*Resolution (2026-08-05):* CONFIRMED and split — as FIVE modules, not the four the recommendation
+names, because four of them close an import cycle. Three of the finding's own claims needed
+correcting first.
+
+**The counts.** The file is 1,691 lines, not 1,680, and four of the five cited spans have drifted
+16-36 lines (`tag_nodes_llm` is :546-725, not :530-709; the projections :1127-1344, not :1123-1341;
+consolidation + `build_concept_map` :1437-1645, not :1437-1634). The five responsibilities and the
+`Concept` DESIGN NOTE at :75-80 are exactly as described.
+
+**Three modules reach into the privates, or four?** Four. `engine/novelty.py:858` imports
+`_experiment_nodes` too, and it does so across a PACKAGE boundary —
+`tests/test_cross_package_private_seams.py` already carried it as a declared debt. `_node_text` has
+exactly one importer (`novelty_recall`). Both are promoted: `concept_tagging.experiment_nodes` and
+`concept_tagging.node_text`, and the registry entry is DELETED rather than re-pointed, which is the
+outcome that registry's own docstring asks for ("the moment to ask whether it should be public
+instead").
+
+**The recommendation's four modules do not import.** It names `concept_graph` (structure) /
+`concept_tagging` / `concept_analytics` plus a destination for the projections, and gives the fifth
+responsibility — consolidation + `build_concept_map` — no home. Left behind in `concept_graph.py`
+that makes the base module import its own dependents. Measured on a scratch copy holding exactly the
+recommended shape: `python -c "import looplab.search.concept_tagging"` → `ImportError: cannot import
+name 'ConceptGraph' from partially initialized module 'looplab.search.concept_graph' (most likely
+due to a circular import)`. So there is a fifth file, `concept_map.py`, at the TOP of the cluster,
+and the layering is `concept_graph` (0) ← `concept_tagging` / `concept_lens` (1) ←
+`concept_analytics` (2) ← `concept_map` (3). 1,691 lines became 413 / 428 / 367 / 314 / 295.
+
+**Where the projections went, and why not where the review said.** Both proposed destinations were
+measured and both fail. `serve/` is unreachable: `tools/run_tools.py` consumes `project_hierarchy`
+and `node_concept_delta`, `tools` sits BELOW `serve`, and
+`test_cross_package_private_seams.py::test_the_upward_import_is_confined_to_that_one_default` allows
+exactly ONE `tools -> serve` import (inside `RunControlTools.lifecycle`). `events/` cannot take the
+group whole: the package imports nothing above `core` (measured — zero non-`core` `looplab.` imports
+in it), while `node_concept_delta` needs `search/concept_projection.py`'s receipt-aware CURRENT
+projection, and `derive_lens` makes an LLM call into a package that holds the PURE projections
+precisely so the fold's neighbourhood never grows a provider edge. Landing three of the five in
+`events/` and leaving two behind splits one view API across two packages to satisfy the letter of a
+recommendation whose reason — cohesion — it breaks. They live in `search/concept_lens.py`, which
+every consumer already imports.
+
+**No re-export facade, on purpose.** The obvious way to make a split invisible is to re-export the
+moved names from `concept_graph`. That is the trap here rather than the fix: a re-export RESOLVES,
+so `monkeypatch.setattr(concept_graph, "build_concept_map", …)` keeps working while the engine's
+`concept_map.build_concept_map` runs untouched — the silent no-op CLAUDE.md's back-compat note
+describes, wearing a green test. Without one, the five stale patches in the suite raised
+`AttributeError: module 'looplab.search.concept_graph' has no attribute 'build_concept_map'` on the
+first run and named themselves.
+
+**The seam the split could have cost.** `from looplab.search.concept_tagging import
+tag_nodes_heuristic` binds BY VALUE, so once the analytics live in another file a
+`monkeypatch.setattr(concept_tagging, …)` stops reaching them — the same second-patch-surface hazard
+CLAUDE.md records for `serve/scope_actions.py`. That seam is live
+(`tests/test_retro_tag_persist.py` patches the tagger to force a CAS race). So a cluster module
+reaches a sibling's FUNCTIONS through the module object; only the two types and the
+`_normalize_concept_id` identity wrapper are imported by name, because nothing patches those.
+
+**Not fixed, and why.** The `Concept` DESIGN NOTE moved verbatim rather than being acted on:
+unifying the dual id-prefix/`axes` encoding changes what `axes_of`/`parents_of` return for every
+curated cross-link (`loss/margin-mse` sits under BOTH `loss` and `distillation`), and those feed
+coverage, graded-novelty admission and Card scoring. That is a behaviour change to live selection,
+not a decomposition, and it needs its own measurement. Noted in passing: `_canonical_with_rename`
+has no caller anywhere in `looplab/` or `tests/` — it moved with the projections rather than being
+deleted only because `events/digest.py`'s comment names it as the thing NOT to reach for, and a
+dangling reference is worse than a dead function. A stale `normalized_concept_renames` import (dead
+since SE-10) went with the split.
+
+`tests/test_concept_module_split.py` (7). Three of the seven DRIVE the seam — patch the sibling, call
+across the file boundary, assert the patched output is what came back — because a counter alone
+cannot tell "the module was imported" from "the patched function ran". Verified by three breaks on a
+scratch copy: restoring the by-value `from looplab.search.concept_tagging import tag_nodes_heuristic`
+in `concept_analytics` (which is what a future refactor does without thinking), adding a
+function-local `concept_map` import back into `concept_graph`, and growing a two-name re-export
+facade. The first break is the one worth recording: 220 existing concept/endpoint/tool tests stayed
+GREEN through it, and only the driven guard failed.
+
 #### SE-10 · MEDIUM · inconsistency · effort: medium
 
 **Concept/synonym merging implemented three different ways; per-run LLM consolidation bypasses the shared agent_merge core**

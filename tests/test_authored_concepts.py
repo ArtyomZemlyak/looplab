@@ -253,7 +253,9 @@ def test_cadence_retags_authored_claim_and_stamps_classifier_generation(tmp_path
     state = fold(s.read_all())
     captured = {}
 
+    from looplab.search import concept_analytics as ca
     from looplab.search import concept_graph as cg
+    from looplab.search import concept_map as cm
     graph = cg.dense_retrieval_skeleton()
     tags = {0: frozenset({"loss/decoupled-contrastive"}),
             1: frozenset({"classifier/known"})}
@@ -264,13 +266,13 @@ def test_cadence_retags_authored_claim_and_stamps_classifier_generation(tmp_path
             "graph": graph,
             "tags": tags,
             "raw_tags": tags,
-            "coverage": cg.concept_coverage(state, graph, tags),
+            "coverage": ca.concept_coverage(state, graph, tags),
             "important_uncovered": [],
             "consolidated": {},
             "mode": "llm",
         }
 
-    monkeypatch.setattr(cg, "build_concept_map", fake_build)
+    monkeypatch.setattr(cm, "build_concept_map", fake_build)
 
     class CaptureStore:
         def __init__(self): self.events = []
@@ -300,7 +302,9 @@ def test_cadence_repairs_partial_classifier_instead_of_caching_subset(tmp_path, 
     assert state.node_concept_materialization_receipts[0]["status"] == "partial"
     captured = {}
 
+    from looplab.search import concept_analytics as ca
     from looplab.search import concept_graph as cg
+    from looplab.search import concept_map as cm
     graph = cg.dense_retrieval_skeleton()
     tags = {0: frozenset({"classifier/repaired"}),
             1: frozenset({"classifier/known"})}
@@ -311,13 +315,13 @@ def test_cadence_repairs_partial_classifier_instead_of_caching_subset(tmp_path, 
             "graph": graph,
             "tags": tags,
             "raw_tags": tags,
-            "coverage": cg.concept_coverage(state, graph, tags),
+            "coverage": ca.concept_coverage(state, graph, tags),
             "important_uncovered": [],
             "consolidated": {},
             "mode": "llm",
         }
 
-    monkeypatch.setattr(cg, "build_concept_map", fake_build)
+    monkeypatch.setattr(cm, "build_concept_map", fake_build)
 
     class CaptureStore:
         def __init__(self): self.events = []
@@ -340,7 +344,9 @@ def test_cadence_persists_per_node_fallback_provenance(tmp_path, monkeypatch):
     s.append("node_created", _created(2, None))
     state = fold(s.read_all())
 
+    from looplab.search import concept_analytics as ca
     from looplab.search import concept_graph as cg
+    from looplab.search import concept_map as cm
     graph = cg.dense_retrieval_skeleton()
     for i in range(70):
         graph.ensure(f"axis/c{i:03d}")
@@ -357,13 +363,13 @@ def test_cadence_persists_per_node_fallback_provenance(tmp_path, monkeypatch):
             "raw_tags": tags,
             # Exercise both JSON/string keys and a defensive over-wide classifier row.
             "raw_tag_modes": {"0": "offline-heuristic", "1": "llm", "2": "llm"},
-            "coverage": cg.concept_coverage(state, graph, tags),
+            "coverage": ca.concept_coverage(state, graph, tags),
             "important_uncovered": [],
             "consolidated": {},
             "mode": "llm",
         }
 
-    monkeypatch.setattr(cg, "build_concept_map", fake_build)
+    monkeypatch.setattr(cm, "build_concept_map", fake_build)
 
     class CaptureStore:
         def __init__(self): self.events = []
@@ -398,7 +404,9 @@ def test_cadence_never_retags_an_operator_edited_node(tmp_path, monkeypatch):
     assert state.node_concept_provenance == {1: "classifier", 0: "operator-edited"}
     captured = {}
 
+    from looplab.search import concept_analytics as ca
     from looplab.search import concept_graph as cg
+    from looplab.search import concept_map as cm
     graph = cg.dense_retrieval_skeleton()
     tags = {0: frozenset({"operator/hand-tag"}), 1: frozenset({"classifier/known"})}
 
@@ -408,13 +416,13 @@ def test_cadence_never_retags_an_operator_edited_node(tmp_path, monkeypatch):
             "graph": graph,
             "tags": tags,
             "raw_tags": tags,
-            "coverage": cg.concept_coverage(state, graph, tags),
+            "coverage": ca.concept_coverage(state, graph, tags),
             "important_uncovered": [],
             "consolidated": {},
             "mode": "llm",
         }
 
-    monkeypatch.setattr(cg, "build_concept_map", fake_build)
+    monkeypatch.setattr(cm, "build_concept_map", fake_build)
 
     class CaptureStore:
         def __init__(self): self.events = []

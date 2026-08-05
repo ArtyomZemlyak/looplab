@@ -68,7 +68,12 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
         "looplab.events.finalize_scope": ("_adjacent_claim", "_finalize_begun", "_scope_has_step"),
         "looplab.runtime.command_eval": ("_LABEL_KEYS", "_PRED_KEYS", "_as_list"),
         "looplab.runtime.sandbox": ("_run_argv", "_to_float"),
-        "looplab.search.concept_graph": ("_experiment_nodes",),
+        # `looplab.search.concept_graph._experiment_nodes` left this list on 2026-08-05: doc 25 SE-09
+        # PROMOTED it (and `_node_text`) to `concept_tagging.experiment_nodes` / `.node_text`. Four
+        # modules imported it — three inside `search`, plus `engine/novelty.py` across this boundary —
+        # so the underscore was claiming a freedom to rename that had already been spent. This is the
+        # outcome the registry's own docstring asks for ("the moment to ask whether it should be
+        # public instead"), which is why the entry is gone rather than re-pointed at the new module.
         "looplab.tools.vectorstore": ("_cosine",),
     },
     "search": {

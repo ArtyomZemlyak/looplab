@@ -474,7 +474,7 @@ class RunTools:
     def _concept_tree(self, st: RunState) -> str:
         """Indented is_a concept tree with per-branch experiment counts (subtree, deduped)."""
         from collections import defaultdict
-        from looplab.search.concept_graph import project_hierarchy
+        from looplab.search.concept_lens import project_hierarchy
         projection = self._concept_projection(st)
         nc = {node_id: list(concepts) for node_id, concepts in projection.memberships.items()}
         if projection.status == "unavailable":
@@ -581,7 +581,7 @@ class RunTools:
     def _node_concept_delta_tool(self, st: RunState, nid: int) -> str:
         if not st.nodes.get(nid):
             return f"(no experiment #{nid})"
-        from looplab.search.concept_graph import node_concept_delta
+        from looplab.search.concept_lens import node_concept_delta
         d = node_concept_delta(st, nid)
         parents = d["parent_ids"]
         base = ("root (no parent)" if not parents

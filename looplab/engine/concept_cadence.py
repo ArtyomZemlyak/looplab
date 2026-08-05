@@ -176,7 +176,8 @@ class ConceptCadenceMixin:
         replay stays deterministic even though the producer is impure — the established memo/lessons pattern.
         Deterministic FALLBACK (no client): the alias heuristic over the task-type skeleton (curated pack
         required) — None when neither a client nor a skeleton is available (nothing to steer on)."""
-        from looplab.search.concept_graph import concept_coverage, skeleton_for, uncovered_regions
+        from looplab.search.concept_analytics import concept_coverage, uncovered_regions
+        from looplab.search.concept_graph import skeleton_for
         from looplab.search.lock_in import lock_in_signal
         # Defensive: a bare/None `self` (e.g. a unit test calling this as a pure helper) has no reflect
         # client -> deterministic fallback, unchanged behaviour. Real engines get the agentic path.
@@ -253,7 +254,7 @@ class ConceptCadenceMixin:
         # The snapshot producer uses `tools=None` and tags from the node's
         # RECORDED text (idea/params/result/log excerpts in state), i.e. mode="llm", NOT a live
         # per-node tool-loop (passing run tools would make it fully agentic but far heavier).
-        from looplab.search.concept_graph import stale_tagged_nodes
+        from looplab.search.concept_tagging import stale_tagged_nodes
         provenance = getattr(state, "node_concept_provenance", None) or {}
         # Researcher-authored Idea.concepts are visible read-model claims, not an
         # independent tagging result. Reusing them as known_tags would prevent the classifier from
@@ -298,7 +299,7 @@ class ConceptCadenceMixin:
         yields no snapshot (unlike the two enrichment steps below, which swallow their own failures)."""
         import contextlib
 
-        from looplab.search.concept_graph import build_concept_map
+        from looplab.search.concept_map import build_concept_map
         known, known_renames = self._reusable_node_tags(state)
         # Span-scope the concept-map LLM generations (tagging + consolidation + importance) so they
         # file under a `concept_coverage` op, not the ambient/next-node trace. nullcontext if spanless.
@@ -400,7 +401,7 @@ class ConceptCadenceMixin:
         # Incremental (skip already-tagged) + capped per cadence, so a big board tags over a few
         # cadences instead of exploding one. Isolated try: a tagging hiccup must not lose the snapshot.
         try:
-            from looplab.search.concept_graph import stale_tagged_nodes, tag_text_llm
+            from looplab.search.concept_tagging import stale_tagged_nodes, tag_text_llm
             known_h = getattr(state, "hypothesis_concepts", None) or {}
             h_at_vocab = getattr(state, "hypothesis_concepts_at_vocab", None) or {}
             v_now = len(graph.concepts())

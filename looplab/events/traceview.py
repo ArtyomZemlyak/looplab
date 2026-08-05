@@ -398,7 +398,7 @@ def _normalize_span(value) -> Optional[dict]:
     # is string-hash order — randomized per process via PYTHONHASHSEED. That made the serialized
     # projection (and any persisted index record built from it) not byte-stable across two server
     # runs, the same raw-set-iteration defect this change series fixed in
-    # project_hierarchy/project_lens/concept_graph. Keep the sort (or make the groups tuples).
+    # project_hierarchy/project_lens (now search/concept_lens.py). Keep the sort (or make the groups tuples).
     for key in sorted(_ATTR_TEXT_FIELDS):
         if key in raw_attributes:
             attributes[key] = budget.text(

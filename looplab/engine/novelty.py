@@ -855,7 +855,8 @@ class NoveltyGateMixin:
         this bypass. It degrades to the skeleton + deterministic heuristic when the trusted cache is empty."""
         if not getattr(self, "_graded_novelty", False) or not state.nodes:
             return None
-        from looplab.search.concept_graph import _experiment_nodes, graph_from_node_concepts, skeleton_for
+        from looplab.search.concept_graph import skeleton_for
+        from looplab.search.concept_tagging import experiment_nodes, graph_from_node_concepts
         from looplab.search.graded_novelty import grade_novelty, tag_idea_llm
         seed = skeleton_for(state.task_id or "")
         seed = seed if seed.concepts() else None
@@ -866,7 +867,7 @@ class NoveltyGateMixin:
         # decided, so they cannot certify their own graded-novelty bypass. Only replay-proven
         # `node_concepts` classifier events enter the agentic path; missing/unknown provenance fails
         # closed to the curated heuristic path (or no-op when no curated vocabulary exists).
-        experiment_ids = {nd.id for nd in _experiment_nodes(state)}
+        experiment_ids = {nd.id for nd in experiment_nodes(state)}
         if any(
             nid in receipts
             and concept_provenance.get(nid) in {

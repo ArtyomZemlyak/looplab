@@ -187,7 +187,9 @@ def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None, ru
     fallback. Returns {graph, tags, important_uncovered, mode, brief}. This is what makes every Phase-1
     diagnostic (lock-in / board-dedup / research-targets) agentic-first and universal, not
     heuristic-hardcoded (§21.13/§21.15 correction)."""
-    from looplab.search.concept_graph import (build_concept_map, skeleton_for, tag_nodes_heuristic)
+    from looplab.search.concept_graph import skeleton_for
+    from looplab.search.concept_map import build_concept_map
+    from looplab.search.concept_tagging import tag_nodes_heuristic
     seed = skeleton_for(resolved_type)
     seed = seed if seed.concepts() else None
 
@@ -252,8 +254,10 @@ def concept_coverage(
     code/logs), computes the coverage, and derives the important-but-uncovered directions per task (universal:
     no hardcoded winning region; grounded in `--repo`'s prior-art brief when given). `--offline` forces the
     deterministic alias-heuristic fallback (needs a curated `--task-type` pack, no importance derivation)."""
-    from looplab.search.concept_graph import (build_concept_map, concept_report, skeleton_for,
-                                              tag_nodes_heuristic)
+    from looplab.search.concept_analytics import concept_report
+    from looplab.search.concept_graph import skeleton_for
+    from looplab.search.concept_map import build_concept_map
+    from looplab.search.concept_tagging import tag_nodes_heuristic
     store = _require_run_dir(run_dir)
     snapshot_events = store.read_all()
     state = fold(snapshot_events)
@@ -439,7 +443,7 @@ def board_dedup(
     """PART IV D4 (§21.5): taxonomy-aware hypothesis-board dedup analysis. Surfaces the dominant
     within-concept redundancy (merge aggressively) and cross-branch look-alikes a blind merge would wrongly
     collapse (keep distinct). Agentic tags by default (`--offline` forces the heuristic); merges nothing."""
-    from looplab.search.concept_graph import tag_text, tag_text_llm
+    from looplab.search.concept_tagging import tag_text, tag_text_llm
     from looplab.search.taxonomy_dedup import dedup_report
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())

@@ -263,8 +263,8 @@ def test_cli_persist_rejects_finished_state_while_engine_lock_is_live(tmp_path):
 def test_cli_persist_cas_rejects_event_appended_during_analysis(tmp_path, monkeypatch):
     store = _store(tmp_path)
     store.append("run_finished", {"reason": "done"})
-    from looplab.search import concept_graph
-    original = concept_graph.tag_nodes_heuristic
+    from looplab.search import concept_tagging
+    original = concept_tagging.tag_nodes_heuristic
     raced = False
 
     def append_racing_event(state, graph):
@@ -275,7 +275,7 @@ def test_cli_persist_cas_rejects_event_appended_during_analysis(tmp_path, monkey
             store.append("annotation", {"text": "concurrent review note"})
         return tags
 
-    monkeypatch.setattr(concept_graph, "tag_nodes_heuristic", append_racing_event)
+    monkeypatch.setattr(concept_tagging, "tag_nodes_heuristic", append_racing_event)
     result = _concept_coverage(str(tmp_path), "--offline", "--persist")
 
     assert raced and result.exit_code == 2

@@ -711,7 +711,7 @@ persisted `co_occurs` cache rows are ignored. A hierarchy is then **computed** b
   carries** (never divided). Current rollups and the median baseline exclude tombstoned/aborted lifecycle
   rows; best/mean eligibility also requires an evaluated, finite metric that is not explicitly infeasible.
   `delta_*` is direction-normalized vs that median, so positive means better for both minimize and maximize
-  runs. See `looplab/search/concept_graph.py`.
+  runs. See `looplab/search/concept_analytics.py`.
 - `node_concept_delta(state, node_id)` — one node's concepts as a **delta vs its parent(s)**:
   `{parent_ids, added, removed, inherited}` (a merge inherits from the UNION of parents; a root's concepts
   are all `added` for legacy full authoring, while a delta-authored root inherits the run base). This is a
@@ -912,7 +912,7 @@ Where each concept lives in the code:
 | Leakage detectors + data profiler | `trust/leakage.py`, `core/profile.py` |
 | Vector store + agentic retrieval | `tools/vectorstore.py`, `tools/retrieval.py`, `tools/knowledge_tools.py`, `agents/agent.py` |
 | Cross-run case library | `engine/memory.py` |
-| Part IV/V concept materialization + graph projections | `core/concepts.py`, `search/concept_projection.py`, `search/concept_graph.py` |
+| Part IV/V concept materialization + graph projections | `core/concepts.py`, `search/concept_projection.py`, the five-module concept cluster `search/concept_graph.py` (structure) → `search/concept_tagging.py` / `search/concept_lens.py` → `search/concept_analytics.py` → `search/concept_map.py` |
 | Live concept cadence (re-tag, consolidation, edges, coverage snapshot) | `engine/concept_cadence.py` |
 | Cross-run index, claims + agent reads | `engine/cross_run_index.py`, `engine/claims.py`, `tools/cross_run_tools.py` |
 | Portfolio governance + paid steward lifecycle | `engine/concept_registry.py`, `engine/governance_health.py`, `engine/steward_invocation.py`, `engine/concept_steward.py`, `engine/claim_steward.py`, `engine/task_facets.py` |

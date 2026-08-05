@@ -144,14 +144,14 @@ def test_classifier_surface_excludes_authored_concept_claims():
     # The Researcher authors idea.concepts; the independent tagger must infer them from descriptive
     # evidence rather than laundering the producer's own labels into classifier provenance.
     from looplab.search.graded_novelty import _idea_tag_text
-    from looplab.search.concept_graph import _node_text, _describe_node
+    from looplab.search.concept_tagging import _describe_node, node_text
     from types import SimpleNamespace
     idea = Idea(operator="improve", params={}, rationale="tweak the training setup",
                 concepts=["loss/contrastive", "negatives/hard-mining"])
     text = _idea_tag_text(idea)
     assert "loss/contrastive" not in text and "negatives/hard-mining" not in text
     node = SimpleNamespace(idea=idea, operator="improve")
-    assert "loss/contrastive" not in _node_text(node)
+    assert "loss/contrastive" not in node_text(node)
     assert "loss/contrastive" not in _describe_node(node)
 
 
@@ -161,19 +161,19 @@ def test_idea_text_includes_search_space_keys_like_node_text():
     # graded-novelty's L4/L5 admission can fire for search-space proposals. Space keys are structural
     # dimension names (not the self-assertable `concepts` field), so this adds no gaming surface.
     from looplab.search.graded_novelty import _idea_tag_text
-    from looplab.search.concept_graph import _node_text
+    from looplab.search.concept_tagging import node_text
     from types import SimpleNamespace
     idea = Idea(operator="improve", params={}, rationale="tune the scaling",
                 space={"temperature": [0.01, 0.1], "warmup_steps": [100, 500]})
     text = _idea_tag_text(idea)
     assert "temperature" in text and "warmup_steps" in text
     node = SimpleNamespace(idea=idea, operator="improve")
-    assert "temperature" in _node_text(node)          # idea + node describe the same fields
+    assert "temperature" in node_text(node)          # idea + node describe the same fields
 
 
 def test_graph_from_node_concepts_rebuilds_deterministically():
     """The cached LLM tags reconstruct into a graph + tags with NO LLM (Feature-1 reuse)."""
-    from looplab.search.concept_graph import graph_from_node_concepts
+    from looplab.search.concept_tagging import graph_from_node_concepts
     g, tags = graph_from_node_concepts({0: ["loss/decoupled-contrastive"], 1: ["negatives/external-mining"]})
     # `ensure()` materializes the full ANCESTOR CHAIN (arbitrary-depth concepts, 3ca45bf), so each leaf
     # id also registers its intermediate id-prefix roots (`loss`, `negatives`) as first-class concepts.
@@ -188,7 +188,7 @@ def test_graph_from_node_concepts_rebuilds_deterministically():
 
 
 def test_graph_from_node_concepts_uses_the_shared_concept_charset_gate():
-    from looplab.search.concept_graph import graph_from_node_concepts
+    from looplab.search.concept_tagging import graph_from_node_concepts
 
     valid = ["loss/decoupled-contrastive", "hyperparameter/learning-rate", "данные/размер",
              "architecture/resnet50", "loss/r-drop", "a/b_c.d", "loss/x y"]

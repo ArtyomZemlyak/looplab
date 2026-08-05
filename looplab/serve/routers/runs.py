@@ -902,7 +902,7 @@ def build_router(srv) -> APIRouter:
     def get_concepts(run_id: str, response: Response, lens: str = "is_a",
                      rels: Optional[str] = None, seq: Optional[int] = None):
         """Return one versioned, bounded, generation-bound ConceptFrame."""
-        from looplab.search.concept_graph import default_lenses
+        from looplab.search.concept_lens import default_lenses
 
         rd = _run_dir(run_id)
         lens_pack = default_lenses()
@@ -1064,7 +1064,7 @@ def build_router(srv) -> APIRouter:
     def _run_concept_lens_worker(settings, run_dir: Path, generation: str, identity: str,
                                  request_digest: str, prompt: str, core: dict,
                                  lens_pack: list[dict]) -> dict:
-        from looplab.search.concept_graph import derive_lens
+        from looplab.search.concept_lens import derive_lens
 
         base_frame = _project_concept_frame(
             core, requested_lens="is_a", lens_pack=lens_pack)
@@ -1134,7 +1134,7 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/runs/{run_id}/concepts/lens")
     async def derive_concept_lens(run_id: str, request: Request, response: Response):
         """Create one generation-bound derived lens behind a durable paid-work claim."""
-        from looplab.search.concept_graph import default_lenses
+        from looplab.search.concept_lens import default_lenses
 
         rd = _run_dir(run_id)
         body = await _concept_lens_json_body(request)
@@ -1367,7 +1367,7 @@ def build_router(srv) -> APIRouter:
         or resolution key. It is observational only: an orphan remains fenced until the operator
         submits the separately idempotent recovery-abandon command below.
         """
-        from looplab.search.concept_graph import default_lenses
+        from looplab.search.concept_lens import default_lenses
 
         if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
             raise HTTPException(400, {
@@ -1457,7 +1457,7 @@ def build_router(srv) -> APIRouter:
     async def abandon_recovered_concept_lens(run_id: str, request: Request,
                                              response: Response):
         """Resolve one exactly identified orphan without possessing or replaying its paid key."""
-        from looplab.search.concept_graph import default_lenses
+        from looplab.search.concept_lens import default_lenses
 
         rd = _run_dir(run_id)
         body = await _concept_lens_json_body(request)
@@ -1593,7 +1593,7 @@ def build_router(srv) -> APIRouter:
         shared command sequencer makes its late terminal lose cleanly to whichever terminal commits
         first.  Provider-side completion, billing, and usage can remain unknowable after abandonment.
         """
-        from looplab.search.concept_graph import default_lenses
+        from looplab.search.concept_lens import default_lenses
 
         rd = _run_dir(run_id)
         body = await _concept_lens_json_body(request)

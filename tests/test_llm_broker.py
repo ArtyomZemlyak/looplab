@@ -20,7 +20,8 @@ from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.runtime.sandbox import SubprocessSandbox
-from looplab.search.concept_graph import dense_retrieval_skeleton, tag_nodes_llm
+from looplab.search.concept_graph import dense_retrieval_skeleton
+from looplab.search.concept_tagging import tag_nodes_llm
 from looplab.search.policy import GreedyTree
 
 

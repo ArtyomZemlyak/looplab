@@ -4,7 +4,8 @@ metric is NOT divided across its concepts (full metric counts in each). Δ is si
 median baseline so positive = better for the run's direction."""
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
-from looplab.search.concept_graph import concept_metrics, graph_from_node_concepts, _median
+from looplab.search.concept_analytics import _median, concept_metrics
+from looplab.search.concept_tagging import graph_from_node_concepts
 
 
 def _run(tmp_path, rows, direction="max"):
