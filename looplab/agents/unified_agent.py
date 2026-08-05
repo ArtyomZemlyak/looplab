@@ -76,9 +76,17 @@ class UnifiedAgent(WrapsDeveloper):
         self._pilot_tools = pilot_tools
         # Tool-loop limits for the pilot's self-driving + crash-triage calls (0/0 = unlimited;
         # config-driven via Settings.agent_max_turns / agent_time_budget_s — never hardcoded).
+        # Kept as the recorded configuration; what `_pilot_emit` actually spreads is `_loop_opts`
+        # below, into which these two are folded once (doc 25 AG-01).
         self._agent_max_turns = agent_max_turns
         self._agent_time_budget_s = agent_time_budget_s
-        self._loop_opts = loop_opts or {}   # B1 stuck + C1 self-plan + C2 summary (config-driven)
+        # B1 stuck + C1 self-plan + C2 summary (config-driven), folded ONCE into the typed bundle
+        # together with the two limits above so `_pilot_emit` spreads it with no option keyword
+        # beside it — the duplicate-keyword shape doc 25 AG-01 closes. `with_defaults`: a bundle
+        # that already carries a limit is the operator's configured value and wins over the ctor's.
+        from looplab.agents.loop_options import LoopOptions
+        self._loop_opts = LoopOptions.coerce(loop_opts).with_defaults(
+            max_turns=agent_max_turns, time_budget_s=agent_time_budget_s)
         # Per-stage clients NOT reachable via researcher/developer (strategy, pilot) — surfaced so
         # the engine's cost roll-up can find their CostAccountants. Deduped by identity downstream.
         self.stage_clients = list(stage_clients or [])
@@ -196,8 +204,6 @@ class UnifiedAgent(WrapsDeveloper):
         # (doc 25 AG-06), and this is the new call site it was meant to be adopted at.
         return resilient(
             lambda: drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
-                                    max_turns=self._agent_max_turns,
-                                    time_budget_s=self._agent_time_budget_s,
                                     finalize=finalize, fallback=fallback, **self._loop_opts),
             lambda: fallback(messages))
 

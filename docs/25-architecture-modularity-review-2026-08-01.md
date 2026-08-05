@@ -4596,6 +4596,103 @@ Scope: `looplab/agents/`: roles.py, tool_loop.py, agent.py, cli_agent.py, unifie
 
 *Recommendation:* Introduce a typed LoopOptions dataclass (built once by loop_opts_from_settings, with a .replace()-style override for DeepResearcher's two divergences) so a duplicate keyword is impossible by construction and every option has one declaration point; then extract the per-tool-call execution block (args hardening, execute, cap, repeat-note, hooks — roughly lines 414-510) and the three forced-emit salvage paths into named helpers, keeping drive_tool_loop as the turn-level skeleton.
 
+*Resolution (2026-08-05) — the bug half in full; the decomposition half in part.*
+
+`agents/loop_options.py::LoopOptions` is a frozen dataclass that IS a Mapping, so every existing
+`**loop_opts` spread keeps working byte-identically while each option has one declaration point.
+`loop_opts_from_settings` returns one. Merging is named rather than inferred: `.replace()` (this
+value WINS — a hard per-session ceiling, the assistant's own 5-minute floor, the memo stage's
+`self_plan=False`), `.with_defaults()` (fill only what is unset — exactly the precedence the two
+`dict.setdefault` merges already had), `.without()` (restore the loop's own default, which is how
+the DeepResearcher's `summary_client` divergence is now stated).
+
+**What actually closes the bug is a two-part rule, not the dataclass.** A typed bundle alone still
+permits `drive_tool_loop(max_turns=…, **opts)`. So `LOOP_OPTION_FIELDS` and
+`EXPLICIT_ONLY_LOOP_ARGS` now PARTITION the loop's 22 keyword-only parameters: an option may travel
+only in a bundle, and the per-call callbacks plus the two prompt contracts (`nudge_prompt` /
+`stuck_prompt`) may travel only as explicit keywords. That makes both halves checkable — an explicit
+option keyword beside a `**` spread is an AST-visible violation, and a bundle carrying `finalize` is
+refused by `coerce` at the boundary. The prompt half is deliberate: prompt strings are contracts, and
+a config bundle that could carry `nudge_prompt` would let a settings file reword an agent's nudge.
+
+**What the finding got wrong, recounted.** The parameter count is right — 4 positional + 22
+keyword-only = 26 — and the two ctor comments are still there, near-identical, describing the same
+swallowed TypeError. The dict was still untyped (`-> dict`). Every line number is stale (the function
+starts at 211, not 204; the two ctors at `agent.py:165-171` and `strategist.py:774-780`), with
+`deep_research.py:110-131` the one exact hit. Three claims are wrong in substance, and all three
+understate the problem:
+
+- "DeepResearcher re-plumbs **9** of the same settings" — **7** overlap with the bundle
+  (`context_budget_chars`, the three stuck knobs, `auto_summary`, `emit_after`, `emit_force`).
+  `max_turns`/`time_budget_s` are the other two, and the bundle never carried them, which is the
+  point below.
+- "the **three** forced-emit salvage paths" — there are **four**: the prose reply, the `emit_force`
+  ceiling, the stuck-detector stop, and budget exhaustion.
+- "fixed per-call-site with duplicated `dict.setdefault` merges" names **two** sites; the merge
+  pattern was at **five** — the two ctors plus `repo_developer._session_opts`,
+  `lessons_distill._reflect_loop_opts` and `serve/assistant.py`'s `opts["self_plan"] = False`, the
+  last three mutating the shared bundle in place rather than merging into it.
+
+And the finding treats the collision as fixed history. It is not: the `option= beside **spread` shape
+was live at **five** call sites (`agent.py`, `strategist.py`, `unified_agent.py`,
+`tool_loop.py::emit_loop`, `serve/assistant.py`), each passing `max_turns=` and `time_budget_s=` next
+to a spread. It had not fired only because `loop_opts_from_settings` happened not to produce those
+two keys — while eight other sites (`serve/report.py`, `trust/judge.py`, `engine/genesis.py`,
+`engine/lessons_distill.py`, `search/best_of_n.py`, `search/concept_graph.py`,
+`search/hybrid_merge.py`, `tools/asset_brief.py`) already build bundles that DO carry `max_turns`.
+The bug was one bundle-and-callsite pairing away from recurring, in the same silent shape. All five
+now fold their limits into the bundle instead.
+
+*The guard is `tests/test_loop_options.py`, and its first section drives the bug rather than pinning
+it.* Each agentic entry point is run against the REAL `drive_tool_loop` with a bundle carrying ALL
+twelve options, and asserted to return its emitted value — the fake client has no `complete_tool`
+and no `complete_text`, so every degraded path fails on it and "not the emitted value" proves the
+loop was never reached. That is the historical failure at full strength: with the old code all five
+sites raise, and the Researcher's is swallowed into a draft Idea indistinguishable from a weak
+model's bad JSON. Behind it sit the AST call-site rule and a two-way registry partition test, so a
+new `drive_tool_loop` parameter has to declare which side it is on.
+
+*Verified to bite by mutating a throwaway copy, five ways.* (1) Restoring `max_turns=self.max_turns,
+time_budget_s=self.time_budget_s` beside the spread in `ToolUsingResearcher.propose` → 3 red (the
+driven test, the AST rule, and the pre-existing `test_agentic_researcher_no_context_budget_kwarg_collision`).
+(2) Swapping the ctor's `with_defaults` for `replace` → 1 red, `max_turns` silently re-capped 11 → 0.
+(3) Making `_check_names` a no-op → 2 red (an unknown key is still caught by the dataclass, but the
+message that distinguishes a typo from a per-call argument is gone). (4) Narrowing the AST matcher to
+drop `run_phase` → the violation test still passes GREEN while searching nothing; only the
+scan-coverage assertion catches it, which is why that assertion exists. (5) The comment evasion —
+deleting the `drive_tool_loop` call in `_pilot_emit` and leaving its exact text as a comment → red,
+because comments are not AST nodes.
+
+*Two test contracts moved with the code.* `tests/test_emit_loop.py`'s fixture returned
+`{"stuck_retries": 3}` — a misspelling of `stuck_repeat` that rode an untyped dict to a `**kwargs`
+fake and was asserted on by name; it now names the real option, which is the same property tested
+against something that exists. `tests/test_deep_research_loop.py` passes `loop_opts=LoopOptions(max_turns=1)`
+where it passed `max_turns=1`, because `DeepResearcher.__init__` now takes the bundle and a named
+`_DEFAULT_LOOP_OPTS` instead of nine individual kwargs.
+
+*The decomposition half is partial, and honestly so.* Four helpers came out — `_compact_in_place`,
+`_tool_call_args`, `_run_tool_call` (execute + trace + cap + repeat ledger + provenance hook, the
+block the recommendation names) and the `_salvage_emit` all four forced-emit exits share.
+`drive_tool_loop` goes 379 → 333 lines, of which 54 are its docstring. That is a smaller win than the
+finding implies, for a reason worth recording: the why-comments MOVE with the code (CLAUDE.md), so
+extracting a 35-line block that is 20 lines of comment relocates ~35 lines rather than deleting them.
+The value is the naming, not the line count.
+
+Deliberately NOT extracted: the emit-validation bounce and the turn skeleton itself. Both are control
+flow — the bounce `continue`s so sibling calls still get their tool results, and an accepted emit
+`return`s from inside a nested loop — so a helper would have to hand that decision back through a
+protocol, trading one readable branch for an invented one. `_salvage_emit` also deliberately returns
+`(accepted, result)` rather than a `None` sentinel: `ToolUsingStrategist`'s finalize degrades to the
+rule baseline, which is `Optional[Strategy]`, so "nothing to accept" and "the result is None" must
+stay distinguishable — collapsing them would silently turn a legitimate None strategy into a
+fallback.
+
+`drive_tool_loop`'s 26-parameter signature is UNCHANGED on purpose. It is a documented monkeypatch
+seam with 15+ call sites and several hundred tests speaking it; replacing the keywords with an
+`options=` object would retire every one of those spellings at once, and the collision they enable is
+already closed by the partition rule above. `LoopOptions` is what a caller CONFIGURES with; the
+signature stays what the loop is CALLED with.
+
 #### AG-02 · MEDIUM · flat-code · effort: medium
 
 **roles.py is a 1058-line god-module; the 137-line CUDA-probe calibration blob in its middle belongs to the speculation subsystem, not to role backends**
