@@ -5079,6 +5079,41 @@ cross-branch variable leakage (the `_sig` UnboundLocalError fix the finding cite
 it needs room to verify the staged and single-command branches against each other rather than a
 mechanical lift. Left explicit so the remaining work is visible.
 
+*Resolution (2026-08-05), the remaining half.* `_run_stages` and `_run_single` now hold the two eval
+paths and `run_command_eval` keeps only setup, the dispatch and the metric read.
+
+The point is not the line count. Both helpers return an `_EvalRun` whose EVERY field has a default,
+and the tail reads that one object — so the leak the finding names becomes unrepresentable rather
+than fixed. The `_sig` bug was exactly this: the name was bound only inside the stage loop, a
+pipeline where no stage ran (all reused via `start_stage`, or a stage whose command expands to `[]`)
+reached `RunResult(..., stalled=_salvageable_stall(_sig))` unbound, and the UnboundLocalError came
+straight out of the eval worker — the node got NO terminal event at all. The fix at the time was to
+pre-bind one more name in one branch, which closes the instance and leaves the class open for the
+next field anyone adds. An early return (a failed stage, or one whose inter-stage check raised a
+concern) is now `_EvalRun.early`, a RunResult the caller returns as is.
+
+`_EvalExec` carries the ten knobs both paths handed `run_argv` unchanged, including the four
+closures `run_command_eval` builds once (the GPU-flag cap + in-container `timeout` prefix, the docker
+wrap, the live log path, the tracer span).
+
+Guards: `tests/test_command_eval_run_split.py` (14) — the defaults, the fresh-dict `signals` default
+(a shared mutable one would carry a watchdog verdict into the next eval, and that verdict decides
+whether a crashed run's metric is salvaged), and the first DIRECT coverage of both helpers: until the
+split they were reachable only through the 23-parameter front door. Verified by removing the
+`signals` default (fails 3 new tests plus the pre-existing `test_no_stage_actually_running_still_
+returns_a_result` — they guard the same class) and by dropping the caller's `early` return (fails the
+two staged-salvage tests).
+
+`tests/test_command_eval_folds.py`'s two site-count guards had to move with the change rather than be
+re-greened: they scanned `run_command_eval`'s source, and two of the three run sites left it, so both
+went red reporting a missing fold that was in fact intact — the stranded-test failure mode CLAUDE.md
+calls out. They now scan the three run-site functions and DERIVE the expected count from the
+`run_argv` calls found there instead of pinning a literal, because the failure being guarded is a run
+site added without the fold — and a literal has to be bumped by the same change that adds one, which
+is exactly when nobody notices. The site count itself is still pinned, so the derivation cannot pass
+vacuously at zero. `_read_adapter`'s `run_argv` is deliberately out of scope: it gates on
+`rc == 0 and not to`, so a container timeout is already excluded by its non-zero exit.
+
 One process note, because it cost a cycle: `runtime/command_eval.py` carries a UTF-8 BOM, so a
 scripted edit that reads it as plain `utf-8` hands `ast.parse` a leading U+FEFF and dies before
 writing. Third occurrence in this campaign — `encoding="utf-8-sig"` on read plus writing the BOM
