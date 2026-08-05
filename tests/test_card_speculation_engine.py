@@ -2174,7 +2174,7 @@ def test_open_for_new_work_is_the_one_exit_gate_predicate():
 
     def _session(**overrides):
         session = speculation_module.CardSession(
-            evals=[], max_eval_seconds=None, wall_deadline=None)
+            max_eval_seconds=None, wall_deadline=None)
         for name, value in overrides.items():
             setattr(session, name, value)
         return session
@@ -2206,7 +2206,15 @@ def test_open_for_new_work_is_the_one_exit_gate_predicate():
 
 
 def test_no_session_phase_re_derives_a_stop_condition_by_hand():
-    """One home for the gate tuple, checked against the source it is supposed to have replaced."""
+    """One home for the gate tuple, and one home for combining it with the live session flags.
+
+    The second half also pins a deliberate ASYMMETRY. `_card_phase_admit_evals` consults
+    `gates.stopping` directly inside an admitted batch rather than `open_for_new_work`, because
+    re-reading `consumer_completed` there would let the first sibling to terminate truncate the
+    batch its own siblings are still being admitted into. That is the exact shape of the regression
+    this subsystem has already paid for once (depth-1 speculation silently going serial), so the
+    two spellings are not interchangeable and this test says which belongs where.
+    """
     tree = ast.parse(
         Path(speculation_module.__file__).read_text(encoding="utf-8-sig", errors="replace"))
     built = [
@@ -2216,11 +2224,32 @@ def test_no_session_phase_re_derives_a_stop_condition_by_hand():
         and node.func.id == "CardSessionGates"
     ]
     assert len(built) == 1, "the gate tuple is built somewhere other than `_session_gates`"
-    stopping = [
-        node for node in ast.walk(tree)
+
+    def _owner(target: ast.AST) -> str:
+        """The nearest enclosing def of *target*."""
+        best = ""
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for inner in ast.walk(node):
+                    if inner is target:
+                        best = node.name
+        return best
+
+    # Reading a live session flag is how a second exit-gate predicate grows. Only the predicate
+    # itself and the raw-stage phase (whose own, different, gate-free test this is not) may.
+    flag_readers = {
+        _owner(node) for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr in {"consumer_completed", "yield_outer"}
+        and isinstance(node.ctx, ast.Load)
+    }
+    assert flag_readers == {"open_for_new_work", "_card_phase_serve_raw_stage"}, flag_readers
+
+    stopping_readers = {
+        _owner(node) for node in ast.walk(tree)
         if isinstance(node, ast.Attribute) and node.attr == "stopping"
-    ]
-    assert len(stopping) == 1, "`stopping` is combined with the live flags in more than one place"
+    }
+    assert stopping_readers == {"open_for_new_work", "_card_phase_admit_evals"}, stopping_readers
 
     phases = [
         getattr(Engine, name) for name in dir(Engine)

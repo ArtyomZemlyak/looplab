@@ -1022,6 +1022,15 @@ exactly the kind the finding's own recommendation is aimed at, in the one phase 
   value. `slots=True` is load-bearing, not tidiness: the one mutation this refactor could plausibly
   get wrong is `session.yeild_outer = True`, which as a `nonlocal` rewrite would bind a new attribute
   and leave the real gate open for the rest of the run.
+* **Two of the twelve sites deliberately do NOT use the full predicate**, and finding that out is the
+  part of this worth reading. Applying the recommendation literally — one predicate everywhere —
+  makes the admitted-batch fill loop and its pre-GPU re-check read `consumer_completed` too, and the
+  first draft did. That is wrong in the dangerous direction: the flag is set by the eval CHILD at any
+  checkpoint, so the first sibling to terminate would truncate the batch its own siblings are still
+  being admitted into — a width-4 consumer silently admitting three, i.e. the same "speculation
+  quietly went serial" shape this subsystem has already paid for. Those two sites consult
+  `gates.stopping`, the FOLD-derived half only; the batch BOUNDARY stays where it was, at the phase's
+  outer entry gate, which does read both flags. The asymmetry is pinned rather than commented.
 * Six phase methods — `_card_phase_serve_raw_stage`, `_card_phase_drop_stale`,
   `_card_phase_serve_head`, `_card_phase_admit_evals`, `_card_phase_request_build`,
   `_card_phase_decide_exit` — plus `_start_head_producer` and `_card_eval_one` hoisted out of the
@@ -1096,9 +1105,11 @@ re-pointed:
   clock, neither reachable from any call site before), and `pytest.raises(AttributeError)` on the
   misspelled-flag mutation that `slots=True` exists to catch.
 * `test_no_session_phase_re_derives_a_stop_condition_by_hand` — `CardSessionGates(` is constructed
-  exactly once in the module and `.stopping` is read exactly once; no `_card_phase_*` method calls
-  `self._terminal_intent`, `session.budget_exhausted`, or `needs_outer_rebuild`. AST, so a
-  commented-out copy is not a node.
+  exactly once in the module; the set of functions that READ `consumer_completed`/`yield_outer` is
+  exactly `{open_for_new_work, _card_phase_serve_raw_stage}` and the set that reads `.stopping` is
+  exactly `{open_for_new_work, _card_phase_admit_evals}`, which is how the asymmetry above stops
+  being a comment; and no `_card_phase_*` method calls `self._terminal_intent`,
+  `session.budget_exhausted`, or `needs_outer_rebuild`. AST, so a commented-out copy is not a node.
 * `test_the_turn_snapshot_folds_once_per_observed_tail` — same tail returns the same object with no
   rebuild; an append rebuilds AND the new state carries the append; a swapped `fold` seam is never
   served the previous function's answer.

@@ -161,7 +161,6 @@ class CardSession:
     quietly never yields to the outer loop.
     """
 
-    evals: list
     max_eval_seconds: Optional[float]
     wall_deadline: Optional[float]
     task_group: Any = None
@@ -2016,7 +2015,13 @@ class SpeculationMixin:
         selection_changed = False
         while len(session.eval_inflight) < max(1, int(self._eval_parallel)):
             current = self._session_state()
-            if not session.open_for_new_work(self._session_gates(current, session)):
+            # `.stopping`, NOT `open_for_new_work`: inside an admitted batch only the FOLD-derived
+            # half may stop the fill.  Re-reading `consumer_completed` here would let the first
+            # sibling to terminate truncate the batch its own siblings are still being admitted
+            # into — a width-4 consumer that silently admits three, which is the "speculation
+            # quietly went serial" failure this subsystem has already paid for once.  The batch
+            # BOUNDARY is the outer entry gate above, which does read both flags.
+            if self._session_gates(current, session).stopping:
                 break
             candidates = [node for node in current.pending_nodes()
                           if self._session_admissible(node, current, session)]
@@ -2038,7 +2043,8 @@ class SpeculationMixin:
             admission = self._session_state()
             live = admission.nodes.get(chosen.id)
             if (
-                not session.open_for_new_work(self._session_gates(admission, session))
+                # Same asymmetry as the fill gate above: the fold-derived half only.
+                self._session_gates(admission, session).stopping
                 or live is None
                 or live.attempt != chosen.attempt
                 or live.status is not NodeStatus.pending
@@ -2275,7 +2281,6 @@ class SpeculationMixin:
         self._ensure_speculation_state()
         send, receive = anyio.create_memory_object_stream(256)
         session = CardSession(
-            evals=evals,
             max_eval_seconds=max_es,
             wall_deadline=wall_deadline,
             notify=send,
