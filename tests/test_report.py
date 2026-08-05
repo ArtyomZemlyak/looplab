@@ -911,7 +911,11 @@ def test_report_refresh_success_requires_durable_terminal_before_success(
             raise OSError("terminal fsync unavailable")
 
     monkeypatch.setattr(eventstore_module, "strict_fsync", fail_terminal_sync)
-    monkeypatch.setattr("looplab.serve.routers.boss.strict_fsync", fail_terminal_sync)
+    # The fsync-confirm that upgrades a visible terminal to a durable receipt is `paid_ledger`'s
+    # since doc 25 SR-01 — the routers no longer import `strict_fsync` at all, so this seam MUST
+    # name the shared module. `tests/test_paid_ledger.py` proves both routers lost the name, which
+    # is what turns a stale spelling here into an AttributeError instead of a silent no-injection.
+    monkeypatch.setattr("looplab.serve.paid_ledger.strict_fsync", fail_terminal_sync)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr("looplab.serve.report.generate_report", lambda state, _client, **_kwargs: (
         calls.append(state.run_id) or {"headline": "paid terminal", "at_node": len(state.nodes)}))

@@ -907,6 +907,7 @@ Where each concept lives in the code:
 | Operators (merge/ensemble, sweep) | `search/operators.py`, `sweep.py` |
 | Control loop + crash-resume | `engine/orchestrator.py` |
 | Authoritative server command lifecycle + leases | `serve/run_commands.py` |
+| Serve-side paid work: metering lease + claim→terminal receipt ledger | `serve/paid_work.py`, `serve/paid_ledger.py` |
 | Variance gate + multi-seed confirmation | `trust/gate.py`, `trust/confirm.py` |
 | CV harness, K-fold, purged walk-forward | `trust/cv.py` |
 | Leakage detectors + data profiler | `trust/leakage.py`, `core/profile.py` |
