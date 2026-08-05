@@ -24,6 +24,7 @@ import {
   presentAssistantCommandResult, restoreAssistantDirectEntry, submitAssistantDirect,
 } from './assistantCommand.js'
 import { assistantDirectDecision, assistantDirectPresentation } from './assistantDirectPolicy.js'
+import { shareActionBlock, shareActionFailure, shareSnapshotAudience } from './assistantShareModel.js'
 import {
   assistantRecoveryFailure, assistantRecoveryPayload, assistantReplyCompletesTurn, assistantTurnIndex,
   danglingAssistantTurn,
@@ -3569,20 +3570,92 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       if (mountedRef.current) setForkBusySid(current => current === forkSid ? null : current)
     }
   }
+  // Doc 25 UI-05. The mint used to be a ~68-line async function inside a JSX `onClick`; both public-link
+  // mutations now sit here, side by side, and share one statement of when they may start and what an
+  // ambiguous outcome means (`assistantShareModel.js`).
+  const beginShareAction = (action, shareSid, { turnIncomplete = false } = {}) => {
+    const block = shareActionBlock(action, {
+      shareActionActive: !!shareActionSessionRef.current,
+      forkingSession: forkActionSessionRef.current === shareSid,
+      deletingSession: deletingSessionsRef.current.has(shareSid),
+      turnIncomplete,
+    })
+    if (block) { flash(block.message); return false }
+    shareActionSessionRef.current = shareSid
+    setShareBusySid(shareSid)
+    return true
+  }
+  const settleShareAction = (shareSid) => {
+    if (shareActionSessionRef.current === shareSid) shareActionSessionRef.current = null
+    if (mountedRef.current) setShareBusySid(current => current === shareSid ? null : current)
+  }
+  const reportShareFailure = (action, shareSid, error) => {
+    const failure = shareActionFailure(action, error)
+    if (failure.uncertain) {
+      setShareUnknown(shareSid, true)
+      refreshSessions()
+    }
+    flash(failure.notice)
+  }
+  const copyShareLink = async (url) => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+      await navigator.clipboard.writeText(url)
+      return true
+    } catch { return false }
+  }
+  const createShareSnapshot = async () => {
+    const shareSid = sid
+    if (!beginShareAction('snapshot', shareSid, {
+      turnIncomplete: runningRef.current || turnCaptureRef.current || busy || commandBusy
+        || pending.length > 0 || msgs[msgs.length - 1]?.role === 'user',
+    })) return
+    try {
+      const r = await boundedRequest(signal => assistantShare(shareSid, false, { signal }))
+      if (!mountedRef.current) return
+      const receipt = assistantShareReceipt(r, shareSid)
+      if (!receipt) throw new Error('Invalid Assistant share receipt')
+      const url = location.origin + location.pathname + receipt.relativeUrl
+      setShareUnknown(shareSid, false)
+      mutateSessionsLocally(current => current.map(session => session.id === shareSid
+        ? { ...session, shared: true, share_count: 1,
+            share_ids: [receipt.shareId], live_share_ids: [], share_expires_at: receipt.expiresAt,
+            share_live: false } : session))
+      retainShareCopy(shareSid, {
+        url, expiresAt: receipt.expiresAt, shareId: receipt.shareId,
+      })
+      refreshSessions()
+      if (shareSnapshotAudience(true, sidRef.current, shareSid) !== 'current') {
+        flash('Snapshot created for the previous chat · reopen it to copy or revoke')
+        return
+      }
+      if (!(await copyShareLink(url))) {
+        if (!mountedRef.current) return
+        flash('Clipboard blocked · select the visible snapshot link and copy it manually')
+        return
+      }
+      const audience = shareSnapshotAudience(mountedRef.current, sidRef.current, shareSid)
+      if (audience === 'gone') return
+      flash(audience === 'departed' ? 'Snapshot link copied for the previous chat'
+        : `Snapshot link copied · expires ${fmtDate(receipt.expiresAt)}.`)
+    } catch (error) {
+      if (!mountedRef.current) return
+      reportShareFailure('snapshot', shareSid, error)
+    } finally {
+      settleShareAction(shareSid)
+    }
+  }
+  // The visible fallback link is the only copy path left once the clipboard is blocked, so a missing
+  // record must land on the same "select it manually" advice the write failure does — never a throw.
+  const copyShareFallbackLink = async () => {
+    const url = shareCopy?.url
+    flash(url && await copyShareLink(url) ? 'Snapshot link copied'
+      : 'Clipboard blocked · select the snapshot link and copy it manually')
+  }
   const revokeCurrentShares = async () => {
     const shareSid = sidRef.current || sid
     if (!shareSid) return
-    if (shareActionSessionRef.current) { flash('Another share action is still in progress'); return }
-    if (forkActionSessionRef.current === shareSid) {
-      flash('Wait for this chat to finish forking before changing its public links')
-      return
-    }
-    if (deletingSessionsRef.current.has(shareSid)) {
-      flash('This chat is being deleted')
-      return
-    }
-    shareActionSessionRef.current = shareSid
-    setShareBusySid(shareSid)
+    if (!beginShareAction('revoke', shareSid)) return
     try {
       const result = await boundedRequest(signal => assistantUnshare(shareSid, { signal }))
       if (!mountedRef.current) return
@@ -3597,15 +3670,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         : 'No active links.')
     } catch (error) {
       if (!mountedRef.current) return
-      if (error?.status >= 400 && error.status < 500) flash('Revoke failed')
-      else {
-        setShareUnknown(shareSid, true)
-        refreshSessions()
-        flash('Revoke uncertain · retry to confirm')
-      }
+      reportShareFailure('revoke', shareSid, error)
     } finally {
-      if (shareActionSessionRef.current === shareSid) shareActionSessionRef.current = null
-      if (mountedRef.current) setShareBusySid(current => current === shareSid ? null : current)
+      settleShareAction(shareSid)
     }
   }
   const retryHandlerFor = (assistantIndex) => {
@@ -4266,74 +4333,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                 ? 'Wait for the current Assistant turn to finish before freezing a complete snapshot'
                 : 'Create and copy a frozen read-only snapshot'}
               disabled={shareBusy || forkingCurrentSession || shareTurnIncomplete || !!directConfirm}
-              onClick={async () => {
-            const shareSid = sid
-            if (shareActionSessionRef.current) { flash('Another share action is still in progress'); return }
-            if (forkActionSessionRef.current === shareSid) {
-              flash('Wait for this chat to finish forking before creating a snapshot')
-              return
-            }
-            if (runningRef.current || turnCaptureRef.current || busy || commandBusy || pending.length > 0
-                || msgs[msgs.length - 1]?.role === 'user') {
-              flash('Wait for the Assistant reply to finish before creating a snapshot')
-              return
-            }
-            if (deletingSessionsRef.current.has(shareSid)) {
-              flash('This chat is being deleted')
-              return
-            }
-            shareActionSessionRef.current = shareSid
-            setShareBusySid(shareSid)
-            try {
-              const r = await boundedRequest(signal => assistantShare(shareSid, false, { signal }))
-              if (!mountedRef.current) return
-              const receipt = assistantShareReceipt(r, shareSid)
-              if (!receipt) throw new Error('Invalid Assistant share receipt')
-              const url = location.origin + location.pathname + receipt.relativeUrl
-              setShareUnknown(shareSid, false)
-              mutateSessionsLocally(current => current.map(session => session.id === shareSid
-                ? { ...session, shared: true, share_count: 1,
-                    share_ids: [receipt.shareId], live_share_ids: [], share_expires_at: receipt.expiresAt,
-                    share_live: false } : session))
-              retainShareCopy(shareSid, {
-                url, expiresAt: receipt.expiresAt, shareId: receipt.shareId,
-              })
-              refreshSessions()
-              if (sidRef.current !== shareSid) {
-                flash('Snapshot created for the previous chat · reopen it to copy or revoke')
-                return
-              }
-              try {
-                if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
-                await navigator.clipboard.writeText(url)
-              } catch {
-                if (!mountedRef.current) return
-                flash('Clipboard blocked · select the visible snapshot link and copy it manually')
-                return
-              }
-              if (!mountedRef.current || sidRef.current !== shareSid) {
-                if (mountedRef.current) flash('Snapshot link copied for the previous chat')
-                return
-              }
-              flash(`Snapshot link copied · expires ${fmtDate(receipt.expiresAt)}.`)
-            } catch (error) {
-              if (!mountedRef.current) return
-              if (error?.status >= 400 && error.status < 500) {
-                flash(error?.code === 'assistant_share_snapshot_too_large'
-                  ? 'This chat is too large for a complete snapshot · fork or share a shorter chat'
-                  : ['assistant_share_in_progress', 'assistant_share_incomplete',
-                    'assistant_share_turn_active', 'assistant_share_turn_incomplete'].includes(error?.code)
-                    ? 'Wait for a complete Assistant reply before sharing' : 'Share failed')
-              } else {
-                setShareUnknown(shareSid, true)
-                refreshSessions()
-                flash('Share uncertain · revoke before retrying')
-              }
-            } finally {
-              if (shareActionSessionRef.current === shareSid) shareActionSessionRef.current = null
-              if (mountedRef.current) setShareBusySid(current => current === shareSid ? null : current)
-            }
-          }}>{shareBusySid === sid ? 'working…' : '⤴ create snapshot'}</button>}
+              onClick={createShareSnapshot}>{shareBusySid === sid ? 'working…' : '⤴ create snapshot'}</button>}
           {sid && !deletingCurrentSession && (currentSession?.shared || shareUnknown || shareCopy)
             && <button className="btn sm ghost"
               title={forkingCurrentSession
@@ -4354,13 +4354,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           </label>
           <input id={`assistant-share-fallback-${sid}`} readOnly value={shareCopy.url}
             onFocus={event => event.currentTarget.select()} />
-          <button type="button" className="btn sm" onClick={async () => {
-            try {
-              if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
-              await navigator.clipboard.writeText(shareCopy.url)
-              flash('Snapshot link copied')
-            } catch { flash('Clipboard blocked · select the snapshot link and copy it manually') }
-          }}>Copy link</button>
+          <button type="button" className="btn sm" onClick={copyShareFallbackLink}>Copy link</button>
           <a className="btn sm" href={shareCopy.url} target="_blank" rel="noreferrer noopener">
             Open snapshot
           </a>

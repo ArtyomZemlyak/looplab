@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { initialDagOverviewDecision, shouldAutoFitDag, shouldRefitDag } from '../src/dagViewport.js'
 import { safeExternalHref, safeMarkdownHref } from '../src/urlSafety.js'
+import { SHARE_ACTIONS, shareActionFailure } from '../src/assistantShareModel.js'
 import {
   CONTROL, runApiPath, runNodeApiPath, patchProject, deleteProject, renameSupertask, deleteSupertask,
 } from '../src/api.js'
@@ -146,7 +147,28 @@ test('early run creation and uncertain share mutations cannot replay user intent
   assert.match(workspace, /window\.dispatchEvent\(queuedNewRun\)/)
   assert.match(assistant, /const onNewRun = \(event\) => \{\s*event\.preventDefault\(\)/)
   assert.match(assistant, /onReady\?\.\(\)/)
-  assert.match(assistant, /shareUnknownSid[\s\S]*?Share uncertain · revoke before retrying/)
+  // Doc 25 UI-05. The uncertain-share rule moved out of a JSX `onClick` into `assistantShareModel.js`,
+  // so it is now DRIVEN rather than pinned as a string that happened to sit after `shareUnknownSids`.
+  // The property is unchanged and is stronger stated this way: only a 4xx is authoritative about a
+  // public link, so every other outcome must leave the chat marked unknown.
+  for (const action of SHARE_ACTIONS) {
+    for (const error of [null, undefined, {}, { status: 500 }, { status: 503 }, { status: 504 },
+      { name: 'TimeoutError' }, { name: 'AbortError' }, { status: 599 }]) {
+      assert.equal(shareActionFailure(action, error).uncertain, true,
+        `${action}: a non-authoritative failure must leave the public-link state unknown`)
+    }
+    for (const status of [400, 403, 404, 409, 413, 422, 499]) {
+      assert.equal(shareActionFailure(action, { status }).uncertain, false,
+        `${action}: a ${status} is the server's verdict on this request and must not be replayed`)
+    }
+  }
+  assert.equal(shareActionFailure('revoke', { status: 502 }).notice, 'Revoke uncertain · retry to confirm')
+  assert.equal(shareActionFailure('snapshot', { status: 502 }).notice,
+    'Share uncertain · revoke before retrying')
+  // ...and the component must ACT on `uncertain` rather than only announce it: an unknown link has to
+  // reach the session list before the next mutation can be started against a stale local truth.
+  assert.match(assistant, /const failure = shareActionFailure\(action, error\)\s*\n\s*if \(failure\.uncertain\) \{\s*\n\s*setShareUnknown\(shareSid, true\)\s*\n\s*refreshSessions\(\)/,
+    'an uncertain share mutation must mark the chat unknown and re-read the authoritative list')
   // The `unknownCreate` boolean became a DURABLE per-view recovery record — an uncertain mint now
   // survives a reload instead of only a re-render, which is the point: a link may already exist on
   // the server. The property is unchanged and is asserted on the record's fields.
