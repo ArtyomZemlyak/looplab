@@ -162,8 +162,13 @@ def test_a_junk_row_does_not_stop_the_valid_ones_after_it():
 
 # ------------------------------------------------------------------ both call sites, and the trap
 
-# `run` is a thin broker wrapper; the concurrent-build chunk lives in `_run_with_llm_broker`.
-_CALL_SITES = ("_run_with_llm_broker", "_stage_card_creates")
+# `run` is a thin broker wrapper, and doc 25 ES-05 lifted the whole `creates` branch out of
+# `_run_with_llm_broker` again — so the concurrent-build chunk now lives in `_handle_create_actions`.
+# This tuple must MOVE with it. Scanning the method the chunk has left is not a weaker guard, it is
+# no guard at all, and re-pointing it is only legitimate after re-checking that the property still
+# holds where the code went (it does: that helper calls both shared owners and hand-reads neither
+# attribute).
+_CALL_SITES = ("_handle_create_actions", "_stage_card_creates")
 
 
 @pytest.mark.parametrize("method", _CALL_SITES)

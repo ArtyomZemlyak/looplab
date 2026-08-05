@@ -555,6 +555,44 @@ pinned. Verified to have teeth by making the inject path keep two emits and drop
 
 *Recommendation:* Extract `_handle_create_actions(creates, state, ...) -> bool` (and within it `_run_parallel_build_chunks` and `_run_serial_creates`) as further §4 phase helpers, keeping every append and fold exactly in place, so the spine loop returns to gate-per-line readability.
 
+*Resolution (2026-08-05):* `_handle_create_actions` is extracted; `_run_with_llm_broker` drops from
+537 to 327 lines and the spine's `creates` arm is now four lines. Every append, fold, `_write_lock`
+point and gate moved verbatim.
+
+The extraction contract was computed with AST rather than read off the screen, and that is what made
+it safe. Two facts decided the signature:
+
+* Eleven of the sixteen `break`/`continue` statements targeted the OUTER `while` and cannot cross a
+  function boundary, so they return a `"break"`/`"continue"` signal; the five that target loops
+  INSIDE the branch are untouched. The branch never fell through — it always continued or broke — so
+  the caller acts on the signal unconditionally.
+* A runaway-guard counter must ROUND-TRIP. The branch mutates a bound that is seeded before the loop
+  and reset only when a node reaches terminal. Passed by value it would lose every mutation, the
+  guard would never trip, and a spinning run would loop forever instead of finishing.
+
+That second one was a real defect in this change's first draft — my free-variable analysis subtracted
+the counter because the branch also ASSIGNS it, so it looked local. `pyflakes` caught it as an
+undefined name before any test ran, and `tests/test_creation_runaway_guard.py` independently fails
+when the round-trip is removed (verified by breaking it). No new test: those existing ones already
+guard the property exactly.
+
+*Amended (2026-08-05, merge with the Card-speculation fix):* the counter that round-trips is now
+`no_mint_turns`, not `_created_no_terminal`, and the census above is the post-merge one (it was
+14/9/5 before). The two changes crossed: this lift moved the branch, and
+`fix(cards): a debug Card killed its own anchor` rewrote the accounting inside it. The charge for
+nodes MINTED moved to the top of the spine loop, where it is read off the log's `node_created` rows
+instead of `len(creates)`, so the four compensating `_created_no_terminal -= …` exits this finding
+called out as hard to trace are gone outright — the branch only READS that counter now, to test the
+trip. What replaced them is the second bound, `no_mint_turns` (consecutive turns that PLANNED creates
+and minted nothing, with its own message), incremented only inside this branch — so the round-trip
+hazard moved rather than went away, and the signature carries `no_mint_turns` out where it used to
+carry `created_no_terminal`.
+
+The finding's inner helpers (`_run_parallel_build_chunks`, `_run_serial_creates`) are NOT split out.
+They share the batch-drop bookkeeping, so splitting them means threading that state through two more
+boundaries — for less gain than the outer lift. (Before the amendment above they also both mutated
+the runaway counter; that is no longer true, but the bookkeeping argument stands on its own.)
+
 #### ES-06 · MEDIUM · duplication · effort: medium
 
 **Serial and parallel eval-dispatch branches triplicate the admission fence (terminal-gate + lifecycle_current + reservation release)**

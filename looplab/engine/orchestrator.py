@@ -1833,235 +1833,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                        if a["kind"] in ("draft", "improve", "debug", "merge")]
 
             if creates:
-                # Runaway trip: MINTED too many nodes with ZERO reaching terminal since the last
-                # progress (charged at the top of the loop from the log). A healthy run creates a batch
-                # then evaluates it (which resets the counter); only a spin (empty-nodes fold re-minting
-                # the same id) grows this unbounded. Cap generously so operator injects / wide seed
-                # batches never false-trip.
-                _runaway_cap = max(self.policy.max_nodes, 4) * 3 + 50
-                if _created_no_terminal > _runaway_cap:
-                    if self._finish_with_report_if_quiescent(state, {
-                            "reason": "stuck: node creation not converging (no node reached terminal)"},
-                            after_seq=decision_seq):
-                        break
-                    continue
-                # …and its companion: a create lane that keeps PLANNING work and minting nothing. The
-                # Card lane can legitimately spend a turn without a node (authoring a work item, losing
-                # a build CAS, refusing a mixed-authority batch), so this cannot be one turn — but it
-                # must still be bounded, or the same stall that used to end the run with the wrong
-                # message would simply never end it at all. Same generous cap, counted in CONSECUTIVE
-                # turns and reset by any mint or any terminal, so only a genuine no-progress spin
-                # reaches it. The reason names what actually happened instead of blaming node creation.
-                _no_mint_turns += 1
-                if _no_mint_turns > _runaway_cap:
-                    if self._finish_with_report_if_quiescent(state, {
-                            "reason": (
-                                f"stuck: {len(creates)} action(s) planned for "
-                                f"{_no_mint_turns} consecutive loop turns without creating a node")},
-                            after_seq=decision_seq):
-                        break
-                    continue
-                self._create_paused = False   # set by _create_node's developer_crash circuit-breaker
-                self._pending_create_pause = []   # …and its worker-side request queue (see _request_create_pause)
-                if self._speculation_enabled():
-                    receipt_owned = [META_CARD_ID in action for action in creates]
-                    # One turn has one authority. A mixed lane could stage new work while claiming a
-                    # stale selection snapshot, so retain the serial spine's existing fail-closed rule.
-                    if any(receipt_owned) and not all(receipt_owned):
-                        continue
-
-                    if not any(receipt_owned):
-                        # Raw policy actions do not yet name executable work. Author their concrete
-                        # Ideas and durable Cards now, but deliberately leave every Node slot unowned;
-                        # the next fresh fold must select them before a producer can be requested.
-                        stageable = speculative_raw_actions(
-                            state,
-                            self.policy,
-                            self.policy.max_nodes,
-                            context=SpeculativeSelectionContext(
-                                scoring=getattr(self, "_card_scoring", None),
-                                resource_envelope=self._resource_envelope(),
-                            ),
-                        )
-                        if stageable:
-                            # Author one work item at a time. The live depth is filled by the isolated
-                            # steady-state proposer while eval runs; staging an unreserved wide seed
-                            # batch here only creates stale inventory if the first fast eval moves best.
-                            one = stageable[:1]
-                            if self._stage_card_creates(one, state):
-                                continue
-                            # A rejected staging attempt gets one ordinary serial compatibility try;
-                            # it must not poll the same paid proposal outside the runaway accounting.
-                        # Unsupported/custom scorer semantics retain the exact serial compatibility
-                        # path below; a Card it cannot score must never be staged/reused in a loop.
-
-                    # A positive depth is useful only with a genuinely isolated role pair. If the
-                    # configured factory cannot provide one, fall through to the safe serial Card
-                    # claim below. Otherwise request/session is the sole build path: a lost selection
-                    # CAS restarts from a fresh fold and never silently converts to serial execution.
-                    serial_fallback = any(
-                        self._card_requires_serial_fallback(action.get(META_CARD_ID))
-                        for action in creates
-                    )
-                    if (all(receipt_owned)
-                            and self._producer_role_pair() is not None
-                            and not serial_fallback):
-                        if self._request_card_build():
-                            await self._run_card_session(
-                                [],
-                                fold(self.store.read_all()),
-                                max_es,
-                                None if max_s is None else start + max_s,
-                            )
-                        continue
-                # Variant-1 parallel BUILD: seed/explore DRAFTS are independent, so build (research + code)
-                # up to `parallel_build` at once, each on its OWN pooled (researcher, developer) pair + its
-                # own pre-reserved id (reserved serially under _id_lock, then fanned out in a task-group of
-                # worker threads). Non-draft creates (improve/merge/debug depend on a parent's result and
-                # use role helpers not yet pool-threaded) and the no-pool config fall through to the serial
-                # loop below — byte-identical to before.
-                _card_reservations: Optional[list[_BuildReservation]] = None
-                if any(META_CARD_ID in action for action in creates):
-                    # A Card lane is one authority decision. Mixing receipt-owned and proposer-owned
-                    # work in it would make the score-to-claim fence ambiguous, so fail closed.
-                    if not all(META_CARD_ID in action for action in creates):
-                        continue
-                    _card_reservations = self._claim_existing_card_builds(creates)
-                    if _card_reservations is None:
-                        continue
-                _card_reservation_by_id = {
-                    reservation.card_id: reservation
-                    for reservation in (_card_reservations or [])
-                }
-                _pb_pairs = (self._build_role_pairs(min(self._llm_parallel, len(creates)))
-                             if (self._llm_parallel > 1 and len(creates) > 1
-                                 and all(a.get("kind") == "draft" for a in creates)
-                                 and not any(META_CARD_ID in a for a in creates)) else None)
-                if _pb_pairs and len(_pb_pairs) > 1:
-                    _fan = len(_pb_pairs)
-                    for _i in range(0, len(creates), _fan):
-                        _chunk = creates[_i:_i + _fan]
-                        # Phase 2: ONE shared-researcher pass produces the DISTINCT seed ideas for this
-                        # chunk (avoidance-driven diversity + novelty gate); the fan-out below then only
-                        # IMPLEMENTS them per-developer, so we never pay N independent research rolls that
-                        # collide. If the researcher can't diversify to the full width, build only as many
-                        # nodes as we got distinct ideas — the loop re-plans the rest next iteration.
-                        # RE-FOLD before each chunk (review finding #6): a batch WIDER than the fan-out is
-                        # built in multiple chunks; earlier chunks' nodes are now in the log, so re-folding
-                        # lets THIS chunk's vs-history novelty gate see them and not re-propose their ideas
-                        # (the serial path gets this for free — each node lands before the next proposes).
-                        if _i:
-                            state = fold(self.store.read_all())
-                        # Per-idea FOREAGENT telemetry snapshots captured by _propose_batch (aligned
-                        # 1:1 with _ideas), so each build emits ITS OWN
-                        # hypothesis_ranked/foresight_selected.
-                        _ideas, _telem, _dropped_batch = self._consume_batch_proposal(
-                            state, len(_chunk))
-                        if not _ideas:
-                            self._record_dropped_batch_cards(_dropped_batch)
-                            self._pending_batch_dropped = []
-                            self._pending_batch_novelty_gated = []
-                            continue
-                        _chunk = _chunk[:len(_ideas)]
-                        for _a in _chunk:               # surface the audit events only for what we build
-                            if "_scores" in _a:
-                                self.store.append(EV_POLICY_DECISION,
-                                                  {"scores": _a["_scores"], "chosen": _a.get("_chosen"),
-                                                   "reason": _a.get("_reason")})
-                            self._append_rung_promotion(_a)
-                        # Proposal is complete before durable reservation: a native Card receipt must
-                        # bind the exact immutable statement/action.  The MAIN TASK serially commits
-                        # card_added -> node_building for each idea, then workers only implement.
-                        _reserved = [
-                            self._reserve_node_build(
-                                _a, _idea, scored_against=state.best_node_id,
-                                source="researcher",
-                                steering_context=(
-                                    (_tel or {}).get("_steering_context", [])
-                                    if isinstance(_tel, dict) else []),
-                            )
-                            for _a, _idea, _tel in zip(_chunk, _ideas, _telem)
-                        ]
-                        # Accepted preplanned ids are durable first. Node-less rejects then receive fresh
-                        # closed Card ids without shifting any reservation the workers are about to use.
-                        self._record_dropped_batch_cards(_dropped_batch)
-                        self._pending_batch_dropped = []
-                        # The accepted Ideas are now durably reserved, so the unreserved compatibility
-                        # capability is no longer reachable or needed.
-                        self._pending_batch_novelty_gated = []
-                        # Cost guardrail (Phase 4): surface the concurrent build fan-out width in the
-                        # trace (spans.jsonl / OTel). `built` is structurally bounded by `fan` (=len of
-                        # the role pool) which is bounded by `parallel_build`, so a batch can never exceed
-                        # the configured fan-out — this span makes the actual per-batch cost observable.
-                        # CODEX AGENT: this join is a bulk-synchronous build barrier, not independent
-                        # adaptive research threads. Fast workers cannot select/propose from completed
-                        # sibling evidence until the slowest build and later eval batch finish; feed each
-                        # completion back to a central scheduler and refill the freed lane immediately.
-                        with self.tracer.span("parallel_build_batch", fan=_fan, built=len(_chunk),
-                                              parallel_build=self._llm_parallel):
-                            async with anyio.create_task_group() as _tg:
-                                for _a, _res, _pair, _idea, _tel in zip(
-                                        _chunk, _reserved, _pb_pairs, _ideas, _telem):
-                                    if _res is None:
-                                        continue
-                                    # _create_node_guarded: an UNEXPECTED exception in one build becomes a
-                                    # node_failed terminal for its already-reserved id (node_building was
-                                    # appended up front) instead of tearing down the task group and killing
-                                    # the whole run — the rest of the concurrent batch still finishes.
-                                    _tg.start_soon(anyio.to_thread.run_sync,
-                                                   functools.partial(self._create_node_guarded,
-                                                                  _a, _pair, _res, _idea, _tel))
-                        # Circuit breaker under concurrency: `start_soon` does not yield, so no worker runs
-                        # until the task group JOINS above — the pause flag can only be observed HERE, after
-                        # the whole chunk finishes. So a developer/build crash pauses after AT MOST this one
-                        # chunk (bounded by the fan-out width), not mid-chunk; stop before the next chunk.
-                        if self._create_paused:
-                            self._drain_create_pause()
-                            break
-                    continue
-                for _create_index, a in enumerate(creates):
-                    reservation = (_card_reservation_by_id.get(a.get(META_CARD_ID))
-                                   if META_CARD_ID in a else None)
-                    if META_CARD_ID in a and reservation is None:
-                        continue
-                    if "_scores" in a:   # policy exposed candidate scores -> surface "why this node"
-                        self.store.append(EV_POLICY_DECISION,
-                                          {"scores": a["_scores"], "chosen": a.get("_chosen"),
-                                           "reason": a.get("_reason")})
-                    self._append_rung_promotion(a)
-                    if META_CARD_ID in a:
-                        # The complete Card lane was claimed atomically above, before the first slow
-                        # build could make its siblings ineligible through the evaluate-all prefix.
-                        try:
-                            self._create_node(a, reserved=reservation)
-                        except BaseException:
-                            for later in (_card_reservations or [])[_create_index + 1:]:
-                                self._fail_reserved_build(
-                                    node_id=later.node_id,
-                                    card_id=later.card_id,
-                                    generation=0,
-                                    error="Card build batch stopped by an unexpected build error",
-                                    reason="build_batch_cancelled",
-                                )
-                            raise
-                    else:
-                        self._create_node(a)  # sequential -> deterministic ids/proposals
-                    if self._create_paused:
-                        self._drain_create_pause()
-                        for later in (_card_reservations or [])[_create_index + 1:]:
-                            self._fail_reserved_build(
-                                node_id=later.node_id,
-                                card_id=later.card_id,
-                                generation=0,
-                                error="Card build batch stopped after a Developer crash",
-                                reason="build_batch_cancelled",
-                            )
-                        # A developer_crash auto-PAUSED the run (LLM unreachable / hard error). STOP the
-                        # rest of the batch instead of building every seed and paying the full within-call
-                        # retry/backoff on each — honouring the "PAUSE on the FIRST developer_crash"
-                        # guarantee the crash branch documents. The loop re-folds paused=True at the top
-                        # and finalizes; a plain `resume` continues once the cause is fixed.
-                        break
+                # doc 25 ES-05: the 220-line branch that used to live here is now a §4 phase
+                # helper. It always continued or broke the loop, never fell through, so the
+                # signal is acted on unconditionally.
+                _signal, state, _no_mint_turns = await self._handle_create_actions(
+                    creates, state, created_no_terminal=_created_no_terminal,
+                    no_mint_turns=_no_mint_turns,
+                    decision_seq=decision_seq, max_es=max_es, max_s=max_s, start=start)
+                if _signal == "break":
+                    break
                 continue
 
             if self._speculation_enabled():
@@ -2078,6 +1858,273 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # diversity archive, LLM cost roll-up, case store + reflection note, read-model,
         # trace.json + tree.html. Event emission order is preserved exactly.
         return finalize_run(self, entry_finished=entry_finished, start_time=start)
+
+    async def _handle_create_actions(self, creates, state, *, created_no_terminal,
+                                     no_mint_turns, decision_seq, max_es, max_s, start):
+        """The `creates` branch of the run loop, lifted verbatim (doc 25 ES-05).
+
+        220 inline lines: runaway-counter arithmetic, the speculation receipt-owned/raw split,
+        parallel-build chunking, card-lane claiming and batch-drop bookkeeping. The §4 comment
+        below claims the loop reads as "a table of guarded steps"; this branch was the one place
+        it did not.
+
+        Structural only — every append, fold, `_write_lock` point and gate stays exactly where it
+        was. The one unavoidable change is control flow: nine `break`/`continue` statements here
+        targeted the OUTER `while`, and those cannot cross a function boundary, so they return a
+        signal instead. The five that target loops INSIDE this branch are untouched. The branch
+        never fell through to the code after it — it always continued or broke — so the caller
+        acts on the signal unconditionally.
+
+        Returns `(signal, state, no_mint_turns)` where signal is `"break"` or `"continue"`.
+        `state` is returned because this branch re-folds it and the loop reads the newer value.
+
+        `no_mint_turns` round-trips for a sharper reason: it is the second of the two runaway
+        bounds — consecutive turns that PLANNED creates and minted nothing — and this branch is the
+        only place that increments it. Passed by value it would lose every mutation, the no-mint
+        guard would never trip, and a create lane that elects work forever without ever building it
+        would loop forever instead of finishing. That hazard is the one this lift's first draft
+        actually hit (for `created_no_terminal`, which then still round-tripped); it moved rather
+        than went away.
+
+        `created_no_terminal` no longer needs the round-trip: the mint charge moved to the top of
+        the loop, where it is read off the log's `node_created` rows instead of `len(creates)`, and
+        the compensating decrements that existed only to undo that over-charge are gone with it. So
+        this branch now only READS the counter, to test the trip. Both are rebound to the original
+        local names below so the lifted lines stay byte-identical.
+        """
+        _created_no_terminal = created_no_terminal
+        _no_mint_turns = no_mint_turns
+        # Runaway trip: MINTED too many nodes with ZERO reaching terminal since the last
+        # progress (charged at the top of the loop from the log). A healthy run creates a batch
+        # then evaluates it (which resets the counter); only a spin (empty-nodes fold re-minting
+        # the same id) grows this unbounded. Cap generously so operator injects / wide seed
+        # batches never false-trip.
+        _runaway_cap = max(self.policy.max_nodes, 4) * 3 + 50
+        if _created_no_terminal > _runaway_cap:
+            if self._finish_with_report_if_quiescent(state, {
+                    "reason": "stuck: node creation not converging (no node reached terminal)"},
+                    after_seq=decision_seq):
+                return "break", state, _no_mint_turns
+            return "continue", state, _no_mint_turns
+        # …and its companion: a create lane that keeps PLANNING work and minting nothing. The
+        # Card lane can legitimately spend a turn without a node (authoring a work item, losing
+        # a build CAS, refusing a mixed-authority batch), so this cannot be one turn — but it
+        # must still be bounded, or the same stall that used to end the run with the wrong
+        # message would simply never end it at all. Same generous cap, counted in CONSECUTIVE
+        # turns and reset by any mint or any terminal, so only a genuine no-progress spin
+        # reaches it. The reason names what actually happened instead of blaming node creation.
+        _no_mint_turns += 1
+        if _no_mint_turns > _runaway_cap:
+            if self._finish_with_report_if_quiescent(state, {
+                    "reason": (
+                        f"stuck: {len(creates)} action(s) planned for "
+                        f"{_no_mint_turns} consecutive loop turns without creating a node")},
+                    after_seq=decision_seq):
+                return "break", state, _no_mint_turns
+            return "continue", state, _no_mint_turns
+        self._create_paused = False   # set by _create_node's developer_crash circuit-breaker
+        self._pending_create_pause = []   # …and its worker-side request queue (see _request_create_pause)
+        if self._speculation_enabled():
+            receipt_owned = [META_CARD_ID in action for action in creates]
+            # One turn has one authority. A mixed lane could stage new work while claiming a
+            # stale selection snapshot, so retain the serial spine's existing fail-closed rule.
+            if any(receipt_owned) and not all(receipt_owned):
+                return "continue", state, _no_mint_turns
+
+            if not any(receipt_owned):
+                # Raw policy actions do not yet name executable work. Author their concrete
+                # Ideas and durable Cards now, but deliberately leave every Node slot unowned;
+                # the next fresh fold must select them before a producer can be requested.
+                stageable = speculative_raw_actions(
+                    state,
+                    self.policy,
+                    self.policy.max_nodes,
+                    context=SpeculativeSelectionContext(
+                        scoring=getattr(self, "_card_scoring", None),
+                        resource_envelope=self._resource_envelope(),
+                    ),
+                )
+                if stageable:
+                    # Author one work item at a time. The live depth is filled by the isolated
+                    # steady-state proposer while eval runs; staging an unreserved wide seed
+                    # batch here only creates stale inventory if the first fast eval moves best.
+                    one = stageable[:1]
+                    if self._stage_card_creates(one, state):
+                        return "continue", state, _no_mint_turns
+                    # A rejected staging attempt gets one ordinary serial compatibility try;
+                    # it must not poll the same paid proposal outside the runaway accounting.
+                # Unsupported/custom scorer semantics retain the exact serial compatibility
+                # path below; a Card it cannot score must never be staged/reused in a loop.
+
+            # A positive depth is useful only with a genuinely isolated role pair. If the
+            # configured factory cannot provide one, fall through to the safe serial Card
+            # claim below. Otherwise request/session is the sole build path: a lost selection
+            # CAS restarts from a fresh fold and never silently converts to serial execution.
+            serial_fallback = any(
+                self._card_requires_serial_fallback(action.get(META_CARD_ID))
+                for action in creates
+            )
+            if (all(receipt_owned)
+                    and self._producer_role_pair() is not None
+                    and not serial_fallback):
+                if self._request_card_build():
+                    await self._run_card_session(
+                        [],
+                        fold(self.store.read_all()),
+                        max_es,
+                        None if max_s is None else start + max_s,
+                    )
+                return "continue", state, _no_mint_turns
+        # Variant-1 parallel BUILD: seed/explore DRAFTS are independent, so build (research + code)
+        # up to `parallel_build` at once, each on its OWN pooled (researcher, developer) pair + its
+        # own pre-reserved id (reserved serially under _id_lock, then fanned out in a task-group of
+        # worker threads). Non-draft creates (improve/merge/debug depend on a parent's result and
+        # use role helpers not yet pool-threaded) and the no-pool config fall through to the serial
+        # loop below — byte-identical to before.
+        _card_reservations: Optional[list[_BuildReservation]] = None
+        if any(META_CARD_ID in action for action in creates):
+            # A Card lane is one authority decision. Mixing receipt-owned and proposer-owned
+            # work in it would make the score-to-claim fence ambiguous, so fail closed.
+            if not all(META_CARD_ID in action for action in creates):
+                return "continue", state, _no_mint_turns
+            _card_reservations = self._claim_existing_card_builds(creates)
+            if _card_reservations is None:
+                return "continue", state, _no_mint_turns
+        _card_reservation_by_id = {
+            reservation.card_id: reservation
+            for reservation in (_card_reservations or [])
+        }
+        _pb_pairs = (self._build_role_pairs(min(self._llm_parallel, len(creates)))
+                     if (self._llm_parallel > 1 and len(creates) > 1
+                         and all(a.get("kind") == "draft" for a in creates)
+                         and not any(META_CARD_ID in a for a in creates)) else None)
+        if _pb_pairs and len(_pb_pairs) > 1:
+            _fan = len(_pb_pairs)
+            for _i in range(0, len(creates), _fan):
+                _chunk = creates[_i:_i + _fan]
+                # Phase 2: ONE shared-researcher pass produces the DISTINCT seed ideas for this
+                # chunk (avoidance-driven diversity + novelty gate); the fan-out below then only
+                # IMPLEMENTS them per-developer, so we never pay N independent research rolls that
+                # collide. If the researcher can't diversify to the full width, build only as many
+                # nodes as we got distinct ideas — the loop re-plans the rest next iteration.
+                # RE-FOLD before each chunk (review finding #6): a batch WIDER than the fan-out is
+                # built in multiple chunks; earlier chunks' nodes are now in the log, so re-folding
+                # lets THIS chunk's vs-history novelty gate see them and not re-propose their ideas
+                # (the serial path gets this for free — each node lands before the next proposes).
+                if _i:
+                    state = fold(self.store.read_all())
+                # Per-idea FOREAGENT telemetry snapshots captured by _propose_batch (aligned
+                # 1:1 with _ideas), so each build emits ITS OWN
+                # hypothesis_ranked/foresight_selected.
+                _ideas, _telem, _dropped_batch = self._consume_batch_proposal(
+                    state, len(_chunk))
+                if not _ideas:
+                    self._record_dropped_batch_cards(_dropped_batch)
+                    self._pending_batch_dropped = []
+                    self._pending_batch_novelty_gated = []
+                    continue
+                _chunk = _chunk[:len(_ideas)]
+                for _a in _chunk:               # surface the audit events only for what we build
+                    if "_scores" in _a:
+                        self.store.append(EV_POLICY_DECISION,
+                                          {"scores": _a["_scores"], "chosen": _a.get("_chosen"),
+                                           "reason": _a.get("_reason")})
+                    self._append_rung_promotion(_a)
+                # Proposal is complete before durable reservation: a native Card receipt must
+                # bind the exact immutable statement/action.  The MAIN TASK serially commits
+                # card_added -> node_building for each idea, then workers only implement.
+                _reserved = [
+                    self._reserve_node_build(
+                        _a, _idea, scored_against=state.best_node_id,
+                        source="researcher",
+                        steering_context=(
+                            (_tel or {}).get("_steering_context", [])
+                            if isinstance(_tel, dict) else []),
+                    )
+                    for _a, _idea, _tel in zip(_chunk, _ideas, _telem)
+                ]
+                # Accepted preplanned ids are durable first. Node-less rejects then receive fresh
+                # closed Card ids without shifting any reservation the workers are about to use.
+                self._record_dropped_batch_cards(_dropped_batch)
+                self._pending_batch_dropped = []
+                # The accepted Ideas are now durably reserved, so the unreserved compatibility
+                # capability is no longer reachable or needed.
+                self._pending_batch_novelty_gated = []
+                # Cost guardrail (Phase 4): surface the concurrent build fan-out width in the
+                # trace (spans.jsonl / OTel). `built` is structurally bounded by `fan` (=len of
+                # the role pool) which is bounded by `parallel_build`, so a batch can never exceed
+                # the configured fan-out — this span makes the actual per-batch cost observable.
+                # CODEX AGENT: this join is a bulk-synchronous build barrier, not independent
+                # adaptive research threads. Fast workers cannot select/propose from completed
+                # sibling evidence until the slowest build and later eval batch finish; feed each
+                # completion back to a central scheduler and refill the freed lane immediately.
+                with self.tracer.span("parallel_build_batch", fan=_fan, built=len(_chunk),
+                                      parallel_build=self._llm_parallel):
+                    async with anyio.create_task_group() as _tg:
+                        for _a, _res, _pair, _idea, _tel in zip(
+                                _chunk, _reserved, _pb_pairs, _ideas, _telem):
+                            if _res is None:
+                                continue
+                            # _create_node_guarded: an UNEXPECTED exception in one build becomes a
+                            # node_failed terminal for its already-reserved id (node_building was
+                            # appended up front) instead of tearing down the task group and killing
+                            # the whole run — the rest of the concurrent batch still finishes.
+                            _tg.start_soon(anyio.to_thread.run_sync,
+                                           functools.partial(self._create_node_guarded,
+                                                          _a, _pair, _res, _idea, _tel))
+                # Circuit breaker under concurrency: `start_soon` does not yield, so no worker runs
+                # until the task group JOINS above — the pause flag can only be observed HERE, after
+                # the whole chunk finishes. So a developer/build crash pauses after AT MOST this one
+                # chunk (bounded by the fan-out width), not mid-chunk; stop before the next chunk.
+                if self._create_paused:
+                    self._drain_create_pause()
+                    break
+            return "continue", state, _no_mint_turns
+        for _create_index, a in enumerate(creates):
+            reservation = (_card_reservation_by_id.get(a.get(META_CARD_ID))
+                           if META_CARD_ID in a else None)
+            if META_CARD_ID in a and reservation is None:
+                continue
+            if "_scores" in a:   # policy exposed candidate scores -> surface "why this node"
+                self.store.append(EV_POLICY_DECISION,
+                                  {"scores": a["_scores"], "chosen": a.get("_chosen"),
+                                   "reason": a.get("_reason")})
+            self._append_rung_promotion(a)
+            if META_CARD_ID in a:
+                # The complete Card lane was claimed atomically above, before the first slow
+                # build could make its siblings ineligible through the evaluate-all prefix.
+                try:
+                    self._create_node(a, reserved=reservation)
+                except BaseException:
+                    for later in (_card_reservations or [])[_create_index + 1:]:
+                        self._fail_reserved_build(
+                            node_id=later.node_id,
+                            card_id=later.card_id,
+                            generation=0,
+                            error="Card build batch stopped by an unexpected build error",
+                            reason="build_batch_cancelled",
+                        )
+                    raise
+            else:
+                self._create_node(a)  # sequential -> deterministic ids/proposals
+            if self._create_paused:
+                self._drain_create_pause()
+                for later in (_card_reservations or [])[_create_index + 1:]:
+                    self._fail_reserved_build(
+                        node_id=later.node_id,
+                        card_id=later.card_id,
+                        generation=0,
+                        error="Card build batch stopped after a Developer crash",
+                        reason="build_batch_cancelled",
+                    )
+                # A developer_crash auto-PAUSED the run (LLM unreachable / hard error). STOP the
+                # rest of the batch instead of building every seed and paying the full within-call
+                # retry/backoff on each — honouring the "PAUSE on the FIRST developer_crash"
+                # guarantee the crash branch documents. The loop re-folds paused=True at the top
+                # and finalizes; a plain `resume` continues once the cause is fixed.
+                break
+        return "continue", state, _no_mint_turns
+
 
     # -------------------------------------------------- run() phase helpers (§4 decomposition)
     # Pure structural decomposition of run(): each method is a cohesive span lifted verbatim so the
