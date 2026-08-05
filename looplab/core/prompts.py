@@ -60,6 +60,10 @@ PROMPT_KEYS: tuple[str, ...] = (
     "strategist_system", "tool_strategist_system",
     "pilot_system", "triage_system",
     "deep_research_system", "foresight_system", "merge_system", "bestofn_judge_system",
+    # The concept-vocabulary consolidation prompt (doc 25 SE-10). A SEPARATE key from
+    # `merge_system`: consolidating an axis/slug vocabulary is a different job from the generic
+    # item merge, and collapsing the two would have changed the shipped text for a paid agent.
+    "concept_consolidate_system",
 )
 # NOT registered (documented exclusion): the LLMOnboarder's system prompt
 # (adapters/repo_developer.py::_SYS) — the onboarder is built pre-run via task.make_onboarder()

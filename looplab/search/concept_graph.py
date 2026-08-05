@@ -1488,7 +1488,7 @@ def _apply_consolidation(graph: "ConceptGraph", tags: dict, rename: dict) -> tup
 
 
 def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embed=None,
-                         parser: str = "tool_call", known_renames=None) -> tuple:
+                         parser: str = "tool_call", known_renames=None, prompts=None) -> tuple:
     """Consolidate a freely-GROWN concept vocabulary so it does not FRAGMENT into synonyms across a run
     (`augmentation` vs `data-augmentation`, `optimizer` vs `optimization`) — the §21.11 follow-up that makes
     the grown graph a STABLE coordinate system on any task. Returns `(graph, tags, rename_map)`.
@@ -1533,7 +1533,12 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
                 merges: list[_Pair] = Field(default_factory=list)
 
             vocab = "\n".join(f"- {c.id}  ({c.label})" for c in concepts)
-            system = (
+            # Routed through the PromptStore like every other agent prompt in this codebase
+            # (doc 25 SE-10). The DEFAULT is the shipped text byte-for-byte: this consolidation is a
+            # different job from `hybrid_merge.agent_merge`'s generic item merge, so it keeps its own
+            # prompt rather than adopting `merge_system`. Re-pointing it at `agent_merge` would have
+            # swapped the text, which is a behaviour change for a paid agent, not a refactor.
+            _CONSOLIDATE_SYSTEM = (
                 "You consolidate a machine-learning experiment CONCEPT vocabulary that was grown "
                 "incrementally and has SYNONYM fragmentation. Merge concepts/axes that mean the SAME thing to "
                 "ONE canonical `axis/slug` id (e.g. `data-augmentation/*`≡`augmentation/*`, "
@@ -1541,6 +1546,8 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
                 "`teacher-distill`≠`self-distill`). Output ONLY the ids that should CHANGE, as {raw, canonical} "
                 "pairs where `canonical` is another id from the list (or a cleaned form of it). Call `emit`."
             )
+            from looplab.core.prompts import render
+            system = render(prompts, "concept_consolidate_system", _CONSOLIDATE_SYSTEM)
             out = parse_structured(client, [{"role": "system", "content": system},
                                             {"role": "user", "content": "VOCABULARY:\n" + vocab}], _Out, parser)
             idset = set(ids)

@@ -3857,6 +3857,33 @@ Covered by `tests/test_json_and_metric_contracts.py` (30).avoid the name collisi
 
 *Recommendation:* Route consolidate_concepts' LLM path through agent_merge (kind='concepts') or at minimum share one rename-chain resolver (core.concepts.resolve_concept) across all three sites.
 
+*Resolution (2026-08-05):* The fallback clause was already done; the primary clause is DECLINED with
+a reason, and the real inconsistency underneath it is fixed instead.
+
+The shared rename-chain resolver exists: `concept_graph` imports `resolve_concept` /
+`normalized_concept_renames` from `core.concepts`, and `_canonical_with_rename` walks the chain
+through them. (`concept_registry.resolve_slug` is a different thing — alias resolution over the
+governance ledger, not consolidation renames — and correctly stays separate.)
+
+Routing `consolidate_concepts` through `agent_merge` is NOT a refactor. `agent_merge` renders
+`merge_system`; `consolidate_concepts` ships its own "You consolidate a machine-learning experiment
+CONCEPT vocabulary" text. Re-pointing one at the other SWAPS the prompt a paid agent receives, which
+CLAUDE.md forbids as part of a refactor: "Prompt strings are contracts. Changes to prompt text alter
+agent behavior — never 'clean up' prompt wording as part of a refactor." Consolidating an axis/slug
+vocabulary is also a genuinely different job from merging generic items, so one prompt for both would
+be worse even done deliberately.
+
+What WAS wrong is that this prompt alone was inline and unoverridable while every other agent prompt
+routes through the PromptStore. It now renders through `concept_consolidate_system` — its own key in
+`PROMPT_KEYS`, with the shipped text as the byte-for-byte default, and `prompts` threaded through
+`consolidate_concepts`.
+
+A guard pins that the default survives rendering unchanged. Writing it surfaced a mistake in my own
+first draft: I claimed a stray `$` would rewrite the text, and the break proved otherwise — an unknown
+`$name` passes through untouched, which is what "safe" in `safe_substitute` means. The actual hazard
+is a DOUBLED `$$`, which collapses to `$`. The docstring and the teeth-test now describe the real
+failure.
+
 #### SE-11 · MEDIUM · other · effort: medium
 
 **Selection-bearing card_score signals are self-reported by the competing proposer — acknowledged in shipped review comments but still live**
