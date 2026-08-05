@@ -76,7 +76,7 @@ def test_background_read_backpressure_nothing_lost(tmp_path):
     tid = mgr.start([sys.executable, "-c", f"import sys; sys.stdout.write({payload!r})"],
                     str(tmp_path))
     for _ in range(200):                                          # wait for the writer to finish
-        if mgr._tasks[tid]["proc"].poll() is not None:
+        if mgr._tasks[tid].proc.poll() is not None:
             break
         time.sleep(0.05)
     r1 = mgr.read(tid)
@@ -106,7 +106,7 @@ def _start_finished(mgr, tmp_path):
     """A background task whose child has already exited (so tests can append to its log directly)."""
     tid = mgr.start([sys.executable, "-c", "pass"], str(tmp_path))
     for _ in range(200):
-        if mgr._tasks[tid]["proc"].poll() is not None:
+        if mgr._tasks[tid].proc.poll() is not None:
             break
         time.sleep(0.05)
     return tid
@@ -121,7 +121,7 @@ def test_background_concurrent_polls_lose_nothing(tmp_path):
     mgr = BackgroundManager()
     tid = _start_finished(mgr, tmp_path)
     payload = "".join(f"<{i:05d}>" for i in range(4000))          # ~28KB of unique ordered markers
-    with open(mgr._tasks[tid]["log"], "ab") as f:
+    with open(mgr._tasks[tid].log, "ab") as f:
         f.write(payload.encode())
     got, lock = [], threading.Lock()
 
@@ -151,7 +151,7 @@ def test_background_read_is_seek_based_and_matches_the_old_chunking(tmp_path):
     mgr = BackgroundManager()
     tid = _start_finished(mgr, tmp_path)
     payload = "".join(f"<{i:04d}>" for i in range(1667))          # ~10KB of unique markers
-    with open(mgr._tasks[tid]["log"], "ab") as f:
+    with open(mgr._tasks[tid].log, "ab") as f:
         f.write(payload.encode())
     chunks = _drain(mgr, tid)
     assert all(len(c) <= _MAX_READ for c in chunks)
@@ -167,7 +167,7 @@ def test_background_backlog_over_cap_is_skipped_with_an_explicit_note(tmp_path):
     mgr = BackgroundManager()
     tid = _start_finished(mgr, tmp_path)
     payload = "".join(f"<{i:07d}>" for i in range(40_000))        # 360KB >> the 256KB backlog cap
-    log = mgr._tasks[tid]["log"]
+    log = mgr._tasks[tid].log
     with open(log, "ab") as f:
         f.write(payload.encode())
     chunks = _drain(mgr, tid)
@@ -239,8 +239,8 @@ def test_background_closes_handle_after_exit(tmp_path):
         if r["status"] == "exited":
             break
         time.sleep(0.05)
-    assert mgr._tasks[tid].get("closed") is True
-    assert mgr._tasks[tid]["fh"].closed
+    assert mgr._tasks[tid].closed is True
+    assert mgr._tasks[tid].fh.closed
 
 
 def test_kill_background_stops_a_running_task(tmp_path):
@@ -303,13 +303,13 @@ def test_background_watcher_reaps_without_any_poll(tmp_path):
     mgr = BackgroundManager(max_seconds=0.1, watch_interval=0.05)
     try:
         tid = mgr.start([sys.executable, "-c", "import time; time.sleep(30)"], str(tmp_path))
-        proc = mgr._tasks[tid]["proc"]
+        proc = mgr._tasks[tid].proc
         for _ in range(200):                   # NO read()/list() — only the watcher thread can reap it
             if proc.poll() is not None:
                 break
             time.sleep(0.05)
         assert proc.poll() is not None         # watcher force-killed the hung child
-        assert mgr._tasks[tid]["timed_out"] is True
+        assert mgr._tasks[tid].timed_out is True
     finally:
         mgr.shutdown()
 
@@ -331,8 +331,8 @@ def test_background_watcher_publishes_timeout_before_kill_returns(tmp_path, monk
     try:
         tid = mgr.start([sys.executable, "-c", "import time; time.sleep(30)"], str(tmp_path))
         assert killed.wait(timeout=10)
-        assert mgr._tasks[tid]["proc"].poll() is not None
-        assert mgr._tasks[tid]["timed_out"] is True
+        assert mgr._tasks[tid].proc.poll() is not None
+        assert mgr._tasks[tid].timed_out is True
     finally:
         release_killer.set()
         mgr.shutdown()
@@ -355,14 +355,14 @@ def test_background_watcher_retries_a_noop_tree_kill(tmp_path, monkeypatch):
     tid = None
     try:
         tid = mgr.start([sys.executable, "-c", "import time; time.sleep(30)"], str(tmp_path))
-        proc = mgr._tasks[tid]["proc"]
+        proc = mgr._tasks[tid].proc
         for _ in range(200):
             if proc.poll() is not None:
                 break
             time.sleep(0.01)
         assert proc.poll() is not None
         assert attempts >= 2
-        assert mgr._tasks[tid]["timed_out"] is True
+        assert mgr._tasks[tid].timed_out is True
     finally:
         mgr.shutdown()
         if tid is not None:
@@ -406,12 +406,12 @@ def test_background_deadline_kill_is_serialized_per_task(tmp_path, monkeypatch):
         release_first_kill.set()
         first.join(timeout=10)
         assert not first.is_alive()
-        assert task["proc"].poll() is None       # the first attempt really was a no-op
+        assert task.proc.poll() is None       # the first attempt really was a no-op
 
         mgr._enforce_deadline(task)               # a later sweep retries after lock release
         assert attempts == 2
-        assert task["proc"].poll() is not None
-        assert task["timed_out"] is True
+        assert task.proc.poll() is not None
+        assert task.timed_out is True
     finally:
         release_first_kill.set()
         if first is not None:
@@ -419,10 +419,10 @@ def test_background_deadline_kill_is_serialized_per_task(tmp_path, monkeypatch):
         mgr.shutdown()
         if tid is not None:
             task = mgr._tasks[tid]
-            if task["proc"].poll() is None:
-                task["proc"].kill()
-                task["proc"].wait(timeout=10)
-            mgr._reap(task)                    # close the Windows log handle before tmp cleanup
+            if task.proc.poll() is None:
+                task.proc.kill()
+                task.proc.wait(timeout=10)
+            task.reap()                        # close the Windows log handle before tmp cleanup
 
 
 def test_background_watcher_disabled_when_interval_zero(tmp_path):
@@ -432,7 +432,7 @@ def test_background_watcher_disabled_when_interval_zero(tmp_path):
     tid = mgr.start([sys.executable, "-c", "import time; time.sleep(2)"], str(tmp_path))
     assert mgr._watcher is None                 # no watcher thread spawned
     time.sleep(0.3)                             # deadline passed, but nothing polled
-    assert mgr._tasks[tid]["proc"].poll() is None   # still running — lazy-only, not reaped
+    assert mgr._tasks[tid].proc.poll() is None   # still running — lazy-only, not reaped
     assert mgr.read(tid)["timed_out"] is True       # the poll enforces it
 
 
@@ -442,17 +442,17 @@ def test_background_evicts_oldest_finished_logs(tmp_path):
     for _ in range(4):
         tid = mgr.start([sys.executable, "-c", "pass"], str(tmp_path))
         tids.append(tid)
-        logs.append(mgr._tasks[tid]["log"])
+        logs.append(mgr._tasks[tid].log)
         for _ in range(100):                   # wait for it to finish before the next start's evict
             t = mgr._tasks.get(tid)
-            if t is None or t["proc"].poll() is not None:
+            if t is None or t.proc.poll() is not None:
                 break
             time.sleep(0.02)
     # 4 finished tasks, cap 2 → the oldest is evicted from the registry AND its tmp log unlinked.
     assert tids[0] not in mgr._tasks
     assert not logs[0].exists()
     assert tids[3] in mgr._tasks                # the newest is always retained
-    retained = [t for t in mgr._tasks.values() if t["proc"].poll() is not None]
+    retained = [t for t in mgr._tasks.values() if t.proc.poll() is not None]
     assert len(retained) <= 3                   # bounded (≤ max_finished + the just-started one)
 
 
@@ -463,7 +463,7 @@ def test_kill_waits_and_reports_exit_code(tmp_path):
     tid = mgr.start([sys.executable, "-c", "import time; time.sleep(30)"], str(tmp_path))
     r = mgr.kill(tid)
     assert r["ok"] and r["status"] == "killed" and r.get("exit_code") is not None
-    assert mgr._tasks[tid]["proc"].poll() is not None      # the process is actually gone
+    assert mgr._tasks[tid].proc.poll() is not None      # the process is actually gone
 
 
 def test_kill_reaps_the_whole_tree(tmp_path):
@@ -605,24 +605,68 @@ def test_the_deadline_precheck_never_reaps_the_child_it_is_only_inspecting():
             polls.append("poll")           # a REAP — must not happen from the unlocked pre-check
             return None
 
-    task = {"proc": _Proc(), "deadline": time.monotonic() - 1.0,
-            "deadline_lock": threading.Lock()}
-    task["deadline_lock"].acquire()        # stand in for kill() holding it inside _kill_tree
+    task = bg_tasks._BgTask(proc=_Proc(), log=None, fh=None, cmd="", cwd="",
+                            deadline=time.monotonic() - 1.0)
+    task.deadline_lock.acquire()        # stand in for kill() holding it inside _kill_tree
     try:
         bg_tasks.BackgroundManager._enforce_deadline(task)
     finally:
-        task["deadline_lock"].release()
+        task.deadline_lock.release()
     assert polls == [], "the unlocked pre-check reaped the child a concurrent kill() was fencing"
 
     # A NOT-yet-overdue task short-circuits before the process is touched at all.
-    fresh = {"proc": _Proc(), "deadline": time.monotonic() + 60.0,
-             "deadline_lock": threading.Lock()}
+    fresh = bg_tasks._BgTask(proc=_Proc(), log=None, fh=None, cmd="", cwd="",
+                             deadline=time.monotonic() + 60.0)
     bg_tasks.BackgroundManager._enforce_deadline(fresh)
     assert polls == []
 
     # kill()'s outcome read happens under the lock it fenced the kill with, not after releasing it.
     src = inspect.getsource(bg_tasks.BackgroundManager.kill)
-    body = src.split('with t["deadline_lock"]:', 1)[1]
+    body = src.split('with t.deadline_lock:', 1)[1]
     locked, _, after = body.partition('\n        try:')
     assert "rc = proc.poll()" in locked and "rc = proc.poll()" not in after, (
         "kill() reads its outcome outside the lock that fenced the kill")
+
+
+# --- RA-09: the F10 lock discipline is encoded once, on the handle -------------------------------
+
+def test_every_reaping_poll_goes_through_the_locked_fence():
+    """`poll()` REAPS and frees the PID, so an unlocked poll can let a concurrent `_kill_tree`
+    signal a REUSED pid. That rule used to live in five comment blocks over dict records; it is now
+    `_BgTask.locked_reap_and_poll`. This checks no manager method reintroduces a bare reaping poll
+    outside the fence — the pre-checks that must stay non-reaping read `.returncode` instead."""
+    import ast
+    import inspect
+
+    from looplab.runtime import bg_tasks
+
+    tree = ast.parse(inspect.getsource(bg_tasks.BackgroundManager))
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        body = ast.unparse(node)
+        if ".poll()" not in body:
+            continue
+        # Fenced either by the shared helper, or by taking `deadline_lock` directly — which
+        # `_enforce_deadline`, `kill` and `_evict_finished` each do for their own reasons (a
+        # non-blocking try, a kill they must not race, a retention sweep that must not stall).
+        if "locked_reap_and_poll" in body or "deadline_lock" in body:
+            continue
+        offenders.append(node.name)
+    assert not offenders, (
+        f"{offenders} call poll() without any fence; use `locked_reap_and_poll`, take "
+        "`deadline_lock` explicitly, or read `.returncode` if the check must not reap")
+
+
+def test_the_handle_rejects_a_typo_instead_of_answering_none():
+    """The reason the record stopped being a dict: `t.get("timed_out")` on a misspelled key returned
+    None and read as 'not timed out'. __slots__ makes it an AttributeError at the call site."""
+    import pytest as _pytest
+
+    from looplab.runtime import bg_tasks
+
+    task = bg_tasks._BgTask(proc=None, log=None, fh=None, cmd="", cwd="", deadline=None)
+    with _pytest.raises(AttributeError):
+        task.timed_ouy = True                      # noqa: B010 - the typo IS the test
+    assert task.timed_out is False
