@@ -2194,15 +2194,22 @@ class RunState(BaseModel):
         return _is_better(self.direction, a, b)
 
 
-# ---------------------------------------------------------------- the discarded-prefetch predicate
-# These three lived in `search/card_selection.py` until 2026-08-05 and are re-exported from there
+# -------------------------------------------------- the Card lane's "did this node spend budget"
+# These FOUR lived in `search/card_selection.py` until 2026-08-05 and are re-exported from there
 # (the SAME objects, so every existing import site and patch seam still resolves to one definition).
 # They moved DOWN to core because the FOLD needs them: `events/replay.py`'s Card anchor gate must not
-# treat a discarded speculative prefetch as a child of the node it was going to debug, and `events`
-# may not import `search` (CLAUDE.md layering). Duplicating the predicate replay-side would have made
-# "did this node spend budget" answerable two ways, which is the exact class of disagreement the
-# original defect was: replay counted the discard, the Card lane's policy view did not, and the lane
-# re-authored a permanently unselectable Card every loop turn. One definition, one answer.
+# treat a node the Card lane's own policy view cannot see as a child of the node it was going to
+# debug, and `events` may not import `search` (CLAUDE.md layering). Duplicating the predicate
+# replay-side would have made "did this node spend budget" answerable two ways, which is the exact
+# class of disagreement the original defect was: replay counted the node, the Card lane's policy view
+# did not, and the lane re-authored a permanently unselectable Card every loop turn. One definition,
+# one answer.
+#
+# The discard predicate moved first (2026-08-05, commit 5620d11f) and that was the mistake worth
+# naming: it moved ONE of the four classes `node_counts_toward_card_budget` hides, so the fold went
+# on disagreeing about the other three (`tombstoned`, `feasible=False`, `breed_excluded`) and the
+# identical runaway reopened on those axes within a day. The unit that has to be shared is the
+# PREDICATE, not the leaf of its proof — so `node_counts_toward_card_budget` itself now lives here.
 
 
 CARD_FRESHNESS_SUPERSEDED_ERROR = "superseded by Card freshness gate"
@@ -2278,4 +2285,36 @@ def is_unevaluated_speculative_discard(state: "RunState", node: Node) -> bool:
                 and node.error == CARD_FRESHNESS_SUPERSEDED_ERROR
             )
         )
+    )
+
+
+def node_counts_toward_card_budget(state: "RunState", node: Node) -> bool:
+    """Whether a node consumes the L3 creation budget.
+
+    Tombstones and both kinds of current gate exclusion do not steal future search capacity:
+    constraint-gated nodes have ``feasible=False`` and trust-gated nodes are in ``breed_excluded``.
+    Failed and aborted attempts still count unless separately tombstoned; they consumed a real build.
+    The Layer-5 refund is a speculative build proven to have been discarded BEFORE it consumed any
+    evaluation — this is the single place that answers "did this node spend budget", and the physical
+    reservation ceiling (``Engine._hard_node_reservation_limit``) reads the same predicate through
+    ``refunded_card_budget_node_ids`` so the two halves of the budget cannot disagree.
+
+    It also answers a SECOND question, and that is why it lives in ``core`` rather than in
+    ``search/card_selection.py`` where it was written: it defines the Card lane's whole node
+    UNIVERSE.  ``card_selection._effective_policy_state`` builds the state the policy sees by
+    filtering ``state.nodes`` through exactly this predicate, so "did this node spend budget" and
+    "can the policy still see this node" are one fact by construction.  The fold's debug anchor
+    (``events/replay.py::_card_debug_leaf_children``) has to answer that same question — a child the
+    policy cannot see does not end its failed parent's life as a debuggable leaf — and ``events`` may
+    not import ``search``.  A replay-side copy is how the two views came to disagree twice: first
+    about a discarded prefetch, then about a tombstoned / constraint-gated / trust-gated child.
+    Changing this predicate therefore moves the budget, the policy's universe and the fold's leaf
+    test TOGETHER, which is the property that was missing, not an accident to be factored apart.
+    """
+
+    return (
+        not node.tombstoned
+        and node.feasible
+        and node.id not in state.breed_excluded
+        and not is_unevaluated_speculative_discard(state, node)
     )

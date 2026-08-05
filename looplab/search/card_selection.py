@@ -25,6 +25,7 @@ from looplab.core.models import (
     _durable_speculative_lifecycle,
     effective_card_footprint,
     is_unevaluated_speculative_discard,
+    node_counts_toward_card_budget,
     normalize_researcher_footprint,
 )
 from looplab.search.concept_projection import (
@@ -34,11 +35,15 @@ from looplab.search.policy import (META_RUNG, asha_expansion, debug_action,
 
 
 META_CARD_ID = "_card_id"
-# BACK-COMPAT re-export seam. `CARD_FRESHNESS_SUPERSEDED_ERROR`, `_durable_speculative_lifecycle` and
-# `is_unevaluated_speculative_discard` were defined HERE until 2026-08-05 and moved DOWN to
-# `core/models.py` so the FOLD could reuse the discard predicate (`events` may not import `search`).
-# They are imported above rather than reimplemented, so `card_selection.<name>` and
+# BACK-COMPAT re-export seam. `CARD_FRESHNESS_SUPERSEDED_ERROR`, `_durable_speculative_lifecycle`,
+# `is_unevaluated_speculative_discard` and `node_counts_toward_card_budget` were defined HERE until
+# 2026-08-05 and moved DOWN to `core/models.py` so the FOLD could reuse them (`events` may not import
+# `search`). They are imported above rather than reimplemented, so `card_selection.<name>` and
 # `core.models.<name>` are the SAME object and every existing import site / patch seam keeps working.
+# `node_counts_toward_card_budget` followed the other three the same day and for the same reason,
+# after moving only the discard predicate left the fold disagreeing with `_effective_policy_state`
+# about the OTHER three classes it hides (tombstoned / infeasible / breed_excluded) — see its
+# docstring. Everything in this module still calls it by the historical local name.
 # (Do not "clean up" the unused-looking `_durable_speculative_lifecycle` import. It has no caller in
 # this module any more, and that is exactly why it is here: it was spellable as
 # `card_selection._durable_speculative_lifecycle` yesterday, so dropping it would turn a monkeypatch
@@ -221,26 +226,6 @@ def normalize_card_scoring(value: CardScoring | Mapping[str, object] | None) -> 
     )
 
 
-def node_counts_toward_card_budget(state: RunState, node: Node) -> bool:
-    """Whether a node consumes the L3 creation budget.
-
-    Tombstones and both kinds of current gate exclusion do not steal future search capacity:
-    constraint-gated nodes have ``feasible=False`` and trust-gated nodes are in ``breed_excluded``.
-    Failed and aborted attempts still count unless separately tombstoned; they consumed a real build.
-    The Layer-5 refund is a speculative build proven to have been discarded BEFORE it consumed any
-    evaluation — this is the single place that answers "did this node spend budget", and the physical
-    reservation ceiling (``Engine._hard_node_reservation_limit``) reads the same predicate through
-    ``refunded_card_budget_node_ids`` so the two halves of the budget cannot disagree.
-    """
-
-    return (
-        not node.tombstoned
-        and node.feasible
-        and node.id not in state.breed_excluded
-        and not is_unevaluated_speculative_discard(state, node)
-    )
-
-
 def card_budget_used(state: RunState) -> int:
     """L3/L5 node-budget denominator, including ordinary superseded attempts."""
 
@@ -287,6 +272,12 @@ def _effective_policy_state(state: RunState) -> RunState:
     tombstoned or gated node from its own denominator made those two halves disagree.  A shallow
     model copy keeps the original folded state and its Nodes untouched while hiding exactly the
     nodes that do not consume the Card budget from the policy view.
+
+    This IS the Card lane's node universe, so anything that has to predict what the policy will
+    propose must hide the same set.  The fold's debug anchor is the one such reader outside this
+    package (``events/replay.py::_card_debug_leaf_children``); it reads the predicate directly from
+    ``core/models.py`` rather than reimplementing the filter, because a replay-side copy of it is
+    what re-opened the debug-Card runaway twice.
     """
 
     effective_nodes = {

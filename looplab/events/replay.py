@@ -43,6 +43,7 @@ from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGES
                      transitional_card_ownership_receipt_v1,
                      hypothesis_id, hypothesis_statement_digest,
                      idea_proposal_digest, is_unevaluated_speculative_discard,
+                     node_counts_toward_card_budget,
                      normalize_extra_metrics, normalize_researcher_footprint,
                      normalize_steering_context,
                      run_setup_key, valid_card_action_digest, valid_researcher_footprint)
@@ -77,6 +78,7 @@ from looplab.events.types import (
     EV_RUNG_PROMOTED,
     EV_SET_STRATEGY,
     EV_SETUP_FINISHED, EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
+    EV_SPECULATION_DEPTH_SETTLED,
     EV_STRATEGY_DECISION, EV_TRUST_GATE_CHANGED, EV_VERIFIER_GROUP_SCORED, EV_WORKSPACE_CHANGED)
 
 
@@ -3595,6 +3597,31 @@ def _on_card_build_attempted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -
         {"card_id": card_id, "generation": generation, "index": index})
 
 
+def _on_speculation_depth_settled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Adopt one AUTO re-resolution of the run's speculation depth.
+
+    A MINIMUM, not an assignment, and that is the whole design. The engine only ever settles AUTO
+    DOWNWARD (`orchestrator.py::_settle_speculation_depth`), so taking the minimum over every row
+    reproduces the engine's own sequence while being ORDER-TOLERANT and IDEMPOTENT — invariant #5's
+    two requirements. Last-write-wins would satisfy neither: two rows spliced in the other order, or
+    one row folded twice, would land on a different treatment, and a duplicated stale row could raise
+    a depth back up after the run had already narrowed it.
+
+    Nothing here is re-measured. The row's `evidence` is recorded for the operator and for
+    `looplab inspect`; the fold reads only `depth`, so a resume on a box with different hardware
+    continues under the treatment THIS RUN chose rather than one re-derived from the new host — the
+    same property `run_started`'s pinned widths give, extended to a value that is allowed to move.
+
+    Bounds are strict for the same reason `run_started`'s are: a bool/float/string in a malformed or
+    hand-edited row must not be able to change the search treatment. A row the engine never wrote
+    (depth above the pinned one) is simply inert under the minimum.
+    """
+    depth = d.get("depth")
+    if type(depth) is not int or not 0 <= depth <= 64:
+        return
+    st.speculation_depth = min(st.speculation_depth, depth)
+
+
 def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     """Advance exactly one positional Card-build request and retain its successful node link.
 
@@ -3835,6 +3862,7 @@ _HANDLERS = {
     EV_CARD_ADDED: _on_card_added,
     EV_CARD_BUILD_REQUESTED: _on_card_build_requested,
     EV_CARD_BUILD_ATTEMPTED: _on_card_build_attempted,
+    EV_SPECULATION_DEPTH_SETTLED: _on_speculation_depth_settled,
     EV_CARD_BUILD_DONE: _on_card_build_done,
     EV_CARD_MERGED: _on_card_merged,
     EV_CARD_AUTO_DROPPED: _on_card_dropped,
@@ -4479,25 +4507,46 @@ def _card_action_from_projection(card: Card) -> dict:
     }
 
 
+# `is_unevaluated_speculative_discard` is still imported above — `tests/test_card_budget_refund.py`
+# asserts one object under every name it is reachable by — but the fold no longer CALLS it directly.
+# `node_counts_toward_card_budget` subsumes it, and that is deliberate: a replay-side binding the
+# fold dispatches through is precisely a place for these two views to drift apart again.
 def _card_debug_leaf_children(st: RunState) -> dict[int, frozenset[int]]:
     """Child node ids that END a failed node's life as a debuggable leaf, keyed by parent id.
 
-    A node with a child is no longer a leaf — EXCEPT for a child that never spent budget.  A
-    discarded speculative prefetch (``is_unevaluated_speculative_discard``) is exactly that: the
-    freshness gate terminalized it before any dispatch, it cost one Developer call and no sandbox
-    at all, and the Card lane's OWN policy view already erases it (``_effective_policy_state``
-    filters ``state.nodes`` through ``node_counts_toward_card_budget``, which is that same
-    predicate).  Counting it here made the two views disagree about whether the failed parent still
-    had work available: the policy kept proposing ``debug`` on it while replay kept folding the
-    resulting Card to ``action_receipt_incomplete``, so the lane authored a fresh permanently
-    unselectable Card every loop turn until the runaway guard tripped.  Reusing the run's SINGLE
-    answer to "did this node spend budget" makes the two views agree by construction rather than by
-    a second rule that can drift.  (That predicate lives in ``core/models.py`` precisely so the fold
-    can reach it — ``events`` may not import ``search``.)
+    A node with a child is no longer a leaf — EXCEPT for a child the Card lane's policy cannot see.
+    That universe is not a judgement call this module gets to make: ``card_selection``'s
+    ``_effective_policy_state`` builds the state the policy actually reads by filtering
+    ``state.nodes`` through ``node_counts_toward_card_budget``, so THAT is the set whose children
+    exist.  Whenever the two answers differ, the failed parent is simultaneously a leaf the policy
+    keeps proposing ``debug`` on and a non-leaf whose Card replay folds to
+    ``action_receipt_incomplete`` — and the lane authors a fresh permanently unselectable Card every
+    loop turn until the runaway guard ends the run.  Measured offline on a 12-node budget, tombstoned
+    and constraint-gated shapes alike: 7 nodes frozen, 89 ``card_added`` of which 84 dead ``debug``
+    Cards on ONE parent, ending on ``stuck: 1 action(s) planned for 84 consecutive loop turns without
+    creating a node``; the same prefix folds to a normal 12-of-12 finish with this map correct.
+    (The escalation to a dead run needs the speculative staging lane — with ``speculation_depth=0``
+    the same proposal falls through to a serial build.  The DISAGREEMENT does not: it needs only
+    ``card_driven_selection``, and at depth 0 it costs the lane its own staged Card plus a duplicate
+    node for the same work.)
+
+    Calling the predicate itself is what makes the two views agree BY CONSTRUCTION.  The 2026-08-05
+    first cut of this fix inlined one of its four clauses instead
+    (``is_unevaluated_speculative_discard``) and the identical runaway reopened the same day on the
+    three it left out — a tombstoned child, a constraint-gated (``feasible=False``) child, and a
+    trust-gated (``breed_excluded``) child.  ``events`` may not import ``search``, which is exactly
+    why the predicate lives in ``core/models.py``: a fourth spelling of "which children count" is the
+    failure this keeps producing, not a layering inconvenience to work around.
+
+    The parent side is deliberately NOT filtered here (see ``_card_debuggable_leaf_candidate_ids``):
+    a failed node the policy cannot see stays a candidate, so replay is at worst MORE permissive than
+    the policy about the anchor itself.  That direction cannot run away — the lane never proposes
+    such a parent, and ``card_selection.eligible_cards`` rechecks every ready debug Card against the
+    live ``debug_action`` before it can be claimed, so it fails closed at the claim instead.
     """
     children: dict[int, set[int]] = {}
     for node in st.nodes.values():
-        if is_unevaluated_speculative_discard(st, node):
+        if not node_counts_toward_card_budget(st, node):
             continue
         for parent_id in node.parent_ids:
             children.setdefault(parent_id, set()).add(node.id)
@@ -5564,9 +5613,20 @@ def _derive_cards(st: RunState) -> None:
         st, candidate_ids=debuggable_leaf_candidate_ids,
         leaf_children=debuggable_leaf_children)
     # The nodes each Card OWNS, keyed by the CANONICAL card id. `Card.evidence` alone is not enough
-    # for the debug exemption below: `card_merged` folds an alias's evidence into its canonical, so
-    # evidence can name a node this Card never authored. Intersecting the two makes "its own work
-    # item" provable from the node row itself.
+    # for the debug exemption below: evidence can name a node whose OWN row never claimed this Card.
+    # Intersecting the two makes "its own work item" provable from the node row itself.
+    #
+    # Be precise about what that buys, because 5620d11f's commit message got it wrong and the next
+    # reader will otherwise trust it: this does NOT stop a `card_merged` alias's node from laundering
+    # the exemption. This map is keyed by `_canon(...)`, so an alias's node IS in the canonical
+    # Card's own-work-item set by construction. What keeps a merged chain closed is the blocker pair
+    # it earns anyway — `merged_work_items` (any surviving work-item alias) and usually
+    # `action_owner_ambiguous` (>1 action owner) — both of which are unconditional.
+    # The intersection's real protection is narrower and worth keeping on its own terms: the
+    # legacy STATEMENT-HASH join (step 2 above) attaches a node to a Card by hypothesis wording when
+    # the node names no `card_id` at all. Such a node is evidence but was never this Card's work
+    # item, and without the intersection it would exempt itself from its own parent's leaf test.
+    # (`identity_not_native` blocks those Cards today; that is a second rule, not this one.)
     own_work_items_by_card: dict[str, set[int]] = {}
     for node in st.nodes.values():
         owner_card_id = node.idea.card_id

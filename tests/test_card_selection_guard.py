@@ -754,9 +754,14 @@ def _discarded(node_id: int):
         "reason": "superseded", "eval_seconds": 0.0, "never_evaluated": True})
 
 
-def _failed_node_2():
+def _failed_node_2(*, trust_gate: str | None = None):
+    baseline = list(_baseline())
+    if trust_gate is not None:
+        # the trust-gated child class below needs a run whose gate actually excludes; `audit`
+        # (the `run_started` default) flags nothing, so `breed_excluded` stays empty.
+        baseline[0] = ("run_started", {**baseline[0][1], "trust_gate": trust_gate})
     return [
-        *_baseline(),
+        *baseline,
         ("node_created", {
             "node_id": 2, "operator": "improve", "parent_ids": [1],
             "idea": {"operator": "improve", "hypothesis": "broken candidate"}}),
@@ -852,3 +857,245 @@ def test_an_ordinary_superseded_child_still_closes_the_debug_anchor():
     assert 2 not in _card_debuggable_leaf_ids(state)
     assert state.cards["debug-later"].selection_ready is False
     assert "action_receipt_incomplete" in state.cards["debug-later"].selection_blockers
+
+
+# --- …and the OTHER THREE classes the Card lane's node universe hides (2026-08-05, second cut) ----
+#
+# The first cut shared exactly ONE clause of `node_counts_toward_card_budget` with the fold
+# (`is_unevaluated_speculative_discard`) and left the other three re-derived by omission, so the
+# identical runaway reopened the same day on a TOMBSTONED child, a constraint-gated
+# (`feasible=False`) child and a trust-gated (`breed_excluded`) child. `_effective_policy_state`
+# hides all four; the fold's child map hid one; a failed node whose only child is in the other three
+# was therefore a debuggable leaf to the policy and a non-leaf to replay, and the lane authored a
+# fresh permanently-unselectable `debug` Card every loop turn. Measured end-to-end on a 12-node
+# budget, tombstoned and constraint-gated shapes alike: 7 nodes frozen, 89 `card_added` of which 84
+# dead `debug` Cards on ONE parent, run dead on "stuck: 1 action(s) planned for 84 consecutive loop
+# turns without creating a node"; the same prefix finishes 12-of-12 once the map is right. Both
+# halves now call the predicate itself, which is why the tests below are one case per CLASS and one
+# property over the predicate — not a fourth rule that can drift again.
+
+# class -> (trust_gate, the rows that retire node 3 into it)
+_CHILDREN_THE_POLICY_VIEW_HIDES = {
+    "tombstoned": (None, [
+        ("node_evaluated", {"node_id": 3, "metric": 0.9}),
+        ("node_tombstoned", {"node_ids": [3]}),
+    ]),
+    "constraint-gated": (None, [
+        ("node_evaluated", {"node_id": 3, "metric": 0.9,
+                            "violations": [{"name": "latency_ms", "value": 900, "max": 500}]}),
+    ]),
+    "trust-gated": ("gate", [
+        ("node_evaluated", {"node_id": 3, "metric": 0.9}),
+        ("reward_hack_suspected", {"node_id": 3, "generation": 0,
+                                   "signals": [{"signal": "critic:hardcoded_metric"}]}),
+    ]),
+}
+
+# the same shape for children that DID spend budget — the boundary these must not cross.
+_CHILDREN_THE_POLICY_VIEW_KEEPS = {
+    "evaluated": [("node_evaluated", {"node_id": 3, "metric": 0.9})],
+    "failed": [("node_failed", {"node_id": 3, "reason": "crash", "eval_seconds": 4.0})],
+    # aborted attempts still consumed a real build; `node_counts_toward_card_budget` keeps them and
+    # `debug_action`'s `has_child` counts them, so the two views agree without a special case.
+    "aborted": [("node_abort", {"node_id": 3, "reason": "operator"}),
+                ("node_failed", {"node_id": 3, "reason": "aborted", "eval_seconds": 1.0})],
+    "still pending": [],
+}
+
+
+def _failed_parent_with_child(kill_rows, *, trust_gate=None):
+    return [
+        *_failed_node_2(trust_gate=trust_gate),
+        ("node_created", {"node_id": 3, "operator": "debug", "parent_ids": [2],
+                          "idea": {"operator": "debug", "hypothesis": "the first repair"}}),
+        *kill_rows,
+        _native_operator_card_added("debug-2nd", "repair the failed candidate again", "debug", [2]),
+    ]
+
+
+@pytest.mark.parametrize("child_class", sorted(_CHILDREN_THE_POLICY_VIEW_HIDES))
+def test_a_child_the_policy_view_hides_leaves_the_debug_anchor_open(child_class):
+    """Each class on its own. The policy proposes `debug` on the crashed parent; before the fix the
+    fold refused the resulting Card forever, which is the runaway."""
+    from looplab.core.models import node_counts_toward_card_budget
+    from looplab.events.replay import _card_debug_leaf_children, _card_debuggable_leaf_ids
+    from looplab.search.card_selection import _effective_policy_state
+    from looplab.search.policy import debug_action
+
+    trust_gate, kill_rows = _CHILDREN_THE_POLICY_VIEW_HIDES[child_class]
+    state = fold(_events(_failed_parent_with_child(kill_rows, trust_gate=trust_gate)))
+
+    assert node_counts_toward_card_budget(state, state.nodes[3]) is False, child_class
+    # the view the lane actually proposes from…
+    assert debug_action(_effective_policy_state(state), 1) == {"kind": "debug", "parent_id": 2}
+    # …and the fold, reading the SAME predicate rather than a second rule
+    assert _card_debug_leaf_children(state).get(2) is None
+    assert 2 in _card_debuggable_leaf_ids(state)
+    assert state.cards["debug-2nd"].selection_blockers == []
+    assert card_action(state.cards["debug-2nd"]) == {
+        "kind": "debug", "parent_id": 2, "_card_id": "debug-2nd"}
+
+
+@pytest.mark.parametrize("child_class", sorted(_CHILDREN_THE_POLICY_VIEW_KEEPS))
+def test_a_child_the_policy_view_KEEPS_still_closes_the_debug_anchor(child_class):
+    """The boundary in the other direction: closing the divergence must open no hole. A child that
+    spent budget still ends its failed parent's life as a debuggable leaf, in BOTH views."""
+    from looplab.core.models import node_counts_toward_card_budget
+    from looplab.events.replay import _card_debug_leaf_children, _card_debuggable_leaf_ids
+    from looplab.search.card_selection import _effective_policy_state
+    from looplab.search.policy import debug_action
+
+    state = fold(_events(
+        _failed_parent_with_child(_CHILDREN_THE_POLICY_VIEW_KEEPS[child_class])))
+
+    assert node_counts_toward_card_budget(state, state.nodes[3]) is True, child_class
+    assert debug_action(_effective_policy_state(state), 1) is None
+    assert _card_debug_leaf_children(state)[2] == frozenset({3})
+    assert 2 not in _card_debuggable_leaf_ids(state)
+    card = state.cards["debug-2nd"]
+    assert card.selection_ready is False
+    assert "action_receipt_incomplete" in card.selection_blockers
+
+
+def test_the_folds_child_map_is_exactly_the_policy_views_child_map():
+    """The PROPERTY the four cases are instances of, and the one that survives a fifth class.
+
+    `_effective_policy_state` builds the policy's node universe by filtering `state.nodes` through
+    `node_counts_toward_card_budget`; the fold's child map must be the parent->children map OF THAT
+    UNIVERSE. Asserting the two maps are equal on a state carrying every class at once is what makes
+    a future edit to the predicate move both halves together instead of reopening this defect on
+    whatever class is added next.
+    """
+    from looplab.events.replay import _card_debug_leaf_children
+    from looplab.search.card_selection import _effective_policy_state
+
+    rows = [
+        *_failed_node_2(trust_gate="gate"),
+        # one child per class, all on the same failed parent, plus a real one so the map is non-empty
+        ("node_created", {"node_id": 3, "operator": "debug", "parent_ids": [2],
+                          "idea": {"operator": "debug", "hypothesis": "tombstoned repair"}}),
+        ("node_evaluated", {"node_id": 3, "metric": 0.9}),
+        ("node_tombstoned", {"node_ids": [3]}),
+        ("node_created", {"node_id": 4, "operator": "debug", "parent_ids": [2],
+                          "idea": {"operator": "debug", "hypothesis": "infeasible repair"}}),
+        ("node_evaluated", {"node_id": 4, "metric": 0.9,
+                            "violations": [{"name": "latency_ms", "value": 900, "max": 500}]}),
+        ("node_created", {"node_id": 5, "operator": "debug", "parent_ids": [2],
+                          "idea": {"operator": "debug", "hypothesis": "trust-gated repair"}}),
+        ("node_evaluated", {"node_id": 5, "metric": 0.9}),
+        ("reward_hack_suspected", {"node_id": 5, "generation": 0,
+                                   "signals": [{"signal": "critic:hardcoded_metric"}]}),
+        _native_operator_card_added("debug-thrown", "a discarded prefetch", "debug", [2]),
+        *_speculative_build(6, "debug-thrown", "debug", [2]),
+        _discarded(6),
+        ("node_created", {"node_id": 7, "operator": "improve", "parent_ids": [1],
+                          "idea": {"operator": "improve", "hypothesis": "an ordinary child"}}),
+        ("node_evaluated", {"node_id": 7, "metric": 0.7}),
+    ]
+    state = fold(_events(rows))
+
+    expected: dict[int, set[int]] = {}
+    for node in _effective_policy_state(state).nodes.values():
+        for parent_id in node.parent_ids:
+            expected.setdefault(parent_id, set()).add(node.id)
+    assert _card_debug_leaf_children(state) == {
+        parent_id: frozenset(ids) for parent_id, ids in expected.items()}
+    # …and concretely: the crashed parent has FOUR dead children and is still a debuggable leaf,
+    # while node 1 keeps its live children.
+    assert set(state.nodes) == {1, 2, 3, 4, 5, 6, 7}
+    assert _card_debug_leaf_children(state) == {1: frozenset({2, 7})}
+
+
+def test_an_alias_node_is_in_the_canonical_cards_own_work_items_and_is_closed_anyway():
+    """Pin the TRUE reason a merged chain stays shut, because 5620d11f's commit message named the
+    wrong one and the code comment repeated it.
+
+    `_derive_cards` keys `own_work_items_by_card` by `_canon(node.idea.card_id)`, so an alias's node
+    IS in the canonical Card's own-work-item set — the node-row intersection does NOT stop a
+    `card_merged` alias's node from reaching the debug exemption. What keeps the chain closed is the
+    blocker pair a merge earns unconditionally: `merged_work_items` and `action_owner_ambiguous`.
+    The intersection's real (narrower) protection is against evidence attached by the legacy
+    STATEMENT-HASH join, where the node's own row never named this Card at all.
+    """
+    state = fold(_events([
+        *_failed_node_2(),
+        _native_operator_card_added("debug-canon", "repair the failed candidate", "debug", [2]),
+        _native_operator_card_added("debug-alias", "repair it another way", "debug", [2]),
+        # the ALIAS authors the work item…
+        *_speculative_build(3, "debug-alias", "debug", [2]),
+        ("card_merged", {"canonical": "debug-canon", "aliases": ["debug-alias"]}),
+    ]))
+
+    canonical = state.cards["debug-canon"]
+    assert state.nodes[3].idea.card_id == "debug-alias"
+    assert 3 in canonical.evidence, "…and the merge folds it into the canonical Card's evidence"
+    # the exemption input the intersection was claimed to withhold — it does not withhold it
+    assert set(canonical.evidence) & {3} == {3}
+    # …yet the Card is unselectable, on the two blockers that actually do the work
+    assert canonical.selection_ready is False
+    assert "merged_work_items" in canonical.selection_blockers
+    assert "action_owner_ambiguous" in canonical.selection_blockers
+
+
+def test_the_fold_never_imports_search_which_is_why_the_predicate_lives_in_core():
+    """The layering rule that decided this predicate's home, made a red test rather than a comment.
+
+    `events` may import only `core` (CLAUDE.md → Conventions → Layering). That is the entire reason
+    `node_counts_toward_card_budget` and its discard clause were moved DOWN out of
+    `search/card_selection.py`: the fold has to answer "which children count" with the SAME object
+    the Card lane's policy view uses, and it cannot reach into `search` to get it. Without this,
+    the next person who needs the answer replay-side writes a second copy — which is exactly how
+    this defect was produced, twice.
+    """
+    import ast
+
+    from _source_scan import PKG, iter_trees
+
+    events_pkg = PKG / "events"
+    offenders: list[str] = []
+    for path, tree in iter_trees(events_pkg):
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("looplab."):
+                package = node.module.split(".")[1]
+            elif isinstance(node, ast.Import):
+                package = next((alias.name.split(".")[1] for alias in node.names
+                                if alias.name.startswith("looplab.")
+                                and len(alias.name.split(".")) > 1), None)
+            else:
+                continue
+            if package in {"search", "engine", "agents", "trust", "adapters", "serve",
+                           "tools", "runtime"}:
+                offenders.append(f"{path.name} imports looplab.{package}")
+    assert offenders == [], (
+        "events may import only core; a fold that can reach `search` will grow a second answer to "
+        f"'which children count': {offenders}")
+
+
+def test_a_gated_failed_PARENT_stays_a_replay_leaf_and_fails_closed_at_the_claim():
+    """The asymmetry `_card_debug_leaf_children` documents, pinned so it stays deliberate.
+
+    Only the CHILD side of the leaf test reads `node_counts_toward_card_budget`. A failed node the
+    policy view itself hides (here: trust-gated) is still a debug CANDIDATE to replay, so replay is
+    more permissive than the policy about the anchor. That direction cannot run away — the lane never
+    proposes such a parent, so nothing re-authors a Card — and `eligible_cards` rechecks every ready
+    debug Card against the live `debug_action` before it can be claimed, which is where it closes.
+    """
+    from looplab.events.replay import _card_debuggable_leaf_ids
+    from looplab.search.card_selection import _effective_policy_state
+    from looplab.search.policy import debug_action
+
+    state = fold(_events([
+        *_failed_node_2(trust_gate="gate"),
+        ("reward_hack_suspected", {"node_id": 2, "generation": 0,
+                                   "signals": [{"signal": "critic:hardcoded_metric"}]}),
+        _native_operator_card_added("debug-gated-parent", "repair the gated failure", "debug", [2]),
+    ]))
+
+    assert state.breed_excluded == {2}
+    assert sorted(_effective_policy_state(state).nodes) == [1], "the policy cannot see node 2"
+    assert debug_action(_effective_policy_state(state), 1) is None, "…so it never proposes it"
+    # replay is the permissive one here, and says so
+    assert 2 in _card_debuggable_leaf_ids(state)
+    assert state.cards["debug-gated-parent"].selection_ready is True
+    # …and Layer 3 is where it fails closed: no live `debug_action` to match, so nothing is claimable
+    assert eligible_cards(state, GreedyTree(n_seeds=1, max_nodes=8, debug_depth=1)) == []

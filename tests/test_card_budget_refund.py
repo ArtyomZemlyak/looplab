@@ -380,7 +380,13 @@ def test_the_refund_predicate_is_one_object_under_every_name_it_is_reachable_by(
     """It moved DOWN to `core/models.py` on 2026-08-05 so the FOLD could reuse it (`events` may not
     import `search`). The old spellings are re-exports, not copies — a second definition is exactly
     the drift this predicate exists to prevent, and a monkeypatch on the historical path would
-    silently miss the fold."""
+    silently miss the fold.
+
+    `node_counts_toward_card_budget` followed it the same day, and that is the load-bearing entry:
+    sharing only the discard clause left the fold re-deriving the other three by omission, so the
+    debug-anchor runaway reopened on a tombstoned / constraint-gated / trust-gated child within
+    hours. The unit that has to be one object is the PREDICATE, not the leaf of its proof.
+    """
     from looplab.core import models
     from looplab.events import replay
     from looplab.search import card_selection, speculation_quality
@@ -389,6 +395,10 @@ def test_the_refund_predicate_is_one_object_under_every_name_it_is_reachable_by(
             is models.is_unevaluated_speculative_discard
             is replay.is_unevaluated_speculative_discard
             is speculation_quality.is_unevaluated_speculative_discard)
+    assert (card_selection.node_counts_toward_card_budget
+            is models.node_counts_toward_card_budget
+            is replay.node_counts_toward_card_budget
+            is speculation_quality.node_counts_toward_card_budget)
     assert (card_selection._durable_speculative_lifecycle
             is models._durable_speculative_lifecycle)
     assert (card_selection.CARD_FRESHNESS_SUPERSEDED_ERROR
@@ -429,3 +439,46 @@ def test_the_budget_view_and_the_fold_agree_on_what_a_discard_costs():
     assert node_counts_toward_card_budget(with_real_child, ran) is True
     assert _card_debug_leaf_children(with_real_child) == {0: frozenset({2})}
     assert 0 not in _card_debuggable_leaf_ids(with_real_child)
+
+
+def test_the_refund_is_reachable_end_to_end_on_the_deterministic_backend(tmp_path):
+    """The budget-NEUTRALITY property speculation rests on, exercised rather than asserted.
+
+    It had never fired in a live run: fourteen consecutive real-LLM runs reported `refunded: 0`,
+    because the Card scorer went 25-for-25 on its prefetches and no supersede ever occurred. That
+    left the whole refund — the thing that makes "a miss costs one Developer call and no budget" true
+    — verified only by unit tests of its parts.
+
+    Driven on the toy backend, where the eval finishes in microseconds and so routinely moves `best`
+    out from under an in-flight prefetch, which is exactly the supersede that never happened live.
+    Measured on the real CLI (`looplab run --backend toy --max-nodes 12 -s speculation_depth=1`):
+    18 requests, 16 committed, 4 superseded before dispatch, **4 refunded, charged_discards 0** — and
+    the run still executed exactly 12 experiments on its 12-node budget across 16 node ids.
+    """
+    from looplab.search.speculation_quality import speculation_budget_observation
+    from tests.factories import make_engine
+
+    from looplab.adapters.toytask import ToyTask
+    task = ToyTask.load(Path(__file__).resolve().parents[1] / "examples" / "toy_task.json")
+    # `role_factory` is what the CLI supplies and what the ISOLATED producer pair comes from; without
+    # it `_producer_role_pair()` is None and every election falls through to the serial claim, so the
+    # prefetch — and therefore the supersede — never happens at all.
+    engine = make_engine(tmp_path / "refund-e2e", task=task, max_nodes=12, n_seeds=3,
+                         card_driven_selection=True, speculation_depth=1,
+                         role_factory=task.build_roles)
+    if not engine._speculation_enabled() or engine._producer_role_pair() is None:
+        pytest.skip("this build does not admit a spelled positive depth on the toy adapter")
+    anyio.run(engine.run)
+
+    state = fold(engine.store.read_all())
+    observed = speculation_budget_observation(state)
+    assert observed["refunded"] >= 1, (
+        "no supersede occurred, so the refund is still unexercised end to end: " f"{observed}")
+    assert observed["charged_discards"] == 0, (
+        "a refunded discard must not also be charged — that is the neutrality claim: " f"{observed}")
+    # The point of the refund: the run gets its full budget of REAL experiments back.
+    assert len(state.evaluated_nodes()) + len(
+        [n for n in state.nodes.values() if n.status is NodeStatus.failed
+         and n.error_reason != "superseded"]) >= observed["evaluated"]
+    assert len(state.nodes) > observed["evaluated"], (
+        "node ids were spent on discarded predictions, which is what the refund gives back")
