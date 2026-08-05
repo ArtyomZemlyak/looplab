@@ -1732,11 +1732,38 @@ def _clean_llm_totals(d: dict | None) -> dict:
     out.update({
         "cost": _llm_cost_value(raw.get("cost")),
         "calls": _llm_counter(raw.get("calls")),
+        # How many of `calls` the provider actually stated an amount for (`core/llm.py::
+        # cost_is_reported`). Plain sanitizer only — the reader-side default for a log written
+        # before this field existed belongs to `_row_priced_calls`, which still has the raw row.
+        "priced_calls": _llm_counter(raw.get("priced_calls")),
         "prompt_tokens": _llm_counter(raw.get("prompt_tokens")),
         "completion_tokens": _llm_counter(raw.get("completion_tokens")),
         "total_tokens": _llm_counter(raw.get("total_tokens")),
     })
     return out
+
+
+def _row_priced_calls(raw: object, clean: dict) -> int:
+    """Priced-call count for ONE usage/summary row, with the pre-counter reader-side default.
+
+    `priced_calls` is additive (invariant 5), so every log written before it existed omits it, and
+    the default chosen there decides what the UI says about ~every historical run. Neither constant
+    works: 0 reports runs with a real invoice as unpriced, `calls` reports the unpriced ones as
+    fully priced. The row settles it itself — a nonzero `cost` on that row IS the provider having
+    stated an amount, and a zero one is exactly the evidence that it did not
+    (`core/llm.py::cost_is_reported`). Measured against `runs/rubert-dr-0804`, whose gateway started
+    reporting prices mid-run, this recovers the true 209-priced-of-313 split from the existing log
+    with no migration; `runs/rubert-dr-0805` stays 0-of-354.
+
+    A modern row always carries the field, so this branch cannot mislabel a new run.
+    """
+    if isinstance(raw, dict) and "priced_calls" in raw:
+        return int(clean["priced_calls"])
+    # Deliberately a COPY of `core/llm.py::inferred_priced_calls` rather than an import of it: that
+    # module pulls in the openai/httpx transport (measured 0.5 s, ~4x this module's whole import) and
+    # `fold` is on every state read. The rule is one comparison and its rationale lives at the shared
+    # definition — change both together, and prefer the import if that weight ever goes away.
+    return int(clean["calls"]) if float(clean["cost"]) > 0.0 else 0
 
 
 def _on_run_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -2280,6 +2307,7 @@ def _on_llm_cost(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # Compatibility base: latest legacy summary before the new ledger. Once a usage delta is
         # present, later summaries are derived snapshots and may not overwrite durable totals.
         st.llm_cost = _clean_llm_totals(d)
+        st.llm_cost["priced_calls"] = _row_priced_calls(d, st.llm_cost)
 
 
 def _on_llm_usage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -2291,8 +2319,9 @@ def _on_llm_usage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         ctx.llm_usage_ids.add(usage_id)
     base = _clean_llm_totals(st.llm_cost)
     delta = _clean_llm_totals(d)
+    delta["priced_calls"] = _row_priced_calls(d, delta)
     base["cost"] = min(_MAX_LLM_COST, float(base["cost"]) + float(delta["cost"]))
-    for key in ("calls", "prompt_tokens", "completion_tokens", "total_tokens"):
+    for key in ("calls", "priced_calls", "prompt_tokens", "completion_tokens", "total_tokens"):
         base[key] = min(_MAX_LLM_COUNTER, int(base[key]) + int(delta[key]))
     st.llm_cost = base
     ctx.llm_usage_seen = True

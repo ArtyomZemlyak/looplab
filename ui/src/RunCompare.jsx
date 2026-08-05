@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { get, fmt, fmtAgo, fmtElapsedSeconds, normalizeRunGeneration, runApiPath } from './util.js'
+import { get, fmt, fmtAgo, fmtCost, fmtElapsedSeconds, normalizeRunGeneration, runApiPath } from './util.js'
 import { effectiveRunStatus } from './runIndex.js'
 import { comparableRunRanking, COMPARE_COLUMNS, configDifferences } from './portfolioModel.js'
 import { deadlineRequest } from './requestDeadline.js'
@@ -131,7 +131,7 @@ const valueFor = (id, run, detail, names, formatMetric) => {
   if (id === 'objective') return run.direction || '—'
   if (id === 'nodes') return run.nodes ?? '—'
   if (id === 'eval') return fmtElapsedSeconds(state?.total_eval_seconds)
-  if (id === 'cost') return state?.llm_cost?.cost == null ? '—' : `$${fmt(state.llm_cost.cost)}`
+  if (id === 'cost') return state?.llm_cost?.cost == null ? '—' : fmtCost(state.llm_cost)
   if (id === 'trust') return state?.trust_gate || '—'
   if (id === 'project') return names.projects[run.project_id] || '—'
   if (id === 'supertask') return names.supertasks[run.supertask_id] || '—'

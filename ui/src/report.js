@@ -3,7 +3,7 @@
 // set. Mirrors the engine's selection rule — only FEASIBLE evaluated nodes move the frontier — so
 // the report never credits a result the engine itself rejected.
 
-import { fmt, isSweep, operatorMeta } from './util.js'
+import { costPricing, fmt, isSweep, operatorMeta } from './util.js'
 import { nodeTheme } from './conceptId.js'
 import { activeNodeMap, nodeIsActive } from './nodeProjection.js'
 import { normalizeRunReport, reportCoverageText, reportNarrativeCoverage } from './reportModel.js'
@@ -296,8 +296,14 @@ export function verdict(state, a) {
   // robustness from the champion's multi-seed confirmation
   let robustness = 'unconfirmed'
   if (best.confirmed_mean != null && (best.confirmed_seeds || 0) >= 2) {
-    const sd = best.confirmed_std ?? 0, mean = Math.abs(best.confirmed_mean) || 1
-    robustness = (sd <= Math.abs(gain) || sd / mean < 0.1) ? 'robust' : 'fragile'
+    // An ABSENT spread used to become `0`, which makes `sd <= |gain|` trivially true and printed
+    // "robust across N seeds" on no evidence at all — the same unknown-as-zero that read a run
+    // nobody priced as free, except this one asserts a TRUST property. A confirmation whose spread
+    // was not recorded is not evidence of a small spread; it stays unconfirmed.
+    const sd = typeof best.confirmed_std === 'number' && Number.isFinite(best.confirmed_std)
+      ? best.confirmed_std : null
+    const mean = Math.abs(best.confirmed_mean) || 1
+    if (sd !== null) robustness = (sd <= Math.abs(gain) || sd / mean < 0.1) ? 'robust' : 'fragile'
   }
   // trust rollup
   const hasAlarm = caveats.some(c => c.severity === 'alarm')
@@ -397,7 +403,10 @@ export function toMarkdown(state, _best, context = {}) {
   L.push(`- **Status:** ${state.phase || (state.finished ? 'finished' : 'running')}${state.stop_reason ? ` (${state.stop_reason})` : ''}`)
   L.push(`- **Nodes:** ${nodeCount} — ${a.nEval} evaluated, ${Object.values(a.failures || {}).reduce((s, x) => s + x.length, 0)} failed`)
   if (champion) L.push(`- **Best:** node #${champion.id} · metric ${fmt(champion.confirmed_mean ?? champion.metric)}${champion.confirmed_mean != null ? ` ±${fmt(champion.confirmed_std)} (${champion.confirmed_seeds}×)` : ''} · params ${JSON.stringify(champion.idea?.params)}`)
-  if (state.llm_cost) L.push(`- **LLM:** ${state.llm_cost.total_tokens} tokens · $${fmt(state.llm_cost.cost)}`)
+  // The exported Markdown is what gets pasted into a report or a ticket, so it is the LAST place a
+  // `$0` may stand in for "nobody priced this run" — spell the pricing evidence out in full here.
+  if (state.llm_cost) L.push(`- **LLM:** ${state.llm_cost.total_tokens} tokens · `
+    + `${costPricing(state.llm_cost).text} (${costPricing(state.llm_cost).title})`)
   if (ctx.generation) L.push(`- **Run generation:** ${ctx.generation}`)
   if (ctx.snapshotSeq != null) L.push(`- **Snapshot event:** #${ctx.snapshotSeq}`)
   if (rep) {

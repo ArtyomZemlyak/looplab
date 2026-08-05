@@ -94,6 +94,33 @@ def speculation_gate(
     }, option=orjson.OPT_INDENT_2).decode())
 
 
+def _run_wall_seconds(run_dir: Path) -> float:
+    """First-to-last event timestamp, or 0.0 when the log is missing/unreadable.
+
+    Deliberately the EVENT log rather than the span file: spans exist only where the code was
+    instrumented, so asking them how long the run took can only ever return "as long as the parts I
+    measured", which is the exact circularity that hid the gap this number exists to expose.
+    """
+    log = run_dir / "events.jsonl"
+    if not log.exists():
+        return 0.0
+    first = last = None
+    try:
+        from looplab.events.eventstore import read_jsonl_lenient
+        for row in read_jsonl_lenient(log, errors="replace"):
+            ts = row.get("ts")
+            if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+                continue
+            if first is None:
+                first = ts
+            last = ts
+    except OSError:
+        return 0.0
+    if first is None or last is None or last <= first:
+        return 0.0
+    return float(last - first)
+
+
 @app.command()
 def timings(run_dir: Path = typer.Argument(...),
             node: Optional[int] = typer.Option(None, help="only this node id")):
@@ -114,12 +141,35 @@ def timings(run_dir: Path = typer.Argument(...),
             return "tools"
         if k == "operation":
             nm = str(sp.get("name") or "")
+            # `evaluate` is the node's ROOT span: it wraps seed_workspace, every stage, triage and
+            # every repair, so after the self-time subtraction below its remainder is scheduling
+            # overhead and nothing else. Bucketing it as "eval" printed `eval 0.0 min` next to a
+            # measured 100.1 s evaluation (rubert-dr-0805 node 0, whose real subprocess time is the
+            # `op:train` row) — a number that read as "the eval was free". Name it for what the row
+            # actually holds and leave "eval" to the stage rows that hold the eval.
+            if nm == "evaluate":
+                return "op:evaluate(self)"
             if "eval" in nm:
                 return "eval"
             if "repair" in nm:
                 return "repair"
             return f"op:{nm}" if nm else "op"
         return k or "other"
+
+    def _mins(secs: float) -> str:
+        """Minutes for anything a human reads in minutes, seconds below that.
+
+        `round(secs/60, 1)` alone printed `0.0 min` for EVERY row of a run that took six seconds,
+        and for the sub-3 s rows of long runs — a resolution failure that is indistinguishable from
+        "no work happened", which is exactly the reading this command exists to prevent.
+        """
+        if secs >= 60.0:
+            return f"{round(secs / 60, 1)} min"
+        # A positive duration must never print as a flat `0`: 94 lessons spans really do sum to
+        # under a millisecond, and "0" is the one rendering that says they did not happen at all.
+        if 0.0 < secs < 0.01:
+            return "<0.01 s"
+        return f"{round(secs, 2)} s"
 
     from looplab.events.eventstore import read_jsonl_lenient
     # skip-and-continue (not iter_jsonl's stop-at-first-bad): a mid-file corrupt span line must
@@ -136,13 +186,28 @@ def timings(run_dir: Path = typer.Argument(...),
     for sp in spans:
         if sp.get("parent_id"):
             child_sum[sp["parent_id"]] += float(sp.get("duration_s") or 0.0)
-    per_node: dict = defaultdict(lambda: defaultdict(lambda: [0.0, 0]))
+
+    # Attribution is `traceview.effective_node_id` — the ONE rule the server already applies, not a
+    # private re-derivation. Reading only `attributes.node_id` and dropping everything else silently
+    # discarded 616 of rubert-dr-0805's 881 spans (915.8 s, 41% of that run's wall clock): the
+    # Researcher/Boss tool loops, propose, report and lessons stamp their node on the TRACE ROOT, so
+    # under the old rule the command that answers "where did the time go" was the one place that time
+    # went nowhere. Spans with neither id are real work too, so they get a visible `run` bucket
+    # instead of vanishing.
+    from looplab.events.traceview import effective_node_id, trace_root_node_id
+    by_trace: dict = defaultdict(list)
     for sp in spans:
-        nid = (sp.get("attributes") or {}).get("node_id")
+        by_trace[sp.get("trace_id")].append(sp)
+    root_nid = {tid: trace_root_node_id(sps) for tid, sps in by_trace.items()}
+
+    per_node: dict = defaultdict(lambda: defaultdict(lambda: [0.0, 0]))
+    charged = 0.0
+    for sp in spans:
+        nid = effective_node_id(sp, root_nid.get(sp.get("trace_id")))
         try:
             nid = int(nid)
         except (TypeError, ValueError):
-            continue
+            nid = None                    # run-level work: no node stamped anywhere in its trace
         if node is not None and nid != node:
             continue
         dur = float(sp.get("duration_s") or 0.0)
@@ -151,13 +216,29 @@ def timings(run_dir: Path = typer.Argument(...),
         cell = per_node[nid][_cat(sp)]
         cell[0] += dur
         cell[1] += 1
+        charged += dur
 
-    for nid in sorted(per_node):
+    # `-1` is the real setup pseudo-node; `None` is "no node anywhere in the trace". Sort with None
+    # last rather than letting `sorted` raise on the mixed key type.
+    for nid in sorted(per_node, key=lambda x: (x is None, x)):
         cats = per_node[nid]
         total = sum(v[0] for v in cats.values()) or 1.0
-        typer.echo(f"\nnode {nid} — {round(total/60, 1)} min:")
+        label = "run (no node)" if nid is None else f"node {nid}"
+        typer.echo(f"\n{label} — {_mins(total)}:")
         for cat, (secs, n) in sorted(cats.items(), key=lambda x: -x[1][0]):
-            typer.echo(f"  {cat:10} {round(secs/60, 1):>6} min  ({n} spans, {round(100*secs/total)}%)")
+            typer.echo(f"  {cat:20} {_mins(secs):>10}  ({n} spans, {round(100*secs/total)}%)")
+
+    # The headline this command's docstring promises. Spans cover only the instrumented parts of a
+    # run — measured, 22-31% of real wall clock — and printing the covered part alone as "where the
+    # wall-clock went" is what made an unmeasured hour look like it never happened. Name the gap.
+    if node is None:
+        wall = _run_wall_seconds(run_dir)
+        if wall:
+            typer.echo(f"\nrun wall clock — {_mins(wall)} (first to last event)")
+            typer.echo(f"  measured by spans      {_mins(charged)}  ({round(100*charged/wall)}%)")
+            typer.echo(f"  not instrumented       {_mins(max(0.0, wall - charged))} "
+                       f"({round(100*max(0.0, wall - charged)/wall)}%)  "
+                       "— setup, queueing, pauses and any phase without a span")
 
 
 @app.command()

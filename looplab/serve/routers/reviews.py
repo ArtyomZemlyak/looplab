@@ -74,7 +74,8 @@ _SECRET_KEY = re.compile(
     r"(?:api[_-]?key|secret|access[_-]?key|token|password|passwd|credential)", re.IGNORECASE)
 _MAX_METRIC_SERIES = 64
 _MAX_METRIC_POINTS = 5_000
-_REVIEW_COST_KEYS = ("cost", "calls", "prompt_tokens", "completion_tokens", "total_tokens")
+_REVIEW_COST_KEYS = ("cost", "calls", "priced_calls",
+                     "prompt_tokens", "completion_tokens", "total_tokens")
 # Detail is an opt-in source-evidence projection, not a serialized Node passthrough.  Keep an explicit
 # allow-list so future model fields (especially logs, prompts, trace data, or host paths) cannot become
 # reviewer-visible merely because they were added to ``Node``.

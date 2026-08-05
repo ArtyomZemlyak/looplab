@@ -207,6 +207,43 @@ _MAX_USAGE_TOKENS = (1 << 63) - 1
 _USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
 
 
+def cost_is_reported(value) -> bool:
+    """Did the provider actually STATE an amount for this call? (doc 25 COST-01)
+
+    UNPRICED IS NOT FREE. `_safe_cost` degrades every absent/malformed/unusable amount to `0.0`,
+    which is also the amount a genuinely free call reports — so after that one conversion the two
+    facts are indistinguishable, and a run priced by nobody rolls up as a run that cost nothing.
+    Measured on this deployment: `runs/rubert-dr-0805`, 354 calls and 11,616,993 tokens through a
+    gateway that reports no `usage.cost`, presented as `$0`. Worse, `runs/rubert-dr-0804` is MIXED —
+    104 unpriced calls (4,102,497 tokens) followed by 209 priced ones — so its `$8.26` looked like a
+    complete invoice while a third of its tokens were never priced at all. That mixture is why this
+    is a per-call COUNTER rather than a "did the total come out zero" heuristic at the read side.
+
+    The acceptance test is exactly `_safe_cost`'s and is stated here ONCE so the two cannot drift:
+    any value this rejects is a value `_safe_cost` turns into a zero that must not be read as free.
+    """
+    if value is None or isinstance(value, (bool, str, bytes, bytearray)):
+        return False
+    try:
+        cost = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return False
+    return math.isfinite(cost) and cost >= 0.0
+
+
+def inferred_priced_calls(cost: float, calls: int) -> int:
+    """Priced-call count for a record whose writer could not state one. Stated ONCE (doc 25 COST-01).
+
+    Two callers, both holding a record that predates the counter: a legacy/third-party accountant
+    with no `priced_calls` attribute (`engine/costs.py::_snapshot`) and a usage row written before
+    the field existed (`events/replay.py::_row_priced_calls`). Neither constant default works — 0
+    reports every historical run with a real invoice as unpriced, `calls` reports the unpriced ones
+    as fully priced — so use the only evidence such a record carries: a nonzero amount IS the
+    provider having stated one. Inputs must already be sanitized.
+    """
+    return int(calls) if float(cost) > 0.0 else 0
+
+
 def _safe_cost(value) -> float:
     """Return a cost only when it is a finite, non-negative numeric value.
 
@@ -215,23 +252,24 @@ def _safe_cost(value) -> float:
     valid for internal gateways such as LiteLLM. Every rejected/absent value degrades to the
     local-model default of zero instead of crashing a completed LLM call or reducing spend.
     """
-    if value is None or isinstance(value, (bool, str, bytes, bytearray)):
+    if not cost_is_reported(value):
         return 0.0
-    try:
-        cost = float(value)
-    except (OverflowError, TypeError, ValueError):
-        return 0.0
-    if not math.isfinite(cost) or cost < 0.0:
-        return 0.0
-    return 0.0 if cost == 0.0 else cost  # canonicalize provider ``-0`` as ordinary zero
+    return 0.0 if float(value) == 0.0 else float(value)  # canonicalize provider ``-0`` as zero
+
+
+def _usage_cost_reported(usage) -> bool:
+    """Whether an OpenRouter-style payload carries a usable ``usage.cost`` at all."""
+    value = usage.get("cost") if isinstance(usage, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return cost_is_reported(value)
 
 
 def _usage_cost(usage) -> float:
     """Extract OpenRouter-style JSON ``usage.cost`` without trusting provider payload types."""
-    value = usage.get("cost") if isinstance(usage, dict) else None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not _usage_cost_reported(usage):
         return 0.0
-    return _safe_cost(value)
+    return _safe_cost(usage.get("cost"))
 
 
 def _safe_token_count(value) -> int:
@@ -273,7 +311,49 @@ def _normalize_usage(usage) -> dict[str, int | float]:
         "completion_tokens": completion,
         "total_tokens": total,
         "cost": _usage_cost(raw),
+        # `priced` travels WITH the laundered cost because this is the last place the difference
+        # still exists: below here `cost` is 0.0 whether the provider said "$0" or said nothing at
+        # all (`cost_is_reported`). An int rather than a bool so it flows through every downstream
+        # counter sanitizer (`sanitize_usage_delta`, `replay._llm_counter`) unchanged.
+        "priced": _normalized_priced(raw),
     }
+
+
+def _normalized_priced(raw: dict) -> int:
+    """The priced marker for one payload, keeping `_normalize_usage` IDEMPOTENT.
+
+    Deriving it from `raw["cost"]` alone is wrong on the second pass: `_post` normalizes the body
+    and then hands that SAME dict back through `add` -> `_normalize_usage`, where the laundered
+    `0.0` of an unpriced call looks exactly like a provider that reported zero — every unpriced call
+    came back marked priced. An already-marked payload is our own output, so its marker wins.
+
+    A provider is out of contract if it sends `priced` itself, and gets bounded to 0/1 here. That is
+    not new exposure: it already controls `usage.cost`, which is the same claim by another name.
+    """
+    marker = raw.get("priced")
+    if isinstance(marker, int) and not isinstance(marker, bool):
+        return 1 if marker else 0
+    return 1 if _usage_cost_reported(raw) else 0
+
+
+def _call_is_priced(cost, usage, normalized: dict) -> bool:
+    """Did THIS `CostAccountant.add` see a stated amount? One rule, stated once (doc 25 COST-01).
+
+    Two inputs claim to carry the price and only one of them is trustworthy at a time:
+
+      * `normalized["priced"]` — minted by `_normalize_usage` from the RAW payload, so it is the
+        only witness that survives the laundering. Authoritative whenever the payload had a cost.
+      * the `cost` ARGUMENT — independent evidence ONLY when the supplied payload carries no `cost`
+        key of its own. Every OpenAI-compatible call site forwards `usage["cost"]` taken from a dict
+        `_normalize_usage` produced — always present, laundered to `0.0` when the provider reported
+        nothing — so reading the argument there would mark every unpriced call priced. A payload
+        with no `cost` key cannot be that laundered value, which leaves the argument meaning what it
+        says: LiteLLM's out-of-band `_hidden_params.response_cost`, or a bare `add(0.05)`.
+    """
+    if normalized.get("priced"):
+        return True
+    carries_cost = isinstance(usage, dict) and "cost" in usage
+    return not carries_cost and cost_is_reported(cost)
 
 
 def _stream_envelope_is_billable(*, usage_observed: bool, delegated_to_fallback: bool,
@@ -840,6 +920,7 @@ class OpenAICompatibleClient:
         for field in _USAGE_FIELDS:
             usage[field] = 0
         usage["cost"] = 0.0
+        usage["priced"] = 0   # no provider call, so nobody priced it — not "priced at $0"
         cached["usage"] = usage
         # Restore the per-call telemetry a live call would have set.
         self._last_usage = usage
@@ -1351,6 +1432,10 @@ class CostAccountant:
         # Token accounting (UI cost panel): local models have no $ price, but tokens are the
         # real signal of how much LLM work a run cost. Accumulated across all calls.
         self.calls = 0
+        # How many of those `calls` the provider actually PRICED. `spent` is only a complete invoice
+        # when this equals `calls`; below it, `spent` is a floor and the gap is unknown, not free.
+        # See `cost_is_reported` for the two real runs that made the distinction load-bearing.
+        self.priced_calls = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.total_tokens = 0
@@ -1394,6 +1479,7 @@ class CostAccountant:
             return {
                 "cost": self.spent,
                 "calls": self.calls,
+                "priced_calls": self.priced_calls,
                 "prompt_tokens": self.prompt_tokens,
                 "completion_tokens": self.completion_tokens,
                 "total_tokens": self.total_tokens,
@@ -1412,6 +1498,7 @@ class CostAccountant:
         delta = {
             "cost": safe_cost,
             "calls": 1,
+            "priced_calls": 1 if _call_is_priced(cost, usage, normalized) else 0,
             "prompt_tokens": int(normalized["prompt_tokens"]),
             "completion_tokens": int(normalized["completion_tokens"]),
             "total_tokens": int(normalized["total_tokens"]),
@@ -1430,6 +1517,8 @@ class CostAccountant:
             candidate_total = min(_MAX_USAGE_TOKENS,
                                   self.total_tokens + delta["total_tokens"])
             candidate_calls = min(_MAX_USAGE_TOKENS, self.calls + 1)
+            candidate_priced = min(_MAX_USAGE_TOKENS,
+                                   self.priced_calls + delta["priced_calls"])
             candidate_peak = max(self.peak_prompt, delta["prompt_tokens"])
             candidate_warned = self.warned
             if (self.limit is not None and not candidate_warned
@@ -1439,6 +1528,7 @@ class CostAccountant:
 
             self.spent = candidate_spent
             self.calls = candidate_calls
+            self.priced_calls = candidate_priced
             self.prompt_tokens = candidate_prompt
             self.completion_tokens = candidate_completion
             self.total_tokens = candidate_total
@@ -1513,11 +1603,21 @@ class LiteLLMClient:
     def _usage(self, resp) -> Optional[dict]:
         try:
             u = resp.usage
-            return _normalize_usage({
+            payload = {
                 "prompt_tokens": getattr(u, "prompt_tokens", 0),
                 "completion_tokens": getattr(u, "completion_tokens", 0),
                 "total_tokens": getattr(u, "total_tokens", 0),
-            })
+            }
+            # LiteLLM states the amount OUT OF BAND (`_hidden_params.response_cost`), so fold it in
+            # here: `_normalize_usage` is where the priced/unpriced witness is minted, and a response
+            # this backend DID price must not be indistinguishable from one it did not. Pre-normalize
+            # through `_safe_cost` because `_usage_cost_reported` deliberately refuses non-int/float
+            # payloads (untrusted JSON) while this gateway legitimately hands back a `Decimal`; the
+            # key is OMITTED, not zeroed, when nothing was reported.
+            raw_cost = self._cost(resp)
+            if cost_is_reported(raw_cost):
+                payload["cost"] = _safe_cost(raw_cost)
+            return _normalize_usage(payload)
         except Exception:
             return None
 

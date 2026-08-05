@@ -25,6 +25,50 @@ export function fmtElapsedSeconds(v) {
   return `${Math.round(v)}s`
 }
 
+// UNPRICED IS NOT FREE. `llm_cost.cost` is the sum of the amounts providers actually stated, and a
+// provider that states nothing contributes 0 — so `$0` was shown for runs nobody ever priced
+// (measured: `rubert-dr-0805`, 354 calls / 11,616,993 tokens / "$0"), and a partial total was shown
+// as if it were the whole invoice (`rubert-dr-0804`: 209 of 313 calls priced, "$8.26" over a third
+// of its tokens unpriced). `priced_calls` is what settles it; the fold backfills it for logs written
+// before the counter existed (`events/replay.py::_row_priced_calls`).
+//
+// Returns { text, priced, partial, title } — `text` is what to show, `title` the hover explanation.
+export function costPricing(c) {
+  if (!c || typeof c !== 'object') {
+    return { text: '—', priced: false, partial: false,
+             title: 'No LLM cost roll-up exists for this run yet.' }
+  }
+  const cost = typeof c.cost === 'number' && Number.isFinite(c.cost) ? c.cost : null
+  const calls = typeof c.calls === 'number' && Number.isFinite(c.calls) ? c.calls : 0
+  const priced = typeof c.priced_calls === 'number' && Number.isFinite(c.priced_calls)
+    ? c.priced_calls : 0
+  if (cost === null) {
+    return { text: '—', priced: false, partial: false, title: 'No cost was recorded.' }
+  }
+  // No provider call at all (offline/toy run): nothing was spent and nothing is unknown.
+  if (calls <= 0) {
+    return { text: '$0', priced: true, partial: false,
+             title: 'No model calls were made, so nothing was spent.' }
+  }
+  if (priced <= 0) {
+    return { text: 'unpriced', priced: false, partial: false,
+             title: `This run's provider reported no price for any of its ${calls.toLocaleString()}`
+               + ' calls. Spend is unknown, not zero — read the token counts instead.' }
+  }
+  const label = `$${fmt(cost)}`
+  if (priced < calls) {
+    return { text: `${label}+`, priced: true, partial: true,
+             title: `Only ${priced.toLocaleString()} of ${calls.toLocaleString()} calls were priced`
+               + ` by the provider, so ${label} is a floor — the other`
+               + ` ${(calls - priced).toLocaleString()} cost an unknown amount.` }
+  }
+  return { text: label, priced: true, partial: false,
+           title: `All ${calls.toLocaleString()} calls were priced by the provider.` }
+}
+
+// Convenience wrapper for the one-line "N tokens · $X" summaries.
+export function fmtCost(c) { return costPricing(c).text }
+
 // Dynamic font size for a node card's one-line caption ("what this node did"). The chip is a fixed
 // width (~168px) and single line, so a long param-diff / change-summary used to hit the hard ellipsis
 // almost immediately. Instead of clipping, shrink the font as the text grows so MORE of the caption

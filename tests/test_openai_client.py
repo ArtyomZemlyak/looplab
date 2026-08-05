@@ -244,8 +244,11 @@ def test_openrouter_cached_response_is_not_recharged_or_retraced(monkeypatch):
     assert c.accountant.calls == 1
     assert seen == [pytest.approx(0.007), pytest.approx(0.0)]
     assert c._last_usage == {
-        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0,
+        # A cache hit made no provider call, so it is not "priced at $0" either — every billed
+        # field of the returned copy is zeroed, `priced` included.
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0, "priced": 0,
     }
+    assert c.accountant.priced_calls == 1   # the ONE real call, which OpenRouter did price
 
 
 def test_deterministic_cache_evicts_least_recently_used_instead_of_growing_forever(monkeypatch):

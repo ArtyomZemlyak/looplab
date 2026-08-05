@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { peekReportRefreshIntent, reportRefreshIntent, isTransientCommandReadError, deadlineGet, fmt,
-  fmtInt, CONTROL, runNodeApiPath } from './util.js'
+  fmtCost, fmtInt, CONTROL, runNodeApiPath } from './util.js'
 import { Trajectory, ImprovementWaterfall } from './charts.jsx'
 import { analyze, buildModelCard, verdict, paramDiffLabel, toMarkdown, hyperImportance } from './report.js'
 import MemoCard from './MemoCard.jsx'
@@ -467,7 +467,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
       <h2 className="report-title">{state.goal || state.task_id}</h2>
       <div className="report-sub muted">{state.run_id} · {state.direction} · {state.phase || (state.finished ? 'finished' : 'running')}{state.stop_reason ? ` (${state.stop_reason})` : ''}
         {' · '}{nodeCount} nodes ({a.nEval} evaluated, {failed.length} failed)
-        {state.llm_cost && ` · ${fmtInt(state.llm_cost.total_tokens)} tokens · $${fmt(state.llm_cost.cost)}`}</div>
+        {state.llm_cost && ` · ${fmtInt(state.llm_cost.total_tokens)} tokens · ${fmtCost(state.llm_cost)}`}</div>
 
       <VerdictBanner v={v} onOpenPanel={onOpenPanel} canOpenPanel={canOpenPanel} />
 
