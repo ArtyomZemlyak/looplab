@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from looplab.core.atomicio import atomic_write_text, strict_fsync
+from looplab.core.atomicio import atomic_write_text
 from looplab.core.config import (
     RUN_START_PINNED_FIELDS, Settings, run_start_pinned_settings, settings_from_snapshot)
 from looplab.core.node_evidence import node_attempt
@@ -53,6 +53,9 @@ from looplab.serve.protocol import (
     EXPECTED_RUN_GENERATION_FIELD, PHASE_FINALIZING, POLL_SECONDS, RUN_GENERATION_FIELD,
     SSE_DONE, SSE_STATE)
 from looplab.serve.assistant import safe_provider_failure
+from looplab.serve.paid_ledger import (
+    FAIL_CLOSED, PaidLedgerSpec, append_claim, confirm_terminal_receipt, fold_paid_ledger,
+    record_terminal)
 from looplab.serve.paid_work import (
     RunCostAccountingPending, metered_run_client, run_directory_identity)
 from looplab.serve.public_cards import PublicCardsProjectionMetadata
@@ -347,43 +350,29 @@ def _assert_lens_generation(srv, rd: Path, *, core_generation: Optional[str],
     return rd, current_generation
 
 
-def _concept_lens_ledger(events, generation: str):
-    """Fold durable paid-lens claims without trusting malformed or conflicting receipts."""
-    claims: dict[str, str] = {}
-    terminals: dict[str, object] = {}
-    conflicts: set[str] = set()
-    for event in events:
-        data = event.data if isinstance(event.data, dict) else {}
-        identity = data.get("lens_request_id")
-        digest = data.get("request_digest")
-        if (not isinstance(identity, str) or _SHA256_RE.fullmatch(identity) is None
-                or not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None
-                or data.get("generation") != generation):
-            continue
-        if event.type == EV_CONCEPT_LENS_STARTED:
-            if identity in claims or identity in terminals:
-                conflicts.add(identity)
-            else:
-                claims[identity] = digest
-        elif event.type in {EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED}:
-            if identity not in claims:
-                continue
-            if identity in terminals or claims[identity] != digest:
-                conflicts.add(identity)
-            else:
-                terminals[identity] = event
-    for identity in conflicts:
-        terminals.pop(identity, None)
-    unresolved = set(claims) - set(terminals)
-    return claims, terminals, unresolved, conflicts
+# The shared claim→terminal event ledger (doc 25 SR-01, `serve/paid_ledger.py`), which owns the fold,
+# the fsync-confirm and the sequenced terminal append this route used to hand-roll beside its
+# report-refresh twin. FAIL_CLOSED and the bound `request_digest` are this protocol's half of the
+# deliberate asymmetry the shared module documents: EVERY paid-lens terminal is written through the
+# ledger, so an unclaimed terminal — or one whose digest disagrees with its claim's — is evidence of
+# a damaged or forged receipt rather than of paid work, and publishing it would show the operator a
+# lens they never asked for. The strict recovery fold below keeps its own separate strategy.
+_CONCEPT_LENS_LEDGER = PaidLedgerSpec(
+    claim_type=EV_CONCEPT_LENS_STARTED,
+    terminal_types=frozenset({EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED}),
+    identity_field="lens_request_id",
+    digest_field="request_digest",
+    conflict_policy=FAIL_CLOSED,
+)
 
 
 def _concept_lens_recovery_ledger(events, generation: str):
     """Strictly fold the current generation into a bounded lost-receipt recovery view.
 
-    The ordinary paid endpoint keeps its legacy-compatible fold above. Recovery has no original
-    browser receipt with which to disambiguate damaged data, so it deliberately fails closed on any
-    malformed, duplicate, out-of-order, or digest-mismatched current-generation paid-lens event.
+    The ordinary paid endpoint keeps its legacy-compatible fold — the shared `_CONCEPT_LENS_LEDGER`
+    above. Recovery has no original browser receipt with which to disambiguate damaged data, so it
+    deliberately fails closed on any malformed, duplicate, out-of-order, or digest-mismatched
+    current-generation paid-lens event.
     Only bounded sequence metadata survives this fold; prompt digests remain server-private.
     """
     claims: dict[str, dict] = {}
@@ -430,16 +419,6 @@ def _concept_lens_recovery_ledger(events, generation: str):
 
     unresolved = set(claims) - set(terminals)
     return claims, terminals, unresolved, conflict
-
-
-def _confirm_concept_lens_terminal(path: Path) -> bool:
-    """Confirm a visible terminal on the storage descriptor before replaying it."""
-    try:
-        with open(path, "r+b") as handle:
-            strict_fsync(handle.fileno())
-        return True
-    except Exception:  # noqa: BLE001 - an unconfirmed paid receipt remains ambiguous
-        return False
 
 
 def _validated_derived_lens(spec, lens_pack: list[dict], inputs: dict):
@@ -1025,33 +1004,9 @@ def build_router(srv) -> APIRouter:
         command sequencer is therefore the only terminal commit point: a late worker observes and
         replays the winner instead of appending a conflicting second receipt.
         """
-        try:
-            with srv.commands.sequence(run_dir):
-                canonical = srv.commands.validate_paths(run_dir)
-                if srv.commands.run_generation(canonical) != generation:
-                    return None
-                store = EventStore(canonical / "events.jsonl")
-                claims, terminals, unresolved, conflicts = _concept_lens_ledger(
-                    store.read_all(), generation)
-                if identity in conflicts or claims.get(identity) != request_digest:
-                    return None
-                if identity in terminals:
-                    return terminals[identity]
-                if identity not in unresolved:
-                    return None
-                return store.append(
-                    event_type,
-                    {
-                        "lens_request_id": identity,
-                        "generation": generation,
-                        "request_digest": request_digest,
-                        **terminal_fields,
-                    },
-                    require_lock=True,
-                    require_durable=True,
-                )
-        except Exception:  # noqa: BLE001 - an unresolved paid claim must remain fail-closed
-            return None
+        return record_terminal(
+            srv, _CONCEPT_LENS_LEDGER, run_dir, generation, identity, event_type,
+            terminal_fields, request_digest=request_digest)
 
     def _record_concept_lens_failure(run_dir: Path, generation: str, identity: str,
                                      request_digest: str, error_kind: str):
@@ -1223,8 +1178,10 @@ def build_router(srv) -> APIRouter:
                 job_identity = _concept_lens_identity(
                     rd, current_generation, raw_idempotency_key)
                 store = EventStore(rd / "events.jsonl")
-                claims, terminals, unresolved, conflicts = _concept_lens_ledger(
-                    store.read_all(), current_generation)
+                ledger = fold_paid_ledger(
+                    _CONCEPT_LENS_LEDGER, store.read_all(), current_generation)
+                claims, terminals = ledger.claims, ledger.terminals
+                unresolved, conflicts = ledger.unresolved, ledger.conflicts
                 if job_identity in conflicts:
                     return _concept_lens_uncertain(
                         base_frame, current_generation, job_identity,
@@ -1246,7 +1203,7 @@ def build_router(srv) -> APIRouter:
                     })
                 terminal = terminals.get(job_identity)
                 if terminal is not None:
-                    if not _confirm_concept_lens_terminal(store.path):
+                    if not confirm_terminal_receipt(store.path):
                         return _concept_lens_uncertain(
                             base_frame, current_generation, job_identity,
                             "The saved lens terminal is visible but its durable receipt is unconfirmed. "
@@ -1313,16 +1270,12 @@ def build_router(srv) -> APIRouter:
                         settings, rd, current_generation, job_identity,
                         request_digest, prompt, core, lens_pack)
                     try:
-                        store.append(
-                            EV_CONCEPT_LENS_STARTED,
-                            {
-                                "lens_request_id": job_identity,
-                                "generation": current_generation,
-                                "request_digest": request_digest,
-                                "input_seq": core["captured_seq"],
-                            },
-                            require_lock=True,
-                            require_durable=True,
+                        append_claim(
+                            store, _CONCEPT_LENS_LEDGER, job_identity, current_generation,
+                            request_digest=request_digest,
+                            # Recovery's strict fold reads `input_seq` to bound what a lost-receipt
+                            # projection may disclose; the ordinary fold never looks at it.
+                            claim_fields={"input_seq": core["captured_seq"]},
                         )
                         srv.jobs.start_reserved(reservation["job_id"], compute)
                     except Exception:
@@ -1435,7 +1388,7 @@ def build_router(srv) -> APIRouter:
                     terminals, key=lambda identity: claims[identity]["started_seq"])
                 claim = claims[request_id]
                 terminal = terminals[request_id]
-                if not _confirm_concept_lens_terminal(store.path):
+                if not confirm_terminal_receipt(store.path):
                     return {
                         **common,
                         "state": "conflict",
@@ -1533,7 +1486,7 @@ def build_router(srv) -> APIRouter:
 
                 terminal = terminals.get(request_id)
                 if terminal is not None:
-                    if not _confirm_concept_lens_terminal(store.path):
+                    if not confirm_terminal_receipt(store.path):
                         return _concept_lens_uncertain(
                             base_frame, current_generation, request_id,
                             "The recovered terminal is visible but its durability is unconfirmed.")
@@ -1574,7 +1527,7 @@ def build_router(srv) -> APIRouter:
                     )
                 except Exception:  # noqa: BLE001 - a possibly visible resolution must not be replayed
                     terminal = None
-                if terminal is None or not _confirm_concept_lens_terminal(store.path):
+                if terminal is None or not confirm_terminal_receipt(store.path):
                     return _concept_lens_uncertain(
                         base_frame, current_generation, request_id,
                         "The recovery resolution could not be confirmed durable; no provider retry "
@@ -1645,8 +1598,10 @@ def build_router(srv) -> APIRouter:
 
                 store = EventStore(rd / "events.jsonl")
                 store_path = store.path
-                claims, terminals, unresolved, conflicts = _concept_lens_ledger(
-                    store.read_all(), current_generation)
+                ledger = fold_paid_ledger(
+                    _CONCEPT_LENS_LEDGER, store.read_all(), current_generation)
+                claims, terminals = ledger.claims, ledger.terminals
+                unresolved, conflicts = ledger.unresolved, ledger.conflicts
                 if request_id in conflicts:
                     raise HTTPException(409, {
                         "code": "concept_lens_ledger_conflict",
@@ -1654,7 +1609,7 @@ def build_router(srv) -> APIRouter:
                     })
                 terminal = terminals.get(request_id)
                 if terminal is not None:
-                    if not _confirm_concept_lens_terminal(store.path):
+                    if not confirm_terminal_receipt(store.path):
                         return _concept_lens_uncertain(
                             base_frame, current_generation, request_id,
                             "The saved lens terminal is visible but its durability is unconfirmed.")
@@ -1690,7 +1645,7 @@ def build_router(srv) -> APIRouter:
             EV_CONCEPT_LENS_COMPLETED,
             {"outcome": "abandoned", "reason": "operator_abandoned", "resolution": "operator"},
         )
-        if terminal is None or not _confirm_concept_lens_terminal(store_path):
+        if terminal is None or not confirm_terminal_receipt(store_path):
             return _concept_lens_uncertain(
                 base_frame, expected_generation, request_id,
                 "The operator resolution could not be confirmed durably; no provider retry was sent.")

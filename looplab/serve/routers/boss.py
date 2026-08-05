@@ -19,7 +19,7 @@ except ModuleNotFoundError as e:  # allow importing pure action models/mappers w
         raise
     APIRouter = HTTPException = Request = Response = JSONResponse = None  # type: ignore[assignment,misc]
 
-from looplab.core.atomicio import best_effort_fsync, strict_fsync
+from looplab.core.atomicio import best_effort_fsync
 from looplab.events.eventstore import EventStore, iter_jsonl
 from looplab.events.types import (
     EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_COMMENT_CREATED, EV_DEEP_RESEARCH,
@@ -32,6 +32,9 @@ from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.http import json_object
 from looplab.serve.llm_context import (
     BOSS_EVIDENCE_GUARD, _client_tokens, _node_context, boss_prompt_parts)
+from looplab.serve.paid_ledger import (
+    FIRST_TERMINAL_WINS, PaidLedgerSpec, append_claim, confirm_terminal_receipt,
+    fold_paid_ledger, record_terminal)
 from looplab.serve.paid_work import (
     RunCostAccountingPending as _RunCostAccountingPending,
     flush_durable_run_costs as _flush_durable_run_costs,
@@ -61,7 +64,6 @@ def _safe_boss_failure(exc: Exception) -> dict:
 # (boss mode auto-applies them in order, then reopens/resumes the run ONCE if any step needs the
 # engine). An empty actions list = pure conversation (only the reply is shown).
 from pydantic import BaseModel  # noqa: E402
-from looplab.core.jsonutil import valid_digest_ref
 
 
 # Per-run bound on the durable UI chat sidecar (`chat.jsonl`). It is a single-writer UI-only file that
@@ -141,20 +143,19 @@ def _background_http_failure(exc: HTTPException) -> dict:
     }
 
 
-def _report_refresh_ledger(events, generation: str) -> tuple[dict[str, object], set[str]]:
-    """Return terminal receipts and unresolved paid-work claims for one run generation."""
-    starts: set[str] = set()
-    terminals: dict[str, object] = {}
-    for event in events:
-        data = event.data if isinstance(event.data, dict) else {}
-        identity = data.get("refresh_id")
-        if not valid_digest_ref(identity) or data.get("generation") != generation:
-            continue
-        if event.type == EV_REPORT_REFRESH_STARTED:
-            starts.add(identity)
-        elif event.type in {EV_REPORT_GENERATED, EV_REPORT_REFRESH_FAILED}:
-            terminals.setdefault(identity, event)  # first visible terminal; replay confirms sync
-    return terminals, starts - set(terminals)
+# The shared claim→terminal event ledger (doc 25 SR-01, `serve/paid_ledger.py`), which owns the fold,
+# the fsync-confirm and the sequenced terminal append this route used to hand-roll beside its
+# concept-lens twin. FIRST_TERMINAL_WINS and the absent digest field are this protocol's half of the
+# deliberate asymmetry the shared module documents: the paid `report_generated` terminal is appended
+# by `_run_report_refresh_worker` OUTSIDE the ledger, so a terminal whose claim is unreadable is
+# still a report the operator has already paid for, and identity here is the Idempotency-Key bound to
+# the run + generation with nothing of the request body folded in.
+_REPORT_REFRESH_LEDGER = PaidLedgerSpec(
+    claim_type=EV_REPORT_REFRESH_STARTED,
+    terminal_types=frozenset({EV_REPORT_GENERATED, EV_REPORT_REFRESH_FAILED}),
+    identity_field="refresh_id",
+    conflict_policy=FIRST_TERMINAL_WINS,
+)
 
 
 def _normalize_report_generation(value: object) -> str:
@@ -197,44 +198,18 @@ def _report_refresh_terminal(event, generation: str) -> dict:
     }
 
 
-def _confirm_report_refresh_terminal(path) -> bool:
-    """Upgrade a visible terminal to a durable replay receipt before returning it.
-
-    A strict append can write a complete line and then fail to confirm its fsync. Such a line is
-    intentionally visible for same-key reconciliation, but it is not authoritative until a later
-    sync succeeds. Windows requires a writable descriptor for ``fsync``/``_commit``.
-    """
-    try:
-        with open(path, "r+b") as handle:
-            strict_fsync(handle.fileno())
-        return True
-    except Exception:  # noqa: BLE001 - replay remains fail-closed on every storage capability gap
-        return False
-
-
 def _record_report_refresh_failure(srv, run_dir, generation: str, identity: str,
                                    error_kind: str) -> bool:
     """Persist a sanitized terminal before telling the caller that a fresh key is safe."""
     safe_kind = error_kind if error_kind in _REPORT_REFRESH_ERROR_KINDS else "provider_error"
-    try:
-        with srv.commands.sequence(run_dir):
-            canonical = srv.commands.validate_paths(run_dir)
-            if srv.commands.run_generation(canonical) != generation:
-                return False
-            store = EventStore(canonical / "events.jsonl")
-            terminals, unresolved = _report_refresh_ledger(store.read_all(), generation)
-            if identity in terminals:
-                return True
-            if identity not in unresolved:
-                return False
-            store.append(
-                EV_REPORT_REFRESH_FAILED,
-                {"refresh_id": identity, "generation": generation, "error_kind": safe_kind},
-                require_lock=True, require_durable=True,
-            )
-        return True
-    except Exception:  # noqa: BLE001 - an unresolved claim remains fail-closed after storage failure
-        return False
+    # A visible terminal for this identity already answers the question the caller asked, so the
+    # shared ledger's "return the winner" and "I appended one" both mean the same thing here: it is
+    # safe to tell the caller a fresh key is unnecessary. Only None — a lost generation, an
+    # already-resolved-elsewhere identity, or any storage failure — leaves the claim fail-closed.
+    return record_terminal(
+        srv, _REPORT_REFRESH_LEDGER, run_dir, generation, identity,
+        EV_REPORT_REFRESH_FAILED, {"error_kind": safe_kind},
+    ) is not None
 
 
 def _run_report_refresh_worker(srv, settings, run_dir, generation: str,
@@ -916,10 +891,11 @@ def build_router(srv) -> APIRouter:
                     ("report_refresh\0" + canonical_identity + "\0" + generation + "\0"
                      + raw_idempotency_key).encode("utf-8")).hexdigest()
                 store = EventStore(rd / "events.jsonl")
-                terminals, unresolved = _report_refresh_ledger(store.read_all(), generation)
+                ledger = fold_paid_ledger(_REPORT_REFRESH_LEDGER, store.read_all(), generation)
+                terminals, unresolved = ledger.terminals, ledger.unresolved
                 terminal = terminals.get(job_identity)
                 if terminal is not None:
-                    if not _confirm_report_refresh_terminal(store.path):
+                    if not confirm_terminal_receipt(store.path):
                         return ({
                             "ok": False,
                             "code": "report_refresh_uncertain",
@@ -965,11 +941,8 @@ def build_router(srv) -> APIRouter:
                     compute = lambda: _run_report_refresh_worker(  # noqa: E731 - bound claim closure
                         srv, settings, rd, generation, job_identity)
                     try:
-                        store.append(
-                            EV_REPORT_REFRESH_STARTED,
-                            {"refresh_id": job_identity, "generation": generation},
-                            require_lock=True, require_durable=True,
-                        )
+                        append_claim(
+                            store, _REPORT_REFRESH_LEDGER, job_identity, generation)
                         # Start before releasing the sequencer: no accepted durable claim can remain an
                         # in-memory workerless reservation if the HTTP task is cancelled at its first await.
                         srv.jobs.start_reserved(reservation["job_id"], compute)

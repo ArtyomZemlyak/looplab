@@ -1,8 +1,10 @@
 """Shared generation-bound accounting for paid UI-side model calls.
 
-The caller owns its operation-specific idempotency ledger.  This module owns the other half of the
-boundary: one model client is leased to an exact run generation and every observed usage delta is
-durably attributed to that run without ever repeating the provider call during recovery.
+The caller owns its operation-specific idempotency ledger — which since doc 25 SR-01 means the
+shared `serve/paid_ledger.py`, the per-operation claim→terminal receipt ledger that wraps this one.
+This module owns the other half of the boundary: one model client is leased to an exact run
+generation and every observed usage delta is durably attributed to that run without ever repeating
+the provider call during recovery.
 """
 from __future__ import annotations
 
