@@ -224,30 +224,33 @@ def test_the_weight_has_exactly_one_way_in():
     door if the validator is the ONLY thing that ever assigns `Engine._card_scoring`. A second
     assignment path (a config loader, a resume restore, a control handler) would reopen it silently,
     and the docs would go from accurate to actively misleading with nothing failing.
+
+    The walk comes from `_source_scan` rather than a local `rglob`, per the meta-guard in
+    `test_source_scan_helper.py`. Its reason is not tidiness: a hand-rolled walk reading plain
+    `utf-8` dies on `runtime/command_eval.py`'s BOM, which is exactly what the first draft of this
+    test did.
     """
     import ast
-    import pathlib
 
-    root = pathlib.Path(__file__).resolve().parents[1] / "looplab"
+    from tests import _source_scan
+
     writes = []
-    for path in root.rglob("*.py"):
-        # `utf-8-sig`, not `utf-8`: `runtime/command_eval.py` carries a BOM, and plain utf-8 hands
-        # `ast.parse` a leading U+FEFF and dies. Recorded in doc 25 RA-02 as the spelling that works.
-        tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+    for path, tree in _source_scan.iter_trees():
         for node in ast.walk(tree):
             targets = (node.targets if isinstance(node, ast.Assign)
                        else [node.target] if isinstance(node, (ast.AnnAssign, ast.AugAssign)) else [])
             for target in targets:
                 if (isinstance(target, ast.Attribute) and target.attr == "_card_scoring"
                         and isinstance(target.value, ast.Name) and target.value.id == "self"):
-                    writes.append((path.relative_to(root).as_posix(), node.lineno))
+                    writes.append((path, node.lineno))
 
-    assert len(writes) == 1, f"_card_scoring is assigned from more than one place: {writes}"
+    assert len(writes) == 1, (
+        "_card_scoring is assigned from more than one place: "
+        f"{[(p.name, line) for p, line in writes]}")
     path, lineno = writes[0]
-    assert path == "engine/strategy.py", path
-    source = (root / path).read_text(encoding="utf-8-sig").split("\n")
-    # the assignment must be reading the VALIDATED map, not the raw proposal
-    context = "\n".join(source[max(0, lineno - 6):lineno])
-    assert "validate_card_scoring(" in context, (
+    assert path.name == "strategy.py", path.name
+    # The single assignment must read the VALIDATED map, not the raw proposal.
+    source = path.read_text(encoding="utf-8-sig", errors="replace").split("\n")
+    assert "validate_card_scoring(" in "\n".join(source[max(0, lineno - 6):lineno]), (
         "the single assignment no longer comes from validate_card_scoring, so a proposal naming "
         "confidence_weight could reach the scorer")
