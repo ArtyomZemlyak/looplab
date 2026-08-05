@@ -1,9 +1,34 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import { createServer } from 'vite'
+import { sessionReadSuperseded } from '../src/assistantSessionModel.js'
+import { newChatGate } from '../src/assistantChromeModel.js'
 
 const assistantSource = () => readFile(new URL('../src/AssistantBar.jsx', import.meta.url), 'utf8')
 const section = (source, start, end) => source.slice(source.indexOf(start), source.indexOf(end))
+
+// Every other assertion in this file reads AssistantBar.jsx as TEXT. That was the whole of its
+// coverage, and text cannot see whether the file is still valid JSX: during doc 25 UI-05 the three
+// view layouts were lifted into named render functions, one fragment lost a closing brace, and all
+// 767 tests stayed green against a tree that `vite build` refused outright. Nothing else in the suite
+// loads this module, so nothing else would have caught it. Parsing is cheap; a real mount is not
+// (AssistantBar reaches storage, timers and ~20 API calls at first render), so this guards the
+// property the near-miss actually violated — the module compiles and its import graph resolves.
+test('AssistantBar is still a module that compiles', async () => {
+  const vite = await createServer({
+    root: fileURLToPath(new URL('..', import.meta.url)),
+    configFile: false, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
+  })
+  try {
+    const module = await vite.ssrLoadModule('/src/AssistantBar.jsx')
+    assert.equal(typeof module.default, 'function')
+    assert.equal(module.default.name, 'AssistantBar')
+  } finally {
+    await vite.close()
+  }
+})
 
 test('session selection commits only a current, bounded read and preserves the prior transcript on failure', async () => {
   const source = await assistantSource()
@@ -21,7 +46,14 @@ test('session selection commits only a current, bounded read and preserves the p
     'an ordinary reselect of current A must supersede a pending B read without launching a late A GET')
   assert.match(open, /const currentNeedsRecovery = id === sidRef\.current && !!danglingAssistantTurn\(msgs\)[\s\S]*?&& !currentNeedsRecovery/,
     'reselecting an observe-only dangling chat must be able to promote it to exact recovery')
-  assert.match(open, /seq !== openSessionSeqRef\.current/)
+  // Doc 25 UI-05. The epoch comparison moved into `assistantSessionModel.js::sessionReadSuperseded`,
+  // which is where its truth table is now driven. What this file still owns is that the claimed epoch
+  // reaches that decision from THIS operation — a fence handed the wrong `seq` is green everywhere.
+  assert.match(open, /choiceSeq: openSessionSeqRef\.current/)
+  assert.match(open, /sessionReadSuperseded\(\{[\s\S]*?sessionId: id, seq,/,
+    'the fence must be asked about the epoch this read claimed, not the current one')
+  assert.equal(sessionReadSuperseded({ mounted: true, sessionId: 'a', seq: 7, choiceSeq: 8 }),
+    'newer-choice', 'a read issued under an older choice epoch can never commit')
   assert.match(open, /sessionRead = observingLiveSession \? null\s*: \{ seq, id, allowsRecovery: !observeOnly, promise: null \}[\s\S]*?openSessionPendingRef\.current = sessionRead/)
   assert.match(open, /requestedAllowsRecovery = options\.observeOnly !== true[\s\S]*?matchingRead\.allowsRecovery \|\| !requestedAllowsRecovery[\s\S]*?return matchingRead\.promise/,
     'same-target reads dedupe only when the pending operation is at least as authoritative')
@@ -76,11 +108,21 @@ test('session creation and send are single-flight while a failed create preserve
     'the shared Send surface must gate both mutation preflights synchronously')
   // Additional guards may be added (a pending run-command confirmation now blocks it too); these
   // two must never be dropped, because either one means an unsent first turn would be orphaned.
-  for (const match of source.matchAll(/disabled=\{([^}]*)\} onClick=\{newChat\}/g)) {
-    assert.match(match[1], /turnStarting/, 'a first-turn session create must not be orphaned')
-    assert.match(match[1], /retryChecking/, 'a saved-turn check must not be orphaned either')
-  }
-  assert.ok([...source.matchAll(/onClick=\{newChat\}/g)].length >= 2, 'both new-chat buttons')
+  // Doc 25 UI-05: the gate was written out once per view, so this used to loop over the copies. It is
+  // ONE decision now (`assistantChromeModel.js::newChatGate`), driven rather than pattern-matched —
+  // and looping over copies that no longer exist is how a guard test goes quietly vacuous.
+  assert.equal(newChatGate({ turnStarting: true }).disabled, true,
+    'a first-turn session create must not be orphaned')
+  assert.equal(newChatGate({ retryChecking: true }).disabled, true,
+    'a saved-turn check must not be orphaned either')
+  assert.equal(newChatGate({ directConfirm: {} }).disabled, true)
+  assert.equal(newChatGate({}, 'new chat').disabled, false)
+  // Every view must reach that decision — a fourth button written by hand is the regression.
+  assert.equal([...source.matchAll(/onClick=\{newChat\}/g)].length, 1,
+    'exactly one new-chat button element, shared by both views that offer it')
+  assert.equal([...source.matchAll(/\{newChatButton\(/g)].length, 2, 'both new-chat buttons')
+  assert.match(source, /const newChatButton = \(cls, label, idleTitle\) => \{\s*\n\s*const gate = newChatGate\(\{ turnStarting, retryChecking, directConfirm \}, idleTitle\)\s*\n\s*return <button[\s\S]{0,160}?title=\{gate\.title\} disabled=\{gate\.disabled\} onClick=\{newChat\}>/,
+    'the gate and the reason it shows must come from the same decision, not two expressions')
   assert.doesNotMatch(normalSend, /setInput\(''\)/)
   assert.match(normalSend, /clearComposer: true/)
 })
@@ -197,8 +239,17 @@ test('Assistant reply completion is owned by one exact attempt and one exact use
   assert.match(source, /const activeReplyAttemptRef = useRef\(null\)/)
   assert.match(source, /const replyAttemptCurrent = \(attempt, id\) => replyAttemptOwned\(attempt, id\) && runningRef\.current/)
   assert.match(open, /const reattachAttempt = \{\}[\s\S]*?activeReplyAttemptRef\.current = reattachAttempt/)
-  assert.match(open, /seq !== openSessionSeqRef\.current \|\| sidRef\.current !== id[\s\S]*?openSessionPendingRef\.current !== sessionRead/,
+  // Doc 25 UI-05. The longhand conjunction became `readSuperseded({ requireVisible: true })`. The
+  // property is unchanged and is checked in two halves: the progress await is fenced AFTER it returns
+  // (here), and `requireVisible` really is what rejects a chat that stopped being visible (driven).
+  const progressRead = open.indexOf('await boundedRequest(signal => assistantProgress(id, { signal }), 8000)')
+  const progressFence = open.indexOf('readSuperseded({ requireVisible: true })', progressRead)
+  const reattach = open.indexOf('activeReplyAttemptRef.current = reattachAttempt', progressFence)
+  assert.ok(progressRead >= 0 && progressFence > progressRead && reattach > progressFence,
     'the progress await must retain the session-selection sequence fence')
+  assert.equal(sessionReadSuperseded({
+    mounted: true, sessionId: 'a', seq: 7, choiceSeq: 7, requireVisible: true, visibleSessionId: 'b',
+  }), 'not-visible', 'a reattach may not bind a session that is no longer the visible one')
   assert.match(open, /sessionRead = observingLiveSession \? null\s*: \{ seq, id, allowsRecovery: !observeOnly, promise: null \}[\s\S]*?finally \{[\s\S]*?openSessionPendingRef\.current === sessionRead/,
     'the selected transcript must own the progress-read window so Send cannot replace its token')
   assert.match(open, /recoverReply\(id, arr\.length \+ 1, dangling, reattachAttempt/)

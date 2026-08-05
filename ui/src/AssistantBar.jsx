@@ -24,6 +24,11 @@ import {
   presentAssistantCommandResult, restoreAssistantDirectEntry, submitAssistantDirect,
 } from './assistantCommand.js'
 import { assistantDirectDecision, assistantDirectPresentation } from './assistantDirectPolicy.js'
+import { shareActionBlock, shareActionFailure, shareSnapshotAudience } from './assistantShareModel.js'
+import {
+  sessionDeleteBlock, sessionDeleteFailure, sessionReadSuperseded,
+} from './assistantSessionModel.js'
+import { foldControl, newChatGate } from './assistantChromeModel.js'
 import {
   assistantRecoveryFailure, assistantRecoveryPayload, assistantReplyCompletesTurn, assistantTurnIndex,
   danglingAssistantTurn,
@@ -1159,16 +1164,23 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       openSessionPendingRef.current = sessionRead
       setOpeningSid(String(id))
     }
+    // Every await below re-reads the same facts, so the observation is gathered in one place and the
+    // decision made in another (`assistantSessionModel.js`). `requireVisible` is the only thing the
+    // three sites disagree about, and it is now an argument rather than a conjunct someone has to
+    // notice is missing.
+    const readSuperseded = (options = {}) => sessionReadSuperseded({
+      mounted: mountedRef.current, sessionId: id, seq, choiceSeq: openSessionSeqRef.current,
+      token: sessionRead, pendingToken: openSessionPendingRef.current,
+      visibleSessionId: sidRef.current,
+      deleted: sessionDeleteTombstonesRef.current.has(String(id)),
+      ...options,
+    })
     const shareMetaRead = beginShareMetaRead(id)
     try {
       // Keep the current transcript intact until the target is known to exist. The sequence fence
       // rejects a slow A response after the user has already selected B (or started a new chat).
       const s = await boundedRequest(signal => assistantGet(id, { signal }))
-      if (!mountedRef.current || seq !== openSessionSeqRef.current
-          || sessionDeleteTombstonesRef.current.has(String(id))
-          || (sessionRead && openSessionPendingRef.current !== sessionRead)) {
-        return { ok: false, sessionId: id, reason: 'superseded' }
-      }
+      if (readSuperseded()) return { ok: false, sessionId: id, reason: 'superseded' }
       const arr = s.messages == null ? [] : s.messages
       if (!Array.isArray(arr)) throw new Error('Invalid Assistant session transcript')
       // assistant_get carries authoritative public-link terms, so compact views can warn about a
@@ -1208,9 +1220,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           progressKnown = true
         } catch { /* offline: observe only */ }
       }
-      if (!mountedRef.current || seq !== openSessionSeqRef.current || sidRef.current !== id
-          || sessionDeleteTombstonesRef.current.has(String(id))
-          || (sessionRead && openSessionPendingRef.current !== sessionRead)) {
+      if (readSuperseded({ requireVisible: true })) {
         return { ok: false, sessionId: id, reason: 'superseded' }
       }
       // Reattach only when the durable transcript identifies the exact pending user turn. Progress
@@ -1340,11 +1350,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       }
       return { ok: true, sessionId: id, messages: arr, loaded: true }
     } catch (e) {
-      if (!mountedRef.current || seq !== openSessionSeqRef.current
-          || sessionDeleteTombstonesRef.current.has(String(id))
-          || (sessionRead && openSessionPendingRef.current !== sessionRead)) {
-        return { ok: false, sessionId: id, reason: 'superseded' }
-      }
+      if (readSuperseded()) return { ok: false, sessionId: id, reason: 'superseded' }
       // The stored/opened session no longer exists (deleted here or in another tab, run-root reset).
       // Don't leave the dead id in `sid`/localStorage — that wedges the chat (every send targets the
       // 404'd session). Drop it back to a fresh composer.
@@ -1613,34 +1619,23 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     activateComposer(NEW_CHAT_COMPOSER_KEY, { clear: true })
     storageRemove('ll.asstSid')
   }
+  // Each fact is observed here; which one wins is decided in `assistantSessionModel.js`, because the
+  // ORDER of the refusals is what the operator is actually told and it is not visible from any one of
+  // these reads.
   const deleteSessionBlock = (id) => {
-    const unresolved = listLaunchTransports()
-      .find(item => launchDraftSession(item.identity) === String(id))
-    if (unresolved) {
-      return {
-        message: `Check or release startup recovery${unresolved.runId ? ` for “${unresolved.runId}”` : ''} before deleting this chat`,
-        revealRecovery: sidRef.current === id,
-      }
-    }
-    if (shareActionSessionRef.current === id) {
-      return { message: 'Wait for the current share action before deleting this chat' }
-    }
-    if (forkActionSessionRef.current === id) {
-      return { message: 'Wait for this chat to finish forking before deleting it' }
-    }
-    if (String(openSessionPendingRef.current?.id || '') === String(id)) {
-      return { message: 'Wait for this chat to finish opening before deleting it' }
-    }
-    if (id === sidRef.current && (turnCaptureRef.current || runningRef.current
-        || busy || pending.length > 0)) {
-      return { message: 'Stop or finish the current Assistant turn before deleting this chat' }
-    }
     const listedSession = sessions.find(session => session.id === id)
-    if (listedSession?.shared || shareUnknownSids.has(id) || shareCopyFallbacks[id]) {
-      return { message: 'Unshare this chat before deleting it so every public link is explicitly revoked' }
-    }
-    if (deletingSessionsRef.current.has(id)) return { duplicate: true }
-    return null
+    return sessionDeleteBlock({
+      launchRecovery: listLaunchTransports()
+        .find(item => launchDraftSession(item.identity) === String(id)) || null,
+      isCurrentSession: sidRef.current === id,
+      shareActionOwned: shareActionSessionRef.current === id,
+      forkOwned: forkActionSessionRef.current === id,
+      openPending: String(openSessionPendingRef.current?.id || '') === String(id),
+      turnActive: id === sidRef.current && (turnCaptureRef.current || runningRef.current
+        || busy || pending.length > 0),
+      publiclyShared: !!(listedSession?.shared || shareUnknownSids.has(id) || shareCopyFallbacks[id]),
+      alreadyDeleting: deletingSessionsRef.current.has(id),
+    })
   }
   const reportDeleteSessionBlock = block => {
     if (!block) return
@@ -1739,28 +1734,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           restored.splice(Math.min(deletedIndex, restored.length), 0, deletedSession)
           return restored
         })
-        const shared = finalError?.code === 'assistant_delete_shared'
-        const incomplete = finalError?.code === 'assistant_delete_incomplete'
-        const stillStopping = finalError?.code === 'assistant_delete_busy'
-        const forkInProgress = finalError?.code === 'assistant_delete_fork_in_progress'
-        const message = shared
-          ? 'This chat still has an active public link. Unshare it first, then delete the chat.'
-          : forkInProgress
-          ? 'This chat is still being forked. It is shown again; try deleting it after the fork finishes.'
-          : stillStopping
-          ? 'The live Assistant turn is still stopping. The chat is shown again; try deleting it again shortly.'
-          : incomplete
-          ? 'The server could not completely remove the chat. Close anything using its files and try again.'
-          : finalAmbiguous && listedPresence === true
-            ? 'Neither bounded deletion attempt was confirmed, and the chat still appears available. You can try again.'
-            : finalAmbiguous
-              ? 'Neither bounded deletion attempt was confirmed. The chat is shown again for safety; retry or refresh.'
-              : 'The chat was not deleted. It is shown again; you can cancel or try again.'
-        flash(shared ? 'Unshare this chat before deleting it'
-          : forkInProgress ? 'Wait for this chat to finish forking before deleting it'
-          : stillStopping ? 'Assistant work is still stopping'
-          : incomplete ? 'Assistant chat was not completely removed' : 'Could not confirm chat deletion')
-        if (mountedRef.current) setDeleteConfirmError(message)
+        const failure = sessionDeleteFailure({
+          code: finalError?.code, ambiguous: finalAmbiguous, listedPresence,
+        })
+        flash(failure.notice)
+        if (mountedRef.current) setDeleteConfirmError(failure.detail)
       }
     }
     finally {
@@ -3569,20 +3547,92 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       if (mountedRef.current) setForkBusySid(current => current === forkSid ? null : current)
     }
   }
+  // Doc 25 UI-05. The mint used to be a ~68-line async function inside a JSX `onClick`; both public-link
+  // mutations now sit here, side by side, and share one statement of when they may start and what an
+  // ambiguous outcome means (`assistantShareModel.js`).
+  const beginShareAction = (action, shareSid, { turnIncomplete = false } = {}) => {
+    const block = shareActionBlock(action, {
+      shareActionActive: !!shareActionSessionRef.current,
+      forkingSession: forkActionSessionRef.current === shareSid,
+      deletingSession: deletingSessionsRef.current.has(shareSid),
+      turnIncomplete,
+    })
+    if (block) { flash(block.message); return false }
+    shareActionSessionRef.current = shareSid
+    setShareBusySid(shareSid)
+    return true
+  }
+  const settleShareAction = (shareSid) => {
+    if (shareActionSessionRef.current === shareSid) shareActionSessionRef.current = null
+    if (mountedRef.current) setShareBusySid(current => current === shareSid ? null : current)
+  }
+  const reportShareFailure = (action, shareSid, error) => {
+    const failure = shareActionFailure(action, error)
+    if (failure.uncertain) {
+      setShareUnknown(shareSid, true)
+      refreshSessions()
+    }
+    flash(failure.notice)
+  }
+  const copyShareLink = async (url) => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+      await navigator.clipboard.writeText(url)
+      return true
+    } catch { return false }
+  }
+  const createShareSnapshot = async () => {
+    const shareSid = sid
+    if (!beginShareAction('snapshot', shareSid, {
+      turnIncomplete: runningRef.current || turnCaptureRef.current || busy || commandBusy
+        || pending.length > 0 || msgs[msgs.length - 1]?.role === 'user',
+    })) return
+    try {
+      const r = await boundedRequest(signal => assistantShare(shareSid, false, { signal }))
+      if (!mountedRef.current) return
+      const receipt = assistantShareReceipt(r, shareSid)
+      if (!receipt) throw new Error('Invalid Assistant share receipt')
+      const url = location.origin + location.pathname + receipt.relativeUrl
+      setShareUnknown(shareSid, false)
+      mutateSessionsLocally(current => current.map(session => session.id === shareSid
+        ? { ...session, shared: true, share_count: 1,
+            share_ids: [receipt.shareId], live_share_ids: [], share_expires_at: receipt.expiresAt,
+            share_live: false } : session))
+      retainShareCopy(shareSid, {
+        url, expiresAt: receipt.expiresAt, shareId: receipt.shareId,
+      })
+      refreshSessions()
+      if (shareSnapshotAudience(true, sidRef.current, shareSid) !== 'current') {
+        flash('Snapshot created for the previous chat · reopen it to copy or revoke')
+        return
+      }
+      if (!(await copyShareLink(url))) {
+        if (!mountedRef.current) return
+        flash('Clipboard blocked · select the visible snapshot link and copy it manually')
+        return
+      }
+      const audience = shareSnapshotAudience(mountedRef.current, sidRef.current, shareSid)
+      if (audience === 'gone') return
+      flash(audience === 'departed' ? 'Snapshot link copied for the previous chat'
+        : `Snapshot link copied · expires ${fmtDate(receipt.expiresAt)}.`)
+    } catch (error) {
+      if (!mountedRef.current) return
+      reportShareFailure('snapshot', shareSid, error)
+    } finally {
+      settleShareAction(shareSid)
+    }
+  }
+  // The visible fallback link is the only copy path left once the clipboard is blocked, so a missing
+  // record must land on the same "select it manually" advice the write failure does — never a throw.
+  const copyShareFallbackLink = async () => {
+    const url = shareCopy?.url
+    flash(url && await copyShareLink(url) ? 'Snapshot link copied'
+      : 'Clipboard blocked · select the snapshot link and copy it manually')
+  }
   const revokeCurrentShares = async () => {
     const shareSid = sidRef.current || sid
     if (!shareSid) return
-    if (shareActionSessionRef.current) { flash('Another share action is still in progress'); return }
-    if (forkActionSessionRef.current === shareSid) {
-      flash('Wait for this chat to finish forking before changing its public links')
-      return
-    }
-    if (deletingSessionsRef.current.has(shareSid)) {
-      flash('This chat is being deleted')
-      return
-    }
-    shareActionSessionRef.current = shareSid
-    setShareBusySid(shareSid)
+    if (!beginShareAction('revoke', shareSid)) return
     try {
       const result = await boundedRequest(signal => assistantUnshare(shareSid, { signal }))
       if (!mountedRef.current) return
@@ -3597,15 +3647,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         : 'No active links.')
     } catch (error) {
       if (!mountedRef.current) return
-      if (error?.status >= 400 && error.status < 500) flash('Revoke failed')
-      else {
-        setShareUnknown(shareSid, true)
-        refreshSessions()
-        flash('Revoke uncertain · retry to confirm')
-      }
+      reportShareFailure('revoke', shareSid, error)
     } finally {
-      if (shareActionSessionRef.current === shareSid) shareActionSessionRef.current = null
-      if (mountedRef.current) setShareBusySid(current => current === shareSid ? null : current)
+      settleShareAction(shareSid)
     }
   }
   const retryHandlerFor = (assistantIndex) => {
@@ -3707,6 +3751,24 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     disabled={historical || composerEditingPaused || draftRunMismatch || pendingFileReads > 0}
     onClick={() => fileRef.current?.click()}>
     <OpIcon name="clip" size={14} /></button>
+
+  // ── chrome the side and full views SHARE ──
+  // Doc 25 UI-05. Both layouts offer "new chat" and "fold to the bar"; the full view offers the fold
+  // twice. Each copy used to carry its own gate and its own explanation ladder, so the two halves of
+  // one decision could drift apart in one view and not the other. `assistantChromeModel.js` returns
+  // them together; only the per-position wording stays an argument, because "collapse to the bar" and
+  // "fold back to the bar" are different sentences about different places on screen.
+  const newChatButton = (cls, label, idleTitle) => {
+    const gate = newChatGate({ turnStarting, retryChecking, directConfirm }, idleTitle)
+    return <button className={cls} aria-label="Start a new Assistant chat"
+      title={gate.title} disabled={gate.disabled} onClick={newChat}>{label}</button>
+  }
+  const foldToBarButton = (cls, idleTitle) => {
+    const fold = foldControl(directConfirm, idleTitle)
+    return <button className={cls} title={fold.title}
+      onClick={fold.action === 'cancel' ? cancelDirectConfirmation : collapseToBar}>
+      {fold.label}</button>
+  }
 
   // mode selector row — placed BELOW the input in the side + full composers.
   const modeRow = <div className="asst-moderow">
@@ -3934,20 +3996,18 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     arm()
     return () => { cancelled = true; if (timer != null) window.clearTimeout(timer) }
   }, [sid, shareCopy, clearShareCopy, setShareUnknown, refreshSessions])
-  return <>
-    {hiddenFileInput}
-    <output className="sr-only" aria-live="polite" aria-atomic="true">
-      {sessionOpening ? view === 'bar' ? 'Opening Assistant chat.' : ''
-        : retryChecking ? 'Checking saved Assistant turn.'
-          : turnStarting ? 'Starting Assistant response.'
-            : busy ? 'Assistant is responding.' : replyAnnouncement}
-    </output>
-    <div id="assistant-share-status" className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-      {shareStatusMessage}
-    </div>
+  // ── the three layouts ──
+  // Doc 25 UI-05. One conversation, three views (see the header note). Each is named here so the
+  // component's `return` shows the SHAPE of the surface instead of 350 lines of one view's chrome
+  // interleaved with another's. They stay render functions rather than sibling components on purpose,
+  // measured on 2026-08-05: between them they read 136 distinct names off this closure (80 / 42 / 83,
+  // with only 18 common to all three). A props bundle that size has no registry guard, and a missing
+  // prop arrives as `undefined` — which for `disabled={shareBusy || …}` silently ENABLES a mutation
+  // gate rather than failing. The decisions actually worth sharing were lifted into
+  // `assistantChromeModel.js` instead, where they can be stated and driven.
 
-    {/* ── bottom bar — ONLY in bar view (moves into the side panel otherwise) ── */}
-    {view === 'bar' && <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (sessionOpening || retryChecking || turnStarting || busy || commandBusy || forkingCurrentSession ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
+  // ── bottom bar — ONLY in bar view (moves into the side panel otherwise) ──
+  const barView = () => <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (sessionOpening || retryChecking || turnStarting || busy || commandBusy || forkingCurrentSession ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
       <button className="cmdbar-ic" aria-label="Open full Assistant" title="open the full assistant" onClick={openFull}>✦</button>
       {launchRecoveryButton}
       <button type="button" className={`cmdbar-mode mode-${mode}`}
@@ -4090,12 +4150,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       <button className="cmdbar-drawer-btn" aria-label="Open Assistant in side view"
         title="open chat on the right (side view)" onClick={openSide}><OpIcon name="chat" size={13} /></button>
       {visibleToast && <div className="cmdbar-toast" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
-    </div></div>}
+    </div></div>
 
-    {/* ── right side panel (resizable) — the composer lives INSIDE it; no bottom bar while open ── */}
-    {view === 'side' && compactAssistant && <div className="asst-side-backdrop" aria-hidden="true"
+  // ── right side panel (resizable) — the composer lives INSIDE it; no bottom bar while open ──
+  const sideView = () => <>
+    {compactAssistant && <div className="asst-side-backdrop" aria-hidden="true"
       onPointerDown={collapseToBar} />}
-    {view === 'side' && <aside ref={sideDialogRef} className="asst-side-panel" aria-label="Assistant"
+    <aside ref={sideDialogRef} className="asst-side-panel" aria-label="Assistant"
       role={compactAssistant ? 'dialog' : undefined} aria-modal={compactAssistant ? 'true' : undefined}
       aria-hidden={deleteConfirm ? 'true' : undefined} inert={deleteConfirm ? '' : undefined}
       tabIndex={compactAssistant ? -1 : undefined} style={{ width: sideW }}>
@@ -4118,40 +4179,27 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         <span className="spacer" style={{ flex: 1 }} />
         {compactAssistant && attentionIndicator.active && <AttentionLauncher
           indicator={attentionIndicator} embedded onClick={openAttentionCenter} />}
-        <button className="btn sm ghost" aria-label="Start a new Assistant chat"
-          title={turnStarting ? 'Wait for the new Assistant chat to finish starting'
-            : retryChecking ? 'Wait for the saved turn check to finish'
-              : directConfirm ? 'Resolve the run-command confirmation first' : 'new chat'}
-          disabled={turnStarting || retryChecking || !!directConfirm} onClick={newChat}>＋ Chat</button>
+        {newChatButton('btn sm ghost', '＋ Chat', 'new chat')}
         <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
-        <button className="btn sm ghost"
-          title={directConfirm ? 'Cancel the run-command confirmation and keep the draft' : 'collapse to the bar'}
-          onClick={directConfirm ? cancelDirectConfirmation : collapseToBar}>
-          {directConfirm ? 'Cancel command' : '▾ bar'}</button>
+        {foldToBarButton('btn sm ghost', 'collapse to the bar')}
       </div>
       <div className="asst-drawer-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
         aria-live="off" aria-busy={busy} tabIndex={0}
         onScroll={onFeedScroll}>{renderThread()}</div>
       {composer('Message the assistant…  (/ for commands · Enter to send)')}
       {visibleToast && <div className="cmdbar-toast side" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
-    </aside>}
+    </aside>
+  </>
 
-    {/* ── full page — dedicated OPAQUE view (sessions · thread · composer) ── */}
-    {view === 'full' && <div ref={fullDialogRef} className="asst-view asst-full" role="dialog"
+  // ── full page — dedicated OPAQUE view (sessions · thread · composer) ──
+  const fullView = () => <div ref={fullDialogRef} className="asst-view asst-full" role="dialog"
       aria-modal="true" aria-label="Assistant" aria-hidden={deleteConfirm ? 'true' : undefined}
       inert={deleteConfirm ? '' : undefined} tabIndex={-1}>
       <div className="asst-side">
         <div className="asst-side-h">
-          <button className="btn sm"
-            title={directConfirm ? 'Cancel the run-command confirmation and keep the draft' : 'fold back to the bar'}
-            onClick={directConfirm ? cancelDirectConfirmation : collapseToBar}>
-            {directConfirm ? 'Cancel command' : '▾ bar'}</button>
+          {foldToBarButton('btn sm', 'fold back to the bar')}
           <span className="ttl" style={{ flex: 1 }}>Assistant</span>
-          <button className="btn sm primary" aria-label="Start a new Assistant chat"
-            title={turnStarting ? 'Wait for the new Assistant chat to finish starting'
-              : retryChecking ? 'Wait for the saved turn check to finish'
-                : directConfirm ? 'Resolve the run-command confirmation first' : undefined}
-            disabled={turnStarting || retryChecking || !!directConfirm} onClick={newChat}>+ Chat</button>
+          {newChatButton('btn sm primary', '+ Chat', undefined)}
         </div>
         <div ref={sessionsRef} className="asst-sessions"
           aria-busy={sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}>
@@ -4266,74 +4314,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                 ? 'Wait for the current Assistant turn to finish before freezing a complete snapshot'
                 : 'Create and copy a frozen read-only snapshot'}
               disabled={shareBusy || forkingCurrentSession || shareTurnIncomplete || !!directConfirm}
-              onClick={async () => {
-            const shareSid = sid
-            if (shareActionSessionRef.current) { flash('Another share action is still in progress'); return }
-            if (forkActionSessionRef.current === shareSid) {
-              flash('Wait for this chat to finish forking before creating a snapshot')
-              return
-            }
-            if (runningRef.current || turnCaptureRef.current || busy || commandBusy || pending.length > 0
-                || msgs[msgs.length - 1]?.role === 'user') {
-              flash('Wait for the Assistant reply to finish before creating a snapshot')
-              return
-            }
-            if (deletingSessionsRef.current.has(shareSid)) {
-              flash('This chat is being deleted')
-              return
-            }
-            shareActionSessionRef.current = shareSid
-            setShareBusySid(shareSid)
-            try {
-              const r = await boundedRequest(signal => assistantShare(shareSid, false, { signal }))
-              if (!mountedRef.current) return
-              const receipt = assistantShareReceipt(r, shareSid)
-              if (!receipt) throw new Error('Invalid Assistant share receipt')
-              const url = location.origin + location.pathname + receipt.relativeUrl
-              setShareUnknown(shareSid, false)
-              mutateSessionsLocally(current => current.map(session => session.id === shareSid
-                ? { ...session, shared: true, share_count: 1,
-                    share_ids: [receipt.shareId], live_share_ids: [], share_expires_at: receipt.expiresAt,
-                    share_live: false } : session))
-              retainShareCopy(shareSid, {
-                url, expiresAt: receipt.expiresAt, shareId: receipt.shareId,
-              })
-              refreshSessions()
-              if (sidRef.current !== shareSid) {
-                flash('Snapshot created for the previous chat · reopen it to copy or revoke')
-                return
-              }
-              try {
-                if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
-                await navigator.clipboard.writeText(url)
-              } catch {
-                if (!mountedRef.current) return
-                flash('Clipboard blocked · select the visible snapshot link and copy it manually')
-                return
-              }
-              if (!mountedRef.current || sidRef.current !== shareSid) {
-                if (mountedRef.current) flash('Snapshot link copied for the previous chat')
-                return
-              }
-              flash(`Snapshot link copied · expires ${fmtDate(receipt.expiresAt)}.`)
-            } catch (error) {
-              if (!mountedRef.current) return
-              if (error?.status >= 400 && error.status < 500) {
-                flash(error?.code === 'assistant_share_snapshot_too_large'
-                  ? 'This chat is too large for a complete snapshot · fork or share a shorter chat'
-                  : ['assistant_share_in_progress', 'assistant_share_incomplete',
-                    'assistant_share_turn_active', 'assistant_share_turn_incomplete'].includes(error?.code)
-                    ? 'Wait for a complete Assistant reply before sharing' : 'Share failed')
-              } else {
-                setShareUnknown(shareSid, true)
-                refreshSessions()
-                flash('Share uncertain · revoke before retrying')
-              }
-            } finally {
-              if (shareActionSessionRef.current === shareSid) shareActionSessionRef.current = null
-              if (mountedRef.current) setShareBusySid(current => current === shareSid ? null : current)
-            }
-          }}>{shareBusySid === sid ? 'working…' : '⤴ create snapshot'}</button>}
+              onClick={createShareSnapshot}>{shareBusySid === sid ? 'working…' : '⤴ create snapshot'}</button>}
           {sid && !deletingCurrentSession && (currentSession?.shared || shareUnknown || shareCopy)
             && <button className="btn sm ghost"
               title={forkingCurrentSession
@@ -4343,10 +4324,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               onClick={revokeCurrentShares}>{shareBusySid === sid ? 'working…'
                 : `⤫ ${shareUnknown ? 'revoke pending' : 'unshare'}`}</button>}
           <button className="btn sm ghost" title="dock to the right" onClick={openSide}>▧ side</button>
-          <button className="btn sm ghost"
-            title={directConfirm ? 'Cancel the run-command confirmation and keep the draft' : 'fold to the bar'}
-            onClick={directConfirm ? cancelDirectConfirmation : collapseToBar}>
-            {directConfirm ? 'Cancel command' : '▾ bar'}</button>
+          {foldToBarButton('btn sm ghost', 'fold to the bar')}
         </div>
         {shareCopy && <div className="copy-link-fallback" role="status">
           <label htmlFor={`assistant-share-fallback-${sid}`}>
@@ -4354,13 +4332,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           </label>
           <input id={`assistant-share-fallback-${sid}`} readOnly value={shareCopy.url}
             onFocus={event => event.currentTarget.select()} />
-          <button type="button" className="btn sm" onClick={async () => {
-            try {
-              if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
-              await navigator.clipboard.writeText(shareCopy.url)
-              flash('Snapshot link copied')
-            } catch { flash('Clipboard blocked · select the snapshot link and copy it manually') }
-          }}>Copy link</button>
+          <button type="button" className="btn sm" onClick={copyShareFallbackLink}>Copy link</button>
           <a className="btn sm" href={shareCopy.url} target="_blank" rel="noreferrer noopener">
             Open snapshot
           </a>
@@ -4371,8 +4343,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {composer('Message the assistant…  (/ for commands · Enter to send)')}
         {visibleToast && <div className="cmdbar-toast side" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
       </div>
-    </div>}
-    {deleteConfirm && <div className="overlay assistant-delete-overlay"
+    </div>
+
+  const deleteConfirmDialog = () => <div className="overlay assistant-delete-overlay"
       onPointerDown={event => {
         if (!deleteConfirmBusy && event.target === event.currentTarget) closeDeleteConfirm()
       }}>
@@ -4403,6 +4376,23 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           </div>
         </div>
       </section>
-    </div>}
+    </div>
+
+  return <>
+    {hiddenFileInput}
+    <output className="sr-only" aria-live="polite" aria-atomic="true">
+      {sessionOpening ? view === 'bar' ? 'Opening Assistant chat.' : ''
+        : retryChecking ? 'Checking saved Assistant turn.'
+          : turnStarting ? 'Starting Assistant response.'
+            : busy ? 'Assistant is responding.' : replyAnnouncement}
+    </output>
+    <div id="assistant-share-status" className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+      {shareStatusMessage}
+    </div>
+
+    {view === 'bar' && barView()}
+    {view === 'side' && sideView()}
+    {view === 'full' && fullView()}
+    {deleteConfirm && deleteConfirmDialog()}
   </>
 }

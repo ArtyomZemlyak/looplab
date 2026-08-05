@@ -8119,6 +8119,59 @@ exits 0.
 
 *Recommendation:* Lift share/unshare into named handlers or a useAssistantShare hook; extract session management (openSession/newChat/delSession/tombstones) into a useAssistantSessions hook; the three view layouts can then be sibling components receiving one shared controller.
 
+*Resolution (2026-08-05):* Done in three parts, as a PURE-model split rather than a move of stateful
+React — `assistantShareModel.js`, `assistantSessionModel.js`, `assistantChromeModel.js`, each with a
+truth-table test.
+
+**The finding's inventory is stale in three places and understates the size in a fourth.** The file is
+**4,408 lines**, not 2,031 — it more than doubled after the review, so every line range in *Locations*
+is void. `openSession` is **~260 lines** (1108-1366), not "~120". The "duplicated direct-command
+machine" was already extracted (`runCommandMachine.js` / `commandModel.js`). And the two share
+handlers were not both inline: **`revokeCurrentShares` was already a named handler**; only the
+snapshot mint was still an `onClick={async () => { … }}` prop, at 68 lines rather than the two
+"~55/30-line" handlers described.
+
+**Share/unshare.** Two rules, stated once. A snapshot may only be minted over a COMPLETE turn (it is a
+durable public artifact; freezing a half-streamed turn publishes text the model has not finished
+saying) while a revoke is safe any time. And a 4xx is authoritative about THIS request while nothing
+else is — a timeout, a 5xx or a lost response leaves a link that may or may not exist, so `uncertain`
+is a FACT the caller acts on (mark the chat unknown, re-read the list), not a second string. Two real
+defects surfaced from stating them: `SHARE_ACTION_BLOCKS['toString']` inherited a truthy function from
+`Object.prototype` so the fail-closed branch never ran, and the fallback Copy-link button dereferenced
+a cleared record outside its try.
+
+**Session management — no `useAssistantSessions` hook, deliberately.** `openSession`'s ORDER against
+the surrounding effects is itself the contract; moving it wholesale relocates risk without making one
+rule statable. What WAS re-derived is the late-read fence, written out longhand at all three awaits
+and differing in exactly one conjunct (`sidRef.current !== id`, present only after the transcript is
+committed). `sessionReadSuperseded` returns the REASON, so the ordering is statable, and two rules
+that were invisible longhand are now driven: a tombstoned chat loses even when the epoch never moved,
+and slot ownership is object IDENTITY rather than the id the slot holds. `sessionDeleteBlock` and
+`sessionDeleteFailure` joined it — the delete dialog's detail and its toast were two nested ternaries
+a dozen lines apart, walking the same four codes and expected to agree.
+
+**The three layouts are NOT sibling components, and the recommendation is wrong about this.** Measured
+before acting: the three blocks read **136 distinct names off the component closure** (80 / 42 / 83,
+only 18 common to all three). A props bundle that size has no registry guard, and a missing prop
+arrives as `undefined` — which for `disabled={shareBusy || …}` silently ENABLES a mutation gate. One
+"shared controller" with 136 members is the same hazard in one place and decomposes nothing. What the
+views genuinely shared was duplicated DECISIONS — the new-chat gate twice byte for byte, the
+fold-to-bar control three times — and those are `assistantChromeModel.js` now, where a control's
+disabled state, its tooltip and its action come from one branch. The layouts became named render
+functions (the file's own pattern for `renderThread` / `composer` / `attachBtn`), JSX moved
+byte-identically, `return` is 12 lines.
+
+**AssistantBar's coverage cannot see a JSX structure break, and that is the finding under this
+finding.** Its tests are almost entirely source pins over the file's TEXT; nothing in the suite loads
+the module. The first attempt at the layout split dropped a closing brace in the side fragment —
+`vite build` refused the tree outright and **all 767 tests passed**. `assistantBarResourceTruth` now
+SSR-loads the module so it at least has to compile. Nothing MOUNTS it; that gap is open and is
+recorded in CLAUDE.md's `ui/` row.
+
+Left undone: `runLLM` (still ~350 lines with two concurrent fallback poll loops — the finding names it
+and it is genuinely the next target), `forkCurrentSession` / `reconcileFork` / `settleForkReconciliation`
+(a second recovery saga, untouched), and a real mount harness for the component. ui suite 741 -> 768.
+
 #### UI-06 · MEDIUM · inconsistency · effort: large
 
 **At least seven independent implementations of the load/last-good/stale/retry resource pattern**
