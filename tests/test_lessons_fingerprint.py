@@ -442,3 +442,200 @@ def test_prompt_slot_key_is_not_a_substitute_for_normalize_statement():
     rows = [{"task_id": "t", "statement": s, "outcome": "failed", "run_id": f"r{i}"}
             for i, s in enumerate((a, b))]
     assert len(consolidate_lessons(rows)) == 2, "the write path must not merge two measurements"
+
+
+# --------------------------------------------------------------------------- #
+# M3, the half that had quietly stopped working: a run with NO winner.
+#
+# `write_reflection_note`'s own comment promises it ("a run in which every node failed is exactly
+# the negative lesson M3 exists to record") and `reflect_lessons` refused to make the call, so the
+# entire learning of every crash-only run was discarded. Reproduced from `runs/rubert-dr-0805`:
+# 2 nodes, 0 evaluated, node 0 crashed after six real library-migration repairs; finalization ran
+# every step and `reflection_note` recorded `n_lessons: 0`.
+# --------------------------------------------------------------------------- #
+
+
+def _crash_only_engine(tmp_path, mem, *, nodes=(0, 1)):
+    """An Engine whose log holds only FAILED nodes — no `node_evaluated`, so `final.best()` is None."""
+    task = ToyTask.load(TASK)
+    researcher, developer = task.build_roles()
+    eng = Engine(tmp_path / "run", task=task, researcher=researcher, developer=developer,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=2),
+                 reflection_priors=True, memory_dir=str(mem))
+    eng.store.append("run_started", {"run_id": "crash-only-1", "task_id": task.id,
+                                     "goal": task.goal, "direction": "min"})
+    for nid in nodes:
+        eng.store.append("node_created", {
+            "node_id": nid, "parent_ids": [], "operator": "draft",
+            "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+        eng.store.append("node_failed", {
+            "node_id": nid, "reason": "crash",
+            "error": "RuntimeError: LightningModule has parameters not used in producing the loss"})
+    eng.store.append("run_finished", {"reason": "stuck", "finalization_required": True})
+    eng._comparative_lessons_on = False
+    return eng
+
+
+class _ScriptedReflect:
+    """Stands in for `agentic_text`: records the prompt it was handed, returns canned lesson lines."""
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.prompts: list[str] = []
+
+    def __call__(self, _client, _tools, messages, **_kw):
+        self.prompts.append(messages[0]["content"])
+        return self.reply
+
+
+def test_crash_only_run_still_distils_lessons_to_the_shared_store(tmp_path, monkeypatch):
+    """The defect: 0 evaluated nodes -> `reflect_lessons` returned before calling the model, so the
+    shared store learned NOTHING from a run whose failures are the most transferable thing it had."""
+    from looplab.events.replay import fold
+    import looplab.agents.agent as agent_mod
+
+    mem = tmp_path / "mem"
+    eng = _crash_only_engine(tmp_path, mem)
+    scripted = _ScriptedReflect(
+        "[BAD] DDP with an unused-parameter module needs find_unused_parameters or the head dropped\n"
+        "[GOOD] pin the trainer's strategy explicitly before porting a script to a newer Lightning")
+    monkeypatch.setattr(agent_mod, "agentic_text", scripted)
+    eng._reflect_client = lambda: object()          # a real run HAS a client; the toy roles do not
+
+    eng._write_reflection_note(fold(eng.store.read_all()))
+
+    rows = read_jsonl_lenient(mem / "lessons.jsonl")
+    assert len(rows) == 2, "a crash-only run must still write its failure lessons"
+    assert {r["outcome"] for r in rows} == {"failed", "supported"}
+    # Every row carries the retrieval + polarity provenance a later run reads it back through.
+    for r in rows:
+        assert r["fingerprint"] and r["direction"] == "min" and r["run_id"] == "crash-only-1"
+        assert r["evidence"] == [0, 1]              # grounded in the two failed nodes
+    # ...and the run's own audit sidecar agrees, instead of reporting n_lessons: 0.
+    note = [e.data for e in eng.store.read_all() if e.type == "reflection_note"][-1]
+    assert note["n_lessons"] == 2
+
+
+def test_crash_only_lessons_reach_the_developer_too(tmp_path, monkeypatch):
+    """A run with no measured result learns about what BLOCKED it — library/API/hardware constraints,
+    which is the Developer's category. Stamping those `role: researcher` routes them away from the
+    role that will hit the same constraint next time, so they are left untagged = shared (the same
+    thing `lessons_reconcile` does for an unattributed comparative line)."""
+    from looplab.events.replay import fold
+    import looplab.agents.agent as agent_mod
+
+    mem = tmp_path / "mem"
+    eng = _crash_only_engine(tmp_path, mem)
+    monkeypatch.setattr(agent_mod, "agentic_text",
+                        _ScriptedReflect("[BAD] a newer Lightning needs the DDP strategy pinned"))
+    eng._reflect_client = lambda: object()
+    eng._write_reflection_note(fold(eng.store.read_all()))
+
+    assert "role" not in read_jsonl_lenient(mem / "lessons.jsonl")[0]
+
+    # Drive it through the real read side: a LATER run on the same task must see it as BOTH roles.
+    task = ToyTask.load(TASK)
+    r, d = task.build_roles()
+    later = Engine(tmp_path / "later", task=task, researcher=r, developer=d,
+                   sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                   reflection_priors=True, memory_dir=str(mem))
+    researcher_prior, developer_prior = later._load_reflection_priors_both()
+    assert "DDP strategy pinned" in researcher_prior
+    assert "DDP strategy pinned" in developer_prior
+
+
+def test_a_winners_lessons_stay_researcher_tagged(tmp_path, monkeypatch):
+    """The other half of §role-split: a run that DID measure something still routes its
+    technique/strategy generalizations to the Researcher only."""
+    from looplab.events.replay import fold
+    import looplab.agents.agent as agent_mod
+
+    mem = tmp_path / "mem"
+    task = ToyTask.load(TASK)
+    r, d = task.build_roles()
+    eng = Engine(tmp_path / "run", task=task, researcher=r, developer=d,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=2),
+                 reflection_priors=True, memory_dir=str(mem))
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"lr": 0.1}, "rationale": ""}})
+    eng.store.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    eng.store.append("run_finished", {"reason": "done", "finalization_required": True})
+    eng._comparative_lessons_on = False
+    monkeypatch.setattr(agent_mod, "agentic_text",
+                        _ScriptedReflect("[GOOD] a smaller learning rate converged more reliably"))
+    eng._reflect_client = lambda: object()
+    eng._causal_meta_note = lambda *_a: "note"      # type: ignore[method-assign]
+
+    eng._write_reflection_note(fold(eng.store.read_all()))
+
+    assert read_jsonl_lenient(mem / "lessons.jsonl")[0]["role"] == "researcher"
+
+
+def test_no_winner_prompt_names_the_blockers_instead_of_an_empty_what_worked(tmp_path, monkeypatch):
+    """The prompt is a contract: with a winner it must stay byte-identical, and without one it must
+    not ship a dangling `What worked (best first):` header followed by nothing."""
+    from looplab.events.replay import fold
+    import looplab.agents.agent as agent_mod
+
+    mem = tmp_path / "mem"
+    eng = _crash_only_engine(tmp_path, mem)
+    scripted = _ScriptedReflect("[BAD] something went wrong in a reusable way")
+    monkeypatch.setattr(agent_mod, "agentic_text", scripted)
+    eng._reflect_client = lambda: object()
+
+    eng._write_reflection_note(fold(eng.store.read_all()))
+
+    assert len(scripted.prompts) == 1
+    prompt = scripted.prompts[0]
+    assert "What worked (best first):" not in prompt
+    assert "NOTHING in this run reached a measured result" in prompt
+    assert "read_experiment / read_logs" in prompt          # error_reason is a bucket, not the error
+    assert "\nWhat failed:\n#0 draft failed: crash" in prompt
+
+
+def test_reflection_makes_no_call_when_the_run_has_no_evidence_at_all(tmp_path, monkeypatch):
+    """The guard `best is None` was standing in for: an empty run has nothing to distil and the
+    model can only invent, so it must still return without spending a call."""
+    from looplab.events.replay import fold
+    import looplab.agents.agent as agent_mod
+
+    mem = tmp_path / "mem"
+    eng = _crash_only_engine(tmp_path, mem, nodes=())       # run_finished, and not one node
+    scripted = _ScriptedReflect("[GOOD] invented from nothing")
+    monkeypatch.setattr(agent_mod, "agentic_text", scripted)
+    eng._reflect_client = lambda: object()
+
+    eng._write_reflection_note(fold(eng.store.read_all()))
+
+    assert scripted.prompts == [], "no evidence -> no paid reflection call"
+    assert not (mem / "lessons.jsonl").exists()
+
+
+def test_winner_prompt_is_unchanged(tmp_path, monkeypatch):
+    """The other side of the same contract: an evaluated run's prompt keeps the original wording."""
+    from looplab.events.replay import fold
+    import looplab.agents.agent as agent_mod
+
+    mem = tmp_path / "mem"
+    task = ToyTask.load(TASK)
+    researcher, developer = task.build_roles()
+    eng = Engine(tmp_path / "run", task=task, researcher=researcher, developer=developer,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=2),
+                 reflection_priors=True, memory_dir=str(mem))
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"lr": 0.1}, "rationale": ""}})
+    eng.store.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    eng.store.append("run_finished", {"reason": "done", "finalization_required": True})
+    eng._comparative_lessons_on = False
+    scripted = _ScriptedReflect("[GOOD] a smaller learning rate converged more reliably")
+    monkeypatch.setattr(agent_mod, "agentic_text", scripted)
+    eng._reflect_client = lambda: object()
+    eng._causal_meta_note = lambda *_a: "note"      # type: ignore[method-assign]
+
+    eng._write_reflection_note(fold(eng.store.read_all()))
+
+    prompt = scripted.prompts[0]
+    assert "\nWhat worked (best first):\n#0 draft metric=0.5 params={'lr': 0.1}" in prompt
+    assert "NOTHING in this run reached a measured result" not in prompt
