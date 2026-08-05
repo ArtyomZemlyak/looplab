@@ -1185,7 +1185,7 @@ have compared an empty list to an empty list and proved nothing.
 
 *Recommendation:* Split a ConceptCadenceMixin (concept snapshot/tagging/consolidation/run-base) and move _maybe_verify_ties/_verifier_soundness to their own small mixin (or eval_stages), leaving strategy.py the consult/apply/coverage core. Parametrize the at_node-idempotence predicate over the snapshot list. Break _concept_coverage_snapshot into tag-refresh / consolidation / edges / hypothesis-tag / coverage-summary steps.
 
-*Resolution (2026-08-05) — the split, the one predicate, and a driver over four named steps.*
+*Resolution (2026-08-05) — the split, the one predicate, and a driver over named steps.*
 
 `engine/concept_cadence.py::ConceptCadenceMixin` (433 lines) and
 `engine/verifier_tiebreak.py::VerifierTiebreakMixin` (168) leave `engine/strategy.py`, which drops
@@ -1198,8 +1198,9 @@ in `core/llm_broker.py::BACKGROUND_LANE_PRODUCERS` — whose two-way scan keys o
 `<filename>::<method>`, so the move alone would have orphaned them — and CLAUDE.md's inventory goes
 to NINETEEN files / eighteen mixins, with `shared.py` the twentieth.
 
-The finding's numbers are stale by a uniform +26 lines (the method is 750-989, not 776-1014; the
-tie-break 991-1128, not 1017-1154; the predicate copies at 605-609 / 673-676 / 692-695) and it
+The finding's numbers are stale by 25-29 lines and the file is 1260, not 1269 (the method is
+750-989, not 776-1014; the tie-break 991-1128, not 1017-1154; the predicate copies at 605-609 /
+673-676 / 692-695, the last of them four lines rather than the five claimed), and it
 overcounts the nesting: `_concept_coverage_snapshot` has THREE `try` statements, not four, at a max
 depth of two — one outer producer guard plus two SIBLINGS inside it. That miscount matters, because
 the sibling structure is the whole design and it is what the decomposition had to preserve: the edge
