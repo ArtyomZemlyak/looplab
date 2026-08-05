@@ -13,7 +13,14 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   assert.equal(schema.groups.length, RAW_SETTINGS_SCHEMA.groups.length)
   assert.equal(Object.keys(schema.fieldByKey).length,
     RAW_SETTINGS_SCHEMA.groups.reduce((total, group) => total + group.fields.length, 0))
-  assert.equal(Object.keys(schema.fieldByKey).length, 158)
+  // A LITERAL beside the derived equality above, so a change in the packaged catalogue's SIZE has to
+  // be re-pinned deliberately rather than sliding through on "the two sides still agree".
+  // Field-count history:
+  //   158 -> 162 (2026-08-05): the live-watchdog knobs landed — `train_monitor`,
+  //   `train_monitor_kill`, `train_monitor_kill_confidence` and `asha_live_kill_confidence`.
+  //   Verified by diffing the catalogue's key set against the last 158-field revision, so this is
+  //   real growth rather than a duplicated or renamed key.
+  assert.equal(Object.keys(schema.fieldByKey).length, 162)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')
   assert.equal(schema.fieldByKey.speculation_depth.minimum, 0)
   assert.equal(schema.fieldByKey.speculation_depth.maximum, 64)

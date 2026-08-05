@@ -382,7 +382,13 @@ export const NARR = {
   // nobody answered (no client / capped), which never kills. Legacy rows carry no `stop_decided`, so
   // they fall back to the flag they do have.
   asha_verdict: {
-    validate: d => ownValue(d, 'node_id') && ownValue(d, 'status'),
+    // `status` is NOT required, and requiring it was a real defect: the renderer below defaults it
+    // (`d.status || 'unavailable'`) and the comment above says what that default MEANS — nobody
+    // answered — so a status-less row is a case this narration was written to explain, not one it
+    // has to refuse. The validator disagreed, and `eventNarration` consults it FIRST, so such a row
+    // rendered as the opaque "details could not be summarized" fallback instead. `node_id` alone
+    // defines the claim; every other field the line interpolates has a documented default.
+    validate: d => ownValue(d, 'node_id'),
     render: (d) => `ASHA judge: #${d.node_id} ${(d.stop_decided ?? d.kill) === true
       ? (d.kill === false
         ? `STOP decided — superseded by ${d.kill_superseded_by || 'another watchdog'}`
