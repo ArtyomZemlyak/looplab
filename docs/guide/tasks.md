@@ -147,7 +147,7 @@ below use it.
 |---|---|---|---|
 | [`quadratic`](#quadratic) | Pick numeric params | Closed-form objective | `examples/toy_task.json` |
 | [`regression`](#regression) | Select model complexity | K-fold CV (built-in) | `examples/regression_task.json` |
-| [`classification`](#classification) | Tune a classifier | K-fold CV (built-in) | `examples/classification_task.json` |
+| [`classification`](#classification) | Pick a feature map + tune a classifier | K-fold CV (built-in) | `examples/classification_task.json` |
 | [`timeseries`](#timeseries) | Tune a forecaster | Backtest (built-in) | `examples/timeseries_task.json` |
 | [`code_regression`](#code_regression) | **Write the code** | CV printed by the solution | `examples/code_regression_task.json` |
 | [`mlebench`](#mlebench) | Beat a private grader | Held-out grader | `examples/mlebench_task.json` |
@@ -203,22 +203,43 @@ adapter. The loop converges on a sensible model complexity.
 
 ## `classification`
 
-Tune a classifier (e.g. logistic regression) for K-fold CV accuracy on generated blob data.
+Choose a polynomial feature-map `degree` — plus the learner's `lr`/`l2`/`iters` — to maximize K-fold
+CV accuracy on two **concentric rings**. The classes differ only in their distance from the origin,
+so the true boundary is a circle and a straight line is the wrong hypothesis class: a `degree` 1
+learner never exceeds **0.555** anywhere in the advertised `lr`/`l2`/`iters` range, while `degree` ≥ 2
+reaches **0.905**. That gap is the gradient the search climbs.
 
 ```jsonc
 {
-  "benchmark": "classification", "id": "blob_classification",
-  "goal": "tune a logistic-regression learner to maximize K-fold CV accuracy",
+  "benchmark": "classification", "id": "ring_classification",
+  "goal": "choose a polynomial feature-map degree + the learner's lr/l2/iters to maximize K-fold CV accuracy on two concentric rings",
   "direction": "max",
-  "n": 80, "sep": 1.5, "seed": 0, "cv_k": 5
+  "n": 200, "gap": 1.6, "noise": 0.6, "seed": 0, "cv_k": 5, "max_degree": 4
 }
 ```
 
 | Field | Description |
 |---|---|
 | `n` | Number of samples |
-| `sep` | Class separation (lower = harder) |
+| `gap` | Radial distance between the two rings (lower = harder) |
+| `noise` | Gaussian smear on each ring's radius (higher = harder) |
+| `max_degree` | Largest feature-map degree the search may try |
 | `cv_k` | Cross-validation folds |
+
+!!! note "Why this example changed (2026-08-05)"
+    It used to generate two linearly-separable Gaussian **blobs** and template only `lr`/`l2`/`iters`.
+    That objective was flat — 163 of 175 grid points scored the identical `0.925` — so every node
+    tied and the champion was arbitrary. Worse, the one idea the Researcher kept proposing on this
+    task (*expand the features to degree 2*) was not a template parameter, so it was silently dropped
+    and the emitted code stayed plain-linear under a rationale describing the expansion. Both halves
+    moved together: the data now *needs* the expansion and the Developer can *build* it. The task id
+    changed from `blob_classification` to `ring_classification` so cross-run
+    [claims](memory.md) are not pooled across two different datasets.
+
+    A templated Developer can only ever build its own parameterization, so `llm_roles` also states
+    the build surface in the prompt ("the Developer fills a fixed template from exactly those four
+    numbers"). For genuinely open-ended structure use an LLM Developer that writes the code
+    ([`code_regression`](#code_regression)), not a wider template.
 
 ## `timeseries`
 

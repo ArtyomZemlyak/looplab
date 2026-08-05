@@ -234,17 +234,21 @@ the `budget` receipt below is how you check what speculation actually did for yo
 
 **A prefetch only pays when there is provider latency to hide behind a running evaluation.** AUTO's
 startup rule keys off the settled `eval_parallel` — *how many experiments can run at once* — which is a
-capacity question, not that one. Measured on the shipped `examples/classification_task.json`, same
-command, both arms 8/8 nodes and the identical champion (node 7, metric 0.925):
+capacity question, not that one. Measured on `examples/classification_task.json` **as it shipped
+before 2026-08-05** (the flat two-blob variant — that example is now the concentric-rings task, see
+[Task reference](tasks.md#classification)), same command, both arms 8/8 nodes and the identical
+champion (node 7, metric 0.925):
 
 | | LLM calls | tokens | wall clock |
 |---|---|---|---|
 | AUTO → depth 1 | **109** | **1,265,911** | 2348.8 s |
 | `-s speculation_depth=0` | 75 | 817,201 | 2448.6 s |
 
-45% more calls and 55% more tokens for a 4% wall-clock saving. Evaluations on that task take ~0.1 s,
+45% more calls and 55% more tokens for a 4% wall-clock saving. Evaluations on that task took ~0.1 s,
 so there was never anything to overlap — and the overhead is *not* waste from wrong predictions (one
-stale prefetch in nine requests); it is fixed Card-lane cost.
+stale prefetch in nine requests); it is fixed Card-lane cost. (The reworked rings example evaluates
+in 0.05–0.6 s, which changes none of this: the argument is "an evaluation far shorter than provider
+latency hides nothing", and sub-second still qualifies.)
 
 So AUTO now settles itself down a third time, on the same argument it already applies twice ("a build
 whose roles call no LLM has no provider latency to overlap"). Once the run has **measured itself** —

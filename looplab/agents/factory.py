@@ -421,7 +421,23 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # a sweep proposed there yields a node the engine stretches by sweep_timeout_mult while waiting
     # for a `trials` line that never comes. Repo/command-eval tasks (anything with a repo_spec,
     # incl. the cli_overrides param-search mode) score via the task cmd, so they never sweep either.
-    _offer_sweep = settings.developer_backend not in PRESETS and not callable(rs_fn)
+    #
+    # ASK THE DEVELOPER, don't infer it from the backend (2026-08-05). The two clauses below name the
+    # backends that CANNOT sweep; they silently missed the largest class that also cannot — the
+    # TEMPLATED Developers the param-tuning adapters return from `llm_roles`
+    # (`ClassificationDeveloper`, `RegressionDeveloper`, `TimeSeriesDeveloper`; MLEBench/dataset/
+    # code_regression hand their LLM path an `LLMDeveloper` and are unaffected). None of the three
+    # reads `idea.space`, none is a PRESET, and none has a `repo_spec` — so the offer was made and
+    # the grid was dropped on the floor. Measured on a live
+    # `examples/classification_task.json` run: the Researcher put `degree` in `space` (not `params`)
+    # on 2 of 8 nodes, `implement` fell back to its `degree` DEFAULT, and both nodes ran a
+    # degree-1 program scoring chance (0.55) under a rationale reading "Sweep degree {2,3} x lr".
+    # The engine reported a normal result for an experiment it had not run — the same class of
+    # defect as a Developer silently ignoring a structural idea, just routed through `space`.
+    # `honors_idea_space` is a POSITIVE marker (absent means no) so a third-party or templated
+    # Developer is fail-closed by omission, and `WrapsDeveloper` forwards it read-through.
+    _offer_sweep = (settings.developer_backend not in PRESETS and not callable(rs_fn)
+                    and bool(getattr(developer, "honors_idea_space", False)))
     try:
         researcher.offer_sweep = _offer_sweep     # plain LLMResearcher path (ctor default is True)
     except Exception:  # noqa: BLE001 — duck-typed researchers without settable attrs are fine

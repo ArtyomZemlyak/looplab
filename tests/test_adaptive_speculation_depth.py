@@ -5,7 +5,9 @@ settled eval width — how many experiments can run at ONCE. That answers a capa
 one that decides whether a prefetch pays: a prefetch exists to overlap the Developer's PROVIDER
 latency with a RUNNING evaluation, and when the evaluation takes 0.1 s there is nothing to overlap.
 
-Measured on the shipped `examples/classification_task.json`, same command, both arms 8/8 nodes and the
+Measured on `examples/classification_task.json` AS IT SHIPPED BEFORE 2026-08-05 (the flat two-blob
+variant; that example is now the concentric-rings task, which evaluates in 0.05-0.6 s — still far
+under provider latency, so the conclusion carries), same command, both arms 8/8 nodes and the
 identical champion: AUTO -> depth 1 cost **109 LLM calls / 1,265,911 tokens / 2348.8 s** against
 `speculation_depth=0`'s **75 calls / 817,201 tokens / 2448.6 s** — 45% more calls and 55% more tokens
 for a 4% wall-clock saving, and not from wrong predictions (one stale prefetch in nine requests).

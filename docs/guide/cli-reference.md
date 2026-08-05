@@ -1012,8 +1012,8 @@ So the scope you review at must be the scope you decide at:
 
 ```bash
 # a task-scoped claim (every engine-produced claim carries its run's task_id)
-looplab claims MEMORY_DIR --scope blob_classification --structured --json --governance-receipt
-looplab claim-decide MEMORY_DIR "STATEMENT" --ratify --scope blob_classification \
+looplab claims MEMORY_DIR --scope ring_classification --structured --json --governance-receipt
+looplab claim-decide MEMORY_DIR "STATEMENT" --ratify --scope ring_classification \
   --claim-uid ... --evidence-digest ... --expected-revision ... --action-id ...
 ```
 

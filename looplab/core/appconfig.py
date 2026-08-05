@@ -213,10 +213,13 @@ _TASK_BLOCKS = {
         "  max_degree: 6\n"
         "  cv_k: 5"),
     "classification": (
-        "  # Synthetic classifier tuning via K-fold CV.\n"
+        "  # Synthetic feature-map + classifier tuning via K-fold CV (concentric rings: the true\n"
+        "  # boundary is a circle, so degree 1 cannot beat chance and degree >= 2 can).\n"
         "  kind: classification\n"
-        "  goal: tune a logistic-regression learner to maximize K-fold CV accuracy\n"
+        "  goal: choose a polynomial feature-map degree + the learner's lr/l2/iters to maximize"
+        " K-fold CV accuracy\n"
         "  direction: max\n"
+        "  max_degree: 4\n"
         "  cv_k: 5"),
     "timeseries": (
         "  # Synthetic forecaster smoothing/seasonality via backtest.\n"

@@ -148,6 +148,20 @@ while the engine still applies `sweep_timeout_mult` and expects a `trials` line.
 2619-2678`) — dead on repo tasks. *Fix: move sweep/eval_timeout prose into the shared suffix and
 gate the sweep offer on the active backend/task kind.*
 
+> **Correction (2026-08-05).** "Gate on the active backend/task kind" — the fix as written and as
+> shipped — is not sufficient, and the gap it left is bigger than the one it closed. It names the
+> two backends that cannot sweep (`PRESETS`, `repo_spec`) and misses the largest class that also
+> cannot: the TEMPLATED Developers the param-tuning adapters return from `llm_roles`
+> (`ClassificationDeveloper`, `RegressionDeveloper`, `TimeSeriesDeveloper` — MLEBench, dataset and
+> code_regression hand their LLM path an `LLMDeveloper`, so they were always correct).
+> None reads `idea.space`, none is a preset, none has a repo spec — so all three were offered the
+> sweep and silently dropped the grid. Measured on a live `examples/classification_task.json` run:
+> the Researcher put `degree` in `space` rather than `params` on 2 of 8 nodes, `implement` fell back
+> to that param's DEFAULT, and both nodes ran a degree-1 program scoring chance (0.55) under a
+> rationale reading *"Sweep degree {2,3} × lr"*. The gate now ASKS the Developer
+> (`roles.py::LLMDeveloper.honors_idea_space`, a positive marker so omission is fail-closed,
+> forwarded read-through by `WrapsDeveloper`) instead of enumerating the backends that cannot.
+
 **P7 · `from looplab.sweep import run_sweep` is a guaranteed crash in Docker tiers.**
 `_SWEEP_CONTRACT` recommends it unconditionally (`roles.py:90-92`); under
 `trust_mode=untrusted/hostile` the solution runs in `python:3.12-slim` with only the workdir
