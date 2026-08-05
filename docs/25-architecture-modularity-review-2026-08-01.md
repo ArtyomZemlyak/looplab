@@ -1124,20 +1124,74 @@ re-pointed:
   `test_run_card_session_pre_gpu_recheck_unions_producer_failed_but_raw_lane_does_not` were
   re-pointed at the phase methods that now own those two consults, with their assertions unchanged.
 
-**Teeth.** Five breaks applied to a throwaway copy of the tree, each by a script that asserts its
-anchor exists exactly once, each run against the guard suites:
+**Teeth.** Breaks applied to a throwaway copy of the tree, each by a script asserting its anchor
+exists exactly once, each run against `test_card_speculation_engine` + `test_card_budget_refund` +
+`test_card_selection_integration`. **Two of the six did not bite, and both are worth more than the
+four that did:**
 
 | break | result |
 |---|---|
-| `_fold_current` stops honouring the tail (serve the memo forever) | 20 failures across all three suites, then a HANG — a session that can never observe a terminal |
-| `open_for_new_work` drops `consumer_completed` | 3 failures incl. the truth table and the outer-boundary session tests |
+| `_fold_current` stops honouring the tail (serve the memo forever) | 5 failures inside the first 15% of one suite, `test_the_turn_snapshot_folds_once_per_observed_tail`, then a HANG — `test_a_turn_that_appends_refolds_before_every_later_phase_reads` never returns, which is the honest consequence: a session that can never observe a terminal |
+| `open_for_new_work` drops `consumer_completed` | 4: the truth table plus the three outer-cadence-boundary session tests |
 | one phase re-derives the stop conditions by hand | `test_no_session_phase_re_derives_a_stop_condition_by_hand` |
-| `self._record_eval_start_boundary(chosen)` → `pass  # …` (CLAUDE.md's documented evasion) | the boundary test, now on its driven half — the old `source.index()` version passed this break |
-| drop the re-fold after `_skip_if_aborted` appends | `test_a_turn_that_appends_refolds_before_every_later_phase_reads` |
+| `self._record_eval_start_boundary(chosen)` → `pass  # …` (CLAUDE.md's documented evasion) | 2, incl. the end-to-end refund run. Verified rather than assumed: the RETIRED `source.index()` pin, replayed against the broken source, returns `boundary < admitted < started` — it passes. The AST pin does not see the call at all |
+| the drop-stale gate reads the pre-`_skip_if_aborted` snapshot | **nothing failed** — and provably cannot |
+| the admitted-batch fill gate reads the live flags again (PARTIAL reversion, pre-GPU re-check left alone) | **nothing failed** on the first guard; `test_no_session_phase_re_derives_a_stop_condition_by_hand` after it was strengthened |
+| both admission gates read the live flags again (FULL reversion) | `test_no_session_phase_re_derives_a_stop_condition_by_hand` |
+
+The two silent breaks are the useful ones. `_skip_if_aborted`'s only append is a
+zero-`eval_seconds` `node_failed` that REMOVES a pending node — it cannot touch
+`paused/finished/stop_requested`, cannot move `total_eval_seconds`, and can only move
+`outer_rebuild` True→False. A stale read there is *conservative in every direction*, so no test can
+distinguish it and one written to try would be testing its own setup. The code stopped depending on
+the distinction anyway: that gate now takes its own `_session_state()`, so there is no refresh line
+for a later editor to delete. The batch-fill asymmetry is likewise **not reachable today** — there
+is no checkpoint inside the fill loop, so `consumer_completed` cannot flip mid-batch — which is
+precisely why it is written down as a structural rule rather than left to be re-derived, the same
+shape as CLAUDE.md's `EV_NODE_EVAL_STARTED` ordering precondition. The guard is what had to change:
+its first version asserted the *set* of functions reading `.stopping`, and reverting only the fill
+gate kept that set identical and passed. It now asserts per-function COUNTS (`open_for_new_work` 1,
+`_card_phase_admit_evals` 2) plus exactly one `open_for_new_work` call in the phase, and both the
+partial and the full reversion fail.
+
+**A flaky test, diagnosed rather than retried.**
+`test_card_budget_refund.py::test_the_refund_is_reachable_end_to_end_on_the_deterministic_backend`
+was failing about 1 run in 3 and had been read as "load-sensitive by design". It is not. Its failure
+detail always showed supersedes HAPPENING (`stale: 5`) with `refunded: 0`, while its assertion
+message said "no supersede occurred" — false, and pointed the next reader at the wrong thing.
+
+Attributed at the branch (a run instrumented at `_serve_card_builds` to record which condition
+closed each request), **8 of 8 `stale` closes were `allow_commit=False`** — not epoch rotation, not
+terminal intent, not a refused claim. `allow_commit` is `session.open_for_new_work(gates)`, and the
+term that shuts it here is `consumer_completed`, set by `_card_eval_one`'s `finally` on the FIRST
+eval terminal of the admitted batch. So the `stale`-vs-`discarded` split is decided by which of two
+real wall-clock durations is shorter: a Developer `implement()` on a worker thread, or a sandbox
+subprocess evaluation. **There is no election or CAS seam that arbitrates it** — the CASes decide
+who WRITES, never which side of the dispatch boundary a supersede lands on — and the fence that
+closes the batch is the documented outer-cadence boundary, so it cannot be moved to make the race
+deterministic without changing a contract. Notably this is the SAME fence as the open
+head-of-line-blocking annotation below: one object, two symptoms.
+
+So the test now asserts every accounting identity that is stage-INDEPENDENT (a discarded prediction
+spends no budget; `discarded == refunded`; `requested == committed + stale + producer_failed`;
+`abandoned == 0`; the run still executes its full 12 experiments; every node id spent beyond those
+12 is a refunded prediction) — measured true in **60/60 runs across six max_nodes/depth
+configurations**, in which `refunded >= 1` would still have failed twice. The refund itself is held
+DETERMINISTICALLY by the sibling `test_discarded_speculative_build_refunds_its_slot_and_survives_replay`,
+which commits a real speculative node and then drives the supersede through
+`_drop_stale_speculation`; that test now also asserts the same `speculation_budget_observation`
+ledger the e2e sibling reports, so a refund that stops reaching the projection is caught on the
+deterministic path. The misleading message is replaced by one that reports the stage split.
+
+Worth recording for whoever reads the flake history: EC-02's fold caching moved this race a long
+way on its own (`stale` closes 3.38 → 0.25 per run, `refunded` 1.12 → 2.88, because the session
+services a finished producer result far sooner) — a much wider margin, and still not a guarantee,
+which is why the test no longer rests on it.
 
 **What remains.** The head-of-line-blocking fence the second `CODEX AGENT:` annotation describes is
 untouched and still annotated: one terminal child still closes the whole admitted batch, so an
-unequal-duration sibling set under-fills the consumer. That is a policy question about refill
+unequal-duration sibling set under-fills the consumer — and, per the diagnosis above, it is also
+what turns a still-building prefetch into a `stale` close. That is a policy question about refill
 fairness, not a structure question, and it wants its own before/after on a workload with unequal
 eval durations. `speculation.py` is still ~2.3k lines for one feature; the file-level split
 (producer lane / request lifecycle / session) is a separate decision the phase boundaries now make

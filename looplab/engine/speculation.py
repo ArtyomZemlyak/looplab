@@ -1947,15 +1947,19 @@ class SpeculationMixin:
             {"node_id": aborted.id}, current,
         ):
             session.progressed = True
-            # `_skip_if_aborted` appended; the gate below must read the log AFTER it.
-            current = self._session_state()
 
         if (
             # An eval terminal closes this admitted batch.  Leave its already-built next
             # Node untouched for the outer control/Strategist/cadence boundary; freshness
             # will re-run from that fresh outer turn.  A pre-decided serial fallback has
             # the same boundary semantics while its admitted eval burns to terminal.
-            session.open_for_new_work(self._session_gates(current, session))
+            #
+            # The gate reads its OWN snapshot rather than the `current` above, because
+            # `_skip_if_aborted` may have appended between them.  Asking `_fold_current` again is
+            # free when nothing was appended (the tail is unmoved) and correct when something was,
+            # so there is no "remember to refresh" line here for anyone to delete later.
+            session.open_for_new_work(
+                self._session_gates(self._session_state(), session))
             and await self._drop_stale_speculation(
                 eval_inflight=session.eval_inflight,
             )

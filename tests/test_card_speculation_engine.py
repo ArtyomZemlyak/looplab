@@ -7,6 +7,7 @@ Node, and every crash prefix is either resumed or explicitly given up without du
 from __future__ import annotations
 
 import ast
+import collections
 import dataclasses
 import inspect
 import threading
@@ -2245,11 +2246,19 @@ def test_no_session_phase_re_derives_a_stop_condition_by_hand():
     }
     assert flag_readers == {"open_for_new_work", "_card_phase_serve_raw_stage"}, flag_readers
 
-    stopping_readers = {
+    # COUNTS, not just the owner set: the admission phase reads `.stopping` at BOTH of its
+    # gates — the batch fill and the pre-GPU re-check — and reverting only one of them back to
+    # `open_for_new_work` leaves the owner set unchanged. (Verified: that partial reversion passed
+    # an earlier set-only version of this assertion.)
+    stopping_readers = collections.Counter(
         _owner(node) for node in ast.walk(tree)
         if isinstance(node, ast.Attribute) and node.attr == "stopping"
-    }
-    assert stopping_readers == {"open_for_new_work", "_card_phase_admit_evals"}, stopping_readers
+    )
+    assert stopping_readers == collections.Counter({
+        "open_for_new_work": 1, "_card_phase_admit_evals": 2,
+    }), stopping_readers
+    # ...and the phase asks the FULL predicate exactly once: its batch boundary, on entry.
+    assert called_names(Engine._card_phase_admit_evals).count("session.open_for_new_work") == 1
 
     phases = [
         getattr(Engine, name) for name in dir(Engine)
