@@ -1106,10 +1106,12 @@ re-pointed:
   misspelled-flag mutation that `slots=True` exists to catch.
 * `test_no_session_phase_re_derives_a_stop_condition_by_hand` — `CardSessionGates(` is constructed
   exactly once in the module; the set of functions that READ `consumer_completed`/`yield_outer` is
-  exactly `{open_for_new_work, _card_phase_serve_raw_stage}` and the set that reads `.stopping` is
-  exactly `{open_for_new_work, _card_phase_admit_evals}`, which is how the asymmetry above stops
-  being a comment; and no `_card_phase_*` method calls `self._terminal_intent`,
-  `session.budget_exhausted`, or `needs_outer_rebuild`. AST, so a commented-out copy is not a node.
+  exactly `{open_for_new_work, _card_phase_serve_raw_stage}`; `.stopping` is read exactly once in
+  `open_for_new_work` and exactly TWICE in `_card_phase_admit_evals`, with exactly one
+  `open_for_new_work` call in that phase — per-function COUNTS, because a set-only version let a
+  half-reverted asymmetry through (see Teeth); and no `_card_phase_*` method calls
+  `self._terminal_intent`, `session.budget_exhausted`, or `needs_outer_rebuild`. AST throughout, so
+  a commented-out copy is not a node.
 * `test_the_turn_snapshot_folds_once_per_observed_tail` — same tail returns the same object with no
   rebuild; an append rebuilds AND the new state carries the append; a swapped `fold` seam is never
   served the previous function's answer.
