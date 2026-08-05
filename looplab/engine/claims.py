@@ -413,6 +413,17 @@ def record_observed_claim_decision(
             "claim_target_changed", expected_claim_uid=expected_uid)
 
     def _validate_target(evidence_snapshot) -> None:
+        # PROJECTION CONTRACT: the digest is validated against the projection scoped to THIS decision's
+        # `scope`, because `claim_evidence_digest` commits the projection's whole-source health receipt
+        # (snapshot digest / producer-run counts / quarantine counters) as well as the claim's own
+        # evidence. Every review surface that hands an operator an `evidence_digest` for this call must
+        # therefore project with the SAME `scope_task`, or the operator reviews one projection and is
+        # judged against another and can never succeed. That is not hypothetical: `cli/governance_cmds.py`
+        # shipped a `claims` command with no `--scope` flag at all, so every task-scoped claim — i.e.
+        # every engine-produced claim — was undecidable from the CLI. Do not "fix" a future mismatch by
+        # narrowing the digest to scope-invariant fields: dropping the source receipt would let a
+        # decision taken over a quarantined/partial source survive that source becoming complete, which
+        # is the freshness fence this whole call exists to enforce.
         current_projection = claims_for_memory(
             memory_dir, lessons=evidence_snapshot.lessons_snapshot,
             research_claims=evidence_snapshot.research_claims_snapshot,

@@ -938,6 +938,16 @@ def claim_evidence_digest(claim: dict) -> str:
 
     Governance metadata is deliberately excluded: ``expected_revision`` fences the decision ledger. This
     digest changes when proof, verification, provenance, or a live opposite-polarity assertion changes.
+
+    It is a token for the PROJECTION, not for the claim alone. ``research_source``/``claim_source`` are
+    whole-source completeness receipts, so the same claim legitimately digests differently in a
+    portfolio-wide projection and in a ``scope_task``-filtered one (the scoped snapshot digest and
+    producer-run counts describe fewer rows). That is deliberate and load-bearing: a partial/quarantined
+    source withholds exact one-sided states, so a decision taken over one must be refused once the
+    omitted tail becomes readable and can flip the verdict. The cost is a contract on the CALLERS —
+    a review surface and the ``record_observed_claim_decision`` validator must project at the same
+    scope. Narrowing these fields out of the digest would make mismatched surfaces agree by removing
+    that fence; scope the projections instead.
     """
     fields = (
         "claim_uid", "statement", "scope", "metric", "polarity", "epistemic", "support", "oppose",

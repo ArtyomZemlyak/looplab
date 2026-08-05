@@ -484,7 +484,7 @@ def claim_decide_cmd(
     """PART V §22.4 — the OPERATOR governance write: ratify / reject / pin the exact live cross-run claim
     snapshot identified by UID, evidence digest and ledger revision. Agents can only read + cite. The
     append is idempotent by action id and rejected if the target/evidence/policy changed since review."""
-    from looplab.engine.claims import record_observed_claim_decision
+    from looplab.engine.claims import ClaimTargetConflict, record_observed_claim_decision
     picked = [d for d, on in (("ratified", ratify), ("rejected", reject), ("pinned", pin)) if on]
     if len(picked) != 1:
         typer.echo("choose exactly one of --ratify / --reject / --pin")
@@ -498,13 +498,33 @@ def claim_decide_cmd(
         raise typer.Exit(2)
     import datetime as _dt
     with _governed_write():
-        rec = record_observed_claim_decision(
-            str(memory_dir), statement=statement, claim_uid=claim_uid,
-            evidence_digest=evidence_digest, decision=picked[0], note=note,
-            scope=scope, metric=metric, expected_revision=expected_revision,
-            action_id=action_id,
-            at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
-        )
+        try:
+            rec = record_observed_claim_decision(
+                str(memory_dir), statement=statement, claim_uid=claim_uid,
+                evidence_digest=evidence_digest, decision=picked[0], note=note,
+                scope=scope, metric=metric, expected_revision=expected_revision,
+                action_id=action_id,
+                at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+            )
+        except ClaimTargetConflict as exc:
+            # The refusal is CORRECT and stays a refusal; only the diagnosis was missing. The digest is
+            # validated against the `--scope`d projection, so an operator who reviewed with a DIFFERENT
+            # `--scope` (in particular the portfolio-wide default, which is what `claims` could only
+            # ever produce before it grew `--scope`) sees "evidence changed" when nothing changed. Name
+            # the projection so the two causes are distinguishable without reading the engine.
+            if exc.code != "claim_evidence_changed":
+                raise
+            typer.echo(f"error: {exc.code}")
+            typer.echo(
+                f"the supplied --evidence-digest does not match this claim in the --scope "
+                f"{scope!r} projection (its current digest is "
+                f"{str(exc.detail.get('current_evidence_digest') or '(claim not projected)')!r}). "
+                "A decision is validated against the SAME scoped projection it must be reviewed in: "
+                f"re-review with `looplab claims MEMORY_DIR --scope {scope!r} --structured --json "
+                "--governance-receipt` and use that receipt's digest. If you already reviewed at this "
+                "scope, the lesson/research evidence genuinely changed since review — re-review it "
+                "before deciding.")
+            raise typer.Exit(2) from exc
     typer.echo(f"recorded: {rec['decision']} — {rec['statement'][:80]}")
 
 
@@ -849,10 +869,16 @@ def claims_cmd(
     fuzzy: bool = typer.Option(False, "--fuzzy", help="Merge paraphrased claims (CR1b, suggestion-grade)."),
     structured: bool = typer.Option(False, "--structured", help="Use the scope+polarity-safe structured "
                                     "claim key (§21.20.13): opposite-polarity claims contradict, not merge."),
+    scope: str = typer.Option(
+        "", "--scope", help="Project only this task's evidence (the CLI spelling of the HTTP "
+        "`/api/cross-run/claims?scope_task=` read). REQUIRED to obtain a usable --governance-receipt "
+        "for a task-scoped claim: `claim-decide --scope T` validates against the SAME scoped "
+        "projection, so a portfolio-wide receipt can never match it. Empty = portfolio-wide."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full assessments as JSON."),
     governance_receipt: bool = typer.Option(
         False, "--governance-receipt",
-        help="With --json, wrap claims with the exact claim-governance revision for claim-decide."),
+        help="With --json, wrap claims with the exact claim-governance revision and reviewed scope "
+             "for claim-decide."),
 ):
     """PART IV cross-run Step 4/5 (§21.20): project distilled lessons into evidence-labelled claim
     records with support and opposition attempt references. Legacy wire states ``supported`` and
@@ -861,12 +887,14 @@ def claims_cmd(
     ``--pack`` renders the hard-capped agent context pack (pinned → ratified → mixed → support-only
     → opposition-only → insufficient; a caveat may replace the weakest non-pinned positive).
     Reads lessons plus D8 research claims and governance decisions; ``--pack`` additionally joins
-    concept capsules, aliases, and splits. No LLM/endpoint."""
+    concept capsules, aliases, and splits. ``--scope`` narrows every joined source to one task, which is
+    what makes the emitted ``evidence_digest`` usable by ``claim-decide --scope``. No LLM/endpoint."""
     from looplab.engine.claims import (
         _load_claim_source_path, _safe_claim_source_summary,
         _safe_research_source_summary, build_context_pack, claims_for_memory,
         load_research_claims, render_context_pack,
     )
+    from looplab.engine.claims_health import scope_cross_run_sources
     from looplab.engine.governance_health import observed_path_missing, project_governed_sources
     from looplab.engine.memory import ConceptCapsuleStore, _portfolio_concept_overview_data
 
@@ -886,8 +914,17 @@ def claims_cmd(
         def _project(governance):
             lessons = _load_claim_source_path(path, research=False)
             research = load_research_claims(base)
+            # `scope_task` is load-bearing, not a convenience filter. `claim_evidence_digest` commits
+            # the projection's WHOLE-SOURCE health receipt (snapshot digest, producer-run counts,
+            # quarantine counters) alongside the claim's own evidence, so the digest is a property of
+            # the PROJECTION and not of the claim alone. `record_observed_claim_decision` validates
+            # against `claims_for_memory(..., scope_task=<the decision's scope>)`, so a review that
+            # projected portfolio-wide hands the operator a digest that can never match and every
+            # scoped `claim-decide` exits 2 with `claim_evidence_changed` — which is what happened
+            # while this command had no `--scope` at all. Review scope must equal decide scope; the
+            # HTTP pair (`/api/cross-run/claims?scope_task=` + POST claim-decide `scope`) already did.
             claims = claims_for_memory(
-                base, lessons=lessons, research_claims=research,
+                base, lessons=lessons, research_claims=research, scope_task=scope,
                 decisions=governance["decisions"], fuzzy=fuzzy, structured=structured)
             research_source = _safe_research_source_summary(
                 getattr(claims, "research_source", None)) or {}
@@ -899,8 +936,16 @@ def claims_cmd(
                 if observed_path_missing(caps_path):
                     overview, concept_rows = None, None
                 else:
+                    # scoping is per-STORE (`scope_cross_run_sources` is the access boundary): the pack
+                    # joins claims and concepts into ONE payload, so a `--scope` that narrowed the
+                    # claims but left the capsules portfolio-wide would put another task's concepts
+                    # beside this task's claims — the exact half-scoped join that boundary exists to
+                    # prevent. `atlas_for_memory(scope_task=...)` filters all three stores for the same
+                    # reason.
+                    _lessons, capsules, _research = scope_cross_run_sources(
+                        task_id=scope, capsules=ConceptCapsuleStore(caps_path).all())
                     overview, concept_rows = _portfolio_concept_overview_data(
-                        ConceptCapsuleStore(caps_path).all(), aliases=governance["aliases"],
+                        capsules, aliases=governance["aliases"],
                         splits=governance["splits"])
                 # build the pack before releasing any policy/source lock. Its claims,
                 # taxonomy, source receipts and decisions must all describe the same durable era.
@@ -943,7 +988,26 @@ def claims_cmd(
             "claims": claims,
             "revision": snapshot["claim_revision"],
             "structured": structured,
+            # the receipt names the PROJECTION its digests describe, not just the ledger revision.
+            # `claim-decide --scope` must be given this exact value or its scoped re-projection
+            # produces a different `evidence_digest` and refuses. The HTTP claims response has
+            # always echoed `scope_task` for the same reason.
+            "scope": scope,
         } if governance_receipt else claims)
+        if governance_receipt and not scope:
+            # Say so HERE, where the unusable receipt is handed out, rather than leaving the operator to
+            # discover it as a `claim_evidence_changed` refusal two commands later. Same discipline as the
+            # partial-source WARNINGs below: a receipt must not overstate what it can be used for. On
+            # STDERR so the JSON on stdout stays machine-parseable.
+            scoped_claims = sorted({str(c.get("scope") or "") for c in claims if c.get("scope")})
+            if scoped_claims:
+                typer.echo(
+                    "WARNING: this receipt describes the PORTFOLIO-WIDE projection, but "
+                    f"{len(scoped_claims)} task scope(s) appear in it "
+                    f"({', '.join(scoped_claims[:5])}{', …' if len(scoped_claims) > 5 else ''}). "
+                    "`claim-decide --scope T` validates against the projection scoped to T, so these "
+                    "evidence digests will be refused. Re-run with `--scope T` to obtain a decidable "
+                    "receipt for one task.", err=True)
         typer.echo(orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode())
         return
     if research_source.get("source_complete") is not True:
