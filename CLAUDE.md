@@ -180,7 +180,17 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   4 -> 0); capped-LLM-lane producers `core/llm_broker.py::BACKGROUND_LANE_PRODUCERS` (a lane name is
   a bare string, so this is what stops a FOREGROUND producer from joining a lane capped at one
   concurrent request because its prompt looks like background work — the per-eval inter-stage check
-  did exactly that and serialized every concurrent eval's stage gate).
+  did exactly that and serialized every concurrent eval's stage gate); the tool-loop keyword split
+  `agents/loop_options.py::LOOP_OPTION_FIELDS` + `EXPLICIT_ONLY_LOOP_ARGS`, which must PARTITION
+  `drive_tool_loop`'s keyword-only parameters — an option travels only inside a `LoopOptions` bundle,
+  a per-call callback (and the two prompt contracts `nudge_prompt`/`stuck_prompt`) only as an
+  explicit keyword. Adding a parameter to exactly one of the two lists is how the original defect
+  comes back: a name reachable BOTH ways raises a duplicate-keyword `TypeError` that the loop's own
+  containment `except` swallows, and the agentic Researcher silently degrades to non-agentic in the
+  DEFAULT config. Also the engine's sub-object forwarding seam
+  `engine/orchestrator.py::Engine.FORWARDED_SUBOBJECT_MEMBERS` (name -> sub-object + `@in_llm_lane`);
+  a delegator whose lane is forgotten does not fail, it just runs outside the capped enrichment lane
+  and competes with foreground work for provider concurrency, which reads as an unexplained stall.
   Adding/renaming any such seam means updating the registry in the SAME change. Note `search/foresight.py`'s
   panel is a `__getattr__` proxy over the wrapped agent: a typo'd read silently resolves to the
   base object, and an attribute SET on the panel shadows reads *through the panel* but does NOT
