@@ -1,11 +1,23 @@
-"""The eval task (`_evaluate` — the engine's single largest method: materialize -> eval ->
-trust scans -> inline repair loop -> ONE terminal event) — extracted from orchestrator.py as a
+"""The eval task (`_evaluate`: materialize -> eval -> trust scans -> inline repair loop -> ONE
+terminal event) — extracted from orchestrator.py as a
 MIXIN: `class Engine(EvaluateMixin, …)` inherits it unchanged, so there is ZERO call-site churn
 and `self` here IS the engine. The body is a verbatim move and reads engine attributes freely
 (~30 of them: `_write_lock`, `proxy_scorer`, `_inline_repair*`, `sandbox`, trust knobs, …); its
 helpers (`_materialize`/`_run_eval`/`_triage_crash`/`_repair`/`_safe_reuse_start`/
 `_audit_workdir_writes`/…) resolve through `self` — onto the sibling mixins or the Engine
 class itself (`_materialize`/`_write_node_files` stay in orchestrator.py).
+
+`_evaluate` was the engine's single largest method until 2026-08-05 (doc 25 ES-03), which named the
+decisions its attempt loop was making inline — the intervention watcher (`_eval_intervention_seen`
+/`_watch_for_intervention`), the trust surface and its findings (`_trust_scan_surface`
+/`_trust_scan_signals`), and the inline-repair pipeline's five verdicts (`_eval_failure_text`,
+`_repaired_footprint`, and the module-level `_repair_provider_failure`/`_repair_change_set`
+/`_repair_forces_full_retrain`). 946 -> 727 lines, the attempt loop 602 -> 420, with every append,
+fold, write-lock point and branch order left exactly where it was. What made those blocks worth
+naming is not their size: each was reachable ONLY by driving a real sandboxed evaluation that failed
+in exactly the right way, so `tests/test_evaluate_named_rules.py` is the first coverage several of
+their branches have had. The residue is genuinely a driver — the one-terminal invariant, the
+attempt loop's control flow, and the loop-local counters those rules round-trip through.
 
 `fold` is imported from its canonical home here (the orchestrator's module-global `fold` seam —
 monkeypatched by two tests — does not reach `_evaluate`: those patches gate node CREATION).
