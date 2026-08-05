@@ -6278,6 +6278,91 @@ Scope: `ui/src/` + `ui/test/`.
 
 *Recommendation:* Split ConfigPanel and the Card board (with _HypothesisFallback) into their own modules re-exported through panels.jsx; the single-chunk lazy strategy in RunView is preserved by keeping panels.jsx as the barrel.
 
+*Resolution (2026-08-05) — done as recommended; every line and comment moved verbatim, and the "free
+to change without affecting bundling" premise turned out to be conditional, so the condition is now a
+test.*
+
+Every number in the finding is stale in the same direction. panels.jsx was 4,857 lines, not 2,351;
+ConfigPanel was 669 lines (830-1498), not ~490; the Card board was 1,406 lines (2758-4163), not ~700.
+`ui/src/ConfigPanel.jsx` (725 lines) and `ui/src/CardBoard.jsx` (1,419 lines — `HypothesisBoard`,
+`_CardKanban`, `_CardKanbanCard`, `_HypothesisFallback` and the hypothesis delete-recovery journal)
+are the two new modules; panels.jsx is 2,741 lines and re-exports both where the code used to sit.
+
+Exactly three names are read by the hub AND by both extracted modules — `isRecord`,
+`PANEL_REQUEST_TIMEOUT_MS`, `RUN_GENERATION_RE`. They went DOWN into a new leaf,
+`ui/src/panelPrimitives.js` (13 lines, carrying the whole payload-guard group so `invalidPanelPayload`
+/ `nullableText` / `nullableNumber` are not separated from `isRecord`), rather than being imported
+back out of the barrel: under the build's `chunkModulesOrder: 'exec-order'` a barrel↔member cycle is a
+load-time TDZ crash, not a build error. Nothing else moved and no name was reworded; the only lines
+that differ from the original are the import statements, which shed the eighteen bindings the split
+orphaned (`SettingsForm`, four `settingsSchema` names, five `settingsModel` names, the
+`cardControlModel` pair and six from `util.js`).
+`usePoll`, `post` and `React` are still imported unused — they were already dead before this change,
+so removing them here would have been a diff about something else.
+
+**Rejected: extracting AuthoringPanel**, which is now the largest resident at 1,125 lines (a 949-line
+component plus 176 lines of its own sessionStorage operation-intent machinery) — bigger than
+ConfigPanel, and the finding does not mention it. It is not the same KIND of resident. Measured on the
+tree: ConfigPanel and the Card board each reach exactly three panels.jsx-local names (the three
+hoisted above) and nothing in panels.jsx reads back into either. AuthoringPanel reaches SEVEN, and two
+of them — `usePanelResource` and `PanelResourceNotice` — are the shared resource hook and its notice
+component used by five other panels; two more (`authoringPayload`, `AUTHORING_MAX_BYTES`) are read
+BACK by MemoryPanel. Extracting it therefore means hoisting `usePanelResource` too, which is UI-06's
+subject and its explicit recommendation ("promote one shared hook family into hooks.js"). Doing it
+here would settle UI-06 by accident, in the wrong file, without Inspector's supersede/mapLastGood
+superset in view.
+
+The finding's claim that "file layout is free to change without affecting bundling" is true of the
+layout that shipped, and only because of a property nothing was enforcing. Measured across the split:
+`dist/.vite/manifest.json` still contains exactly one key for this code (`src/panels.jsx`), total
+chunks 33 → 33, the `panel-hub increment` closure 11 chunks → 11 chunks and 45,303 B → 45,209 B gzip,
+and `npm run check:bundle` reports the same 14 pre-existing violations (byte deltas only; the tree was
+already over budget before this change). That holds because `panels.jsx` is the ONLY importer of the
+new modules. Give Rolldown a second reachability root and it stops holding — see the guard below.
+
+Twelve source reads across five test files pointed `panels.jsx` at code that has moved, and a sixth
+file kept a coverage list that would have silently stopped covering it. Six slices in
+`cardKanban.test.js` now read `CardBoard.jsx` (its
+`HypothesisBoard`-to-`// Module scope` slice lost its end anchor with the move and is now bounded by
+an asserted start anchor plus EOF, since `HypothesisBoard` is last in the file); two in
+`settingsPersistence.test.js` and the Config-restart slice in `uiSemantics.test.js` read
+`ConfigPanel.jsx`; `submitCommand.test.js` searches both modules for its six converted call sites
+instead of dropping the three that moved. Two COVERAGE lists mattered more than the slices, because
+shrinking them is invisible: `dataTableMigration.test.js` and the raw-run-id-in-a-URL scan in
+`uiGlobalReview.test.js` both enumerate modules by name, so both gained `ConfigPanel.jsx` and
+`CardBoard.jsx` (CardBoard is excluded from the positive `runApiPath(` half — every board mutation
+goes through a `CONTROL.*` helper, so it never names a run path). The four test files that
+`ssrLoadModule('/src/panels.jsx')` were deliberately NOT re-pointed: they are what proves the barrel.
+
+The guard is `ui/test/panelsBarrel.test.js` (4 tests). It does not hand-list the hub's exports — it
+DERIVES them from the real call sites (`lazyNamed(loadPanels, '<Name>')` literals in RunView.jsx, any
+named import of `./panels.jsx`, and the `ssrLoadModule('/src/panels.jsx')` destructurings and
+`panels.<Name>` reads in the suite: 20 names from 4 files today), refuses to run on a derivation
+smaller than 20 names or drawn from fewer than 2 files, then LOADS the barrel through vite and checks
+each name really resolves. That matters because RunView reaches every panel by STRING: a dropped
+re-export is not a build error, `module[name]` is `undefined`, and React.lazy hands back
+`{ default: undefined }` — a crash the first time an operator opens that panel.
+
+Verified by mutation on a throwaway copy of the tree (each break applied by a script that asserts its
+anchor appears exactly once):
+
+* Drop only `ConfigPanel` from the re-export line, leaving `__testPublicConfigForm` so
+  settingsPersistence's loader check still passes. Of 688 tests, exactly one new failure — this guard,
+  at `panels.jsx no longer exports ConfigPanel — a consumer resolves undefined`. Nothing else notices.
+* Add `import { HypothesisBoard } from './CardBoard.jsx'` to Dock.jsx. The guard fails at
+  `CardBoard.jsx must be reachable only through panels.jsx`, naming Dock.jsx. Built, the mutant emits
+  34 chunks instead of 33 and the `panel-hub increment` DROPS to 33,497 B gzip — 11.7 KiB of Card
+  board code left the panel chunk for one a review route loads eagerly — while `check:bundle` still
+  reports the same 14 violations and no `forbidden_reachability`. Its selectors resolve panel code by
+  `src: 'src/panels.jsx'`, so the leak reads as a smaller panel budget. That silent-improvement shape
+  is the reason this test exists rather than a note in the config.
+* Re-derive `const isRecord = …` locally in CardBoard.jsx instead of importing it. The guard fails at
+  `CardBoard.jsx re-derives isRecord instead of importing the shared one`.
+
+`npm test` 686 pass / 2 fail — `dockNarration` (asha_verdict narration) and `settingsSchemaResource`
+(162 vs 158 fields), both failing identically before this change and unrelated to it. `npm run build`
+exits 0.
+
 #### UI-05 · MEDIUM · under-decomposition · effort: large
 
 **AssistantBar.jsx: 2,031-line component mixing 3 view layouts, session lifecycle, stream+recovery, share management, and the duplicated command machine**
