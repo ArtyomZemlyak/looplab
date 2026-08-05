@@ -146,8 +146,8 @@ BACKGROUND_LANE_PRODUCERS: dict[str, tuple[str, ...]] = {
         # Report writing and the Strategist/coverage/tie-break cadence: same shape — bounded-cadence
         # main-task work whose latency no node is waiting on.
         "research_cadence.py::_write_report_with_seq",
-        "strategy.py::_maybe_snapshot_concept_coverage",
-        "strategy.py::_maybe_verify_ties",
+        "concept_cadence.py::_maybe_snapshot_concept_coverage",
+        "verifier_tiebreak.py::_maybe_verify_ties",
         "strategy.py::_maybe_consult_strategist",
     ),
 }

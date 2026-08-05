@@ -67,6 +67,8 @@ from looplab.engine.asha_monitor import AshaMonitorMixin
 from looplab.engine.shared import SharedEngineMixin
 from looplab.engine.novelty import NoveltyGateMixin
 from looplab.engine.strategy import StrategyCadenceMixin
+from looplab.engine.concept_cadence import ConceptCadenceMixin
+from looplab.engine.verifier_tiebreak import VerifierTiebreakMixin
 from looplab.engine.research_cadence import ResearchCadenceMixin
 from looplab.engine.finalize import (
     ensure_finish_report,
@@ -373,6 +375,7 @@ _BUDGET_WAIT_MAX_S = 4.0
 
 
 class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
+             ConceptCadenceMixin, VerifierTiebreakMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
              AuditMixin, ResourceSchedulingMixin, SpeculationMixin, EvaluateMixin, NodeBuildMixin,
              ProposalCuesMixin,
@@ -3979,12 +3982,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # ------------------------------- strategist cadence (extracted to engine/strategy.py)
     # The A7 strategist-consultation + coverage-snapshot cluster (`_strategy_core`,
     # `_available_developers`, `_strategy_ctx`, `_coverage_for_ctx`, `_should_consult`,
-    # `_record_strategy`, `_ensure_surrogate`, `_apply_strategy`, `_already_covered_at`,
+    # `_record_strategy`, `_ensure_surrogate`, `_apply_strategy`,
     # `_maybe_snapshot_coverage`, `_maybe_consult_strategist`) lives in looplab/engine/strategy.py
     # (StrategyCadenceMixin — inherited, zero call-site churn). `_op_span` did NOT come with it and no
     # longer lives here either: it is a generic new-trace span helper shared by the research /
     # hypothesis-merge / lessons clusters too, so it moved to `engine/shared.py::SharedEngineMixin`
     # (called from more than one cluster, owns no state of its own — the bar that module documents).
+    # Two clusters that never belonged to the strategist cadence left it in doc 25 EC-09: the PART
+    # IV/V concept cadence (`_should_consult_concepts`, `_maybe_snapshot_concept_coverage`,
+    # `_maybe_seed_run_base_concepts`, `_concept_coverage_snapshot` + its steps) is
+    # engine/concept_cadence.py (ConceptCadenceMixin) and paces on `concept_retag_every`, not
+    # `strategist_every`; the R1-c calibrated-verifier tie-break (`_maybe_verify_ties`,
+    # `_metric_tie_groups`, `_verifier_soundness`) is engine/verifier_tiebreak.py
+    # (VerifierTiebreakMixin) and is SELECTION machinery. The at_node idempotence gate all three
+    # snapshot sites shared is no longer an Engine member at all: it is
+    # `search/coverage.py::already_covered_at(state, n, snapshots)`, beside the projection match it
+    # composes and beside `latest_live_snapshot`, its mirror on the consumption side.
 
     # ------------------------------ research cadence (extracted to engine/research_cadence.py)
     # The P2 deep-research + open-hypothesis-board merge + run-report cadence cluster

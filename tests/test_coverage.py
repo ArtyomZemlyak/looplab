@@ -178,14 +178,18 @@ def test_coverage_snapshot_folds_as_audit_only(tmp_path):
 
 def test_already_covered_at_gate():
     from looplab.core.models import Idea, Node
+    from looplab.search.coverage import already_covered_at
     # The producer always calls this with n == len(state.nodes); build a consistent 3-node state so the
     # tokenless snapshot's node-boundary check (a legacy row is live only at its own node count) holds.
     st = RunState()
     st.nodes = {i: Node(id=i, operator="draft", idea=Idea(operator="draft", params={})) for i in range(3)}
-    assert not Engine._already_covered_at(st, 3)
+    assert not already_covered_at(st, 3, st.coverage_snapshots)
     st.coverage_snapshots.append({"at_node": 3})
-    assert Engine._already_covered_at(st, 3)
-    assert not Engine._already_covered_at(st, 6)
+    assert already_covered_at(st, 3, st.coverage_snapshots)
+    assert not already_covered_at(st, 6, st.coverage_snapshots)
+    # Parametrized over the LIST (doc 25 EC-09): the concept producer's own snapshots must not
+    # satisfy the flat producer's gate, and vice versa — they advance independently.
+    assert not already_covered_at(st, 3, st.concept_coverage_snapshots)
 
 
 def test_tokenless_snapshot_requires_node_boundary():
@@ -208,7 +212,6 @@ def test_same_node_count_abort_refreshes_flat_coverage_snapshot(tmp_path):
     eng = SimpleNamespace(
         _coverage_context=True,
         _should_consult=lambda state, **_: True,
-        _already_covered_at=lambda state, n: Engine._already_covered_at(state, n),
         archive_resolution=1.0,
         store=store,
     )

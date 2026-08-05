@@ -3,14 +3,27 @@
 A later `node_concepts` classifier event refines them last-write-wins; admission consumers can therefore
 distinguish a proposal claim from independent classifier evidence without migrating old event logs.
 """
-from types import SimpleNamespace
-
 import pytest
 
 from looplab.core.models import Idea, IdeaEmission, Node, durable_idea_payload
-from looplab.engine.strategy import StrategyCadenceMixin
+from looplab.engine.concept_cadence import ConceptCadenceMixin
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
+
+
+class _CadenceHost(ConceptCadenceMixin):
+    """The engine surface `_concept_coverage_snapshot` actually needs: a reflect client and a store.
+
+    A REAL mixin instance rather than a `SimpleNamespace`, because the producer drives its tagging /
+    edge / hypothesis steps through `self` (doc 25 EC-09) — a duck host would only exercise whichever
+    steps happened to be inlined on the day it was written.
+    """
+
+    def __init__(self, store):
+        self.store = store
+
+    def _reflect_client(self):
+        return object()
 
 
 def _store(tmp_path) -> EventStore:
@@ -264,8 +277,8 @@ def test_cadence_retags_authored_claim_and_stamps_classifier_generation(tmp_path
         def append(self, event_type, data): self.events.append((event_type, data))
 
     store = CaptureStore()
-    host = SimpleNamespace(_reflect_client=lambda: object(), store=store)
-    assert StrategyCadenceMixin._concept_coverage_snapshot(host, state) is not None
+    host = _CadenceHost(store)
+    assert host._concept_coverage_snapshot(state) is not None
 
     assert captured["known_tags"] == {1: ["classifier/known"]}
     emitted = [data for event_type, data in store.events if event_type == "node_concepts"]
@@ -311,8 +324,8 @@ def test_cadence_repairs_partial_classifier_instead_of_caching_subset(tmp_path, 
         def append(self, event_type, data): self.events.append((event_type, data))
 
     store = CaptureStore()
-    host = SimpleNamespace(_reflect_client=lambda: object(), store=store)
-    assert StrategyCadenceMixin._concept_coverage_snapshot(host, state) is not None
+    host = _CadenceHost(store)
+    assert host._concept_coverage_snapshot(state) is not None
 
     assert captured["known_tags"] == {1: ["classifier/known"]}
     emitted = [data for event_type, data in store.events if event_type == "node_concepts"]
@@ -357,8 +370,8 @@ def test_cadence_persists_per_node_fallback_provenance(tmp_path, monkeypatch):
         def append(self, event_type, data): self.events.append((event_type, data))
 
     store = CaptureStore()
-    host = SimpleNamespace(_reflect_client=lambda: object(), store=store)
-    assert StrategyCadenceMixin._concept_coverage_snapshot(host, state) is not None
+    host = _CadenceHost(store)
+    assert host._concept_coverage_snapshot(state) is not None
 
     emitted = {data["node_id"]: data for event_type, data in store.events
                if event_type == "node_concepts"}
@@ -408,8 +421,8 @@ def test_cadence_never_retags_an_operator_edited_node(tmp_path, monkeypatch):
         def append(self, event_type, data): self.events.append((event_type, data))
 
     store = CaptureStore()
-    host = SimpleNamespace(_reflect_client=lambda: object(), store=store)
-    assert StrategyCadenceMixin._concept_coverage_snapshot(host, state) is not None
+    host = _CadenceHost(store)
+    assert host._concept_coverage_snapshot(state) is not None
 
     # The operator node (0) AND the classifier node (1) are both KNOWN — the operator node survives the
     # staleness filter despite its at_vocab=0, so neither enters the LLM todo set.

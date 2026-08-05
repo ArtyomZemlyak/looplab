@@ -129,6 +129,32 @@ def latest_live_snapshot(state: RunState, snapshots) -> dict:
     return {}
 
 
+def already_covered_at(state: RunState, n: int, snapshots) -> bool:
+    """Whether *snapshots* already holds a STILL-LIVE snapshot recorded at node count *n* — the
+    at_node idempotence gate every snapshot PRODUCER shares, and the mirror of `latest_live_snapshot`
+    on the consumption side (doc 25 EC-09).
+
+    The producer's gate has two halves and both matter. `at_node == n` is what makes resume by replay
+    idempotent: each node-count decision point is reached exactly once, so a re-entered cadence sees
+    its own record and does not re-emit (or, for the paid concept cadence, re-purchase). The
+    projection match is what keeps that from ossifying: an abort / reset / tag edit changes the live
+    steering inputs WITHOUT allocating a node, so a snapshot taken before it no longer describes the
+    run and the cadence must be allowed to record a fresh one at the same `n`. Dropping either half
+    fails silently in a different direction — without the first the cadence re-emits every pass,
+    without the second a stale row suppresses the cadence for the rest of that node count.
+
+    Parametrized over the snapshot LIST because the two producers keep independent ones
+    (`coverage_snapshots`, `concept_coverage_snapshots`) and must not be able to satisfy each other's
+    gate — the same reason `cadence_due` takes each consumer's own marks.
+
+    Cheap half FIRST, as all three call sites already spelled it: the projection match digests every
+    node's idea/params/concepts, so testing `at_node` first keeps a long snapshot history O(rows)
+    rather than O(rows x nodes)."""
+    return any((snapshot or {}).get("at_node") == n
+               and snapshot_matches_analytics_projection(state, snapshot)
+               for snapshot in (snapshots or []))
+
+
 def _node_theme(node):
     """A node's theme exactly as the canonical `theme_rollup` reads it — delegated to the ONE shared
     derivation (`events.digest.node_theme`: legacy `idea.theme`, else the first concept's axis) so the

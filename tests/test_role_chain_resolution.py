@@ -131,7 +131,7 @@ def test_the_developer_client_is_used_when_the_researcher_has_none():
 # ------------------------------------------------------------------ every site delegates
 
 @pytest.mark.parametrize("module,holder,function", [
-    ("looplab.engine.strategy", "StrategyCadenceMixin", "_verifier_soundness"),
+    ("looplab.engine.verifier_tiebreak", "VerifierTiebreakMixin", "_verifier_soundness"),
     ("looplab.engine.novelty", "NoveltyGateMixin", "_verified_failed_direction_reopen"),
 ])
 def test_no_engine_site_re_derives_the_parser_walk(module, holder, function):

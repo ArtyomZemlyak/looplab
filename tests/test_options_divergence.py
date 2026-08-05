@@ -169,12 +169,19 @@ def test_curation_rationale_discloses_synchronous_finalize_latency():
 
 def test_part_iv_comments_distinguish_fold_storage_from_live_steering():
     root = Path(__file__).parents[1]
-    strategy = (root / "looplab" / "engine" / "strategy.py").read_text(encoding="utf-8")
+    engine = root / "looplab" / "engine"
+    # The concept cadence left `engine/strategy.py` in doc 25 EC-09, and these comments went with it.
+    # Both files are read, and the NEGATIVE pins cover both: the retracted claim ("audit-only, so the
+    # flag being off by default is harmless") is about the concept pivot, so it would come back in
+    # `concept_cadence.py` — but the split is recent enough that a revert could land it in either.
+    cadence = (engine / "concept_cadence.py").read_text(encoding="utf-8")
+    strategy = (engine / "strategy.py").read_text(encoding="utf-8")
     graph = (root / "looplab" / "search" / "concept_graph.py").read_text(encoding="utf-8")
-    assert "product `Settings` is ON" in strategy
-    assert "can steer later proposals" in strategy
+    assert "product `Settings` is ON" in cadence
+    assert "can steer later proposals" in cadence
     assert "change admission" in graph
     assert "configured live-client call is synchronous" in graph
+    assert "`_concept_pivot` being OFF by default" not in cadence
     assert "`_concept_pivot` being OFF by default" not in strategy
     assert "off-by-default + audit-only" not in graph
     assert "Never raises, never blocks the caller" not in graph

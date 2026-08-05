@@ -50,6 +50,7 @@ _LAYOUT = {
     "settings_ui_schema": "serve",
     "asset_brief": "tools",   # PART IV D1 bounded local asset/prior-art brief
     "audit": "engine",   # engine audit/trust-emitter mixin
+    "concept_cadence": "engine",  # PART IV/V concept re-tag + snapshot mixin (doc 25 EC-09)
     "concept_capsules": "engine",  # durable per-run concept record + portfolio views (doc 25 EM-10)
     "concept_graph": "search",   # PART IV D5 pure concept-graph projection used offline and live
     "concept_projection": "search",  # receipt/lifecycle-aware CURRENT membership boundary
@@ -266,6 +267,7 @@ _LAYOUT = {
     "validate": "core",
     "vectorstore": "tools",
     "verifier": "trust",   # PART IV keystone-B §12 advisory verifier (offline/library)
+    "verifier_tiebreak": "engine",  # R1-c calibrated-verifier metric tie-break mixin (doc 25 EC-09)
     # The D8 memo-claim verifier. It was `trust/verify.py` — two letters from `trust/verifier.py`,
     # which is a DIFFERENT verifier (doc 25 CT-09). Both legacy spellings live in `_RENAMED` below,
     # because this map's contract is canonical-stem -> package and `verify` is no longer a stem.
