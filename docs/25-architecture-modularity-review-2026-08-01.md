@@ -1638,7 +1638,38 @@ module never imports back into `memory` — the break for the second one surface
 ERROR rather than a test failure, which is worth stating because a harness filtering only on `FAILED`
 reads it as green.
 
-The `concept_capsules.py` half is NOT done; it is the larger of the two and wants its own pass.
+*Both halves are now done (2026-08-05).* `engine/concept_capsules.py` holds the 16 capsule defs and
+the 17 bound constants only they use; `memory.py` is 1625 -> 655 lines and is finally the episodic
+case library its docstring describes.
+
+The blocker below was real and was cleared first rather than worked around:
+
+The capsule band is 16 defs / ~739 lines (`_CapsuleRows` through `portfolio_concept_graph`). It needs
+19 names from `memory`: 17 are capsule/graph bound constants that belong WITH the capsules and move
+freely. The other two are the problem — `fingerprint_similarity` and `_is_finite_metric`. This
+finding says fingerprints stay in `memory.py`, but `memory` must import the new module to re-export
+it, so "capsules import fingerprints from memory" is a CYCLE, not a layering.
+
+It resolves cleanly because both blockers are tiny and pure: `fingerprint_similarity` is six lines of
+Jaccard over two token lists, and `_is_finite_metric` is a finiteness predicate. They belong BELOW
+both modules, in `core` — and `core/fitness.py` is already the established home for "what counts as a
+usable metric" (that is exactly what CO-09 settled). Moving those two down first turns this half into
+the same verbatim-move-plus-shim that the lesson-hygiene half already is.
+
+Attempting the capsule move WITHOUT that step would either introduce the cycle or force a
+function-local import to hide it, which is the smell this finding exists to remove.
+
+So the helpers moved first. `fingerprint_similarity` is now `core/text` (pure set math over the token
+lists that module already defines), and `_is_finite_metric` is `core/fitness.finite_or_absent_metric`
+— a NAMED sibling of `is_usable_metric`, not a merge, because they differ on exactly one input:
+`None` is a legitimate capsule state ("no metric recorded") but not a usable ordering key. That
+equivalence was verified across twelve inputs before the move, and a guard pins the one difference.
+Keeping them distinct is the same call CO-09 made for this family of predicates.
+
+With the direction fixed, the capsule move is the same verbatim-move-plus-shim as the first half. A
+guard pins that `concept_capsules` never imports back into `memory`; its break surfaces as a
+circular-import ERROR across the whole module, which is why the harness counts ERROR as well as
+FAILED.
 
 #### EM-11 · MEDIUM · dead-code · effort: small — **RESOLVED (2026-08-02)**
 

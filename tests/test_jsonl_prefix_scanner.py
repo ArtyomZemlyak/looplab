@@ -274,3 +274,48 @@ def test_lesson_hygiene_does_not_import_back_into_memory():
         back += [f"line {node.lineno}: {n}" for n in names
                  if n and n.startswith("looplab.engine.memory")]
     assert not back, f"lesson_hygiene imports back into memory: {back}"
+
+
+def test_concept_capsule_re_exports_are_the_same_objects():
+    """The capsule half of EM-10. `tools/` reaches for `_dedup_valid_capsules`,
+    `_portfolio_concept_overview_data` and `_capsule_rows` THROUGH `memory` (they are declared
+    cross-package private seams), so identity — not name resolution — is the contract."""
+    from looplab.engine import concept_capsules, memory
+
+    for name in ("ConceptCapsuleStore", "build_concept_capsule", "_dedup_valid_capsules",
+                 "_capsule_rows", "_filter_capsule_rows", "_portfolio_concept_overview_data",
+                 "portfolio_concept_overview", "portfolio_concept_graph", "_valid_capsule_record",
+                 "_capsule_source_summary", "_capsule_completeness", "concept_profit_tendencies",
+                 "CONCEPT_CAPSULE_VERSION"):
+        assert getattr(memory, name) is getattr(concept_capsules, name), (
+            f"{name} is a COPY in memory, not a re-export")
+
+
+def test_the_capsule_module_does_not_import_back_into_memory():
+    """The reason the two shared helpers moved to `core` FIRST. `memory` imports this module to
+    re-export it, so an import the other way is a cycle — and hiding one behind a function-local
+    import is the smell EM-10 exists to remove."""
+    import ast
+    from pathlib import Path as _P
+
+    src = _P(__file__).resolve().parents[1] / "looplab" / "engine" / "concept_capsules.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    back = []
+    for node in ast.walk(tree):
+        mod = node.module if isinstance(node, ast.ImportFrom) else None
+        names = ([mod] if mod else
+                 [a.name for a in node.names] if isinstance(node, ast.Import) else [])
+        back += [f"line {node.lineno}: {n}" for n in names
+                 if n and n.startswith("looplab.engine.memory")]
+    assert not back, f"concept_capsules imports back into memory: {back}"
+
+
+def test_the_none_tolerant_metric_predicate_stays_distinct():
+    """`_is_finite_metric` moved to core as `finite_or_absent_metric`. It is NOT `is_usable_metric`:
+    absent is a legitimate capsule state but not a usable ordering key, and merging them would make
+    a capsule with no metric look malformed."""
+    from looplab.core.fitness import finite_or_absent_metric, is_usable_metric
+
+    assert finite_or_absent_metric(None) is True and is_usable_metric(None) is False
+    for shared in (1.5, float("nan"), float("inf"), True, "x", 10 ** 400):
+        assert finite_or_absent_metric(shared) == is_usable_metric(shared), shared

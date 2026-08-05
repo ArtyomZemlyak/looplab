@@ -42,6 +42,19 @@ def is_usable_metric(value) -> bool:
         return False
 
 
+def finite_or_absent_metric(value) -> bool:
+    """`is_usable_metric`, except ABSENT counts as fine (doc 25 EM-10).
+
+    The capsule/receipt readers ask a different question from the selection contract: a metric that
+    was never recorded is a legitimate state there ("this capsule carries no metric"), while for
+    ordering it is simply unusable. That one difference — `None` -> True here, False there — is the
+    whole delta, so it is a named sibling rather than a flag on `is_usable_metric`: a caller must
+    pick the question it is asking, which is the same reason the CO-09 map keeps these predicates
+    distinct instead of merging them.
+    """
+    return value is None or is_usable_metric(value)
+
+
 def finite_metric(value) -> "float | None":
     """The same rule as `is_usable_metric`, returning the coerced float instead of a verdict.
 
