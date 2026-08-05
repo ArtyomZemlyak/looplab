@@ -880,7 +880,12 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
     provenance OUT of `CONTROL_DATA_FIELDS` (else a UI forges `source:'novelty'` and defeats operator-wins
     + the freshness gate's engine-vs-operator branch). All four L6 events register across
     `CONTROL_EVENTS`+`COLLABORATION_EVENTS`+`CONTROL_SPECS`(NO_SPAWN/folded_intent)+`CONTROL_DATA_FIELDS`+a
-    `normalize_control` branch in the SAME change (the two assert-equal guards, run_commands.py:113/150).
+    `normalize_control` branch in the SAME change. Since doc 25 SC-02 that "branch" is a registered
+    `_CONTROL_NORMALIZERS` entry and there are FIVE assert-equal guards, not two —
+    `CONTROL_DATA_FIELDS`/`_CONTROL_NORMALIZERS`/`_CONTROL_PRECONDITIONS`/`_CONTROL_DECISIONS`/
+    `_CONTROL_POLICIES`, each asserted against `CONTROL_EVENTS`, plus the cross-check that exactly the
+    `COLLABORATION_EVENTS` declare an append-time precondition. A new L6 control that forgets one of
+    them no longer ships silently: `run_commands` refuses to import.
 27. **Operator-wins is structural, not arrival-based.** `_derive_cards` applies Strategist `card_ranked` +
     engine `card_enriched` first, then overlays operator maps in a FIXED LAST phase → operator wins
     independent of event arrival order. `card_enriched` must NOT overwrite any field present in

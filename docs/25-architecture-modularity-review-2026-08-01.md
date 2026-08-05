@@ -3219,7 +3219,7 @@ Scope: `looplab/serve/`: run_commands.py, command_observation.py, engine_proc.py
 
 *Recommendation:* Split along the existing seams: process_identity.py (PID/identity probes), control_validation.py (normalize_control + the CONTROL_* tables), spawn_leases.py (claim/quarantine/start-record sidecars), and keep RunCommandService as the orchestrator. All helpers are already module-level functions or self-contained methods, so this is mostly mechanical with re-exports for test patch seams.
 
-#### SC-02 · HIGH · flat-code · effort: large
+#### SC-02 · HIGH · flat-code · effort: large — **RESOLVED (2026-08-05)**
 
 **normalize_control is a ~775-line flat if/elif chain that re-spells the per-event registries three more times**
 
@@ -3228,6 +3228,79 @@ Scope: `looplab/serve/`: run_commands.py, command_observation.py, engine_proc.py
 *Evidence:* The file already has two per-event registries (CONTROL_SPECS, CONTROL_DATA_FIELDS with equality assertions), yet event-specific behavior is then implemented as three separate giant if/elif chains: normalize_control (485-1259, one branch per event type, some >100 lines), _collaboration_precondition (2706-2843, a second per-type chain re-checking cards/comments/nodes), and _decision (2901-2975, a third per-type chain). Field allowlists are spelled twice inside the same file: EV_BUDGET_EXTEND's field tuple at 142-144 is repeated verbatim at 928-929, and EV_INJECT_NODE's allowed set at 150-152 is re-declared as allowed_inject at 1058-1061 (already drifted: the second omits source_run/source_node because they were popped earlier — invisible coupling).
 
 *Recommendation:* Extend ControlSpec into a real per-event strategy record: {event_type, engine_policy, postcondition, data_fields, normalize(fn), precondition(fn), decide(fn)}. The existing set-equality assertions then guarantee every event has all handlers, and the duplicate field tuples collapse into the single data_fields definition.
+
+*Resolution (2026-08-05):* done as recommended, with ONE deliberate departure recorded below.
+`ControlSpec` now carries `data_fields`, `normalize`, `precondition` and `decide`, and is joined from
+five tables — `CONTROL_DATA_FIELDS`, `_CONTROL_NORMALIZERS`, `_CONTROL_PRECONDITIONS`,
+`_CONTROL_DECISIONS`, `_CONTROL_POLICIES` — each asserted equal to `CONTROL_EVENTS` at import. All
+three chains became dispatchers: `normalize_control` is 37 lines (the shared preamble — known type,
+JSON object, allow-listed fields — plus the shared tail — finite, encodable, ≤1 MiB), and
+`_collaboration_precondition` / `_decision` are 22 and 33. What used to be inside them is 35 named
+per-event functions (24 normalizers, 5 preconditions, 6 decisions), the `_ControlIntake` object that
+carries the coercion helpers `normalize_control`'s closures used to be, and three shared rules the
+chains had inlined — `_normalize_lifecycle_target` (the exact-`(node, generation)` fence the seven
+`_LIFECYCLE_CONTROL_TARGETS` events share), `_import_cross_run_source`, `_relative_file_name`.
+
+**The line numbers were stale and the "~775-line" count was low:** `normalize_control` is 782 lines
+(487-1268, not 485-1259), `_collaboration_precondition` 2736-2872 (not 2706-2843), `_decision`
+2930-3004 (not 2901-2975), the registries 133-181 (not 134-173). Every structural claim was
+otherwise accurate, including both duplicate allow-lists.
+
+**The `allowed_inject` drift is REAL — and the recommended fix for it is a security regression.**
+The two lists do differ, exactly as reported. But the difference is fail-CLOSED, and it is not
+vestigial: the import block pops `source_run`/`source_node` only when `source_run` is truthy AND
+`source_node` is present, so `{"source_run": "", "source_node": 0, "idea": {...}}` reaches the
+residual check with both fields intact and is refused. Collapsing the two lists "into the single
+data_fields definition" accepts it and writes `"source_run": "", "source_node": 0` straight into the
+durable event. Measured on the payload corpus: **61 cases flip from HTTP 400 to accepted**. So the
+residual list stays a residual list, spelled as `CONTROL_DATA_FIELDS[EV_INJECT_NODE] -
+_INJECT_IMPORT_FIELDS` — the duplicate literal is gone, the subtraction is named and commented, and
+`_INJECT_IMPORT_FIELDS <= CONTROL_DATA_FIELDS[EV_INJECT_NODE]` is asserted at import. `budget_extend`
+had no such subtlety and did collapse to `CONTROL_DATA_FIELDS[EV_BUDGET_EXTEND]` verbatim.
+
+**One behaviour deliberately CHANGED, in the fail-closed direction.** The old
+`_collaboration_precondition` chain ended in an unguarded `else` that ran the COMMENT recheck, so any
+event type it did not name — a new collaboration event, a corrupted record — was rechecked against a
+`comment_id` it does not have, and for a payload that happened to look like a comment revision it
+PASSED. A missing handler is now a `collaboration_precondition_missing` refusal, and the registry
+cross-check (`{event: handler for non-None} == COLLABORATION_EVENTS`) keeps that branch unreachable.
+This is the only difference in 3,510 compared `_collaboration_precondition`/`_decision` outcomes:
+2,016 of them, ALL on the 21 non-collaboration event types the caller never passes
+(`_append_collaboration_intent` is gated on `event_type in COLLABORATION_EVENTS`), 0 of them
+refusal → pass. `_decision` is byte-identical across all 630 of its cases.
+
+*Verification.* A differential corpus of **2,599 control payloads** (every event × every
+allow-listed field × 26 adversarial values, every event × 11 foreign field names, empty/absent/
+non-dict bodies, ~180 hand-written branch and boundary cases, two >1 MiB bodies) was run against the
+pre-change module and the new one and compared outcome-by-outcome — return value, HTTP status and
+full error detail: **0 differences** (379 accepted, 1,988× 400, 92× 404, 139× 409, 1× 413). The
+harness was teeth-checked by injecting four real mutations into a copy of the OLD module: the naive
+inject collapse (61 differences), `<= 0` → `< 0` on `add_nodes` (3), dropping `parallel_build` from
+the budget tuple (2), and skipping the lifecycle generation fence for `promote` (4).
+
+*Guard test:* `tests/test_control_registry.py` (16). It drives the completeness rather than pinning
+it: `CONTROL_EVENTS` is widened by a fake type and the five tables are satisfied ONE at a time, with
+every stage required to still refuse the import and to name the next table that has not chosen;
+dropping any single row from any table is separately proven to be caught by that table's OWN
+assertion, not by a neighbour's. The two collapsed allow-lists are pinned behaviourally (every
+registered budget field alone satisfies the budget check and keeps its own upper bound; every
+unconsumed `source_run`/`source_node` combination is a 400 and neither field survives a real
+import), and the three chains are proven gone by AST — no `Compare` node against `event_type` other
+than the class-level `in COLLABORATION_EVENTS` — because comments are not AST nodes.
+
+Teeth-tested against six breaks on a scratch copy, all biting: the naive inject collapse (1 test),
+re-copying the budget tuple one field short (2), the precondition dispatcher falling through to the
+comment recheck (1), a control event losing its normalizer row (import refused, 3 collection
+errors), a collaboration event losing its precondition (import refused, 3), and `pause` losing its
+own engine decision — which reddens two PRE-EXISTING tests in `test_run_command_service.py`
+(`test_stop_and_resume_reject_during_pending_finalize`,
+`test_finish_seq_only_pending_is_visible_and_rejects_new_commands`) rather than a new one, i.e. the
+`decide` table's entries are load-bearing behaviour the suite already held.
+
+**Not done:** SC-01's file split. `run_commands.py` is still one module and grew (4,274 → 4,661
+lines) — naming 35 rules costs more lines than one chain that names none — but the
+`control_validation.py` extraction SC-01 proposes is now a clean cut along a section boundary
+(`_error` through `CONTROL_SPECS` + `normalize_control`) rather than surgery on a flat chain.
 
 #### SC-03 · HIGH · duplication · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
