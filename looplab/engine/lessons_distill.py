@@ -195,7 +195,20 @@ class LessonDistillMixin:
     def reflect_lessons(self, final: RunState, best, fp: list) -> list:
         """LLM reflection over the whole run → 1-3 GENERALIZABLE lessons (transferable good/bad
         takeaways), the DS-Agent/MARS reflective-memory idea — not per-run specifics. [] on no-client
-        / error, so the hypothesis-derived + failure lessons still stand."""
+        / error, so the hypothesis-derived + failure lessons still stand.
+
+        A WINNER IS NOT REQUIRED. `write_reflection_note`'s contract says so in as many words ("a run
+        in which every node failed is exactly the negative lesson M3 exists to record") and until
+        2026-08-05 this method contradicted it: the guard below read `client is None or best is None`,
+        so a run whose every experiment crashed returned before making any call. That was invisible
+        while the templated hypothesis/failure lessons still existed; once lessons became EXCLUSIVELY
+        LLM-authored it silently became "a failed run teaches nothing". Measured on
+        `runs/rubert-dr-0805` (2 nodes, 0 evaluated, node 0 crashed after 6 real library-migration
+        repairs and a DDP unused-parameter constraint): finalization ran every step, `reflection_note`
+        recorded `n_lessons: 0`, and the shared store gained one concept capsule with `best_metric:
+        null` and nothing else. The crash-only run is the one whose evidence is CHEAPEST to reuse —
+        an environment/API constraint transfers to every later run on the same repo, unconditionally,
+        while a metric result only transfers to a similar objective."""
         def _winner_lesson():
             # Offline/toy fallback (no LLM to generalize): keep a minimal winner record so the
             # fingerprint-keyed store still captures this run for retrieval + consolidation.
@@ -218,7 +231,10 @@ class LessonDistillMixin:
         # `_winner_lesson` is the OFFLINE/toy safety net ONLY (no LLM at all). In a real run — an LLM
         # IS wired — lessons are ALWAYS LLM-authored: on error or empty output we write NOTHING rather
         # than a templated "op X reached Y" line (which polluted the real store as look-alike noise).
-        if client is None or best is None:
+        # NOTE the guard is on the CLIENT only: `best is None` used to short-circuit here too, and
+        # `_winner_lesson` returns [] in that case, so every crash-only run wrote nothing at all. See
+        # the docstring. Whether there is anything WORTH a call is decided below, from the evidence.
+        if client is None:
             return _winner_lesson()
         rev = (final.direction != "min")
         ok = sorted((n for n in final.evaluated_nodes() if n.metric is not None),
@@ -246,8 +262,24 @@ class LessonDistillMixin:
                 f"{' '.join((h.statement or '').split())[:160]}"
                 for h in final.research_cards()
                 if h.verdict in ("supported", "tested", "abandoned") and h.statement]
+        # NOTHING to reflect on — no result, no failure, no resolved card — is the one case that must
+        # still return without a call: the prompt would carry a task line and nothing else, and the
+        # model can only invent. This is the guard `best is None` was standing in for, stated over the
+        # evidence it was a proxy for. A run with failures but no winner has evidence and reflects.
+        if not (rows or fails or hyps):
+            return []
+        # With no winner the failure rows are the ONLY evidence, so say what the run is and point the
+        # model at the tools that hold the detail (`error_reason` is a one-word bucket — "crash" — and
+        # the traceback lives in read_logs / read_experiment). Byte-identical to the pre-2026-08-05
+        # prompt whenever there IS a measured result, which is the case this wording was written for.
+        worked = ("\nWhat worked (best first):\n" + "\n".join(rows) if rows else
+                  "\nNOTHING in this run reached a measured result — every experiment failed before it "
+                  "could be scored. The transferable lesson is therefore about what BLOCKED the work: "
+                  "the environment, library, API and hardware constraints hit, and which fixes did or "
+                  "did not clear them. READ the failures (read_experiment / read_logs) — the reasons "
+                  "below are one-word buckets, not the error.")
         prompt = ("Distil reusable LESSONS from a finished ML experiment run, to guide FUTURE runs on "
-                  f"SIMILAR tasks.\nTask: {final.goal}\nWhat worked (best first):\n" + "\n".join(rows) +
+                  f"SIMILAR tasks.\nTask: {final.goal}" + worked +
                   ("\nWhat failed:\n" + "\n".join(fails) if fails else "") +
                   ("\nHypotheses tested (outcome, Δ):\n" + "\n".join(hyps) if hyps else "") +
                   "\n\nWrite GENERALIZABLE lessons — transferable findings, NOT these exact numbers "
@@ -267,11 +299,19 @@ class LessonDistillMixin:
         except Exception:   # noqa: BLE001 - best-effort; a real run writes NO templated fallback
             return []
         from looplab.engine.memory import distilled_claim_stance, parse_credit_lessons
+        # §role-split: these are generalizable technique/strategy takeaways → the RESEARCHER's context
+        # (what to try next) — WHEN the run produced a measured result to generalize from. With no
+        # winner the run's only findings are what BLOCKED it (the environment/library/API constraints
+        # of the prompt above), which is as much the Developer's category as the Researcher's, and the
+        # Developer's own prior header already names "failure themes" as part of its pool. So the row
+        # is left UNTAGGED = SHARED, exactly as `lessons_reconcile._lesson(pr=None)` does for a
+        # comparative line it cannot attribute to one role. Omitting the key (rather than writing
+        # null) keeps it byte-shaped like that precedent and like every legacy shared row.
+        role_tag = {"role": LESSON_ROLE_RESEARCHER} if rows else {}
         # No fixed cap: one lesson per distinct theme (consolidation keeps this small); bound at 8 as a
-        # runaway guard, not a target. §role-split: these are generalizable technique/strategy takeaways
-        # → the RESEARCHER's context (what to try next). n_pairs=0 (reflection lines carry no valid
-        # P-marker) — pass limit=8 explicitly: the parser's default cap is max(3, n_pairs)=3, which
-        # used to silently drop themes 4-8 (the [:8] slice was dead) (architecture-review M6).
+        # runaway guard, not a target. n_pairs=0 (reflection lines carry no valid P-marker) — pass
+        # limit=8 explicitly: the parser's default cap is max(3, n_pairs)=3, which used to silently
+        # drop themes 4-8 (the [:8] slice was dead) (architecture-review M6).
         res = [{"task_id": final.task_id, "fingerprint": fp,
                 "kind": getattr(self._e.task, "kind", ""), "statement": stmt,
                 "outcome": outcome, "delta": None, "confidence": 0.6,
@@ -281,7 +321,7 @@ class LessonDistillMixin:
                 # real run writes) never reach agent-facing cross-run memory.
                 "direction": final.direction,
                 "run_id": final.run_id, "evidence": list(ev_ids), "evidence_sig": ev_sig,
-                "role": LESSON_ROLE_RESEARCHER}
+                **role_tag}
                for _, stmt, outcome in parse_credit_lessons(out, 0, limit=8)]
         return res      # LLM gave nothing usable → [] (a real run never writes a templated lesson)
 
