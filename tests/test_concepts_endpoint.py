@@ -512,7 +512,7 @@ def test_concept_frame_preserves_unknown_feasibility_as_null(tmp_path):
     # CODEX AGENT: legacy/recovery projections can carry tri-state feasibility. Never coerce unknown
     # to False in the transport: that would turn missing evidence into an infeasibility claim.
     from looplab.events.replay import fold
-    from looplab.search.concept_graph import default_lenses
+    from looplab.search.concept_lens import default_lenses
     from looplab.serve.concept_frame import build_frame
 
     rd = _demo_run(tmp_path)
@@ -706,7 +706,7 @@ def test_concept_frame_membership_caps_are_canonical_and_insertion_order_indepen
         tmp_path, monkeypatch):
     import looplab.serve.concept_frame as frame_module
     from looplab.events.replay import fold
-    from looplab.search.concept_graph import default_lenses
+    from looplab.search.concept_lens import default_lenses
 
     rd = _demo_run(tmp_path)
     store = EventStore(rd / "events.jsonl")
@@ -761,7 +761,7 @@ def test_concept_frame_edge_cap_uses_canonical_tuple_order_before_selection(
         tmp_path, monkeypatch):
     import looplab.serve.concept_frame as frame_module
     from looplab.events.replay import fold
-    from looplab.search.concept_graph import default_lenses
+    from looplab.search.concept_lens import default_lenses
 
     state = fold(EventStore(_demo_run(tmp_path) / "events.jsonl").read_all())
     state.concept_consolidation = {"raw-a": "a"}
@@ -813,7 +813,7 @@ def test_concept_frame_edge_cap_uses_canonical_tuple_order_before_selection(
 def test_concept_frame_signed_zero_edges_have_identical_core_and_frame_bytes(tmp_path):
     import looplab.serve.concept_frame as frame_module
     from looplab.events.replay import fold
-    from looplab.search.concept_graph import default_lenses
+    from looplab.search.concept_lens import default_lenses
 
     state = fold(EventStore(_demo_run(tmp_path) / "events.jsonl").read_all())
     negative = {
@@ -854,7 +854,7 @@ def test_concept_frame_receipts_derived_edge_omitted_by_full_static_cap(
         tmp_path, monkeypatch):
     import looplab.serve.concept_frame as frame_module
     from looplab.events.replay import fold
-    from looplab.search.concept_graph import default_lenses
+    from looplab.search.concept_lens import default_lenses
 
     def make_state(root, *, repeated_pair):
         root.mkdir()
@@ -898,7 +898,7 @@ def test_concept_frame_node_cap_ignores_empty_invalid_only_and_deleted_rows(
         tmp_path, monkeypatch):
     import looplab.serve.concept_frame as frame_module
     from looplab.events.replay import fold
-    from looplab.search.concept_graph import default_lenses
+    from looplab.search.concept_lens import default_lenses
 
     store = EventStore(tmp_path / "events.jsonl")
     store.append("run_started", {
@@ -947,7 +947,7 @@ def test_concept_frame_raw_edge_aliases_duplicates_and_cooccurs_do_not_false_cap
         tmp_path, monkeypatch):
     import looplab.serve.concept_frame as frame_module
     from looplab.events.replay import fold
-    from looplab.search.concept_graph import default_lenses
+    from looplab.search.concept_lens import default_lenses
 
     state = fold(EventStore(_demo_run(tmp_path) / "events.jsonl").read_all())
     state.concept_consolidation = {"raw-a": "a"}
@@ -994,7 +994,7 @@ def test_concept_frame_top_k_preprocessing_stays_bounded_for_large_sources(
         tmp_path, monkeypatch):
     import looplab.serve.concept_frame as frame_module
     from looplab.events.replay import fold
-    from looplab.search.concept_graph import default_lenses
+    from looplab.search.concept_lens import default_lenses
 
     state = fold(EventStore(_demo_run(tmp_path) / "events.jsonl").read_all())
     state.node_concepts = {

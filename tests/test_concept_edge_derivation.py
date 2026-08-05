@@ -5,7 +5,7 @@ Legacy persisted counts are ignored because their max-fold could never retract d
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.serve.concept_frame import bounded_inputs
-from looplab.search.concept_graph import default_lenses
+from looplab.search.concept_lens import default_lenses
 
 
 def _store(tmp_path) -> EventStore:

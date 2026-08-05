@@ -1,7 +1,7 @@
 """Phase 2a: `project_hierarchy` — a hierarchy is a pure PROJECTION over concept ids, not stored.
 Default lens is_a nests by the concept PATH (parent of a/b/c is a/b); ancestor prefixes are
 materialized so a deep-only tag still shows its parent groups. Deterministic + replay-safe."""
-from looplab.search.concept_graph import project_hierarchy
+from looplab.search.concept_lens import project_hierarchy
 
 
 def test_is_a_tree_from_paths():

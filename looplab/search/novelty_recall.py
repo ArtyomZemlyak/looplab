@@ -24,15 +24,15 @@ from itertools import combinations
 from typing import Optional
 
 from looplab.core.models import RunState
-from looplab.search.concept_graph import _experiment_nodes, _node_text
+from looplab.search.concept_tagging import experiment_nodes, node_text
 
 
 def _idea_full_text(node) -> str:
-    """`_node_text` + the idea's param VALUES (`k=v`). Critical for the paraphrase judge: `_node_text`
+    """`node_text` + the idea's param VALUES (`k=v`). Critical for the paraphrase judge: `node_text`
     carries only param NAMES, so two nodes differing ONLY by a value (`temperature=0.02` vs `0.05`) would
     have identical text and be mis-judged a paraphrase — but a value tweak is a VARIANT, not a dup. Feeding
     the values lets the adjudicator apply its 'different value = variant' rule."""
-    base = _node_text(node)
+    base = node_text(node)
     idea = getattr(node, "idea", None)
     params = getattr(idea, "params", None) or {}
     vals = " ".join(f"{k}={v}" for k, v in params.items())
@@ -43,7 +43,7 @@ def _idea_texts(state: RunState) -> tuple[list[int], list[str]]:
     """(node ids, idea texts incl. param values) for every idea-carrying node, in id order — the proposals
     that PASSED the gate (a rejected proposal never became a node; a node that failed to evaluate was still
     BUILT, so it is real spent effort a duplicate would waste again)."""
-    nodes = _experiment_nodes(state)
+    nodes = experiment_nodes(state)
     return [n.id for n in nodes], [_idea_full_text(n) for n in nodes]
 
 

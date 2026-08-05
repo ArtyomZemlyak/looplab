@@ -180,7 +180,7 @@ def test_concept_read_tools_expose_the_run_vocabulary(tmp_path):
 
 def test_node_concept_delta_read_model_and_tool():
     # PART V Phase 3 (Layer 2): a node's concepts as a DELTA vs its parent(s) — added / removed / inherited.
-    from looplab.search.concept_graph import node_concept_delta
+    from looplab.search.concept_lens import node_concept_delta
     st = RunState(goal="g", direction="max")
     st.nodes = {
         0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={}), status=NodeStatus.evaluated),
@@ -216,7 +216,7 @@ def test_node_concept_delta_read_model_and_tool():
 def test_node_concept_delta_never_raises_on_non_dict_stores():
     # REVIEW: a truthy non-dict concept_consolidation/node_concepts must soft-fail (empty), not raise
     # AttributeError out of the LLM-invocable read-model/tool — matching every sibling concept read-path.
-    from looplab.search.concept_graph import node_concept_delta
+    from looplab.search.concept_lens import node_concept_delta
     st = RunState(goal="g", direction="max")
     st.nodes = {0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
                         status=NodeStatus.evaluated)}
@@ -235,7 +235,7 @@ def test_node_concept_delta_never_raises_on_non_dict_stores():
 
 
 def test_node_concept_delta_applies_consolidation_rename_on_both_sides():
-    from looplab.search.concept_graph import node_concept_delta
+    from looplab.search.concept_lens import node_concept_delta
     st = RunState(goal="g", direction="max")
     st.nodes = {
         0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={}), status=NodeStatus.evaluated),
@@ -252,7 +252,7 @@ def test_node_concept_delta_applies_consolidation_rename_on_both_sides():
 
 
 def test_node_concept_delta_distinguishes_pending_classification_from_empty_tags():
-    from looplab.search.concept_graph import node_concept_delta
+    from looplab.search.concept_lens import node_concept_delta
 
     st = RunState(goal="g", direction="max")
     st.nodes = {
@@ -423,7 +423,7 @@ def test_missing_or_untrusted_membership_provenance_is_partial_and_forbids_delta
 
 
 def test_missing_base_and_partial_receipts_reach_all_concept_tools():
-    from looplab.search.concept_graph import node_concept_delta
+    from looplab.search.concept_lens import node_concept_delta
 
     st = RunState(goal="g", direction="max")
     st.nodes = {
@@ -599,7 +599,7 @@ def test_run_tool_collection_arguments_are_bounded_and_receipted():
 
 
 def test_partial_child_delta_never_infers_removal_from_an_omitted_membership():
-    from looplab.search.concept_graph import node_concept_delta
+    from looplab.search.concept_lens import node_concept_delta
 
     st = RunState(goal="g", direction="max")
     st.nodes = {
@@ -628,7 +628,7 @@ def test_partial_child_delta_never_infers_removal_from_an_omitted_membership():
 
 
 def test_unknown_parent_reference_is_unavailable_instead_of_becoming_a_root():
-    from looplab.search.concept_graph import node_concept_delta
+    from looplab.search.concept_lens import node_concept_delta
 
     st = RunState(goal="g", direction="max")
     st.nodes = {1: Node(id=1, parent_ids=[99], operator="improve", idea=Idea(operator="improve"))}

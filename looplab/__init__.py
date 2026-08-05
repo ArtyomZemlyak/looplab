@@ -52,7 +52,11 @@ _LAYOUT = {
     "audit": "engine",   # engine audit/trust-emitter mixin
     "concept_cadence": "engine",  # PART IV/V concept re-tag + snapshot mixin (doc 25 EC-09)
     "concept_capsules": "engine",  # durable per-run concept record + portfolio views (doc 25 EM-10)
-    "concept_graph": "search",   # PART IV D5 pure concept-graph projection used offline and live
+    "concept_graph": "search",   # PART IV D5 concept vocabulary + axis-DAG + curated skeletons
+    "concept_analytics": "search",  # ...its pure coverage/metrics/alarm read-models (doc 25 SE-09)
+    "concept_lens": "search",    # ...the hierarchy/lens view projections the UI reads (same split)
+    "concept_map": "search",     # ...consolidation + the build_concept_map entry (same split)
+    "concept_tagging": "search",  # ...the heuristic + LLM taggers (same split)
     "concept_projection": "search",  # receipt/lifecycle-aware CURRENT membership boundary
     "coverage": "search",
     "graded_novelty": "search",   # PART IV D3 graded novelty + failed-direction re-exam (advisory)

@@ -28,7 +28,8 @@ from collections import defaultdict
 from typing import Optional
 
 from looplab.core.models import RunState
-from looplab.search.concept_graph import ConceptGraph, tag_text
+from looplab.search.concept_graph import ConceptGraph
+from looplab.search.concept_tagging import tag_text
 
 
 def dedup_analysis(state: RunState, graph: ConceptGraph, *,

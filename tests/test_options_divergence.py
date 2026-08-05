@@ -176,12 +176,17 @@ def test_part_iv_comments_distinguish_fold_storage_from_live_steering():
     # `concept_cadence.py` — but the split is recent enough that a revert could land it in either.
     cadence = (engine / "concept_cadence.py").read_text(encoding="utf-8")
     strategy = (engine / "strategy.py").read_text(encoding="utf-8")
+    # Both POSITIVE pins live on `tag_text_llm`, which left `search/concept_graph.py` for
+    # `search/concept_tagging.py` in doc 25 SE-09. The NEGATIVE pins keep reading BOTH files for the
+    # same reason the cadence pair above does: the split is recent, so a revert of the retracted
+    # claims could land in either module.
+    tagging = (root / "looplab" / "search" / "concept_tagging.py").read_text(encoding="utf-8")
     graph = (root / "looplab" / "search" / "concept_graph.py").read_text(encoding="utf-8")
     assert "product `Settings` is ON" in cadence
     assert "can steer later proposals" in cadence
-    assert "change admission" in graph
-    assert "configured live-client call is synchronous" in graph
+    assert "change admission" in tagging
+    assert "configured live-client call is synchronous" in tagging
     assert "`_concept_pivot` being OFF by default" not in cadence
     assert "`_concept_pivot` being OFF by default" not in strategy
-    assert "off-by-default + audit-only" not in graph
-    assert "Never raises, never blocks the caller" not in graph
+    assert "off-by-default + audit-only" not in graph + tagging
+    assert "Never raises, never blocks the caller" not in graph + tagging

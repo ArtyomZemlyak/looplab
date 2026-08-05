@@ -29,8 +29,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from looplab.core.models import Idea, NodeStatus, RunState
-from looplab.search.concept_graph import (ConceptGraph, _experiment_nodes, tag_nodes_heuristic,
-                                          tag_text, tag_text_llm)
+from looplab.search.concept_graph import ConceptGraph
+from looplab.search.concept_tagging import (experiment_nodes, tag_nodes_heuristic, tag_text, tag_text_llm)
 
 
 # --------------------------------------------------------------------------- #
@@ -40,7 +40,7 @@ from looplab.search.concept_graph import (ConceptGraph, _experiment_nodes, tag_n
 def _idea_tag_text(idea: Idea) -> str:
     # concepts are authored by the proposal being admitted. They remain display metadata,
     # not classifier input; otherwise a proposal can self-assign a shared/failed concept and earn L4/L5.
-    # Include the search-SPACE key names alongside params (as concept_graph._node_text does), so the idea
+    # Include the search-SPACE key names alongside params (as concept_tagging.node_text does), so the idea
     # tagger and the node tagger describe the SAME experiment by the same structural fields — a sweep whose
     # only signal is in `space` (params={}, space={"temperature": [...]}) otherwise tags empty as an idea
     # but tags "hyperparameter/temperature" as the executed node. These are structural dimension names, not
@@ -115,7 +115,7 @@ def failed_directions(state: RunState, graph: ConceptGraph,
     touching node is feasible with a metric that beat its parent (or, absent a parent, just has a metric);
     a direction all of whose nodes are failed/never-improved is a candidate. Concepts touched by a real
     win are excluded."""
-    nodes = _experiment_nodes(state)
+    nodes = experiment_nodes(state)
     if tags is None:
         tags = tag_nodes_heuristic(state, graph)
     by_concept: dict[str, list] = {}
@@ -189,7 +189,7 @@ def grade_novelty(state: RunState, idea: Idea, graph: ConceptGraph, *,
     agent's tagging, consistent with the LLM novelty gate. Both default to the deterministic alias tagger
     only as the no-LLM FALLBACK. `prior_concepts`: concept ids tried in EARLIER runs (cross-run memory).
     """
-    nodes = _experiment_nodes(state)
+    nodes = experiment_nodes(state)
     if tags is None:
         tags = tag_nodes_heuristic(state, graph)
     idea_concepts = idea_tags if idea_tags is not None else tag_idea(idea, graph)

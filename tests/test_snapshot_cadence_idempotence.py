@@ -244,7 +244,10 @@ def test_the_concept_producer_lands_all_four_of_its_recording_steps(tmp_path, mo
     and two of them (edges, card tags) swallow their own exceptions, which is exactly the shape that
     disappears quietly.
     """
+    from looplab.search import concept_analytics as ca
     from looplab.search import concept_graph as cg
+    from looplab.search import concept_map as cm
+    from looplab.search import concept_tagging as ct
 
     s = _store(tmp_path, n_nodes=2)
     s.append("card_added", {"id": "card-1", "statement": "r-drop helps recall"})
@@ -255,13 +258,13 @@ def test_the_concept_producer_lands_all_four_of_its_recording_steps(tmp_path, mo
 
     def fake_build(*args, **kwargs):
         return {"graph": graph, "tags": tags, "raw_tags": tags,
-                "coverage": cg.concept_coverage(state, graph, tags),
+                "coverage": ca.concept_coverage(state, graph, tags),
                 "important_uncovered": [],
                 "consolidated": {"loss/dcl": "loss/decoupled-contrastive"},
                 "mode": "llm"}
 
-    monkeypatch.setattr(cg, "build_concept_map", fake_build)
-    monkeypatch.setattr(cg, "tag_text_llm", lambda *a, **k: {"regularization/r-drop"})
+    monkeypatch.setattr(cm, "build_concept_map", fake_build)
+    monkeypatch.setattr(ct, "tag_text_llm", lambda *a, **k: {"regularization/r-drop"})
 
     assert _ProducerHost(s)._concept_coverage_snapshot(state) is not None
 
