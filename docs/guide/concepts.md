@@ -899,6 +899,7 @@ Where each concept lives in the code:
 | Card identity: versioned action/idea digests, ownership receipts, `Card` + its provenance | `core/cards.py` (re-exported through `core/models.py`) |
 | Layered settings + masked snapshot | `core/config.py` |
 | Append-only log / pure fold / SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
+| Derived Card ledger (fold-time receipt bounds + the `derive_cards` post-pass) | `events/card_ledger.py` |
 | Sandbox seam + subprocess/Docker bodies | `runtime/sandbox.py` |
 | Researcher/Developer roles (toy + LLM) | `agents/roles.py`, `agents/unified_agent.py` |
 | Structured output + LLM client + cost accountant | `core/parse.py`, `core/llm.py` |

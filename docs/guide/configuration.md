@@ -173,7 +173,7 @@ defaults to `-1` (AUTO) and everything around it was already in place: AUTO reso
 pin, the node-budget refund, and three AUTO settle-to-off rules.
 
 What blocked it was a defect in the Card **debug** anchor that only a default would make everyone's
-problem. `events/replay.py::_card_debuggable_leaf_ids` disqualified a failed node the moment it had
+problem. `events/card_ledger.py::_card_debuggable_leaf_ids` disqualified a failed node the moment it had
 *any* child — and a receipt-bound `debug` Card's own work item is such a child. So the instant the
 Card's node existed, the Card's own anchor died and it folded to `action_receipt_incomplete`. The
 ordinary lane never noticed, because it never re-checks a Card after its node exists. The speculative

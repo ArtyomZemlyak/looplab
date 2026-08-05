@@ -2162,6 +2162,87 @@ Scope: `looplab/events/`: eventstore.py, replay.py, types.py, projections, span_
 
 *Recommendation:* Extract the Card ledger into a sibling module (e.g. events/cards.py: fold-time bounded-receipt helpers + a derive_cards(st) post-pass) and decompose _derive_cards into its numbered phases as top-level pure functions taking/returning explicit small dataclasses (identity map, alias map, action-owner table). Keep _finalize_fold calling one entry point; behavior is unchanged because the pass is already pure over RunState.
 
+*Resolution (2026-08-05) — done, both halves, and the module name is the one thing the
+recommendation got wrong.*
+
+`looplab/events/card_ledger.py` (2,256 lines) now owns the whole Card ledger; `replay.py` drops
+5,846 -> 3,819 lines. `_derive_cards` (847 lines by the time it was moved, not 818) is fifteen
+top-level phase functions plus a 17-line `derive_cards` that calls them in order, and the six nested
+closures are gone: `_card_id` and `_node_parent_generations` are module functions, `_canon` is
+`_CardAliases.canon`, `_record_registration`/`_record_action_owner` are `_CardLedger` methods, and
+`_register_card_identity` stays local to the one phase that owns it. The three dataclasses are the
+ones the finding named — `_CardIdentity` (frozen: the id decisions, made over the whole log before
+any Card exists), `_CardLedger` (the four provenance tables the merge fold has to rewrite together)
+and `_CardAliases` (bridge edges + merge edges + the display statements). `_finalize_fold` still
+calls one entry point.
+
+**Not `events/cards.py`.** `cards` is already a `_LAYOUT` stem (`core/cards.py`, doc 25 CO-02), and
+that map is keyed by module STEM, not by path — a second `cards.py` would have collided with the
+flat compat alias and `tests/test_package_layout.py` fails on it two ways. The stem is `card_ledger`.
+
+**Three names had to move DOWN to `core/models.py` first, and that is the part the recommendation
+does not mention.** The Card cluster's only dependencies outside itself were `_coerce_node_id`,
+`_MISSING` and `_INHERITABLE_CONCEPT_PROVENANCE`, all defined in `replay.py` — so the sibling module
+as specified imports `replay` while `replay` imports it. `coerce_node_id` and
+`INHERITABLE_CONCEPT_PROVENANCE` are now `core/models.py` (beside `Node` and beside the
+`NODE_CONCEPT_PROVENANCE_*` tiers respectively, re-imported into `replay` under their old private
+names so all ~30 call sites and `tests/test_shared_identity_rules.py` are untouched); `_MISSING` is a
+private absence marker that never crosses a module boundary, so the ledger has its own, documented as
+such. That keeps `card_ledger` a LEAF importing only `looplab.core`, which two of the new guard tests
+assert structurally over every import node — a function-local edge back into `replay` is a hidden
+cycle, not a style nit.
+
+**What is deliberately NOT re-exported.** Only the names `replay`'s own handlers CALL are imported
+back (the `_bounded_card_*` receipt bounds, `_card_replay_*`, `derive_cards`). The ledger internals
+several tests reached for through `looplab.events.replay` — `_card_added_snapshot`,
+`_bounded_card_action`, `_card_debug_leaf_children`, `_card_debuggable_leaf_ids`, `_native_first`,
+`_evidence_verdict`, `_record_setter_ids`, `_CARD_NODE_CONCEPT_PROVENANCE` — are re-pointed at
+`looplab.events.card_ledger` in the same change. A re-export would have been the *worse* option here
+and for a specific reason: unlike the flat-import module aliases (which resolve to the SAME module
+object, so patching either path patches both), a re-exported FUNCTION is a second binding — it looks
+like a patch seam while a monkeypatch through it would silently miss the fold. `is_unevaluated_
+speculative_discard` and `node_counts_toward_card_budget` moved with it for the same reason: the
+fold-side caller (`_card_debug_leaf_children`) is here now, so `tests/test_card_budget_refund.py`'s
+one-object-under-every-name assertion names `card_ledger`, and `replay.py` becomes pyflakes-clean
+(it had exactly one deliberate unused import before; the ledger now carries it, with its comment).
+
+**Verification.** A differential harness folded a corpus of **345 event logs / 1,259 derived Cards**
+on the pre-change and post-change trees and compared the derived ledger byte for byte, including
+`st.cards` INSERTION ORDER. 324 of the logs are real: every `fold()` input from the card-related test
+files, captured by wrapping `replay.fold` in a pytest plugin; 21 are synthetic, covering what the
+harvest was thin on (identity conflicts, X->A/X->B merge conflicts, merge cycles, auto-drops,
+hypothesis deletes, hostile rows, receipted natives, debug anchors). Identical after the move and
+again after the decomposition — the whole dump hashes to the same sha256 in all three runs. Order
+tolerance (invariant 5) was measured the same way: **11,040 permutations** (32 per log, seeded per
+log) folded on BOTH trees, with two checks — the same permuted log must fold to the same Cards on
+both trees, and the *set* of permutations that reproduce the unpermuted answer must be the same set
+(6,010 of 11,040 on both, unchanged). The harness was teeth-checked by injecting real one-line
+changes into a scratch copy: dropping the `verdict != "abandoned"` clause from `actionable` (3 Cards
+diverge) and reverting the merge-alias `min()` to last-write-wins (1 Card diverges, on exactly the
+synthetic conflict log). A third injected change — `rationale[:400]` to `[:399]` — was NOT detected,
+and that is a real finding about the corpus rather than the harness: `_bounded_card_added_receipt`
+DROPS a rationale longer than 400 chars at admission rather than truncating it, so the derive-time
+slice is unreachable through any admitted row.
+
+**One divergence documented, not fixed.** The hoisted `_card_id` is deliberately not
+`_card_replay_id`: it bounds the STRIPPED id at 256 while admission rejects a raw string longer than
+256 *before* stripping, so a padded 300-character spelling with a 250-character core is a usable
+control id on the derive side and not an admissible `card_added` id. That is live, not theoretical —
+the derive side reads ids from places admission never bounded (`Idea.card_id`, operator pin/edit map
+keys, a `card_ranked` order entry). Unifying them would silently retire controls on historical logs,
+so both names stay and the difference is now stated at the definition. Same family as EV-02's
+measured drift, opposite verdict.
+
+`tests/test_card_ledger_module.py` is new (8 tests): the two import-direction guards, the phase-order
+pin (AST, so a commented-out call cannot satisfy it), an orphan/double-call check, and three
+behavioural drivers — a 200-permutation order-tolerance fold, an operator pin that must beat a rank
+(the docs/23 decision 27 ordering), and an identity conflict created by the LAST event in the log
+(the phase-0 ordering). Teeth-tested against 5 breaks on a scratch copy, all biting: swapping the
+overlay and ranking calls (2 tests), reverting the merge-alias `min()` (1), a function-local
+`import replay` (2), an identity map that skips the node scan (1), and `pass  #
+_apply_card_actionable(ledger)` — the comment-carrying mutation CLAUDE.md warns about — which fails
+both the order pin and the orphan check.
+
 #### EV-02 · MEDIUM · duplication · effort: medium
 
 **Card action bounding is implemented twice: fold-admit (_bounded_card_action) and derive-time (_card_added_snapshot) re-validate the same fields with copy-pasted blocks**

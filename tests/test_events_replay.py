@@ -3172,13 +3172,13 @@ def _state_with_one_evaluated_node() -> RunState:
 # copied the same coercions and already disagreed on one of them.
 
 def _admit_space(space):
-    from looplab.events.replay import _bounded_card_action_space
+    from looplab.events.card_ledger import _bounded_card_action_space
 
     return _bounded_card_action_space(space)
 
 
 def _snapshot(payload):
-    from looplab.events.replay import _card_added_snapshot
+    from looplab.events.card_ledger import _card_added_snapshot
 
     return _card_added_snapshot(payload)
 
@@ -3200,7 +3200,7 @@ def test_both_stages_bound_a_search_space_identically():
 def test_both_stages_agree_on_an_unusable_eval_timeout():
     """`isinstance(True, int)` is True in Python, so `eval_timeout: true` must not become a
     1-second timeout — in EITHER stage."""
-    from looplab.events.replay import _bounded_card_action
+    from looplab.events.card_ledger import _bounded_card_action
 
     for bad in (True, False, "30", float("inf"), float("nan"), 0, -5, [], {}):
         admitted = _bounded_card_action({"eval_timeout": bad})
@@ -3213,7 +3213,7 @@ def test_both_stages_agree_on_an_unusable_eval_timeout():
 def test_an_explicit_null_timeout_survives_both_stages():
     """A card that deliberately CLEARS its timeout is not the same as one that never named one, and
     it is not an invalid value either — the three cases stay distinguishable."""
-    from looplab.events.replay import _bounded_card_action
+    from looplab.events.card_ledger import _bounded_card_action
 
     admitted = _bounded_card_action({"eval_timeout": None})
     decoded, owns = _snapshot({"eval_timeout": None})
@@ -3226,7 +3226,7 @@ def test_an_explicit_null_timeout_survives_both_stages():
 
 
 def test_both_stages_bound_and_dedupe_parent_ids_identically():
-    from looplab.events.replay import _bounded_card_action
+    from looplab.events.card_ledger import _bounded_card_action
 
     raw = [3, 3, "4", True, -1, 2 ** 31, None, 5] + list(range(100))
     admitted = _bounded_card_action({"parent_ids": raw})
@@ -3243,7 +3243,7 @@ def test_neither_stage_re_derives_the_shared_card_coercions():
     import inspect
     import textwrap
 
-    from looplab.events import replay as replay_module
+    from looplab.events import card_ledger as replay_module
 
     for name in ("_bounded_card_action", "_card_added_snapshot"):
         source = textwrap.dedent(inspect.getsource(getattr(replay_module, name)))
@@ -3282,7 +3282,7 @@ def _discard_lane_rows():
 
 
 def _selection_projection(rows):
-    from looplab.events.replay import _card_debuggable_leaf_ids
+    from looplab.events.card_ledger import _card_debuggable_leaf_ids
     from looplab.search.card_selection import card_budget_used, refunded_card_budget_node_ids
 
     state = fold([Event(seq=i, type=k, data=d) for i, (k, d) in enumerate(rows)])
@@ -3374,7 +3374,7 @@ def test_a_pre_speculation_log_keeps_every_selection_decision():
     # …and the ordinary failed child still ends its parent's life as a debuggable leaf, exactly as
     # before: nothing in this log proves a build that never ran.
     from looplab.core.models import is_unevaluated_speculative_discard
-    from looplab.events.replay import _card_debuggable_leaf_ids
+    from looplab.events.card_ledger import _card_debuggable_leaf_ids
     assert is_unevaluated_speculative_discard(done, done.nodes[3]) is False
     assert 2 not in _card_debuggable_leaf_ids(done)
 

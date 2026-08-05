@@ -84,6 +84,7 @@ _LAYOUT = {
     "assistant_commands": "serve",
     "atomicio": "core",
     "best_of_n": "search",
+    "card_ledger": "events",  # the derived Card ledger: receipt bounds + derive_cards (doc 25 EV-01)
     "card_selection": "search",  # Card-backed candidate election and ownership receipts
     "cards": "core",          # card identity: digests, ownership receipts, provenance (doc 25 CO-02)
     "bg_tasks": "runtime",
