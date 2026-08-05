@@ -22,9 +22,11 @@ The closed lane vocabulary is intentionally small:
 
 ``total=None`` disables the global ceiling.  This is the compatibility mode used when canonical
 ``llm_parallel`` is unset (including a legacy-only ``parallel_build`` configuration) and for startup
-AUTO: historical overlapped research remains unbounded.  A positive canonical value enables the
-shared total.  Per-lane limits remain useful under a finite total; round-robin admission prevents a
-permanent build backlog from starving a waiting background lane.
+AUTO: the foreground lanes (``build``, ``engine``) remain unbounded, exactly as before the broker
+existed.  A positive canonical value enables the shared total.  The BACKGROUND lane caps are
+independent of that ceiling and apply either way — see ``default_llm_lane_limits`` for why the two
+must not be welded together.  Round-robin admission prevents a permanent build backlog from starving
+a waiting background lane.
 """
 from __future__ import annotations
 
@@ -74,24 +76,40 @@ def normalize_llm_lane_limits(value: Optional[Mapping[str, Optional[int]]]) -> d
     return out
 
 
+# The background producers: cadence/watchdog work that runs BESIDE the main task rather than being
+# it.  Each is capped at one concurrent request whether or not a finite total exists — the cap is what
+# stops one such producer from multiplying itself across every concurrent evaluation.
+_BACKGROUND_LANE_LIMITS = {"deep_research": 1, "novelty_dedup": 1, "enrichment": 1}
+
+
 def default_llm_lane_limits(total: Optional[int]) -> dict[str, Optional[int]]:
-    """Default fair allocation for a finite shared budget.
+    """Default fair allocation, with or without a finite shared budget.
 
     Build may consume the full total while it is the only demand.  Background categories are capped
     at one concurrent request each; round-robin gives each queued category the next available turn.
     This is work-conserving (no idle reservation) while still preventing one noisy background producer
     from multiplying itself across the whole budget.
+
+    ``total=None`` (AUTO, or a legacy-only ``parallel_build``) keeps the historical UNBOUNDED total,
+    but still applies the background caps.  Welding the two together made the cap inert exactly where
+    it was needed most: both live-log watchdogs are ``@in_llm_lane("enrichment")``, and under the
+    shipped AUTO default the broker was returned ``{}`` — not merely unbounded but DISABLED
+    (``enabled`` is False, so ``llm_request_permit`` never borrows), which made the lane annotation
+    decorative.  On a 2-GPU box that is 2 concurrent evals x 2 LLM-calling watchdogs = 4 unbounded
+    background calls competing with build and repair; on 8 GPUs, 16.  The per-node backstops (200
+    monitor calls, 20 judge calls) are per NODE, not per run, so nothing else bounded it.
+
+    ``build`` and ``engine`` stay unbounded without a total, and that asymmetry is deliberate: under a
+    finite total their ``1`` is a FAIRNESS share of a budget the operator asked for, while with no
+    budget it would be an absolute serialization of the main task's own foreground work — including
+    the per-eval repair loop, which inherits the ``engine`` fallback lane and would then serialize
+    across an otherwise parallel eval batch.  A cap where there is no budget to be fair about is a
+    throughput regression, not a bound on background spend.
     """
     if total is None:
-        return {}
+        return {"build": None, **_BACKGROUND_LANE_LIMITS, "engine": None}
     total = cast(int, _positive_limit(total, label="LLM total"))
-    return {
-        "build": total,
-        "deep_research": 1,
-        "novelty_dedup": 1,
-        "enrichment": 1,
-        "engine": 1,
-    }
+    return {"build": total, **_BACKGROUND_LANE_LIMITS, "engine": 1}
 
 
 @dataclass(frozen=True)

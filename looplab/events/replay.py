@@ -353,6 +353,17 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     )
     _policy_scope = d.get("speculation_policy_scope", "")
     st.speculation_policy_scope = _policy_scope if _policy_scope == "greedy" else ""
+    # The SETTLED concurrency widths, pinned as RESOLVED integers (never the `0` AUTO sentinel, which
+    # re-derives off the resuming box). Strict bounded ints for the same reason speculation_depth is:
+    # a bool/string/float in a hand-edited or foreign row must not reshape a run's execution
+    # treatment. Absent (old logs) or malformed -> 0 -> "not recorded" -> the engine keeps its own
+    # startup resolution, which is byte-identical to the pre-pin behaviour.
+    _eval_parallel = d.get("eval_parallel", 0)
+    st.eval_parallel = (_eval_parallel if type(_eval_parallel) is int
+                        and 0 <= _eval_parallel <= 1024 else 0)
+    _llm_parallel = d.get("llm_parallel", 0)
+    st.llm_parallel = (_llm_parallel if type(_llm_parallel) is int
+                       and 0 <= _llm_parallel <= 64 else 0)
     # D1: recorded at start so replay applies the same selection rule. Absent in old
     # logs -> False -> byte-identical legacy selection.
     st.holdout_select = bool(d.get("holdout_select", False))
@@ -5260,10 +5271,14 @@ def _derive_cards(st: RunState) -> None:
             c.status = "building"
         elif not ev_nodes:
             c.status = "proposed"
-        # every pending Node collapses directly to running and the log has no durable
-        # evaluation-start boundary, so the frozen coded lane advertised by the model/UI is unreachable.
-        # Add replayable eval ownership/start state, or remove the lane until coded-versus-running can
-        # be represented truthfully.
+        # every pending Node collapses directly to running, so the frozen coded lane advertised by the
+        # model/UI is unreachable. A durable evaluation-start boundary now EXISTS —
+        # `events/types.py::EV_NODE_EVAL_STARTED`, folded to `Node.eval_started` by
+        # `_on_node_eval_started` — but it is stamped only on speculative attempt-zero lifecycles (see
+        # `Node.eval_start_boundary`) and this branch reads neither field, so the reason the lane cannot
+        # be derived is now THIS projection rather than missing evidence. Split the pending branch on
+        # `eval_started` (and widen the boundary past speculative nodes if the lane must be general), or
+        # remove the lane until coded-versus-running can be represented truthfully.
         elif any(n.status is NodeStatus.pending for n in ev_nodes):
             c.status = "running"
         elif all((n.id in st.breed_excluded) or (not n.feasible) for n in ev_nodes):

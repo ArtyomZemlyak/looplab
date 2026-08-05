@@ -24,7 +24,7 @@ from looplab.events.types import (EV_APPROVAL_GRANTED, EV_PAUSE, EV_RESUME, EV_R
 from looplab.engine.orchestrator import (
     Engine,
     SPECULATION_CALIBRATION_PROFILE_DIGEST,
-    SpeculationAuthorizationError,
+    RunStartPinError,
 )
 from looplab.engine.finalize import finalize_run, incomplete_finalize_scope
 from looplab.events.replay import fold
@@ -61,8 +61,9 @@ def _run_engine_guarded(eng: Engine):
     started = time.time()
     try:
         return anyio.run(eng.run)
-    except SpeculationAuthorizationError:
-        # Authorization failures deliberately leave the untrusted/stale run prefix untouched.  The
+    except RunStartPinError:
+        # A refused re-entry (stale speculation evidence, or a resume spelling a width other than the
+        # one run_started pinned) deliberately leaves the untrusted/stale run prefix untouched.  The
         # generic fatal-error path below writes run_finished + finalization receipts, which would turn
         # a refused re-entry into a mutation by the very engine that refused to trust it.
         raise

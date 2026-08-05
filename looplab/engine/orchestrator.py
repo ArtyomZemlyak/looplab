@@ -135,13 +135,21 @@ SPECULATION_CALIBRATION_VARIANT_FIELDS = SPECULATION_CALIBRATION_PROFILE_VARIANT
 # the engine, the CLI and the tests all spell them on this module.
 
 
-class SpeculationAuthorizationError(RuntimeError):
-    """A durable speculation prefix cannot be re-entered under the current evidence authority.
+class RunStartPinError(RuntimeError):
+    """A re-entry contradicts a value this run's own ``run_started`` pinned (engine invariant #6).
 
     This is deliberately distinct from an ordinary fatal engine error.  CLI fatal-error recovery
-    writes terminal events, while an authorization failure must return without changing the log it
-    refused to trust.
+    writes terminal events, while a refused re-entry must return without changing the log it refused
+    to trust — so `cli/run_cmds.py::_run_engine_guarded` re-raises this family untouched.
     """
+
+
+class SpeculationAuthorizationError(RunStartPinError):
+    """A durable speculation prefix cannot be re-entered under the current evidence authority."""
+
+
+class SettledWidthPinError(RunStartPinError):
+    """A resume explicitly spells a concurrency width other than the one ``run_started`` pinned."""
 
 
 # Bounded aging for continuous eval dispatch (`_dispatch_evals`). After this many consecutive
@@ -695,8 +703,33 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # envelope, the runtime-scope pin and `run_started` all have to agree on.
         self._gpu_ids: list[int] = _detect_gpu_ids()
         self._gpu_physical_ids, self._gpu_mem = detect_gpu_inventory(self._gpu_ids)
+        # Which axes were spelled AUTO. Only an AUTO axis may ADOPT the width `run_started` pinned on
+        # re-entry (`_repin_settled_widths`); an explicitly spelled width that disagrees with the pin
+        # is a changed treatment and fails closed there. Same rule, same rationale as
+        # `_speculation_depth_auto` below — AUTO is a request to let the BOX decide, and on re-entry
+        # the run's own log outranks a different box.
+        # Each flag mirrors its own resolver's AUTO test EXACTLY (the `== 0` branch below for evals,
+        # `_resolve_llm_parallel`'s post-`int()` test for builds), so the two can never disagree about
+        # whether this launch asked for AUTO.
+        self._eval_parallel_startup_auto = (_eval_parallel_value == 0)
+        try:
+            self._llm_parallel_startup_auto = (int(self._llm_parallel_startup_opt) == 0)
+        except (TypeError, ValueError):
+            self._llm_parallel_startup_auto = False   # unparseable -> `_resolve_llm_parallel` returns 1
         if _eval_parallel_value == 0:                    # AUTO: the agent/operator lets the box decide
-            _eval_parallel_value = max(1, len(self._gpu_ids))
+            # ...but only where the box is the constraint. AUTO means "one experiment per detected
+            # GPU", so a task that declares itself CPU-locked has no GPU-derived width: `len(_gpu_ids)`
+            # is then a coincidence, not a capacity estimate. `_task_gpu_capable` is the same signal,
+            # with the same "absent means capable" rule, that already keeps such a task out of the
+            # per-eval device reservation and the pool-wide host lease — "`_eval_parallel` and
+            # `_gpu_ids` describe the BOX, not the work" (engine/resources.py). Deriving the WIDTH
+            # from the box for work the box's GPUs cannot serve is that same category error one layer
+            # up, and it costs determinism: two concurrent toy evals finish in wall-clock order, so
+            # the documented offline smoke produced a different `node_evaluated` order run to run.
+            # An explicitly spelled width is still honoured — an operator who wants CPU-parallel evals
+            # asks for them by number.
+            _eval_parallel_value = (max(1, len(self._gpu_ids))
+                                    if self._task_gpu_capable() else 1)
         self._eval_parallel = max(1, int(_eval_parallel_value))
         # Now that eval_parallel is settled, resolve llm_parallel (0 = AUTO = eval_parallel), so a build
         # fan-out never exceeds what we can concurrently evaluate.
@@ -1053,7 +1086,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # canonical attributes; legacy Engine(...) callers and direct assignments transparently feed them.
         # The canonical field is also the opt-in switch for the SHARED provider-call budget. An
         # unset field (including legacy-only parallel_build) and startup AUTO preserve historical
-        # unbounded research overlap; only a positive canonical value activates a finite total.
+        # unbounded FOREGROUND overlap; only a positive canonical value activates a finite total.
+        # The background lane caps are NOT part of that opt-in — `default_llm_lane_limits` applies them
+        # with or without a total, because the producers they bound (both live-log watchdogs, per eval)
+        # multiply with the eval width, which AUTO is precisely what derives from the box.
         try:
             _startup_llm_total = (min(64, int(_llm_parallel_opt))
                                   if _llm_parallel_opt is not None
@@ -1465,6 +1501,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # Re-entry authorization is the first semantic boundary.  Recovery, command ACK and setup all
         # append events, so a stale/missing/different receipt must fail before any of them can mutate a
         # positive-depth run.  `_reentry_repin` repeats this after setup to guard a concurrent tail edit.
+        # The settled widths are the same kind of boundary and are restored first, so every later
+        # decision in this invocation runs at the width the run's own log was written under.
+        self._repin_settled_widths(state)
         self._require_pinned_speculation_receipt(state)
         if self._speculation_gate_calibration and events:
             # The hidden bootstrap is launch-only.  Even an exact prior calibration envelope cannot be
@@ -2254,6 +2293,73 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             values["speculation_policy_scope"] = self._speculation_policy_scope
         return values
 
+    def _run_start_settled_widths(self) -> dict:
+        """The RESOLVED concurrency widths this run is executing at, for the ``run_started`` record.
+
+        Both Settings fields ship ``0`` = AUTO, a sentinel resolved off the LIVE BOX
+        (`_detect_gpu_ids`). `config.snapshot.json` therefore stores the operator's INTENT, not the
+        treatment the log was written under, and re-entry re-derives from whatever hardware it lands
+        on: a 1-GPU run resumed on a 2-GPU host doubles its eval concurrency and flips the build spine
+        from the serial one to the concurrent-append seam (invariant #1) MID-LOG, with nothing
+        recorded either way. Pin the settled INTEGERS — the same fix, for the same reason, that
+        `_resolve_speculation_depth` already applies to its own AUTO sentinel (invariant #6).
+
+        These deliberately stay OUT of `RUN_START_PINNED_FIELDS`. That contract is the HTTP config
+        editor's refuse-list ("start a new run to use different semantics"), and both widths remain
+        operator-mutable mid-run through the durable `budget_extend` control event — exactly the
+        reason `trust_gate` is excluded from it too. What re-entry owes them is narrower and lives in
+        `_repin_settled_widths`: adopt the pin when the axis was launched AUTO, refuse a differently
+        spelled explicit width, and stand aside once a control event has taken the axis over.
+        """
+        return {"eval_parallel": self._eval_parallel, "llm_parallel": self._llm_parallel}
+
+    def _repin_settled_widths(self, entry: RunState) -> None:
+        """Restore the widths ``run_started`` pinned, or refuse a re-entry that contradicts them.
+
+        Called at the same re-entry boundaries as `_require_pinned_speculation_receipt` and, like it,
+        BEFORE any append — a refusal must leave the log it declined to trust untouched.
+
+        Deliberately NOT called per loop iteration: `_apply_control_overrides` re-applies an
+        operator's `budget_extend` widths on every turn, so a per-iteration re-pin would either undo
+        the operator's own live retune or refuse the run over it.
+        """
+        for axis, upper, recorded, resolved, auto in (
+            ("eval_parallel", EVAL_WIDTH_MAX, getattr(entry, "eval_parallel", 0),
+             self._eval_parallel, self._eval_parallel_startup_auto),
+            ("llm_parallel", LLM_WIDTH_MAX, getattr(entry, "llm_parallel", 0),
+             self._llm_parallel, self._llm_parallel_startup_auto),
+        ):
+            # 0 = the key is absent or malformed = a log written before widths were pinned. Keep this
+            # process's own startup resolution: that is byte-identical to the pre-pin behaviour, and
+            # inventing a width for a legacy log would be the very re-derivation this pin prevents.
+            if type(recorded) is not int or not 1 <= recorded <= upper:
+                continue
+            if auto:
+                # AUTO asked the BOX to decide. On re-entry the run's own log outranks a different
+                # box — including a SMALLER one: continuing at the pinned width keeps one search
+                # treatment across the whole log, and a width above what the hardware can serve is
+                # bounded by the resource scheduler, not by silently rewriting the treatment.
+                setattr(self, f"_{axis}", recorded)
+                continue
+            if recorded == resolved:
+                continue
+            # An operator who already retuned this axis through a durable control event owns it: the
+            # override is re-applied by `_apply_control_overrides` on every turn, so the launch flag
+            # has no effect on the running width and refusing the resume over it would be a false
+            # alarm about a value that does nothing. Either spelling of the axis counts.
+            if any(key in (getattr(entry, "budget_overrides", None) or {})
+                   for key in (("max_parallel", "eval_parallel") if axis == "eval_parallel"
+                               else ("parallel_build", "llm_parallel"))):
+                continue
+            raise SettledWidthPinError(
+                f"cannot resume this run at {axis}={resolved}: run_started pinned {recorded}. "
+                "The run-start record owns the width its log was written under (engine invariant "
+                f"#6) — a change here would splice two execution treatments into one log with "
+                f"nothing recording the change. Put {axis} back to {recorded} (or to 0 = AUTO, which "
+                "adopts the pin) in this run's config.snapshot.json / launch settings, or change the "
+                "width durably with a `budget_extend` control event, which the log DOES record."
+            )
+
     def _setup_phase(self, state: RunState) -> None:
         # Per-RUN reset of the dep-install circuit breaker: it is a module global, so in the long-lived
         # `looplab ui` server a run that latched (egress blip) would leave auto-install disabled for the
@@ -2331,6 +2437,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # restores this shared contract from the fold rather than accepting a later
                             # snapshot edit that would mix incomparable scores or selection rules.
                             **self._run_start_pinned_values(),
+                            # The SETTLED widths, not their AUTO sentinel: re-entry must never
+                            # re-derive this run's execution treatment from a different box.
+                            **self._run_start_settled_widths(),
                             "select_verifier_contract": VERIFIER_SELECTION_CONTRACT,
                         },
                     )
@@ -2605,6 +2714,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _reentry_repin(self) -> bool:
         _events = self.store.read_all()
         _entry = fold(_events)
+        # Re-pin after setup for the same reason the receipt check repeats here: a FRESH run's own
+        # run_started was appended by `_setup_phase` a few lines ago (a no-op re-pin), while a resume
+        # re-reads a tail another writer may have extended.
+        self._repin_settled_widths(_entry)
         self._require_pinned_speculation_receipt(_entry)
         self._pending_finalize_scope = incomplete_finalize_scope(_events)
         # A failed finalize attempt is recorded as finished(reason=error) by the CLI guard, but its
@@ -3628,8 +3741,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # `_available_developers`, `_strategy_ctx`, `_coverage_for_ctx`, `_should_consult`,
     # `_record_strategy`, `_ensure_surrogate`, `_apply_strategy`, `_already_covered_at`,
     # `_maybe_snapshot_coverage`, `_maybe_consult_strategist`) lives in looplab/engine/strategy.py
-    # (StrategyCadenceMixin — inherited, zero call-site churn). `_op_span` STAYS here: it is a
-    # generic new-trace span helper shared by the research / hypothesis-merge / lessons clusters too.
+    # (StrategyCadenceMixin — inherited, zero call-site churn). `_op_span` did NOT come with it and no
+    # longer lives here either: it is a generic new-trace span helper shared by the research /
+    # hypothesis-merge / lessons clusters too, so it moved to `engine/shared.py::SharedEngineMixin`
+    # (called from more than one cluster, owns no state of its own — the bar that module documents).
 
     # ------------------------------ research cadence (extracted to engine/research_cadence.py)
     # The P2 deep-research + open-hypothesis-board merge + run-report cadence cluster
@@ -4839,6 +4954,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             payload["never_evaluated"] = True
         self.store.append(EV_NODE_FAILED, payload)
 
+    def _build_calls_an_llm(self) -> bool:
+        """Does building one node make provider calls at all?
+
+        Read off the ROLES rather than a backend string, because the engine never sees
+        `Settings.backend`: every LLM-backed role carries the shared client (`agents/roles.py` —
+        wrappers forward `client` read-through, and `search/foresight.py`'s panel proxies it), and an
+        external coding-agent Developer declares `is_code_generating` instead of holding a client.
+        Either marker means a build has provider latency to overlap. Neither means the build is pure
+        local Python (`task.build_roles()` — the Toy/templated roles) and finishes in microseconds.
+        Total by construction: an exotic role that raises on attribute access still answers "no LLM",
+        which only ever costs fan-out, never correctness.
+        """
+        for role in (getattr(self, "researcher", None), getattr(self, "developer", None)):
+            if role is None:
+                continue
+            try:
+                if getattr(role, "client", None) is not None:
+                    return True
+                if getattr(role, "is_code_generating", False):
+                    return True
+            except Exception:  # noqa: BLE001 — a proxy/property that raises is not evidence of an LLM
+                continue
+        return False
+
     def _resolve_llm_parallel(self, value: int) -> int:
         """Resolve startup ``llm_parallel`` to a concrete build fan-out. ``0`` = AUTO = the (already
         resolved) ``self._eval_parallel``, so we build exactly as many seeds as we can concurrently evaluate;
@@ -4848,6 +4987,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         try:
             value = int(value)
         except (TypeError, ValueError):
+            return 1
+        # AUTO on a build that calls NO LLM settles to serial width 1. Fan-out exists to overlap
+        # provider LATENCY; a Toy/templated build has none, so a width derived from the GPU count buys
+        # exactly nothing and costs the property CLAUDE.md invariant #1 states: "a settled build width
+        # of 1 keeps the strict 'only the main task appends' behaviour, byte-identical". Since
+        # `llm_parallel` began defaulting to AUTO (2026-08-04) and `cli/__init__.py` wires
+        # `role_factory` unconditionally, the documented offline smoke fanned out on any GPU box and
+        # produced THREE distinct event orders across 8 identical runs — and `bench.py`, the
+        # capability-regression harness, inherits the same AUTO width while promising "Deterministic
+        # for the toy backend". This restores that promise where it is made instead of retracting it.
+        # An EXPLICITLY spelled width is still honoured as spelled: an operator who asks a toy run to
+        # fan out (a concurrency test) gets the fan-out and its nondeterministic byte order.
+        if value == 0 and not self._build_calls_an_llm():
             return 1
         # Clamp to the config `le=64` ceiling on BOTH branches: AUTO resolves to max_parallel (config
         # `le=1024`), which must not silently exceed the parallel_build cap the config author set (nor

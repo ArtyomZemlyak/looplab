@@ -346,7 +346,12 @@ def _engine(tmp_path, **kwargs) -> Engine:
     )
 
 
-def test_engine_enables_shared_total_only_for_positive_canonical_value(tmp_path):
+def test_engine_enables_shared_total_only_for_positive_canonical_value(tmp_path, monkeypatch):
+    # AUTO's build fan-out follows the resolved eval width only when the build actually calls an LLM
+    # (it exists to overlap provider latency). Mark the role the way a production LLM role is marked —
+    # it carries the shared client — so the `auto` case below measures the coupling, not the toy
+    # narrowing; see tests/test_settled_width_pins.py.
+    monkeypatch.setattr(ToyResearcher, "client", object(), raising=False)
     default = _engine(tmp_path / "default")
     legacy = _engine(tmp_path / "legacy", parallel_build=4)
     auto = _engine(tmp_path / "auto", eval_parallel=3, llm_parallel=0)

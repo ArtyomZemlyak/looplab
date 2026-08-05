@@ -1231,6 +1231,11 @@ def test_gpu_pool_auto_max_parallel_and_distinct_pinning(tmp_path, monkeypatch):
     # "serial mode never pins" branch was a SECOND copy of the rule that really lives in admission —
     # so the assertion below could have held while the real path disagreed.
     monkeypatch.setattr("looplab.engine.orchestrator._detect_gpu_ids", lambda: [0, 1])
+    # AUTO is "one experiment per detected GPU", so it is hardware-derived only for a task that can
+    # USE one — a CPU-locked adapter now settles its AUTO width to serial instead of reading a GPU
+    # count that cannot serve it (tests/test_settled_width_pins.py). This test is about the box, so
+    # speak for a capable task while the AUTO engine is built; the CPU-locked half below flips it back.
+    monkeypatch.setattr(ToyTask, "gpu_capable", lambda self: True)
     eng = _engine(tmp_path / "gpu-auto", max_parallel=0)
     assert eng.max_parallel == 2                   # AUTO resolved to the 2 detected GPUs
     (a,) = eng._acquire_gpus(1)
@@ -1248,6 +1253,9 @@ def test_gpu_pool_auto_max_parallel_and_distinct_pinning(tmp_path, monkeypatch):
     # in pure arithmetic). So even at AUTO width its unspecified footprint asks for NOTHING — that is
     # what keeps a `--kind quadratic` run from taking, and then blocking on, the cross-process host
     # GPU pool lease. Width alone no longer decides; the task's own answer is the second input.
+    # (Restore the adapter's real answer: the width above is already settled on both engines, so this
+    # exercises the ADMISSION half against the declaration a `--kind quadratic` run really makes.)
+    monkeypatch.setattr(ToyTask, "gpu_capable", lambda self: False)
     assert eng._resource_request_for_node(object())["count"] == 0
     monkeypatch.setattr(type(eng.task), "gpu_capable", lambda self: True)
     assert eng._resource_request_for_node(object())["count"] == 1   # capable + parallel -> one device

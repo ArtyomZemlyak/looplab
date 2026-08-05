@@ -85,15 +85,32 @@ def test_eval_parallel_auto_resolves_to_gpu_count(tmp_path, monkeypatch):
     # 0 = AUTO -> max(1, len(gpu_ids)). Inject a 3-GPU inventory so AUTO is DISTINGUISHED from
     # fall-through-to-1 (a CPU box would make eval_parallel=0 coincide with the default).
     monkeypatch.setattr(_orch, "_detect_gpu_ids", lambda: [0, 1, 2])
+    # AUTO means "one experiment per detected GPU", so it is hardware-derived only for a task that
+    # can USE one. ToyTask declares `gpu_capable() -> False` (closed-form arithmetic), which now
+    # settles its AUTO width to serial — see test_settled_width_pins.py. Speak for a GPU-capable task
+    # here, which is what this property is about.
+    monkeypatch.setattr(ToyTask, "gpu_capable", lambda self: True)
     e = _engine(tmp_path / "a", eval_parallel=0)
     assert e._gpu_ids == [0, 1, 2]
     assert e.max_parallel == 3 and e._eval_parallel == 3
 
 
-def test_llm_parallel_auto_tracks_resolved_eval(tmp_path):
+def test_llm_parallel_auto_tracks_resolved_eval(tmp_path, monkeypatch):
     # llm_parallel=0 -> AUTO -> the resolved eval width (build as many seeds as you can eval).
+    # AUTO's build fan-out exists to overlap PROVIDER LATENCY, so it settles to serial when no role
+    # calls an LLM at all. Mark the role the way a production LLM role is marked — it carries the
+    # shared client — so this asserts the coupling rather than the toy narrowing beside it.
+    monkeypatch.setattr(ToyResearcher, "client", object(), raising=False)
     e = _engine(tmp_path / "la", eval_parallel=4, llm_parallel=0)
     assert e.max_parallel == 4 and e.parallel_build == 4 and e._llm_parallel == 4
+
+
+def test_auto_build_width_is_serial_when_the_build_calls_no_llm(tmp_path):
+    # The sibling of the coupling above: a Toy build has no provider latency to overlap, so a
+    # GPU-derived fan-out buys nothing and costs the byte-order determinism CLAUDE.md invariant #1
+    # promises at width 1. Full coverage lives in tests/test_settled_width_pins.py.
+    e = _engine(tmp_path / "la-toy", eval_parallel=4, llm_parallel=0)
+    assert e._eval_parallel == 4 and e._llm_parallel == 1
 
 
 def test_strategist_steers_new_names_and_syncs_alias(tmp_path):
@@ -147,10 +164,12 @@ def test_strategy_context_reads_the_live_broker_lane_allocation(tmp_path):
     assert ctx.llm_lane_limits == {"build": 2, "deep_research": 1}
 
 
-def test_strategy_context_distinguishes_unbounded_broker_from_build_fanout(tmp_path):
+def test_strategy_context_distinguishes_unbounded_broker_from_build_fanout(tmp_path, monkeypatch):
     # llm_parallel=0 is canonical startup AUTO: it couples only the build fan-out to the resolved eval
     # width and leaves the shared provider-call broker unbounded. An unset canonical value preserves
     # the legacy parallel_build setting, whose compatibility default is serial 1.
+    # LLM-backed roles, so the coupling is what is measured (see the AUTO tests above).
+    monkeypatch.setattr(ToyResearcher, "client", object(), raising=False)
     e = _engine(tmp_path / "unbounded-ctx", eval_parallel=4, llm_parallel=0)
     ctx = e._strategy_ctx(RunState())
     assert ctx.llm_parallel == 4

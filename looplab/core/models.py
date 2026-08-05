@@ -1405,7 +1405,11 @@ class Card(BaseModel):
     # (node_building in flight) | running (pending eval) | evaluated (>=1 terminal) | gated (only
     # trust-gated / breed-excluded evidence) | dropped (drop/merge event). `coded` (pending node with
     # code) is a RESERVED lane the fold does NOT currently produce — every pending Node collapses
-    # directly to `running` (no durable eval-start boundary in the log; see `_derive_cards`).
+    # directly to `running` (see `_derive_cards`). NOT for want of a boundary any more: the log now
+    # carries `events/types.py::EV_NODE_EVAL_STARTED`, folded to `Node.eval_started`. It is stamped
+    # only on SPECULATIVE attempt-zero lifecycles (the ones whose budget refund needs it), and
+    # `_derive_cards` reads none of it, so the lane stays unreachable for a different reason: the
+    # projection, not the evidence. Deriving it means splitting the pending branch there.
     status: str = "proposed"
     # Research verdict (DERIVED via the shared `_evidence_verdict` helper — byte-identical to the
     # hash-joined hypothesis): open | testing | supported | tested | abandoned.
@@ -1669,6 +1673,17 @@ class RunState(BaseModel):
     # The v1 scorer/evidence envelope is intentionally Greedy-only.  A later broader policy rollout
     # needs its own source-owned scorer matrix and a new receipt scope.
     speculation_policy_scope: str = Field(default="", exclude=True)
+    # The SETTLED concurrency widths this run actually started with, pinned by run_started. Both
+    # Settings fields ship `0` = AUTO, a SENTINEL resolved off the LIVE BOX (`_detect_gpu_ids`) — so
+    # a snapshot storing `0` records the operator's *intent*, never the treatment the log was written
+    # under. Resuming a 1-GPU run on a 2-GPU host would then silently double eval concurrency and flip
+    # the build spine from serial to the concurrent-append seam MID-LOG (engine invariant #1's
+    # byte-order seam), with nothing in the log to say so. Pinning the RESOLVED integer is the same
+    # treatment `speculation_depth` already gets, for the same reason (invariant #6).
+    # `0` here means NOT RECORDED (old logs) -> the engine neither adopts nor refuses -> byte-identical
+    # legacy behaviour. Excluded from the public dump so those old logs keep their exact shape.
+    eval_parallel: int = Field(default=0, ge=0, le=1024, exclude=True)
+    llm_parallel: int = Field(default=0, ge=0, le=64, exclude=True)
     # D1 holdout-gated promotion (folded from run_started; False for old logs -> byte-identical
     # legacy selection). When True, best-selection prefers the holdout metric among the nodes
     # that carry one (the val-top-k re-scored on the unseen partition at finish).

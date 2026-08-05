@@ -194,6 +194,13 @@ _CALIBRATION_RUN_STARTED_FIELDS = frozenset({
     "speculation_calibration_gpu_inventory",
     "speculation_calibration_seed",
     "speculation_policy_scope",
+    # The settled concurrency widths (`Engine._run_start_settled_widths`). Named here rather than
+    # reached through RUN_START_PINNED_FIELDS because they are RESOLVED integers, while that set
+    # drives the per-field equality loop below — which compares run_started against the SETTINGS in
+    # config.snapshot.json. The two coincide for this profile (it spells both widths `1`, not the `0`
+    # AUTO sentinel the product default ships), but that is a coincidence, not the contract.
+    "eval_parallel",
+    "llm_parallel",
 }) | RUN_START_PINNED_FIELDS
 _CALIBRATION_CARD_ADDED_FIELDS = frozenset({
     "id",

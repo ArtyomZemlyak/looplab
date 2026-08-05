@@ -402,6 +402,12 @@ def _make_run(
         "trust_gate": config["trust_gate"],
         "select_verifier_contract": VERIFIER_SELECTION_CONTRACT,
         **{field: config[field] for field in RUN_START_PINNED_FIELDS},
+        # The settled concurrency widths (`Engine._run_start_settled_widths`). These are RESOLVED
+        # integers, not the Settings values — the loop above cannot supply them — but the calibration
+        # profile spells both widths explicitly as `1`, so this writer records what that profile
+        # resolves to. Present because the reader checks run_started's EXACT key set.
+        "eval_parallel": config["eval_parallel"],
+        "llm_parallel": config["llm_parallel"],
     }
     started.update(pin_overrides or {})
     for field in omit_pins:
