@@ -16,15 +16,39 @@ export function activeNodeMap(nodes = {}, state = null) {
   return out
 }
 
-export function activeNodeConcepts(state = null) {
-  const memberships = state?.node_concepts || {}
+// The rows whose membership is AUTHORITATIVE, plus a count of the active tagged rows withheld because
+// theirs is not. A materialization receipt is minted PER NODE (replay.py::_materialize_concept_deltas
+// stamps `node_concept_materialization_receipts[nid]`), and it is complete information about that node:
+// a root delta node inherits the run base's own problems into its own receipt (`reasons.update(
+// base_reasons)`), so a row with no receipt of its own is exact regardless of what the base receipt says.
+// That makes withholding a per-ROW operation. Collapsing the receipts to one run-wide verdict and then
+// dropping every row -- what this file used to force ConceptChipBar to do -- discards the memberships the
+// fold proved exact: `b2-validate` withheld all 21 memberships across 6 clean experiments because ONE
+// node (#4, whose delta parent #3 was never tagged) could not be resolved. The server never did this;
+// serve/concept_frame.py::bounded_inputs keeps every row and stamps the reason on the frame instead.
+// This REPLACES a lifecycle-only `activeNodeConcepts`, deliberately rather than sitting beside it: a
+// projection that applies only the tombstone/abort filter is the one every caller reached for and is
+// exactly how a degraded row gets counted as exact. There is one concept projection, and it is this one.
+export function authoritativeNodeConcepts(state = null) {
   const nodes = state?.nodes || {}
   const aborted = new Set((state?.aborted_nodes || []).map(Number))
-  const out = {}
-  for (const [key, concepts] of Object.entries(memberships)) {
-    if (nodeIsActive(nodes[key], state, aborted)) out[key] = concepts
+  const receipts = state?.node_concept_materialization_receipts
+  const wellFormed = receipts == null
+    || (typeof receipts === 'object' && !Array.isArray(receipts))
+  const degraded = wellFormed ? (receipts || {}) : {}
+  const concepts = {}
+  let withheld = 0
+  for (const [key, ids] of Object.entries(state?.node_concepts || {})) {
+    if (!nodeIsActive(nodes[key], state, aborted)) continue
+    // A receipt STORE that is not a map is structural corruption, and this projection must fail closed
+    // on its own rather than relying on its one caller checking the status first.
+    if (!wellFormed) { withheld += 1; continue }
+    // Absence within a degraded row is not truth, so it may not reach chip counts, search, selection
+    // or DAG filtering -- but its EXISTENCE is truth, and stays disclosed through `withheld`.
+    if (Object.hasOwn(degraded, key)) { withheld += 1; continue }
+    concepts[key] = ids
   }
-  return out
+  return { concepts, withheld }
 }
 
 // A retained concept row is authoritative only when replay emitted no
@@ -79,11 +103,17 @@ export function conceptMaterializationStatus(state = null, nodeId = undefined) {
     return status === 'unavailable' ? status : 'partial'
   }
   const aborted = new Set((state?.aborted_nodes || []).map(Number))
-  for (const [key, receipt] of Object.entries(receipts)) {
-    if (!nodeIsActive(nodes[key], state, aborted)) continue
-    const status = receiptStatus(receipt)
-    if (status === 'unavailable') return status
-    aggregate = status
+  // A per-node receipt is scoped to ITS node. Returning `unavailable` for the whole run the moment one
+  // active node carried an unavailable receipt was the bug behind "Concepts UNAVAILABLE" on runs whose
+  // concepts plainly existed: it answered "I could not determine membership" for a run where membership
+  // was determined, exactly, for every other experiment. The two run-SCOPED failures above still answer
+  // `unavailable` -- a degraded/malformed run-base receipt and a malformed receipt store are statements
+  // about the whole projection. Anything keyed by node degrades the run to `partial` and is withheld
+  // row-wise by `authoritativeNodeConcepts`.
+  // `receiptStoreValid` already rejected every `invalid` envelope, so a surviving receipt is `partial` or
+  // `unavailable` -- either way that node's row is not exact and the RUN is, at best, partially known.
+  for (const key of Object.keys(receipts)) {
+    if (nodeIsActive(nodes[key], state, aborted)) return 'partial'
   }
   return aggregate
 }
