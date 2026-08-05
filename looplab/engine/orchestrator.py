@@ -4011,6 +4011,59 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # (ProposalCuesMixin — inherited, zero call-site churn; the hint-forwarding registry test
     # source-scans that module too).
 
+    # The sub-object forwarding seam, DECLARED (doc 25 ES-13): `<engine name> -> (sub-object, lane)`
+    # for every one-line delegator below that forwards to `self.<sub-object>.<same name minus the
+    # leading underscore>`. All 32 follow that naming rule exactly, which is what makes the table
+    # checkable rather than decorative.
+    #
+    # It exists because of ONE named cost, and it removes exactly that one: a new `LessonMemory` /
+    # `HoldoutGrader` / `Workspace` method needs a hand-written forwarder carrying the correct
+    # `@in_llm_lane`, and eight of the thirty-two carry one. Forgetting the lane does not fail —
+    # the call simply runs outside the capped enrichment lane and competes with foreground work for
+    # provider concurrency, which shows up as an unexplained stall, not an error. The two-way guard
+    # in `tests/test_engine_forwarding_registry.py` turns both halves (a delegator missing from the
+    # table, a table entry whose lane no longer matches) into a red test.
+    #
+    # The delegators stay WRITTEN OUT rather than generated from this table — see the resolution note
+    # in doc 25 for the measurement behind that.
+    FORWARDED_SUBOBJECT_MEMBERS = {
+        # --- lessons (looplab/engine/lessons.py::LessonMemory)
+        "_load_reflection_priors": ("lessons", None),
+        "_load_reflection_priors_both": ("lessons", None),
+        "_empty_state_for_fp": ("lessons", None),
+        "_task_fingerprint": ("lessons", None),
+        "_write_reflection_note": ("lessons", "enrichment"),
+        "_reflect_lessons": ("lessons", "enrichment"),
+        "_append_lessons": ("lessons", None),
+        "_comparative_lessons": ("lessons", "enrichment"),
+        "_lessons_store_stamp": ("lessons", None),
+        "_distill_skill_body": ("lessons", None),
+        "_reflect_client": ("lessons", None),
+        "_causal_meta_note": ("lessons", "enrichment"),
+        "_store_case": ("lessons", None),
+        "_store_concept_capsule": ("lessons", None),
+        "_store_research_claims": ("lessons", "enrichment"),
+        "_store_concept_curation": ("lessons", "enrichment"),
+        "_store_claim_curation": ("lessons", "enrichment"),
+        "_store_task_facets": ("lessons", "enrichment"),
+        # --- holdout (looplab/trust/holdout.py::HoldoutGrader)
+        "_graded_output_name": ("holdout", None),
+        "_apply_host_grade": ("holdout", None),
+        "_host_score_split": ("holdout", None),
+        "_build_holdout_idx": ("holdout", None),
+        "_holdout_topk": ("holdout", None),
+        "_holdout_pending": ("holdout", None),
+        # --- workspace (looplab/engine/workspace.py::Workspace)
+        "_write_assets": ("workspace", None),
+        "_write_node_files": ("workspace", None),
+        "_materialize": ("workspace", None),
+        "_workspace_fingerprint": ("workspace", None),
+        "_seed_workspace": ("workspace", None),
+        "_seed_repo_tree": ("workspace", None),
+        "_link_input": ("workspace", None),
+        "_sandbox_cwd": ("workspace", None),
+    }
+
     # ---------------------------- cross-run memory / lessons / reflection (extracted)
     # The lessons/reflection cluster lives in looplab/engine/lessons.py (`LessonMemory`,
     # constructed as `self.lessons` in __init__). These thin delegators keep the ORIGINAL
@@ -4018,6 +4071,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # `engine._write_reflection_note` / `engine._reflect_client` / `engine._prior_note_text` —
     # and LessonMemory routes its internal cross-calls back through them, so an instance-level
     # monkeypatch intercepts every path.
+    #
+    # The property pairs immediately below and the three `staticmethod(...)` aliases further down are
+    # deliberately NOT in `FORWARDED_SUBOBJECT_MEMBERS`: a property forwards an ATTRIBUTE (both ways,
+    # via its setter) rather than a call, and a staticmethod alias binds `LessonMemory`'s own function
+    # — so unlike every entry in the table it does NOT follow `self.lessons`, and re-pointing that
+    # instance would not intercept it. Three different forwarding semantics, kept visibly different.
     @property
     def _lessons_seen_stamp(self):
         return self.lessons.seen_stamp

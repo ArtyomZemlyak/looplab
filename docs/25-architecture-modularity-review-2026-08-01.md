@@ -848,6 +848,43 @@ in the same change.
 
 *Recommendation:* Pick one forwarding style per sub-object and generate the delegators from a small name registry (a class-body loop or a tested __getattr__ with an explicit allow-list mirroring the existing registry-test pattern), including lane decoration as registry data. Keep the two deprecated-width properties as-is (they carry real semantics).
 
+*Resolution (2026-08-05):* The registry is DATA and the guard is real; GENERATION is rejected, with
+the measurement.
+
+`Engine.FORWARDED_SUBOBJECT_MEMBERS` declares all 32 one-line delegators as
+`<engine name> -> (sub-object, lane)`, and `tests/test_engine_forwarding_registry.py` (69) checks it
+both ways plus the lane and the forwarding target. That closes the one cost the finding actually
+names — a new sub-object method needing a hand-written forwarder with the correct `@in_llm_lane`,
+where forgetting the lane does not fail but silently runs the call outside the capped enrichment lane
+to compete with foreground work for provider concurrency. Verified by three breaks: dropping
+`_comparative_lessons`'s lane, adding an undeclared delegator, and pointing an entry at the wrong
+sub-object — each fails only its own assertion.
+
+REJECTED: generating the delegators. Measured before deciding, not asserted:
+
+* the naming rule IS uniform — 32 of 32 forward to `self.<sub>.<name minus the leading underscore>`
+  — so generation would work mechanically. That is what makes the table checkable, and it is also
+  the entire benefit generation would add over checking it.
+* 15 of the 32 are referenced by the suite, one of them (`_reflect_client`) 49 times, and they are a
+  documented monkeypatch seam. `monkeypatch.setattr(Engine, name, ...)` raises unless the attribute
+  already exists, so the `__getattr__` half of the recommendation is simply unavailable here; a
+  class-body loop keeps `hasattr` true but costs `inspect.signature`, a greppable `def`, and any
+  per-delegator comment — in a module CLAUDE.md already treats as comment-dense and that two other
+  open findings (ES-01, XP-06) want to keep readable.
+* the finding's own severity is LOW and it concedes the delegators are documented design. Trading
+  static analysis and greppability across 32 members of the Engine, in a file with ~170 direct
+  construction sites, to save writing three lines per new method is the wrong side of that trade.
+
+Also corrected: the finding says "eleven delegators carry it [`@in_llm_lane`]". Eleven methods in
+`Engine` carry the `enrichment` lane, but only EIGHT of them are sub-object delegators; the other
+three are ordinary engine methods. The registry pins eight.
+
+Kept visibly separate, and pinned as such: the five property pairs forward an ATTRIBUTE both ways
+through a setter rather than a call, and the three `staticmethod(LessonMemory.x)` aliases bind the
+CLASS's function — so unlike every table entry they do NOT route through `self.lessons`, and
+re-pointing that instance would not intercept them. Listing either shape in the table would claim a
+routing guarantee it does not have, so two tests assert they stay out.
+
 #### ES-14 · LOW · layering · effort: small
 
 **Mixin-boundary misplacements: governance and generic helpers live in unrelated clusters**
