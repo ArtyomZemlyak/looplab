@@ -1,8 +1,10 @@
 """The FINALIZE at-most-once paid-curation transaction (doc 25 EM-03).
 
 This is governance infrastructure, not lessons. It used to live inside `lessons.py`/`LessonMemory`,
-where it was ~645 of that file's 1,301 lines and had nothing to do with the E4/M2/M6 cross-run
-lesson machinery around it. Nothing about the protocol changed in the move: `LessonMemory` still
+where it was 698 of that file's 1,301 lines (645 of method bodies plus the claim/scratch constants
+above them) and had nothing to do with the E4/M2/M6 cross-run lesson machinery around it. Nothing
+about the protocol changed in the move — the method bodies are byte-identical apart from the
+ledger-name derivation in `_run_finalize_steward` — and `LessonMemory` still
 mixes it in, so `LessonMemory._write_curation_claim` / `store_concept_curation` / … resolve exactly
 as before and every existing monkeypatch seam through the class keeps working.
 

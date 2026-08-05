@@ -1660,8 +1660,9 @@ campaign keeps finding:
 `looplab/engine/curation_protocol.py` now owns the finalize at-most-once paid-curation transaction:
 the semantic keys, the claim write/read, the decision lock, the `.curation_invocations/` scratch GC,
 the paid attempt and its recovery, `_append_curation_once`, the shared steward driver and its three
-configurations. `lessons.py` drops from 1,301 to 604 lines — 645 of them were this, and the finding's
-"~700 of 1,334" was the right order of magnitude against a file EM-02 had already shrunk. It stays a
+configurations. `lessons.py` drops from 1,301 to 604 lines — 698 of them were this (645 of method
+bodies plus the claim/scratch constants), so the finding's "~700 of 1,334" was almost exactly right
+against a file EM-02 had since shrunk to 1,301. It stays a
 MIXIN on `LessonMemory` on purpose: every method in it is a live patch seam spelled
 `LessonMemory.<name>` (23 of them, pinned by name in the new guard), and the protocol legitimately
 reads the engine handle for `memory_dir`, the two `_cross_run_curation*` gates and `reflect_client`.
