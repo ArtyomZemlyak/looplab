@@ -5794,6 +5794,26 @@ wiring line exists in one specific file. A test pins that exclusion so it reads 
 
 *Recommendation:* Add a tests/factories.py (or conftest fixtures) with a canonical make_engine(run_dir, **overrides) plus the common scripted-role stubs; migrate opportunistically. This directly reduces the cost of ever evolving Engine's keyword API.
 
+*Resolution (2026-08-05):* `tests/factories.py` ships `make_engine(run_dir, **overrides)` — load the
+toy task, build its roles, hand the engine a subprocess sandbox and a `GreedyTree` — which is the
+shape all 29 private `_engine` factories already had. `test_ablation`, `test_build_recovery` and
+`test_end_to_end` are migrated as proof it is usable rather than merely present; the rest stay, as the
+finding says, opportunistic.
+
+The design constraint worth naming: `make_engine` must never become a SECOND, LAGGING spelling of
+`Engine`'s keyword API, which is exactly what those 29 factories collectively were. So it names only
+the parameters it actually shapes and forwards `**overrides` untouched — a new engine knob needs no
+change here. A guard pins both halves of that (the `**kwargs` forwarding, and the exact named set, so
+that adding a parameter is a deliberate act), and removing the forwarding fails it.
+
+Deliberately a plain function, not a fixture: these constructions happen inside helper functions and
+parametrized bodies as often as at test top level, and the resume/crash-recovery tests build a SECOND
+engine over the same run dir, which a fixture would force them to work around.
+
+The scripted-role stubs the finding also mentions are NOT included. The 12 `_*Developer` and 13
+`_*Researcher` classes differ in what they script — that is the content of the test, not boilerplate —
+and a shared stub would either grow a flag per caller or quietly change what a test asserts.
+
 #### XP-12 · LOW · layering · effort: small
 
 **Generic KNN/IDW numeric estimator lives in the events package and drags runtime/search into depending on it**
