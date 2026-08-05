@@ -12,6 +12,7 @@ from collections.abc import Callable
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import TypeVar
+from looplab.core.jsonutil import valid_digest_ref
 
 _ProjectionT = TypeVar("_ProjectionT")
 
@@ -356,8 +357,7 @@ def _validate_v2_curation_row(row: dict, *, kind: str) -> str | None:
                 or outcome != "error"):
             return "invalid_record"
     else:
-        if (not isinstance(input_digest, str) or len(input_digest) != 64
-                or any(ch not in "0123456789abcdef" for ch in input_digest)
+        if (not valid_digest_ref(input_digest)
                 or input_schema not in _FINALIZE_INPUT_SCHEMAS[kind]):
             return "invalid_record"
         expected_key = (
@@ -415,9 +415,7 @@ def _validate_curation_row(row: dict, *, kind: str) -> str | None:
         return "invalid_record"
 
     request_digest = row.get("request_digest")
-    if (request_digest is not None
-            and (not isinstance(request_digest, str) or len(request_digest) != 64
-                 or any(ch not in "0123456789abcdef" for ch in request_digest))):
+    if request_digest is not None and not valid_digest_ref(request_digest):
         return "invalid_record"
 
     # Modern finalize rows are semantic input-digest receipts, not HTTP action-id receipts. All

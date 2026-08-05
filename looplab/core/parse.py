@@ -261,3 +261,37 @@ def parse_structured(
             last_err = e
             continue
     raise ParseError(f"all parsers failed (last: {last_err})")
+
+
+def forced_structured(client: LLMClient, messages: list[dict], model: Type[T], parser: str,
+                      *, nudge: str | None = None, then=None, on_fail):
+    """One structured parse whose failure DEGRADES to `on_fail` instead of crashing the run.
+
+    The salvage shape four agent roles had each written out (doc 25 AG-05): the agentic Researcher's
+    forced emit, the deep Researcher's forced memo, and the Strategist's parse-or-rule decision (the
+    fourth, `LLMResearcher.propose`, is a two-attempt retry LOOP with error feedback folded back into
+    the prompt — a genuinely different shape, and it keeps its own).
+
+    `nudge` is appended as a trailing USER turn when given. It stays a caller argument because prompt
+    text is a contract: each site's wording is its own and must not drift into a shared default.
+    `then` runs INSIDE the guarded region, because two callers transform the parsed model there
+    (`.to_idea()`, `_assemble(...)`) and a transform that raises must degrade with everything else
+    rather than escape past the salvage.
+
+    The exception posture is the part worth spelling ONCE, because it depends on a fact that is not
+    visible at any call site: `BudgetExceeded` is deliberately NOT an `LLMError`, so unlike a
+    transport failure it passes straight through `parse_structured` rather than arriving as a
+    `ParseError`. A hard budget stop must therefore END the run here, while everything else — an
+    unparseable answer, a dead endpoint, a coercion that blew up — degrades. Two of the three sites
+    re-stated that re-raise and one relied on a narrower catch to get the same effect by accident.
+    """
+    from looplab.core.errors import BudgetExceeded
+
+    turns = messages + ([{"role": "user", "content": nudge}] if nudge else [])
+    try:
+        out = parse_structured(client, turns, model, parser)
+        return then(out) if then is not None else out
+    except BudgetExceeded:      # a hard budget stop ends the run; it is not a degradable failure
+        raise
+    except Exception as exc:  # noqa: BLE001 — every other failure is what the salvage exists for
+        return on_fail(exc)

@@ -26,7 +26,8 @@ from looplab.core.fitness import is_better as _is_better, is_usable_metric
 # Aliased so the shared digest tail does not become part of this module's public namespace: historical
 # consumers import domain contracts from here, and `canonical_json_digest` belongs to core.jsonutil.
 from looplab.core.jsonutil import (DIGEST_TEXT_CAP as _DIGEST_TEXT_CAP,
-                                   canonical_json_digest as _canonical_json_digest)
+                                   canonical_json_digest as _canonical_json_digest,
+                                   valid_digest_ref)
 
 # Compatibility/public import seam: receipt ownership lives in core.concepts, while historical consumers
 # import domain contracts from core.models. Explicit assignments keep that API stable without duplicate logic.
@@ -696,19 +697,9 @@ def normalize_steering_context(value) -> list[dict] | None:
                     return None
                 item[key] = round(fval, 3)
             elif key == "ref":
-                is_digest = (
-                    isinstance(current, str)
-                    and current.startswith("sha256:")
-                    and len(current) == 71
-                    and all(ch in "0123456789abcdef" for ch in current[7:])
-                )
-                is_memo = (
-                    isinstance(current, str)
-                    and current.startswith("memo:sha256:")
-                    and len(current) == 76
-                    and all(ch in "0123456789abcdef" for ch in current[12:])
-                )
-                if not (is_memo if kind == "research_memo" else is_digest):
+                if not valid_digest_ref(
+                        current,
+                        prefix="memo:sha256:" if kind == "research_memo" else "sha256:"):
                     return None
                 item[key] = current
             elif key in _CARD_STEERING_ENUMS:
@@ -985,9 +976,7 @@ def valid_card_action_digest(value: object, *, version: int | None = None) -> bo
     for candidate in versions:
         if candidate not in _CARD_ACTION_DIGEST_VERSIONS:
             continue
-        prefix = f"card-action:v{candidate}:"
-        if (len(value) == len(prefix) + 64 and value.startswith(prefix)
-                and all(char in "0123456789abcdef" for char in value[len(prefix):])):
+        if valid_digest_ref(value, prefix=f"card-action:v{candidate}:"):
             return True
     return False
 

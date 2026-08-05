@@ -21,7 +21,9 @@ import math
 import pytest
 
 from looplab.core import advisory_payloads, fitness, models, parse, profile
-from looplab.core.jsonutil import DIGEST_TEXT_CAP, canonical_json, canonical_json_digest
+from looplab.core.jsonutil import (DIGEST_TEXT_CAP, canonical_json, canonical_json_digest,
+                                   valid_digest_ref)
+from looplab.core.receipts import bounded_receipt_count
 
 
 # ------------------------------------------------------------------ CO-08: one dump/hash tail
@@ -202,3 +204,159 @@ def test_the_mapped_contracts_really_do_differ():
     assert fitness.is_usable_metric(_Real(1.5)) is True, "a subclass is still a real scalar"
     assert finite_measurement(_Real(1.5)) is None, (
         "a durable comparison claim refuses a subclass that could override __lt__")
+
+
+# --- EV-04: one READER for the format the minter above writes ------------------------------------
+#
+# The same predicate — "is this a str of prefix + exactly 64 lowercase hex?" — was hand-rolled at ~20
+# sites, four times inside `_on_run_started` alone. These pin the clauses that a re-derived copy is
+# most likely to drop, because each drop admits something that is not a digest this repo ever minted.
+
+_H = "a" * 64
+
+
+@pytest.mark.parametrize("value,prefix,why", [
+    (None, "", "a hand-edited log can put any JSON type here"),
+    (5, "", "an int has no .startswith, and raising inside the fold kills every replay"),
+    (True, "", "bools are ints, and `isinstance(True, int)` is the trap next door"),
+    ([], "", "a list is len()-able and iterable, so len/membership alone would not reject it"),
+    (list(_H), "", "a 64-element list of hex chars passes a len+membership check without isinstance"),
+])
+def test_a_non_string_is_refused_rather_than_raising(value, prefix, why):
+    assert valid_digest_ref(value, prefix=prefix) is False, why
+
+
+@pytest.mark.parametrize("value,prefix,why", [
+    ("a" * 63, "", "a short body is a DIFFERENT identity, not a near match"),
+    ("a" * 65, "", "a long body likewise"),
+    ("sha256:" + "a" * 63, "sha256:", "prefix match alone would accept a truncated digest"),
+    ("sha256:" + "a" * 65, "sha256:", "and a padded one"),
+    ("A" * 64, "", "hexdigest() emits lowercase; two spellings of one digest break identity"),
+    ("sha256:" + "A" * 64, "sha256:", "same, under a prefix"),
+    ("g" * 64, "", "non-hex characters of the right length"),
+    ("SHA256:" + _H, "sha256:", "the prefix itself is case-sensitive"),
+    (" sha256:" + _H, "sha256:", "leading whitespace is not stripped for us"),
+    ("sha256:" + _H + " ", "sha256:", "nor trailing"),
+    ("memo:sha256:" + _H, "sha256:", "a different namespace is a different ref"),
+    (_H, "sha256:", "a bare digest is not a prefixed one"),
+    ("sha256:" + _H, "", "and a prefixed one is not bare"),
+])
+def test_the_exact_shape_is_required(value, prefix, why):
+    assert valid_digest_ref(value, prefix=prefix) is False, why
+
+
+@pytest.mark.parametrize("prefix", ["", "sha256:", "memo:sha256:", "idea:v1:", "card-action:v2:"])
+def test_what_the_minter_produces_is_what_the_reader_accepts(prefix):
+    """The property that makes sharing these two worth it: round-trip, not two independent rules."""
+    minted = canonical_json_digest({"any": ["payload", 1, None]}, prefix=prefix)
+    assert isinstance(minted, str)
+    assert valid_digest_ref(minted, prefix=prefix) is True
+
+
+def test_every_prefixed_call_site_reads_through_the_shared_predicate():
+    """The regression that matters is a re-derived copy, not a wrong answer here. Two spellings are
+    deliberately EXEMPT and must stay that way, so they are named rather than merely absent."""
+    from _source_scan import iter_sources
+
+    # Exemptions are matched on the REASON, not the filename. Exempting whole files would let a
+    # genuinely re-derived 64-hex predicate slip in beside an unrelated random-id check — which is
+    # exactly what happened to the first draft of this test.
+    non_digest_lengths = ("== 32", "!= 32", "{12, 32}")
+
+    offenders = []
+    for path, text in iter_sources():
+        if path.name == "jsonutil.py":
+            continue                                   # the canonical definition
+        lines = text.split("\n")
+        for index, line in enumerate(lines, 1):
+            if "0123456789abcdef" not in line:
+                continue
+            # A length check may sit on the line above the character-set check, so read the pair.
+            window = (lines[index - 2] if index >= 2 else "") + line
+            if "ABCDEF" in window:
+                continue        # HTTP input normalizer: accepts either case, then lowercases
+            if any(marker in window for marker in non_digest_lengths):
+                continue        # 12/32-hex RANDOM ids (review link ids, uuid4().hex) — not digests
+            offenders.append(f"{path.as_posix()}:{index}")
+    assert not offenders, (
+        "these re-derive the digest predicate instead of calling `valid_digest_ref`; if the site is "
+        f"genuinely not a 64-hex digest, exempt it here with the reason: {offenders}")
+
+
+# --- EM-12: one bounded-receipt-count rule, where there had been two -----------------------------
+#
+# The ~8 receipt validators share a leaf guard on a single count field, and it had DIVERGED:
+# `claims_health`/`memory` spelled it `type(v) is int`, `concept_steward` spelled it
+# `isinstance(v, int) and not isinstance(v, bool)`. Same concept, two rules. These pin the survivor.
+
+def test_a_bool_is_never_a_receipt_count():
+    """The trap next door: `isinstance(True, int)` is True, so a receipt reading
+    `{"rows_total": true}` passes any isinstance-built guard and then arithmetics as 1."""
+    assert bounded_receipt_count(True, 10) is False
+    assert bounded_receipt_count(False, 10) is False
+
+
+def test_an_int_subclass_is_never_a_receipt_count():
+    """The divergence itself. The two spellings agreed on everything JSON can produce and disagreed
+    ONLY here, so no shipped receipt distinguished them — which is exactly why it went unnoticed."""
+
+    class Count(int):
+        pass
+
+    assert isinstance(Count(5), int) and not isinstance(Count(5), bool), (
+        "the retired spelling would have accepted this")
+    assert bounded_receipt_count(Count(5), 10) is False, "the strict spelling refuses it"
+
+
+@pytest.mark.parametrize("value", [None, "5", 5.0, [], {}, object()])
+def test_a_non_integer_is_never_a_receipt_count(value):
+    assert bounded_receipt_count(value, 10) is False
+
+
+@pytest.mark.parametrize("value,maximum,expected", [
+    (0, 10, True), (10, 10, True), (5, 10, True),
+    (-1, 10, False), (11, 10, False), (0, 0, True), (1, 0, False),
+])
+def test_the_bound_is_inclusive_and_non_negative(value, maximum, expected):
+    assert bounded_receipt_count(value, maximum) is expected
+
+
+_RECEIPT_VALIDATORS = {
+    "claims_health.py": ("_safe_claim_read_segment",),
+    "memory.py": ("_capsule_concept_evidence_completeness", "_capsule_completeness"),
+    "concept_steward.py": ("_concept_source_receipt",),
+}
+
+
+def test_the_receipt_validators_do_not_re_derive_the_count_guard():
+    """Scoped to the named validator FUNCTIONS, not their files.
+
+    A file-wide scan was the first attempt and it was wrong three ways: it flagged unbounded
+    coercions that are not receipt counts, matched `int)` inside `fingerprint)`, and reported its own
+    explanatory comment. A guard that cries wolf gets exemptions bolted on until it guards nothing.
+
+    Only the LEAF is shared. `_concept_source_receipt`'s consistency predicate is deliberately left
+    alone — it is domain logic carrying a ten-line comment about reading both source axes, and
+    folding that into a generic spec table would hide the part a reader needs."""
+    import ast
+    from pathlib import Path
+
+    pkg = Path(__file__).resolve().parents[1] / "looplab" / "engine"
+    offenders = []
+    for filename, functions in _RECEIPT_VALIDATORS.items():
+        text = (pkg / filename).read_text(encoding="utf-8-sig")
+        tree = ast.parse(text)
+        wanted = {name: node for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef) and node.name in functions
+                  for name in [node.name]}
+        assert set(wanted) == set(functions), (
+            f"{filename} no longer defines {set(functions) - set(wanted)} — this registry and the "
+            "receipt validators have drifted apart")
+        for name, node in wanted.items():
+            # Comments are not in the AST, so unparsing compares CODE only.
+            body = ast.unparse(node)
+            if "not isinstance" in body and ", int)" in body:
+                offenders.append(f"{filename}::{name}")
+    assert not offenders, (
+        "a receipt validator re-derives the bounded-count guard instead of calling "
+        f"`bounded_receipt_count`: {offenders}")

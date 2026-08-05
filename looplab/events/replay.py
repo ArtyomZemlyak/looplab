@@ -28,6 +28,7 @@ from looplab.core.concepts import (
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, finite_metric,
                                   is_usable_metric,
                                   verifier_evidence_digest)
+from looplab.core.jsonutil import valid_digest_ref
 from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGEST_V2_FIELDS,
                      NODE_CONCEPT_PROVENANCE_AUTHORED,
                      NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR,
@@ -293,42 +294,21 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # speculative execution. Absent on old logs -> 0 -> historical alternating build/eval behavior.
     _spec_depth = d.get("speculation_depth", 0)
     st.speculation_depth = (_spec_depth if type(_spec_depth) is int and 0 <= _spec_depth <= 64 else 0)
-    _spec_receipt = d.get("speculation_gate_receipt_digest", "")
-    st.speculation_gate_receipt_digest = (
-        _spec_receipt
-        if isinstance(_spec_receipt, str)
-        and len(_spec_receipt) == 71
-        and _spec_receipt.startswith("sha256:")
-        and all(ch in "0123456789abcdef" for ch in _spec_receipt[7:])
-        else ""
-    )
-    _runtime_scope = d.get("speculation_runtime_scope_sha256", "")
-    st.speculation_runtime_scope_sha256 = (
-        _runtime_scope
-        if isinstance(_runtime_scope, str)
-        and len(_runtime_scope) == 71
-        and _runtime_scope.startswith("sha256:")
-        and all(ch in "0123456789abcdef" for ch in _runtime_scope[7:])
-        else ""
-    )
-    _spec_implementation = d.get("speculation_implementation_digest", "")
-    st.speculation_implementation_digest = (
-        _spec_implementation
-        if isinstance(_spec_implementation, str)
-        and len(_spec_implementation) == 71
-        and _spec_implementation.startswith("sha256:")
-        and all(ch in "0123456789abcdef" for ch in _spec_implementation[7:])
-        else ""
-    )
-    _calibration_profile = d.get("speculation_calibration_profile_digest", "")
+    # Four sha256-prefixed receipt digests admitted by ONE predicate (doc 25 EV-04); they were four
+    # copies of the same six-line conjunction. The assignments stay written out rather than a
+    # `setattr` loop over field-name strings: a typo in such a loop would silently set the wrong
+    # attribute AND leave the real one at its default — the silent-no-op class this fold exists to
+    # avoid. The fail-closed "" per field is what makes a malformed digest read as "no receipt"
+    # rather than as a receipt nothing can verify.
+    _rd = d.get("speculation_gate_receipt_digest", "")
+    st.speculation_gate_receipt_digest = _rd if valid_digest_ref(_rd, prefix="sha256:") else ""
+    _rd = d.get("speculation_runtime_scope_sha256", "")
+    st.speculation_runtime_scope_sha256 = _rd if valid_digest_ref(_rd, prefix="sha256:") else ""
+    _rd = d.get("speculation_implementation_digest", "")
+    st.speculation_implementation_digest = _rd if valid_digest_ref(_rd, prefix="sha256:") else ""
+    _rd = d.get("speculation_calibration_profile_digest", "")
     st.speculation_calibration_profile_digest = (
-        _calibration_profile
-        if isinstance(_calibration_profile, str)
-        and len(_calibration_profile) == 71
-        and _calibration_profile.startswith("sha256:")
-        and all(ch in "0123456789abcdef" for ch in _calibration_profile[7:])
-        else ""
-    )
+        _rd if valid_digest_ref(_rd, prefix="sha256:") else "")
     # Bound the row CONTENTS, not just the row count: `dict(row)` copied each row whole, so a
     # hand-edited/foreign run_started could park megabytes in RunState — which FoldCursor then
     # deep-copies on EVERY snapshot. That is the amplification the card handlers' bounding comments
@@ -2563,6 +2543,46 @@ def _bounded_card_action_space(value) -> dict[str, list[float]]:
     return out
 
 
+def _bounded_card_eval_timeout(value) -> tuple[float | None, bool]:
+    """Decode a PRESENT `eval_timeout` into `(timeout, valid)`.
+
+    `(None, True)` is an explicit null — a card that deliberately clears the timeout — and
+    `(None, False)` is an unusable value. Callers guard on the key being present, so "absent" never
+    reaches here and the two Nones cannot be confused.
+
+    Shared by the fold's admission bound and the derive-time snapshot (doc 25 EV-02), which had
+    byte-similar copies of this ladder. The bool guard is the part worth spelling once:
+    `isinstance(True, int)` is True in Python, so a payload carrying `eval_timeout: true` would
+    otherwise become a 1-second timeout.
+    """
+    if value is None:
+        return None, True
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None, False
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None, False
+    return (timeout, True) if math.isfinite(timeout) and timeout > 0 else (None, False)
+
+
+def _bounded_card_parent_ids(value) -> list[int]:
+    """Bounded, de-duplicated, first-wins node ids from an untrusted parent list.
+
+    The third copy of this loop (doc 25 EV-02): both admission sites and the snapshot walked it
+    identically. Order is preserved rather than sorted, because a card's parent order is part of what
+    the action digest covers.
+    """
+    out: list[int] = []
+    if not isinstance(value, list):
+        return out
+    for raw in value[:_CARD_REPLAY_ACTION_LIST_MAX]:
+        parent_id = _card_replay_node_id(raw)
+        if parent_id is not None and parent_id not in out:
+            out.append(parent_id)
+    return out
+
+
 def _bounded_card_action(value: dict, *, record_unknown_fields: bool = False) -> dict:
     """Copy only the action fields consumed by ``_card_added_snapshot``."""
     out: dict = {}
@@ -2577,18 +2597,9 @@ def _bounded_card_action(value: dict, *, record_unknown_fields: bool = False) ->
     if profile is not None:
         out["eval_profile"] = profile
     if "eval_timeout" in value:
-        raw_timeout = value.get("eval_timeout")
-        if raw_timeout is None:
-            out["eval_timeout"] = None
-        elif not isinstance(raw_timeout, bool) and isinstance(raw_timeout, (int, float)):
-            try:
-                timeout = float(raw_timeout)
-            except (TypeError, ValueError, OverflowError):
-                timeout = math.nan
-            if math.isfinite(timeout) and timeout > 0:
-                out["eval_timeout"] = timeout
-            else:
-                out["_eval_timeout_invalid"] = True
+        timeout, timeout_valid = _bounded_card_eval_timeout(value.get("eval_timeout"))
+        if timeout_valid:
+            out["eval_timeout"] = timeout           # None = an explicit "no timeout"
         else:
             out["_eval_timeout_invalid"] = True
 
@@ -2604,12 +2615,7 @@ def _bounded_card_action(value: dict, *, record_unknown_fields: bool = False) ->
         out["_concept_tags_invalid"] = invalid
 
     if isinstance(value.get("parent_ids"), list):
-        parent_ids: list[int] = []
-        for raw_parent in value["parent_ids"][:_CARD_REPLAY_ACTION_LIST_MAX]:
-            parent_id = _card_replay_node_id(raw_parent)
-            if parent_id is not None and parent_id not in parent_ids:
-                parent_ids.append(parent_id)
-        out["parent_ids"] = parent_ids
+        out["parent_ids"] = _bounded_card_parent_ids(value["parent_ids"])
     parent_id = _card_replay_node_id(value.get("parent_id"))
     if parent_id is not None:
         out["parent_id"] = parent_id
@@ -2872,9 +2878,7 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                     or type(generation) is not int or not 0 <= generation <= (1 << 31) - 1
                     or not isinstance(proposal_ref, dict)
                     or set(proposal_ref) != {"v", "digest"} or proposal_ref.get("v") != 1
-                    or not isinstance(digest, str) or not digest.startswith("idea:v1:")
-                    or len(digest) != len("idea:v1:") + 64
-                    or any(ch not in "0123456789abcdef" for ch in digest[len("idea:v1:"):])):
+                    or not valid_digest_ref(digest, prefix="idea:v1:")):
                 return
             rec.update({
                 "node_id": node_id,
@@ -4171,9 +4175,11 @@ def _bounded_card_ref(value) -> str | None:
 
 
 def _digest_ref(value: str, namespace: str) -> bool:
-    prefix = f"{namespace}:sha256:"
-    return (value.startswith(prefix) and len(value) == len(prefix) + 64
-            and all(ch in "0123456789abcdef" for ch in value[len(prefix):]))
+    # Delegating also FIXES this copy (doc 25 EV-04): it lacked the `isinstance` guard its siblings
+    # had, so a non-string reached `.startswith` and raised `AttributeError` inside the fold — which
+    # takes down every replay of the run, not just this field. Both call sites happen to pass an
+    # already-bounded `str` today, so it was latent rather than live.
+    return valid_digest_ref(value, prefix=f"{namespace}:sha256:")
 
 
 def _bounded_card_footprint_enrichment(value) -> dict | None:
@@ -4280,41 +4286,24 @@ def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
         snapshot["params"] = normalize_extra_metrics(idea["params"], max_items=64)
         owns_action = True
     if isinstance(idea.get("space"), dict):
-        space: dict[str, list[float]] = {}
-        for raw_key, raw_values in sorted(idea["space"].items(), key=lambda row: str(row[0]))[:64]:
-            if not isinstance(raw_key, str) or not raw_key or len(raw_key) > 200:
-                continue
-            if not isinstance(raw_values, list):
-                continue
-            values: list[float] = []
-            for value in raw_values[:64]:
-                if not isinstance(value, (int, float)) or isinstance(value, bool):
-                    continue
-                try:
-                    number = float(value)
-                except (TypeError, ValueError, OverflowError):
-                    continue
-                if math.isfinite(number):
-                    values.append(number)
-            space[raw_key] = values
-        snapshot["space"] = space
+        # The SAME bound the fold's admission applies (doc 25 EV-02). The copy here sliced the top-64
+        # BEFORE filtering keys, so an unusable key that sorts early consumed the window and the two
+        # stages disagreed about the same input: 64 usable keys admitted, 14 decoded. Not reachable
+        # today — only already-bounded `st.cards_added` rows reach this function — but nothing
+        # enforced that, and the drift was silent by construction.
+        snapshot["space"] = _bounded_card_action_space(idea["space"])
         owns_action = True
     profile = idea.get("eval_profile")
     if isinstance(profile, str) and len(profile) <= 256:
         snapshot["eval_profile"] = profile
         owns_action = True
     if "eval_timeout" in idea:
-        raw_timeout = idea.get("eval_timeout")
-        if raw_timeout is None:
-            snapshot["eval_timeout"] = None
-        elif not isinstance(raw_timeout, bool) and isinstance(raw_timeout, (int, float)):
-            try:
-                timeout = float(raw_timeout)
-            except (TypeError, ValueError, OverflowError):
-                timeout = math.nan
-            if math.isfinite(timeout) and timeout > 0:
-                snapshot["eval_timeout"] = timeout
-                owns_action = True
+        timeout, timeout_valid = _bounded_card_eval_timeout(idea.get("eval_timeout"))
+        if timeout_valid:
+            snapshot["eval_timeout"] = timeout      # None = an explicit "no timeout"
+            # An explicit null clears a timeout rather than declaring one, so it does not by itself
+            # make this row an action owner — the pre-existing asymmetry, kept deliberately.
+            owns_action = owns_action or timeout is not None
     concept_key_present = (
         "concept_tags" in idea or "concepts" in idea
         or "_concept_tags_overflow" in idea or "_concept_tags_invalid" in idea
@@ -4337,12 +4326,7 @@ def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
 
     raw_parent_ids = d.get("parent_ids", idea.get("parent_ids"))
     if isinstance(raw_parent_ids, list):
-        parent_ids: list[int] = []
-        for raw in raw_parent_ids[:64]:
-            nid = _coerce_node_id({"node_id": raw})
-            if nid is not None and 0 <= nid <= (1 << 31) - 1 and nid not in parent_ids:
-                parent_ids.append(nid)
-        snapshot["parent_ids"] = parent_ids
+        snapshot["parent_ids"] = _bounded_card_parent_ids(raw_parent_ids)
         owns_action = True
     raw_parent_id = d.get("parent_id", idea.get("parent_id"))
     parent_id = _coerce_node_id({"node_id": raw_parent_id})

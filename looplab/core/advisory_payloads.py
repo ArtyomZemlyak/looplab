@@ -11,7 +11,7 @@ import itertools
 import json
 import math
 
-from looplab.core.jsonutil import canonical_json_digest
+from looplab.core.jsonutil import canonical_json_digest, valid_digest_ref
 from looplab.core.redact import (bounded_redacted_tree, is_secret_key_name,
                                  redact_persisted_text)
 from looplab.core.source_identity import canonical_source_ref, valid_source_identity
@@ -79,11 +79,7 @@ def bounded_cross_run_advisory_receipt(value) -> dict:
         return {}
 
     def _digest(item) -> bool:
-        return bool(
-            isinstance(item, str)
-            and len(item) == 64
-            and all(ch in "0123456789abcdef" for ch in item)
-        )
+        return valid_digest_ref(item)          # bare 64-hex: the same predicate, empty namespace
 
     def _count(item) -> bool:
         return type(item) is int and 0 <= item <= _MAX_CROSS_RUN_RECEIPT_COUNT
@@ -239,13 +235,10 @@ def valid_advisory_ref(value, namespace: str) -> bool:
     recreate the body/path side channel the ref-only Card contract is intended to close.
     """
     prefix = _ADVISORY_REF_PREFIXES.get(namespace) if isinstance(namespace, str) else None
-    return bool(
-        prefix is not None
-        and isinstance(value, str)
-        and len(value) == len(prefix) + 64
-        and value.startswith(prefix)
-        and all(ch in "0123456789abcdef" for ch in value[len(prefix):])
-    )
+    # An UNKNOWN namespace stays a refusal before the shared predicate is consulted: `prefix=None`
+    # would otherwise have to mean "no prefix", which is the bare-64-hex case and would admit a
+    # digest under a namespace this module does not issue.
+    return prefix is not None and valid_digest_ref(value, prefix=prefix)
 
 
 def stable_advisory_ref(namespace: str, payload) -> str | None:

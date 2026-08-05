@@ -234,6 +234,8 @@ synthetic task adapters (RA-06).
   `agents.cli_agent.PRESETS`).
 - **SE-07 / XP-07** the lazy search↔engine cycle around speculation calibration constants —
   contradicting `speculation_calibration.py`'s own stated purpose.
+  *(resolved 2026-08-04 — the constants had already moved down; the last upward import,
+  `incomplete_finalize_scope`'s five-function pure cluster, now lives in `events/finalize_scope.py`.)*
 - **AG-07** agents↔search cycle held apart only by import placement, direction undocumented.
   *(resolved 2026-08-02 — stated in CLAUDE.md, enforced by `tests/test_agents_search_direction.py`.)*
 - **SR-12** router-to-router private imports and late-bound `srv.*_fn` attribute wiring (also XP-05).
@@ -670,6 +672,29 @@ governance-sensitive sections, are left explicit as the finding itself recommend
 *Evidence:* GPU discovery exists in four forms: orchestrator._detect_gpu_ids (CVD tokens -> torch.cuda.device_count -> counting `nvidia-smi -L` output lines), core/hardware.detect_gpus (nvidia-smi CSV query with comma-in-name repair), core/hardware.effective_gpu_inventory (ctypes CUDA Driver API with UUID/PCI identity), and core/hardware.detect_gpu (first GPU name, kept for back-compat). Two independent nvidia-smi invocation/parsing styles exist (`-L` line counting vs CSV query), and resources.detect_gpu_inventory even contains a defensive cross-check comment ("_detect_gpu_ids derives the same count. A mismatch means one of the probes changed...", resources.py:166-169) — evidence the duplication is a known hazard being papered over with a runtime consistency check.
 
 *Recommendation:* Make core/hardware the single probe owner: _detect_gpu_ids's count should derive from detect_gpus() (falling back to torch), eliminating the `-L` parser and the cross-probe mismatch failure mode that detect_gpu_inventory currently guards against.
+
+*Resolution (2026-08-04) — the second parser is gone; the fail-closed guard stays, because it defends something else.*
+
+`orchestrator._detect_gpu_ids` keeps its ladder (CUDA_VISIBLE_DEVICES → torch → inventory) but its
+last step now reads `len(core.hardware.detect_gpus())` instead of counting `nvidia-smi -L` output
+lines. `core/hardware` is the sole owner: `query_nvidia_smi` is documented as the one
+launcher+CSV-splitter, and `detect_gpus` adds the comma-in-a-GPU-name repair — a GPU whose model name
+contains a comma makes a fixed-position CSV read grab a name fragment instead of a memory figure. The
+`-L` counter never needed that repair, which is exactly why it was able to sit beside the real probe
+looking correct.
+
+**The cross-check in `detect_gpu_inventory` is NOT removed.** The finding reads it as a symptom of
+the duplication, and its comment did say "_detect_gpu_ids derives the same count" — but what it
+actually guards is the `logical_ids` list arriving from a CALLER, which may be stale or forged.
+Nothing about single-sourcing the nvidia-smi parse makes that argument go away, and an empty mapping
+is what stops an independently forged reservation escaping the operator's visibility fence through
+logical-id fallback. Both branches derive from `cuda_visible_device_tokens`, so the case the comment
+literally describes was already impossible; the guard earns its place on the other one.
+
+Pinned by three tests in `tests/test_gpu_resources.py` (40 → 43): the ordinal probe's count tracks
+the shared inventory (both a populated box and an empty one), a probe that raises degrades to "no
+GPUs" rather than out of `Engine.__init__`, and a source scan that no module outside `core/hardware`
+invokes the binary itself. Teeth-tested against 2 breaks, both biting.
 
 #### ES-11 · LOW · inconsistency · effort: small — **RESOLVED (2026-08-02)**
 
@@ -1392,6 +1417,38 @@ would serve one task's paid overlay to another.
 
 *Recommendation:* Relocate _append_governance to governance_health.py, parameterize the ledger-specific readers instead of branching on filenames (read_rows is already the right hook — make it mandatory for policy ledgers), and port record_claim_decision onto it, keeping its sanitize-on-replay as a wrapper.
 
+*Resolution (2026-08-05) — PARTIAL, the middle clause only:* `read_rows` is now the sole way a caller
+selects a strict reader. Both filename branches inside `_append_governance` are gone (the reader
+selection and the torn-tail separator), and the four concept call sites pass `_read_alias_rows` /
+`_read_split_rows` explicitly. The primitive four subsystems import as generic no longer names a
+concept ledger.
+
+Safe because the two revision derivations are the SAME computation, not merely similar:
+`_ledger_revision` returns `max([len(rows), *explicit], default=0)` over `_read_alias_rows(path)`, and
+the `strict_rows` branch computes that expression over the rows `read_rows` just returned. Passing
+the reader therefore changes which line computes the CAS revision, not its value — and collapses two
+reads of the ledger into one inside the same lock.
+
+The separator clause needed no replacement either: these two ledgers now reach it with a reader, so
+`read_rows is None` already excludes them and the filename clause could only ever have agreed with it.
+
+**What teeth-testing changed here, and it is the point of the entry.** Deleting the branches moved a
+STRUCTURAL guarantee ("this path implies a strict reader") into a call-site CONVENTION ("this caller
+passes one") — and breaking the convention failed no test at all. The guarantee only survived because
+`_ledger_revision` keeps its own filename dispatch, a third copy the finding does not list. Two guards
+now pin what the branch used to: the primitive contains no ledger filename, and every
+`_append_governance` call in `concept_registry` passes `read_rows`. Both were verified to fail when
+broken.
+
+NOT done, and deliberately: the relocation and the `record_claim_decision` port. `_append_governance`
+still depends on concept-specific machinery — `concept_governance_global_revision`,
+`ConceptGovernanceConflict`, `_idempotency_payload`, `_validate_expected_revision` — so moving it to
+`governance_health.py` means injecting or relocating those too, and `record_claim_decision` is a
+durable CAS protocol on operator policy where a behaviour-preserving port needs its own evidence
+rather than a shared one. `_ledger_revision`'s dispatch stays for the same reason: it is reached from
+`concept_governance_revision(memory_dir, kind)`, which legitimately knows the two ledgers, and it now
+carries the fail-closed guarantee that the deleted branches used to duplicate.
+
 #### EM-06 · MEDIUM · inconsistency · effort: large
 
 **Three coexisting claim-identity systems, each with its own decision-overlay resolution logic**
@@ -1534,6 +1591,43 @@ a real construction.
 
 *Recommendation:* Keep the fail-closed semantics but extract a tiny declarative helper (field specs: bounded-int/bool + a consistency predicate list) that each receipt defines once and both builder and validator consume; the invariants are all expressible as (field types, bounds, equalities). This shrinks each validator to a spec table and makes builder/validator drift structurally impossible.
 
+*Resolution (2026-08-04):* The LEAF is shared; the spec table is deliberately NOT built, and the
+reason is worth recording because the finding's premise is half right.
+
+What reading the eight validators shows is that the repeated part is one line, not the validator. The
+consistency predicates the recommendation proposes to tabulate are the actual content: they are
+domain logic with load-bearing comments, and `_concept_source_receipt`'s carries ten lines explaining
+why it must read BOTH source axes — a bug someone already fixed once, where comparing against
+`partial_capsules == 0` alone reported a readable-but-incomplete receipt as unreadable. Expressing
+that as a row in a spec table would hide precisely the part a reader needs. "Field types, bounds,
+equalities" describes the shape of these predicates but not their meaning.
+
+What IS shared is the guard on a single count field, and it had DIVERGED — which is a real defect the
+finding did not name:
+
+* `claims_health` and `memory` spelled it `type(value) is int` — rejecting every `int` subclass.
+* `concept_steward` spelled it `isinstance(value, int) and not isinstance(value, bool)` — rejecting
+  `bool` specifically and ACCEPTING any other `int` subclass.
+
+One concept, two rules. They agree on everything JSON can produce and disagree only on an in-process
+`int` subclass, so no shipped receipt ever distinguished them — which is exactly why it survived.
+`core/receipts.bounded_receipt_count(value, maximum)` is now the single answer, and the STRICT
+spelling wins for the reason the fold uses it on untrusted data: a receipt is durable evidence, an
+`int` subclass can override the comparisons the bound is expressed in, and a bound a value can talk
+its way past is not a bound. Nothing constructs receipt counts as a subclass, so `concept_steward`
+tightens without any reachable behaviour change.
+
+The guard test is scoped to the named validator FUNCTIONS via AST, not to their files. A file-wide
+scan was the first attempt and was wrong three ways: it flagged unbounded coercions that are not
+receipt counts, matched `int)` inside `fingerprint)`, and reported its own explanatory comment. A
+guard that cries wolf collects exemptions until it guards nothing — the same trap EV-04's first draft
+fell into one finding earlier.
+
+Still open under this finding: the builder/validator drift the recommendation's last sentence is
+really about. Nothing yet forces a receipt's WRITER and its READER to agree on the field set; that is
+a registry problem (the shape CLAUDE.md's other duck-typed seams solve) rather than a helper problem,
+and it is not addressed here.
+
 #### EM-13 · LOW · duplication · effort: small
 
 **_valid_node_source and _node_ids duplicate the same numeric-string node-id parsing rules**
@@ -1642,6 +1736,38 @@ Scope: `looplab/events/`: eventstore.py, replay.py, types.py, projections, span_
 
 *Recommendation:* Make _card_added_snapshot consume the receipt shape _bounded_card_action produces (single shared decoder for the action block: one function returning the normalized action dict + owns_action flag), or at minimum extract shared helpers for the eval_timeout, space and parent_ids coercions so the two stages cannot drift (they already differ on top-K selection strategy).
 
+*Resolution (2026-08-04) — the "at minimum" path, deliberately; and the drift the finding suspected is REAL and measured.*
+
+Three coercions are now shared: `_bounded_card_action_space` (already existed — the snapshot simply
+was not calling it), plus new `_bounded_card_eval_timeout(value) -> (timeout, valid)` and
+`_bounded_card_parent_ids(value) -> list[int]`. Admission and the derive-time snapshot both go
+through all three.
+
+**The measured drift.** The snapshot sliced its top-64 window BEFORE filtering keys
+(`sorted(space.items(), key=str)[:64]`, then discard unusable ones), while admission filters first
+and then takes the 64 lexically smallest. On a space whose earliest-sorting keys are unusable, the
+snapshot's window is eaten by keys it then throws away: admission kept **64** usable keys, the
+snapshot decoded **14** of the same input. Not reachable today — only `st.cards_added` rows reach
+`_card_added_snapshot`, and those were bounded on the way in — but nothing enforced that, and a
+divergence inside the fold is silent by construction.
+
+**Why not the fuller refactor.** Making the snapshot consume the receipt shape wholesale would fold
+the `owns_action` derivation into the bounding pass, and `owns_action` is not a bounding fact: it
+decides whether a row CLAIMS an action, which drives card ownership and selection. It also has a
+deliberate asymmetry the bound does not share — an explicit `eval_timeout: null` CLEARS a timeout and
+so does not by itself make the row an owner, while admission records the same null as a legitimate
+value. Merging the two would have to reproduce that distinction inside a function whose job is
+"shrink untrusted data", which is how the two stages would end up coupled for a second time.
+
+`_card_replay_node_id` replaced the snapshot's inline `_coerce_node_id(...)` + range check; verified
+equivalent across bools, floats, strings, negatives and both `2**31` boundaries before substituting.
+
+`tests/test_events_replay.py` 170 → 175: both stages bound a space identically (the drift case),
+both reject an unusable timeout including the `isinstance(True, int)` trap, an explicit null survives
+both stages while staying distinguishable from absent and from invalid, parent ids bound/dedupe
+identically, and a structural guard that neither stage carries an inline `math.isfinite` ladder any
+more. Teeth-tested against 6 breaks, all biting.
+
 #### EV-03 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **The completion-certificate invalidation block is copy-pasted at 5 sites, and a comment records a real bug caused by one site drifting**
@@ -1679,6 +1805,43 @@ new-candidate site: each fails exactly its own case with `assert 2 == 1`.
 *Evidence:* _on_run_started validates four sha256-prefixed digest fields with four identical 6-line blocks (len==71, startswith 'sha256:', all-hex — replay.py:277-312); the same idiom recurs at 2820-2826 ('idea:v1:' digest), 4117-4120 (_digest_ref), and in 15+ other modules (core/models.py:661,667,952, engine/costs.py:194, search/speculation_quality.py:322, ...). Meanwhile the package already contains two other admission styles: declarative field tables (_COVERAGE_SNAPSHOT_STR/INT/FLOAT/LIST driving _coverage_snapshot_row, 1984-2019) and a recursive generic bounder (_bounded_card_enrichment, 4070-4107). The scalar guards `type(x) is int and 0 <= x <= (1 << 31) - 1` and `isinstance(v, bool) or not isinstance(v, int)` are each hand-rolled at dozens of call sites in replay.py.
 
 *Recommendation:* Add a tiny validators module (e.g. core: valid_hex_digest(value, prefix), bounded_int(value, lo, hi), bounded_str(value, max_len)) and use the existing table-driven style (_coverage_snapshot_row) as the canonical pattern for new handlers. Collapse the four _on_run_started digest blocks into one loop over field names first — that alone removes ~30 lines with zero semantic risk.
+
+*Resolution (2026-08-04):* The hex-digest half is done. `core/jsonutil.valid_digest_ref(value, *,
+prefix="")` now answers it once, at 16 call sites across `events`, `core`, `engine`, `search`, `tools`
+and `serve`.
+
+It lives in `jsonutil.py` rather than a new validators module because it is the READER of the format
+`canonical_json_digest` in that same file WRITES. The two are one contract: a verifier that drifts
+from its minter accepts refs nothing issued, or rejects refs that were. Splitting them across modules
+is what let ~20 copies exist in the first place.
+
+Two of the copies were not merely duplicated, they were WEAKER, and the shared predicate fixes both:
+
+* `replay._digest_ref` had no `isinstance` guard, so a non-string reached `.startswith` and raised
+  `AttributeError` inside the fold — which takes down every replay of the run, not one field. Both
+  call sites pass an already-bounded `str` today, so it was latent rather than live.
+* `lessons.py`'s curation-claim check tested `len` and character membership with no type guard at
+  all, so a 64-element LIST of hex characters satisfied both and was accepted as a digest.
+
+Three deliberate NON-conversions, which is the part a blind sweep would have got wrong:
+
+* `serve/routers/boss._normalize_report_generation` accepts `A-F` as well as `a-f`. It normalizes a
+  generation a client typed into an HTTP request and lowercases it afterwards — input normalization,
+  not identity checking. Its sibling twelve lines up is fold-side and lowercase-only. Merging the two
+  would have silently made the fold accept two spellings of one digest.
+* `serve/reviews.py` and `serve/assistant.py` validate 12- and 32-hex REVIEW LINK IDS, and
+  `engine/costs.py` a 32-hex `usage_id` (`uuid4().hex`). Random identifiers, not digests.
+
+The guard is a source scan, and its first draft had the same bug the finding describes: it exempted
+those files WHOLESALE, so a genuinely re-derived 64-hex predicate added beside an unrelated random-id
+check would have passed. Exemptions now match on the reason (an uppercase alphabet, or a non-64
+length in the two-line window) rather than the filename; a teeth-test that injects a re-derived copy
+into `costs.py` confirms it is caught.
+
+The finding's OTHER two halves — the scalar guards (`type(x) is int and 0 <= x <= (1 << 31) - 1`,
+`isinstance(v, bool) or not isinstance(v, int)`) and adopting the `_coverage_snapshot_row` table style
+for new handlers — are NOT done here and stay open. They are a larger change with real semantic risk
+per site, unlike the digest predicate, which is one exact shape with a differential check available.
 
 #### EV-05 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-02)**
 
@@ -2651,6 +2814,40 @@ rather than sitting open behind a status note.
 *Evidence:* Every Card wire field is classified by membership in ~10 category sets (_TEXT_LIMITS, _REF_FIELDS, _INT_FIELDS, ...) and then dispatched through three separate if-chains: _field_value (projection), _field_projection_lossless (exactness verification, a full mirror of the projector), and _field_slice (loss counting). Complex fields additionally get paired projector/verifier functions (_cross_run/_cross_run_lossless, _steering/_steering_lossless, _card_identity/_card_identity_lossless, etc.). Adding one field requires touching _FIELDS, a category set, and up to three dispatch chains; the file's own comments record a bug this caused (matched_concept_outcome rows verified against the wrong key set, line 77-82).
 
 *Recommendation:* Replace the category sets + three chains with a single per-field descriptor table mapping name -> {project, is_lossless, slice_units}; generic kinds (text/ref/int/list) become shared descriptor factories, complex fields keep bespoke pairs but registered in one place.
+
+*Resolution (2026-08-04) — TWO chains collapsed into `_FIELD_KINDS`; the third was never a per-field chain.*
+
+`_FieldKind(project, lossless)` pairs each field's projector with its exactness verifier, and
+`_FIELD_KINDS` is built from the existing category SETS via shared factories (`_text_kind`,
+`_ref_kind`, `_int_kind`, `_nonneg_int_kind`, `_float_kind`, `_positive_float_kind`,
+`_ref_list_kind`, `_int_list_kind`, `_bool_kind`, `_mapping_kind`, `_named_scalars_kind`), with the
+eleven complex fields registered as explicit pairs. `_field_value` and `_field_projection_lossless`
+are each three lines of table lookup.
+
+The verifier is the half that made this worth doing. It decides whether the completeness RECEIPT
+claims a field came through exactly, so a verifier that drifts from its projector does not corrupt
+the wire data — it LIES about it, and this module's own comments record exactly that happening once
+(`matched_concept_outcome` rows verified against the wrong key set). The two halves now sit on one
+line together instead of fifty lines apart, and a field cannot acquire a projector without a
+verifier.
+
+**`_field_slice` is left alone: the finding miscounts it as a third per-field chain.** It dispatches
+on the RAW VALUE's type (str → characters, list → items, dict → entries, else → values) with two
+name-keyed special cases for dicts whose loss partition is a key SET rather than a length. Folding a
+`slice_units` column into the descriptors would push per-field data into a function that is
+deliberately type-driven, and the two special cases would still need naming somewhere.
+
+Verified by golden master rather than by inspection: every field in `_FIELDS` × a 31-value corpus
+(None/bools/ints/floats/NaN/inf/2^31 boundaries/empty and oversized strings/lists/dicts/tuples) run
+through BOTH chains before and after — **1426 rows, zero differences**.
+
+Pinned by six tests in `tests/test_card_public_projection.py` (31 → 37): every published field has
+both halves, neither function may contain a category-set or per-name branch again, an unregistered
+field is skipped AND never certified exact, and per generic kind a clean value round-trips exactly
+while a clipped/sliced/rejected one is never certified. Teeth-tested against 5 breaks, 4 biting — the
+fifth (dropping `len(raw) <= _MAX_ITEMS` from a list verifier) turned out to be a NON-break: `_refs`
+already slices to the bound, so `_refs(raw) == list(raw)` fails on a long list anyway and the guard
+is redundant in the original expression, which is preserved verbatim.
 
 #### SC-10 · MEDIUM · inconsistency · effort: medium
 
@@ -3819,6 +4016,43 @@ loudly.
 *Evidence:* ToolUsingResearcher._fallback (agent.py:219-228: messages + 'Emit the Idea now.' -> parse_structured -> default draft Idea), DeepResearcher._forced (deep_research.py:224-236: messages + 'Emit the memo now.' -> parse_structured -> '(deep research produced no memo)'), LLMResearcher.propose's 2-attempt retry-with-error-feedback loop (roles.py:728-746), and LLMStrategist.decide's parse-or-rule fallback (strategist.py:717-722) are structural clones of one 'forced structured parse with a safe default' pattern; all four re-state the ParseError handling, and two of them (DeepResearcher._forced, LLMStrategist.decide) also re-state the explicit BudgetExceeded-raise.
 
 *Recommendation:* Add one helper in tool_loop or core.parse — forced_structured(client, messages, model_cls, parser, nudge, on_fail) — keeping each caller's nudge wording and default factory as arguments (prompt strings stay byte-identical); the four sites shrink to one call each.
+
+*Resolution (2026-08-04) — three of the four; the fourth is a different shape and keeps its own.*
+
+`core/parse.py::forced_structured(client, messages, model, parser, *, nudge, then, on_fail)`. The
+agentic Researcher's forced emit, the deep Researcher's forced memo and the Strategist's
+parse-or-rule decision now each call it once. Nudge wording stays a caller argument — prompt strings
+are contracts and must not drift into a shared default — and the Strategist passes none at all,
+because its call is the PRIMARY one rather than a forced re-emit after a failure.
+
+`LLMResearcher.propose` is NOT migrated. It is a two-attempt retry LOOP that folds the parse error
+back into the prompt before re-asking, and that re-prompt is the point: without it the retry is
+byte-identical and deterministically re-fails. Collapsing it into a single forced parse would delete
+the only thing that makes the second attempt worth making.
+
+`then` runs INSIDE the guarded region, because two callers transform the parsed model there
+(`.to_idea()`, `_assemble(...)`) and a transform that raises must degrade with everything else rather
+than escape past the very salvage that exists to keep the run alive.
+
+**The exception posture is what actually justified the extraction.** It depends on a fact visible at
+no call site: `BudgetExceeded` is deliberately not an `LLMError`, so unlike a transport failure it
+passes straight through `parse_structured` instead of arriving as a `ParseError`. A hard budget stop
+must therefore END the run, while everything else degrades. Two of the three sites re-stated that
+re-raise; the third (`ToolUsingResearcher._fallback`) caught only `ParseError` and got the same
+effect by accident, because `parse_structured` converts `LLMError` on its way out. That accident was
+load-bearing in the wrong place: `_fallback` is also the `drive_tool_loop(fallback=…)` callback, where
+a raise has no handler at all. It now degrades on everything but a budget stop, which is the contract
+`propose`'s own comment already claimed for it.
+
+The Strategist needed a private `_RULE_FALLBACK = object()` sentinel rather than `None`: `None` is a
+LEGITIMATE `decide` result ("no strategy change"), so it cannot double as "the parse failed" without
+collapsing two different outcomes.
+
+`tests/test_parse_llm.py` 20 → 26. Teeth-tested against 6 breaks — a budget stop degrading, the
+transform escaping the guard, the nudge always appended, the sentinel collapsed to `None`, and a site
+parsing directly again — all biting. (The transform break had to be written twice: the first attempt
+left the second `try` under the original handlers, so it preserved the semantics it was meant to
+break and reported a false green.)
 
 #### AG-06 · LOW · duplication · effort: small — **RESOLVED (2026-08-02)**
 
@@ -5342,6 +5576,41 @@ entry, and a fresh upward import from `core/parse.py`.
 *Evidence:* speculation_quality.py (search layer) lazily imports engine.finalize.incomplete_finalize_scope and engine.orchestrator's SPECULATION_CALIBRATION_PROFILE_* constants — upward imports into the orchestrator from a policy package. Its implementation digest rglobs every looplab/*.py and hashes raw bytes into the receipt manifest (1955-1985), so a comment-only or docs-adjacent edit anywhere in the codebase revokes every issued calibration receipt; the module's own inline comment (≈1961) states this 'turns review-only commits into an operational stop/resume outage and forces six fresh GPU calibration runs after documentation edits' and recommends a versioned semantic manifest instead — i.e. the code ships with an acknowledged unresolved design defect.
 
 *Recommendation:* Move the calibration-profile constants into search (or a shared core module) so engine imports them downward, and implement the comment's own recommendation: pin receipts to an explicit rollout/protocol version plus exact hashes of only execution-affecting files.
+
+*Resolution (2026-08-04):* Both halves done; the first half of the finding was already partly stale.
+
+**Layering.** The calibration-profile constants had already moved to `search/speculation_calibration.py`
+and the orchestrator already imports them DOWNWARD, so that half needed nothing. One upward import
+remained — `engine.finalize.incomplete_finalize_scope`. It was not alone: it sits in a cluster of five
+pure functions over an event list (`_adjacent_claim`, `_finalize_begun`, `_scope_has_step`,
+`finalize_scope_quiescent`, `incomplete_finalize_scope`) that read event types and nothing else. That
+cluster is a READ SIDE, not orchestration, so it moved verbatim to `looplab/events/finalize_scope.py`,
+which `search` may import downward. `engine/finalize.py` re-exports all five, so the existing engine
+and `serve/run_commands.py` import sites — and every monkeypatch seam through them — resolve to the
+SAME objects; `_LAYOUT` gained the module. A test now pins the direction for this module specifically,
+alongside the package-wide `tests/test_agents_search_direction.py`.
+
+**Digest.** The comment's own recommendation is implemented, but not as it was written. "Exact hashes
+of only execution-affecting FILES" cannot be decided per file — every shipped `.py` can affect
+execution, which is exactly why the rglob was total. The separable axis is not which files but which
+BYTES: the manifest now hashes `ast.dump(ast.parse(raw))` per file, so comments, blank lines, line
+endings and rewrapping vanish while everything that can change what the process does survives. The
+manifest stays total, so nothing is silently excluded.
+
+Two decisions worth recording. Docstrings are deliberately KEPT execution-affecting — a tool's
+docstring is its agent-facing description, so editing one really can change a run; that is a narrower
+claim than "review-only", and the test says so. A file that does not parse falls back to its raw
+bytes, which can only over-revoke, never under-revoke.
+
+The schema is bumped to `looplab.speculation-implementation/v2` rather than reused: the same tree now
+hashes differently, so receipts issued under v1 are revoked ONCE by this change. That is correct, and
+it is the last time a comment edit will do it.
+
+One defect was found in this fix's own first draft and is worth naming, because the test that caught
+it is the one worth keeping: hashing the parsed tree while still recording `"bytes": len(raw)` put the
+byte-for-byte sensitivity straight back into the manifest through the OTHER field, and a test that
+only exercised `_semantic_source` passed anyway. The row is now minted by one `_manifest_entry`
+helper whose every field derives from the same bytes, and the guard asserts on the ROW.
 
 #### XP-08 · LOW · dead-code · effort: small — **RESOLVED (2026-08-02)**
 

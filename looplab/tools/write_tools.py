@@ -27,6 +27,7 @@ from looplab.tools._base import fn_spec
 from looplab.tools.patch import SurfacePolicy, apply_patch as _apply_patch, gate as _gate
 from looplab.tools.perm_modes import (
     DEFAULT_PROTECT, DEFAULT_PROTECT_EXCEPTIONS, authorize, default_approver)
+from looplab.core.jsonutil import valid_digest_ref
 
 _MAX_PREVIEW = 4000
 _BACKUP_STACK_LOCK = threading.RLock()
@@ -47,8 +48,7 @@ def _valid_file_state(value) -> bool:
     if not isinstance(value.get("exists"), bool):
         return False
     digest = value.get("digest")
-    return ((value["exists"] and isinstance(digest, str) and len(digest) == 64
-             and all(ch in "0123456789abcdef" for ch in digest))
+    return ((value["exists"] and valid_digest_ref(digest))
             or (not value["exists"] and digest is None))
 
 

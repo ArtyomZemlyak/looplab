@@ -3129,3 +3129,91 @@ def _state_with_one_evaluated_node() -> RunState:
     st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
                        metric=1.0, status=NodeStatus.evaluated, feasible=True)
     return st
+
+
+# --- one card-action bound for both stages (doc 25 EV-02) ---------------------------------------
+#
+# `st.cards_added` rows are bounded on ADMISSION, then decoded again at DERIVE time. The two had
+# copied the same coercions and already disagreed on one of them.
+
+def _admit_space(space):
+    from looplab.events.replay import _bounded_card_action_space
+
+    return _bounded_card_action_space(space)
+
+
+def _snapshot(payload):
+    from looplab.events.replay import _card_added_snapshot
+
+    return _card_added_snapshot(payload)
+
+
+def test_both_stages_bound_a_search_space_identically():
+    """The measured drift. The derive-time copy sliced its top-64 window BEFORE filtering keys, so
+    unusable keys that sort early ate the window: admission kept 64 usable keys, the snapshot decoded
+    14 of them. Only already-bounded rows reach the snapshot today, so this was latent — but nothing
+    enforced that, and a divergence inside the fold is silent by construction."""
+    space = {index: [1.0] for index in range(50)}          # non-str keys; str() sorts them first
+    space.update({f"z_param_{index:03d}": [float(index)] for index in range(80)})
+
+    admitted = _admit_space(space)
+    decoded, _owns = _snapshot({"space": space})
+    assert len(admitted) == 64
+    assert decoded["space"] == admitted
+
+
+def test_both_stages_agree_on_an_unusable_eval_timeout():
+    """`isinstance(True, int)` is True in Python, so `eval_timeout: true` must not become a
+    1-second timeout — in EITHER stage."""
+    from looplab.events.replay import _bounded_card_action
+
+    for bad in (True, False, "30", float("inf"), float("nan"), 0, -5, [], {}):
+        admitted = _bounded_card_action({"eval_timeout": bad})
+        decoded, _owns = _snapshot({"eval_timeout": bad})
+        assert "eval_timeout" not in admitted, bad
+        assert "eval_timeout" not in decoded, bad
+        assert admitted.get("_eval_timeout_invalid") is True, bad
+
+
+def test_an_explicit_null_timeout_survives_both_stages():
+    """A card that deliberately CLEARS its timeout is not the same as one that never named one, and
+    it is not an invalid value either — the three cases stay distinguishable."""
+    from looplab.events.replay import _bounded_card_action
+
+    admitted = _bounded_card_action({"eval_timeout": None})
+    decoded, owns = _snapshot({"eval_timeout": None})
+    assert admitted["eval_timeout"] is None and "_eval_timeout_invalid" not in admitted
+    assert decoded["eval_timeout"] is None
+    assert owns is False, "clearing a timeout does not by itself make the row an action owner"
+
+    assert "eval_timeout" not in _bounded_card_action({})
+    assert "eval_timeout" not in _snapshot({})[0]
+
+
+def test_both_stages_bound_and_dedupe_parent_ids_identically():
+    from looplab.events.replay import _bounded_card_action
+
+    raw = [3, 3, "4", True, -1, 2 ** 31, None, 5] + list(range(100))
+    admitted = _bounded_card_action({"parent_ids": raw})
+    decoded, _owns = _snapshot({"parent_ids": raw})
+    assert admitted["parent_ids"] == decoded["parent_ids"]
+    assert len(admitted["parent_ids"]) <= 64
+    assert admitted["parent_ids"][:2] == [3, 4], admitted["parent_ids"][:4]
+
+
+def test_neither_stage_re_derives_the_shared_card_coercions():
+    """Structural guard on the collapse. Both stages must call the shared helpers; an inline
+    `float(...)` timeout ladder or a hand-rolled parent loop is the second copy coming back — and the
+    last one drifted without anything going red."""
+    import inspect
+    import textwrap
+
+    from looplab.events import replay as replay_module
+
+    for name in ("_bounded_card_action", "_card_added_snapshot"):
+        source = textwrap.dedent(inspect.getsource(getattr(replay_module, name)))
+        assert "_bounded_card_eval_timeout(" in source, f"{name} re-derives the timeout ladder"
+        assert "_bounded_card_parent_ids(" in source, f"{name} re-derives the parent-id loop"
+        assert "math.isfinite" not in source, f"{name} still coerces numbers inline"
+    snapshot_source = textwrap.dedent(inspect.getsource(replay_module._card_added_snapshot))
+    assert "_bounded_card_action_space(" in snapshot_source, "the snapshot re-derives the space bound"

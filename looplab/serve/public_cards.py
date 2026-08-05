@@ -4,7 +4,7 @@ from __future__ import annotations
 import heapq
 import json
 import math
-from typing import Literal
+from typing import Callable, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -632,56 +632,13 @@ def _field(card, name: str):
 
 
 def _field_value(card, name: str):
+    """Project one field for the wire. Dispatch is `_FIELD_KINDS` (doc 25 SC-09); an unregistered
+    field is `_SKIP`, i.e. it does not reach the DTO."""
     value = _field(card, name)
     if value is _SKIP:
         return _SKIP
-    if name in _TEXT_LIMITS:
-        return _text(value, _TEXT_LIMITS[name], free_text=True)
-    if name in _REF_FIELDS:
-        return None if value is None else _text(value, _MAX_REF_BYTES)
-    if name in _INT_FIELDS:
-        return _number(value, integer=True)
-    if name in _NONNEG_INT_FIELDS:
-        number = _number(value, integer=True)
-        return (
-            number if number is None or (
-                number is not _SKIP and 0 <= number <= (1 << 31) - 1
-            ) else _SKIP
-        )
-    if name in _FLOAT_FIELDS:
-        return _number(value)
-    if name in _POSITIVE_FLOAT_FIELDS:
-        number = _number(value)
-        return number if number is None or (number is not _SKIP and number > 0) else _SKIP
-    if name in _REF_LIST_FIELDS:
-        return _refs(value)
-    if name in _INT_LIST_FIELDS:
-        return _ints(value)
-    if name in {"actionable", "selection_ready", "scored_against_empty", "pinned"}:
-        return value if isinstance(value, bool) else _SKIP
-    if name == "identity":
-        return _card_identity(value)
-    if name == "selection_provenance":
-        return _card_selection_provenance(value)
-    if name == "selection_blockers":
-        return _card_selection_blockers(value)
-    if name == "params":
-        return _params(value)
-    if name == "space":
-        return _space(value)
-    if name == "parent_generations":
-        return None if value is None else _generations(value)
-    if name in {"footprint", "resource_pin"}:
-        return _named_scalars(value, _FOOTPRINT_KEYS)
-    if name == "novelty_verdict":
-        return _named_scalars(value, _NOVELTY_KEYS, free_text=True)
-    if name == "cross_run_prior":
-        return _cross_run(value)
-    if name == "concept_source":
-        return _card_concept_source(value)
-    if name == "steering_context":
-        return _steering(value)
-    return _SKIP
+    kind = _FIELD_KINDS.get(name)
+    return kind.project(value) if kind is not None else _SKIP
 
 
 def _json_value(value):
@@ -876,58 +833,146 @@ def _card_selection_blockers_lossless(raw, bounded) -> bool:
     )
 
 
-def _field_projection_lossless(name: str, raw, bounded) -> bool:
-    raw = _json_value(raw)
-    if name in _TEXT_LIMITS:
-        return isinstance(raw, str) and bounded == raw
-    if name in _REF_FIELDS:
-        return isinstance(raw, str) and bounded == raw
-    if name in _INT_FIELDS:
-        return _number(raw, integer=True) == raw == bounded
-    if name in _NONNEG_INT_FIELDS:
-        return (_number(raw, integer=True) == raw == bounded
-                and 0 <= raw <= (1 << 31) - 1)
-    if name in _FLOAT_FIELDS:
-        return _number(raw) == raw == bounded
-    if name in _POSITIVE_FLOAT_FIELDS:
-        return _number(raw) == raw == bounded and raw > 0
-    if name in _REF_LIST_FIELDS:
+class _FieldKind(NamedTuple):
+    """One field's PROJECTOR and its exactness VERIFIER, bound together.
+
+    These were two parallel if-chains over the same ~10 category sets — `_field_value` projecting and
+    `_field_projection_lossless` mirroring it — that had to be edited in lockstep (doc 25 SC-09). The
+    mirror is the dangerous half: it decides whether the completeness RECEIPT claims a field was
+    returned exactly, so a verifier that drifts from its projector does not corrupt the wire data, it
+    lies about it. This module's own comments record one such bug, where `matched_concept_outcome`
+    rows were verified against the wrong key set.
+
+    Pairing them in one table means a field cannot acquire a projector without a verifier, and the
+    two are read together on one line instead of fifty lines apart.
+    """
+    project: Callable[[object], object]
+    lossless: Callable[[object, object], bool]
+
+
+def _plain_lossless(raw, bounded) -> bool:
+    return isinstance(raw, str) and bounded == raw
+
+
+def _text_kind(limit: int) -> _FieldKind:
+    return _FieldKind(lambda value: _text(value, limit, free_text=True), _plain_lossless)
+
+
+def _ref_kind() -> _FieldKind:
+    return _FieldKind(
+        lambda value: None if value is None else _text(value, _MAX_REF_BYTES), _plain_lossless)
+
+
+def _int_kind() -> _FieldKind:
+    return _FieldKind(
+        lambda value: _number(value, integer=True),
+        lambda raw, bounded: _number(raw, integer=True) == raw == bounded)
+
+
+def _nonneg_int_kind() -> _FieldKind:
+    def project(value):
+        number = _number(value, integer=True)
         return (
+            number if number is None or (
+                number is not _SKIP and 0 <= number <= (1 << 31) - 1
+            ) else _SKIP
+        )
+
+    return _FieldKind(
+        project,
+        lambda raw, bounded: (_number(raw, integer=True) == raw == bounded
+                              and 0 <= raw <= (1 << 31) - 1))
+
+
+def _float_kind() -> _FieldKind:
+    return _FieldKind(_number, lambda raw, bounded: _number(raw) == raw == bounded)
+
+
+def _positive_float_kind() -> _FieldKind:
+    def project(value):
+        number = _number(value)
+        return number if number is None or (number is not _SKIP and number > 0) else _SKIP
+
+    return _FieldKind(
+        project, lambda raw, bounded: _number(raw) == raw == bounded and raw > 0)
+
+
+def _ref_list_kind() -> _FieldKind:
+    return _FieldKind(
+        _refs,
+        lambda raw, bounded: (
             isinstance(raw, (list, tuple))
             and len(raw) <= _MAX_ITEMS
             and _refs(raw) == list(raw) == bounded
-        )
-    if name in _INT_LIST_FIELDS:
-        return (
+        ))
+
+
+def _int_list_kind() -> _FieldKind:
+    return _FieldKind(
+        _ints,
+        lambda raw, bounded: (
             isinstance(raw, (list, tuple))
             and len(raw) <= _MAX_ITEMS
             and _ints(raw) == list(raw) == bounded
-        )
-    if name in {"actionable", "selection_ready", "scored_against_empty", "pinned"}:
-        return isinstance(raw, bool) and bounded is raw
-    if name == "identity":
-        return _card_identity_lossless(raw, bounded)
-    if name == "selection_provenance":
-        return _card_selection_provenance_lossless(raw, bounded)
-    if name == "selection_blockers":
-        return _card_selection_blockers_lossless(raw, bounded)
-    if name == "params":
-        return isinstance(raw, dict) and len(raw) <= _MAX_ITEMS and bounded == raw
-    if name == "space":
-        return isinstance(raw, dict) and len(raw) <= _MAX_ITEMS and bounded == raw
-    if name == "parent_generations":
-        return isinstance(raw, dict) and len(raw) <= _MAX_ITEMS and _generations(raw) == raw == bounded
-    if name in {"footprint", "resource_pin"}:
-        return _named_scalars_lossless(raw, bounded, _FOOTPRINT_KEYS)
-    if name == "novelty_verdict":
-        return _named_scalars_lossless(raw, bounded, _NOVELTY_KEYS, free_text=True)
-    if name == "cross_run_prior":
-        return _cross_run_lossless(raw, bounded)
-    if name == "concept_source":
-        return _concept_source_lossless(raw, bounded)
-    if name == "steering_context":
-        return _steering_lossless(raw, bounded)
-    return False
+        ))
+
+
+def _bool_kind() -> _FieldKind:
+    return _FieldKind(
+        lambda value: value if isinstance(value, bool) else _SKIP,
+        lambda raw, bounded: isinstance(raw, bool) and bounded is raw)
+
+
+def _mapping_kind(project) -> _FieldKind:
+    """A dict copied through verbatim once bounded: exact iff it was already within the item bound."""
+    return _FieldKind(
+        project,
+        lambda raw, bounded: isinstance(raw, dict) and len(raw) <= _MAX_ITEMS and bounded == raw)
+
+
+def _named_scalars_kind(allowed, *, free_text: bool = False) -> _FieldKind:
+    return _FieldKind(
+        lambda value: _named_scalars(value, allowed, free_text=free_text),
+        lambda raw, bounded: _named_scalars_lossless(raw, bounded, allowed, free_text=free_text))
+
+
+# name -> (project, lossless). The category SETS above stay the declaration of which fields are
+# which kind; this table is where each kind's two halves meet. A field absent here never reaches the
+# DTO — `_FIELDS` alone does not publish anything.
+_FIELD_KINDS: dict[str, _FieldKind] = {
+    **{name: _text_kind(limit) for name, limit in _TEXT_LIMITS.items()},
+    **{name: _ref_kind() for name in _REF_FIELDS},
+    **{name: _int_kind() for name in _INT_FIELDS},
+    **{name: _nonneg_int_kind() for name in _NONNEG_INT_FIELDS},
+    **{name: _float_kind() for name in _FLOAT_FIELDS},
+    **{name: _positive_float_kind() for name in _POSITIVE_FLOAT_FIELDS},
+    **{name: _ref_list_kind() for name in _REF_LIST_FIELDS},
+    **{name: _int_list_kind() for name in _INT_LIST_FIELDS},
+    **{name: _bool_kind()
+       for name in ("actionable", "selection_ready", "scored_against_empty", "pinned")},
+    "identity": _FieldKind(_card_identity, _card_identity_lossless),
+    "selection_provenance": _FieldKind(
+        _card_selection_provenance, _card_selection_provenance_lossless),
+    "selection_blockers": _FieldKind(_card_selection_blockers, _card_selection_blockers_lossless),
+    "params": _mapping_kind(_params),
+    "space": _mapping_kind(_space),
+    "parent_generations": _FieldKind(
+        lambda value: None if value is None else _generations(value),
+        lambda raw, bounded: (isinstance(raw, dict) and len(raw) <= _MAX_ITEMS
+                              and _generations(raw) == raw == bounded)),
+    "footprint": _named_scalars_kind(_FOOTPRINT_KEYS),
+    "resource_pin": _named_scalars_kind(_FOOTPRINT_KEYS),
+    "novelty_verdict": _named_scalars_kind(_NOVELTY_KEYS, free_text=True),
+    "cross_run_prior": _FieldKind(_cross_run, _cross_run_lossless),
+    "concept_source": _FieldKind(_card_concept_source, _concept_source_lossless),
+    "steering_context": _FieldKind(_steering, _steering_lossless),
+}
+
+
+def _field_projection_lossless(name: str, raw, bounded) -> bool:
+    """Whether the projected value is EXACTLY the source. An unregistered field is never exact."""
+    kind = _FIELD_KINDS.get(name)
+    return bool(kind is not None and kind.lossless(_json_value(raw), bounded))
 
 
 def _field_exact(card, dto: dict, name: str) -> bool:

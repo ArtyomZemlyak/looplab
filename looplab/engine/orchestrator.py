@@ -269,8 +269,18 @@ class _InjectedNodePlan(NamedTuple):
 def _detect_gpu_ids() -> list[int]:
     """Best-effort list of usable GPU ordinals for the per-eval GPU pinning + `max_parallel=0` AUTO
     (evaluate.py). Honors an existing `CUDA_VISIBLE_DEVICES` (respect an operator/scheduler that already
-    fenced the box), else asks torch, else `nvidia-smi -L`. Returns [] when there is no GPU (CPU box /
-    detection unavailable) — the caller then simply never pins and AUTO collapses to 1. Never raises."""
+    fenced the box), else asks torch, else `core/hardware.detect_gpus`. Returns [] when there is no GPU
+    (CPU box / detection unavailable) — the caller then simply never pins and AUTO collapses to 1.
+    Never raises.
+
+    The last step used to count `nvidia-smi -L` output lines itself, which made this the SECOND
+    nvidia-smi parser in the tree (doc 25 ES-10). `core/hardware` owns that probe: `query_nvidia_smi`
+    is documented as the one launcher+CSV-splitter, and `detect_gpus` adds the comma-in-a-GPU-name
+    repair the `-L` counter never needed but every other reader of the same binary does. Two parsers
+    for one fact is how a box comes to report different GPU COUNTS to the pinning code and to the
+    admission envelope, which is a discrepancy `engine/resources.py::detect_gpu_inventory` has a
+    fail-closed guard for.
+    """
     cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
     if cvd is not None:
         ids = cuda_visible_device_tokens(cvd) or []
@@ -284,14 +294,10 @@ def _detect_gpu_ids() -> list[int]:
     except Exception:  # noqa: BLE001 — torch missing / driver error -> fall through
         pass
     try:
-        import subprocess
-        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=10)
-        if out.returncode == 0:
-            n = sum(1 for line in out.stdout.splitlines() if line.strip().startswith("GPU "))
-            return list(range(n))
-    except Exception:  # noqa: BLE001
-        pass
-    return []
+        from looplab.core.hardware import detect_gpus
+        return list(range(len(detect_gpus())))
+    except Exception:  # noqa: BLE001 — capability detection is best-effort by contract
+        return []
 
 
 # The confirm phase (engine/confirm_phase.py) and ablation (engine/ablation.py) clusters are

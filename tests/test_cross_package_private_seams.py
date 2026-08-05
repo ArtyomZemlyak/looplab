@@ -59,6 +59,13 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
     "engine": {
         "looplab.agents.roles": ("_state_brief",),
         "looplab.events.eventstore": ("_interprocess_lock",),
+        # The finalize-scope read side moved DOWN to `events/` so `search` could stop importing the
+        # engine (doc 25 XP-07). Its two public names are the cluster's API; these three are the
+        # cluster's own internals, and `engine/finalize.py` — the module they moved OUT of — still
+        # calls them directly (`_scope_has_step` 13 times). Declared rather than promoted: they are
+        # private on purpose, and this registry is what turns a future rename into a red test
+        # instead of a silent break.
+        "looplab.events.finalize_scope": ("_adjacent_claim", "_finalize_begun", "_scope_has_step"),
         "looplab.runtime.command_eval": ("_LABEL_KEYS", "_PRED_KEYS", "_as_list"),
         "looplab.runtime.sandbox": ("_run_argv", "_to_float"),
         "looplab.search.concept_graph": ("_experiment_nodes",),

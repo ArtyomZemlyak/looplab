@@ -1725,3 +1725,92 @@ def test_the_calibration_prefix_snapshots_only_at_the_authority_events():
         "cursor.snapshot() runs unconditionally on every event — the prefix is consumed only by the "
         "authority branches, so this deep-copies the whole RunState once per row for nothing")
     assert _snapshots(loop), "the authority branches must still take their prefix snapshot"
+
+
+# --- the implementation digest is SEMANTIC, not byte-for-byte (doc 25 XP-07) --------------------
+#
+# Hashing raw source made a comment-only or reformatting commit revoke every issued calibration
+# receipt — an operational stop/resume outage plus six fresh GPU calibration runs after a
+# documentation edit. This module's own comment recorded that defect; these pin the fix.
+
+@pytest.mark.parametrize("before,after,why", [
+    (b"x = 1  # explain\n", b"x = 1\n", "a comment-only edit"),
+    (b"x = 1\n", b"x = 1\n\n\n", "trailing blank lines"),
+    (b"x = 1\n", b"x = 1\r\n", "a line-ending conversion"),
+    (b"def f(a,b):\n    return a\n", b"def f(\n    a,\n    b,\n):\n    return a\n", "rewrapping"),
+])
+def test_a_review_only_edit_does_not_change_the_semantic_source(before, after, why):
+    from looplab.search.speculation_quality import _semantic_source
+
+    assert _semantic_source(before, "m.py") == _semantic_source(after, "m.py"), why
+
+
+@pytest.mark.parametrize("before,after,why", [
+    (b"x = 1\n", b"x = 2\n", "a changed constant"),
+    (b"def f():\n    return 1\n", b"def f():\n    return 2\n", "a changed return"),
+    (b"import os\n", b"import sys\n", "a changed import"),
+    (b'def f():\n    """tool description"""\n', b'def f():\n    """CHANGED"""\n',
+     "a docstring — an agent-facing tool description really can change a run"),
+])
+def test_anything_that_can_change_execution_still_revokes(before, after, why):
+    from looplab.search.speculation_quality import _semantic_source
+
+    assert _semantic_source(before, "m.py") != _semantic_source(after, "m.py"), why
+
+
+def test_an_unparseable_shipped_file_falls_back_to_its_raw_bytes():
+    """Strictly conservative: it can only over-revoke, never under-revoke, and the manifest stays
+    TOTAL — a syntactically broken shipped module must still be covered, not silently excluded."""
+    from looplab.search.speculation_quality import _semantic_source
+
+    broken = b"def (\n"
+    assert _semantic_source(broken, "m.py") == broken
+
+
+@pytest.mark.parametrize("before,after,why", [
+    (b"x = 1  # explain\n", b"x = 1\n", "a comment-only edit"),
+    (b"x = 1\n", b"x = 1\r\n\n", "a line-ending conversion plus a blank line"),
+])
+def test_a_review_only_edit_does_not_change_the_manifest_ROW(before, after, why):
+    """The row, not `_semantic_source` alone, is what the digest consumes. Sizing the raw bytes
+    beside a semantic hash would smuggle byte-for-byte sensitivity back in through `bytes`."""
+    from looplab.search.speculation_quality import _manifest_entry
+
+    assert _manifest_entry("m.py", before) == _manifest_entry("m.py", after), why
+
+
+def test_a_real_code_change_still_changes_the_manifest_row():
+    from looplab.search.speculation_quality import _manifest_entry
+
+    assert _manifest_entry("m.py", b"x = 1\n") != _manifest_entry("m.py", b"x = 2\n")
+
+
+def test_the_digest_is_stable_and_schema_versioned():
+    """Stable across calls on an unchanged tree, and the schema string was bumped: the same tree now
+    hashes differently than under v1, so receipts issued then are revoked ONCE, deliberately."""
+    import inspect
+
+    from looplab.search import speculation_quality
+    from looplab.search.speculation_quality import speculation_implementation_digest
+
+    first = speculation_implementation_digest()
+    assert first == speculation_implementation_digest()
+    assert first.startswith("sha256:") or len(first) == 64
+
+    source = inspect.getsource(speculation_implementation_digest)
+    assert "looplab.speculation-implementation/v2" in source
+    assert "_manifest_entry(" in source, "the manifest must hash parsed modules, not raw bytes"
+
+
+def test_the_quality_module_never_imports_upward_into_the_engine():
+    """`search` is a policy layer. Reaching up into `engine` is what doc 25 XP-07 named, and the one
+    remaining case (`incomplete_finalize_scope`) now lives in `events/`, which `search` may import
+    downward."""
+    from pathlib import Path
+
+    source = Path(
+        __file__).resolve().parents[1] / "looplab" / "search" / "speculation_quality.py"
+    text = source.read_text(encoding="utf-8")
+    offenders = [line.strip() for line in text.split("\n")
+                 if "import" in line and "looplab.engine" in line and not line.strip().startswith("#")]
+    assert not offenders, f"search reaches up into the engine: {offenders}"

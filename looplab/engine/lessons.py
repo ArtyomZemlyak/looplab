@@ -53,6 +53,7 @@ from looplab.engine.memory import JsonlCaseLibrary
 from looplab.events.replay import fold
 from looplab.events.types import (
     EV_LESSONS_DISTILLED, EV_LESSONS_REFRESHED, EV_LESSONS_STORE_UNAVAILABLE)
+from looplab.core.jsonutil import valid_digest_ref
 
 if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestrator
     from looplab.engine.orchestrator import Engine
@@ -748,8 +749,12 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 and (isinstance(finish_seq, bool) or not isinstance(finish_seq, int)
                      or finish_seq < 0)):
             raise ValueError("invalid curation claim finish_seq")
+        # The shared predicate also CLOSES a gap here (doc 25 EV-04): this copy tested `len` and
+        # membership without an `isinstance`, so a 64-element list of hex characters satisfied both
+        # and was accepted as a digest. The binding stays — `_portfolio_curation_key` below rebuilds
+        # this claim's identity from it.
         digest = claim["input_digest"]
-        if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        if not valid_digest_ref(digest):
             raise ValueError("invalid curation claim input_digest")
         from looplab.core.redact import redact_persisted_text
         for field, maximum in (("input_schema", 200), ("model", 200), ("parser", 100)):

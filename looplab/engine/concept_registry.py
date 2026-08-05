@@ -248,6 +248,7 @@ def record_concept_alias(memory_dir, *, from_concept: str, to_concept: str, by: 
     with _concept_governance_transaction(memory_dir):
         with _concept_source_transaction(memory_dir, required=require_existing):
             return _append_governance(path, rec, validate=_validate_locked,
+                                      read_rows=_read_alias_rows,
                                       expected_revision=expected_revision,
                                       governance_memory_dir=memory_dir,
                                       expected_governance_revision=expected_governance_revision,
@@ -285,7 +286,8 @@ def clear_concept_alias(memory_dir, *, from_concept: str, by: str = "operator", 
 
     with _concept_governance_transaction(memory_dir):
         return _append_governance(
-            path, rec, validate=_validate_clear, expected_revision=expected_revision,
+            path, rec, validate=_validate_clear, read_rows=_read_alias_rows,
+            expected_revision=expected_revision,
             governance_memory_dir=memory_dir,
             expected_governance_revision=expected_governance_revision,
             require_durable=True,
@@ -538,6 +540,7 @@ def record_concept_split(memory_dir, *, from_concept: str, rules, default: str =
     with _concept_governance_transaction(memory_dir):
         with _concept_source_transaction(memory_dir, required=require_existing):
             return _append_governance(path, rec, validate=_validate_targets,
+                                      read_rows=_read_split_rows,
                                       expected_revision=expected_revision,
                                       governance_memory_dir=memory_dir,
                                       expected_governance_revision=expected_governance_revision,
@@ -570,7 +573,8 @@ def clear_concept_split(memory_dir, *, from_concept: str, by: str = "operator", 
 
     with _concept_governance_transaction(memory_dir):
         return _append_governance(
-            path, rec, validate=_validate_clear, expected_revision=expected_revision,
+            path, rec, validate=_validate_clear, read_rows=_read_split_rows,
+            expected_revision=expected_revision,
             governance_memory_dir=memory_dir,
             expected_governance_revision=expected_governance_revision,
             require_durable=True,
@@ -916,11 +920,12 @@ def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[],
         if action_id and path.exists():
             if strict_rows is not None:
                 existing_rows = strict_rows
-            elif path.name == "concept_aliases.jsonl":
-                existing_rows = _read_alias_rows(path)
-            elif path.name == "concept_splits.jsonl":
-                existing_rows = _read_split_rows(path)
             else:
+                # `read_rows` is now the ONLY way a caller selects a strict reader (doc 25 EM-05).
+                # This used to branch on `concept_aliases.jsonl`/`concept_splits.jsonl` by name, so a
+                # primitive that four subsystems import as generic secretly knew the concept ledgers.
+                # Those two call sites pass their reader explicitly; what is left here is the lenient
+                # projection that non-policy RECEIPT logs have always used.
                 from looplab.events.eventstore import read_jsonl_lenient
                 existing_rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True)
             for existing in existing_rows:
@@ -967,9 +972,11 @@ def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[],
         # Allocate the CAS revision inside the same required lock as validation and append.
         rec["revision"] = current + 1
         separator = ""
-        if (read_rows is None
-                and path.name not in {"concept_aliases.jsonl", "concept_splits.jsonl"}
-                and path.exists() and path.stat().st_size):
+        # `read_rows is None` now carries the whole distinction (doc 25 EM-05). It always did for
+        # these two ledgers — they reach this line with a reader, so the filename clause that used to
+        # sit here could only ever agree with it. A strict ledger is one whose caller supplied a
+        # strict reader, which is the same statement the name check was making indirectly.
+        if read_rows is None and path.exists() and path.stat().st_size:
             with open(path, "rb") as existing:
                 existing.seek(-1, 2)
                 if existing.read(1) not in (b"\n", b"\r"):

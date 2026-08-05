@@ -30,13 +30,13 @@ import uuid
 from pathlib import Path
 
 from looplab.core.atomicio import atomic_write_text
+from looplab.core.jsonutil import valid_digest_ref
 
 
 DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
 MIN_TTL_SECONDS = 5 * 60
 MAX_TTL_SECONDS = 30 * 24 * 60 * 60
 REVIEW_HEADER = "X-LoopLab-Review"
-_GENERATION_HEX = frozenset("0123456789abcdef")
 _RECOVERY_SECRET = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 _CREATE_CONTRACT = 1
 _STORE_LOCK_TIMEOUT_SECONDS = 5.0
@@ -133,8 +133,7 @@ def _finite_number(value, fallback: float | None = None) -> float | None:
 
 def exact_review_generation(value: object) -> str | None:
     """Return only the canonical event-log generation spelling used by run commands."""
-    return (value if isinstance(value, str) and len(value) == 64
-            and all(char in _GENERATION_HEX for char in value) else None)
+    return value if valid_digest_ref(value) else None
 
 
 def _public(record: dict) -> dict:

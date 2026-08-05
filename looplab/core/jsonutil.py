@@ -78,3 +78,35 @@ def canonical_json_digest(value: object, *, prefix: str = "",
     if cap is not None and len(encoded) > cap:
         return None
     return prefix + hashlib.sha256(encoded).hexdigest()
+
+
+_HEX = "0123456789abcdef"
+
+
+def valid_digest_ref(value: object, *, prefix: str = "") -> bool:
+    """Whether *value* is exactly what `canonical_json_digest` mints under *prefix* (doc 25 EV-04).
+
+    The READER of the format the function above WRITES, which is why it lives here: the two are one
+    contract, and a verifier that drifts from its minter accepts refs nothing issued or rejects refs
+    that were. This exact predicate was hand-rolled at ~20 sites — four times inside one `run_started`
+    handler alone — as some ordering of "is a str / has the prefix / is prefix+64 long / is all
+    lowercase hex".
+
+    Every clause is load-bearing against untrusted event data and agent output:
+
+    * ``isinstance`` first — these run inside the fold, where a hand-edited log can put any JSON type
+      here and an ``AttributeError`` would take down every replay of the run, not just this field.
+      One copy (`replay._digest_ref`) omitted this and raised on a non-string.
+    * exact LENGTH, not a minimum — a prefix match alone accepts ``"sha256:"`` with a truncated or
+      padded body, and a truncated digest is a different identity that would silently compare equal
+      to nothing.
+    * lowercase hex only — ``hashlib``'s ``hexdigest`` emits lowercase, so accepting uppercase would
+      admit two spellings of one digest and break identity comparison. A caller that must accept
+      either (an HTTP parameter typed by a human, e.g. `serve/routers/boss._normalize_report_generation`)
+      is doing INPUT NORMALIZATION rather than identity checking and deliberately does not use this.
+
+    ``prefix=""`` is the bare-64-hex case, which is the same predicate with an empty namespace.
+    """
+    if not isinstance(value, str) or len(value) != len(prefix) + 64:
+        return False
+    return value.startswith(prefix) and all(ch in _HEX for ch in value[len(prefix):])

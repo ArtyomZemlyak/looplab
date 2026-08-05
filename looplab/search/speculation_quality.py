@@ -15,6 +15,7 @@ never accepted as evidence.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
@@ -27,7 +28,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from looplab.core.jsonutil import canonical_json
+from looplab.core.jsonutil import canonical_json, valid_digest_ref
 from looplab.core.atomicio import strict_atomic_write_text
 from looplab.core.config import RUN_START_PINNED_FIELDS
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT, finite_metric
@@ -353,12 +354,7 @@ def _sha256(data: bytes) -> str:
 
 
 def _valid_digest(value: object) -> bool:
-    return bool(
-        isinstance(value, str)
-        and value.startswith("sha256:")
-        and len(value) == 71
-        and all(ch in "0123456789abcdef" for ch in value[7:])
-    )
+    return valid_digest_ref(value, prefix="sha256:")
 
 
 def _read_bounded(path: Path, *, limit: int, label: str) -> bytes:
@@ -786,7 +782,9 @@ def _validate_calibration_terminal(events: Sequence[Event], state) -> None:
         raise ValueError("quality evidence has incomplete modern finalization")
     # A complete marker must close the sole scope.  The helper additionally catches any newer
     # incomplete scope that could otherwise be hidden behind the folded terminal state.
-    from looplab.engine.finalize import incomplete_finalize_scope
+    # DOWNWARD into `events`, not up into the engine (doc 25 XP-07): this is a pure projection
+    # over an event list, and `search` importing `engine` is the direction that closes the cycle.
+    from looplab.events.finalize_scope import incomplete_finalize_scope
     if incomplete_finalize_scope(events) is not None:
         raise ValueError("quality evidence retains a pending finalization scope")
 
@@ -2186,6 +2184,40 @@ def _implementation_digest(
     return digest
 
 
+def _semantic_source(raw: bytes, relative: str) -> bytes:
+    """The bytes a Python file's MEANING reduces to: its parsed tree, comments and layout removed.
+
+    Hashing raw source made a comment-only, reformatting or line-ending-conversion commit revoke
+    every previously issued calibration receipt, even though runtime semantics were identical — the
+    defect this module's own comment recorded, whose cost is an operational stop/resume outage plus
+    six fresh GPU calibration runs after a documentation edit (doc 25 XP-07).
+
+    `ast.dump` without attributes carries no line or column numbers, so blank lines, wrapping and
+    trailing whitespace vanish; comments never reach the AST at all. Everything that can change what
+    the process DOES survives — including docstrings, which are AST nodes and are deliberately kept:
+    a tool's docstring is its agent-facing description, so editing one really can change a run.
+
+    A file that does not parse falls back to its raw bytes. That is strictly conservative (it can
+    only over-revoke, never under-revoke) and keeps the digest total: a syntactically broken shipped
+    module must still be covered rather than silently excluded from the manifest.
+    """
+    try:
+        return ast.dump(ast.parse(raw, filename=relative)).encode("utf-8")
+    except (SyntaxError, ValueError, RecursionError):
+        return raw
+
+
+def _manifest_entry(relative: str, raw: bytes) -> dict:
+    """One row of the implementation manifest, whose EVERY field derives from the same bytes.
+
+    Kept as its own function because the row — not `_semantic_source` alone — is what the digest
+    consumes: sizing `raw` beside a hash of the parsed tree would smuggle byte-for-byte sensitivity
+    back in through the other field, and a comment-only edit would still revoke every receipt.
+    """
+    body = _semantic_source(raw, relative)
+    return {"path": relative, "bytes": len(body), "sha256": _sha256(body)}
+
+
 def speculation_implementation_digest() -> str:
     """Digest the complete Python runtime plus shipped runtime/packaging resources.
 
@@ -2202,11 +2234,6 @@ def speculation_implementation_digest() -> str:
         # package root directly instead of assuming a repository checkout surrounds it.
         package_root = Path(__file__).resolve().parents[1]
         root = package_root.parent
-    # hashing raw source bytes makes comments, formatting and line-ending conversion
-    # revoke every previously issued receipt even when runtime semantics are identical. That turns
-    # review-only commits into an operational stop/resume outage and forces six fresh GPU calibration
-    # runs after documentation edits. Bind a versioned semantic/runtime manifest (or an explicit
-    # rollout protocol version) while retaining exact hashes only for files that affect execution.
     paths = list(package_root.rglob("*.py"))
     for relative in _IMPLEMENTATION_REQUIRED_PACKAGE_FILES:
         resource = package_root / relative
@@ -2220,11 +2247,15 @@ def speculation_implementation_digest() -> str:
     for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
         relative = path.relative_to(root).as_posix()
         raw = _read_bounded(path, limit=8 * 1024 * 1024, label=f"implementation file {relative}")
-        manifest.append({"path": relative, "bytes": len(raw), "sha256": _sha256(raw)})
+        manifest.append(_manifest_entry(relative, raw))
     if not 1 <= len(manifest) <= 1000:
         raise ValueError("implementation source manifest is empty or oversized")
     return _sha256(canonical_json({
-        "schema": "looplab.speculation-implementation/v1",
+        # v2: the per-file hash covers the PARSED module, not its raw bytes (see `_semantic_source`).
+        # Bumped rather than reused because the same tree now yields a different digest — every
+        # receipt issued under v1 is revoked ONCE by this change, which is correct and is the last
+        # time a comment edit will do it.
+        "schema": "looplab.speculation-implementation/v2",
         "files": manifest,
     }))
 

@@ -635,3 +635,85 @@ def test_the_running_budget_still_refuses_a_field_that_would_overflow_the_card_c
     encoded = json.dumps(dto, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     assert len(encoded) <= PUBLIC_CARD_MAX_BYTES, len(encoded)
     assert dto["id"] == "card-big" and dto["status"] == "evaluated"   # identity survives the drop
+
+
+# --- one per-field descriptor table (doc 25 SC-09) ----------------------------------------------
+#
+# Projection and exactness-verification were two parallel if-chains over the same ~10 category sets,
+# fifty lines apart and edited in lockstep. The verifier is the dangerous half: it decides whether the
+# completeness RECEIPT claims a field came through exactly, so a verifier that drifts from its
+# projector does not corrupt the wire data — it lies about it.
+
+def test_every_published_field_has_a_projector_and_a_verifier():
+    """A field in `_FIELDS` with no descriptor silently never reaches the DTO; one with a projector
+    but no verifier could never be reported exact. Pairing them in the table makes both impossible,
+    and this pins that the table actually covers the published set."""
+    from looplab.serve.public_cards import _FIELD_KINDS, _FIELDS
+
+    missing = [name for name in _FIELDS if name not in _FIELD_KINDS]
+    assert not missing, f"published fields with no projection descriptor: {missing}"
+    for name, kind in _FIELD_KINDS.items():
+        assert callable(kind.project) and callable(kind.lossless), name
+
+
+def test_the_table_owns_dispatch_so_neither_half_can_grow_its_own_chain():
+    """The two if-chains are gone. A `name in _TEXT_LIMITS` style test reappearing in either
+    function is the second chain coming back — which is how the two drifted before (this module's
+    own comments record `matched_concept_outcome` rows verified against the wrong key set)."""
+    import inspect
+    import textwrap
+
+    from looplab.serve import public_cards
+
+    for name in ("_field_value", "_field_projection_lossless"):
+        source = textwrap.dedent(inspect.getsource(getattr(public_cards, name)))
+        assert "_FIELD_KINDS" in source, f"{name} no longer dispatches through the table"
+        for category in ("_TEXT_LIMITS", "_REF_FIELDS", "_INT_FIELDS", "_REF_LIST_FIELDS"):
+            assert category not in source, f"{name} re-grew a category if-chain ({category})"
+        assert 'name == "' not in source, f"{name} re-grew per-field name branches"
+
+
+def test_an_unregistered_field_is_skipped_and_never_certified_exact():
+    """The two halves must agree about a field they do not know: absent from the DTO, and never
+    reported as exactly returned."""
+    from looplab.serve.public_cards import _SKIP, _field_projection_lossless, _field_value
+
+    assert _field_value({"not_a_wire_field": "x"}, "not_a_wire_field") is _SKIP
+    assert _field_projection_lossless("not_a_wire_field", "x", "x") is False
+
+
+@pytest.mark.parametrize("name,raw", [
+    ("statement", "plain"),
+    ("id", "card-1"),
+    ("created_at_node", 4),
+    ("statement_edit_seq", 2),
+    ("best_delta", 1.5),
+    ("eval_timeout", 30.0),
+    ("aliases", ["a", "b"]),
+    ("evidence", [1, 2]),
+    ("pinned", True),
+    ("params", {"lr": 0.1}),
+])
+def test_a_clean_value_projects_unchanged_and_verifies_exact(name, raw):
+    """The property the receipt rests on, per generic kind: an in-bounds value survives projection
+    byte-for-byte AND its verifier agrees. A projector/verifier pair that disagreed here would either
+    under-report completeness or certify data the DTO does not contain."""
+    from looplab.serve.public_cards import _field_projection_lossless, _field_value
+
+    projected = _field_value({name: raw}, name)
+    assert projected == raw
+    assert _field_projection_lossless(name, raw, projected) is True
+
+
+@pytest.mark.parametrize("name,raw", [
+    ("statement", "z" * 5000),                 # clipped by the byte cap
+    ("aliases", [str(i) for i in range(200)]),  # sliced by the item cap
+    ("created_at_node", "not-a-number"),
+    ("pinned", "yes"),
+])
+def test_a_bounded_or_rejected_value_is_never_certified_exact(name, raw):
+    from looplab.serve.public_cards import _SKIP, _field_projection_lossless, _field_value
+
+    projected = _field_value({name: raw}, name)
+    bounded = None if projected is _SKIP else projected
+    assert _field_projection_lossless(name, raw, bounded) is False

@@ -20,6 +20,7 @@ import json
 from typing import Optional
 
 from looplab.trust.cross_run import cross_run_text
+from looplab.core.receipts import bounded_receipt_count
 
 _MAX_PROPOSALS = 12          # a bounded curation per pass — the steward suggests the highest-value few
 _MAX_GRAPH = 200             # cap the concepts shown to the model (most-explored first) — bounded prompt
@@ -80,15 +81,16 @@ def _concept_source_receipt(overview: dict, payload: list[dict]) -> dict:
     )
     source = overview if isinstance(overview, dict) else {}
     raw_counts = {key: source.get(key) for key in keys}
+    # This validator spelled the count guard `isinstance(v, int) and not isinstance(v, bool)` while
+    # its siblings in `claims_health`/`memory` spelled it `type(v) is int` (doc 25 EM-12). The two
+    # agree on everything JSON can produce and disagree only on an in-process `int` subclass, so no
+    # shipped receipt distinguished them — but one concept had two rules. `bounded_receipt_count` is
+    # the strict spelling; nothing here constructs a subclass, so no reachable behaviour changes.
     counts_valid = all(
-        isinstance(value, int) and not isinstance(value, bool)
-        and 0 <= value <= _MAX_RECEIPT_COUNT
-        for value in raw_counts.values()
-    )
+        bounded_receipt_count(value, _MAX_RECEIPT_COUNT) for value in raw_counts.values())
     complete_valid = type(source.get("source_complete")) is bool
     counts = {
-        key: value if isinstance(value, int) and not isinstance(value, bool)
-        and 0 <= value <= _MAX_RECEIPT_COUNT else 0
+        key: value if bounded_receipt_count(value, _MAX_RECEIPT_COUNT) else 0
         for key, value in raw_counts.items()
     }
     # `_capsule_source_summary` defines source_complete = (partial_capsules == 0 AND
@@ -118,10 +120,8 @@ def _concept_source_receipt(overview: dict, payload: list[dict]) -> dict:
     overview_omitted = source.get("concepts_omitted", 0)
     projection_counts_valid = (
         isinstance(raw_concepts, list)
-        and isinstance(concepts_total, int) and not isinstance(concepts_total, bool)
-        and 0 <= concepts_total <= _MAX_RECEIPT_COUNT
-        and isinstance(overview_omitted, int) and not isinstance(overview_omitted, bool)
-        and 0 <= overview_omitted <= _MAX_RECEIPT_COUNT
+        and bounded_receipt_count(concepts_total, _MAX_RECEIPT_COUNT)
+        and bounded_receipt_count(overview_omitted, _MAX_RECEIPT_COUNT)
     )
     projection_consistent = (
         projection_counts_valid

@@ -120,6 +120,7 @@ _LAYOUT = {
     "eventstore": "events",
     "evaluate": "engine",
     "engine_proc": "serve",
+    "finalize_scope": "events",   # the finalize-scope read side (doc 25 XP-07)
     "finalize": "engine",
     "foresight": "search",
     "gate": "trust",
@@ -194,6 +195,7 @@ _LAYOUT = {
     # the package-layout audit and also breaks the supported ``looplab.public_cards`` legacy alias.
     "public_cards": "serve",
     "readmodel": "events",
+    "receipts": "core",         # the one bounded-receipt-count rule (doc 25 EM-12)
     "redact": "core",
     "regression": "adapters",
     "replay": "events",
