@@ -3798,7 +3798,7 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 
 *Recommendation:* Extract two shared services in looplab/serve/: an event-ledger paid-action protocol (claim event, terminal event, fsync-confirm, generation fence — parameterized by event types) covering report_refresh and concept-lens, and keep the file-ledger machinery of scope actions as its own module. Each new hand-rolled variant is a fresh set of crash-window bugs to re-find; the near-identical helper pairs prove the abstraction already exists implicitly.
 
-#### SR-02 · HIGH · under-decomposition · effort: large
+#### SR-02 · HIGH · under-decomposition · effort: large — **LARGELY RESOLVED (2026-08-05)**
 
 **reports.py is a god-module: a distributed-storage subsystem inside a router file**
 
@@ -3807,6 +3807,106 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 *Evidence:* 3103 lines total. Lines ~154-1553 (~1400 lines) are module-level storage machinery with zero HTTP content: path confinement (`_validated_reports_dir`, `_confined_report_path`, `_confined_scope_root_path`), cross-platform byte-range file locks (`_open_scope_action_lease`, `_try_lock_scope_action_descriptor` with msvcrt/fcntl branches), lease markers, fences, receipt validation, and the prompt projection `_prior_learnings_index`. The endpoints themselves are enormous: `abandon_scope_report_action` is ~195 lines of nested marker/fence/lease case analysis; `generate_scope_report_ep` is ~530 lines containing five nested closures (`_stamp_scope_action_usage`, `_compute`, `_inputs_unchanged`, `_persist_terminal`, `_compute_durable`). serve/ already extracts comparable subsystems (deletion_service.py, reset_transaction.py, scope_report.py, scope_sources.py), so this file is the exception, not the pattern.
 
 *Recommendation:* Move the lease/fence/receipt machinery to looplab/serve/scope_actions.py (or fold into scope_report.py), and `_prior_learnings_index` next to its consumers (it is a Genesis prompt projection, not a report route). The router should shrink to endpoint wiring plus the staleness GET.
+
+*Resolution (2026-08-05).* **Half of this finding was already done when I picked it up, by SR-12 on
+2026-08-04, and the measurement matters because it changes what the remaining work IS.** Every name
+this finding lists as "module-level storage machinery" — `_validated_reports_dir`,
+`_confined_report_path`, `_confined_scope_root_path`, `_open_scope_action_lease`,
+`_try_lock_scope_action_descriptor` with its msvcrt/fcntl branches, the markers, the fences, receipt
+validation, and `_prior_learnings_index` — already lived in `serve/scope_report_store.py`. That move
+took `routers/reports.py` from 3 117 to 1 612 lines (`git show 8228283e`), i.e. the ~1 400 lines the
+evidence paragraph counts were gone. The finding's first recommendation was therefore stale on
+arrival; its second (`_prior_learnings_index` "next to its consumers") was answered differently and
+better — the projection reads eleven private helpers and three constants of the store, so it went
+WITH the store rather than to `routers/genesis.py`, which now imports it from there.
+
+What was NOT done, and is what this change does, is the finding's second sentence: *"The endpoints
+themselves are enormous."* Both endpoint measurements were still exactly right at 1 612 lines —
+`abandon_scope_report_action` was 193 lines of nested marker/fence/lease case analysis and
+`generate_scope_report_ep` 550 with its five nested closures — and, less visibly, the whole file was
+still ONE function: all 25 of its top-level helpers (40 defs counting the inner
+closures) were nested inside `build_router`, so every branch of the
+crash-recovery state machine was reachable only by building the ASGI app and driving HTTP. That is
+the same complaint SR-03 made about `control.py`, and it gets the same answer.
+
+`looplab/serve/scope_actions.py` (587 lines) now owns the paid ACTION protocol: `action_response`,
+`indeterminate_receipt`, `_reconcile_running_action`, `read_reconciled_action`,
+`active_scope_action`, plus `get_scope_action` and `durable_abandon_scope_action` — the two
+`/api/scope-report-actions/…` bodies. `routers/reports.py` keeps the route decorators, the abandon
+docstring (it is the OpenAPI description) and the comment explaining why action observation has its
+own URL namespace; each route is now a single delegating call. The file goes 1 612 → 1 131 lines,
+3 117 → 1 131 across both changes.
+
+The moved bodies are VERBATIM. A normalized differential over all 497 significant lines — reversing
+the three documented mechanical edits — reports the signatures and docstrings as the only
+difference. Those edits are: `srv` threaded explicitly where it was captured, `srv.reports_dir` in
+place of the captured `_reports_dir` (`AppState.__init__` assigns it once and nothing in the tree
+ever reassigns it, so the capture and the live read are the same object), and the five helpers
+renamed to public spellings because the router calls four of them.
+
+**Rejected: translating the refusals at the boundary.** `durable_abandon_scope_action` raises
+`HTTPException(409, …)` from inside the storage case analysis, which looks like HTTP leaking down a
+layer. Introducing a typed refusal instead would have changed which failures are terminal and which
+are retryable — the ordering of `except HTTPException: raise` ahead of the two store-conflict
+handlers is load-bearing, and a new exception type re-entering that ladder is a behaviour change
+dressed as a refactor. `deletion_service.py` and `trace_clear.py` already raise `HTTPException` from
+`serve/`, so the precedent runs the other way. The new module raises it; a guard asserts it holds no
+`APIRouter` and no route decorator, which is the line that actually matters.
+
+**Rejected: folding into `scope_report_store.py`.** It is the finding's own second option and it
+would have added ZERO new patch surface, which is a real argument. It loses on layering: the store's
+docstring commits to "none of it is HTTP", and reconciliation is policy OVER the store (it decides
+when to write a tombstone and when a visible terminal must still read as running), not more store.
+
+**Not attempted:** `generate_scope_report_ep`. See "still open" below.
+
+*The seam this move creates, and the guard.* Importing a store name binds it BY VALUE exactly as the
+router's star import does, so `scope_actions.py` is a THIRD copy of every seam it names — and it is
+now the ONLY reader of `_read_scope_action_lease_marker` outside the store, the router's copy having
+become live-but-dead. A two-module sweep would have left `test_report.py`'s marker-loss recovery test
+green while injecting nothing, which is precisely the failure SR-12 paid for once.
+`test_report.py::_patch_store` therefore sweeps a named constant `_STORE_PATCH_MODULE_PATHS`
+(store, scope_actions, routers/reports, routers/genesis — genesis binds `_prior_learnings_index` and
+was missing from the old two-module sweep), and
+`test_scope_actions_service.py::test_the_store_patch_sweep_names_every_module_that_binds_a_store_name`
+fails if any module imports from the store without being listed. The rule is stated over the IMPORT
+statement rather than over a list of names patched today, because the next test to inject a failure
+picks a name nobody enumerated.
+
+*The guard.* `tests/test_scope_actions_service.py` — 12 tests, 8 of which DRIVE the state machine
+against a stub `srv` carrying two attributes (`reports_dir`, `jobs`) with no ASGI app, no engine and
+no run, seeding real on-disk ledgers through the store's own writers. They reach the states HTTP
+cannot construct on demand: a claim whose worker died between the receipt and the terminal, a
+terminal that is visible while its OS lock is still held, an abandon racing a live provider call, and
+an abandon of a UUID the server never issued. The four remaining tests are structural — re-export
+identity asserted with `is` (not name lookup), the two routes as one delegating call each (over the
+AST, so a comment carrying the call cannot satisfy it), and no route decorator in the service module.
+
+*It bites.* Nine deliberate breaks, each applied to a backup copy by a harness that asserts its
+anchor occurs exactly once, each caught by exactly the test guarding the property it broke:
+(1) orphan a claim whose OS lease is still held → the live-lease and abandon-race tests;
+(2) disclose a terminal during the lease hand-off window → the hand-off test;
+(3) let abandon overwrite a running receipt → the abandon-race test;
+(4) mint a durable tombstone for a server-unknown UUID → the no-durable-files test;
+(5) drop `scope_actions` from the patch sweep → the sweep guard;
+(6) inline one line of storage case analysis back into the route and (7) replace a delegate with
+`pass  # <the same call>` → the AST route-shape test, which is what makes (7) interesting: the
+comment-only mutation is the one a substring pin would have missed;
+(8) skip `srv.jobs.discard_orphaned_running` → the dead-worker test, which is how the `jobs`
+threading is proven to have landed rather than asserted;
+(9) rebind the router's imported name to an alias → the identity test.
+
+**Still open:** `generate_scope_report_ep` — 550 lines with five nested closures
+(`_stamp_scope_action_usage`, `_compute`, `_inputs_unchanged`, `_persist_terminal`,
+`_compute_durable`) — stays in the router, as does the ~210-line source-probe staleness cache
+(`_source_probe_key` … `_omission_is_current`), which SR-02 explicitly wants the router to keep but
+whose caching machinery is not HTTP either and captures three mutable `build_router` locals, so
+extracting it needs a class rather than a move. `generate` is the harder half: it interleaves the
+action protocol with agent invocation, the `anyio` job hand-off, `_scope_run_ids`/`_scope_sig`/
+`_scope_context_digest`, and lease RETENTION (the quarantine path), and a verbatim move cannot
+establish that its crash windows are unchanged the way a 497-line differential can here. It wants
+the SR-03 treatment — a byte-level differential harness against a pre-extraction worktree — and is
+a separate change.
 
 #### SR-03 · HIGH · under-decomposition · effort: medium — **RESOLVED (2026-08-02)**
 

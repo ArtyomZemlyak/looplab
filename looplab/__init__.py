@@ -229,6 +229,7 @@ _LAYOUT = {
     "sandbox": "runtime",
     "scorer_fidelity": "search",
     "schemas": "serve",
+    "scope_actions": "serve",   # the paid ACTION protocol above that store (doc 25 SR-02)
     "scope_report": "serve",
     "scope_report_store": "serve",   # the durable store `routers/reports.py` shed (doc 25 SR-12)
     "scope_sources": "serve",
