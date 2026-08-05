@@ -3598,6 +3598,29 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 
 *Recommendation:* Introduce one WrapsResearcher base (parity with WrapsDeveloper) owning the delegation contract (parser/prompts/client/bounds/space_hint pass-through, hint forwarding, telemetry attrs) and have all three wrappers extend it, so a forwarding rule is fixed once.
 
+*Resolution (2026-08-05) — the base is added; its membership is NOT what the recommendation lists.*
+
+`agents/roles.WrapsResearcher` now sits beside `WrapsDeveloper` and all three wrappers extend it. It
+owns exactly two members — the `_delegate` handle and `space_hint`. That is thin on purpose, and the
+rest of the recommendation is not an oversight but a rejection with evidence.
+
+`client` pass-through in a shared base would be a BUG. `cli/__init__.py:435` gates foresight wiring on
+``getattr(researcher, "client", None) is not None``, so a bare `SurrogateResearcher` must fall through
+to None — its own comment says a catch-all delegate "would surface the fallback's client and flip that
+gate". Meanwhile `PanelResearcher` MUST forward `client`, because a missing attr there silently
+shadowed the run's configured PromptStore/parser/client behind the defaults. Both wrappers are right;
+one shared rule cannot be. `parser`/`prompts` follow `client` for the same reason.
+
+`ForesightPanelResearcher`'s catch-all `__getattr__` likewise stays: it exists so the panel can wrap a
+UNIFIED agent, where the researcher IS the developer and the whole developer surface must pass through
+the SAME object. A per-attr base cannot express that and must not fight it.
+
+So the finding's real content — "each wrapper has its own history of forwarding bugs" — is true, but
+the cure is not one delegation contract. Three of the four guards added here pin the DIVERGENCES
+rather than the sharing, including one that pins the base's own surface: if `WrapsResearcher` ever
+grows `client`, the surrogate's fall-through breaks silently. Applying the recommendation literally
+(adding `client` to the base) is the teeth-test, and it fails two guards.
+
 #### SE-03 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **ASHA survivor-retirement logic duplicated between policy and card_selection, with no fidelity guard covering ASHA**
