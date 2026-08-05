@@ -123,6 +123,74 @@ class SpecRawStageResult:
     error: str = ""
 
 
+def needs_outer_rebuild(node) -> bool:
+    """A pending Node whose rerun crosses the proposal/implementation boundary the outer loop owns."""
+
+    return node.rerun_from in {"implement", "propose"}
+
+
+@dataclass(frozen=True)
+class CardSessionGates:
+    """The three FOLD-DERIVED stop conditions of one session turn, derived ONCE per snapshot.
+
+    They used to be spelled out four times per turn (doc 25 EC-02), each copy re-folding the log
+    first, and every one of the four had to keep agreeing with the others about what "the outer loop
+    owns the next decision" means.  A drift between two copies does not crash: it silently lets one
+    phase start speculative work that the phase two lines below has already decided is stale.
+    """
+
+    terminal_gate: bool
+    budget_exhausted: bool
+    outer_rebuild: bool
+
+    @property
+    def stopping(self) -> bool:
+        """True when the OUTER control/Strategist/cadence boundary owns the next decision."""
+
+        return bool(self.terminal_gate or self.budget_exhausted or self.outer_rebuild)
+
+
+@dataclass(slots=True)
+class CardSession:
+    """The mutable state of one ``_run_card_session`` turn loop, so its phases can be methods.
+
+    ``slots=True`` on purpose: every field here used to be a ``nonlocal`` of a ~500-line closure, and
+    the one mutation this decomposition could plausibly get wrong is a misspelled flag assignment
+    (``session.yeild_outer = True``) that binds a NEW attribute and leaves the real gate open
+    forever.  With slots that is an ``AttributeError`` at the first turn instead of a run that
+    quietly never yields to the outer loop.
+    """
+
+    max_eval_seconds: Optional[float]
+    wall_deadline: Optional[float]
+    task_group: Any = None
+    bg_task_group: Any = None
+    notify: Any = None
+    eval_inflight: set[tuple[int, int]] = field(default_factory=set)
+    research_spawned: bool = False
+    consumer_completed: bool = False
+    yield_outer: bool = False
+    progressed: bool = False
+
+    def budget_exhausted(self, state: RunState) -> bool:
+        return bool(
+            (self.max_eval_seconds is not None
+             and state.total_eval_seconds >= self.max_eval_seconds)
+            or (self.wall_deadline is not None and time.time() >= self.wall_deadline)
+        )
+
+    def open_for_new_work(self, gates: CardSessionGates) -> bool:
+        """The ONE exit-gate predicate: may this turn still START speculative or eval work?
+
+        The fold-derived half comes from *gates*; the two session flags are read LIVE and are not
+        bundled into the snapshot, because they are not folded state and one of them
+        (``consumer_completed``) is set from the eval child at any checkpoint.  Freezing them into
+        the gate tuple would make a turn keep admitting after the batch had already closed.
+        """
+
+        return not (gates.stopping or self.consumer_completed or self.yield_outer)
+
+
 class SpeculationMixin:
     """Execution helpers inherited by :class:`looplab.engine.orchestrator.Engine`."""
 
@@ -291,6 +359,83 @@ class SpeculationMixin:
                 and type(event.seq) is int
             ),
             default=-1,
+        )
+
+    # The per-tail fold memo behind `_fold_current`.  A CLASS-level default so every entry point —
+    # a session turn, the outer spine, a focused test calling one helper directly — shares one memo
+    # without an initialization-order dependency; the first real fold binds an instance attribute.
+    _spec_fold_memo: Optional[tuple[Any, int, int, RunState]] = None
+
+    def _fold_current(self) -> tuple[list, RunState]:
+        """Read the log and fold it, REUSING the previous fold while the tail has not moved.
+
+        This is the caching the review annotation in `_run_card_session` asked for (doc 25 EC-02).
+        Measured before it existed: ONE idle polling turn of the session rebuilt the entire RunState
+        — every Card, every concept — nine times over byte-identical input (six with no request head
+        outstanding), and did it again every 0.5s poll for the whole life of a long evaluation.
+
+        Why this does not violate engine invariant 4 ("state is only observed via
+        `fold(store.read_all())` — never cache derived state across loop iterations without
+        re-folding"): the log is STILL read on every call, and the memo is consulted only when the
+        freshly read prefix is unchanged in the only two ways an append-only log can change — its
+        length, and its last logical sequence.  That pair is the same identity
+        `EventStore.append(expected_last_seq=...)` already trusts to decide whether a caller's view
+        of the log is current, so a hit is not derived state carried across a turn; it is the pure
+        function `fold` not being recomputed on an input it has already seen.  An append by ANY
+        writer — this task, an eval worker, the research task, an operator through the UI — moves the
+        tail and forces a real fold on the very next call.  That is what makes "a phase that appends
+        re-folds before the next phase reads" mechanical here instead of a discipline each phase has
+        to remember.
+
+        The memo also keys on the `fold` callable ITSELF.  `looplab.engine.speculation.fold` is a
+        documented patch seam (tests swap it for a fabricated RunState), and a memo that outlived the
+        swap would serve the previous function's answer to the new one — the "test still runs but no
+        longer measures anything" failure CLAUDE.md warns about.
+
+        A folded `RunState` is treated as immutable by every consumer: no engine or search module
+        assigns to one of its attributes or mutates one of its containers, and this session already
+        hands ONE folded state to a background research task that outlives the turn.  Sharing the
+        object between two readers of the same tail is therefore exactly the guarantee two equal
+        copies gave.  Written only from the MAIN task (the worker-thread folds in
+        `_producer_card_reservation` / `_prepare_raw_card_stage` deliberately do not go through here).
+        """
+
+        events = self.store.read_all()
+        tail = events[-1].seq if events else -1
+        memo = self._spec_fold_memo
+        if memo is not None and memo[0] is fold and memo[1] == tail and memo[2] == len(events):
+            return events, memo[3]
+        state = fold(events)
+        self._spec_fold_memo = (fold, tail, len(events), state)
+        return events, state
+
+    def _session_state(self) -> RunState:
+        """`_fold_current` for the callers that need only the folded half."""
+
+        return self._fold_current()[1]
+
+    def _session_gates(self, state: RunState, session: CardSession) -> CardSessionGates:
+        """The one computation of a turn's three fold-derived stop conditions, from ONE snapshot."""
+
+        return CardSessionGates(
+            terminal_gate=self._terminal_intent(state),
+            budget_exhausted=session.budget_exhausted(state),
+            outer_rebuild=any(needs_outer_rebuild(node) for node in state.pending_nodes()),
+        )
+
+    def _session_admissible(self, node, state: RunState, session: CardSession) -> bool:
+        return bool(
+            node.id not in {node_id for node_id, _generation in session.eval_inflight}
+            and not self._developer_sentinel(node)
+            and node.id not in state.aborted_nodes
+            and not needs_outer_rebuild(node)
+            # A speculative node is not consumer-owned until the matching durable done-link
+            # exists. If its append raced, crash recovery keeps retrying the request head first.
+            and (
+                not node.speculative
+                or node.attempt != 0
+                or self._speculative_link_matches(state, node)
+            )
         )
 
     def _ensure_speculation_state(self) -> None:
@@ -1229,7 +1374,7 @@ class SpeculationMixin:
         """Crash-recovery-first main-task service of one durable request."""
 
         self._ensure_speculation_state()
-        state = fold(self.store.read_all())
+        state = self._session_state()
         request = self._head_request(state)
         key = self._request_key(request)
         if request is None or key is None:
@@ -1543,8 +1688,7 @@ class SpeculationMixin:
     async def _close_developer_sentinel_once(self) -> bool:
         """Recover one sentinel lifecycle without ever re-pausing an acknowledged crash."""
 
-        events = self.store.read_all()
-        state = fold(events)
+        events, state = self._fold_current()
         pending = next(
             (candidate for candidate in state.pending_nodes()
              if self._developer_sentinel(candidate)),
@@ -1610,8 +1754,7 @@ class SpeculationMixin:
 
         if not self._speculation_enabled():
             return False
-        events = self.store.read_all()
-        state = fold(events)
+        events, state = self._fold_current()
         if self._terminal_intent(state):
             return False
         self._refresh_speculation_budget(state)
@@ -1676,6 +1819,450 @@ class SpeculationMixin:
                 return True  # force a fresh fold before any scorer consult
         return False
 
+    def _start_head_producer(self, current: RunState, session: CardSession) -> bool:
+        """Start the exact durable head in the same turn that elected it.
+
+        Waiting for the next loop turn leaves a request visible but not yet executing.
+        A fast admitted eval can then cross the search-epoch boundary first and make a
+        depth-one prefetch spuriously stale. Registering the producer before the next
+        checkpoint preserves the documented live-backlog overlap without changing the
+        durable request/commit authority.
+        """
+
+        head = self._head_request(current)
+        key = self._request_key(head)
+        if (
+            head is None
+            or key is None
+            or key in self._spec_build_inflight
+            or key in self._spec_builds
+        ):
+            return False
+        # recovery may have terminalized this head's interrupted
+        # node_building after it consumed the final physical Node id. The request then
+        # has no result but capacity remains zero, so no worker can close it and this
+        # session polls forever. Close recovered unbuildable heads before this gate.
+        if self._node_reservation_slots_remaining(
+            current, consume_request=True,
+        ) < 1:
+            return False
+        roles = self._producer_role_pair()
+        if roles is None:
+            if self._append_card_build_done(
+                head, skipped="producer_failed",
+            ):
+                session.yield_outer = True
+                return True
+            return False
+        self._spec_build_inflight.add(key)
+        # Receipt BEFORE the producer can reach a provider, and after the inflight
+        # marker so a main-task service turn in between cannot mistake this process's
+        # own fresh attempt for a dead process's unreconciled one.
+        self._record_card_build_attempt(current, head)
+        try:
+            session.task_group.start_soon(
+                self._produce_card_build,
+                dict(head),
+                roles,
+                session.notify,
+            )
+        # ACCEPTED asymmetry, stated. The rollback below discards only the in-memory
+        # `_spec_build_inflight`; the DURABLE `card_build_attempted` receipt appended
+        # just above is NOT undone, so if the producer never started, the next service
+        # turn sees an unreconciled attempt (no inflight marker, no result) and closes
+        # the head `producer_failed` — barring an unbilled Card from speculative
+        # re-election. It stands because `start_soon` raises only during task-group
+        # TEARDOWN: the process is already stopping, nothing else will consume that
+        # head this run, and the degrade is conservative (a Card is skipped, never
+        # double-built). Undoing it would mean a compensating durable append on the
+        # shutdown path — more machinery, and more failure surface, than the edge it
+        # closes.
+        except BaseException:
+            self._spec_build_inflight.discard(key)
+            raise
+        return True
+
+    async def _card_eval_one(
+        self,
+        node_id: int,
+        generation: int,
+        reservation: Optional[dict],
+        session: CardSession,
+    ) -> None:
+        try:
+            await self._evaluate(node_id, anyio.CapacityLimiter(1), session.max_eval_seconds)
+        finally:
+            # CODEX AGENT: this session-wide first-completion fence prevents the Card path from
+            # refilling a freed GPU while unrelated long-running siblings finish. Preserve the outer
+            # cadence boundary without turning one terminal child into head-of-line blocking for
+            # every remaining slot; add an unequal-duration refill regression.
+            # One terminal/attempt boundary closes this admitted batch. Existing children still
+            # burn to terminal, but no later scorer/admission may bypass outer controls/cadences.
+            session.consumer_completed = True
+            if reservation is not None:
+                self._clear_eval_resource_reservation(node_id, generation)
+                self._release_gpus(reservation.get("gpu_ids"))
+            session.eval_inflight.discard((node_id, generation))
+            notify_producer(session.notify, ("eval", (node_id, generation)))
+
+    def _card_phase_serve_raw_stage(self, session: CardSession) -> None:
+        """Commit one prepared raw proposal, then elect and start its producer in the same turn."""
+
+        raw_consumed, raw_staged = self._serve_raw_card_stage()
+        if not raw_consumed:
+            return
+        session.progressed = True
+        if raw_staged and not session.consumer_completed and not session.yield_outer:
+            if self._request_card_build(consumed_inflight=session.eval_inflight):
+                # The election above APPENDED, so this snapshot re-folds: `_fold_current` serves the
+                # memo only while the observed tail is unmoved.
+                self._start_head_producer(self._session_state(), session)
+            else:
+                # A durable request, not Card reuse alone, is the success boundary.
+                # Return to the outer selector instead of repeating a paid proposal.
+                session.yield_outer = True
+        else:
+            session.yield_outer = True
+
+    async def _card_phase_drop_stale(self, session: CardSession) -> bool:
+        """Release orphaned buffers, acknowledge one aborted node, drain the stale prefix.
+
+        Returns True when the turn must RESTART — the gate drops one Node per CAS, and a later Card
+        scorer consult must never see a partially-clean selection state.
+        """
+
+        current = self._session_state()
+        self._discard_orphaned_spec_results(current)
+        aborted = next(
+            (
+                node for node in current.pending_nodes()
+                if node.id in current.aborted_nodes
+                and node.id not in {
+                    node_id for node_id, _generation in session.eval_inflight
+                }
+            ),
+            None,
+        )
+        if aborted is not None and self._skip_if_aborted(
+            {"node_id": aborted.id}, current,
+        ):
+            session.progressed = True
+
+        if (
+            # An eval terminal closes this admitted batch.  Leave its already-built next
+            # Node untouched for the outer control/Strategist/cadence boundary; freshness
+            # will re-run from that fresh outer turn.  A pre-decided serial fallback has
+            # the same boundary semantics while its admitted eval burns to terminal.
+            #
+            # The gate reads its OWN snapshot rather than the `current` above, because
+            # `_skip_if_aborted` may have appended between them.  Asking `_fold_current` again is
+            # free when nothing was appended (the tail is unmoved) and correct when something was,
+            # so there is no "remember to refresh" line here for anyone to delete later.
+            session.open_for_new_work(
+                self._session_gates(self._session_state(), session))
+            and await self._drop_stale_speculation(
+                eval_inflight=session.eval_inflight,
+            )
+        ):
+            # The gate drops one Node per CAS. Drain the whole stale prefix before any
+            # later Card scorer consult sees a partially-clean selection state.
+            await anyio.sleep(0)
+            return True
+        return False
+
+    def _card_phase_serve_head(self, session: CardSession) -> None:
+        """Service one durable request head, or start the producer that will close it."""
+
+        current = self._session_state()
+        head = self._head_request(current)
+        key = self._request_key(head)
+        if head is None or key is None:
+            return
+        # Recovery still links an already-created exact Node before consulting this
+        # flag. Once the admitted batch closes, every other head is acknowledged stale
+        # without another scorer consult/claim crossing the outer cadence boundary.
+        if self._serve_card_builds(
+            session.max_eval_seconds,
+            allow_commit=session.open_for_new_work(
+                self._session_gates(current, session)),
+        ):
+            session.progressed = True
+            if self._spec_force_outer:
+                session.yield_outer = True
+                self._spec_force_outer = False
+            return
+        # `_serve_card_builds` can return False having appended (a committed build whose
+        # `card_build_done` close then lost its CAS is the live case), so both the head AND the
+        # gates below are re-derived from a snapshot taken after it, never from the one above.
+        current = self._session_state()
+        head = self._head_request(current)
+        key = self._request_key(head)
+        if (
+            head is not None
+            and key is not None
+            and session.open_for_new_work(self._session_gates(current, session))
+            and key not in self._spec_build_inflight
+            and key not in self._spec_builds
+        ):
+            if self._start_head_producer(current, session):
+                session.progressed = True
+
+    async def _card_phase_admit_evals(self, session: CardSession) -> bool:
+        """Admit fresh, resource-fitting pending Nodes up to the live consumer width.
+
+        Returns True when the turn must RESTART because selection moved under the admission scan.
+        """
+
+        current = self._session_state()
+        if not session.open_for_new_work(self._session_gates(current, session)):
+            return False
+        selection_changed = False
+        while len(session.eval_inflight) < max(1, int(self._eval_parallel)):
+            current = self._session_state()
+            # `.stopping`, NOT `open_for_new_work`: inside an admitted batch only the FOLD-derived
+            # half may stop the fill.  Re-reading `consumer_completed` here would let the first
+            # sibling to terminate truncate the batch its own siblings are still being admitted
+            # into — a width-4 consumer that silently admits three, which is the "speculation
+            # quietly went serial" failure this subsystem has already paid for once.  The batch
+            # BOUNDARY is the outer entry gate above, which does read both flags.
+            if self._session_gates(current, session).stopping:
+                break
+            candidates = [node for node in current.pending_nodes()
+                          if self._session_admissible(node, current, session)]
+            if not candidates:
+                break
+            chosen = None
+            reservation = None
+            for candidate in candidates:
+                got = self._try_reserve_node_resources(
+                    candidate,
+                    resource_pin=self._card_resource_pin_for_node(
+                        current, candidate),
+                )
+                if got is not None:
+                    chosen, reservation = candidate, got
+                    break
+            if chosen is None:
+                break
+            admission = self._session_state()
+            live = admission.nodes.get(chosen.id)
+            if (
+                # Same asymmetry as the fill gate above: the fold-derived half only.
+                self._session_gates(admission, session).stopping
+                or live is None
+                or live.attempt != chosen.attempt
+                or live.status is not NodeStatus.pending
+                or not self._session_admissible(live, admission, session)
+            ):
+                self._release_gpus(reservation.get("gpu_ids"))
+                break
+            current = admission
+            chosen = live
+            if not self._node_resource_reservation_is_current(
+                current, chosen, reservation,
+            ):
+                # An operator may change the Card pin between the fit scan and this
+                # fresh admission fold. Never launch with a reservation formed for
+                # the old quantities; release it and rescan against current truth.
+                self._release_gpus(reservation.get("gpu_ids"))
+                session.progressed = True
+                selection_changed = True
+                break
+            # Freshness was checked above, but a resource wait/earlier admission may
+            # have moved selection. Re-check immediately before the GPU child starts.
+            if self._speculative_link_matches(current, chosen):
+                fresh = speculative_card_is_fresh(
+                    current,
+                    self.policy,
+                    self._speculative_selection_node_limit(current),
+                    card_id=chosen.idea.card_id,
+                    node_id=chosen.id,
+                    context=SpeculativeSelectionContext(
+                        scoring=getattr(self, "_card_scoring", None),
+                        excluded_card_ids=self._speculative_card_ids(current)
+                        | self._producer_failed_card_ids(current),
+                        ignored_pending_node_ids=(
+                            self._acknowledged_pending_ids(current)),
+                        resource_envelope=self._resource_envelope(),
+                        consumed_inflight=session.eval_inflight,
+                    ),
+                )
+                if not fresh:
+                    self._release_gpus(reservation.get("gpu_ids"))
+                    if await self._drop_stale_speculation(
+                        eval_inflight=session.eval_inflight,
+                    ):
+                        session.progressed = True
+                        selection_changed = True
+                    break
+            if not session.research_spawned:
+                self._spawn_research(session.bg_task_group, current)
+                session.research_spawned = True
+            self._register_eval_resource_reservation(
+                chosen.id, chosen.attempt, reservation,
+            )
+            # The DURABLE half of `eval_inflight`, written by the MAIN task at the
+            # dispatch decision itself. `eval_inflight` is in-memory, so a process
+            # that resumed after a kill starts with an empty one and cannot tell a
+            # prefetch that never ran from one whose sandbox burned GPU minutes;
+            # this row can. It belongs HERE and not in the worker because
+            # `_request_card_build` elects under a tail CAS, and a worker-written
+            # row inside that window makes every election lose it (see
+            # `_record_eval_start_boundary`).
+            self._record_eval_start_boundary(chosen)
+            session.eval_inflight.add((chosen.id, chosen.attempt))
+            try:
+                session.task_group.start_soon(
+                    self._card_eval_one, chosen.id, chosen.attempt, reservation, session,
+                )
+            except BaseException:
+                session.eval_inflight.discard((chosen.id, chosen.attempt))
+                self._clear_eval_resource_reservation(
+                    chosen.id, chosen.attempt,
+                )
+                self._release_gpus(reservation.get("gpu_ids"))
+                raise
+            session.progressed = True
+        if selection_changed:
+            await anyio.sleep(0)
+            return True
+        return False
+
+    async def _card_phase_request_build(self, session: CardSession) -> bool:
+        """Own the counterfactual next action: elect a durable Card, or propose a raw one.
+
+        Returns True when the turn must RESTART because the freshness drain moved selection.
+        """
+
+        current = self._session_state()
+        consumer_active = bool(
+            session.eval_inflight
+            or any(self._session_admissible(node, current, session)
+                   for node in current.pending_nodes())
+        )
+        if not (
+            consumer_active
+            and session.open_for_new_work(self._session_gates(current, session))
+            and self._head_request(current) is None
+            and not self._spec_build_inflight
+            and not self._spec_raw_stage_inflight
+            and self._spec_raw_stage_result is None
+            and self._speculation_depth_used(
+                current,
+                consumed_inflight=session.eval_inflight,
+            ) < self.speculation_depth
+        ):
+            return False
+        # `_request_card_build` consults the Card scorer. Drain any newly-stale
+        # speculative prefix immediately before that consult, not just per session turn.
+        if await self._drop_stale_speculation(
+            eval_inflight=session.eval_inflight,
+        ):
+            await anyio.sleep(0)
+            return True
+        requested = self._request_card_build(
+            consumed_inflight=session.eval_inflight,
+        )
+        if not requested:
+            # No durable Card owns the counterfactual next action. Propose and stage
+            # that raw lane in the main task while GPU children continue in worker
+            # threads; then request the exact receipt from a fresh fold. Card staging
+            # owns its own tail/generation/parent CAS and may safely decline a stale
+            # proposal if an eval changes the search state during the paid call.
+            # Selection and proposal share one immutable log snapshot.  A second
+            # read here would let an old raw action inherit a newer best/parent/cue
+            # fence and make the main-task commit validate the wrong authority.
+            # Deliberately NOT `_fold_current`: this pair is the proposal's OWN authority snapshot,
+            # handed whole to a worker that outlives the turn, and its explicit read/fold pairing is
+            # what `test_raw_action_selection_and_worker_share_one_proposal_snapshot` reads.
+            proposal_events = self.store.read_all()
+            proposal_state = fold(proposal_events)
+            if (
+                self._head_request(proposal_state) is None
+                and self._speculation_depth_used(
+                    proposal_state,
+                    consumed_inflight=session.eval_inflight,
+                ) < self.speculation_depth
+            ):
+                raw_actions = speculative_raw_actions(
+                    proposal_state,
+                    self.policy,
+                    self._speculative_selection_node_limit(proposal_state),
+                    context=SpeculativeSelectionContext(
+                        scoring=getattr(self, "_card_scoring", None),
+                        excluded_card_ids=self._speculative_card_ids(
+                        proposal_state),
+                        ignored_pending_node_ids=self._acknowledged_pending_ids(
+                        proposal_state),
+                        resource_envelope=self._resource_envelope(),
+                    ),
+                )
+                roles = self._producer_role_pair()
+                if raw_actions and roles is not None:
+                    proposal_node_ceiling = self._node_id_ceiling(
+                        proposal_events, proposal_state,
+                    )
+                    # Rolled back on a failed spawn, exactly like
+                    # `_start_head_producer` does with its inflight key. If
+                    # `start_soon` raises (the task group is already closing) the
+                    # `finally` in `_produce_raw_card_stage` never runs, and
+                    # `_ensure_speculation_state` only initializes MISSING attrs —
+                    # so this flag would stay True forever, every session-exit gate
+                    # below would keep counting it in `memory_pending`, and the
+                    # NEXT `_run_card_session` could never reach a break condition.
+                    self._spec_raw_stage_inflight = True
+                    try:
+                        session.task_group.start_soon(
+                            self._produce_raw_card_stage,
+                            dict(raw_actions[0]),
+                            proposal_events,
+                            proposal_state,
+                            proposal_node_ceiling,
+                            self._proposal_cue_fence(proposal_state),
+                            roles,
+                            session.notify,
+                        )
+                    except BaseException:
+                        self._spec_raw_stage_inflight = False
+                        raise
+                    session.progressed = True
+                else:
+                    # Unsupported raw interception (or no isolated pair) must
+                    # degrade at the outer serial boundary, never poll/re-propose.
+                    session.yield_outer = True
+        if requested:
+            # The election APPENDED, so this re-folds (see `_fold_current`).
+            self._start_head_producer(self._session_state(), session)
+            session.progressed = True
+        return False
+
+    def _card_phase_decide_exit(self, session: CardSession) -> bool:
+        """The ONE session-exit decision.  True means break out of the turn loop."""
+
+        current = self._session_state()
+        self._discard_orphaned_spec_results(current)
+        gates = self._session_gates(current, session)
+        pending_ready = any(
+            self._session_admissible(node, current, session)
+            for node in current.pending_nodes()
+        )
+        outstanding = bool(self._outstanding_requests(current))
+        building = bool(current.buildings)
+        memory_pending = bool(
+            self._spec_build_inflight
+            or self._spec_builds
+            or self._spec_raw_stage_inflight
+            or self._spec_raw_stage_result is not None
+        )
+        inflight = bool(any((
+            session.eval_inflight, outstanding, building, memory_pending)))
+        if session.open_for_new_work(gates):
+            # Still open for work, so a ready pending Node also keeps the session alive.
+            return not (inflight or pending_ready)
+        # Closing — for any of the five reasons `open_for_new_work` folds into one predicate — so
+        # only work already in flight can hold the session open.
+        return not inflight
+
     async def _run_card_session(
         self,
         evals: list,
@@ -1683,501 +2270,55 @@ class SpeculationMixin:
         max_es: Optional[float],
         wall_deadline: Optional[float] = None,
     ) -> None:
-        """Continuously overlap the folded-log consumer with one isolated Card producer."""
+        """Continuously overlap the folded-log consumer with one isolated Card producer.
+
+        The turn loop is six named phases over ONE folded snapshot per phase (doc 25 EC-02).  Each
+        phase re-derives its own snapshot through `_fold_current`, which serves the previous fold
+        only while the observed log tail is unmoved — so a phase that appends is re-folded for the
+        next phase BY CONSTRUCTION rather than by remembering to, and the session folds once per
+        OBSERVED TAIL instead of six-to-nine times per turn.
+        """
 
         if not self._speculation_enabled():
             await self._dispatch_evals(evals, state, max_es)
             return
         self._ensure_speculation_state()
-        eval_inflight: set[tuple[int, int]] = set()
-        research_spawned = bool(evals)
-        consumer_completed = False
-        yield_outer = False
         send, receive = anyio.create_memory_object_stream(256)
-
-        def _budget_exhausted(current: RunState) -> bool:
-            return bool(
-                (max_es is not None and current.total_eval_seconds >= max_es)
-                or (wall_deadline is not None and time.time() >= wall_deadline)
-            )
-
-        def _needs_outer_rebuild(node) -> bool:
-            return node.rerun_from in {"implement", "propose"}
-
-        def _admissible(node, current: RunState) -> bool:
-            return bool(
-                node.id not in {node_id for node_id, _generation in eval_inflight}
-                and not self._developer_sentinel(node)
-                and node.id not in current.aborted_nodes
-                and not _needs_outer_rebuild(node)
-                # A speculative node is not consumer-owned until the matching durable done-link
-                # exists. If its append raced, crash recovery keeps retrying the request head first.
-                and (
-                    not node.speculative
-                    or node.attempt != 0
-                    or self._speculative_link_matches(current, node)
-                )
-            )
-
-        async def _eval_one(node_id: int, generation: int, reservation: Optional[dict]) -> None:
-            nonlocal consumer_completed
-            try:
-                await self._evaluate(node_id, anyio.CapacityLimiter(1), max_es)
-            finally:
-                # CODEX AGENT: this session-wide first-completion fence prevents the Card path from
-                # refilling a freed GPU while unrelated long-running siblings finish. Preserve the outer
-                # cadence boundary without turning one terminal child into head-of-line blocking for
-                # every remaining slot; add an unequal-duration refill regression.
-                # One terminal/attempt boundary closes this admitted batch. Existing children still
-                # burn to terminal, but no later scorer/admission may bypass outer controls/cadences.
-                consumer_completed = True
-                if reservation is not None:
-                    self._clear_eval_resource_reservation(node_id, generation)
-                    self._release_gpus(reservation.get("gpu_ids"))
-                eval_inflight.discard((node_id, generation))
-                notify_producer(send, ("eval", (node_id, generation)))
+        session = CardSession(
+            max_eval_seconds=max_es,
+            wall_deadline=wall_deadline,
+            notify=send,
+            research_spawned=bool(evals),
+        )
 
         async with anyio.create_task_group() as bg_tg:
+            session.bg_task_group = bg_tg
             if evals:
                 self._spawn_research(bg_tg, state)
             try:
                 async with send, receive, anyio.create_task_group() as task_group:
-                    def _start_head_producer(current: RunState) -> bool:
-                        """Start the exact durable head in the same turn that elected it.
-
-                        Waiting for the next loop turn leaves a request visible but not yet executing.
-                        A fast admitted eval can then cross the search-epoch boundary first and make a
-                        depth-one prefetch spuriously stale. Registering the producer before the next
-                        checkpoint preserves the documented live-backlog overlap without changing the
-                        durable request/commit authority.
-                        """
-
-                        nonlocal yield_outer
-                        head = self._head_request(current)
-                        key = self._request_key(head)
-                        if (
-                            head is None
-                            or key is None
-                            or key in self._spec_build_inflight
-                            or key in self._spec_builds
-                        ):
-                            return False
-                        # recovery may have terminalized this head's interrupted
-                        # node_building after it consumed the final physical Node id. The request then
-                        # has no result but capacity remains zero, so no worker can close it and this
-                        # session polls forever. Close recovered unbuildable heads before this gate.
-                        if self._node_reservation_slots_remaining(
-                            current, consume_request=True,
-                        ) < 1:
-                            return False
-                        roles = self._producer_role_pair()
-                        if roles is None:
-                            if self._append_card_build_done(
-                                head, skipped="producer_failed",
-                            ):
-                                yield_outer = True
-                                return True
-                            return False
-                        self._spec_build_inflight.add(key)
-                        # Receipt BEFORE the producer can reach a provider, and after the inflight
-                        # marker so a main-task service turn in between cannot mistake this process's
-                        # own fresh attempt for a dead process's unreconciled one.
-                        self._record_card_build_attempt(current, head)
-                        try:
-                            task_group.start_soon(
-                                self._produce_card_build,
-                                dict(head),
-                                roles,
-                                send,
-                            )
-                        # ACCEPTED asymmetry, stated. The rollback below discards only the in-memory
-                        # `_spec_build_inflight`; the DURABLE `card_build_attempted` receipt appended
-                        # just above is NOT undone, so if the producer never started, the next service
-                        # turn sees an unreconciled attempt (no inflight marker, no result) and closes
-                        # the head `producer_failed` — barring an unbilled Card from speculative
-                        # re-election. It stands because `start_soon` raises only during task-group
-                        # TEARDOWN: the process is already stopping, nothing else will consume that
-                        # head this run, and the degrade is conservative (a Card is skipped, never
-                        # double-built). Undoing it would mean a compensating durable append on the
-                        # shutdown path — more machinery, and more failure surface, than the edge it
-                        # closes.
-                        except BaseException:
-                            self._spec_build_inflight.discard(key)
-                            raise
-                        return True
-
+                    session.task_group = task_group
                     while True:
-                        progressed = False
+                        session.progressed = False
                         if await self._close_developer_sentinel_once():
-                            progressed = True
-                        raw_consumed, raw_staged = self._serve_raw_card_stage()
-                        if raw_consumed:
-                            progressed = True
-                            if raw_staged and not consumer_completed and not yield_outer:
-                                if self._request_card_build(
-                                    consumed_inflight=eval_inflight,
-                                ):
-                                    _start_head_producer(fold(self.store.read_all()))
-                                else:
-                                    # A durable request, not Card reuse alone, is the success boundary.
-                                    # Return to the outer selector instead of repeating a paid proposal.
-                                    yield_outer = True
-                            else:
-                                yield_outer = True
-                        # CODEX AGENT: one idle polling turn performs this full replay plus several more
-                        # below, then repeats even when the log tail is unchanged. read_all caches bytes,
-                        # but fold still rebuilds all Cards/concepts. Cache one snapshot per observed tail
-                        # and invalidate it only after a write/wakeup, or extend a FoldCursor by suffix.
-                        current = fold(self.store.read_all())
-                        self._discard_orphaned_spec_results(current)
-                        aborted = next(
-                            (
-                                node for node in current.pending_nodes()
-                                if node.id in current.aborted_nodes
-                                and node.id not in {
-                                    node_id for node_id, _generation in eval_inflight
-                                }
-                            ),
-                            None,
-                        )
-                        if aborted is not None and self._skip_if_aborted(
-                            {"node_id": aborted.id}, current,
-                        ):
-                            progressed = True
-                            current = fold(self.store.read_all())
-
-                        outer_rebuild = any(
-                            _needs_outer_rebuild(node) for node in current.pending_nodes()
-                        )
-                        terminal_gate = self._terminal_intent(current)
-                        budget_exhausted = _budget_exhausted(current)
-                        if (
-                            not terminal_gate
-                            and not budget_exhausted
-                            and not outer_rebuild
-                            # An eval terminal closes this admitted batch.  Leave its already-built next
-                            # Node untouched for the outer control/Strategist/cadence boundary; freshness
-                            # will re-run from that fresh outer turn.  A pre-decided serial fallback has
-                            # the same boundary semantics while its admitted eval burns to terminal.
-                            and not consumer_completed
-                            and not yield_outer
-                            and await self._drop_stale_speculation(
-                                eval_inflight=eval_inflight,
-                            )
-                        ):
-                            # The gate drops one Node per CAS. Drain the whole stale prefix before any
-                            # later Card scorer consult sees a partially-clean selection state.
-                            await anyio.sleep(0)
+                            session.progressed = True
+                        self._card_phase_serve_raw_stage(session)
+                        if await self._card_phase_drop_stale(session):
                             continue
-
-                        current = fold(self.store.read_all())
-                        head = self._head_request(current)
-                        key = self._request_key(head)
-                        if head is not None and key is not None:
-                            # Recovery still links an already-created exact Node before consulting this
-                            # flag. Once the admitted batch closes, every other head is acknowledged stale
-                            # without another scorer consult/claim crossing the outer cadence boundary.
-                            if self._serve_card_builds(
-                                max_es,
-                                allow_commit=not (
-                                    terminal_gate
-                                    or budget_exhausted
-                                    or outer_rebuild
-                                    or consumer_completed
-                                    or yield_outer
-                                ),
-                            ):
-                                progressed = True
-                                if self._spec_force_outer:
-                                    yield_outer = True
-                                    self._spec_force_outer = False
-                            else:
-                                current = fold(self.store.read_all())
-                                head = self._head_request(current)
-                                key = self._request_key(head)
-                                if (
-                                    head is not None
-                                    and key is not None
-                                    and not terminal_gate
-                                    and not budget_exhausted
-                                    and not outer_rebuild
-                                    and not consumer_completed
-                                    and not yield_outer
-                                    and key not in self._spec_build_inflight
-                                    and key not in self._spec_builds
-                                ):
-                                    if _start_head_producer(current):
-                                        progressed = True
-
-                        current = fold(self.store.read_all())
-                        outer_rebuild = any(
-                            _needs_outer_rebuild(node) for node in current.pending_nodes()
-                        )
-                        terminal_gate = self._terminal_intent(current)
-                        budget_exhausted = _budget_exhausted(current)
-                        if (
-                            not terminal_gate
-                            and not budget_exhausted
-                            and not outer_rebuild
-                            and not consumer_completed
-                            and not yield_outer
-                        ):
-                            selection_changed = False
-                            while len(eval_inflight) < max(1, int(self._eval_parallel)):
-                                current = fold(self.store.read_all())
-                                if self._terminal_intent(current) or _budget_exhausted(current):
-                                    budget_exhausted = True
-                                    break
-                                if any(
-                                    _needs_outer_rebuild(node) for node in current.pending_nodes()
-                                ):
-                                    outer_rebuild = True
-                                    break
-                                candidates = [node for node in current.pending_nodes()
-                                              if _admissible(node, current)]
-                                if not candidates:
-                                    break
-                                chosen = None
-                                reservation = None
-                                for candidate in candidates:
-                                    got = self._try_reserve_node_resources(
-                                        candidate,
-                                        resource_pin=self._card_resource_pin_for_node(
-                                            current, candidate),
-                                    )
-                                    if got is not None:
-                                        chosen, reservation = candidate, got
-                                        break
-                                if chosen is None:
-                                    break
-                                admission = fold(self.store.read_all())
-                                live = admission.nodes.get(chosen.id)
-                                if (
-                                    self._terminal_intent(admission)
-                                    or _budget_exhausted(admission)
-                                    or any(
-                                        _needs_outer_rebuild(node)
-                                        for node in admission.pending_nodes()
-                                    )
-                                    or live is None
-                                    or live.attempt != chosen.attempt
-                                    or live.status is not NodeStatus.pending
-                                    or not _admissible(live, admission)
-                                ):
-                                    self._release_gpus(reservation.get("gpu_ids"))
-                                    break
-                                current = admission
-                                chosen = live
-                                if not self._node_resource_reservation_is_current(
-                                    current, chosen, reservation,
-                                ):
-                                    # An operator may change the Card pin between the fit scan and this
-                                    # fresh admission fold. Never launch with a reservation formed for
-                                    # the old quantities; release it and rescan against current truth.
-                                    self._release_gpus(reservation.get("gpu_ids"))
-                                    progressed = True
-                                    selection_changed = True
-                                    break
-                                # Freshness was checked above, but a resource wait/earlier admission may
-                                # have moved selection. Re-check immediately before the GPU child starts.
-                                if self._speculative_link_matches(current, chosen):
-                                    fresh = speculative_card_is_fresh(
-                                        current,
-                                        self.policy,
-                                        self._speculative_selection_node_limit(current),
-                                        card_id=chosen.idea.card_id,
-                                        node_id=chosen.id,
-                                        context=SpeculativeSelectionContext(
-                                            scoring=getattr(self, "_card_scoring", None),
-                                            excluded_card_ids=self._speculative_card_ids(current)
-                                            | self._producer_failed_card_ids(current),
-                                            ignored_pending_node_ids=(
-                                                self._acknowledged_pending_ids(current)),
-                                            resource_envelope=self._resource_envelope(),
-                                            consumed_inflight=eval_inflight,
-                                        ),
-                                    )
-                                    if not fresh:
-                                        self._release_gpus(reservation.get("gpu_ids"))
-                                        if await self._drop_stale_speculation(
-                                            eval_inflight=eval_inflight,
-                                        ):
-                                            progressed = True
-                                            selection_changed = True
-                                        break
-                                if not research_spawned:
-                                    self._spawn_research(bg_tg, current)
-                                    research_spawned = True
-                                self._register_eval_resource_reservation(
-                                    chosen.id, chosen.attempt, reservation,
-                                )
-                                # The DURABLE half of `eval_inflight`, written by the MAIN task at the
-                                # dispatch decision itself. `eval_inflight` is in-memory, so a process
-                                # that resumed after a kill starts with an empty one and cannot tell a
-                                # prefetch that never ran from one whose sandbox burned GPU minutes;
-                                # this row can. It belongs HERE and not in the worker because
-                                # `_request_card_build` elects under a tail CAS, and a worker-written
-                                # row inside that window makes every election lose it (see
-                                # `_record_eval_start_boundary`).
-                                self._record_eval_start_boundary(chosen)
-                                eval_inflight.add((chosen.id, chosen.attempt))
-                                try:
-                                    task_group.start_soon(
-                                        _eval_one, chosen.id, chosen.attempt, reservation,
-                                    )
-                                except BaseException:
-                                    eval_inflight.discard((chosen.id, chosen.attempt))
-                                    self._clear_eval_resource_reservation(
-                                        chosen.id, chosen.attempt,
-                                    )
-                                    self._release_gpus(reservation.get("gpu_ids"))
-                                    raise
-                                progressed = True
-                            if selection_changed:
-                                await anyio.sleep(0)
-                                continue
-
-                        current = fold(self.store.read_all())
-                        outer_rebuild = any(
-                            _needs_outer_rebuild(node) for node in current.pending_nodes()
-                        )
-                        terminal_gate = self._terminal_intent(current)
-                        budget_exhausted = _budget_exhausted(current)
-                        consumer_active = bool(
-                            eval_inflight
-                            or any(_admissible(node, current) for node in current.pending_nodes())
-                        )
-                        if (
-                            consumer_active
-                            and not terminal_gate
-                            and not budget_exhausted
-                            and not outer_rebuild
-                            and not consumer_completed
-                            and not yield_outer
-                            and self._head_request(current) is None
-                            and not self._spec_build_inflight
-                            and not self._spec_raw_stage_inflight
-                            and self._spec_raw_stage_result is None
-                            and self._speculation_depth_used(
-                                current,
-                                consumed_inflight=eval_inflight,
-                            ) < self.speculation_depth
-                        ):
-                            # `_request_card_build` consults the Card scorer. Drain any newly-stale
-                            # speculative prefix immediately before that consult, not just per session turn.
-                            if await self._drop_stale_speculation(
-                                eval_inflight=eval_inflight,
-                            ):
-                                await anyio.sleep(0)
-                                continue
-                            requested = self._request_card_build(
-                                consumed_inflight=eval_inflight,
-                            )
-                            if not requested:
-                                # No durable Card owns the counterfactual next action. Propose and stage
-                                # that raw lane in the main task while GPU children continue in worker
-                                # threads; then request the exact receipt from a fresh fold. Card staging
-                                # owns its own tail/generation/parent CAS and may safely decline a stale
-                                # proposal if an eval changes the search state during the paid call.
-                                # Selection and proposal share one immutable log snapshot.  A second
-                                # read here would let an old raw action inherit a newer best/parent/cue
-                                # fence and make the main-task commit validate the wrong authority.
-                                proposal_events = self.store.read_all()
-                                proposal_state = fold(proposal_events)
-                                if (
-                                    self._head_request(proposal_state) is None
-                                    and self._speculation_depth_used(
-                                        proposal_state,
-                                        consumed_inflight=eval_inflight,
-                                    ) < self.speculation_depth
-                                ):
-                                    raw_actions = speculative_raw_actions(
-                                        proposal_state,
-                                        self.policy,
-                                        self._speculative_selection_node_limit(proposal_state),
-                                        context=SpeculativeSelectionContext(
-                                            scoring=getattr(self, "_card_scoring", None),
-                                            excluded_card_ids=self._speculative_card_ids(
-                                            proposal_state),
-                                            ignored_pending_node_ids=self._acknowledged_pending_ids(
-                                            proposal_state),
-                                            resource_envelope=self._resource_envelope(),
-                                        ),
-                                    )
-                                    roles = self._producer_role_pair()
-                                    if raw_actions and roles is not None:
-                                        proposal_node_ceiling = self._node_id_ceiling(
-                                            proposal_events, proposal_state,
-                                        )
-                                        # Rolled back on a failed spawn, exactly like
-                                        # `_start_head_producer` does with its inflight key. If
-                                        # `start_soon` raises (the task group is already closing) the
-                                        # `finally` in `_produce_raw_card_stage` never runs, and
-                                        # `_ensure_speculation_state` only initializes MISSING attrs —
-                                        # so this flag would stay True forever, every session-exit gate
-                                        # below would keep counting it in `memory_pending`, and the
-                                        # NEXT `_run_card_session` could never reach a break condition.
-                                        self._spec_raw_stage_inflight = True
-                                        try:
-                                            task_group.start_soon(
-                                                self._produce_raw_card_stage,
-                                                dict(raw_actions[0]),
-                                                proposal_events,
-                                                proposal_state,
-                                                proposal_node_ceiling,
-                                                self._proposal_cue_fence(proposal_state),
-                                                roles,
-                                                send,
-                                            )
-                                        except BaseException:
-                                            self._spec_raw_stage_inflight = False
-                                            raise
-                                        progressed = True
-                                    else:
-                                        # Unsupported raw interception (or no isolated pair) must
-                                        # degrade at the outer serial boundary, never poll/re-propose.
-                                        yield_outer = True
-                            if requested:
-                                _start_head_producer(fold(self.store.read_all()))
-                                progressed = True
-
-                        current = fold(self.store.read_all())
-                        self._discard_orphaned_spec_results(current)
-                        outer_rebuild = any(
-                            _needs_outer_rebuild(node) for node in current.pending_nodes()
-                        )
-                        terminal_gate = self._terminal_intent(current)
-                        budget_exhausted = _budget_exhausted(current)
-                        pending_ready = any(
-                            _admissible(node, current) for node in current.pending_nodes()
-                        )
-                        outstanding = bool(self._outstanding_requests(current))
-                        building = bool(current.buildings)
-                        memory_pending = bool(
-                            self._spec_build_inflight
-                            or self._spec_builds
-                            or self._spec_raw_stage_inflight
-                            or self._spec_raw_stage_result is not None
-                        )
-                        if terminal_gate or budget_exhausted:
-                            if not any((eval_inflight, outstanding, building, memory_pending)):
-                                break
-                        elif outer_rebuild:
-                            if not any((eval_inflight, outstanding, building, memory_pending)):
-                                break
-                        elif consumer_completed or yield_outer:
-                            if not any((eval_inflight, outstanding, building, memory_pending)):
-                                break
-                        elif not any((
-                            eval_inflight, pending_ready, outstanding, building, memory_pending,
-                        )):
+                        self._card_phase_serve_head(session)
+                        if await self._card_phase_admit_evals(session):
+                            continue
+                        if await self._card_phase_request_build(session):
+                            continue
+                        if self._card_phase_decide_exit(session):
                             break
 
-                        if progressed:
+                        if session.progressed:
                             await anyio.sleep(0)
                             continue
-                        # Notifications are only wake-ups.  The next turn always re-folds the log and
-                        # derives truth again; a finite poll also observes operator events, which do not
+                        # Notifications are only wake-ups.  The next turn always re-READS the log and
+                        # derives truth again — re-folding it whenever the tail moved, see
+                        # `_fold_current`; a finite poll also observes operator events, which do not
                         # write into this process-local wake-up stream.
                         with anyio.move_on_after(0.5):
                             await receive.receive()

@@ -970,7 +970,7 @@ Neither is visible in rendered output, which is exactly why centralizing them ne
 rather than inherited ones. `tests/test_cross_run_context.py` — 14 tests; all seven breaks (the five
 above plus receipt key-order and a digest leaking into the unavailable receipt) now fail loudly.
 
-#### EC-02 · HIGH · under-decomposition · effort: large
+#### EC-02 · HIGH · under-decomposition · effort: large — **RESOLVED (2026-08-05)**
 
 **_run_card_session is a ~500-line async god-function with acknowledged perf debt**
 
@@ -979,6 +979,225 @@ above plus receipt key-order and a digest leaking into the unavailable receipt) 
 *Evidence:* _run_card_session spans speculation.py:1467-1968: a while-True loop with two nested closures (_start_head_producer, _eval_one), and the triple gate recomputation `outer_rebuild/terminal_gate/budget_exhausted = ...` copy-pasted four times per iteration (lines 1640-1644, 1703-1708, 1824-1829, 1926-1932). One idle turn performs ~8 full `fold(self.store.read_all())` rebuilds; the code itself carries embedded review comments admitting this ('CODEX AGENT: one idle polling turn performs this full replay plus several more below... Cache one snapshot per observed tail', line 1618-1621) and a head-of-line-blocking fence issue (line 1516-1520). The whole file is 1968 lines for one feature.
 
 *Recommendation:* Decompose the loop body into named phase methods (recover_sentinels, serve_raw_stage, drop_stale, serve_head, admit_evals, decide_exit) that each take and return one folded snapshot, so the state is folded once per turn and the exit-gate predicate exists in exactly one place. The two admitted-vs-terminal gate tuples should be one small dataclass computed once per fold. Then address the acknowledged fold-caching TODO.
+
+*Resolution (2026-08-05) — decomposed as recommended, with the snapshot PLUMBING rejected in favour
+of a tail-keyed fold, which is what turns "re-fold after an append" from a discipline into a
+mechanism.*
+
+**Recount first, because four of the finding's numbers do not survive one.** Every cited line is
+stale by ~210 lines (`_run_card_session` spanned 1679-2186 of a 2186-line file at `568ea78b`, not
+1467-1968 of 1968), which is cosmetic. Three are not:
+
+* *"two nested closures"* — there were **five**: `_budget_exhausted`, `_needs_outer_rebuild`,
+  `_admissible`, `_eval_one`, `_start_head_producer`. The three the finding missed are the ones that
+  mattered, because they are the gate vocabulary itself.
+* *"copy-pasted four times per iteration"* — the four full `outer_rebuild/terminal_gate/
+  budget_exhausted` tuples are real (1849, 1913, 2041, 2146), but they were the smaller half. The
+  five-term OPEN-GATE conjunction built from them (`not terminal and not budget and not outer and
+  not consumer_completed and not yield_outer`) was spelled **five** more times (1854, 1882, 1898,
+  1918, 2050), the session-exit ladder spelled a sixth variant of it as a four-branch `if/elif`
+  chain (2162-2174), and the admission loop re-derived **two** of the three conditions inline a
+  seventh and eighth time (1928, 1931). Twelve places had to agree on one rule.
+* *"~8 full fold rebuilds per idle turn"* — right order of magnitude, wrong for every actual turn
+  shape. Instrumented (`fold` counted per turn, turns delimited at `_close_developer_sentinel_once`):
+  a quiescing poll costs **6**, an open-gate poll with no request head **7**, an open-gate poll with
+  a durable head and a live producer **9**. All nine fold *byte-identical* input.
+
+Two defects the finding did not name turned up in the recount. The admission loop's
+`budget_exhausted = True` / `outer_rebuild = True` assignments before its `break`s were **dead
+stores** — every path out of that loop either `continue`s the turn or falls into the fresh triple
+seven lines below, so no reader ever observed them (pyflakes cannot see this: the names are
+reassigned later). And `_serve_card_builds` can return False **having appended** — a committed build
+whose `card_build_done` close then loses its CAS is the live case — after which the old code went on
+to guard `_start_head_producer` with the gate tuple computed *before* it. That is a stale read of
+exactly the kind the finding's own recommendation is aimed at, in the one phase it did not suspect.
+
+**What shipped.** `looplab/engine/speculation.py`:
+
+* `CardSessionGates` (frozen) is the three fold-derived stop conditions, built in exactly one place
+  (`_session_gates`), and `CardSession` (`slots=True`) is the turn loop's mutable state — every field
+  a former `nonlocal`. `CardSession.open_for_new_work(gates)` is **the** exit-gate predicate: all
+  twelve sites above now ask it, including the exit ladder, which collapses to "still open ⇒ a ready
+  pending Node also holds the session; closing ⇒ only in-flight work does" without changing a truth
+  value. `slots=True` is load-bearing, not tidiness: the one mutation this refactor could plausibly
+  get wrong is `session.yeild_outer = True`, which as a `nonlocal` rewrite would bind a new attribute
+  and leave the real gate open for the rest of the run.
+* **Two of the twelve sites deliberately do NOT use the full predicate**, and finding that out is the
+  part of this worth reading. Applying the recommendation literally — one predicate everywhere —
+  makes the admitted-batch fill loop and its pre-GPU re-check read `consumer_completed` too, and the
+  first draft did. That is wrong in the dangerous direction: the flag is set by the eval CHILD at any
+  checkpoint, so the first sibling to terminate would truncate the batch its own siblings are still
+  being admitted into — a width-4 consumer silently admitting three, i.e. the same "speculation
+  quietly went serial" shape this subsystem has already paid for. Those two sites consult
+  `gates.stopping`, the FOLD-derived half only; the batch BOUNDARY stays where it was, at the phase's
+  outer entry gate, which does read both flags. The asymmetry is pinned rather than commented.
+* Six phase methods — `_card_phase_serve_raw_stage`, `_card_phase_drop_stale`,
+  `_card_phase_serve_head`, `_card_phase_admit_evals`, `_card_phase_request_build`,
+  `_card_phase_decide_exit` — plus `_start_head_producer` and `_card_eval_one` hoisted out of the
+  closure. The turn body is now twelve lines of phase dispatch.
+* `_fold_current()` reads the log on every call and reuses the previous fold only while the observed
+  tail — `(len(events), events[-1].seq)` — has not moved. It also keys on the `fold` callable itself,
+  because `looplab.engine.speculation.fold` is a documented patch seam and a memo outliving a swap
+  would answer the new function's caller with the old one's state.
+
+**The snapshot-threading half of the recommendation was rejected.** "Phase methods that each take
+and return one folded snapshot" makes freshness a *discipline*: a phase that appends has to remember
+to hand the next one a new snapshot, and the two defects above are precisely that discipline failing
+inside a single function. With a tail-keyed `_fold_current` each phase simply asks for the current
+state and **cannot** be served a pre-append fold — the append moved the tail. That is the property
+CLAUDE.md's invariant 4 is protecting, made mechanical instead of reviewed. The invariant is not
+weakened: the log is still read every time, and a memo hit is the pure function `fold` not being
+recomputed on an input it has already seen — the same `(length, last seq)` identity
+`EventStore.append(expected_last_seq=…)` already trusts to decide whether a caller's view is
+current.
+
+Three fold sites deliberately stay un-memoized. The raw-proposal lane keeps its explicit
+`proposal_events = self.store.read_all()` / `proposal_state = fold(proposal_events)` pair: that is
+the proposal's OWN authority snapshot, handed whole to a worker that outlives the turn, and its
+pairing is a guarded property. `_producer_card_reservation` and `_prepare_raw_card_stage` run in
+worker THREADS, and the memo is main-task-only by construction. `_request_card_build` /
+`_claim_requested_card_build` / `_append_card_build_done` run once per election rather than once per
+poll, and each is immediately followed by a tail CAS that is the real freshness authority. A
+one-line `recover_sentinels` wrapper was also declined — `_close_developer_sentinel_once` already is
+that phase and already has that name; wrapping it adds a name, not a boundary.
+
+**Folds per idle turn: 6 / 7 / 9 (by turn shape) → 0.** A poll whose tail has not moved now folds
+zero times; the first turn that observes a new tail folds once. Measured on the same instrumented
+session that produced the "before" numbers.
+
+**The election and discard counts are preserved, and the proof needed three arms, not two.** Eight
+full deterministic runs each (`make_engine`, toy adapter, `max_nodes=12`, `speculation_depth=1`,
+real `role_factory` producer pair — the harness behind
+`test_the_refund_is_reachable_end_to_end_on_the_deterministic_backend`), reporting
+`speculation_budget_observation` plus the raw `card_build_requested`/`card_build_done` rows:
+
+| arm | requested | committed | closed `stale` | refunded | folds |
+|---|---|---|---|---|---|
+| A — pristine `568ea78b` | 16.50 | 13.12 | 3.38 | 1.12 | 929.12 |
+| B — decomposition, memo disabled | 16.75 | 12.75 | 4.00 | 0.75 | 928.38 |
+| C — decomposition + memo (shipped) | 15.12 | 14.88 | 0.25 | 2.88 | 225.38 |
+
+A vs B is the load-bearing comparison and it is what makes the C column readable: with the memo
+switched off, the decomposition lands inside the baseline's own run-to-run spread on every count,
+so **the restructuring is behaviour-neutral**. C's shift is therefore attributable to the memo alone,
+and its direction is the OPPOSITE of the regression CLAUDE.md records for this subsystem (a
+worker-written boundary row that took depth-1 speculation from 17 builds / 5 discards to 12 / 0 —
+*less* overlap): a main task that is ~4x cheaper per turn services its request head before the search
+epoch rotates under it, so prefetches that used to be given up `stale` now commit and are honestly
+superseded-and-refunded instead. In all 24 runs `evaluated == 12`, `charged_discards == 0`,
+`abandoned == 0`, `producer_failed == 0` — the budget-neutrality claim speculation rests on is
+untouched.
+
+**Comments.** The `CODEX AGENT:` head-of-line-blocking fence annotation moved verbatim into
+`_card_eval_one`; it describes an open question about refill fairness that this change does not
+answer. The `CODEX AGENT:` fold-caching annotation was the thing being FIXED, so per the "if you fix
+what an annotation describes, replace it with a note recording what was done" rule it is now
+`_fold_current`'s docstring, which states the measurement, the invariant-4 argument, and the three
+sites left out. One nearby comment was amended rather than moved: the poll comment claiming "the
+next turn always re-folds the log" is now "always re-READS the log … re-folding it whenever the tail
+moved", because the old wording had become false.
+
+**Guards.** Four new tests in `tests/test_card_speculation_engine.py` (56 → 60), plus three
+re-pointed:
+
+* `test_open_for_new_work_is_the_one_exit_gate_predicate` — the rule STATED. Truth table over each
+  fold-derived condition and each live flag, both halves of `budget_exhausted` (eval-seconds and wall
+  clock, neither reachable from any call site before), and `pytest.raises(AttributeError)` on the
+  misspelled-flag mutation that `slots=True` exists to catch.
+* `test_no_session_phase_re_derives_a_stop_condition_by_hand` — `CardSessionGates(` is constructed
+  exactly once in the module; the set of functions that READ `consumer_completed`/`yield_outer` is
+  exactly `{open_for_new_work, _card_phase_serve_raw_stage}`; `.stopping` is read exactly once in
+  `open_for_new_work` and exactly TWICE in `_card_phase_admit_evals`, with exactly one
+  `open_for_new_work` call in that phase — per-function COUNTS, because a set-only version let a
+  half-reverted asymmetry through (see Teeth); and no `_card_phase_*` method calls
+  `self._terminal_intent`, `session.budget_exhausted`, or `needs_outer_rebuild`. AST throughout, so
+  a commented-out copy is not a node.
+* `test_the_turn_snapshot_folds_once_per_observed_tail` — same tail returns the same object with no
+  rebuild; an append rebuilds AND the new state carries the append; a swapped `fold` seam is never
+  served the previous function's answer.
+* `test_a_turn_that_appends_refolds_before_every_later_phase_reads` — the turn-scope half of
+  invariant 4, DRIVEN: phase one appends an operator pause, and the same turn must not consult the
+  freshness drain, must not admit the pending Node, and must close after exactly one turn.
+* `test_admission_records_the_eval_start_boundary_before_it_starts_the_worker` was three ordered
+  `source.index()` lookups — the exact pin CLAUDE.md names as satisfiable by
+  `pass  # self._record_eval_start_boundary(chosen)`. It now DRIVES the property (the eval child
+  observes its own `eval_started` already durable) and keeps only an AST ordering pin.
+  `test_raw_action_selection_and_worker_share_one_proposal_snapshot` and
+  `test_run_card_session_pre_gpu_recheck_unions_producer_failed_but_raw_lane_does_not` were
+  re-pointed at the phase methods that now own those two consults, with their assertions unchanged.
+
+**Teeth.** Breaks applied to a throwaway copy of the tree, each by a script asserting its anchor
+exists exactly once, each run against `test_card_speculation_engine` + `test_card_budget_refund` +
+`test_card_selection_integration`. **Two of the six did not bite, and both are worth more than the
+four that did:**
+
+| break | result |
+|---|---|
+| `_fold_current` stops honouring the tail (serve the memo forever) | 5 failures inside the first 15% of one suite, `test_the_turn_snapshot_folds_once_per_observed_tail`, then a HANG — `test_a_turn_that_appends_refolds_before_every_later_phase_reads` never returns, which is the honest consequence: a session that can never observe a terminal |
+| `open_for_new_work` drops `consumer_completed` | 4: the truth table plus the three outer-cadence-boundary session tests |
+| one phase re-derives the stop conditions by hand | `test_no_session_phase_re_derives_a_stop_condition_by_hand` |
+| `self._record_eval_start_boundary(chosen)` → `pass  # …` (CLAUDE.md's documented evasion) | 2, incl. the end-to-end refund run. Verified rather than assumed: the RETIRED `source.index()` pin, replayed against the broken source, returns `boundary < admitted < started` — it passes. The AST pin does not see the call at all |
+| the drop-stale gate reads the pre-`_skip_if_aborted` snapshot | **nothing failed** — and provably cannot |
+| the admitted-batch fill gate reads the live flags again (PARTIAL reversion, pre-GPU re-check left alone) | **nothing failed** on the first guard; `test_no_session_phase_re_derives_a_stop_condition_by_hand` after it was strengthened |
+| both admission gates read the live flags again (FULL reversion) | `test_no_session_phase_re_derives_a_stop_condition_by_hand` |
+
+The two silent breaks are the useful ones. `_skip_if_aborted`'s only append is a
+zero-`eval_seconds` `node_failed` that REMOVES a pending node — it cannot touch
+`paused/finished/stop_requested`, cannot move `total_eval_seconds`, and can only move
+`outer_rebuild` True→False. A stale read there is *conservative in every direction*, so no test can
+distinguish it and one written to try would be testing its own setup. The code stopped depending on
+the distinction anyway: that gate now takes its own `_session_state()`, so there is no refresh line
+for a later editor to delete. The batch-fill asymmetry is likewise **not reachable today** — there
+is no checkpoint inside the fill loop, so `consumer_completed` cannot flip mid-batch — which is
+precisely why it is written down as a structural rule rather than left to be re-derived, the same
+shape as CLAUDE.md's `EV_NODE_EVAL_STARTED` ordering precondition. The guard is what had to change:
+its first version asserted the *set* of functions reading `.stopping`, and reverting only the fill
+gate kept that set identical and passed. It now asserts per-function COUNTS (`open_for_new_work` 1,
+`_card_phase_admit_evals` 2) plus exactly one `open_for_new_work` call in the phase, and both the
+partial and the full reversion fail.
+
+**A flaky test, diagnosed rather than retried.**
+`test_card_budget_refund.py::test_the_refund_is_reachable_end_to_end_on_the_deterministic_backend`
+was failing about 1 run in 3 and had been read as "load-sensitive by design". It is not. Its failure
+detail always showed supersedes HAPPENING (`stale: 5`) with `refunded: 0`, while its assertion
+message said "no supersede occurred" — false, and pointed the next reader at the wrong thing.
+
+Attributed at the branch (a run instrumented at `_serve_card_builds` to record which condition
+closed each request), **8 of 8 `stale` closes were `allow_commit=False`** — not epoch rotation, not
+terminal intent, not a refused claim. `allow_commit` is `session.open_for_new_work(gates)`, and the
+term that shuts it here is `consumer_completed`, set by `_card_eval_one`'s `finally` on the FIRST
+eval terminal of the admitted batch. So the `stale`-vs-`discarded` split is decided by which of two
+real wall-clock durations is shorter: a Developer `implement()` on a worker thread, or a sandbox
+subprocess evaluation. **There is no election or CAS seam that arbitrates it** — the CASes decide
+who WRITES, never which side of the dispatch boundary a supersede lands on — and the fence that
+closes the batch is the documented outer-cadence boundary, so it cannot be moved to make the race
+deterministic without changing a contract. Notably this is the SAME fence as the open
+head-of-line-blocking annotation below: one object, two symptoms.
+
+So the test now asserts every accounting identity that is stage-INDEPENDENT (a discarded prediction
+spends no budget; `discarded == refunded`; `requested == committed + stale + producer_failed`;
+`abandoned == 0`; the run still executes its full 12 experiments; every node id spent beyond those
+12 is a refunded prediction) — measured true in **60/60 runs across six max_nodes/depth
+configurations**, in which `refunded >= 1` would still have failed twice. The refund itself is held
+DETERMINISTICALLY by the sibling `test_discarded_speculative_build_refunds_its_slot_and_survives_replay`,
+which commits a real speculative node and then drives the supersede through
+`_drop_stale_speculation`; that test now also asserts the same `speculation_budget_observation`
+ledger the e2e sibling reports, so a refund that stops reaching the projection is caught on the
+deterministic path. The misleading message is replaced by one that reports the stage split.
+
+Worth recording for whoever reads the flake history: EC-02's fold caching moved this race a long
+way on its own (`stale` closes 3.38 → 0.25 per run, `refunded` 1.12 → 2.88, because the session
+services a finished producer result far sooner) — a much wider margin, and still not a guarantee,
+which is why the test no longer rests on it.
+
+**What remains.** The head-of-line-blocking fence the second `CODEX AGENT:` annotation describes is
+untouched and still annotated: one terminal child still closes the whole admitted batch, so an
+unequal-duration sibling set under-fills the consumer — and, per the diagnosis above, it is also
+what turns a still-building prefetch into a `stale` close. That is a policy question about refill
+fairness, not a structure question, and it wants its own before/after on a workload with unequal
+eval durations. `speculation.py` is still ~2.3k lines for one feature; the file-level split
+(producer lane / request lifecycle / session) is a separate decision the phase boundaries now make
+cheap but which nothing here needs.
 
 #### EC-03 · HIGH · duplication · effort: small — **RESOLVED (2026-08-02)**
 
