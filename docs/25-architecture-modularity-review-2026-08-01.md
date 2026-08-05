@@ -4092,6 +4092,28 @@ failure.
 
 *Recommendation:* If receipt-embedded proof must stay, shrink the runtime matrix to a digest of the offline test result or a handful of forced-gate cases; keep the full 15-case matrix in tests/ where the fixtures belong.
 
+*Resolution (2026-08-05) — adjudicated: this is a RECEIPT-FORMAT change, not a cleanup.*
+
+The observation is correct — `scorer_fidelity.py` really does ship fixture builders and a 15-case
+matrix as production code. But both halves of the recommendation change the WIRE, and the finding
+does not say so:
+
+`speculation_quality.py:2772` puts `"scorer_fidelity": dict(scorer)` into the receipt body, and
+`_self_digest` hashes that whole body minus its own key. So shrinking the matrix to a digest, OR
+moving it to `tests/` so the receipt stops carrying it, changes `self_digest` for every receipt —
+every already-issued calibration receipt stops verifying, and the gate refuses runs that were
+legitimately calibrated.
+
+That is doable, and this repo has done it deliberately once (XP-07 bumped the implementation digest
+to `/v2` and revoked v1 receipts in one shot). It needs the same treatment: a schema bump, a stated
+one-time revocation, and a guard pinning the new digest. What it must NOT be is a quiet refactor —
+which is how the finding reads, filed under `over-engineering` at LOW severity.
+
+Deliberately not done here. The cost the finding names (a matrix recomputed per gate) is a
+performance concern with no measurement attached; the cost of getting it wrong is a fleet of
+unverifiable receipts. If revisited, do it as an explicit receipt-schema change with its own
+evaluation, not as part of a modularity sweep.
+
 #### SE-13 · LOW · dead-code · effort: small — **RESOLVED (2026-08-02)**
 
 **Dead helper: _explored_concepts is never called**
