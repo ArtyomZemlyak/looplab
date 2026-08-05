@@ -45,7 +45,13 @@ def driven(monkeypatch):
         return None
 
     monkeypatch.setattr(agent_module, "drive_tool_loop", _drive)
-    monkeypatch.setattr(tool_loop, "loop_opts_from_settings", lambda s: {"stuck_retries": 3})
+    # A REAL option name. This fixture used to return `{"stuck_retries": 3}` — a misspelling of
+    # `stuck_repeat` that no assertion could distinguish from the real thing, because the fake driver
+    # below takes `**kwargs` and the bundle was an untyped dict all the way to the call. That is the
+    # typo class doc 25 AG-01 closes: `LoopOptions.coerce` now refuses an unknown option by name, so
+    # the fixture has to name one that exists — and the property this file pins (the bundle is still
+    # spread in, it is not dropped on the floor) is asserted on that real key instead.
+    monkeypatch.setattr(tool_loop, "loop_opts_from_settings", lambda s: {"stuck_repeat": 3})
     return captured
 
 
@@ -68,7 +74,7 @@ def test_the_loop_limits_come_from_settings_and_are_not_hardcoded(driven):
     the plan to a no-op advisory reply."""
     _run(driven)
     assert driven["max_turns"] == 7 and driven["time_budget_s"] == 12.5
-    assert driven["stuck_retries"] == 3, "loop_opts_from_settings must still be spread in"
+    assert driven["stuck_repeat"] == 3, "loop_opts_from_settings must still be spread in"
 
 
 def test_absent_limit_settings_default_to_unlimited_rather_than_a_guess(driven):

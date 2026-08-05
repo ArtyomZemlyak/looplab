@@ -25,6 +25,15 @@ from looplab.core import tracing
 from looplab.core.llm import BudgetExceeded
 from looplab.tools._base import RESULT_CAP
 from looplab.core.redact import redact_secrets
+# The typed options bundle (doc 25 AG-01). Re-exported here — and, through `agents/agent.py`, under
+# every historical spelling — because `loop_opts_from_settings` lives in THIS module and now returns
+# one: a caller that imports the factory must be able to name its type from the same place.
+from looplab.agents.loop_options import (  # noqa: F401
+    EXPLICIT_ONLY_LOOP_ARGS, LOOP_OPTION_FIELDS, UNSET, LoopOptions)
+# The StuckDetector's own args canonicalizer, reused by the repeat ledger below so the two repeat
+# notions can't drift. (`StuckDetector` itself stays a function-local import in `drive_tool_loop`:
+# a FRESH detector is built per call, so nothing about it is module state.)
+from looplab.agents.stuck import _canonical
 
 
 # A configured compressor that cannot be constructed must not silently fall back to the main
@@ -208,6 +217,94 @@ def _render_plan(args: dict) -> str:
     return "\n".join(parts).strip()
 
 
+def _compact_in_place(messages: list, context_budget_chars, auto_summary: bool, summarize) -> None:
+    """Bound a growing tool-loop history to `context_budget_chars`, once per turn.
+
+    Compaction happens IN PLACE (slice-assign, same list object): callers like the assistant's
+    `run_turn` keep a reference to this list to post-process the trace (stream the final answer
+    over it); a rebind would orphan their reference on a compacted turn and they'd re-answer
+    BLIND, missing every post-compaction tool result. (Which is why this returns None and takes the
+    list rather than returning a new one — the in-place contract is the point, not an accident.)
+
+    `context_budget_chars`: None = unset (fall back to the built-in default), 0 = compaction OFF
+    (the documented "0 = off" — the old `or DEFAULT` fallback silently turned 0 into the 120k
+    default, i.e. compaction ~8× MORE aggressive than the operator asked for), >0 = the budget.
+    """
+    budget = context_budget_chars
+    if auto_summary and budget is None:
+        from looplab.core.context_budget import DEFAULT_SUMMARY_CHARS
+        budget = DEFAULT_SUMMARY_CHARS
+    if not budget:
+        return
+    if auto_summary:                    # C2: summarize the stale middle once the history grows long
+        from looplab.core.context_budget import compact_history
+        messages[:] = compact_history(messages, budget, summarize)
+    else:                               # H4: else just middle-truncate stale tool output
+        from looplab.core.context_budget import truncate_history
+        messages[:] = truncate_history(messages, budget)
+
+
+def _tool_call_args(tc: dict) -> tuple[str, dict]:
+    """`(name, args)` for one model tool call, with the args HARDENED to a dict.
+
+    A small/junk model can emit malformed JSON arguments; never let that crash the
+    run — treat an unparseable tool call as empty args (emit then falls back to a
+    safe result; a retrieval call just gets {}).
+    """
+    fn = tc.get("function", {})
+    raw = fn.get("arguments") or "{}"
+    try:
+        args = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+    if not isinstance(args, dict):
+        # Valid-but-non-object JSON ("[0]", "\"x\"", "3") would otherwise reach finalize()/
+        # tools.execute() and blow up on .get(); a junk model must never crash the run.
+        args = {}
+    return fn.get("name", ""), args
+
+
+def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
+                   on_tool_result=None) -> tuple[str, str]:
+    """Execute ONE retrieval tool call and return `(capped_result, repeat_note)`.
+
+    Every tool call ALWAYS executes and returns fresh content. The G2 read-dedup cache
+    that used to stub an exact repeat ("already ran … use the earlier output") was
+    REMOVED by explicit operator decision (P3, docs/PROMPT_REVIEW.md): the stub pointed
+    at content the model could no longer see after compaction/phase handoff, and the
+    cached copy silently went stale — always read what is asked. The StuckDetector in the
+    caller is the loop-safety net now: a model that thrashes on the SAME call with the
+    SAME result trips B1 and the loop force-emits instead of spinning; the repeat
+    note below covers the 3+-call round-robins B1's 1-/2-cycle window can't see.
+
+    `repeat_state` is the caller's per-invocation ledger (see `_REPEAT_NOTE`), mutated here.
+    """
+    # First-class TOOL observation (Langfuse-style): input=args, output=result, nested
+    # under the active operation span next to the generations that decided the call.
+    with tracing.tool(name, _trace_preview(args)) as _tool_obs:
+        result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
+        _tool_obs.output(_trace_preview(result))
+    # Cap once, up front — appending an explicit truncation marker when the cap actually
+    # bites (P3) — so the provenance hook receives EXACTLY what the tool message below
+    # will carry (a single expression, not two kept-in-sync copies).
+    result = _cap_tool_result(str(result))
+    # Tag the 3rd+ IDENTICAL-RESULT repeat of this (tool, canonical-args) call (see
+    # _REPEAT_NOTE: the round-robin gap the StuckDetector's 1-/2-cycle window can't
+    # cover; a changed result — a cursor poll's new chunk, a post-write re-read —
+    # resets the streak and never gets the note). The note rides OUTSIDE the cap so it
+    # can never be truncated away.
+    repeat_note = ""
+    sig = f"{name}({_canonical(args)})"
+    prev, streak = repeat_state.get(sig, (None, 0))
+    streak = streak + 1 if result == prev else 1
+    repeat_state[sig] = (result, streak)
+    if streak >= 3:
+        repeat_note = _REPEAT_NOTE.format(k=streak)
+    if on_tool_result is not None:      # provenance hook: exceptions propagate
+        on_tool_result(name, args, result + repeat_note)
+    return result, repeat_note
+
+
 def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     max_turns: int = 0, context_budget_chars: int | None = None,
                     time_budget_s: float = 0.0, finalize=None, fallback=None,
@@ -303,10 +400,10 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     # STATELESS per-loop repeat ledger (see _REPEAT_NOTE): for each exact (tool, canonical-args)
     # call, the previous CAPPED result and the length of the current identical-result streak — for
     # THIS invocation only, a fresh dict per call, like the StuckDetector, so nothing leaks across
-    # loops or phases. `_canonical` is the detector's own args canonicalizer, reused so the two
-    # repeat notions can't drift. The full previous result string is kept (not a hash): it is
-    # already capped at RESULT_CAP, and byte-identity must be exact — no collision caveat.
-    from looplab.agents.stuck import _canonical
+    # loops or phases. `_canonical` (imported at module scope) is the detector's own args
+    # canonicalizer, reused so the two repeat notions can't drift. The full previous result string
+    # is kept (not a hash): it is already capped at RESULT_CAP, and byte-identity must be exact —
+    # no collision caveat. `_run_tool_call` owns the ledger's updates.
     repeat_state: dict[str, tuple[str, int]] = {}
     tool_specs = ((tools.specs() if tools is not None else []) + [emit_spec])
     if self_plan:
@@ -350,6 +447,16 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 pass
         return True, finalize(forced)
 
+    def _salvage_emit():
+        """The forced-emit salvage all FOUR exits share (prose reply / `emit_force` ceiling / stuck /
+        budget exhaustion): make ONE forced tool call from everything gathered and validate it like
+        an in-loop emit. Returns `(accepted, result)` — deliberately a pair rather than a `None`
+        sentinel, because `finalize` may legitimately return None (ToolUsingStrategist's degrades to
+        the rule baseline, which is `Optional[Strategy]`), so "nothing to accept" and "the result is
+        None" have to stay distinguishable. The `_cancelled()` guard stays at each call site: what a
+        cancelled loop does next differs per exit, and only three of the four skip the paid call."""
+        return _accept_forced(_force_emit(client, messages, emit_spec))
+
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
         if _cancelled():                # user hit stop -> finalize from what we have, promptly
@@ -357,24 +464,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         if time_budget_s and (time.monotonic() - started) > time_budget_s:
             exhausted = True
             break                       # out of wall-clock budget -> salvage an emit below
-        # Compaction happens IN PLACE (slice-assign, same list object): callers like the assistant's
-        # `run_turn` keep a reference to this list to post-process the trace (stream the final answer
-        # over it); a rebind would orphan their reference on a compacted turn and they'd re-answer
-        # BLIND, missing every post-compaction tool result.
-        # `context_budget_chars`: None = unset (fall back to the built-in default), 0 = compaction OFF
-        # (the documented "0 = off" — the old `or DEFAULT` fallback silently turned 0 into the 120k
-        # default, i.e. compaction ~8× MORE aggressive than the operator asked for), >0 = the budget.
-        _budget = context_budget_chars
-        if auto_summary and _budget is None:
-            from looplab.core.context_budget import DEFAULT_SUMMARY_CHARS
-            _budget = DEFAULT_SUMMARY_CHARS
-        if _budget:
-            if auto_summary:            # C2: summarize the stale middle once the history grows long
-                from looplab.core.context_budget import compact_history
-                messages[:] = compact_history(messages, _budget, summarize)
-            else:                       # H4: else just middle-truncate stale tool output
-                from looplab.core.context_budget import truncate_history
-                messages[:] = truncate_history(messages, _budget)
+        _compact_in_place(messages, context_budget_chars, auto_summary, summarize)
         # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal. A
         # `user`-role reminder, not `system`: the plan is verbatim MODEL output (from update_plan
         # args), so a `system` reinjection would let content the model was steered into by injected
@@ -400,7 +490,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             # exhaustion path at the bottom of this loop already guards its forced emit this way.
             if _cancelled():
                 break
-            ok, result = _accept_forced(_force_emit(client, messages, emit_spec))
+            ok, result = _salvage_emit()
             if ok:
                 return result
             stalls += 1
@@ -426,20 +516,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         investigated = False            # did any call this turn actually RUN a tool (see call_turns)
         for tc in calls:
             repeat_note = ""            # per-call: set only when an executed call is a 3rd+ repeat
-            fn = tc.get("function", {})
-            name = fn.get("name", "")
-            raw = fn.get("arguments") or "{}"
-            # A small/junk model can emit malformed JSON arguments; never let that crash the
-            # run — treat an unparseable tool call as empty args (emit then falls back to a
-            # safe result; a retrieval call just gets {}).
-            try:
-                args = json.loads(raw) if isinstance(raw, str) else (raw or {})
-            except (json.JSONDecodeError, TypeError):
-                args = {}
-            if not isinstance(args, dict):
-                # Valid-but-non-object JSON ("[0]", "\"x\"", "3") would otherwise reach finalize()/
-                # tools.execute() and blow up on .get(); a junk model must never crash the run.
-                args = {}
+            name, args = _tool_call_args(tc)     # args HARDENED to a dict (see there)
             if name == emit_name:
                 # Bounce a malformed emit BACK to the model with the concrete error instead of silently
                 # accepting a degraded/empty idea (the "fallback (agent parse failed)" no-op nodes that
@@ -480,41 +557,15 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 current_plan = _render_plan(args) or current_plan
                 result = "plan updated"
             else:
-                # Every tool call ALWAYS executes and returns fresh content. The G2 read-dedup cache
-                # that used to stub an exact repeat ("already ran … use the earlier output") was
-                # REMOVED by explicit operator decision (P3, docs/PROMPT_REVIEW.md): the stub pointed
-                # at content the model could no longer see after compaction/phase handoff, and the
-                # cached copy silently went stale — always read what is asked. The StuckDetector
-                # below is the loop-safety net now: a model that thrashes on the SAME call with the
-                # SAME result trips B1 and the loop force-emits instead of spinning; the repeat
-                # note below covers the 3+-call round-robins B1's 1-/2-cycle window can't see.
                 # Surface what the agent is about to do BEFORE the (possibly slow) tool runs, so a
                 # live progress view advances turn-by-turn instead of jumping only at the end.
                 investigated = True     # a real retrieval — this turn counts as investigation
                 _step(turn=turn_idx, tool=name,
                       arg=next((str(v) for v in (args or {}).values() if v), ""))
-                # First-class TOOL observation (Langfuse-style): input=args, output=result, nested
-                # under the active operation span next to the generations that decided the call.
-                with tracing.tool(name, _trace_preview(args)) as _tool_obs:
-                    result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
-                    _tool_obs.output(_trace_preview(result))
-                # Cap once, up front — appending an explicit truncation marker when the cap actually
-                # bites (P3) — so the provenance hook receives EXACTLY what the tool message below
-                # will carry (a single expression, not two kept-in-sync copies).
-                result = _cap_tool_result(str(result))
-                # Tag the 3rd+ IDENTICAL-RESULT repeat of this (tool, canonical-args) call (see
-                # _REPEAT_NOTE: the round-robin gap the StuckDetector's 1-/2-cycle window can't
-                # cover; a changed result — a cursor poll's new chunk, a post-write re-read —
-                # resets the streak and never gets the note). The note rides OUTSIDE the cap so it
-                # can never be truncated away.
-                sig = f"{name}({_canonical(args)})"
-                prev, streak = repeat_state.get(sig, (None, 0))
-                streak = streak + 1 if result == prev else 1
-                repeat_state[sig] = (result, streak)
-                if streak >= 3:
-                    repeat_note = _REPEAT_NOTE.format(k=streak)
-                if on_tool_result is not None:      # provenance hook: exceptions propagate
-                    on_tool_result(name, args, result + repeat_note)
+                # Execute + trace + cap + repeat-ledger + provenance hook — see `_run_tool_call`,
+                # which owns the always-execute rule (P3) and the identical-result repeat note.
+                result, repeat_note = _run_tool_call(tools, name, args, repeat_state=repeat_state,
+                                                     on_tool_result=on_tool_result)
             result = _cap_tool_result(str(result))   # idempotent final bound (cancel/plan stubs too)
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                              "name": name, "content": result + repeat_note})
@@ -550,7 +601,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             if emit_force and call_turns >= emit_force:
                 if _cancelled():        # paid call — see the prose-reply force above
                     break
-                ok, result = _accept_forced(_force_emit(client, messages, emit_spec))
+                ok, result = _salvage_emit()
                 if ok:
                     return result
                 break   # force unsupported/rejected: fall to fallback, don't re-attempt every turn
@@ -569,7 +620,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                                               f"Call `{emit_name}` now with your best answer.")})
             if _cancelled():            # paid call — see the prose-reply force above
                 break
-            ok, result = _accept_forced(_force_emit(client, messages, emit_spec))
+            ok, result = _salvage_emit()
             if ok:
                 return result
             break
@@ -583,7 +634,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         messages.append({"role": "user",
                          "content": f"Out of turn/time budget. Call `{emit_name}` NOW with your "
                                     "best answer from everything you have gathered."})
-        ok, result = _accept_forced(_force_emit(client, messages, emit_spec))
+        ok, result = _salvage_emit()
         if ok:
             return result
     return fallback(messages)
@@ -604,6 +655,10 @@ def agentic_text(client, tools, messages, *, loop_opts=None, fallback=None,
     fb = fallback or (lambda m: str(client.complete_text(m) or ""))
     if not tools:
         return fb(messages)
+    # Checked OUTSIDE the try below, on purpose: a bad option name must raise where nothing is
+    # catching it, not be swallowed by the containment `except` that turns any agentic failure into
+    # a plain completion — which is exactly how the historical duplicate-keyword TypeError hid.
+    options = LoopOptions.coerce(loop_opts)
     emit_spec = {"type": "function", "function": {
         "name": "answer", "description": f"Emit {answer_desc}. This ends your turn.",
         "parameters": {"type": "object",
@@ -612,7 +667,7 @@ def agentic_text(client, tools, messages, *, loop_opts=None, fallback=None,
     try:
         return drive_tool_loop(client, tools, messages, emit_spec,
                                finalize=lambda a: str((a or {}).get("text", "") or ""),
-                               fallback=fb, **(loop_opts or {}))
+                               fallback=fb, **options)
     except BudgetExceeded:  # a HARD budget stop must propagate — degrading to fb() runs ANOTHER LLM
         raise                # call after the budget tripped (every sibling loop caller re-raises first)
     except Exception:  # noqa: BLE001 — an agentic-path failure must never break a best-effort step
@@ -629,6 +684,7 @@ def agentic_struct(client, tools, messages, model_cls, *, parser="tool_call",
     fb = fallback or (lambda m: parse_structured(client, m, model_cls, parser))
     if not tools:
         return fb(messages)
+    options = LoopOptions.coerce(loop_opts)      # checked outside the try — see `agentic_text`
     emit_spec = {"type": "function", "function": {
         "name": "emit", "description": "Emit the final structured result. This ends your turn.",
         "parameters": model_cls.model_json_schema()}}
@@ -640,7 +696,7 @@ def agentic_struct(client, tools, messages, model_cls, *, parser="tool_call",
             return fb(messages)
     try:
         return drive_tool_loop(client, tools, messages, emit_spec, finalize=_final, fallback=fb,
-                               **(loop_opts or {}))
+                               **options)
     except BudgetExceeded:  # a HARD budget stop must propagate, not degrade to another LLM call
         raise
     except Exception:  # noqa: BLE001 — the agentic path must never break a best-effort step
@@ -745,29 +801,34 @@ def summarize_phase(client, messages, *, phase: str, next_phase: str, min_chars:
         return ""
 
 
-def loop_opts_from_settings(settings) -> dict:
+def loop_opts_from_settings(settings) -> LoopOptions:
     """Collect the config-driven tool-loop options (B1 stuck detection + C1 self-plan + C2
-    auto-summary) into a dict to spread into `drive_tool_loop`. Plain scalars only — safe to reuse
-    across calls (the loop builds a FRESH StuckDetector per invocation from these thresholds) —
-    plus the optional D11 compression client (stateless, reusable)."""
+    auto-summary) into the typed `LoopOptions` bundle to spread into `drive_tool_loop`. Plain
+    scalars only — safe to reuse across calls (the loop builds a FRESH StuckDetector per invocation
+    from these thresholds) — plus the optional D11 compression client (stateless, reusable).
+
+    `LoopOptions` is Mapping-shaped, so `**loop_opts_from_settings(s)` spreads exactly the keys the
+    dict this replaced carried (doc 25 AG-01); what it adds is that every option has ONE declaration
+    point and merging is `.replace()` / `.with_defaults()` instead of a per-call-site `setdefault`.
+    """
     g = getattr
-    opts = {
-        "stuck_detection": bool(g(settings, "agent_stuck_detection", True)),
-        "stuck_repeat": int(g(settings, "agent_stuck_repeat", 4)),
-        "stuck_alternate": int(g(settings, "agent_stuck_alternate", 4)),
-        "self_plan": bool(g(settings, "agent_self_plan", True)),
-        "plan_reinject_every": int(g(settings, "agent_plan_reinject_every", 5)),
-        "auto_summary": bool(g(settings, "agent_auto_summary", True)),
-        "emit_after": int(g(settings, "agent_emit_after", 300)),  # G: nudge to emit after N tool turns
-        "emit_force": int(g(settings, "agent_emit_force", 500)),  # G: force the emit at this many turns
-    }
+    opts = LoopOptions(
+        stuck_detection=bool(g(settings, "agent_stuck_detection", True)),
+        stuck_repeat=int(g(settings, "agent_stuck_repeat", 4)),
+        stuck_alternate=int(g(settings, "agent_stuck_alternate", 4)),
+        self_plan=bool(g(settings, "agent_self_plan", True)),
+        plan_reinject_every=int(g(settings, "agent_plan_reinject_every", 5)),
+        auto_summary=bool(g(settings, "agent_auto_summary", True)),
+        emit_after=int(g(settings, "agent_emit_after", 300)),  # G: nudge to emit after N tool turns
+        emit_force=int(g(settings, "agent_emit_force", 500)),  # G: force the emit at this many turns
+    )
     # C2/H4: the configured context budget must reach EVERY loop, not just the Researcher — the
     # 120k built-in fallback otherwise survives in the Developer's 500-turn implement session (the
     # exact loop the budget raise targeted). Only set when configured, so a bare stub settings
     # object keeps the loop's own unset (None -> built-in default) semantics; an explicit 0 = off.
     cb = g(settings, "context_budget_chars", None)
     if cb is not None:
-        opts["context_budget_chars"] = int(cb)
+        opts = opts.replace(context_budget_chars=int(cb))
     # D11 compression model slot (open_deep_research's four-slot pattern): a dedicated CHEAP
     # summarizer for history compression, instead of paying the main model for it. Blank = the
     # loop's own client (byte-identical legacy behavior).
@@ -780,9 +841,9 @@ def loop_opts_from_settings(settings) -> dict:
         try:
             # Role-resolved, so the compressor can sit on its own provider WITH its own credential;
             # its own fields still win, so this is the same client as before without profiles.
-            opts["summary_client"] = make_llm_client_for(settings, role="compressor")
+            opts = opts.replace(summary_client=make_llm_client_for(settings, role="compressor"))
         except Exception:  # noqa: BLE001 - invalid optional config stays local, never bills main
-            opts["summary_client"] = _SUMMARY_LOCAL_ONLY
+            opts = opts.replace(summary_client=_SUMMARY_LOCAL_ONLY)
     return opts
 
 
@@ -868,13 +929,19 @@ def emit_loop(client, tools, messages: list, model_cls, settings, *, description
     # that check an untrusted prior report cannot reach a system prompt.
     from looplab.agents import agent as _agent  # deferred: `agent` imports this module
 
+    # The turn/time limits ride IN the bundle rather than beside it (doc 25 AG-01): `max_turns=…,
+    # **opts` is the exact shape that raises `TypeError: got multiple values` the day `opts` gains
+    # the key — here through a monkeypatched `loop_opts_from_settings`, which the suite does. They
+    # are DEFAULTS, not overrides: a bundle that already carries a limit is the operator's configured
+    # value and must win over these `getattr` fallbacks.
+    options = LoopOptions.coerce(loop_opts_from_settings(settings)).with_defaults(
+        max_turns=getattr(settings, "agent_max_turns", 0),
+        time_budget_s=getattr(settings, "agent_time_budget_s", 0.0))
     _agent.drive_tool_loop(
         client, tools, messages,
         {"type": "function", "function": {
             "name": "emit", "description": description,
             "parameters": model_cls.model_json_schema()}},
-        max_turns=getattr(settings, "agent_max_turns", 0),
-        time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),
         finalize=_finalize, fallback=_fallback, on_step=on_step,
-        **loop_opts_from_settings(settings))
+        **options)
     return emitted.get("value")

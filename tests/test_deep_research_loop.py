@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 
 from looplab.agents.deep_research import _SYSTEM, DeepResearcher, state_brief
+from looplab.agents.loop_options import LoopOptions
 from looplab.core.models import RunState
 from looplab.core.source_identity import canonical_source_ref
 
@@ -150,7 +151,9 @@ def test_turn_budget_exhaustion_forces_memo_fallback():
     client = _ForcingClient(
         [_tool_call("search", {"query": "q"})],         # one tool turn, then the budget is gone
         forced={"summary": "forced memo", "findings": ["from history"]})
-    memo = DeepResearcher(client, tools, max_turns=1).research(RunState(goal="g"))
+    # The turn budget rides the typed options bundle now (doc 25 AG-01), not a ctor kwarg.
+    memo = DeepResearcher(client, tools,
+                          loop_opts=LoopOptions(max_turns=1)).research(RunState(goal="g"))
     assert memo.summary == "forced memo" and memo.findings == ["from history"]
     assert memo.sources == [{"title": "search(q)", "url": "", "url_identity": "",
                              "snippet": "partial evidence"}]

@@ -42,7 +42,7 @@ from looplab.agents.roles import (
 # rather than aliases, so patching `tool_loop._X` and patching `agent._X` would already disagree —
 # forwarding one by default hands a caller that ambiguity for nothing.
 from looplab.agents.tool_loop import (  # noqa: F401
-    CompositeTools, _cap_tool_result, _flatten_transcript, _force_emit, _handoff_ctx,
+    CompositeTools, LoopOptions, _cap_tool_result, _flatten_transcript, _force_emit, _handoff_ctx,
     agentic_struct, agentic_text, drive_tool_loop, emit_loop, handoff_scope,
     loop_opts_from_settings, summarize_phase)
 
@@ -162,13 +162,18 @@ class ToolUsingResearcher:
         # (the in-house repo developer's stages/plan/implement phases) will actually READ it;
         # False skips the per-node summary LLM call nobody consumes on single-shot developers.
         self.handoff = handoff
-        # Collapse the two sources of context_budget_chars to ONE, here, once. loop_opts_from_settings
-        # injects it into loop_opts AND it arrives as an explicit ctor kwarg; passing BOTH to run_phase
-        # would hand it the keyword twice -> TypeError, caught by propose()'s broad except -> silent
-        # fallback (the agentic Researcher DEAD in the default config, where the budget is always set).
-        # Merging in __init__ makes the collision impossible by construction for every call site.
-        self.loop_opts = dict(loop_opts or {})   # B1/C1/C2 tool-loop options (loop_opts_from_settings)
-        self.loop_opts.setdefault("context_budget_chars", context_budget_chars)
+        # Collapse the THREE ctor kwargs that are also loop options to ONE bundle, here, once.
+        # loop_opts_from_settings injects context_budget_chars into loop_opts AND it arrives as an
+        # explicit ctor kwarg; passing BOTH to run_phase would hand it the keyword twice ->
+        # TypeError, caught by propose()'s broad except -> silent fallback (the agentic Researcher
+        # DEAD in the default config, where the budget is always set). `LoopOptions` makes that
+        # collision impossible by construction (doc 25 AG-01): one field per option, and `propose`
+        # spreads this bundle with NO option keyword beside it. `with_defaults` keeps the exact
+        # precedence the old `setdefault` had — a value the bundle already carries is the operator's
+        # configured value and wins over a ctor default like `max_turns=0`.
+        self.loop_opts = LoopOptions.coerce(loop_opts).with_defaults(   # B1/C1/C2 tool-loop options
+            context_budget_chars=context_budget_chars,
+            max_turns=max_turns, time_budget_s=time_budget_s)
 
     def _emit_spec(self) -> dict:
         return {"type": "function", "function": {
@@ -294,8 +299,11 @@ class ToolUsingResearcher:
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},
         ]
         try:
-            # context_budget_chars is folded into self.loop_opts once in __init__ (see there) — pass the
-            # merged opts straight through, no per-call re-merge, no double-keyword collision.
+            # Every loop OPTION (the turn/time/context budgets included) is folded into
+            # self.loop_opts once in __init__ (see there) — pass the merged bundle straight through,
+            # no per-call re-merge, no option keyword beside the spread, so no double-keyword
+            # collision. What stays explicit here is per-call only: the result callbacks and the
+            # emit validator, which `LoopOptions` deliberately cannot carry.
             # P25: `handoff` is True only when a run_phase-based (repo) Developer follows — its
             # stages/plan/implement phases read the brief; the single-shot developers never do,
             # so no summary call is spent there and the label names the developer that ACTUALLY runs.
@@ -306,7 +314,6 @@ class ToolUsingResearcher:
                             if getattr(self, "handoff", True)
                             else "the Developer (single-shot implement)"),
                 handoff=getattr(self, "handoff", True),
-                max_turns=self.max_turns, time_budget_s=self.time_budget_s,
                 finalize=self._finalize, fallback=self._fallback,
                 validate=self._validate_emit, **self.loop_opts)
         except BudgetExceeded:      # hard budget stop -> propagate and end the run

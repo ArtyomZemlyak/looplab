@@ -180,17 +180,20 @@ class LessonDistillMixin:
         from looplab.tools.run_tools import readonly_run_tools
         return readonly_run_tools(state)
 
-    def _reflect_loop_opts(self) -> dict:
+    def _reflect_loop_opts(self):
         """Bounded tool-loop opts for the auxiliary agentic passes (reflection/distillation) — the same
         config-driven B1/C1/C2 options as the main agents, plus a tight turn cap (these READ a bit then
-        emit, they don't investigate for 300 turns)."""
+        emit, they don't investigate for 300 turns).
+
+        `.replace()`, not `.with_defaults()`: the tight cap must WIN over the configured
+        `agent_max_turns`, which is what the old `opts["max_turns"] = 15` assignment did."""
+        from looplab.agents.loop_options import LoopOptions
         try:
             from looplab.agents.agent import loop_opts_from_settings
-            opts = loop_opts_from_settings(getattr(self._e, "settings", None))
+            opts = LoopOptions.coerce(loop_opts_from_settings(getattr(self._e, "settings", None)))
         except Exception:  # noqa: BLE001
-            opts = {}
-        opts["max_turns"] = 15
-        return opts
+            opts = LoopOptions()
+        return opts.replace(max_turns=15)
 
     def reflect_lessons(self, final: RunState, best, fp: list) -> list:
         """LLM reflection over the whole run → 1-3 GENERALIZABLE lessons (transferable good/bad
