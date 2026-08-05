@@ -272,7 +272,7 @@ missing model to degrade into a false success. On a **wrap-up-only** entry point
 instead of refusing and the wrap-up proceeds:
 
 ```
-⚠ LLM endpoint unreachable while wrapping up: the default target (deepseek-v4-flash at http://…): …
+⚠ LLM endpoint unusable while wrapping up: [unreachable] the default target (deepseek-v4-flash at …)
   This run is over, so no proposal can degrade — wrapping it up anyway. What the missing model costs:
     · end-of-run report → the placeholder "(report unavailable)", not the written report
     · cross-run lessons, skills and curation → nothing the model would have authored; …

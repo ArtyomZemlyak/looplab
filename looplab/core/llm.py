@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import math
 import os
 import sys
@@ -59,15 +60,22 @@ from looplab.core.parse import split_think  # noqa: F401  (also a re-export)
 # (`looplab.core.llm_streaming._X`). `tests/test_llm_reexport_seam.py` enumerates which names are
 # affected and fails if a new one appears without this note being true of it.
 from looplab.core.llm_transient import (  # noqa: F401
-    BACKOFF_CAP_S, RETRY_AFTER_CAP_S, _REASONING_REJECT_KEYS, _backoff, _err_body,
-    _is_reasoning_reject, _is_stream_options_reject, _is_throttle_403, _retry_after_of,
-    _retry_after_seconds, _sdk_transient)
+    BACKOFF_CAP_S, LLM_FAILURE_CAUSES, RETRY_AFTER_CAP_S, _REASONING_REJECT_KEYS, _backoff,
+    _err_body, _is_reasoning_reject, _is_stream_options_reject, _is_throttle_403,
+    _retry_after_of, _retry_after_seconds, _sdk_transient, classify_llm_failure)
 from looplab.core.llm_streaming import (  # noqa: F401
     _chunk_has_content, _shutdown_pool_sockets, _stream_raw_socket, _stream_with_idle_guard)
 from looplab.core.llm_toolcall import (  # noqa: F401
     _ANSWER_FIELDS, _CODE_SPAN_RE, _FINAL_NAMES, _NATIVE_INVOKE_RE, _NATIVE_OPEN_RE,
     _NATIVE_PARAM_RE, _apply_native_tool_calls, _args_complete, _assistant_text, _clean_thinking,
     _code_spans, _extract_native_tool_calls, _reasoning_of, _tool_call_slot)
+
+# Narration for the one thing this module does that takes visible wall-clock time without saying so:
+# the 429/5xx backoff (`_policy_throttled`). WARNING because that is the level logging's `lastResort`
+# handler emits, so it reaches stderr in a CLI run that configured no logging at all — the same
+# reasoning, for the same "silent wait reads as a deadlock" failure, as
+# `engine/resources.py::_note_gpu_host_lease_contention`.
+_LOG = logging.getLogger(__name__)
 
 # Named stream/timeout constants (previously inline magic numbers). Their retry/backoff siblings
 # (BACKOFF_CAP_S / RETRY_AFTER_CAP_S) live in `llm_transient` and are re-imported above.
@@ -417,7 +425,8 @@ class OpenAICompatibleClient:
                  guided_json: bool = False, reasoning: Optional[dict] = None,
                  stream: bool = True, cache: bool = False,
                  header_timeout: Optional[float] = None, trust_env: bool = False,
-                 max_retries: int = 8, wall_timeout: Optional[float] = None):
+                 max_retries: int = 8, wall_timeout: Optional[float] = None,
+                 retry_after_cap: Optional[float] = None):
         # The live transport needs the openai SDK + httpx. They are declared deps, but the module
         # import is guarded (offline/replay import-safety), so fail with a clear, actionable message
         # here rather than an opaque `NoneType has no attribute 'OpenAI'` if someone stripped them.
@@ -439,6 +448,21 @@ class OpenAICompatibleClient:
         # Optional whole-attempt guard for short, non-streaming probes. Ordinary generation keeps
         # the historical timeout+header+cleanup window; streaming remains governed by its idle guards.
         self.wall_timeout = wall_timeout
+        # The largest SERVER-DIRECTED wait (`Retry-After`) this client will absorb, for a caller that
+        # has its own wall-clock budget. `None` = the historical behaviour: clamp every directive to
+        # the module-wide RETRY_AFTER_CAP_S and sleep it. When SET, a directive above the cap ends the
+        # retries instead of being clamped — the same "refuse out-of-range rather than clamp" rule
+        # `engine/widths.py` settles concurrency widths by, and for the same reason. Clamping a budget
+        # is silent: the endpoint preflight advertises a 60 s bound and, measured against the team
+        # endpoint's real `Retry-After: 60`, sat SILENT for 121.4 s (2 retries x 60 s) before refusing.
+        # Sleeping through a reset window also buys nothing at a preflight — a rate limit that is
+        # minutes wide is the ANSWER, not a blip to ride out, and the refusal quotes the server's own
+        # number so the operator learns the wait instead of serving it.
+        if retry_after_cap is not None:
+            retry_after_cap = float(retry_after_cap)
+            if not math.isfinite(retry_after_cap) or retry_after_cap <= 0:
+                raise ValueError("retry_after_cap must be a positive finite number")
+        self._retry_after_cap = retry_after_cap
         # `header_timeout` bounds the TCP/TLS CONNECT (httpx `connect=`, see `_new_sdk`), so a connection
         # that never ESTABLISHES fails over fast instead of waiting the full idle `timeout`. It ALSO bounds
         # the wait for HTTP response HEADERS on the STREAM path: `create(stream=True)` runs under a wall-
@@ -925,7 +949,30 @@ class OpenAICompatibleClient:
             # negative value, or an HTTP-date already in the PAST (clock skew) yields ra==0.0 —
             # honoring that would sleep(0) and burn every retry in milliseconds, defeating the
             # 429/5xx backoff entirely. Treat a non-positive directive as "unusable" → backoff.
-            time.sleep(min(ra, RETRY_AFTER_CAP_S) if ra else _backoff(attempt))
+            delay = min(ra, RETRY_AFTER_CAP_S) if ra else _backoff(attempt)
+            if self._retry_after_cap is not None and delay > self._retry_after_cap:
+                # A caller that declared a budget gets a refusal rather than a clamp (see the
+                # constructor). Name the number the SERVER asked for, not the clamped one: that is
+                # the wait the operator actually faces, and it is the whole content of the answer.
+                # `ra` decides the wording because the same branch also catches our OWN backoff once
+                # it grows past a small cap (`_backoff(3)` is already 16 s), and claiming the
+                # endpoint asked for a delay we chose would be a lie the operator cannot check.
+                whose = ("the endpoint asked us to wait" if ra else
+                         "the next backoff before re-asking would be")
+                raise LLMError(
+                    f"LLM request to {self.base_url} failed: {exc} — {whose} {delay:.0f}s, longer "
+                    f"than this call's {self._retry_after_cap:.0f}s retry budget, so it was not "
+                    f"waited out") from exc
+            # This wait used to be TOTALLY silent, which is indistinguishable from a hang — the same
+            # failure the GPU host-lease notice was added for. WARNING so it reaches stderr through
+            # logging's `lastResort` handler in a CLI run that configured no logging at all.
+            _LOG.warning(
+                "%s answered HTTP %s (%s) — waiting %.0fs before attempt %d of %d. %s The endpoint "
+                "is up; nothing is stuck.", self.base_url, getattr(exc, "status_code", "?"),
+                classify_llm_failure(exc), delay, attempt + 2, self._max_retries + 1,
+                "That is the wait the endpoint itself asked for (Retry-After)." if ra else
+                "Our own exponential backoff; the endpoint sent no Retry-After.")
+            time.sleep(delay)
             return False
         raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
 
@@ -1904,6 +1951,7 @@ def make_llm_client(settings, *, model: str | None = None,
                     stream: bool | None = None,
                     disable_reasoning: bool = False,
                     wall_timeout: float | None = None,
+                    retry_after_cap: float | None = None,
                     cache: bool | None = None) -> OpenAICompatibleClient:
     """The one Settings -> live client factory (used by cli, serve, adapters and the agent loop).
     Historically lived in adapters/tasks.py — the only reason `agents` ever imported `adapters` —
@@ -1936,6 +1984,8 @@ def make_llm_client(settings, *, model: str | None = None,
         extra["max_retries"] = max_retries
     if wall_timeout is not None:
         extra["wall_timeout"] = wall_timeout
+    if retry_after_cap is not None:
+        extra["retry_after_cap"] = retry_after_cap
     return OpenAICompatibleClient(
         model=mdl, base_url=endpoint, api_key=key,
         temperature=(temperature if temperature is not None else settings.llm_temperature),

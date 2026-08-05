@@ -90,8 +90,11 @@ export LOOPLAB_LLM_MODEL=qwen3:8b
 ```
 
 From here on you can drop `--backend toy`. LoopLab probes each configured endpoint once before a run
-starts and refuses the run outright if it is unreachable, rather than degrading to empty fallback
-proposals that report success — see [endpoint preflight](llm-and-agents.md#endpoint-preflight-before-a-run-starts).
+starts and refuses the run outright if it will not serve — rather than degrading to empty fallback
+proposals that report success. The refusal names *which* of six causes it measured (`[unreachable]`,
+`[throttled]`, `[credential]`, `[model]`, …) and prints only the remedies that can reach that one, so
+a rate-limited endpoint is never diagnosed as an absent one — see
+[endpoint preflight](llm-and-agents.md#endpoint-preflight-before-a-run-starts).
 
 See [LLM & coding agents](llm-and-agents.md) for hosted models, per-role models, and delegating the
 Developer to an external coding agent.
