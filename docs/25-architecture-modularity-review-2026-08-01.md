@@ -6926,7 +6926,14 @@ would have had to pick a winner for each:
   bar) and **read at none** — no `.lastError` read exists in `ui/src`, it is in neither component's
   markup, and `saveCommandTransport` builds its payload field-by-field so it never reaches storage
   either (`commandLifecycle.test.js` pins exactly that). Left as found; deleting dead state is a
-  different diff.
+  different diff — and, on inspection at merge, a diff that would COST something. The pin in question
+  is `test_strict storage persists no server free text, raw lastError, payload, or JSON-like secret`,
+  which asserts `raw.includes('lastError') === false`: it is a secret-leak guard, and `lastError` is
+  where a raw provider/transport message lands before the storage layer drops it. Deleting the field
+  would make that assertion pass because the NAME no longer exists anywhere, i.e. turn a security pin
+  vacuous. The dead state is what keeps it honest. Removing it is therefore only correct together
+  with re-stating the storage rule generally — no unknown free-text field reaches storage — rather
+  than naming this one, and that is the diff, not a deletion.
 * `acceptTransportRecord` vs `acceptDirectRecord` — when the post-accept persist fails, Dock escalates
   to `protocolInvalid` (`canResubmit: false`, only Dismiss clears it) while the Assistant degrades to
   `observationKind: 'transport'` (still checkable). Both are defensible; merging silently picks one.
