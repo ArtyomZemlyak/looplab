@@ -41,6 +41,37 @@ test('timeline narration stays renderable for malformed and forward-compatible e
     assert.equal(eventNarration({ type: 'train_monitor_alert', data: {
       node_id: 3, status: 'broken', reason: 'loss diverged', confidence: 0.9,
     } }), 'training monitor: #3 looks broken — loss diverged (90% conf)')
+    // A verdict is about ONE eval phase. Only `training` may kill; a `work` stage's verdict is
+    // advisory, and rendering it as "the training looks broken" asserted something false about a node
+    // still in data_prep. `log_role`/`stage` are additive — the row above (written before they
+    // existed) must keep its exact historical wording.
+    assert.equal(eventNarration({ type: 'train_monitor_alert', data: {
+      node_id: 3, status: 'broken', reason: 'loss stuck at 0.6931', confidence: 0.9,
+      log_role: 'work', stage: 'data_prep',
+    } }), 'training monitor: #3 stage data_prep looks broken (advisory) — loss stuck at 0.6931 (90% conf)')
+    assert.equal(eventNarration({ type: 'train_monitor_alert', data: {
+      node_id: 3, status: 'watch', log_role: 'training',
+    } }), 'training monitor: #3 looks watch')
+    // asha_verdict records a DECISION (`stop_decided`) and a CLAIM (`kill`) separately, because they
+    // differ whenever the sibling training monitor wins the race. Branching on `kill` alone rendered a
+    // real superseded stop as `ASHA judge: #0 keep running (stop)` — the comment above the renderer
+    // said "render the decision, not just the flag" while doing the opposite.
+    assert.equal(eventNarration({ type: 'asha_verdict', data: {
+      node_id: 0, status: 'stop', stop_decided: true, kill: false,
+      kill_superseded_by: 'monitor_broken', confidence: 0.9,
+    } }), 'ASHA judge: #0 STOP decided — superseded by monitor_broken (90% conf)')
+    assert.equal(eventNarration({ type: 'asha_verdict', data: {
+      node_id: 0, status: 'stop', stop_decided: true, kill: true, confidence: 0.9,
+    } }), 'ASHA judge: #0 STOP decided — early-kill claimed (90% conf)')
+    // The COMMON row: the rank test fired and the judge kept the run alive.
+    assert.equal(eventNarration({ type: 'asha_verdict', data: {
+      node_id: 0, status: 'watch', stop_decided: false, kill: false,
+    } }), 'ASHA judge: #0 keep running (watch)')
+    assert.equal(eventNarration({ type: 'asha_verdict', data: { node_id: 0, stop_decided: false } }),
+      'ASHA judge: #0 keep running (unavailable)')
+    // A legacy row carries no `stop_decided`; it falls back to the flag it does have.
+    assert.equal(eventNarration({ type: 'asha_verdict', data: { node_id: 0, kill: true } }),
+      'ASHA judge: #0 STOP decided — early-kill claimed')
     assert.equal(eventNarration({ type: 'asha_rank', data: {
       node_id: 3, intermediate: 0.42, quantile: 0.5, population: 4,
     } }), 'ASHA: #3 0.42 endpoint rank warning')

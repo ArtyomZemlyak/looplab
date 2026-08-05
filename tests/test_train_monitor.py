@@ -283,12 +283,18 @@ class _FakeStore:
 _MONITOR_SETTLE_TIMEOUT_S = 15.0
 
 
-# The stage plan these workdirs correspond to: they all write `train.log`, which in a resolved
-# pipeline is a work stage (the engine's protected `score` scorer is always appended last). Kill
-# authority requires an IDENTIFIED training stage, so any test asserting about the kill must say which
-# pipeline it is running — a bare `*.log` could be a scorer's or a pip install's.
-_TRAIN_PLAN = _tm.eval_log_plan([{"name": "train", "command": ["python", "train.py"]},
-                                 {"name": "score", "command": ["python", "score.py"]}])
+# The stage plan these workdirs correspond to: they all write `train.log`. Kill authority requires a
+# log the plan can PROVE is the run's own training, which `eval_log_plan` grants only to a log that is
+# the WHOLE eval — the single-command `eval.log`, or (as here) a ONE-stage pipeline. So any test
+# asserting about the kill must say which pipeline it is running: a bare `*.log` could be a scorer's,
+# a pip install's, or some intermediate `data_prep` stage's.
+_TRAIN_PLAN = _tm.eval_log_plan([{"name": "train", "command": ["python", "train.py"]}])
+# The MULTI-stage shape (the Developer manifest plus the engine's always-appended protected scorer).
+# `train.log` here is `LOG_ROLE_WORK`: read and judged exactly as before, but ADVISORY — nothing in the
+# resolved pipeline proves which of its work stages is the training step. See `eval_log_plan`.
+_PIPELINE_PLAN = _tm.eval_log_plan([{"name": "data_prep", "command": ["python", "prep.py"]},
+                                    {"name": "train", "command": ["python", "train.py"]},
+                                    {"name": "score", "command": ["python", "score.py"]}])
 
 
 def _run_verdict_monitor(tmp_path, *, workdir, developer, hold_s=0.22, redact=None,

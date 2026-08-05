@@ -582,7 +582,11 @@ class AshaMonitorMixin:
         `log_plan` (from `train_monitor.eval_log_plan`) confines the read to the stage logs that carry
         the LIVE curve: the dep install writes no metrics, and the final scorer's log carries the run's
         FINAL value, which is not an intermediate and must never be ranked against sibling mid-training
-        checkpoints."""
+        checkpoints. That scorer is identified STRUCTURALLY (the last stage of the pipeline — where
+        `command_eval` reads the metric), not by the name `score`, so an operator pipeline whose final
+        stage is spelled `Score` is excluded here too; the plan's advisory/kill split
+        (`LOG_ROLE_WORK` vs `LOG_ROLE_TRAINING`) is the TRAINING monitor's concern and does not narrow
+        what this watchdog may read — a work stage is exactly where the live curve is printed."""
         # Local: `evaluate` imports this module, so a module-level import would be a cycle.
         from looplab.engine.evaluate import _watch_limiter
         import anyio

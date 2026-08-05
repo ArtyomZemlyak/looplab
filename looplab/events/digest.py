@@ -302,7 +302,7 @@ def watchdog_reflection(events, max_shown: int = 2, *, state: RunState | None = 
     byte-identical when off or quiet. Pure; extracted here so `tests/test_signal_delivery.py` exercises
     it directly."""
     from looplab.events.replay import fold
-    from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
+    from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT, LOG_ROLE_TRAINING
 
     rows = list(events or ())
     # proposal generation already owns the fold that selected this action. Reuse it instead
@@ -378,7 +378,19 @@ def watchdog_reflection(events, max_shown: int = 2, *, state: RunState | None = 
             status = str(m.get("status") or "flagged")
             reason = " ".join(str(m.get("reason") or "").split())[:120]    # reason is redacted at source
             conf = m.get("confidence")
-            seg = f"training flagged {status}"
+            # WHAT the verdict was about. `log_role`/`stage` are additive fields the training monitor
+            # stamps on every alert (see EV_TRAIN_MONITOR_ALERT in events/types.py); rows written
+            # before them carry neither, and those keep the historical "training flagged ..." wording
+            # byte-identically. Naming the stage matters because a non-training role (`work`) means the
+            # verdict is ADVISORY about some pipeline step — narrating it as "training flagged broken"
+            # asserted something false to the next proposer about a node still in `data_prep`.
+            role = str(m.get("log_role") or "").strip().lower()
+            stage = " ".join(str(m.get("stage") or "").split())[:64]
+            if role and role != LOG_ROLE_TRAINING:
+                seg = (f"stage '{stage}' flagged {status}" if stage
+                       else f"a non-training eval phase flagged {status}")
+            else:
+                seg = f"training flagged {status}"
             if reason:
                 seg += f" ({reason})"
             if isinstance(conf, (int, float)) and not isinstance(conf, bool):

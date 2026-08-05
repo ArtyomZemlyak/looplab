@@ -161,16 +161,30 @@ const NARR = {
   log_repaired: (d) => `event log repaired${d.dropped_lines != null ? ` — dropped ${d.dropped_lines} corrupt line${d.dropped_lines === 1 ? '' : 's'}, kept ${d.good_records ?? '?'}` : ' at divergence'}`,
   stage_finished: (d) => `stage ${d.name || d.stage || '?'} ${d.status === 'ok' || d.status === 'passed' || d.ok === true ? '✓' : (d.status || 'finished')}${d.node_id != null ? ` (#${d.node_id})` : ''}`,
   lessons_reconciled: (d) => `lessons reconciled${d.n_retired != null || d.n_added != null ? ` — ${d.n_retired || 0} retired, ${d.n_added || 0} re-derived` : ''}`,
-  train_monitor_alert: (d) => `training monitor: #${d.node_id} looks ${d.status}${d.reason ? ' — ' + String(d.reason).slice(0, 90) : ''}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}`,
+  // The verdict is about ONE eval phase, and saying so is the difference between "the training is
+  // broken" and "the data_prep stage printed something odd". `log_role`/`stage` are additive (rows
+  // predating them render exactly as before); only `training` may have killed anything.
+  train_monitor_alert: (d) => `training monitor: #${d.node_id} ${d.log_role && d.log_role !== 'training'
+    ? `${d.stage ? `stage ${d.stage}` : 'a non-training phase'} looks ${d.status} (advisory)`
+    : `looks ${d.status}`}${d.reason ? ' — ' + String(d.reason).slice(0, 90) : ''}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}`,
   // asha_rank carries RECOVERY edges too — asha_monitor publishes both precisely so projections can
   // CLEAR the flag — so ignoring `d.underperforming` rendered a recovery as another warning.
   asha_rank: (d) => `ASHA: #${d.node_id} ${fmt(d.intermediate)} ${d.underperforming === false
     ? 'rank recovered'
     : `${d.endpoint_underperforming === false ? 'same-resource' : 'endpoint'} rank warning`}`,
   // asha_verdict is the STOP DECISION taken over a persistent rank flag — the rank test is only the
-  // evidence. The COMMON row is a judge that kept the run alive (kill=false), so render the decision,
-  // not just the flag; `unavailable` means nobody answered (no client / capped), which never kills.
-  asha_verdict: (d) => `ASHA judge: #${d.node_id} ${d.kill ? 'STOP — early kill' : `keep running (${d.status || 'unavailable'})`}${d.reason ? ' — ' + String(d.reason).slice(0, 90) : ''}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}`,
+  // evidence. The COMMON row is a judge that kept the run alive, so render the DECISION (`stop_decided`)
+  // and the CLAIM (`kill`) separately, which is what the row actually records: branching on `d.kill`
+  // alone printed a superseded stop as `keep running (stop)`. Neither bit says the node stopped —
+  // `_evaluate` reaches its kill branch only after a reset/abort/usable-result pre-emption — so the
+  // wording stays "claimed", and the node's own terminal remains the authority. `unavailable` means
+  // nobody answered (no client / capped), which never kills. Legacy rows carry no `stop_decided`, so
+  // they fall back to the flag they do have.
+  asha_verdict: (d) => `ASHA judge: #${d.node_id} ${(d.stop_decided ?? d.kill) === true
+    ? (d.kill === false
+      ? `STOP decided — superseded by ${d.kill_superseded_by || 'another watchdog'}`
+      : 'STOP decided — early-kill claimed')
+    : `keep running (${d.status || 'unavailable'})`}${d.reason ? ' — ' + String(d.reason).slice(0, 90) : ''}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}`,
   restart: () => 'run restart requested (pause-and-resume handoff)',
 }
 

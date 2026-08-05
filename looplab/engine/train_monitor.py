@@ -40,6 +40,19 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 from looplab.core.llm_broker import in_llm_lane
+# The log-role vocabulary is stamped on the DURABLE `EV_TRAIN_MONITOR_ALERT` row, so it lives in
+# `events/types.py` where readers below the engine (`events/digest.py`'s `watchdog_reflection`) can
+# name a role without importing the engine (layering: `events` imports only `core`). Imported here
+# and re-exported, because `train_monitor.LOG_ROLE_*` is the spelling engine code and tests use.
+# `events.types` imports nothing, so this module-level import cannot become a cycle.
+from looplab.events.types import (
+    LOG_ROLE_AMBIGUOUS,
+    LOG_ROLE_SCORE,
+    LOG_ROLE_SETUP,
+    LOG_ROLE_TRAINING,
+    LOG_ROLE_UNKNOWN,
+    LOG_ROLE_WORK,
+)
 
 # The verdict schema the log observer returns. `status` drives everything downstream: a non-"healthy"
 # verdict becomes an EV_TRAIN_MONITOR_ALERT (Phase 1) and, later, a gated early kill (Phase 3, "broken"
@@ -109,8 +122,20 @@ _MONITOR_CADENCE_CAP_S = 3600.0     # never wait more than an hour between check
 _MAX_MONITOR_LLM_CALLS = 200
 
 # Phase 3 confirmation window. A kill needs this many CONSECUTIVE confident `broken` verdicts about the
-# SAME stage log; anything else (a 'watch'/'healthy' tick, a switch to another stage's log) re-arms it
-# from zero. The sibling ASHA watchdog will not stop a node on one observation either — it wants a grace
+# SAME stage log. EVERYTHING else re-arms the gate from zero, and the list below is exhaustive on
+# purpose — the previous wording said "anything else" while the code only ever touched the streak
+# inside `if verdict is not None`, so a tick the model ANSWERED but whose answer did not validate left
+# the arm standing:
+#   • a parseable 'watch'/'healthy' verdict;
+#   • a switch to another stage's log (`armed_key`);
+#   • a tick that produced NO parseable verdict — an endpoint failure, model output that fails schema
+#     validation, or the per-node LLM cap. That second case was the commit's own cited mitigation:
+#     told the stage was a scorer, `deepseek-v4-flash` answers `unknown`, which is not in
+#     `TrainingVerdict.status`'s `Literal[healthy|watch|broken]`, so `parse_structured` returns None.
+#     The model DECLINING to confirm must not read the same as never having been asked. Reproduced:
+#     arm, six `unknown` ticks, one `broken` -> killed;
+#   • the arm outliving `_MONITOR_ARM_TTL_S` or spending `_MONITOR_ARM_MAX_LOOKS` (below).
+# The sibling ASHA watchdog will not stop a node on one observation either — it wants a grace
 # window, a min-siblings floor and an LLM judge — and the loss here is the same multi-hour training with
 # no repair and no retry, so one sampled verdict must not be the whole gate. Deliberately small: the
 # watchdog's whole point is to catch a wasted run EARLY, and a second look costs one extra cadence.
@@ -118,20 +143,48 @@ _MONITOR_KILL_CONFIRM_TICKS = 2
 # The confirmation look is scheduled SOONER than the ordinary cadence (which is up to 30 min on a long
 # budget) so arming the gate delays a real kill by seconds, not by another full watch interval.
 _MONITOR_CONFIRM_DELAY_S = 30.0
+# BOUNDS ON THE ARM. The arming tick bypasses the changed-digest gate so "diverged, then stopped
+# printing" cannot survive by saying nothing — but that bypass held for as long as the arm did, and the
+# arm had no bound at all. On a frozen log with a dead endpoint the monitor issued one billable call per
+# cadence, every one carrying a BYTE-IDENTICAL prompt, until `_MAX_MONITOR_LLM_CALLS` (~100 minutes of
+# re-asking the same question; measured: 25 calls, 1 distinct prompt, log bytes unchanged). Two
+# independent bounds, both of which simply disarm:
+#   • looks: the bypass buys exactly ONE re-ask of an unchanged digest. A second identical prompt is
+#     not additional evidence — the confirmation defends against sampling noise, and on a frozen log
+#     there is no new sample to take. A tick that DOES see new bytes was never a bypass, so a live log
+#     is unaffected;
+#   • wall clock: an arm older than this is stale regardless of why, so a slow or hanging endpoint
+#     cannot leave a kill primed indefinitely. Sized well above one confirmation delay plus a full
+#     provider timeout, and far below the runaway.
+_MONITOR_ARM_MAX_LOOKS = 1
+_MONITOR_ARM_TTL_S = 300.0
+# The SAME digest is re-asked at most this many times before it is retired as judged. `last_digest` is
+# deliberately committed only when a verdict parses (a transient endpoint failure must not permanently
+# skip judging the current digest — for a slow-logging stage that is a long window to be blind in), but
+# "only on success" and "forever" are different promises: against an endpoint that never answers, an
+# unchanged log was re-sent every cadence. After this many failures the digest is retired and the
+# monitor goes quiet until the log actually changes, which is the pre-arm behaviour it was protecting.
+_MONITOR_SAME_DIGEST_RETRIES = 2
 
 # Which eval phase a log belongs to. The eval writes one log per phase into the node workdir
 # (`runtime/command_eval.py`): `setup.log` for the dep install, `<stage>.log` for every resolved
 # pipeline stage, and `eval.log` for the single-command path. Those three shapes are the WHOLE naming
 # contract, and these roles say which of them a TRAINING-health verdict may be formed about at all
 # (see `eval_log_plan` / `resolve_stage_log`, and the `log_role` conjunct of `should_monitor_kill`).
-LOG_ROLE_TRAINING = "training"   # the candidate's own work stage — the thing this watchdog judges
-LOG_ROLE_SETUP = "setup"         # pip/dep install: no loss trajectory exists yet, by construction
-LOG_ROLE_SCORE = "score"         # the engine-appended protected scorer: training already FINISHED
-LOG_ROLE_UNKNOWN = "unknown"     # no plan available / a log the plan cannot name — advisory only
-# Roles a training-health prompt can say nothing useful about. Feeding one of these to the judge is not
-# merely low-value: a short CPU-only scorer that prints framework warnings and has no loss trajectory
-# hits three separate clauses of `TrainingVerdict.status`'s `broken` contract at once.
-_NON_TRAINING_ROLES = frozenset({LOG_ROLE_SETUP, LOG_ROLE_SCORE})
+# The vocabulary itself is defined in `events/types.py` and imported at the top of this module (see
+# the note there); only what each role MEANS to this watchdog is decided here.
+#
+# Roles a training-health prompt can say nothing useful about, so they produce no tick at all. Feeding
+# one of these to the judge is not merely low-value: a short CPU-only scorer that prints framework
+# warnings and has no loss trajectory hits three separate clauses of `TrainingVerdict.status`'s
+# `broken` contract at once. `LOG_ROLE_AMBIGUOUS` joins them because a filename with two possible
+# writers cannot be attributed at all (see `eval_log_plan`), and "we do not know whose bytes these
+# are" is the same answer as "these are not training bytes" for a prompt that must name evidence.
+_NON_TRAINING_ROLES = frozenset({LOG_ROLE_SETUP, LOG_ROLE_SCORE, LOG_ROLE_AMBIGUOUS})
+# The ONLY role that may end a node. A set, so the kill conjunct reads as membership rather than an
+# equality that silently widens when a role is added: `LOG_ROLE_WORK` is judged like training but is
+# deliberately NOT here.
+_KILL_ELIGIBLE_ROLES = frozenset({LOG_ROLE_TRAINING})
 
 
 def next_monitor_sleep(base: float, *, status: Optional[str] = None,
@@ -179,21 +232,24 @@ def should_monitor_kill(verdict: Optional["TrainingVerdict"], *, enabled: bool, 
     - `enabled`: the opt-in (`train_monitor_kill`).
     - a `broken` verdict at confidence >= `threshold`. The prompt makes a slow/plateauing-but-progressing
       run 'watch', never 'broken'; 'watch'/'healthy' stay advisory.
-    - `log_role` is `LOG_ROLE_TRAINING`: the tail came from a stage that can HAVE training health. A
-      verdict about `setup.log`, the protected scorer, or a log nothing could attribute (`
-      LOG_ROLE_UNKNOWN`, the default) is advisory evidence and never authority — the monitor must not
-      act on a stage it cannot identify.
+    - `log_role` is in `_KILL_ELIGIBLE_ROLES`, i.e. `LOG_ROLE_TRAINING`: the tail is provably the run's
+      own training (`eval_log_plan` grants that role only to a log that is the WHOLE eval). A verdict
+      about `setup.log`, the pipeline's scorer, an unattributable filename, a pipeline WORK stage
+      (`LOG_ROLE_WORK` — judged, but the plan cannot prove it is the training step) or a log nothing
+      could attribute at all (`LOG_ROLE_UNKNOWN`, the default) is advisory evidence and never
+      authority — the monitor must not act on a stage it cannot identify.
     - `broken_streak >= confirm_ticks`: the verdict has been REPEATED. One confident tick used to be the
       whole gate, which is out of step with every sibling control in this family — the ASHA watchdog
       needs a grace window, a min-siblings floor AND an LLM judge before it may stop a node, and the
       cost of being wrong here is identical (a multi-hour training discarded with no repair, no retry
       and no refund of its `max_nodes` slot). `confirm_ticks=1` restores single-tick behaviour for a
       caller that wants it; 0 or less cannot disable the requirement, because `broken_streak` counts
-      the current tick and is therefore always >= 1 at a real call site.
+      the current tick and is therefore always >= 1 at a real call site. What COUNTS toward that
+      streak is the caller's business and is spelled out on `_MONITOR_KILL_CONFIRM_TICKS`.
     """
     if not enabled or verdict is None or verdict.status != "broken":
         return False
-    if log_role != LOG_ROLE_TRAINING:
+    if log_role not in _KILL_ELIGIBLE_ROLES:
         return False
     try:
         needed = int(confirm_ticks)
@@ -270,13 +326,38 @@ _SINGLE_COMMAND_LOG = "eval.log"
 # `score` is RESERVED for the engine-appended protected scoring stage (`engine/eval_stages.py`
 # appends it to every Developer manifest, and `command_eval.validate_stages(reserved=("score",))`
 # refuses it to the agent). An operator-declared pipeline MAY own the name, and there it means the
-# same thing — so an exact `score` match is an unambiguous "this stage is the scorer, not training".
-_SCORE_STAGE = "score"
+# same thing. This is a BACKSTOP, not the primary test — the structural "last stage" rule in
+# `_is_scorer_stage` is — and it is spelled to match `validate_stages` EXACTLY: that validator refuses
+# the name case-INSENSITIVELY (`nm.lower() in reserved`), so anything it would have refused to the
+# agent must read as "scorer" here too. Comparing `name == "score"` instead was live on every platform
+# we run (`os.path.normcase` is identity outside Windows): two byte-identical runs differing only in
+# capitalisation ended `node_evaluated metric=0.7` and `node_failed monitor_broken` — an operator
+# pipeline spelled `Score` handed a scorer's tail to a training-health judge holding kill authority.
+_RESERVED_SCORER_NAMES = frozenset({"score"})
 
 
 def _log_name_key(name: str) -> str:
     """Case-folded log basename, matching `_log_path_key`'s Windows handling."""
     return os.path.normcase(str(name))
+
+
+def _is_scorer_stage(name: str, *, index: int, total: int) -> bool:
+    """Whether a resolved pipeline stage is the SCORER — structurally first, by name only as a backstop.
+
+    STRUCTURAL: `command_eval.run_command`'s staged branch states the contract verbatim — "The LAST
+    stage's stdout carries the metric" — and that stage's output is the only one `read_metric` reads.
+    It holds for BOTH shapes `_resolve_stages` produces: the engine appends its protected `score`
+    stage last to a Developer manifest, and an operator-declared pipeline scores in its own final
+    stage. So POSITION, not spelling, is what the engine actually knows. `total == 1` is excluded
+    because a one-stage pipeline is the single-command shape wearing a stage name: that one command
+    both trains and scores, exactly like `eval.log`.
+
+    NAME: any spelling `command_eval.validate_stages` would have RESERVED (case-folded `score`) also
+    reads as the scorer wherever it appears, so a mid-pipeline stage the agent could never have been
+    allowed to name cannot acquire training authority by sitting in an operator's list."""
+    if total > 1 and index == total - 1:
+        return True
+    return str(name).strip().lower() in _RESERVED_SCORER_NAMES
 
 
 @dataclass(frozen=True)
@@ -299,20 +380,71 @@ def eval_log_plan(stages) -> EvalLogPlan:
     single-command eval (whose one command trains AND scores in one process — see the
     `command_eval.py` comment on that branch — so its `eval.log` IS a training log).
 
-    Every stage except the protected `score` scorer is a work stage, which is exactly the set
-    `command_eval` already treats as "where TRAINING runs" (it enables the divergence `health_check`
-    for declared stages and disables it for the short scorer `cmd`). A stage that shadows `setup.log`
-    wins the name over the dep install, because its output is what actually lands in that file.
+    WHICH STAGES MAY KILL. Only `LOG_ROLE_TRAINING` carries kill authority, and this plan grants it
+    only where the log is PROVABLY the run's own training:
+
+    - the single-command `eval.log`, and a ONE-stage pipeline (the same shape wearing a stage name):
+      that command is the whole eval, so there is nothing else its output could be. `command_eval`
+      says as much on that branch — "A single-command RepoTask eval IS the training (train->eval in
+      one process, often multi-hour)" — and it is also the only path the runtime leaves WITHOUT its
+      own deterministic divergence kill (`health_check=True` is passed for every declared stage and
+      omitted here), so the LLM watchdog is that path's only early stop;
+    - every other pipeline stage is `LOG_ROLE_WORK`: still read, still judged, still alerting — but
+      ADVISORY.
+
+    That last line is the substantive narrowing, and it is deliberate. The previous rule — "every
+    stage whose name is not the exact string `score` is training" — was justified in this docstring by
+    a claim about `command_eval` that is false for the staged path: `run_argv` is called with
+    `health_check=True` for EVERY declared stage, the appended scorer included, so the runtime draws
+    no train/not-train line there at all. Nothing else draws one either: `validate_stages` accepts any
+    filesystem-safe slug, the manifest carries no role field, and the appended `score` stage is the
+    operator's `cmd` — which the operator is explicitly invited to point at an entrypoint "the agent
+    must BUILD", i.e. one that may itself train. So a pipeline's work stages cannot even be argued to
+    CONTAIN the training by elimination.
+
+    Measured, not theorised: driving the real `_evaluate` over `data_prep -> train -> score` with a
+    `data_prep` stage printing framework warnings, `CUDA not available - falling back to CPU` and a
+    flat `loss: 0.6931`, `deepseek-v4-flash` answered `broken` at confidence 0.9 — while being told,
+    in the prompt, that it was looking at stage `data_prep` of that pipeline, and it armed the kill
+    gate. The stage identity is a mitigation, not a guarantee, so a stage the plan cannot PROVE is
+    training must not hold the authority to discard a multi-hour run with no repair, no retry and no
+    refunded `max_nodes` slot. A `LOG_ROLE_WORK` verdict still reaches the alert row,
+    `watchdog_reflection`, the attention feed and the audit trail — the watchdog keeps its whole
+    advisory job on those stages, only not the gun.
+
+    AMBIGUOUS FILENAMES. A log basename with more than one possible writer cannot be attributed to a
+    phase, so it produces no tick. That is ONE rule covering two real collisions: a pipeline stage
+    named `setup` shadows the dep install's `setup.log` (`command_eval` writes pip output there
+    regardless of any stage), and on Windows two stage names differing only in case fold onto one
+    file. Previously the shadowing stage "won the name" and inherited kill authority over pip output.
     """
-    names = tuple(str(s.get("name")) for s in (stages or [])
+    raw = list(stages or [])
+    names = tuple(str(s.get("name")) for s in raw
                   if isinstance(s, dict) and s.get("name") is not None)
-    roles: dict = {_log_name_key(_SETUP_LOG): (None, LOG_ROLE_SETUP)}
+    # A row this cannot name is a broken resolved pipeline (`_resolve_stages` only ever returns
+    # `validate_stages`-cleaned dicts), and dropping it would RENUMBER the rest: a 3-stage list with
+    # two unusable rows would otherwise collapse to a "one-stage pipeline" and hand the survivor kill
+    # authority. Position-derived SCORE stays (marking more logs unjudged is the safe direction);
+    # only the TRAINING grant is withheld.
+    complete = len(names) == len(raw)
+    roles: dict = {}
+
+    def _claim(key: str, value: tuple) -> None:
+        # A second writer for the same basename -> unattributable, and unattributable is not judged.
+        roles[key] = value if roles.get(key, value) == value else (None, LOG_ROLE_AMBIGUOUS)
+
+    _claim(_log_name_key(_SETUP_LOG), (None, LOG_ROLE_SETUP))
     if names:
-        for name in names:
-            roles[_log_name_key(f"{name}.log")] = (
-                name, LOG_ROLE_SCORE if name == _SCORE_STAGE else LOG_ROLE_TRAINING)
+        for index, name in enumerate(names):
+            if _is_scorer_stage(name, index=index, total=len(names)):
+                role = LOG_ROLE_SCORE
+            elif len(names) == 1 and complete:
+                role = LOG_ROLE_TRAINING     # a one-stage pipeline IS the single-command shape
+            else:
+                role = LOG_ROLE_WORK
+            _claim(_log_name_key(f"{name}.log"), (name, role))
     else:
-        roles[_log_name_key(_SINGLE_COMMAND_LOG)] = (None, LOG_ROLE_TRAINING)
+        _claim(_log_name_key(_SINGLE_COMMAND_LOG), (None, LOG_ROLE_TRAINING))
     return EvalLogPlan(roles=roles, stage_names=names)
 
 
@@ -385,19 +517,34 @@ def monitor_stage_context(resolved: Optional[ActiveStageLog],
     order = " -> ".join(plan.stage_names)
     if resolved.stage in plan.stage_names:
         position = plan.stage_names.index(resolved.stage) + 1
-        return (f"This is the live log of pipeline stage {resolved.stage!r} "
+        line = (f"This is the live log of pipeline stage {resolved.stage!r} "
                 f"(stage {position} of {len(plan.stage_names)}; the pipeline is {order}). "
                 "Judge THIS stage's output only.")
+        if resolved.role == LOG_ROLE_WORK:
+            # A WORK stage is one the plan cannot prove is the training step (see `eval_log_plan`), and
+            # it is exactly where a confident wrong `broken` was measured: a `data_prep` stage printing
+            # framework warnings and a flat loss drew `broken` 0.9 WITH the sentence above present.
+            # The role carries the safety (no kill authority); this only helps the model answer the
+            # right question. Additive — the sentence above is unchanged, and every other attribution
+            # still renders byte-identically to before.
+            line += (" This stage may be data preparation, export or another non-training step rather "
+                     "than the training loop itself; if these lines are not a training run, say that "
+                     "instead of judging them as one.")
+        return line
     return f"This eval runs the pipeline {order}. Judge only the stage output shown below."
 
 
 def active_training_log(workdir, plan: Optional[EvalLogPlan] = None) -> Optional[Path]:
-    """The live log a TRAINING observer may read, or None.
+    """The live log an observer may read, or None.
 
-    A thin role filter over `resolve_stage_log`: `setup.log` (dep install) and the protected `score`
-    stage carry no training signal at all, so they are not returned — a tick during those phases has
-    nothing to observe, exactly like a tick before the first log exists. Without a plan this is the
-    historical freshest-`*.log` answer (see `resolve_stage_log`'s superseded review note).
+    A thin role filter over `resolve_stage_log`, and the filter is READABILITY, never kill authority:
+    `setup.log` (dep install), the pipeline's scorer and an unattributable filename
+    (`_NON_TRAINING_ROLES`) carry no training signal at all, so they are not returned — a tick during
+    those phases has nothing to observe, exactly like a tick before the first log exists. A
+    `LOG_ROLE_WORK` stage IS returned: its verdict is advisory (`should_monitor_kill` is where that is
+    enforced) but it is the candidate's own running code, and it is also where the sibling ASHA
+    watchdog finds the live metric curve. Without a plan this is the historical freshest-`*.log`
+    answer (see `resolve_stage_log`'s superseded review note).
     """
     resolved = resolve_stage_log(workdir, plan)
     if resolved is None or resolved.role in _NON_TRAINING_ROLES:
@@ -632,10 +779,12 @@ class TrainingMonitorMixin:
 
         WHICH log (`log_plan`, from `eval_log_plan`): the monitor lives across the WHOLE eval — setup,
         every stage, the always-appended score stage — so "the freshest `*.log`" is not a synonym for
-        "the training". With a plan it reads only the stage logs that can carry training output and the
-        judge is TOLD which stage it is looking at; `setup.log` and the protected scorer produce no tick
-        at all. Without a plan it keeps the historical freshest-file read but can never kill (see
-        `should_monitor_kill`) — the monitor must not act on a stage it cannot identify.
+        "the training". With a plan it reads only the stage logs that can carry the candidate's own
+        output and the judge is TOLD which stage it is looking at; `setup.log`, the pipeline's scorer
+        and an unattributable filename produce no tick at all. Which of the logs it DOES read may kill
+        is a second, stricter question, answered by `eval_log_plan` (only a log that is the whole eval)
+        and enforced in `should_monitor_kill`. Without a plan it keeps the historical freshest-file
+        read but can never kill — the monitor must not act on a stage it cannot identify.
 
         Advisory (always): every tick with a CHANGED digest emits a `train_monitor` trace span carrying
         the verdict; a NON-healthy verdict additionally appends an EV_TRAIN_MONITOR_ALERT diagnostic event
@@ -685,9 +834,24 @@ class TrainingMonitorMixin:
         llm_calls = 0
         # Phase 3 arming state. `broken_streak` counts CONSECUTIVE confident-broken verdicts about the
         # same stage log; `armed_key` is the log they were about, so a stage change (train.log ->
-        # score.log) can never let two different subjects confirm each other.
+        # score.log) can never let two different subjects confirm each other. `armed_at` is set only
+        # when the KILL GATE actually arms (a broken verdict about a kill-eligible log) and is what
+        # licenses the changed-digest bypass; with `arm_looks` it bounds how long and how expensively
+        # an arm may stand (`_MONITOR_ARM_TTL_S` / `_MONITOR_ARM_MAX_LOOKS`). `disarm()` is the ONE
+        # spelling of "re-arm from zero", so every path listed on `_MONITOR_KILL_CONFIRM_TICKS`
+        # provably resets the same three variables.
         broken_streak = 0
         armed_key: Optional[str] = None
+        armed_at: Optional[float] = None
+        arm_looks = 0
+        # Bounded retry of one unchanged digest whose verdict never parsed (`_MONITOR_SAME_DIGEST_RETRIES`).
+        failed_digest: Optional[str] = None
+        failed_digest_tries = 0
+
+        def disarm() -> None:
+            nonlocal broken_streak, armed_at, arm_looks
+            broken_streak, armed_at, arm_looks = 0, None, 0
+
         while True:
             await anyio.sleep(next_sleep)    # only cancellation (eval finished) unwinds the task, from here
             if cancel.is_set():
@@ -695,10 +859,11 @@ class TrainingMonitorMixin:
             try:
                 def _observe_log():
                     """ONE attributed read per tick, in the worker thread: which stage log is live, and
-                    (only when that stage can HAVE training health) its digested tail. `setup.log` and
-                    the protected scorer return no tail at all — there is nothing for a training-health
-                    prompt to say about a dep install or about a scorer running after the training
-                    already finished, and asking anyway is what produced a confident wrong verdict."""
+                    (only when that phase can carry the candidate's own output) its digested tail.
+                    `setup.log`, the pipeline's scorer and an unattributable filename return no tail at
+                    all — there is nothing for a training-health prompt to say about a dep install or
+                    about a scorer running after the training already finished, and asking anyway is
+                    what produced a confident wrong verdict."""
                     resolved = resolve_stage_log(workdir, log_plan)
                     if resolved is None or resolved.role in _NON_TRAINING_ROLES:
                         return resolved, ""
@@ -709,7 +874,11 @@ class TrainingMonitorMixin:
                 log_role = resolved.role if resolved is not None else LOG_ROLE_UNKNOWN
                 log_key = _log_path_key(resolved.path) if resolved is not None else None
                 if log_key != armed_key:
-                    broken_streak, armed_key = 0, log_key   # a different subject re-arms from zero
+                    armed_key = log_key
+                    disarm()                 # a different subject re-arms from zero
+                elif armed_at is not None and (
+                        anyio.current_time() - armed_at) > _MONITOR_ARM_TTL_S:
+                    disarm()                 # a stale arm is not evidence — see _MONITOR_ARM_TTL_S
                 # KNOWN BLIND SPOT of this changed-digest gate: a HUNG training (process alive, no
                 # new log output) holds the digest constant forever, so the LLM is never consulted
                 # again and the hang is never judged here. The STALL watchdog in `run_argv` is what
@@ -720,8 +889,19 @@ class TrainingMonitorMixin:
                 # the log has gone quiet since. "Diverged, then stopped printing" is precisely the run
                 # the confirmation is meant to end, and skipping it there would turn the confirmation
                 # window into a way for a broken run to survive by saying nothing.
-                if not tail or (tail == last_digest and broken_streak == 0):
-                    continue                 # no live log yet, or nothing new since last tick -> no LLM call
+                if not tail:
+                    continue                 # no live log yet (or none this watchdog may read)
+                unchanged = tail == last_digest
+                if unchanged:
+                    if armed_at is None:
+                        continue             # nothing new since last tick -> no LLM call
+                    if arm_looks >= _MONITOR_ARM_MAX_LOOKS:
+                        # The arm has already bought its one re-ask of this identical digest. Asking
+                        # again buys a byte-identical prompt, not a second sample, so disarm and let
+                        # the ordinary changed-digest gate take over (see _MONITOR_ARM_MAX_LOOKS).
+                        disarm()
+                        continue
+                    arm_looks += 1
                 # Open the span BEFORE the LLM call so the observer's LLM turn bands under `train_monitor`
                 # (not the enclosing `evaluate`) — the same trace-attribution fix `_triage_crash` uses.
                 with self.tracer.span("train_monitor", node_id=node_id) as sp:
@@ -729,6 +909,11 @@ class TrainingMonitorMixin:
                                 digest_lines=tail.count("\n") + 1, digest_chars=len(tail))
                     if resolved is not None and resolved.stage:
                         sp.set("stage", resolved.stage)
+                    if unchanged:
+                        # The confirming look at a FROZEN log re-asks a byte-identical question. It
+                        # defends against sampling noise, never against a systematic misread — say so
+                        # on the span rather than letting "two verdicts" imply two observations.
+                        sp.set("confirm_digest_unchanged", True)
                     # Per-node backstop on LLM cost (the adaptive cadence + healthy-backoff are the primary
                     # budget control; this only bounds a pathological run whose digest keeps changing while
                     # staying non-healthy). Past the cap we keep OBSERVING (trace-only) but stop calling the
@@ -753,7 +938,28 @@ class TrainingMonitorMixin:
                             self._training_verdict, tail, context,
                             monitor_stage_context(resolved, log_plan), abandon_on_cancel=False)
                         llm_calls += 1
-                    if verdict is not None:
+                    if verdict is None:
+                        # NO PARSEABLE ANSWER this tick — an endpoint failure, model output that failed
+                        # schema validation (`unknown` is not a `TrainingVerdict.status`), or the
+                        # per-node LLM cap. Under `_MONITOR_KILL_CONFIRM_TICKS` that is "anything
+                        # else", so it re-arms the gate from zero: the streak used to be touched only
+                        # inside this branch's `else`, which left an arm standing across six `unknown`
+                        # ticks and let the NEXT `broken` kill as though the two were consecutive.
+                        if armed_at is not None:
+                            next_sleep = base   # drop the shortened confirmation cadence with the arm
+                        disarm()
+                        sp.set("verdict_unparsed", True)
+                        # Bounded same-digest retry (see `_MONITOR_SAME_DIGEST_RETRIES`): `last_digest`
+                        # is otherwise committed only on a usable verdict, so an endpoint that never
+                        # answers re-sent a byte-identical prompt every cadence until the LLM cap.
+                        if tail == failed_digest:
+                            failed_digest_tries += 1
+                        else:
+                            failed_digest, failed_digest_tries = tail, 1
+                        if failed_digest_tries >= _MONITOR_SAME_DIGEST_RETRIES:
+                            last_digest = tail   # retire it: quiet until the log actually changes
+                            sp.set("digest_retired", True)
+                    else:
                         conf, confidence_valid = _normalize_monitor_confidence(verdict.confidence)
                         # The reason is LLM text derived from the raw log; redact it before it lands in the
                         # trace / event log / attention feed, matching how `_evaluate` stores stderr tails.
@@ -765,8 +971,12 @@ class TrainingMonitorMixin:
                         sp.set_many(status=verdict.status, confidence=round(conf, 3), reason=reason[:200])
                         if not confidence_valid:
                             sp.set("confidence_valid", False)
+                        failed_digest, failed_digest_tries = None, 0   # this digest WAS judged
                         healthy_streak = healthy_streak + 1 if verdict.status == "healthy" else 0
-                        broken_streak = broken_streak + 1 if verdict.status == "broken" else 0
+                        if verdict.status == "broken":
+                            broken_streak += 1
+                        else:
+                            disarm()         # a parseable non-broken verdict re-arms from zero
                         next_sleep = next_monitor_sleep(
                             base, status=verdict.status, recheck_after_s=verdict.recheck_after_s,
                             healthy_streak=healthy_streak)
@@ -795,12 +1005,17 @@ class TrainingMonitorMixin:
                         if stop_decided:
                             sp.set_many(stop_decided=True, kill=bool(claimed))
                         elif (verdict.status == "broken" and broken_streak == 1
-                              and log_role == LOG_ROLE_TRAINING and kill_signal is not None
+                              and log_role in _KILL_ELIGIBLE_ROLES and kill_signal is not None
                               and getattr(self, "_train_monitor_kill", False)):
                             # ARMED, not acting: re-look promptly instead of after another full cadence
                             # (up to 30 min on a long budget), so confirmation costs seconds of a
-                            # multi-hour budget rather than a meaningful slice of it.
+                            # multi-hour budget rather than a meaningful slice of it. `armed_at` starts
+                            # the TTL at the TRANSITION, never on a later broken tick — otherwise a
+                            # flapping log could renew the arm indefinitely. It is also what licenses
+                            # the changed-digest bypass, so a `LOG_ROLE_WORK` stage (advisory, this
+                            # branch not taken) never buys a re-look it could not act on.
                             next_sleep = min(next_sleep, _MONITOR_CONFIRM_DELAY_S)
+                            armed_at, arm_looks = anyio.current_time(), 0
                             sp.set("kill_armed", True)
                         sp.set("next_check_s", round(next_sleep, 2))
                         if (verdict.status != "healthy"
@@ -812,7 +1027,17 @@ class TrainingMonitorMixin:
                             alert = {
                                 "node_id": node_id, "generation": generation,
                                 "status": verdict.status, "reason": reason,
-                                "confidence": round(conf, 3)}
+                                "confidence": round(conf, 3),
+                                # STAGE ATTRIBUTION on the DURABLE row, not only on the trace span.
+                                # The span is a self-described high-volume sidecar; the alert is the
+                                # authoritative record and the one every projection reads, so without
+                                # these `watchdog_reflection` told the next Researcher "node 0:
+                                # training flagged broken ... loss is stuck at its initialization
+                                # value" about a node whose training had not started. Additive and
+                                # fold-ignored; readers default an absent role to "unknown".
+                                "log_role": log_role}
+                            if resolved is not None and resolved.stage:
+                                alert["stage"] = str(resolved.stage)[:64]
                             if not confidence_valid:
                                 alert["confidence_valid"] = False
                             if stop_decided:
@@ -839,7 +1064,11 @@ class TrainingMonitorMixin:
                         # Committed only once a USABLE verdict came back. Setting it before the call
                         # meant a transient endpoint failure (verdict None) permanently skipped
                         # judging THIS digest: the monitor went quiet until the log changed again,
-                        # which for a slow-logging stage is a long window to be blind in.
+                        # which for a slow-logging stage is a long window to be blind in. That
+                        # protection is now BOUNDED rather than unconditional — after
+                        # `_MONITOR_SAME_DIGEST_RETRIES` failed attempts the None branch above commits
+                        # the same digest itself, so an endpoint that never answers stops re-sending a
+                        # byte-identical prompt every cadence.
                         last_digest = tail
                         if stop_decided:
                             return           # won or lost, this node is ending — stop watching it

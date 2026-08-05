@@ -275,6 +275,21 @@ EV_CARD_BUILD_DONE = "card_build_done"
 # producer starts, so an unreconciled prior attempt is visible on resume and its head is quarantined
 # instead of silently re-issued.
 EV_CARD_BUILD_ATTEMPTED = "card_build_attempted"
+# AUTO speculation depth RE-RESOLVING mid-run, from evidence the run measured about itself. FOLDED,
+# main-task-only, and the reason it is an event rather than a process-local decision is engine
+# invariant #3: the resolved depth IS the run's search treatment, so a change to it that only lived
+# in memory would make a resume continue under a treatment its own log never recorded — the exact
+# defect 5f86626d fixed for the concurrency widths.
+#
+# THE PAYLOAD MUST MAKE THE NEW DEPTH A FUNCTION OF THE LOG, NOT OF THE BOX. It carries the resolved
+# integer AND the evidence it was derived from, so `replay.fold` READS the outcome and never
+# re-measures anything: a resume on a different host reproduces the same treatment.
+#
+# The fold applies it as a MINIMUM (a one-way ratchet DOWN), which is what makes it order-tolerant
+# and idempotent under invariant #5 — several rows in any order, or the same row twice, settle to the
+# same depth. Absent on every pre-existing log, where the reader-side default is simply the depth
+# `run_started` pinned, so old runs behave exactly as before.
+EV_SPECULATION_DEPTH_SETTLED = "speculation_depth_settled"
 EV_RUN_REOPENED = "run_reopened"
 EV_RESUME_REQUESTED = "resume_requested"   # P1-1: durable resume intent, appended by /resume pre-spawn
 EV_TRUST_GATE_CHANGED = "trust_gate_changed"   # server config edit; folded last-write-wins
@@ -316,11 +331,39 @@ EV_WORKSPACE_SEEDED = "workspace_seeded"
 # still calling itself exactly-once. `RunState.run_setup_open` now carries that ambiguity forward.
 EV_RUN_SETUP_STARTED = "run_setup_started"
 EV_RUN_SETUP_FINISHED = "run_setup_finished"
+# ------------------------------------------------------------------ live-watchdog log roles
+# WHICH eval phase a watchdog verdict is about. These live here, not in `engine/train_monitor.py`,
+# because they are part of the DURABLE vocabulary of `EV_TRAIN_MONITOR_ALERT.log_role` (below) —
+# `events/digest.py` and every other reader must be able to name them without importing the engine
+# (layering: `events` imports only `core`). `engine/train_monitor.py` imports and re-exports them, so
+# `train_monitor.LOG_ROLE_*` remains the spelling engine code and tests already use.
+#
+# The roles are assigned by `train_monitor.eval_log_plan` from the eval's OWN resolved pipeline, and
+# only `LOG_ROLE_TRAINING` carries kill authority — see that function's docstring for why a pipeline
+# work stage cannot be PROVEN to be the training step and is therefore advisory.
+LOG_ROLE_TRAINING = "training"    # the log that is the WHOLE eval's own work — judged AND kill-eligible
+LOG_ROLE_WORK = "work"            # a pipeline work stage: judged (advisory), never kill authority
+LOG_ROLE_SETUP = "setup"          # pip/dep install: no loss trajectory exists yet, by construction
+LOG_ROLE_SCORE = "score"          # the pipeline's final, metric-producing stage: training already FINISHED
+LOG_ROLE_AMBIGUOUS = "ambiguous"  # one filename, more than one possible writer — unattributable
+LOG_ROLE_UNKNOWN = "unknown"      # no plan available / a log the plan cannot name — advisory only
+LOG_ROLES: frozenset[str] = frozenset({
+    LOG_ROLE_TRAINING, LOG_ROLE_WORK, LOG_ROLE_SETUP, LOG_ROLE_SCORE,
+    LOG_ROLE_AMBIGUOUS, LOG_ROLE_UNKNOWN,
+})
+
 # Training-log monitor (engine/train_monitor.py): a NON-healthy verdict (watch|broken) from the per-eval
 # LLM log observer. DIAGNOSTIC — the fold never reads it (splice-neutral even though the concurrent
 # monitor appends it), so it cannot directly change lifecycle, ranking, or replay. The raw
 # event may still enter a later Researcher prompt through watchdog_reflection; it also feeds owner
 # attention + audit. Healthy verdicts stay trace-only except for a recovery transition after an alert.
+# Every row carries the STAGE ATTRIBUTION the verdict was formed about: `log_role` (one of LOG_ROLES
+# above) and, when the plan could name it, `stage`. They are what makes "which phase of the eval was
+# this said about?" answerable from the durable log rather than only from the high-volume trace
+# sidecar — a `broken` verdict about a `data_prep` stage narrated to the next Researcher as "training
+# flagged broken ... loss is stuck at its initialization value" is a false statement about a node whose
+# training had not started. Both are ADDITIVE: rows written before 2026-08-05 carry neither, and
+# readers must default (an absent `log_role` means the attribution is unknown, NOT that it was training).
 # When the monitor DECIDES to stop the run it also stamps the kill-attribution pair described on
 # EV_ASHA_VERDICT below (`stop_decided` + `kill`, plus `kill_superseded_by` when a sibling watchdog won
 # the claim); those fields are absent on an ordinary advisory row.
@@ -340,10 +383,15 @@ EV_ASHA_RANK = "asha_rank"
 # node's own terminal, and this row is written before it exists: `stop_decided` is what this watchdog
 # decided, and `kill` whether it then WON the shared per-eval claim (`train_monitor.claim_watchdog_kill`)
 # and therefore owns the terminal's reason; `kill_superseded_by` names the sibling that won instead.
-# `kill: true` still does not prove a stop, because `engine/evaluate.py` converts a claim into a
-# terminal only `if kill_signal.get("kill") and not ok` — a kill claimed against an eval that had
-# already produced a usable result ends in `node_evaluated`. Join to the node's single terminal for the
-# outcome; these fields answer "which watchdog decided/claimed what". DIAGNOSTIC / fold-ignored as
+# `kill: true` still does not prove a stop, because `engine/evaluate.py` reaches its kill branch only
+# after THREE pre-emptions, any of which returns first with a DIFFERENT terminal: a `reset` that
+# SUPERSEDED this lifecycle (`_record_superseded`), an operator `abort`/Card drop (`aborted and not ok`),
+# and a usable result (`if kill_signal.get("kill") and not ok` — a kill claimed against an eval that
+# had already produced a metric ends in `node_evaluated`). So a `kill: true` row can sit beside a
+# superseded, aborted OR evaluated terminal, not only beside `node_failed`.
+# Join to the node's single terminal for the outcome; these fields answer "which watchdog
+# decided/claimed what" — a renderer that branches on `kill` alone (as `ui/src/Dock.jsx` once did)
+# reports a superseded claim as an early kill. DIAGNOSTIC / fold-ignored as
 # EV_ASHA_RANK: the judge runs in a concurrent per-eval task, so its splice position is thread-dependent
 # and must not reach folded state — the stop itself is recorded by the node's single `node_failed`
 # terminal (reason=asha_underperforming), which is what replay reads instead of re-invoking the LLM.
