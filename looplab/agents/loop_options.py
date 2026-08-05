@@ -127,7 +127,7 @@ class LoopOptions(Mapping):
     def without(self, *names: str) -> "LoopOptions":
         """Drop options so the loop's own defaults apply again (the DeepResearcher's `summary_client`
         divergence: that stage has always compacted with its own client, never the D11 compressor)."""
-        _check_names(dict.fromkeys(names), "without")
+        _check_names(names, "without")
         return _dc_replace(self, **{name: UNSET for name in names}) if names else self
 
     # ---------------------------------------------------------------- boundary
