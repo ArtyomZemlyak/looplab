@@ -350,3 +350,95 @@ def test_lessons_engine_level_off_when_flag_not_passed(tmp_path):
                      sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=3),
                      memory_dir=str(mem)).run)
     assert not (mem / "lessons.jsonl").exists()
+
+
+# --------------------------------------------------------- read-path slot hygiene (prompt budget)
+def _prior_engine(tmp_path, mem, task_id="slotted"):
+    """An Engine whose task id is `task_id`, so every stored lesson carrying that task_id scores an
+    EXACT-task similarity of 1.0 and the prior's ordering is decided purely by the rank key."""
+
+    class SlotTask:
+        id = task_id; kind = "regression"; direction = "min"; metric = "mse"
+        goal = "minimize the error"
+
+        def build_roles(self):
+            return ToyTask.load(TASK).build_roles()
+
+    t = SlotTask()
+    r, d = t.build_roles()
+    return Engine(tmp_path / f"run-{task_id}", task=t, researcher=r, developer=d,
+                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=3),
+                  reflection_priors=True, memory_dir=str(mem))
+
+
+def test_one_template_family_cannot_eat_the_whole_lesson_prior(tmp_path):
+    """A prior has FIVE lesson slots. The offline producers (`lessons_distill._winner_lesson`,
+    `memory.param_credit_statement`) are f-string templates whose rows differ only in their digits,
+    so the old `statement[:80]` de-dup key never fired on them and ONE family could take all five —
+    leaving a genuinely different finding unshown. Measured on the real shared store before this
+    fix: 5/5 slots for `toy_quadratic`, 7/42 (17%) of slots across every task."""
+    mem = tmp_path / "mem"
+    # Lowest file index => ranked LAST among equal-confidence rows (recency breaks the tie), so this
+    # only reaches the prior if the template family stops consuming every slot.
+    rows = [{"task_id": "slotted", "fingerprint": [], "kind": "regression",
+             "statement": "feature standardization is what made the linear model competitive",
+             "outcome": "supported", "delta": None, "confidence": 0.55}]
+    # Six siblings of ONE template — identical modulo digits, all well inside the old 80-char key.
+    for i in range(6):
+        rows.append({"task_id": "slotted", "fingerprint": [], "kind": "regression",
+                     "statement": f"changing x {i}.2255->{i}.4047, y -1.9013->-2.7324 "
+                                  f"regressed the metric by {i}.227",
+                     "outcome": "failed", "delta": None, "confidence": 0.55})
+    _write_lessons(mem, rows)
+
+    prior = _prior_engine(tmp_path, mem)._load_reflection_priors()
+    body = prior.split("Lessons from related runs")[1]
+    kept = [ln for ln in body.split(";") if "regressed the metric by" in ln]
+    assert len(kept) == 1, f"one template family took {len(kept)} slots:\n{body}"
+    # The surviving row is rendered VERBATIM — de-dup rations slots, it never rewrites a statement.
+    assert "5.2255->5.4047" in body, body        # the newest sibling (highest file index) wins
+    # ...and the distinct finding it used to crowd out is now shown.
+    assert "feature standardization" in body, body
+
+
+def test_repeated_meta_notes_do_not_eat_the_warm_start_budget(tmp_path):
+    """`meta_notes.jsonl` has no consolidation pass at all, and `write_reflection_note`'s only
+    de-dup is per (run_id, finish_seq) — which by construction cannot see a DIFFERENT run that
+    landed on the same winner. So the three-slot warm-start tail repeated: on the real shared store
+    two of the three `toy_quadratic` slots were byte-identical."""
+    mem = tmp_path / "mem"
+    mem.mkdir(parents=True, exist_ok=True)
+    notes = [
+        {"task_id": "slotted", "note": "best metric 0.5 via op 'draft' params {'x': 1}; 2 nodes"},
+        {"task_id": "slotted", "note": "best metric 0.4 via op 'merge' params {'x': 9}; 7 nodes"},
+    ]
+    # Three separate runs that all rediscovered the same winner: distinct rows, identical text.
+    notes += [{"task_id": "slotted", "run_id": f"r{i}", "finish_seq": i,
+               "note": "best metric 0.3 via op 'improve' params {'x': 3}; 4 nodes"}
+              for i in range(3)]
+    (mem / "meta_notes.jsonl").write_text(
+        "\n".join(orjson.dumps(x).decode() for x in notes) + "\n")
+
+    prior = _prior_engine(tmp_path, mem)._load_reflection_priors()
+    line = prior.split("Prior-run insights for this task (meta-learned): ")[1].split("\n")[0]
+    assert line.count("op 'improve'") == 1, f"the repeated note took >1 slot: {line}"
+    # The freed slots go to the notes the repeat used to push out of the [-3:] tail.
+    assert "op 'draft'" in line and "op 'merge'" in line, line
+
+
+def test_prompt_slot_key_is_not_a_substitute_for_normalize_statement():
+    """The two keys must stay SEPARATE. `normalize_statement` decides what `consolidate_lessons`
+    MERGES and what `filter_contradicted` treats as one claim's verdict history; collapsing digits
+    THERE would fold two distinct measurements into one row and let one run's delta silently retire
+    another's. `prompt_slot_key` only rations prompt slots. Folding them together would be a silent
+    data-loss bug, so pin the difference behaviourally rather than trusting the docstrings."""
+    from looplab.engine.memory import consolidate_lessons, normalize_statement, prompt_slot_key
+
+    a = "changing x 0.2255->0.4047 regressed the metric by 1.227"
+    b = "changing x 0.7176->0.3338 regressed the metric by 0.099"
+    assert normalize_statement(a) != normalize_statement(b)   # distinct MEASUREMENTS
+    assert prompt_slot_key(a) == prompt_slot_key(b)           # one SENTENCE for prompt purposes
+
+    rows = [{"task_id": "t", "statement": s, "outcome": "failed", "run_id": f"r{i}"}
+            for i, s in enumerate((a, b))]
+    assert len(consolidate_lessons(rows)) == 2, "the write path must not merge two measurements"

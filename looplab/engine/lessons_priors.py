@@ -123,11 +123,33 @@ class LessonPriorsMixin:
         """Render ONE role's prior text from a shared `_scan_prior_context` scan: filter the parsed
         lessons to that role (untagged = shared), score by fingerprint similarity, splice in Memora
         harmonic recall, apply D2 read-time hygiene + ranking, and pick the top 5 with a role label."""
+        from looplab.engine.memory import prompt_slot_key      # both slot budgets below key on it
         notes, parsed, fp, embed = ctx
         out = ""
         # (1) meta-notes — research-flavoured, so the Developer never sees them.
+        # DE-DUPE FIRST, then take the last 3. These notes are a `write_reflection_note` f-string
+        # ("best metric {m} via op '{op}' params {p}; N nodes, M evaluated"), and `meta_notes.jsonl`
+        # has no consolidation pass at all (unlike lessons.jsonl, which at least gets
+        # `consolidate_lessons_file` + `compact_lessons`) — its only de-dup is the per-(run_id,
+        # finish_seq) crash-retry guard in `write_reflection_note`, which by construction cannot see
+        # a DIFFERENT run that landed on the same winner. So the tail repeats: measured on the
+        # shared store, 140 notes carry 65 distinct texts, and for `toy_quadratic` two of these
+        # three slots were BYTE-IDENTICAL. Keyed on `prompt_slot_key`, so re-running the same task
+        # to the same optimum with cosmetically different digits also stops eating the budget.
+        # LATEST occurrence wins (scan reversed, then restore order) — recency is what the `[-3:]`
+        # tail was always selecting for, so a repeat promotes its newest copy rather than resurrect
+        # an old one. Nothing is dropped from the store; this only picks which notes fill 3 slots.
         if notes and role != LESSON_ROLE_DEVELOPER:
-            out += "\nPrior-run insights for this task (meta-learned): " + " | ".join(notes[-3:])
+            _seen_notes: set[str] = set()
+            _distinct: list[str] = []
+            for _n in reversed(notes):
+                _k = prompt_slot_key(_n, cap=200)
+                if _k in _seen_notes:
+                    continue
+                _seen_notes.add(_k)
+                _distinct.append(_n)
+            _distinct.reverse()
+            out += "\nPrior-run insights for this task (meta-learned): " + " | ".join(_distinct[-3:])
         if not parsed:
             return cross_run_text(
                 out, max_chars=8_000, single_line=False, entropy=True)
@@ -170,10 +192,20 @@ class LessonPriorsMixin:
         # Rank: similarity, then confidence × corroboration (evidence_count), then recency —
         # so a twice-confirmed lesson from a related task beats a one-off at equal similarity.
         scored.sort(key=lambda t: lesson_rank_key(*t))
-        seen: set[str] = set()
+        seen: set[tuple] = set()
         picked: list[str] = []
         for _, _, o in scored:
-            key = (o.get("statement", "")[:80], o.get("outcome"))
+            # SLOT identity, not claim identity: `prompt_slot_key` collapses numbers, so N rows of
+            # one f-string template ("changing x A->B regressed the metric by D") spend ONE of the
+            # five slots instead of five. The old `statement[:80]` key never fired on them — the
+            # digits sit well inside 80 chars — so a single template family could fill the whole
+            # prior: measured on the shared store, 5/5 slots for `toy_quadratic` and 7/42 (17%)
+            # across every task. `scored` is already ranked (similarity, then confidence ×
+            # corroboration, then recency), so the row that keeps the slot is the family's BEST
+            # one and it is still rendered with its digits intact below. Nothing is dropped from
+            # the store — `consolidate_lessons` alone owns what MERGES, and it must not fold these
+            # (they are distinct measurements); this only rations prompt space.
+            key = (prompt_slot_key(o.get("statement", "")), o.get("outcome"))
             if key in seen:
                 continue
             seen.add(key)

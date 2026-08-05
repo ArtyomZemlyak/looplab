@@ -52,6 +52,37 @@ def normalize_statement(s: str) -> str:
     """Identity of a lesson claim: collapsed whitespace, lowercased, capped."""
     return " ".join(str(s or "").split()).lower()[:160]
 
+# Every numeric literal (int/decimal/scientific, sign included) — the only thing that separates one
+# templated lesson from its siblings. Kept module-level so the pattern compiles once.
+_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
+
+def prompt_slot_key(s: str, cap: int = 80) -> str:
+    """PRESENTATION identity: `normalize_statement` with every NUMBER collapsed to `#`.
+
+    Deliberately lossier than `normalize_statement`, and deliberately NOT usable in its place. The
+    two answer different questions:
+      * `normalize_statement` = "are these the SAME stored claim?" — it decides what
+        `consolidate_lessons` MERGES and what `filter_contradicted` treats as one claim's verdict
+        history. It must keep digits: `x 0.2255->0.4047 regressed by 1.227` and
+        `x 0.7176->0.3338 improved by 0.099` are two distinct MEASUREMENTS, and folding them would
+        destroy evidence and let one run's delta silently retire another's.
+      * `prompt_slot_key` = "would these two fill a prompt slot with the SAME SENTENCE?" — it only
+        decides which ONE of several ranked rows is worth a slot in the 5-lesson / 3-note prior. It
+        drops nothing from the store, changes no verdict, and merges no record: the highest-ranked
+        member of a family is still shown in full, digits intact.
+
+    Why the read path needs the lossier key: the offline/toy producers (`lessons_distill`'s
+    `_winner_lesson`, `lessons_reconcile`'s `param_credit_statement` fallback) are f-string
+    templates, so their output differs from row to row ONLY in the digits. Measured on the shared
+    store (139 rows): the old `statement[:80]` key found 139 distinct sentences and let one template
+    family eat 5 of 5 lesson slots and 2 of 3 note slots for `toy_quadratic`; this key finds 46, and
+    every row it folds is a templated fallback row (0 of the LLM-distilled rows collapse). That
+    asymmetry is not luck — the reflection prompts ask for generalizable findings "NOT these exact
+    numbers", which `hybrid_merge.agent_merge` also relies on ("lesson statements are deliberately
+    number-free"), so a real run's lessons have no decisive digits for this key to erase.
+    """
+    return _NUMBER_RE.sub("#", normalize_statement(s))[:cap]
+
 def consolidate_lessons(lessons: list[dict], *, client=None, embed=None,
                         parser: str = "tool_call", prompts=None) -> list[dict]:
     """Merge near-duplicate lessons and resolve contradictions — the write-path hygiene pass.
