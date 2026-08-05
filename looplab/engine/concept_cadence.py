@@ -10,9 +10,11 @@ both are cadence work; they share no state, and the gate they run on is delibera
 is heavier and slower-moving than a strategy consult, while the Strategist runs on
 `strategist_every`. Keeping them in one file made that decoupling read as an accident.
 
-`_concept_coverage_snapshot` is a DRIVER over four named steps (`_reusable_node_tags` ->
-`_refresh_concept_tags` -> `_assert_concept_edges` -> `_tag_hypothesis_concepts`, then the coverage
-summary it returns). The step boundaries are the ones the original 240-line body already had, marked
+`_concept_coverage_snapshot` is a DRIVER over named steps (`_refresh_concept_tags`, itself over
+`_reusable_node_tags` and `_record_node_concept_tags`, then `_assert_concept_edges` and
+`_tag_hypothesis_concepts`, then the coverage summary it returns — four DURABLE effects in the log:
+consolidation renames, per-node tag rows, `is_a` edges, card tags).
+The step boundaries are the ones the original 240-line body already had, marked
 by its nested try blocks: the edge assertion and the hypothesis tagging each swallow their own
 failures so a hiccup in audit enrichment cannot lose the snapshot, while a failure in the tagging
 pass itself falls through to the outer guard and yields no snapshot at all. That asymmetry is the
@@ -160,7 +162,7 @@ class ConceptCadenceMixin:
                 return fold(self.store.read_all())
         return state
 
-    # -------------------------------------------------- the snapshot producer and its four steps
+    # ----------------------------------------------- the snapshot producer and its named steps
     def _concept_coverage_snapshot(self, state: RunState) -> Optional[dict]:
         """The compact concept-coverage record (uncovered regions + top-concentration + lock-in).
 
