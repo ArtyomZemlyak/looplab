@@ -4220,6 +4220,62 @@ failure.
 
 *Recommendation:* Either implement the prescribed gating (verifier-calibrated confidence via ForesightPanelResearcher.verify_score plumbing; trusted post-classification tags for coverage) or demote these terms to tie-breaks, and convert the CODEX comments into tracked issues rather than shipped annotations.
 
+*Resolution (2026-08-05):* CONFIRMED live and fixed, taking the recommendation's second branch for
+confidence and a third option for coverage. Both CODEX annotations are gone from the source; what they
+prescribed is now behaviour, and the reasoning lives beside the code it governs.
+
+Confirmed first: `Settings.card_driven_selection` defaults to **True**, so this was not a dormant
+path. And `Card.confidence` is worse-provenanced than the annotation says — it is not merely
+"provenance-free", it is `search/foresight.py::_prioritize`'s `conf`, copied verbatim by
+`engine/audit.py` onto `card_ranked`: the foresight ranker's self-assessment of its own board
+ordering. The same module's `_verifier_confidence` exists specifically to REPLACE that number with a
+calibrated §12-verifier score, but only on the idea path, never on the board ranking that stamps the
+Card. So the repository builds the antidote and does not apply it here.
+
+**Confidence — demoted.** `foresight` was `0.65 * confidence + 0.35 * priority`. These are two
+different things and only one is evidence: `priority` is the rank the ranker CHOSE, `confidence` is
+its opinion of that choice, and §21.12 measures the latter at Pearson≈0 with realized outcome. A
+number measured not to predict is not a defensible default majority of an active selection signal.
+`_foresight_signal(confidence, priority, confidence_weight)` now takes the weight from
+`CardScoring.confidence_weight`, which defaults to **0.0** — the rank stands alone. Confidence is not
+discarded: it remains a tie-break component of the score key, which is exactly what the
+recommendation's "demote these terms to tie-breaks" asked for. The shape is a WEIGHT rather than a
+deletion so the escape hatch can express the old behaviour exactly for anyone wanting to A/B it —
+`0.65` reproduces the historical blend, and the guard checks that against the literal formula rather
+than against itself.
+
+**Coverage — capped, not replaced.** The prescribed fix ("score only post-build trusted tags") does
+not work as stated: a Card is scored BEFORE its node is built, so post-build tags do not exist yet
+and the term would be dead for every candidate. What DOES exist is `Card.concept_source`, the exact
+`CardConceptSource` receipt — so the gate is "does a COMPLETE receipt from a non-proposer source back
+these tags", and the answer decides a CEILING rather than a value. The asymmetry is the whole design:
+the exploit only runs upward (mint a slug, every tag falls outside `explored`, score 1.0), so an
+unverified claim is capped at the neutral `0.5` while an honest low fraction passes through
+untouched. Replacing the value with 0.5 outright — the obvious reading — would have INFLATED exactly
+the honest case worth protecting, and that mutation is one of the breaks the guard is verified
+against. The midpoint rather than the floor follows `_UNGRADED_NOVELTY`'s own recorded reasoning:
+unverified is unknown, not disproved.
+
+**Withheld from the Strategist on purpose.** `confidence_weight` is deliberately NOT in
+`strategist.py::_CARD_SCORING_FIELDS`. That is a trust decision, not a search stance: letting an LLM
+Strategist raise it would let the model hand its own self-report back its majority share of a signal
+it was measured not to predict. The existing exact-set match rejects a proposal naming it, whole, so
+the omission needs no new branch — but it needed the comment, because the next person adding a
+`CardScoring` field will otherwise assume the two lists should match.
+
+Also corrected: `_independently_classified` checks `receipt_valid`, `membership_present` and
+`complete` separately even though `CardConceptSource._coherent_owner` already implies the first two
+from the third. That is not redundancy — `card_score` is a documented PUBLIC scoring hook, so an
+external policy can pass a source object no validator ever saw, and `complete` alone would then trust
+a hand-built receipt that says complete while admitting it is invalid. Both halves are pinned: the
+duck-typed path per clause, and the fact that the model makes those combinations unconstructible.
+
+`tests/test_card_selection_trust.py` (22) and a `docs/guide/configuration.md` paragraph. NOTHING
+covered either term before: this change altered live selection and all 191 existing card/strategist
+tests stayed green. Verified by three breaks on a scratch copy — removing the cap, turning the cap
+into a replacement, and restoring `confidence_weight = 0.65` as the default — each failing only its
+own assertions.
+
 #### SE-12 · LOW · over-engineering · effort: medium
 
 **scorer_fidelity.py ships a 15-case unit-test suite (with its own fixture factories) as production code, re-executed on every gate and receipt revalidation**

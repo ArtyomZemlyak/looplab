@@ -42,6 +42,13 @@ from looplab.core.prompts import PromptStore, render
 NOVELTY_STANCES: tuple[str, ...] = ("explore", "balanced", "exploit")
 CARD_SCORING_STANCES: tuple[str, ...] = ("explore", "balanced", "exploit")
 
+# Deliberately NOT the same set as `search/card_selection.py::CardScoring`'s fields. That dataclass
+# also carries `confidence_weight` — how much of the foresight term the ranker's own self-reported
+# confidence gets — and it is withheld from the Strategist ON PURPOSE (doc 25 SE-11). That weight is a
+# TRUST decision, not a search-stance one: the number it governs is measured at Pearson≈0 with
+# realized outcome (§21.12), and letting an LLM Strategist raise it would let the model hand its own
+# self-assessment back its majority share of an active selection signal. The exact-set match below is
+# what enforces the omission — a proposal naming it is rejected whole, like any other unknown field.
 _CARD_SCORING_FIELDS = frozenset({"stance", "novelty_weight", "coverage_weight"})
 
 

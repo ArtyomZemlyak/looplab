@@ -194,6 +194,10 @@ class CardScoring:
     stance: Literal["explore", "balanced", "exploit"] = "balanced"
     novelty_weight: float = 0.5
     coverage_weight: float = 0.5
+    # How much of the FORESIGHT term the ranker's self-reported confidence carries; the remainder goes
+    # to the rank it actually chose. Historically a hardcoded 0.65, which is what `0.65` still restores
+    # exactly. It defaults to 0.0 — see `_foresight_signal` for the measurement that moved it.
+    confidence_weight: float = 0.0
 
 
 def _unit_float(value: object, default: float = 0.0) -> float:
@@ -212,17 +216,20 @@ def normalize_card_scoring(value: CardScoring | Mapping[str, object] | None) -> 
         raw_stance: object = value.stance
         raw_novelty: object = value.novelty_weight
         raw_coverage: object = value.coverage_weight
+        raw_confidence: object = value.confidence_weight
     elif isinstance(value, Mapping):
         raw_stance = value.get("stance", "balanced")
         raw_novelty = value.get("novelty_weight", 0.5)
         raw_coverage = value.get("coverage_weight", 0.5)
+        raw_confidence = value.get("confidence_weight", 0.0)
     else:
-        raw_stance, raw_novelty, raw_coverage = "balanced", 0.5, 0.5
+        raw_stance, raw_novelty, raw_coverage, raw_confidence = "balanced", 0.5, 0.5, 0.0
     stance = raw_stance if raw_stance in {"explore", "balanced", "exploit"} else "balanced"
     return CardScoring(
         stance=stance,
         novelty_weight=_unit_float(raw_novelty, 0.5),
         coverage_weight=_unit_float(raw_coverage, 0.5),
+        confidence_weight=_unit_float(raw_confidence, 0.0),
     )
 
 
@@ -686,6 +693,42 @@ def _novelty_signal(card: Card) -> float:
     return _NOVELTY_LEVEL_CREDIT.get(int(number), _UNGRADED_NOVELTY)
 
 
+# The ceiling an UNVERIFIED coverage claim may reach — the same neutral midpoint `_UNGRADED_NOVELTY`
+# uses, and for the same stated reason: unverified is unknown, not disproved.
+_UNVERIFIED_COVERAGE_CEILING = 0.5
+# The concept provenances produced by something OTHER than the Card's own proposer. `offline-heuristic`
+# is deliberately absent: it is a coarse display-only fallback the classifier is expected to upgrade,
+# and `_on_node_created` already excludes it from the cadence's known-tag cache for that reason.
+# `researcher-authored` is the gameable case, and `untrusted-source` is the malformed one.
+_INDEPENDENT_CONCEPT_PROVENANCE = frozenset({"classifier", "operator-edited"})
+
+
+def _independently_classified(card: Card) -> bool:
+    """True when ``card.concept_tags`` carries a COMPLETE receipt from a non-proposer source.
+
+    Every clause is load-bearing, and `CardConceptSource` exists to make them checkable:
+    ``receipt_valid`` rejects a malformed/forged envelope, ``membership_present`` distinguishes "no
+    membership was recorded" from "an empty one was", ``complete`` rejects a lossy or partial
+    materialization (a delta whose ancestry did not resolve), and ``provenance`` is what says the
+    tags came from somewhere other than the proposer competing for this selection.
+
+    The clauses look redundant against a VALIDATED ``CardConceptSource`` — its ``_coherent_owner``
+    validator already enforces ``complete => membership_present and receipt_valid``, so the
+    under-complete combinations are unconstructible through the model. They are not redundant on the
+    path this gate has to survive: ``card_score`` is a documented public scoring hook, so an external
+    policy can hand it a source object no validator ever saw, and checking ``complete`` alone would
+    then trust a hand-built receipt that says complete while admitting it is invalid. Read through
+    ``getattr`` for the same reason, so an absent or foreign receipt fails CLOSED rather than raising.
+    """
+    source = getattr(card, "concept_source", None)
+    if source is None:
+        return False
+    return bool(getattr(source, "receipt_valid", False)
+                and getattr(source, "membership_present", False)
+                and getattr(source, "complete", False)
+                and getattr(source, "provenance", None) in _INDEPENDENT_CONCEPT_PROVENANCE)
+
+
 def _coverage_signal(
     card: Card,
     explored: set[str],
@@ -694,9 +737,6 @@ def _coverage_signal(
     # Card proposal tags preserve their bounded raw spelling for audit. Compare them only after the
     # SAME normalization/consolidation projection that produced ``trusted_memberships``; otherwise
     # ``Loss X``/``loss-x`` or a retired alias receives a false uncovered bonus.
-    # CODEX AGENT: candidate coverage is self-reported by the same Researcher competing for selection.
-    # A plausible new slug earns maximal exploration bonus before independent classification/evidence;
-    # require a complete independent concept-source receipt or score only post-build trusted tags.
     concepts = sorted({
         concept
         for tag in card.concept_tags
@@ -705,7 +745,27 @@ def _coverage_signal(
     })
     if not concepts:
         return 0.0
-    return sum(tag not in explored for tag in concepts) / len(concepts)
+    fraction = sum(tag not in explored for tag in concepts) / len(concepts)
+    if _independently_classified(card):
+        return fraction
+    # doc 25 SE-11. Until this cap, a Card's coverage bonus was computed from `concept_tags` ALONE —
+    # which, before the node is built, is the taxonomy the proposing Researcher wrote about its own
+    # proposal, while competing for selection. Minting a plausible new slug put every tag outside
+    # `explored` and returned 1.0: the MAXIMAL exploration bonus, earned by naming, before any
+    # independent classification exists. That is a gameable input to a default-on selection path
+    # (`Settings.card_driven_selection` is True).
+    #
+    # The cap is a CEILING, not a replacement, and the asymmetry is the point: the exploit only runs
+    # UPWARD. A card that honestly reports tags already explored still scores its true low fraction —
+    # nobody games themselves down — while an unverified claim of new ground can earn at most the
+    # neutral midpoint. Replacing the value with 0.5 outright would have INFLATED exactly the honest
+    # case this is meant to protect.
+    #
+    # The midpoint (rather than 0.0) follows `_UNGRADED_NOVELTY` above, for the same reason recorded
+    # there: an unverified claim is UNKNOWN, not disproved, and flooring it would let the signals that
+    # ARE recorded outrank every genuinely new region. An independent receipt — a classifier pass or
+    # an operator edit — lifts the cap and restores the full range.
+    return min(fraction, _UNVERIFIED_COVERAGE_CEILING)
 
 
 def _priority_signal(card: Card) -> float:
@@ -713,6 +773,29 @@ def _priority_signal(card: Card) -> float:
     if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0:
         return 0.0
     return 1.0 / (priority + 1.0)
+
+
+def _foresight_signal(confidence: float, priority: float, confidence_weight: float) -> float:
+    """Blend the ranker's RANK with its self-reported confidence in that rank (doc 25 SE-11).
+
+    These are two different things and only one of them is evidence. `priority` is the order the
+    foresight ranker actually CHOSE; `confidence` is the same model's self-assessment of that choice,
+    and this repository's own §21.12 measurement records it as Pearson≈0 with realized outcome —
+    `search/foresight.py::_verifier_confidence` exists specifically to REPLACE it with a calibrated
+    §12-verifier score, but only on the idea path, never on the board ranking that stamps
+    `Card.confidence` (`engine/audit.py` copies `last_hyp_priority["confidence"]` straight through).
+
+    It nevertheless carried a hardcoded 65% of this term, on a selection path that is ON by default
+    (`Settings.card_driven_selection`). A number measured to be uncorrelated is not a defensible
+    default majority of an active selection signal, so the weight now defaults to 0.0 and the rank
+    stands alone. Confidence is NOT discarded — it remains a tie-break component of the score key,
+    which is what the finding's own alternative asked for.
+
+    Setting `confidence_weight` to 0.65 restores the historical blend exactly, which is why the shape
+    is a weight rather than a deletion: the escape hatch has to be able to express the old behaviour
+    for anyone who wants to A/B it.
+    """
+    return confidence_weight * confidence + (1.0 - confidence_weight) * priority
 
 
 def _action_key(action: Mapping[str, object]) -> tuple[str, tuple[int, ...]] | None:
@@ -781,10 +864,7 @@ def card_score(
     )
     confidence = _unit_float(card.confidence, 0.0)
     priority = _priority_signal(card)
-    # CODEX AGENT: provenance-free model self-confidence is known by the foresight module to be
-    # outcome-uncorrelated, yet it carries 65% of this active selection signal. Persist confidence
-    # source/evidence and admit only verifier-calibrated values; otherwise keep it display-only.
-    foresight = 0.65 * confidence + 0.35 * priority
+    foresight = _foresight_signal(confidence, priority, treatment.confidence_weight)
     if treatment.stance == "explore":
         primary, secondary = exploration, foresight
     elif treatment.stance == "exploit":
