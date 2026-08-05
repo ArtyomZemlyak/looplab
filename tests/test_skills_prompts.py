@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import anyio
@@ -106,3 +107,52 @@ def test_skilltools_execute_never_raises_on_junk_arg():
     st = SkillTools(tempfile.mkdtemp())
     assert st.execute("use_skill", {"name": ["not", "hashable"]}).startswith("(")   # tool error, no raise
     assert st.execute("bogus", {}).startswith("(unknown tool")
+
+
+# ---- the Authoring panel's "how do I turn this on" hint ----
+# `skills_dir` and `prompt_dir` are the only two knowledge directories with NO default, so for both
+# the very first thing an operator sees is an empty tab plus an env-var name. That name used to be
+# DERIVED as `LOOPLAB_${kind.toUpperCase()}_DIR`, which is right for skills/knowledge and wrong for
+# prompts: the flat settings field is `prompt_dir`, singular, so `LOOPLAB_PROMPTS_DIR` is read by
+# nothing. Following the hint therefore left the tab exactly as empty as before — which reads as
+# "prompts are not a thing in this product". The mapping is data in panels.jsx now; this drives it.
+_AUTHORING_ENV_LINE = re.compile(r"const AUTHORING_KIND_ENV = \{(?P<body>[^}]*)\}")
+_AUTHORING_ENV_PAIR = re.compile(r"(?P<kind>\w+):\s*'(?P<env>LOOPLAB_[A-Z_]+)'")
+
+
+def _authoring_kind_env() -> dict[str, str]:
+    source = (ROOT / "ui" / "src" / "panels.jsx").read_text(encoding="utf-8")
+    match = _AUTHORING_ENV_LINE.search(source)
+    assert match, "panels.jsx no longer declares AUTHORING_KIND_ENV — the hint is derived again?"
+    return {m.group("kind"): m.group("env") for m in _AUTHORING_ENV_PAIR.finditer(match.group("body"))}
+
+
+def test_every_env_var_the_authoring_panel_prints_actually_configures_that_kind(monkeypatch, tmp_path):
+    """Set the variable the UI tells you to set; the directory the authoring route reads must move.
+
+    Driven end to end rather than pinned as a string pair: it goes through the real `Settings`
+    loader (so it also fails if the flat `LOOPLAB_<FIELD>` convention is ever broken) and then
+    through `serve/routers/misc.py::_current_author_directory`, which is the function the
+    `GET /api/{kind}` listing resolves its root with.
+    """
+    from looplab.core.config import Settings
+    from looplab.serve.routers.misc import _current_author_directory
+
+    kinds = _authoring_kind_env()
+    assert set(kinds) == {"prompts", "skills", "knowledge"}, kinds
+
+    for kind, env in kinds.items():
+        target = tmp_path / kind
+        target.mkdir()
+        monkeypatch.setenv(env, str(target))
+        settings = Settings()
+
+        class _Srv:
+            def global_settings(self):
+                return settings
+
+        resolved = _current_author_directory(_Srv(), kind)
+        assert resolved == target, (
+            f"the Authoring panel tells an operator to set {env} for `{kind}`, but the "
+            f"{kind} authoring route resolved {resolved!r} instead — the hint is a no-op")
+        monkeypatch.delenv(env)

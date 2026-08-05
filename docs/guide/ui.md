@@ -290,6 +290,31 @@ evaluation identity, or a comparison protocol; those operations remain unavailab
 `ComparisonContract` exists. If the displayed run has no non-blank `task_id`, the panel fails closed with no
 observations: multiple legacy rows with a missing identity are not members of one task.
 
+## Which memory panel am I looking at?
+
+Three panels hold durable knowledge, and what separates them is **who writes**, not what the content
+is about. Each panel now says so in its own header; the full per-kind reference is
+[Memory & knowledge](memory.md#which-surface-am-i-looking-at).
+
+| Surface | Holds | Written by | Editable there |
+|---|---|---|---|
+| **Lab → Authoring** | `prompts` (role system-prompt overrides), `skills` (techniques the Researcher can load), `knowledge` (free-form notes) | **you** — plus the assistant's `remember` tool for `knowledge` | yes, with a CAS/receipt protocol |
+| **Lab → Memory** | Lessons, Cases, Notes, and a read-only view of the same `knowledge` notes | the **runs**, at run end | no |
+| **Runs → Atlas preview** | Concepts and claims across every run in the shared memory dir | derived at read time from what the runs wrote, plus your governance decisions | no — governance is CLI/HTTP only |
+
+Consequences that have repeatedly been reported as bugs and are not:
+
+- **Skills and prompts are not missing from Memory.** They live on Authoring because a human writes
+  them. `skills_dir` and `prompt_dir` both default to unset, so both tabs are empty until you point
+  them somewhere; `memory_dir` and `knowledge_dir` do have defaults.
+- **`knowledge` deliberately appears twice** — writable in Authoring, read-only in Memory. One
+  directory, one set of files.
+- **An Atlas claim will not appear in the Memory panel under that name.** Claims are a projection over
+  the same `lessons.jsonl` rows plus the deep-research memo claims, not a fourth store.
+- **The Authoring `skills` list shows root-level `*.md` only.** A packaged `<name>/SKILL.md` is
+  loadable by the Researcher and invisible in the editor, and run-distilled skills under
+  `<memory_dir>/skills/` appear in neither panel.
+
 Old run links may still contain a `focus` query from the retired Direction surface. The router does not
 silently apply it: the value is ignored and the UI announces **“Legacy Direction focus is no longer
 supported; use the Concepts filter instead.”** New links must encode the Concepts selection when that

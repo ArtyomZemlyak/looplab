@@ -380,6 +380,14 @@ export default function ResearchAtlas({ onBack }) {
         : <div className="atlas-content">
           <header className="atlas-intro">
             <h1 id="atlas-title">Portfolio evidence</h1>
+            {/* What this surface IS, before what it is not. Concepts and claims are DERIVED here —
+                claims are a projection over the same lessons the Memory panel lists plus the
+                deep-research memo claims — so an operator who reads a claim and then cannot find it
+                in Memory is not looking at a bug. */}
+            <p>Rolled up across <b>every</b> run in the shared memory dir, where Lab → Memory shows the
+              stores themselves. <b>Concepts</b> are the per-run capsules of what was tried;{' '}
+              <b>claims</b> are a derived view that groups the same lessons by statement and records
+              what supports and what opposes each one.</p>
             <p>Rows do not prove coverage. D8 receipts cover processed rows,
               not every run.</p>
           </header>
