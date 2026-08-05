@@ -1,14 +1,25 @@
-"""Endpoint reachability preflight for a live-backend run.
+"""The pre-run LLM gates: is the role's credential usable, and is its endpoint actually there?
 
-The sibling of `core/llm.py::validate_bound_profiles`, and deliberately its neighbour at the same
-gate (`cli/__init__.py::_engine`): that one fails before transport when a role's CREDENTIAL is
-unusable, this one fails before the loop when the role's endpoint is simply not THERE.
+Two gates, deliberately neighbours at the same call site (`cli/__init__.py::_engine`):
+`core/llm.py::validate_bound_profiles` fails before transport when a role's CREDENTIAL is unusable,
+`preflight_role_endpoints` fails before the loop when the role's endpoint is simply not THERE. This
+module owns the second gate outright and owns the WRAP-UP POLICY of both.
 
-ONE probe, TWO policies, because the same dead endpoint means different things at different entry
-points: `preflight_role_endpoints` REFUSES a run that is about to propose, and
-`wrap_up_endpoint_warning` WARNS an entry point that can only complete a run that is already over.
-Adding a third caller means choosing between them — and the test for which one is not "does this
-command touch the model" but "can this command still start new work".
+EACH GATE HAS TWO POLICIES, because the same missing model means different things at different
+entry points. `preflight_role_endpoints` / `validate_bound_profiles` REFUSE a run that is about to
+propose; `wrap_up_endpoint_warning` / `wrap_up_credential_warning` WARN an entry point that can only
+complete a run that is already over. Adding a third caller means choosing between them — and the
+test for which one is not "does this command touch the model" but "can this command still start new
+work". That question has ONE right answer per entry, and it has to be asked against the SAME folded
+state that decides whether the run gets lifted (`cli/run_cmds.py::resume` asks both inside the
+singleton lock, for exactly this reason).
+
+The two gates degrade differently, and only one of them can be softened by a policy alone. An
+unreachable endpoint still lets every client be BUILT — it fails at request time, which is precisely
+the silent degradation the refusal exists for. An unusable credential fails at CONSTRUCTION, so a
+warning on its own would just move the same `LLMError` one function later, into `make_roles`
+(measured: `looplab finalize` still exited 1 with zero artifacts). `credential_free_wrap_up_settings`
+is what actually makes the warning true.
 
 Its own module rather than a function in `factory.py` for two reasons: it is a gate, not a
 composition root (the factory's `test_agent_factory_split.py` line cap is a deliberate reminder of
@@ -20,7 +31,8 @@ LAYERING: same rule as `factory.py` — imports of `agents`/`search`/`tools` sta
 from __future__ import annotations
 
 from looplab.core.errors import LLMError
-from looplab.core.llm import llm_credential_consumers, make_llm_client_for, resolve_llm_target
+from looplab.core.llm import (llm_credential_consumers, make_llm_client_for, resolve_llm_target,
+                              validate_bound_profiles)
 
 # One bounded, four-token completion — the SAME probe shape, and the same probe-only client controls
 # (no stream, no cache, no reasoning, a whole-call wall guard), that the UI's `/api/llm/health` route
@@ -130,6 +142,25 @@ def preflight_role_endpoints(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S
               "and names the artifacts a missing model degrades.)")
 
 
+# The one tail both wrap-up policies end with. A missing model costs the same two artifacts whether
+# the endpoint is unreachable or its credential is unusable, so the operator must read the same
+# sentence either way — and when both gates warn at once (they can) the caller prints two HEADS, not
+# two copies of this list.
+_COSTS = (
+    ".\n  This run is over, so no proposal can degrade — wrapping it up anyway. What the "
+    "missing model costs:\n"
+    "    · end-of-run report → the placeholder \"(report unavailable)\", not the written "
+    "report\n"
+    "    · cross-run lessons, skills and curation → nothing the model would have authored; "
+    "the\n      reflection note and each curation log still record this run deterministically"
+    "\n  Everything else is computed without a model and lands normally: budget summary, "
+    "diversity\n  archive, case + concept capsule, LLM cost roll-up, readmodel.sqlite, "
+    "trace.json, tree.html.\n"
+    "  Each step is marked COMPLETE once attempted, so a later `looplab finalize` will NOT "
+    "redo it.\n  If you want the model-written report and lessons, stop now, bring the "
+    "endpoint back, and\n  re-run this command.")
+
+
 def wrap_up_endpoint_warning(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S) -> str | None:
     """The same probe, for an entry point that can only COMPLETE a run's wrap-up. Never refuses.
 
@@ -154,17 +185,94 @@ def wrap_up_endpoint_warning(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S
     failures = _probe_role_endpoints(settings, timeout_s=timeout_s)
     if not failures:
         return None
-    return (
-        "⚠ LLM endpoint unreachable while wrapping up: " + "; ".join(failures)
-        + ".\n  This run is over, so no proposal can degrade — wrapping it up anyway. What the "
-          "missing model costs:\n"
-          "    · end-of-run report → the placeholder \"(report unavailable)\", not the written "
-          "report\n"
-          "    · cross-run lessons, skills and curation → nothing the model would have authored; "
-          "the\n      reflection note and each curation log still record this run deterministically"
-          "\n  Everything else is computed without a model and lands normally: budget summary, "
-          "diversity\n  archive, case + concept capsule, LLM cost roll-up, readmodel.sqlite, "
-          "trace.json, tree.html.\n"
-          "  Each step is marked COMPLETE once attempted, so a later `looplab finalize` will NOT "
-          "redo it.\n  If you want the model-written report and lessons, stop now, bring the "
-          "endpoint back, and\n  re-run this command.")
+    return "⚠ LLM endpoint unreachable while wrapping up: " + "; ".join(failures) + _COSTS
+
+
+def wrap_up_credential_warning(settings) -> str | None:
+    """`validate_bound_profiles`'s wrap-up policy: the same split, one gate earlier. Never refuses.
+
+    `7b11e7ad` softened the endpoint probe for a run that is already over and left its NEIGHBOUR
+    untouched, so the dead end it set out to remove was still reachable one function earlier: a
+    finished run whose API-key/endpoint pair had gone incomplete could not be finalized AT ALL
+    (`LLMError: LLM credential preflight failed`, exit 1, not one artifact), stayed
+    `finalization_pending` forever, and left its spend stranded in `.llm-usage-outbox` — the exact
+    failure `wrap_up_endpoint_warning` documents at length. The reasoning there transfers verbatim:
+    past the terminal boundary there is no proposal to degrade, and refusing costs the operator
+    every artifact that needs no model to protect the two the model can no longer produce anyway.
+
+    The credential differs from the endpoint in ONE way that matters, and it is why this function
+    has a partner: a dead endpoint still BUILDS its clients (they fail at request time), while an
+    unusable credential fails inside `make_llm_client`. Warning alone would only move the identical
+    `LLMError` from this gate into `make_roles` a few lines later. The caller therefore pairs this
+    warning with `credential_free_wrap_up_settings`.
+
+    Returns the operator-facing warning, or None when every required credential is usable.
+    """
+    try:
+        validate_bound_profiles(settings)
+    except LLMError as exc:
+        detail = str(exc)
+        prefix = "LLM credential preflight failed: "
+        if detail.startswith(prefix):                   # this function's own header replaces it
+            detail = detail[len(prefix):]
+        return ("⚠ LLM credential unusable while wrapping up: " + detail + _COSTS
+                + "\n  The wrap-up below runs with NO credential at all rather than sending this "
+                  "one somewhere it\n  is not bound to, so any call it does attempt is refused by "
+                  "the provider, not silently mis-sent.")
+    return None
+
+
+def credential_free_wrap_up_settings(settings):
+    """A copy of `settings` with every LoopLab-managed credential dropped — the wrap-up's transport.
+
+    `wrap_up_credential_warning` decides that a run which is already over may proceed without a
+    model. This is what makes that decision executable: `make_llm_client` resolves the shared
+    key/binding pair through `bound_api_key_for` and a profile's `api_key_env` through
+    `client_kwargs_for`, and BOTH raise on the same unusable credential the gate just warned about —
+    so without this the warning is followed immediately by the refusal it replaced.
+
+    Dropping the credential is the SAFE direction of that refusal, not a way around it. Every
+    message `validate_bound_profiles` can raise means "this secret does not belong to this
+    endpoint"; the answer here is to send no secret, so the request is refused by the provider
+    instead of carrying one provider's live key to another's host. The run then degrades exactly the
+    way an unreachable endpoint does, which is what the shared warning above already describes.
+
+    Deliberately not a mutation: `cli/__init__.py::run` still publishes the caller's own settings
+    into `config.snapshot.json`, and the operator's real (merely mis-bound) credential configuration
+    must survive there for the next command to fix.
+    """
+    profiles = getattr(settings, "llm_profiles", None) or {}
+    stripped = {name: {key: value for key, value in entry.items() if key != "api_key_env"}
+                for name, entry in profiles.items() if isinstance(entry, dict)}
+    degraded = settings.model_copy(update={
+        # An EMPTY pair, not a half one: `bound_api_key_for` reads "no credential configured" as the
+        # local-model tier and returns without demanding a binding. Half a pair is the incomplete
+        # state that raises.
+        "llm_api_key": "",
+        "llm_api_key_base_url": None,
+        "llm_profiles": {**profiles, **stripped} if profiles else profiles,
+    })
+    # Pin the pair to the COPY's own (now empty) fields. Without this, `bound_api_key_for`
+    # deliberately re-selects an ambient env/dotenv tier — the very tier that is mis-bound here —
+    # and the strip would be a no-op.
+    degraded._llm_credential_pair_trusted = True
+    return degraded
+
+
+def wrap_up_lift_refusal(kind: str, warning: str | None) -> LLMError:
+    """The refusal for a wrap-up-only engine whose boundary turned LIFTABLE before the loop started.
+
+    A `wrap_up_only` engine is built on a promise: this entry point can only complete the terminal
+    the log already carries. `cli/run_cmds.py` re-checks that promise against the folded log at the
+    one place all three commands enter the loop, because when it does not hold the engine is about
+    to do the thing the whole split exists to prevent — propose against a model the operator was
+    told is unavailable, and report success on the flat, meaningless result.
+    """
+    return LLMError(
+        f"the run is {kind!r} at the moment the loop would start, but this command was prepared as "
+        "a WRAP-UP: it may only complete the terminal already on disk, never start new work. "
+        "Something lifted the run (a concurrent `resume`, or a UI control) after that was decided"
+        + (", and the model this run needs is not available:\n" + warning if warning else "")
+        + "\nRefusing rather than searching on a boundary this command never classified. Re-run "
+          "the command you actually want: `looplab resume` to continue the run, `looplab finalize` "
+          "to wrap it up.")

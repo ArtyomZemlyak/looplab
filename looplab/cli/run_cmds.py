@@ -55,9 +55,37 @@ _engine = late_bound("looplab.cli", "_engine")
 make_llm_client = late_bound("looplab.cli", "make_llm_client")
 
 
+def _refuse_wrap_up_engine_that_could_propose(eng) -> None:
+    """A `wrap_up_only` engine must not drive a loop on a boundary that can start new work.
+
+    The backstop for the whole refuse-vs-warn split, placed at the ONE point all three commands
+    enter the loop. `wrap_up_only` is a promise made when the engine is built — "this entry point
+    can only complete the terminal already on disk" — and it is what turns the endpoint/credential
+    REFUSAL into a warning. Every command decides it from a folded log, and a fold is a snapshot: if
+    anything lifts the run between that fold and this line, the engine the operator was told is only
+    wrapping up starts proposing instead, against a model it has already been told is unavailable.
+    That produced N identical `x=0,y=0` fallback nodes, a flat metric and exit 0 (`resume`, whose
+    decision sat on the far side of the handoff wait — fixed at the source below, since a backstop
+    that only catches the outcome would still have let a `finalize` become a search epoch).
+
+    Costs one fold on every entry, and answers with the classifier the decision was made with, so
+    the check and the promise cannot drift apart. Engines built outside `_engine` (test stubs) carry
+    no promise and are not checked.
+    """
+    if not getattr(eng, "wrap_up_only", False):
+        return
+    events = eng.store.read_all()
+    kind = classify_prior_run(fold(events), events)
+    if is_wrap_up(kind):
+        return
+    from looplab.agents.preflight import wrap_up_lift_refusal
+    raise wrap_up_lift_refusal(kind, getattr(eng, "wrap_up_degradation_warning", None))
+
+
 def _run_engine_guarded(eng: Engine):
     """Drive the engine loop to completion, funneling any fatal abort into a terminal event.
     Shared by `run` and `resume` (previously duplicated verbatim in both)."""
+    _refuse_wrap_up_engine_that_could_propose(eng)
     started = time.time()
     try:
         return anyio.run(eng.run)
@@ -161,6 +189,46 @@ def _preflight_speculation_authority(eng: Engine, events=None) -> None:
     guard(fold(source))
 
 
+def _preflight_settled_widths(eng: Engine, events=None, *, surface: str) -> None:
+    """Adopt or refuse this run's pinned concurrency widths BEFORE the CLI writes anything.
+
+    The exact twin of `_preflight_speculation_authority`, and it exists for the exact same reason.
+    `SettledWidthPinError` was given `RunStartPinError` as its base so that a refused re-entry gets
+    the receipt's "do not mutate the log you refused to trust" handling — but the receipt has this
+    command-level boundary and the width check had only the one inside `Engine.run`, which the CLI
+    reaches AFTER it has already written. Both entry points therefore mutated the run they went on to
+    refuse, measured on a real run dir:
+
+    * `looplab run <existing dir>` with a disagreeing width overwrote `config.snapshot.json` (2 -> 3)
+      and appended `run_reopened` (38 -> 39 events), THEN raised. The refusal's own remedy pointed at
+      the snapshot it had just clobbered — and at a file `run` never reads back;
+    * `looplab resume <finished|paused run>` appended `resume` first (38 -> 39). The byte-unchanged
+      property held only on the SECOND identical attempt, i.e. once the run was no longer in a state
+      worth lifting — not in the case an operator actually hits.
+
+    `_repin_settled_widths` is left as the sole owner of the adopt/refuse rule; this only moves WHERE
+    it is first asked. It is idempotent, so `Engine.run`'s own call still runs and still guards a
+    concurrent tail edit: on the adopt path it has already set the width and re-reads its own value.
+    ``surface`` tells the refusal which knob this command actually reads (`engine/widths.py`).
+    The callable guard keeps lightweight compatibility stubs used by command-level tests working.
+
+    DELIBERATELY NOT WIRED INTO the two WRAP-UP boundaries — `finalize`, and `run`'s
+    `finalization_pending` branch — unlike the receipt preflight. The width pin protects an execution
+    TREATMENT, and both of those are `wrap_up_only`: they can only complete the terminal already on
+    disk, at no width. Neither publishes a snapshot or appends a lifecycle event, so there is nothing
+    for an early refusal to protect; both also take their settings from the run's OWN snapshot rather
+    than the launch flags, so `surface="run"` would name the wrong knob. Refusing there would buy
+    nothing and could strand a run that can no longer be wrapped up — the same reason `finalize`
+    warns about a dead endpoint instead of refusing. (`Engine.run` still refuses if a wrap-up ends up
+    driving the loop; that is its backstop's business, not a boundary to move earlier.)
+    """
+    guard = getattr(eng, "_repin_settled_widths", None)
+    if not callable(guard):
+        return
+    source = eng.store.read_all() if events is None else events
+    guard(fold(source), source=surface)
+
+
 def terminal_projection_incomplete(state, events) -> bool:
     """Whether a folded run has an ACCEPTED terminal boundary whose wrap-up did not complete.
 
@@ -234,14 +302,15 @@ def announce_wrap_up(kind: str) -> bool:
 
 
 def wrap_up_degradation_note(eng) -> str | None:
-    """The closing half of a wrap-up whose endpoint was down, or None when it was up.
+    """The closing half of a wrap-up that ran without a model, or None when it had one.
 
-    `_engine` probes the endpoint on a wrap-up entry and warns instead of refusing; the artifacts it
-    then produces are real but partly model-free. A bare "finalized <dir>" after that would be the
-    silent half of the degradation — the operator would have to scroll back past a whole wrap-up to
-    learn that the report is a placeholder and that no lessons were distilled.
+    `_engine` runs both LLM gates on a wrap-up entry — is the credential usable, is the endpoint
+    there — and warns instead of refusing; the artifacts it then produces are real but partly
+    model-free. A bare "finalized <dir>" after that would be the silent half of the degradation —
+    the operator would have to scroll back past a whole wrap-up to learn that the report is a
+    placeholder and that no lessons were distilled.
     """
-    if not getattr(eng, "wrap_up_endpoint_warning", None):
+    if not getattr(eng, "wrap_up_degradation_warning", None):
         return None
     return ("wrapped up WITHOUT the model: the end-of-run report is the \"(report unavailable)\" "
             "placeholder and nothing model-authored reached cross-run memory. Those steps are "
@@ -687,6 +756,7 @@ def run(
             # paid report/cost wrap-up. Missing or corrupt snapshots fail closed without rewriting them.
             engine_task, engine_settings = _pending_finalization_inputs(out, prior.task_id)
             eng = _engine(out, engine_task, engine_settings, crash_after=None, wrap_up_only=True)
+            # No WIDTH preflight on this wrap-up branch — see `_preflight_settled_widths`.
             _preflight_speculation_authority(eng, prior_events)
         else:
             # Construction initializes roles/clients and can fail. Preserve the prior run's provenance
@@ -703,9 +773,10 @@ def run(
                 **({"speculation_gate_calibration": True}
                    if speculation_gate_calibration else {}),
             )
-            # This existing prefix is still the authority until the new snapshots are published.
-            # Refuse a stale/missing/different receipt before replacing either snapshot.
+            # This existing prefix is still the authority until the new snapshots are published:
+            # refuse a stale receipt, or a width this log never pinned, BEFORE the publish below.
             _preflight_speculation_authority(eng, prior_events)
+            _preflight_settled_widths(eng, prior_events, surface="run")
             _publish_run_snapshots(out, task_dict, settings)
         # Continue a run dir that ALREADY FINISHED. Without this, re-entering the loop folds the log,
         # sees finished=True and breaks at once — printing the OLD best and doing no work. That silently
@@ -784,18 +855,6 @@ def resume(
         if max_nodes < 1:
             raise typer.BadParameter("--max-nodes must be >= 1")
         settings.max_nodes = max_nodes
-    # `resume` is the one entry point that is wrap-up-only SOMETIMES: it LIFTS a finished/paused run
-    # back into the loop (new work — a dead endpoint must refuse), but on a wrap-up boundary it may
-    # only complete the terminal already on disk (`announce_wrap_up` below refuses to lift it). The
-    # answer lives in the log, so classify the entry prefix BEFORE building the engine, on the store
-    # `_require_run_dir` already scanned for divergence (so its consumed prefix is cached). This read
-    # is not the authority for anything that gets appended — every lifecycle decision below re-folds
-    # under the singleton lock; it only chooses refuse-vs-warn for the endpoint probe.
-    entry_events = entry_store.read_all()
-    entry_kind = classify_prior_run(fold(entry_events), entry_events)
-    eng = _engine(run_dir, task, settings, crash_after=None,
-                  wrap_up_only=is_wrap_up(entry_kind))
-    _preflight_speculation_authority(eng)
     # Continuing a STOPPED run: a `stop` (paused) or natural finish re-breaks on the first iteration
     # and does no work unless we LIFT it — so append the universal `resume` event (fold clears
     # paused + finished). BUT a pending FINALIZE (stop_requested set, not yet finished — e.g. the UI
@@ -806,7 +865,9 @@ def resume(
     # says finished/stopped, but engine.lock is still held. Returning there loses the user's continue
     # intent. Only that stopped-state handoff waits; a second CLI against an actively working run still
     # returns immediately. Re-fold between attempts so another owner that already lifted the gate wins.
-    initial_events = eng.store.read_all()
+    # Read through the store `_require_run_dir` already scanned for divergence (its consumed prefix is
+    # cached); the engine does not exist yet, deliberately — see the block below.
+    initial_events = entry_store.read_all()
     initial = fold(initial_events)
     wait_for_handoff = bool(
         initial.paused or initial.finished or initial.stop_requested
@@ -824,12 +885,41 @@ def resume(
             if ok:
                 # Lifecycle mutation belongs under singleton ownership. A losing CLI in an old
                 # engine's post-finish lock tail must not reopen the run without an owner.
-                prior_events = eng.store.read_all()
+                prior_events = entry_store.read_all()
                 prior = fold(prior_events)
+                prior_kind = classify_prior_run(prior, prior_events)
+                # …and so does the REFUSE-VS-WARN decision that depends on it. `resume` is the one
+                # entry point that is wrap-up-only SOMETIMES: it LIFTS a finished/paused run back
+                # into the loop (new work — a dead endpoint must refuse), but on a wrap-up boundary
+                # it may only complete the terminal already on disk (`announce_wrap_up` below
+                # refuses to lift it). Both answers come from `prior_kind`, so they are read from
+                # ONE fold, under the lock, and the engine is built here rather than before the
+                # wait.
+                #
+                # Classifying earlier — before the singleton, before the handoff loop — is what the
+                # split shipped with, and it was wrong in the one way that matters: the handoff wait
+                # exists to let the PREVIOUS OWNER finish its wrap-up, which is precisely the
+                # transition from a wrap-up boundary to a liftable one. Measured with two real
+                # processes (a `finalize` holding the singleton, this command arriving ~1s later,
+                # endpoint at a closed port): the entry fold said `pending_finalize`, so the probe
+                # only WARNED; by the time the lock was free the run was plainly `finished`, so the
+                # same command LIFTED it and ran the remaining budget as four identical `x=0,y=0`
+                # fallback nodes with a flat metric and exit 0 — verbatim the fake success
+                # `preflight_role_endpoints` exists to refuse. Nothing conflicting happened: the
+                # previous owner simply did what this command waited for.
+                #
+                # Cost of building here: the endpoint probe (bounded by PREFLIGHT_TIMEOUT_S) now
+                # runs while this process owns the singleton. That is the same window the run
+                # itself owns it for, and a losing CLI already no-ops with a message.
+                eng = _engine(run_dir, task, settings, crash_after=None,
+                              wrap_up_only=is_wrap_up(prior_kind))
                 # A control may have landed while this command waited for singleton ownership.
                 # Re-authorize the exact prefix immediately before resume/resume_served can append.
                 _preflight_speculation_authority(eng, prior_events)
-                prior_kind = classify_prior_run(prior, prior_events)
+                # …and settle the widths on the same terms, BEFORE the `resume` append below. A
+                # refused width used to land that append first, so the "byte-unchanged" property held
+                # only on a second, identical attempt — after the state worth lifting was gone.
+                _preflight_settled_widths(eng, prior_events, surface="resume")
                 # `resume` LIFTS both liftable states the same way; `run` reopens a finished dir
                 # instead. That difference is real, so it stays here rather than in the classifier.
                 if not announce_wrap_up(prior_kind) and prior_kind in ("finished", "paused"):
@@ -847,7 +937,7 @@ def resume(
         if not wait_for_handoff:
             typer.echo(f"engine already running on {run_dir} — not resuming a second loop")
             return
-        current = fold(eng.store.read_all())
+        current = fold(entry_store.read_all())
         if not (current.paused or current.finished or current.stop_requested):
             typer.echo(f"run {run_dir} was already resumed by the active engine")
             return

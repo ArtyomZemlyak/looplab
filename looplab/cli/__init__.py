@@ -472,12 +472,41 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             wrap_up_only: bool = False) -> Engine:
     from looplab.core.llm import validate_bound_profiles
     from looplab.core.tracing import set_llm_capture
+    from looplab.agents.preflight import (credential_free_wrap_up_settings,
+                                          preflight_role_endpoints, wrap_up_credential_warning,
+                                          wrap_up_endpoint_warning)
+    # Everything this entry point may lose to a missing model, in the order the two gates run. A
+    # wrap-up entry collects instead of raising (see below) and the commands close by naming it.
+    _degradations: list[str] = []
     # Fail here, before any role is built, when a role is bound to a connection profile whose
     # credential variable is unset. Every CLI path (run/resume, and the UI, which spawns them)
     # funnels through this constructor, so this is the one gate that catches it — and catching it at
     # the first paid call instead would mean discovering the missing key partway into a run. Optional
     # offline consumers (embedding/Memora) retain their own hash/lexical fallback and are not strict.
-    validate_bound_profiles(settings)
+    #
+    # …unless this entry point can only COMPLETE a wrap-up (`wrap_up_only`, below), which cannot
+    # propose and therefore cannot degrade. The refusal then costs the operator every artifact that
+    # needs no model and strands the run at `finalization_pending` forever — the identical dead end
+    # the endpoint probe's own two policies were written to remove, reached one gate earlier. So
+    # warn, and swap in a credential-free copy for the roles: an unusable credential fails at client
+    # CONSTRUCTION, not at request time, so the warning alone would just move the same `LLMError` a
+    # few lines down into `make_roles` (measured: `finalize` still exited 1 with zero artifacts).
+    if wrap_up_only:
+        _credential_warning = wrap_up_credential_warning(settings)
+        if _credential_warning:
+            typer.echo(_credential_warning, err=True)
+            _degradations.append(_credential_warning)
+            # Local rebinding ONLY — the caller keeps the settings it publishes into
+            # config.snapshot.json, so the operator's real (merely mis-bound) credential
+            # configuration survives for the command that fixes it. (The shared key is popped from
+            # snapshots anyway; a profile's `api_key_env` is NOT, and losing it would turn one
+            # degraded wrap-up into a permanently uncredentialed run.) Everything below therefore
+            # reads the copy, including the in-place calibration-profile mutation — which cannot
+            # coincide with this branch: that lane requires a FRESH run dir, and a fresh dir is
+            # never wrap-up-only.
+            settings = credential_free_wrap_up_settings(settings)
+    else:
+        validate_bound_profiles(settings)
     # The calibrated lane is the toy benchmark and its replays ONLY. A receipt supplied alongside a
     # real Dataset/Repo/Command workload used to drag the whole run into the offline measurement
     # profile (backend="toy", every optional subsystem off) — a run that could not do the operator's
@@ -524,17 +553,26 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # and refusing costs the operator every artifact that needs no model, so the same probe WARNS
     # instead, naming what the missing endpoint degrades. The result is recorded on the Engine as a
     # CLI-owned annotation: the engine never reads it, the command reads it to keep its closing line
-    # honest. Residual, accepted: if a concurrent UI control lifts the stop while the wrap-up runs,
-    # the loop could still start work against the dead endpoint — a deliberate conflicting action,
-    # and the warning above already says what that endpoint state means.
-    from looplab.agents.preflight import preflight_role_endpoints, wrap_up_endpoint_warning
-    _wrap_up_warning = None
-    if wrap_up_only:
-        _wrap_up_warning = wrap_up_endpoint_warning(settings)
-        if _wrap_up_warning:
-            typer.echo(_wrap_up_warning, err=True)
-    else:
+    # honest — and `run_cmds._run_engine_guarded` re-checks the `wrap_up_only` promise against the
+    # folded log before entering the loop, so a boundary that moves under a warn-path engine refuses
+    # instead of proposing.
+    #
+    # THE CALLER OWES ONE THING FOR THIS FLAG TO MEAN ANYTHING: it must be decided against the same
+    # state as the decision to LIFT the run. `resume` derived it from a fold taken BEFORE the
+    # handoff wait — a wait whose whole purpose is to let the previous owner finish the wrap-up,
+    # i.e. to produce exactly the transition that invalidates it — and then lifted on a re-fold
+    # taken after. Both now happen under the singleton lock, from one fold (`cli/run_cmds.py`).
+    if not wrap_up_only:
         preflight_role_endpoints(settings)
+    elif not _degradations:
+        # `not _degradations`: the credential gate has already answered "this wrap-up has no model".
+        # A probe now would necessarily run credential-free (that is what the roles below will use),
+        # so it would measure a configuration this run never had and could only repeat the one
+        # warning the operator has already been given.
+        _endpoint_warning = wrap_up_endpoint_warning(settings)
+        if _endpoint_warning:
+            typer.echo(_endpoint_warning, err=True)
+            _degradations.append(_endpoint_warning)
     role_builder = (_make_calibration_roles if narrow_speculation_runtime else make_roles)
     researcher, developer = role_builder(task, settings, run_dir)
     # Agentic-foresight tools: run-introspection (own experiments) + data facts, so the ranker can
@@ -677,9 +715,12 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # dead LLM endpoint degrades to the deterministic lexical abstractor inside make_abstractor.
         lesson_abstractor=_make_lesson_abstractor(settings),
     )
-    # CLI-owned annotation, never read by the engine: the wrap-up commands close with a line that
-    # must say whether the artifacts they just wrote were produced without a model.
-    engine.wrap_up_endpoint_warning = _wrap_up_warning
+    # CLI-owned annotations, never read by the engine. `wrap_up_degradation_warning` is what the
+    # wrap-up commands close with, so their last line says whether the artifacts they just wrote
+    # were produced without a model; `wrap_up_only` is the promise this engine was built on, which
+    # `run_cmds._run_engine_guarded` re-checks against the log before driving the loop.
+    engine.wrap_up_degradation_warning = "\n".join(_degradations) or None
+    engine.wrap_up_only = wrap_up_only
     return engine
 
 

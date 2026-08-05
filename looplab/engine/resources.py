@@ -209,6 +209,54 @@ def cuda_visible_device_tokens(value: object) -> Optional[list[str]]:
     return tokens
 
 
+def schedulable_cuda_tokens(tokens: Optional[list[str]]) -> Optional[list[str]]:
+    """Apply CUDA's OWN left-to-right truncation to an all-ordinal ``CUDA_VISIBLE_DEVICES`` fence.
+
+    ``cuda_visible_device_tokens`` answers "is this selector well-formed"; this answers the different
+    question "how many of those devices will the child process actually see".  CUDA parses an ordinal
+    device list left to right and STOPS at the first index that does not exist, so on this two-GPU box
+    ``CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`` exposes TWO devices and ``CUDA_VISIBLE_DEVICES=7`` exposes
+    NONE (verified against ``torch.cuda.device_count()``: 2 and 0).  Counting the tokens instead makes
+    the engine believe in hardware the runtime will never hand it.
+
+    That matters because the count is a WIDTH.  ``eval_parallel``/``llm_parallel`` ship ``0`` = AUTO =
+    one experiment per detected GPU, and `run_started` pins the resolved integer permanently — so a
+    transient env typo did not merely over-subscribe the box that saw it, it became the durable
+    treatment every later resume ADOPTS (invariant #6, `_repin_settled_widths`).  A width of 8 on two
+    GPUs also hands six evals a `CUDA_VISIBLE_DEVICES` naming a physical id CUDA drops, i.e. a silent
+    CPU fallback rather than an honest refusal.  Agreeing with CUDA at the source fixes both, and it
+    is a correction to the PROBE, not a new policy: nothing here decides what a width should be.
+
+    Deliberately narrow, and FAIL-OPEN in every case where the ordinal inventory cannot judge:
+
+    * UUID/MIG tokens are returned untouched — ``nvidia-smi``'s numeric index cannot bound them, and
+      a MIG fence legitimately names more instances than there are physical GPUs;
+    * so is every token list when the physical probe is unavailable, empty, or not the contiguous
+      ``0..n-1`` block CUDA ordinals index into (no nvidia-smi, a driver error, ROCm, a CI box).
+
+    ``nvidia-smi`` reports the PHYSICAL box regardless of ``CUDA_VISIBLE_DEVICES`` (measured: index
+    0,1 under every fence above), which is what makes it a trustworthy bound for a fenced view rather
+    than a circular one.
+    """
+    if not tokens or any(not token.isdecimal() for token in tokens):
+        return tokens
+    try:
+        rows = detect_gpus()
+    except Exception:  # noqa: BLE001 -- capability detection is best-effort by contract
+        return tokens
+    indices = {row.get("index") for row in rows if isinstance(row, dict)}
+    if not indices or indices != set(range(len(rows))):
+        # A partial/duplicated/non-contiguous inventory is not the ordinal space CUDA indexes, so it
+        # cannot say which ordinals exist. Keep the operator's fence rather than guess it smaller.
+        return tokens
+    keep: list[str] = []
+    for token in tokens:
+        if int(token, 10) not in indices:
+            break
+        keep.append(token)
+    return keep
+
+
 def detect_gpu_inventory(logical_ids: list[int]) -> tuple[dict[int, str], dict[int, int]]:
     """Return ``(logical -> physical, logical -> free MiB)`` for the visible GPU set.
 
@@ -220,7 +268,10 @@ def detect_gpu_inventory(logical_ids: list[int]) -> tuple[dict[int, str], dict[i
     ids = list(logical_ids or [])
     cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
     if cvd is not None:
-        tokens = cuda_visible_device_tokens(cvd) or []
+        # The SAME two steps `_detect_gpu_ids` takes, in the same order: validate the selector, then
+        # truncate it the way CUDA does.  Skipping the truncation here would make every fenced view it
+        # shortens look like a probe mismatch and fail the whole inventory closed.
+        tokens = schedulable_cuda_tokens(cuda_visible_device_tokens(cvd)) or []
         # _detect_gpu_ids derives the same count.  A mismatch means one of the probes changed or the
         # environment was malformed; an empty mapping makes any independently forged reservation fail
         # closed instead of escaping the operator's visibility fence through logical-id fallback.
