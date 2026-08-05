@@ -20,7 +20,48 @@ from typing import Optional
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import RunState, normalize_researcher_footprint
-from looplab.engine.triage import _rule_triage, coerce_repair_class
+from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION, _rule_triage,
+                                   coerce_triage_action)
+
+
+def _accepted_kwargs(fn, candidates: dict) -> dict:
+    """The subset of `candidates` that `fn` can actually be called with.
+
+    Everything, when `fn` declares `**kwargs`; nothing it does not name otherwise. Signature
+    introspection can fail on an exotic callable (a C function, a `functools.partial` chain, a
+    proxy) — that answers "pass nothing", which is the safe direction: the callee keeps its
+    historical prompt rather than the call blowing up and being mistaken for a provider outage."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return dict(candidates)
+    return {k: v for k, v in candidates.items() if k in params}
+
+
+def _format_repair_log(repair_log) -> str:
+    """Render this node's in-node repair history for the stop judge: one line per attempt, oldest
+    first, newest last. Pure text assembly — the engine decides WHAT the judge sees, the agent
+    decides how to ask about it.
+
+    Rendered here rather than in `agents/unified_agent.py` because the rows are the ENGINE's
+    record of what it did, and because the deterministic rule path must be able to ignore them
+    without the agent module having an opinion. Empty history renders empty, so the first attempt's
+    prompt is byte-identical to what it was before the history existed."""
+    rows = [r for r in (repair_log or []) if isinstance(r, dict)]
+    if not rows:
+        return ""
+    out = ["--- WHAT HAS ALREADY BEEN TRIED ON THIS NODE (oldest first) ---"]
+    for r in rows:
+        changed = ", ".join(str(c) for c in (r.get("changed") or [])) or "nothing"
+        out.append(
+            f"attempt {r.get('attempt')}: failed with — {' '.join(str(r.get('error', '')).split())}\n"
+            f"    the fix claimed: {str(r.get('fix', '')).strip() or '(no rationale)'}\n"
+            f"    it changed: {changed} | pipeline stages passed before the failure: "
+            f"{r.get('stages_passed')}")
+    return "\n".join(out)
 
 
 class CrashRepairMixin:
@@ -29,23 +70,31 @@ class CrashRepairMixin:
 
     @in_llm_lane("build")
     def _triage_crash(self, state: RunState, node, error: str, attempt: int,
-                      reason: str = "crash", *, charged_attempt: Optional[int] = None) -> dict:
+                      reason: str = "crash", *, repair_log=None,
+                      depth: Optional[int] = None, attempts_left: Optional[int] = None) -> dict:
         """Decide what to do with a just-failed node BEFORE spending another eval:
-        {"action": "repair"|"abandon"|"reject_idea", "rationale": str}. Base mode: the unified
-        agent decides (it can consult the run via its pilot tools — read_code / find_analogous —
-        to judge whether nearby configs also fail, i.e. whether the IDEA is wrong vs the code).
-        Falls back to a deterministic rule when no LLM triage agent is wired (unified_agent off),
-        which never rejects an idea — so the feature is safe without an agent.
+        {"action": "repair"|"abandon"|"reject_idea"|"unanswerable", "rationale": str}.
 
-        `reason` (crash|timeout) is surfaced to both paths so a timeout is triaged as "too slow ->
-        reduce compute" rather than mis-read as a wrong idea (a missing KNOWN lib never reaches here
-        — env-prep installs it and re-runs first).
+        THIS IS THE STOPPING RULE for the inline-repair loop, not merely a repair-vs-reject
+        classifier. The unified agent decides (it can consult the run via its pilot tools —
+        read_code / find_analogous — to judge whether nearby configs also fail, i.e. whether the
+        IDEA is wrong vs the code), and `abandon` is its "I no longer know how to fix this". It is
+        asked once per attempt, which costs no extra calls: the loop already made exactly one triage
+        call per attempt. What changed is the EVIDENCE — `repair_log` is this node's whole repair
+        history (what failed, what each fix claimed, which files it actually touched, how deep the
+        pipeline got), so the model judges a trajectory instead of one traceback in isolation.
 
-        `attempt` is the repair attempt NUMBER (what the agent and the trace see); `charged_attempt`
-        is that number as the EXPERIMENT budget counts it — the two diverge once a repair has been
-        charged to the environment ledger instead (`engine/evaluate.py`). Only the rule path's own
-        cap compares against a budget, so only it reads the charged number; defaulting to `attempt`
-        keeps every other caller on the historical behaviour."""
+        `reason` (crash|timeout|oom) is surfaced to both paths so a timeout is triaged as "too slow
+        -> reduce compute" rather than mis-read as a wrong idea (a missing KNOWN lib never reaches
+        here — env-prep installs it and re-runs first). `attempts_left` is the operator's remaining
+        hard budget (None = unlimited), told to the model so a stop and a cap-out are not the same
+        surprise; it is advisory to the model and enforced by the caller regardless.
+
+        FAIL CLOSED. When a triage model IS wired and cannot answer — transport failure, refusal,
+        an emit that does not parse — this returns `unanswerable`, NOT a permissive "repair" and NOT
+        the deterministic rule. A wired-but-dead judge is a provider outage, which is how the
+        2345-repair incident began, and the caller routes it to the run-level circuit breaker. The
+        rule path is reserved for the genuinely different case of no judge being wired at all."""
         # Tag the failure kind so the LLM agent (and the rule's marker scan) see crash vs timeout.
         tagged = f"[failure kind: {reason}]\n{error}"
         fn = getattr(self.researcher, "triage_crash", None)
@@ -65,27 +114,55 @@ class CrashRepairMixin:
                 # inherit phase=evaluate and inflate the "evaluate" band with failure-debugging that has
                 # nothing to do with scoring — the exact "why is there a big eval when it never scored?"
                 # confusion. (The repair itself already has its own `inline_repair` span.)
+                # `triage_crash` is a DUCK-TYPED seam (any object wired as `researcher` may
+                # implement it), and this change added three keyword arguments to it. Passing them
+                # unconditionally makes an implementation written against the old signature raise
+                # TypeError — which the fail-closed handler below would then read as a dead provider
+                # and use to stop the node and pause the RUN. That is the worst possible way for a
+                # signature change to land, so the call is narrowed to what the callee actually
+                # accepts. A `**kwargs` implementation gets everything, as before.
+                extra = {"history": _format_repair_log(repair_log),
+                         "stages_passed": depth, "attempts_left": attempts_left}
                 with self.tracer.span("triage", attempt=attempt, reason=reason):
-                    out = fn(node, tagged, attempt, state=state, brief=brief)
-                if isinstance(out, dict) and out.get("action") in ("repair", "abandon", "reject_idea"):
-                    # `repair_class` (which BUDGET the repair spends) and `missing_dependency` (a
-                    # library the agent says is absent) are part of the verdict, so they are carried
-                    # here rather than re-derived downstream. Both fail closed: an agent that emits
-                    # neither is coerced to the historical behaviour — the experiment budget, and no
-                    # install. The engine never acts on `missing_dependency` alone (see
+                    out = fn(node, tagged, attempt, state=state, brief=brief,
+                             **_accepted_kwargs(fn, extra))
+                if isinstance(out, dict) and out.get("action") in AGENT_TRIAGE_ACTIONS:
+                    # `missing_dependency` (a library the agent says is absent) is part of the
+                    # verdict, so it is carried here rather than re-derived downstream. It fails
+                    # closed to "" = no install, and the engine never acts on it alone (see
                     # runtime/deps.py::triage_install_candidates).
                     return {"action": out["action"], "rationale": str(out.get("rationale", ""))[:300],
-                            "repair_class": coerce_repair_class(out.get("repair_class")),
                             "missing_dependency": str(out.get("missing_dependency", ""))[:100]}
-            except BudgetExceeded:      # the hard budget stop must propagate, not degrade to the rule
+                # A wired judge that answered with something outside the vocabulary. Coerced through
+                # the registry, which fails closed to `unanswerable` rather than inventing "repair" —
+                # tonight's watchdog verification found the mirror-image bug (an unparseable verdict
+                # read as transparent) and it was a real break.
+                #
+                # `unanswerable` can also arrive ALREADY SPELLED, from the agent's own fail-closed
+                # paths (`UnifiedAgent.triage_crash` returns it for a transport failure or an emit it
+                # could not read). That one is not malformed, it is the same verdict reached one
+                # layer down — so its rationale passes through instead of being re-wrapped in
+                # "returned no usable verdict (…)", which is what the operator ends up reading in the
+                # pause reason.
+                _raw = (out or {}).get("action") if isinstance(out, dict) else None
+                _why = (str(out.get("rationale", ""))[:300] if _raw == DEFAULT_TRIAGE_ACTION
+                        else f"the triage model returned no usable verdict ({out!r})"[:300])
+                return {"action": coerce_triage_action(_raw),
+                        "rationale": _why or "no verdict returned", "missing_dependency": ""}
+            except BudgetExceeded:      # the hard budget stop must propagate, not degrade to a verdict
                 raise
-            except Exception:  # noqa: BLE001 - agent triage is best-effort; fall through to the rule
-                pass
-        # 0 = unlimited attempts -> pass a large cap so the rule path keeps repairing mechanical
-        # crashes (the anti-stuck guard, not a count, stops a genuinely stuck node).
+            except Exception as exc:  # noqa: BLE001 - a WIRED judge that cannot answer is a provider
+                # outage, not a licence to keep repairing. This used to fall through to `_rule_triage`,
+                # which answers "repair" for any mechanical crash while attempts remain — so a dead
+                # endpoint kept the loop running at full speed with no LLM in it at all.
+                return {"action": DEFAULT_TRIAGE_ACTION,
+                        "rationale": f"{type(exc).__name__}: {exc}"[:300],
+                        "missing_dependency": ""}
+        # NO judge wired (`unified_agent` off) — a configuration, not a failure. The deterministic
+        # rule keeps repairing mechanical crashes, bounded ONLY by the operator's hard cap, because
+        # it has no way to form the stop judgement the model makes. 0 = unlimited -> a large cap.
         cap = self._inline_repair_attempts or 10**9
-        return _rule_triage(reason, error,
-                            attempt if charged_attempt is None else charged_attempt, cap)
+        return _rule_triage(reason, error, attempt, cap)
 
     def _repair_error_context(self, reason: str, error: str,
                               state: Optional[RunState] = None, node=None) -> str:

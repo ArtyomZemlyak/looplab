@@ -134,10 +134,12 @@ class EngineOptions:
     # revalidates it and refuses a stale/forged one (`Engine.__init__`'s admission block).
     speculation_gate_receipt: Optional[str] = None
     inline_repair: bool = True           # hybrid: triage + repair a crashed node IN PLACE (no new node)
-    inline_repair_attempts: int = 0      # max in-place repair retries per node (0 = UNLIMITED); a
-                                         # positive N bounds EACH ledger — experiment repairs and
-                                         # environment reconciliation — see core/config.py
-    inline_repair_stuck_repeat: int = 4  # abandon when the SAME error repeats this many times in a row
+    inline_repair_attempts: int = 12     # HARD cap on in-place repair retries per node (0 = UNLIMITED).
+                                         # The primary stop is the triage model's `abandon` verdict;
+                                         # this is the backstop — see core/config.py for the numbers
+                                         # behind 12. Same value as the product Settings on purpose:
+                                         # a bound is the CONSERVATIVE choice, so the library default
+                                         # must not be the more permissive of the two.
     inline_repair_reasons: tuple = ("crash", "timeout", "oom")  # reasons eligible for inline repair
     inline_repair_retrain_cap: int = 2   # max FULL pipeline re-runs (re-trains) before abandoning
     auto_install_deps: bool = True       # pip-install a missing KNOWN lib + re-run (trusted_local only)

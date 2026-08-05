@@ -251,6 +251,58 @@ DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
     "last_report", "last_seed", "last_run", "last_patch")
 RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
 
+# Duck-typed attributes that answer "does building one node make provider calls at all?" — the seam
+# `engine/orchestrator.py::_build_calls_an_llm` reads, and the other half of the same AUTO width
+# decision `adapters/tasks.py::TASK_OPTIONAL_HOOKS::gpu_capable` already covers. Registered for the
+# same reason every other duck-typed seam here is: the read is `getattr(obj, name, default)`, so a
+# rename on the PRODUCER side cannot fail loudly, and a false answer is not a crash — it silently
+# reshapes the run (measured on the real `UnifiedAgent` shape: True -> False, `llm_parallel` 4 -> 1,
+# `speculation_depth` 4 -> 0, no test red).
+#
+# `tests/test_build_llm_probe_contract.py` source-scans BOTH directions: every attribute the
+# predicate probes must be listed, and every listed attribute must still be a live public handle on
+# the shipped roles/facade.
+LLM_PRESENCE_ATTRS: tuple[str, ...] = (
+    # Every LLM-backed role carries the shared client; wrappers forward it read-through (see
+    # `WrapsDeveloper` below) and `search/foresight.py`'s panel proxies it.
+    "client",
+    # An external coding-agent Developer (`agents/cli_agent.py`) holds no client and declares this
+    # instead — it spends provider latency through its own CLI.
+    "is_code_generating",
+)
+
+# The `UnifiedAgent` facade's PUBLIC per-stage handles, which the same predicate descends into.
+# Load-bearing precisely because the facade's own `client`/`is_code_generating` forwarders come from
+# `WrapsDeveloper` and therefore describe the DEVELOPER stage only: under the shipped
+# `unified_agent=True` one object plays both roles, so on every adapter with a templated Developer
+# but an `LLMResearcher` (classification, regression, timeseries) the forwarders read a client-less
+# template while the run calls the provider once per node. These handles are what re-open the facade.
+#
+# They are ALREADY public for a second consumer — the cost roll-up walk names them in
+# `engine/costs.py::_CHILD_ATTRS`, so a per-stage CostAccountant is reachable — but that consumer
+# only loses BILLING when a handle is renamed, which is why it never caught this. Keep both consumers
+# in mind before making one of these private.
+FACADE_STAGE_ATTRS: tuple[str, ...] = ("researcher", "developer", "stage_clients")
+
+# TWO KNOWN IMPRECISIONS, both accepted, both outside any shipped wiring — recorded so the next
+# reader does not "fix" one into a real defect. The predicate is a WIDTH heuristic, so it is tuned to
+# be wrong in the cheap direction, and the two directions are not symmetric:
+#
+# * OVER-approximation (answers True with no build latency): `stage_clients` holds the clients no
+#   per-stage backend owns — strategy and pilot — so a `UnifiedAgent` whose researcher AND developer
+#   are both templates still answers True if a Strategist client was threaded in. Cost: AUTO fans a
+#   local build out and the log's byte ORDER stops being reproducible. Kept because narrowing it means
+#   naming which entries are build-facing, and `stage_clients` is deliberately an opaque list for the
+#   cost roll-up; no shipped factory builds that shape (a templated pair never gets a stage client).
+# * UNDER-approximation (answers False with real latency): a role that holds its client privately, or
+#   whose property raises, reads as "no LLM" — `_build_calls_an_llm` swallows the exception on
+#   purpose, because a proxy that raises is not evidence of a provider call. Cost is only lost
+#   fan-out, never a wrong result. A role that wants the fan-out declares one of LLM_PRESENCE_ATTRS.
+#
+# The b89b0209 regression was a THIRD shape and is not in this list because it was not acceptable:
+# the shipped default hit it on three adapters, and the cost was a run serialized against its own
+# per-node provider call.
+
 # The SUBSET of RESEARCHER_HINT_ATTRS that both researchers splice into their PROMPT (doc 25 AG-10).
 # Both `LLMResearcher.propose` and `ToolUsingResearcher.propose` had this as an inline literal, under
 # a docstring promising "both researchers honor the same cues" — a promise nothing checked.
@@ -482,19 +534,81 @@ class ToyObjectiveDeveloper:
 # --------------------------------------------------------------------------- #
 
 
+# The Researcher's IN-BAND degraded-proposal sentinel — the exact twin of the Developer's
+# `core/models.py::DEVELOPER_ERROR_PREFIX` / `is_developer_error`, and it exists for the same reason.
+#
+# Every LLM role degrades on purpose (see `agents/preflight.py`'s docstring for the stacked chain),
+# and for the Researcher the degradation is an Idea with NO params, NO hypothesis, and an error string
+# where the rationale should be. That is not a weak experiment, it is the ABSENCE of one — but it used
+# to be indistinguishable from a real proposal by the time the engine saw it, so a provider that died
+# MID-RUN was never noticed on the proposal path. Measured live (`/tmp/ll-s4b/run`, provider killed
+# after node 0): three further nodes with byte-identical bounds-midpoint params, the transport error
+# spliced into the hypothesis board, the node rationale, the research memo AND the durable cross-run
+# case, a champion declared over them, `run_finished` with no reason, and exit 0.
+#
+# IN-BAND on the rationale, deliberately, rather than an attribute on the role. `RESEARCHER_HINT_ATTRS`
+# is a DELIVERY contract that every wrapper must mirror by hand (the foresight panel, the UnifiedAgent
+# facade, the surrogate and empirical panels), and an attribute missing from one of them dies silently
+# at that wrapper. The Idea is the one thing every wrapper is obliged to return, so a sentinel carried
+# ON it reaches the engine through all of them by construction — which is exactly why the Developer's
+# crash sentinel rides its CODE.
+RESEARCHER_FALLBACK_PREFIX = "fallback ("
+
+
+def researcher_fallback_rationale(what: str, cause) -> str:
+    """The one spelling of a degraded proposal's rationale. `what` names which stage gave up."""
+    return f"{RESEARCHER_FALLBACK_PREFIX}{what}: {cause})"
+
+
+def is_researcher_fallback(idea) -> bool:
+    """True when `idea` is a role's degraded FALLBACK rather than a proposed experiment.
+
+    Total and duck-typed: anything without a readable string rationale is a real proposal, so a
+    plugin Researcher returning an exotic object can never be mistaken for a dead provider.
+    """
+    try:
+        rationale = getattr(idea, "rationale", None)
+    except Exception:  # noqa: BLE001 - a hostile/read-only surface is not evidence of a crash
+        return False
+    return isinstance(rationale, str) and rationale.startswith(RESEARCHER_FALLBACK_PREFIX)
+
+
+def researcher_fallback_cause(idea) -> str:
+    """The captured provider/parse error inside a degraded proposal, for the operator-facing pause."""
+    if not is_researcher_fallback(idea):
+        return ""
+    text = str(getattr(idea, "rationale", "") or "")[len(RESEARCHER_FALLBACK_PREFIX):]
+    return text[:-1].strip() if text.endswith(")") else text.strip()
+
+
 def _clamp_fill(idea: Idea, bounds: Optional[dict]) -> Idea:
     """Clamp numeric params into bounds and fill any missing ones with the midpoint, so
     a stray/empty proposal can't crash the objective. A SWEPT dimension (present in `idea.space`) is
-    left to its grid — midpoint-filling it would inject a spurious 'fixed at X' param the Developer
-    prompt renders ALONGSIDE the sweep grid ('sweep degree in [1,2,3]' AND 'degree=3.0'), telling the
-    model the swept dim is simultaneously fixed; the sweep-offer contract keeps swept dims out of
-    params on purpose. (Direct mutation here bypasses Idea._clamp_params_to_space, so guard here.)"""
+    left to its grid ENTIRELY — neither filled nor clamped — because the grid, not the task bounds,
+    is what the Developer actually runs for that dimension.
+
+    Midpoint-filling a swept dim would inject a spurious 'fixed at X' param the Developer prompt
+    renders ALONGSIDE the sweep grid ('sweep degree in [1,2,3]' AND 'degree=3.0'), telling the model
+    the swept dim is simultaneously fixed; the sweep-offer contract keeps swept dims out of params
+    on purpose. CLAMPING one is worse, and is why the exemption now covers both branches. Direct
+    mutation here bypasses `Idea._clamp_params_to_space`, so a bounds clamp on a swept key can push
+    `params[k]` OUTSIDE its own `space[k]` grid and leave the Idea no longer a FIXED POINT of its own
+    validators. Every durable Card action digest is minted from those params and re-derived by
+    rebuilding the Idea from the Card — which re-runs the space clamp and gets a different number —
+    so such a Card can never be claimed again and the create lane spins on it forever. Measured live
+    (`/tmp/ll-s1/spec`): the Researcher proposed `iters=5000` with `space.iters=[1000,5000]` against
+    this task's `iters` bound of (10, 500); the clamp wrote `params.iters=500`, reconstruction snapped
+    it back to 1000, `_prepare_existing_card_claim` refused the mismatch on every turn, and the run
+    burned 74 loop turns in one second before dying "stuck: 1 action(s) planned … without creating a
+    node". A swept dim's params entry is redundant with its grid, so skipping it costs nothing."""
     if bounds:
         swept = set(getattr(idea, "space", None) or {})
         for k, (lo, hi) in bounds.items():
+            if k in swept:
+                continue                          # the grid owns this dimension — see the docstring
             if k in idea.params:
                 idea.params[k] = max(lo, min(hi, float(idea.params[k])))
-            elif k not in swept:
+            else:
                 idea.params[k] = (lo + hi) / 2.0
     return idea
 
@@ -690,7 +804,10 @@ class LLMResearcher:
                     "NUMERIC `params` only (put any non-numeric/structural change in `rationale`), a "
                     "valid `operator`, and a `rationale`."}]
         if idea is None:
-            idea = Idea(operator="draft", params={}, rationale=f"fallback (parse failed: {last})")
+            # Through the shared sentinel: the engine's proposal-path circuit breaker recognises this
+            # exact prefix and refuses to turn a non-proposal into a Card/node. Byte-identical text.
+            idea = Idea(operator="draft", params={},
+                        rationale=researcher_fallback_rationale("parse failed", last))
         return _clamp_fill(idea, self.bounds)
 
 
@@ -749,6 +866,14 @@ class LLMDeveloper:
         # deterministically re-fails, burning every attempt.
         if idea is not None and getattr(idea, "rationale", ""):
             user += "\n\n--- ADDITIONAL GUIDANCE ---\n" + idea.rationale
+        # `complete_text` is NOT caught here, and neither is it by `ValidatingDeveloper._attempt_loop`
+        # above — a 401/402/outage RAISES out of `repair`. That is deliberate but only safe because
+        # every caller now has a handler: the two build-time ones are inside `_create_node` (which
+        # terminalizes the build and requests the build_crash pause), and the inline-repair loop
+        # normalizes the raise into the "(developer error: …)" sentinel at its own call site
+        # (`engine/evaluate.py`), so it takes the same provider circuit breaker as a repo Developer's
+        # in-band sentinel. It used to be the one uncaught path: the exception escaped `_evaluate`
+        # with no terminal and no pause, so the breaker never engaged for non-repo tasks.
         repaired = extract_code(self.client.complete_text(
             [{"role": "system", "content": system}, {"role": "user", "content": user}]))
         self.last_footprint = developer_artifact_footprint(idea.footprint, repaired)

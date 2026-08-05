@@ -568,44 +568,35 @@ class Settings(BaseSettings):
     # Semantic failures still flow to a new idea/debug node via the policy. ON by default; set False
     # to restore the prior behavior (every crash waits for a budgeted inter-node debug node).
     inline_repair: bool = True
-    # Max in-place repair attempts per node before it fails normally. Default 0 = UNLIMITED: the same
-    # agent keeps fixing + re-evaluating IN THE SAME node until it produces a clean metric — no new
-    # node just to retry. Runaway is prevented not by a count but by the anti-stuck guard
-    # (`inline_repair_stuck_repeat`): when the SAME error signature repeats with no progress, or the
-    # agent's crash-triage says "abandon", the node fails. Set a positive N to cap the retries instead.
+    # HARD upper limit on in-place repair attempts per node — the operator's backstop, not the
+    # primary stopping rule. The primary rule is the crash-triage MODEL: it is consulted once per
+    # attempt with this node's whole repair history (what failed, what each fix claimed, which files
+    # it touched, how far the pipeline got) and its `abandon` verdict — "I no longer know how to fix
+    # this" — stops the node (`engine/evaluate.py`). That call is not an extra cost: the loop already
+    # made exactly one triage call per attempt to decide repair-vs-reject.
     #
-    # N is APPORTIONED, not a single pool: it bounds EACH of two ledgers separately, because two
-    # equally "mechanical" repairs can be completely different resources. A repair that only
-    # reconciles the authored code with the INSTALLED libraries (a moved import, a removed/renamed
-    # API, a major-version migration, a symbol an absent optional dependency left undefined) draws on
-    # the ENVIRONMENT ledger; everything else — the node's own logic, a modelling decision, a run
-    # that was too slow or too big — draws on the EXPERIMENT ledger, which is what an operator is
-    # really budgeting. So the worst case per node is 2N repairs, and one number still controls it.
-    # Deliberately no second knob: the two ledgers are not independently tunable quantities, they are
-    # the same allowance charged to whoever incurred the cost.
-    # WHY: measured on `runs/rubert-dr-0805` node 0 with `inline_repair_attempts: 6` — all six
-    # attempts went on PyTorch-Lightning-2.x / transformers / accelerate migrations of a repo whose
-    # pinned deps were a year stale (every triage rationale said "mechanical"), and the first genuine
-    # research question, a DDP `find_unused_parameters` modelling decision, arrived with the budget
-    # exhausted. Under one pool such a repo can NEVER reach its own research question: every node
-    # re-pays the same migration.
-    # The environment ledger cannot become a second runaway: an exemption additionally requires the
-    # agent's structured `repair_class`, the ENGINE's own reading of the traceback
-    # (`engine/triage.py::_environment_failure`) and FORWARD PROGRESS (a never-before-seen normalized
-    # error signature, or a later pipeline stage reached) to agree — so the 2345-repair incident,
-    # whose failures all normalize to one signature, buys exactly one exempt attempt and still stops
-    # at `inline_repair_stuck_repeat`. Anything that disagrees is charged to the experiment budget.
-    inline_repair_attempts: int = Field(default=0, ge=0)
-    # Anti-stuck: abandon in-node repair once ONE normalized error signature has failed this node
-    # this many times (no progress). Keeps "unlimited" repair from looping forever on an unfixable
-    # error — with inline_repair_attempts=0 this guard is the ONLY bound on the loop, so it is
-    # counted PER SIGNATURE over the whole node rather than as a consecutive streak (a streak is
-    # defeated by any interleaving: an oscillating repair, or a failure that cycles through
-    # variants). What counts as "the same" error is `engine/triage.py::_normalize_error_sig`, which
-    # documents the variation it absorbs (addresses/line numbers/paths/numbers/quoted identifiers)
-    # and the variation it deliberately still distinguishes (exception class, message template,
-    # failing frame) so a crash that genuinely moves as it is fixed keeps its attempts.
-    inline_repair_stuck_repeat: int = Field(default=4, ge=2)
+    # 0 = UNLIMITED, which is what this shipped as and what an existing run resumes with
+    # (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`). It is no longer the default, because a cap is the only
+    # thing that bounds the case where the judge cannot help: it is wrong in the expensive
+    # direction, or the endpoint answering it is degraded rather than dead (a dead one is caught —
+    # an unanswerable judge stops the node and pauses the run naming the provider). Under 0 a single
+    # node reached 2345 `node_repaired` events over 3.5 h on a dead provider.
+    #
+    # WHY 12. It has to clear the longest legitimate chain on record with margin: `runs/rubert-dr-0805`
+    # node 0 needed 8 repairs — six PyTorch-Lightning/transformers/accelerate migrations of a repo
+    # whose pinned deps were a year stale, and only then two on its actual research question (a DDP
+    # `find_unused_parameters` modelling decision). Driving that recorded sequence through the real
+    # `_evaluate`, the node reaches its research question and produces a metric at any cap >= 8 and
+    # dies at the migrations below that. 12 is that 8 plus room for a chain half again as long, and
+    # is deliberately the SAME per-node worst case as the two-ledger apportionment it replaces
+    # (2 x 6 = 12 measured exactly), so this redesign removes a dimension without buying more compute
+    # than the design it supersedes already admitted. The operator's own ask was "inline repair on,
+    # at least 5".
+    #
+    # SUPERSEDES the environment/experiment apportionment (commit e0ec3a4d), which bounded two
+    # ledgers with this one number. A budget is about time and money — a re-eval costs the same
+    # whichever kind of mistake preceded it — so `repair_class` and its corroboration are gone.
+    inline_repair_attempts: int = Field(default=12, ge=0)
     # Which failure reasons (_failure_reason: crash|timeout|oom|setup|no_metric|drift) are eligible for
     # inline repair. Default: mechanical crashes, timeouts AND OOM-kills — a timeout/OOM means the code
     # was too slow / too memory-hungry for the budget (or the pod's cgroup limit), not that the idea is
@@ -619,8 +610,9 @@ class Settings(BaseSettings):
     # `train`) REUSES the completed train checkpoint and re-runs only from the failed stage — that is
     # CHEAP and NOT counted here; only a repair that changes an EARLIER stage's code (train.py/loss.py/…)
     # forces a full re-train, which each costs the whole training time. Without this bound, a repair that
-    # keeps changing training code could burn many full trains (the anti-stuck guard is error-signature
-    # based, not cost based). 0 = unlimited (legacy behavior). Single-command evals ignore it.
+    # keeps changing training code could burn many full trains (`inline_repair_attempts` bounds the
+    # COUNT of repairs, not what each one costs). 0 = unlimited (legacy behavior). Single-command
+    # evals ignore it.
     inline_repair_retrain_cap: int = Field(default=2, ge=0)
     # Environment self-prep: when a solution crashes purely because a KNOWN library isn't installed
     # (ModuleNotFoundError), the engine pip-installs it into the eval interpreter and re-runs — so a
@@ -1668,6 +1660,17 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # `EngineOptions` / `orchestrator._DEFAULTS`. Without this entry a pre-field snapshot resumed on
     # an LLM backend silently gained ensemble merges it never did.
     "merge_mode": "mean",
+    # The one entry of a DIFFERENT kind, and the reason the rule below says "a new field" rather
+    # than "a new key": `inline_repair_attempts` is not new — it is a pre-existing field whose
+    # DEFAULT changed (0 = unlimited -> 12) on 2026-08-05, after four measured ways the unlimited
+    # loop could run without a terminal (see the field's own comment). A full-dump snapshot carries
+    # the key, so for those this is inert `setdefault`; what it protects is the pre-versioning
+    # snapshot that does NOT, which must resume the run it was written for — an operator who chose
+    # unlimited in-node repair keeps it, rather than silently acquiring a cap mid-run and having a
+    # node abandon at 12 that the first half of the same run would have kept repairing. It satisfies
+    # (c) exactly (0 is pointable at every commit before this one) and satisfies (b) in the mirror
+    # direction: re-entry must not silently REMOVE work the run was doing either.
+    "inline_repair_attempts": 0,
     # WHAT THIS MAP IS NOT. It is a hand-maintained list of FEATURE switches whose before-the-field
     # value is unambiguous, not a complete partition of `Settings`. Two classes stay out on purpose,
     # because for them a wrong entry is worse than a missing one — it would silently REMOVE behaviour
@@ -1680,7 +1683,10 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     #    disables working machinery rather than preserving history.
     # A new field belongs here only when it (a) postdates 2026-06-23, (b) defaults to adding paid
     # calls / interventions / concurrency / a different selection policy, and (c) has a historical
-    # value you can point at a commit for. When (c) fails, leave it out and say so here.
+    # value you can point at a commit for. When (c) fails, leave it out and say so here. A CHANGED
+    # default on a pre-existing field belongs here on (b)+(c) alone — (a) cannot apply — and (c) is
+    # never a guess for one, which is why `inline_repair_attempts` above does not contradict the
+    # "magnitudes stay out" rule: that rule is about magnitudes whose historical value is unknown.
 }
 
 

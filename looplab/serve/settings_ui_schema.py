@@ -74,7 +74,7 @@ _UNCURATED_NOT_TYPED_BY_AN_OPERATOR = frozenset({
 _UNCURATED_SECOND_ORDER = frozenset({
     "coverage_context", "developer_temperature", "eval_stall_timeout_s", "foresight_min_confidence",
     "foresight_verify", "foresight_verify_samples", "inline_repair_retrain_cap",
-    "inline_repair_stuck_repeat", "memora_anchors", "memora_cache",
+    "memora_anchors", "memora_cache",
     "memora_consolidate_threshold", "memora_llm", "phase_handoff_summary",
     "researcher_temperature", "sandbox_cpus", "sandbox_fsize_local", "sandbox_memory",
     "sandbox_memory_local", "strategist_temperature", "train_monitor_interval_s",

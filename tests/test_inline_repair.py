@@ -157,24 +157,21 @@ def test_inline_repair_off_restores_debug_node(tmp_path):
 
 
 def test_inline_repair_attempt_bound(tmp_path):
-    """A node that keeps crashing spends exactly `inline_repair_attempts` EXPERIMENT repairs, then
-    fails normally and stays eligible for the budgeted inter-node debug operator.
+    """A node that keeps crashing makes exactly `inline_repair_attempts` repairs, then fails
+    normally and stays eligible for the budgeted inter-node debug operator.
 
-    `inline_repair_attempts` bounds each LEDGER, not the raw event count (see
-    `engine/evaluate.py`'s ledger comment): `_BAD` is a missing import, which the engine reads as
-    environment reconciliation, so its FIRST sighting — a signature this node had never produced,
-    i.e. forward progress — is charged to the environment ledger and the operator's 2 attempts are
-    still spent on the experiment. The bound is what this test guards, and it holds in the form that
-    matters: 2 charged, 1 exempt, terminal reached."""
+    ONE budget, counted in `node_repaired` events. It used to bound two LEDGERS (experiment repairs
+    and environment reconciliation) with this one number, so the same node made 3 repairs under a
+    setting of 2; that apportionment was removed on 2026-08-05 — a budget is about time and money,
+    and a re-eval costs the same whichever kind of mistake preceded it."""
     dev = _AlwaysMechCrash()
     eng = _engine(tmp_path / "bound", dev, inline_repair=True, inline_repair_attempts=2)
     anyio.run(eng.run)
 
     evs = _events(tmp_path / "bound")
     repaired_n0 = [e for e in evs if e.type == "node_repaired" and e.data.get("node_id") == 0]
-    classes = [e.data.get("repair_class") for e in repaired_n0]
-    assert classes.count("experiment") == 2     # the budgeted ledger, bounded by the setting
-    assert classes.count("environment") == 1    # only the first sighting moved the failure forward
+    assert len(repaired_n0) == 2                # the raw event count IS the budget now
+    assert all("repair_class" not in e.data for e in repaired_n0)
     failed_n0 = [e for e in evs if e.type == "node_failed" and e.data.get("node_id") == 0]
     assert failed_n0 and failed_n0[0].data.get("reason") == "crash"
 

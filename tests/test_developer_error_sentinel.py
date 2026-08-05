@@ -63,3 +63,81 @@ def test_every_producer_and_consumer_still_goes_through_the_shared_name(relative
         f"{relative} no longer references {symbol} — it either lost its crash handling or "
         "re-spelled the sentinel some other way")
 
+
+
+# --------------------------------------------------------------------------- #
+# The Researcher's twin. A Developer that cannot finish returns its error in band as the node's CODE;
+# a Researcher that cannot finish returns it in band as the Idea's RATIONALE. The failure mode is the
+# same shape and worse in one respect: nothing downstream errors either, and the run reports a
+# CHAMPION over experiments that were never proposed (`/tmp/ll-s4b/run`). Same guard, same reason.
+# --------------------------------------------------------------------------- #
+
+from looplab.agents.roles import (  # noqa: E402
+    RESEARCHER_FALLBACK_PREFIX, is_researcher_fallback, researcher_fallback_cause)
+
+
+def test_the_researcher_fallback_sentinel_text_is_unchanged():
+    """Pinned here and nowhere else: it is a wire contract with logs already on disk. Nodes written
+    before the constant existed carry rationales starting with this exact prefix."""
+    assert RESEARCHER_FALLBACK_PREFIX == "fallback ("
+
+    class _Idea:
+        rationale = "fallback (agent parse failed: Connection error.)"
+
+    assert is_researcher_fallback(_Idea())
+    assert researcher_fallback_cause(_Idea()) == "agent parse failed: Connection error."
+
+    class _Real:
+        rationale = "Expand the features with a degree-2 polynomial basis."
+
+    assert not is_researcher_fallback(_Real())
+    # Must be a PREFIX, not a substring, and total over anything without a string rationale.
+    class _Mentions:
+        rationale = "the previous node was a fallback (agent parse failed)"
+
+    assert not is_researcher_fallback(_Mentions())
+    assert not is_researcher_fallback(None) and not is_researcher_fallback(object())
+
+
+def test_no_module_respells_the_researcher_fallback_literally():
+    """AST-based, unlike its Developer-side twin above, and it has to be: `agents/preflight.py`'s
+    docstring QUOTES the sentinel while telling the story of the run that produced it, and a
+    why-comment/docstring that quotes a contract is exactly what this codebase asks for. Only string
+    constants a module could actually BUILD a rationale from count — docstrings are excluded by
+    position, the way Python itself distinguishes them."""
+    import ast
+
+    offenders = []
+    for path, source in iter_sources(_PKG):
+        if path.name == "roles.py" and path.parent.name == "agents":
+            continue                      # the definition site
+        tree = ast.parse(source)
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = getattr(node, "body", None) or []
+                first = body[0] if body else None
+                if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                        and isinstance(first.value.value, str)):
+                    docstrings.add(id(first.value))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and id(node) not in docstrings
+                    and node.value.startswith(RESEARCHER_FALLBACK_PREFIX)):
+                offenders.append(
+                    f"{path.relative_to(_PKG.parent)}:{node.lineno}: {node.value[:60]!r}")
+    assert not offenders, (
+        "a degraded proposal's rationale must come from roles.researcher_fallback_rationale / "
+        "is_researcher_fallback, never a re-spelled literal:\n" + "\n".join(offenders))
+
+
+@pytest.mark.parametrize("relative,symbol", [
+    ("agents/roles.py", "researcher_fallback_rationale"),
+    ("agents/agent.py", "researcher_fallback_rationale"),
+    ("engine/orchestrator.py", "is_researcher_fallback"),
+])
+def test_every_researcher_fallback_site_goes_through_the_shared_name(relative, symbol):
+    source = (_PKG / relative).read_text(encoding="utf-8-sig")
+    assert re.search(rf"\b{symbol}\b", source), (
+        f"{relative} no longer references {symbol} — it either lost the proposal-path circuit "
+        "breaker or re-spelled the sentinel some other way")

@@ -40,16 +40,23 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #
 # Field-set history:
 #   2026-08-04  + asha_live_kill_confidence  (ASHA live-kill LLM judge)
+#   2026-08-05  - inline_repair_stuck_repeat (see the second history block below)
 # A LITERAL, measured on the tree. Both halves must stay literals: an earlier attempt at this guard
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:e3fd5e1019c2fb93b0bbef4b80ffd32941505ccec084f8a6fdf04f1dc5643b77"
+_EXPECTED_DIGEST = "sha256:1f49ef0c19ab53b160ef0dae2baee59c97e8dfc59d630f2c89e082acb031f650"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
 #   2026-08-04  + asha_live_kill_confidence   (ASHA live-kill LLM judge)
-_EXPECTED_FIELD_COUNT = 191
+#   2026-08-05  - inline_repair_stuck_repeat  (the error-signature anti-stuck guard was replaced by
+#               the triage model's own stop decision, so the knob had nothing left to tune), and
+#               inline_repair_attempts 0 -> 12. This is the "field set changed too" branch: the
+#               calibration envelope really is different — the inline-repair loop that a speculative
+#               node's eval runs under is bounded differently now — so previously-issued receipts
+#               SHOULD stop verifying, and BOTH pins are re-set deliberately.
+_EXPECTED_FIELD_COUNT = 190
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

@@ -250,11 +250,12 @@ def triage_install_candidates(named: str, rationale: str, traceback: str) -> lis
     missing-dependency field, `rationale` its free text. FAIL CLOSED — a candidate needs the
     traceback and the triage to point at it JOINTLY, which they can do in exactly two ways:
 
-      A. the triage NAMES it in its structured field, and its rationale demonstrably describes this
+      A. the triage NAMES it in its structured field, its rationale demonstrably describes this
          traceback (it mentions at least one identifier the traceback points at — the unresolved
-         symbol, a package on its frames, a name its message quotes). This is the `accelerate` case:
-         the distribution appears nowhere in the traceback, so only the agent can supply the name,
-         and the rationale is what proves the agent was reading THIS failure.
+         symbol, a package on its frames, a name its message quotes), AND that same rationale names
+         the distribution itself, which must be the ONLY one the field names. This is the
+         `accelerate` case: the distribution appears nowhere in the traceback, so only the agent can
+         supply the name, and the rationale is what proves the agent was reading THIS failure.
       B. the traceback AND the rationale both name it. This is the `tensorboard` case: the library
          re-raised its own missing-dependency error naming the package in prose
          (``Neither `tensorboard` nor `tensorboardX` is available``), which the canonical
@@ -266,6 +267,21 @@ def triage_install_candidates(named: str, rationale: str, traceback: str) -> lis
     Free rationale text alone can NEVER mint a candidate: a rationale mentioning "the installed
     Lightning version" while the traceback names `pytorch_lightning` must not install `lightning`.
 
+    WHY PATH A NEEDS ITS LAST TWO CONDITIONS. The join used to be one-sided: the rationale had only
+    to ECHO one identifier the traceback points at, after which the structured field was trusted
+    whole. `transformers` appears on every frame of the real accelerate traceback, so an honest
+    rationale satisfied that on its own — and verified through the engine seam, the verbatim
+    ``NameError: name 'init_empty_weights' is not defined`` traceback with that honest rationale and
+    ``missing_dependency="tensorflow, jax, prophet, fastai"`` had the engine attempt exactly those
+    four heavyweight installs into the SHARED eval interpreter, spending nothing on either ledger.
+    Bounded (by `_dep_attempted`, `_MAX_DEP_ROUNDS` and the `trusted_local` gate) but not harmless:
+    pip can downgrade numpy/protobuf under every other node in the run. The two added conditions are
+    what the degraded-dependency SHAPE actually claims — "library L guards symbol S behind
+    `is_X_available()`", one distribution X, diagnosed in the same sentences that read the traceback
+    — so a field the agent's own prose does not stand behind, or a LIST of them (a guess, not a
+    diagnosis), authorizes nothing. Path B is unaffected and can still return several, because there
+    the traceback itself names each one.
+
     The CALLER adds the last and decisive condition: the distribution must actually be ABSENT from
     the eval interpreter (`is_present`), so a diagnosis that merely mentions an installed package
     installs nothing."""
@@ -273,9 +289,11 @@ def triage_install_candidates(named: str, rationale: str, traceback: str) -> lis
         return []
     pointed = traceback_names(traceback)
     out: dict[str, None] = {}
-    if pointed & _tokens(f"{named or ''}\n{rationale or ''}"):     # A: the triage is about THIS failure
-        for m in named_installable(named):
-            out.setdefault(m, None)
+    # A: the triage is about THIS failure, and stands behind exactly one name for the cause.
+    structured = named_installable(named)
+    if len(structured) == 1 and pointed & _tokens(f"{named or ''}\n{rationale or ''}"):
+        if _normal(structured[0]) in _tokens(rationale):
+            out.setdefault(structured[0], None)
     for m in named_installable(rationale):                         # B: named by BOTH, independently
         if _normal(m) in pointed:
             out.setdefault(m, None)

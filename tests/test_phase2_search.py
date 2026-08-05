@@ -7,7 +7,7 @@ import pytest
 from looplab.core.errors import BudgetExceeded
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.agents.strategist import RuleStrategist, StrategyContext
-from looplab.engine.orchestrator import Engine, _normalize_error_sig
+from looplab.engine.orchestrator import Engine
 from looplab.search.policy import (EvolutionaryPolicy, GreedyTree, _bandit_pick, make_policy,
                                    operator_yields, weighted_parent)
 
@@ -129,16 +129,14 @@ def test_make_policy_passes_new_knobs():
     assert p2.debug_depth == 3
 
 
-# --------------------------------------------------------------------------- #
-# T10 normalized error signatures
-# --------------------------------------------------------------------------- #
-
-def test_normalize_error_sig_matches_semantically_identical_errors():
-    a = 'File "/tmp/x1/solution.py", line 42, in <module>\nValueError: shape (128, 10) mismatch'
-    b = 'File "/tmp/x2/solution.py", line 57, in <module>\nValueError: shape (256, 10) mismatch'
-    assert _normalize_error_sig(a) == _normalize_error_sig(b)
-    c = "TypeError: unsupported operand"
-    assert _normalize_error_sig(a) != _normalize_error_sig(c)
+# T10's normalized error signature (`_normalize_error_sig`) and the anti-stuck recurrence counter
+# it fed were REMOVED on 2026-08-05. The property this test asserted — that two runs of the same
+# defect with different tensor shapes compare equal — was only ever a proxy for "is this node still
+# making progress?", and it answered that question from the TEXT QUALITY of the program's own error
+# output: it collapsed ASCII quoted identifiers and nothing else, so the identical failure ran
+# unbounded the moment the quoted symbol was Cyrillic. That judgement now belongs to the crash-triage
+# model, which reads the repair history rather than a regex over one string, and its coverage lives
+# in tests/test_repair_stop_decision.py.
 
 
 # --------------------------------------------------------------------------- #

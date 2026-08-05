@@ -100,7 +100,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
     assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 162
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 194
+    # 194 -> 193 on 2026-08-05: `inline_repair_stuck_repeat` was removed. The literal is a review
+    # tripwire, not a gate (the gate is the two-way reconciliation) — it fired, the removal is real
+    # and docs/guide/configuration.md already says 193, so it is re-pinned rather than relaxed.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 193
     assert hashlib.sha256("\0".join(sorted(keys)).encode()).hexdigest() == SETTINGS_UI_SCHEMA_KEYSET_REVISION
     assert set(keys) <= set(Settings.model_fields)
     by_key = {field["key"]: field for field in fields}

@@ -293,12 +293,19 @@ class UnifiedAgent(WrapsDeveloper):
         "still reaches you, the install failed (offline / not on PyPI / a typo'd or local module) — "
         "prefer 'repair' (switch to an available library or fix the import) over 'reject_idea' unless "
         "the approach itself is unsound.\n"
-        "Also classify WHAT THE REPAIR WOULD CHANGE, in `repair_class`:\n"
-        "  - 'environment': the fix only reconciles the existing code with the INSTALLED libraries — "
-        "a moved import, a removed/renamed API, a major-version migration, a symbol an absent "
-        "optional dependency left undefined. The experiment itself is unchanged.\n"
-        "  - 'experiment': anything else — the node's own logic, a modelling decision, a run that was "
-        "too slow or too memory-hungry. When in doubt, say 'experiment'.\n"
+        "YOU ARE THE STOPPING RULE. There is no heuristic behind you that will notice a repair loop "
+        "going in circles — only a hard attempt cap that exists so a wrong call is not unbounded. If "
+        "you are shown a repair history, read it as a TRAJECTORY and answer the question it poses: "
+        "given everything already tried on this node, do you still know what to change next?\n"
+        "  - Say 'repair' when you can name the next change. A failure that MOVES (a different error, "
+        "a later pipeline stage reached, different files touched each time) is progress even if it "
+        "has taken many attempts — a repo with stale dependencies legitimately needs a run of "
+        "mechanical fixes before the real experiment can start, and stopping that early wastes the "
+        "whole node.\n"
+        "  - Say 'abandon' when the history shows the same ground being re-covered: the same failure "
+        "after fixes that claimed to address it, edits cycling over the same files, or a fix you "
+        "cannot describe beyond retrying. 'I do not know how to fix this any more' is a correct and "
+        "useful answer — say it rather than proposing a guess.\n"
         "If the crash is caused by a library that is simply NOT INSTALLED — including one that "
         "degraded into a NameError or AttributeError because the library guards it behind an "
         "availability check — put ONLY that distribution's name in `missing_dependency` (e.g. "
@@ -309,27 +316,40 @@ class UnifiedAgent(WrapsDeveloper):
     )
 
     def triage_crash(self, node, error: str, attempt: int, *, state: Optional[RunState] = None,
-                     brief: str = "") -> Optional[dict]:
+                     brief: str = "", history: str = "", stages_passed: Optional[int] = None,
+                     attempts_left: Optional[int] = None) -> Optional[dict]:
         """Decide what to do with a just-crashed node: returns ``{"action", "rationale"}`` where
         action ∈ {repair, abandon, reject_idea}, or ``None`` when no pilot model is wired (the engine
         then falls back to its deterministic rule). The agent may use its run-introspection tools
         (read_code / find_analogous) to judge whether the IDEA is wrong vs just the code. No side
-        effects: the CALLER performs the repair and records the events."""
+        effects: the CALLER performs the repair and records the events.
+
+        `history` is this node's in-node repair trajectory, already rendered by the engine
+        (`engine/crash_repair.py::_format_repair_log`); `attempts_left` is the operator's remaining
+        hard cap (None = unlimited). Both exist because this call IS the loop's stopping rule — see
+        `_TRIAGE_SYSTEM`. All three are keyword-only with empty/None defaults, so an older caller
+        (and every test double) still gets the historical single-traceback prompt."""
         if self._pilot_client is None:
             return None                       # no triage model -> engine uses the rule-based fallback
-        # DEFERRED (function-local) import of the repair-class registry: `agents` sits BELOW the
-        # engine, and re-spelling the vocabulary here is exactly the silent-typo failure the
-        # registry exists to prevent — the engine's budget apportionment keys on these strings.
-        # `engine/triage.py` is pure (stdlib-only at module scope), so this cannot cycle; keeping it
-        # call-local mirrors the `agents` -> `search` rule and adds no import-time edge upward.
-        from looplab.engine.triage import REPAIR_CLASSES, DEFAULT_REPAIR_CLASS, coerce_repair_class
+        # DEFERRED (function-local) import of the verdict registry: `agents` sits BELOW the engine,
+        # and re-spelling the vocabulary here is exactly the silent-typo failure the registry exists
+        # to prevent — the engine's stop decision keys on these strings. `engine/triage.py` is pure
+        # (stdlib-only at module scope), so this cannot cycle; keeping it call-local mirrors the
+        # `agents` -> `search` rule and adds no import-time edge upward.
+        from looplab.engine.triage import AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION
         code_tail = (getattr(node, "code", "") or "")[-1500:]
+        budget = ("" if attempts_left is None else
+                  f"Attempts left before the hard cap stops this node anyway: {attempts_left}.\n")
+        depth = ("" if stages_passed is None else
+                 f"Pipeline stages that passed before this failure: {stages_passed}.\n")
         messages = [
             {"role": "system", "content": render(self.prompts, "triage_system", self._TRIAGE_SYSTEM)},
             {"role": "user", "content": (
                 (brief + "\n" if brief else "") +
                 f"Crashed node {getattr(node, 'id', '?')} (repair attempt {attempt}).\n"
+                + budget + depth +
                 f"--- ERROR (stderr tail) ---\n{error}\n"
+                + (f"{history}\n" if history else "") +
                 f"--- CODE (tail) ---\n{code_tail}\n"
                 "Choose: repair, reject_idea, or abandon.").strip()},
         ]
@@ -337,16 +357,14 @@ class UnifiedAgent(WrapsDeveloper):
             "name": "triage_crash",
             "description": "Decide how to handle the crashed node.",
             "parameters": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["repair", "abandon", "reject_idea"],
-                           "description": "repair in place | abandon node | reject the whole idea."},
-                # The repair-class contract (engine/triage.py::REPAIR_CLASSES) — the enum is read
-                # from the registry, never re-spelled here, because the engine's budget
-                # apportionment keys on these exact strings.
-                "repair_class": {"type": "string", "enum": list(REPAIR_CLASSES),
-                                 "description": "environment = only reconciles the code with the "
-                                                "installed libraries (moved import, removed/renamed "
-                                                "API, version migration, absent dependency); "
-                                                "experiment = changes the experiment or its own logic."},
+                # The verdict contract (engine/triage.py::AGENT_TRIAGE_ACTIONS) — the enum is
+                # read from the registry, never re-spelled here, because the engine's STOP decision
+                # keys on these exact strings. `unanswerable` is deliberately absent: it is minted
+                # by the engine for a judge that could not answer, and a live model must not be able
+                # to claim its own unreachability and trip the provider circuit breaker.
+                "action": {"type": "string", "enum": list(AGENT_TRIAGE_ACTIONS),
+                           "description": "repair in place | abandon this node (you no longer know "
+                                          "what to change) | reject the whole idea."},
                 "missing_dependency": {"type": "string",
                                        "description": "Distribution name to install, ONLY when the "
                                                       "crash is caused by a library that is not "
@@ -355,23 +373,34 @@ class UnifiedAgent(WrapsDeveloper):
                 "required": ["action"]}}}
 
         def _finalize(args: dict) -> dict:
-            action = str((args or {}).get("action", "")).strip()
-            if action not in ("repair", "abandon", "reject_idea"):
-                action = "repair"             # default to the cheap, safe action on a malformed emit
-            # `repair_class` fails closed to "experiment" (the budgeted resource) on an absent or
-            # malformed emit; `missing_dependency` is a NAME, not a command — the engine still
-            # requires its own allowlist + traceback corroboration + an absence check before any
-            # install (runtime/deps.py::triage_install_candidates), so a hallucinated value here
-            # can at worst be ignored.
+            action = str((args or {}).get("action", "")).strip().lower()
+            if action not in AGENT_TRIAGE_ACTIONS:
+                # FAIL CLOSED. This used to default to "repair" — "the cheap, safe action" — which is
+                # only cheap if a repair is cheap: each one is a full re-eval plus two LLM calls, and
+                # a provider stuck emitting garbage would drive them forever. An emit nobody can read
+                # is not a verdict, so it becomes the engine's `unanswerable` and the caller treats
+                # it as the provider outage it almost always is.
+                action = DEFAULT_TRIAGE_ACTION
+            # `missing_dependency` is a NAME, not a command — the engine still requires its own
+            # allowlist + traceback corroboration + an absence check before any install
+            # (runtime/deps.py::triage_install_candidates), so a hallucinated value here can at worst
+            # be ignored.
             return {"action": action, "rationale": str((args or {}).get("rationale", ""))[:300],
-                    "repair_class": coerce_repair_class((args or {}).get("repair_class")),
                     "missing_dependency": str((args or {}).get("missing_dependency", ""))[:100]}
 
         def _fallback(_messages) -> dict:
-            return {"action": "repair", "rationale": "fallback: attempt repair",
-                    "repair_class": DEFAULT_REPAIR_CLASS, "missing_dependency": ""}
+            # A TRANSPORT FAILURE IS NOT A VERDICT. `resilient` calls this when the pilot loop could
+            # not complete — an unreachable endpoint, a 401/402, a model that never emitted. It
+            # answered "attempt repair", which is precisely the reading that let a dead provider keep
+            # a repair loop at full speed with no model in it. The engine's own fail-closed action
+            # says "nobody answered" instead, and its caller stops the node and pauses the RUN naming
+            # the provider — recoverable with `resume` once the endpoint is back.
+            return {"action": DEFAULT_TRIAGE_ACTION,
+                    "rationale": "the crash-triage model did not return a verdict "
+                                 "(transport failure or no emit)",
+                    "missing_dependency": ""}
 
         # Binding only with a run state is what enables read_code / find_analogous on it; on any
-        # transport failure triage degrades to the safe "attempt repair" action.
+        # transport failure triage degrades to the fail-closed "unanswerable" verdict.
         return self._pilot_emit(messages, emit_spec, _finalize, _fallback,
                                 state=state, bind_state=state is not None)

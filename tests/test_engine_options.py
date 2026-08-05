@@ -111,7 +111,6 @@ ATTR_BY_FIELD = {
     "speculation_gate_receipt": "speculation_gate_receipt",
     "inline_repair": "_inline_repair",
     "inline_repair_attempts": "_inline_repair_attempts",
-    "inline_repair_stuck_repeat": "_inline_repair_stuck_repeat",
     "inline_repair_reasons": "_inline_repair_reasons",
     "auto_install_deps": "_auto_install_deps",
     "dep_install_timeout": "_dep_install_timeout",
@@ -238,7 +237,6 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         deep_repair=settings.deep_repair,
         inline_repair=settings.inline_repair,
         inline_repair_attempts=settings.inline_repair_attempts,
-        inline_repair_stuck_repeat=settings.inline_repair_stuck_repeat,
         inline_repair_reasons=settings.inline_repair_reasons,
         auto_install_deps=settings.auto_install_deps,
         dep_install_timeout=settings.dep_install_timeout,
@@ -356,6 +354,6 @@ def test_default_options_reproduce_bare_engine(tmp_path):
     dflt = _mk_engine(tmp_path / "dflt", options=EngineOptions())
     for attr in ("max_parallel", "timeout", "max_eval_timeout", "sweep_timeout_mult", "confirm_top_k",
                  "_holdout_fraction", "_merge_mode", "trust_gate", "_novelty_epsilon",
-                 "_inline_repair_stuck_repeat", "_track_hypotheses", "lessons_every",
+                 "_inline_repair_attempts", "_track_hypotheses", "lessons_every",
                  "_debug_depth", "memory_dir", "_seed_mode"):
         assert getattr(bare, attr) == getattr(dflt, attr), attr
