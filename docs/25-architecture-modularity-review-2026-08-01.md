@@ -1417,6 +1417,38 @@ would serve one task's paid overlay to another.
 
 *Recommendation:* Relocate _append_governance to governance_health.py, parameterize the ledger-specific readers instead of branching on filenames (read_rows is already the right hook — make it mandatory for policy ledgers), and port record_claim_decision onto it, keeping its sanitize-on-replay as a wrapper.
 
+*Resolution (2026-08-05) — PARTIAL, the middle clause only:* `read_rows` is now the sole way a caller
+selects a strict reader. Both filename branches inside `_append_governance` are gone (the reader
+selection and the torn-tail separator), and the four concept call sites pass `_read_alias_rows` /
+`_read_split_rows` explicitly. The primitive four subsystems import as generic no longer names a
+concept ledger.
+
+Safe because the two revision derivations are the SAME computation, not merely similar:
+`_ledger_revision` returns `max([len(rows), *explicit], default=0)` over `_read_alias_rows(path)`, and
+the `strict_rows` branch computes that expression over the rows `read_rows` just returned. Passing
+the reader therefore changes which line computes the CAS revision, not its value — and collapses two
+reads of the ledger into one inside the same lock.
+
+The separator clause needed no replacement either: these two ledgers now reach it with a reader, so
+`read_rows is None` already excludes them and the filename clause could only ever have agreed with it.
+
+**What teeth-testing changed here, and it is the point of the entry.** Deleting the branches moved a
+STRUCTURAL guarantee ("this path implies a strict reader") into a call-site CONVENTION ("this caller
+passes one") — and breaking the convention failed no test at all. The guarantee only survived because
+`_ledger_revision` keeps its own filename dispatch, a third copy the finding does not list. Two guards
+now pin what the branch used to: the primitive contains no ledger filename, and every
+`_append_governance` call in `concept_registry` passes `read_rows`. Both were verified to fail when
+broken.
+
+NOT done, and deliberately: the relocation and the `record_claim_decision` port. `_append_governance`
+still depends on concept-specific machinery — `concept_governance_global_revision`,
+`ConceptGovernanceConflict`, `_idempotency_payload`, `_validate_expected_revision` — so moving it to
+`governance_health.py` means injecting or relocating those too, and `record_claim_decision` is a
+durable CAS protocol on operator policy where a behaviour-preserving port needs its own evidence
+rather than a shared one. `_ledger_revision`'s dispatch stays for the same reason: it is reached from
+`concept_governance_revision(memory_dir, kind)`, which legitimately knows the two ledgers, and it now
+carries the fail-closed guarantee that the deleted branches used to duplicate.
+
 #### EM-06 · MEDIUM · inconsistency · effort: large
 
 **Three coexisting claim-identity systems, each with its own decision-overlay resolution logic**

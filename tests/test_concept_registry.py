@@ -579,3 +579,54 @@ def test_governance_append_refuses_a_torn_jsonl_tail(tmp_path):
         record_concept_alias(str(tmp_path), from_concept="b", to_concept="c",
                              expected_revision=0, action_id="tail-retry")
     assert p.read_bytes() == before
+
+
+# --- EM-05: the append primitive no longer knows the concept ledgers by name --------------------
+
+def test_the_append_primitive_has_no_ledger_filename_branch():
+    """`_append_governance` is imported as a generic primitive by task_facets, lessons and
+    steward_invocation, but branched on `concept_aliases.jsonl`/`concept_splits.jsonl` in two
+    places — so a "generic" append secretly knew the concept ledgers (doc 25 EM-05)."""
+    import ast
+    import inspect
+
+    from looplab.engine import concept_registry
+
+    body = ast.unparse(ast.parse(inspect.getsource(concept_registry._append_governance)))
+    assert "concept_aliases.jsonl" not in body and "concept_splits.jsonl" not in body, (
+        "the shared append primitive names a specific ledger again; select the reader with "
+        "`read_rows` at the call site instead")
+
+
+def test_every_policy_ledger_append_passes_its_strict_reader():
+    """The discipline that REPLACED the filename branch, and the reason this test exists.
+
+    Removing the branch moved a structural guarantee ("this path implies a strict reader") into a
+    call-site convention ("this caller passes one"). A convention with nothing checking it is how
+    a policy ledger silently starts being read leniently — the exact failure the strict readers
+    exist to prevent, since a torn or malformed operator row must fail closed rather than be
+    skipped. Verified by breaking it: dropping `read_rows` from these call sites failed NO test
+    before this one existed."""
+    import ast
+    from pathlib import Path
+
+    source = Path(concept_registry_path()).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name != "_append_governance":
+            continue
+        if not any(kw.arg == "read_rows" for kw in node.keywords):
+            offenders.append(node.lineno)
+    assert not offenders, (
+        f"_append_governance called without `read_rows` at lines {offenders} in concept_registry; "
+        "a policy ledger read leniently cannot fail closed on a torn operator row")
+
+
+def concept_registry_path() -> str:
+    from looplab.engine import concept_registry
+
+    return concept_registry.__file__
