@@ -118,3 +118,41 @@ def test_the_engine_factory_builds_a_real_engine(tmp_path):
     engine = make_engine(tmp_path / "run", n_seeds=1, max_nodes=1)
     assert isinstance(engine, Engine)
     assert engine.task is not None and engine.researcher is not None
+
+
+# --- ES-04: pass-through knobs resolve at the assignment, not via a local ------------------------
+
+def test_no_knob_is_resolved_into_a_local_only_to_be_assigned_unchanged():
+    """`Engine.__init__` resolved every option into a local and then assigned it to `self`, so a new
+    pass-through knob cost three edits (doc 25 ES-04). The ones with real normalization keep their
+    local — that local IS the normalization. What must not come back is the BARE relay:
+    `x = _opt("x")` read exactly once, only to become `self.x = x`."""
+    import ast
+    import inspect
+
+    from looplab.engine.orchestrator import Engine
+
+    init = ast.parse(inspect.getsource(Engine.__init__).lstrip()).body[0]
+    opt = {}
+    for st in init.body:
+        if (isinstance(st, ast.Assign) and len(st.targets) == 1
+                and isinstance(st.targets[0], ast.Name) and isinstance(st.value, ast.Call)
+                and getattr(st.value.func, "id", None) == "_opt" and len(st.value.args) == 1
+                and isinstance(st.value.args[0], ast.Constant)):
+            opt[st.targets[0].id] = st.value.args[0].value
+    uses = {}
+    for n in ast.walk(init):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in opt:
+            uses[n.id] = uses.get(n.id, 0) + 1
+    relays = []
+    for st in ast.walk(init):
+        if (isinstance(st, ast.Assign) and len(st.targets) == 1
+                and isinstance(st.targets[0], ast.Attribute)
+                and getattr(st.targets[0].value, "id", None) == "self"
+                and isinstance(st.value, ast.Name) and st.value.id in opt):
+            name = st.value.id
+            if st.targets[0].attr == name == opt[name] and uses.get(name, 0) == 1:
+                relays.append(name)
+    assert not relays, (
+        f"these knobs are resolved into a local and assigned unchanged: {relays}. Write "
+        '`self.x = _opt("x")` at the assignment instead — the local buys nothing and costs an edit.')

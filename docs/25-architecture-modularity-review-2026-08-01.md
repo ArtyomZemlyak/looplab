@@ -545,6 +545,29 @@ pinned. Verified to have teeth by making the inject path keep two emits and drop
 
 *Recommendation:* Collapse the local-variable indirection: iterate EngineOptions fields and setattr the trivial pass-through knobs from a table, keeping explicit code only for knobs with real normalization (about 30). Move the calibration-envelope closures out to module-level functions taking an explicit context (they already only read locals that are attributes or arguments). This is mechanical and preserves the keyword API the ~100 test call sites depend on.
 
+*Resolution (2026-08-05) — the indirection is collapsed; the setattr TABLE is not built, and the
+counts in the finding are off.*
+
+Measured rather than estimated: `__init__` holds 105 `x = _opt("x")` locals, and only 16 are bare
+relays — declared once, read once, assigned unchanged. The other 89 feed normalization, conditionals
+or sub-constructors, so their local IS the work and removing it would inline logic into an assignment.
+"~110 knob resolutions copied into locals then re-assigned" describes 16 of them, not 110, and
+"about 30 with real normalization" undercounts by roughly threefold.
+
+The 16 now resolve at the assignment (`self.timeout = _opt("timeout")`) and their locals are gone.
+A `setattr`-from-a-table loop was rejected on ORDERING: these assignments span lines 529-1171 of the
+constructor, so hoisting them into one loop would move every one of them relative to the code between
+— and anything in that span that reads `self.<knob>` would silently see a different value or none at
+all. Inlining at the assignment site keeps the order byte-identical, which is what makes this
+mechanically checkable rather than merely plausible.
+
+A guard now fails on any bare relay that comes back. It deliberately keys on the SHAPE — resolved
+once, read once, assigned to the same name — so knobs that genuinely normalize keep their local
+without being flagged.
+
+Not done: the calibration-envelope closures. Those are a separate lift with their own context to
+thread, and this change was kept to the part whose safety is provable from the AST.
+
 #### ES-05 · MEDIUM · under-decomposition · effort: medium
 
 **run() loop's `creates` branch inlines ~230 lines of parallel-build chunking, card-lane claiming and batch-drop bookkeeping**
