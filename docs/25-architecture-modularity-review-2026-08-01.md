@@ -4139,6 +4139,22 @@ Scope: `looplab/agents/`: roles.py, tool_loop.py, agent.py, cli_agent.py, unifie
 
 *Recommendation:* Move SPECULATION_CUDA_PROBE_* (and the calibration hooks on ToyResearcher/ToyObjectiveDeveloper if feasible) into a dedicated agents/calibration.py or next to search/speculation_quality.py, preserving comments verbatim and adding the old names to the import shim; consider a follow-up split of the wrapper stack (WrapsDeveloper/ValidatingDeveloper) into roles_wrappers.py with re-exports, mirroring the tool_loop split pattern already proven here.
 
+*Resolution (2026-08-05) — the probe half.* `agents/calibration.py` holds all seven
+`SPECULATION_CUDA_PROBE_*` names; `roles.py` goes 1158 -> 1029 lines and re-exports them, so both
+spellings resolve to the SAME objects. An AST pass confirmed the block needed NOTHING from `roles`
+first, so it is a relocation rather than a rewrite.
+
+The probe source is an INPUT to the calibration digest, which makes "moved verbatim" a correctness
+claim rather than a courtesy: a stray whitespace edit during the move would revoke every issued
+calibration receipt, exactly as an edit to the implementation digest does. Two things pin it — the
+constants were compared byte-for-byte against the pre-move copy, and a guard now asserts the probe
+source's sha256. Adding one space to an `import` line inside the probe fails that guard.
+
+NOT done: the `ToyResearcher`/`ToyObjectiveDeveloper` calibration hooks the recommendation calls
+"if feasible". They are entangled with the toy backends' own behaviour rather than being constants,
+so they want their own pass — and the finding's other four responsibilities in `roles.py` (prompt
+fragments, the Protocols + attr registries, the toy backends, the wrapper contracts) are untouched.
+
 #### AG-03 · MEDIUM · inconsistency · effort: medium — **RESOLVED (2026-08-02)**
 
 **Strategy field set is manually synchronized across five parallel encodings with no registry/source-scan guard, contrary to the codebase's own convention** — **RESOLVED (2026-08-02)**
