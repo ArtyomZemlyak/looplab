@@ -746,24 +746,102 @@ def test_the_lifecycle_scan_ignores_other_types_generations_and_empty_logs():
     assert last_lifecycle_row([], "t", 1, 0) is None
 
 
-def test_all_three_lifecycle_scans_go_through_the_shared_helper():
-    """Both resume recoveries and `asha_monitor.latest_train_verdict`. A site that re-grows the
-    reversed scan gets its own copy of the bool guard, which is the half that drifts."""
-    import inspect
-    import textwrap
-
+def _lifecycle_scan_sites():
+    """The three sites that must not own a lifecycle scan: both resume recoveries and the judge's
+    health lookup."""
     from looplab.engine import asha_monitor as asha
     from looplab.engine import train_monitor as train
 
-    sites = {
+    return {
         "train resume": train.TrainingMonitorMixin._monitor_training,
         "asha resume": asha.AshaMonitorMixin._monitor_asha,
         "latest_train_verdict": asha.latest_train_verdict,
     }
-    for name, fn in sites.items():
-        source = textwrap.dedent(inspect.getsource(fn))
-        assert "last_lifecycle_row(" in source, f"{name} no longer uses the shared scan"
-        assert "reversed(" not in source, f"{name} re-grew its own reverse scan"
+
+
+def test_all_three_lifecycle_scans_go_through_the_shared_helper():
+    """Both resume recoveries and `asha_monitor.latest_train_verdict`. A site that re-grows the
+    reversed scan gets its own copy of the bool guard, which is the half that drifts.
+
+    Asserted on the AST, not on substrings: a mention of `last_lifecycle_row(` in a COMMENT satisfies
+    a substring test, and `[::-1]` re-grows the reverse scan without ever spelling `reversed(`. Both
+    together are a site that hand-rolls the scan while every textual check stays green.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    for name, fn in _lifecycle_scan_sites().items():
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        calls = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == "last_lifecycle_row"]
+        assert calls, f"{name} no longer CALLS the shared scan (a mention is not a call)"
+
+        for node in ast.walk(tree):
+            # `reversed(rows)` / `rows.reverse()` / `sorted(..., reverse=True)`
+            if isinstance(node, ast.Call):
+                callee = (node.func.id if isinstance(node.func, ast.Name)
+                          else getattr(node.func, "attr", ""))
+                assert callee not in ("reversed", "reverse"), (
+                    f"{name} re-grew its own reverse scan (`{callee}(...)`)")
+                assert not any(kw.arg == "reverse" for kw in node.keywords), (
+                    f"{name} re-grew its own reverse scan (`reverse=` sort)")
+            # `rows[::-1]`
+            if isinstance(node, ast.Slice) and isinstance(node.step, ast.UnaryOp) \
+                    and isinstance(node.step.op, ast.USub):
+                assert False, f"{name} re-grew its own reverse scan (`[::-1]`)"
+
+
+def test_the_train_resume_recovery_really_calls_the_shared_scan(tmp_path, monkeypatch):
+    """And behaviourally, so the structural test above is not the only thing holding it: the running
+    monitor's resume recovery goes through the helper for exactly its own `(type, node, generation)`.
+
+    A re-inlined scan keeps the module import and every source mention while never invoking it.
+    """
+    import looplab.engine.train_monitor as train
+
+    calls: list[tuple] = []
+    real = train.last_lifecycle_row
+
+    def spy(rows, event_type, node_id, generation):
+        calls.append((event_type, node_id, generation))
+        return real(rows, event_type, node_id, generation)
+
+    monkeypatch.setattr(train, "last_lifecycle_row", spy)
+
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("step 1 loss: 0.5\n")
+    client = _FakeClient({"status": "healthy", "reason": "fine", "confidence": 0.9})
+    _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client),
+        prior_events=[(EV_TRAIN_MONITOR_ALERT,
+                       {"node_id": 0, "generation": 0, "status": "watch"})])
+
+    assert (EV_TRAIN_MONITOR_ALERT, 0, 0) in calls, (
+        f"the train resume recovery never asked the shared scan: {calls}")
+
+
+def test_the_judges_health_lookup_really_calls_the_shared_scan(monkeypatch):
+    """`latest_train_verdict` reads UNTRUSTED diagnostic rows; the lifecycle half of that read is the
+    shared scan, and a bool `node_id` must not hand the judge another lifecycle's verdict."""
+    import looplab.engine.asha_monitor as asha
+    import looplab.engine.train_monitor as train
+
+    calls: list[tuple] = []
+    real = train.last_lifecycle_row
+
+    def spy(rows, event_type, node_id, generation):
+        calls.append((event_type, node_id, generation))
+        return real(rows, event_type, node_id, generation)
+
+    monkeypatch.setattr(train, "last_lifecycle_row", spy)
+
+    rows = [_row(EV_TRAIN_MONITOR_ALERT, node_id=True, generation=1,
+                 status="broken", reason="another lifecycle's crash")]
+    assert asha.latest_train_verdict(rows, 1, 1) is None
+    assert calls == [(EV_TRAIN_MONITOR_ALERT, 1, 1)], calls
 
 
 def test_every_watchdog_tick_loop_reraises_cancellation_before_swallowing():

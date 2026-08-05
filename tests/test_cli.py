@@ -272,7 +272,10 @@ def test_speculation_gate_calibration_is_restricted_and_explicitly_threaded(
         "--speculation-gate-calibration",
     ])
     assert result.exit_code == 1
-    assert seen == {"speculation_gate_calibration": True}
+    # `wrap_up_only=False`: a fresh dir has no terminal boundary, so this run CAN start work and the
+    # LLM endpoint preflight must refuse an unreachable endpoint here rather than warn (the
+    # wrap-up-only entry points are the ones `run_cmds.is_wrap_up` recognizes).
+    assert seen == {"speculation_gate_calibration": True, "wrap_up_only": False}
 
 
 def test_speculation_gate_calibration_rejects_non_gpu_or_ambient_receipt(tmp_path, monkeypatch):
@@ -549,7 +552,7 @@ def _capture_backend(monkeypatch):
     import looplab.cli as cli
     seen = {}
 
-    def _cap(out, task, settings, crash_after):
+    def _cap(out, task, settings, crash_after, **_kwargs):
         seen["backend"] = settings.backend
         raise RuntimeError("stop-before-run")
     monkeypatch.setattr(cli, "_engine", _cap)

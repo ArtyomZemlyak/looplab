@@ -487,6 +487,47 @@ def test_resumed_asha_monitor_closes_pre_crash_episode(tmp_path, monkeypatch):
     assert transitions == [True, False]
 
 
+def test_the_resume_recovery_rejects_a_bool_node_id_from_the_event_log(tmp_path, monkeypatch):
+    """The other half of the resume recovery, and the half that drifts when a site re-inlines the
+    scan: `isinstance(True, int)` is True and `True == 1`, so a row carrying `node_id: true` matches a
+    plain `== node_id` test against node 1 and hands this lifecycle ANOTHER one's open episode.
+
+    Adopting it publishes a recovery edge for an episode this node never had — Attention and the
+    digest then show a warning-then-recovered history that did not happen. `last_lifecycle_row` owns
+    that guard for both watchdogs (doc 25 EC-04); this drives the asha resume through it.
+    """
+    wd = tmp_path / "node_1"
+    wd.mkdir()
+    (wd / "train.log").write_text('{"recall": 0.90}\n', encoding="utf-8")   # above every peer: healthy
+
+    idea = Idea(operator="draft", params={}, rationale="asha test")
+    nodes = {1: Node(id=1, operator="draft", idea=idea, status=NodeStatus.pending)}
+    for index, metric in enumerate([0.80, 0.70, 0.60], start=2):
+        nodes[index] = Node(id=index, operator="draft", idea=idea, metric=metric,
+                            status=NodeStatus.evaluated)
+    monkeypatch.setattr("looplab.events.replay.fold", lambda events: RunState(nodes=nodes))
+
+    stub = _AshaStub(kill=False, quantile=0.5, min_siblings=3)
+    stub.store.events.append((EV_ASHA_RANK, {
+        "node_id": True, "generation": 1, "underperforming": True,
+        "intermediate": 0.3, "quantile": 0.5, "population": 3,
+    }))
+
+    async def drive():
+        cancel = threading.Event()
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(AshaMonitorMixin._monitor_asha, stub, 1, 1, str(wd), cancel,
+                          {"kind": "stdout_json", "key": "recall"}, "max", {}, None)
+            await anyio.sleep(0.12)
+            tg.cancel_scope.cancel()
+
+    anyio.run(drive)
+    published = [data for event_type, data in stub.store.events[1:] if event_type == EV_ASHA_RANK]
+    assert published == [], (
+        "the resume recovery adopted a bool `node_id` row as this lifecycle's own episode "
+        f"and published a phantom edge: {published}")
+
+
 def test_loop_stays_quiet_when_on_track_or_too_few_siblings(tmp_path, monkeypatch):
     wd = tmp_path / "node_0"
     wd.mkdir()
@@ -678,6 +719,27 @@ def test_should_asha_kill_requires_enabled_confident_and_present_verdict():
     assert should_asha_kill(None, enabled=True, threshold=0.0, rank_underperforming=True) is False
 
 
+@pytest.mark.parametrize("bar", [0.0, 0.5, 0.8, 1.0])
+def test_the_confidence_bar_is_inclusive_at_exactly_the_threshold(bar):
+    """`confidence >= threshold` is the documented contract, and the operator-facing knob is spelled
+    as a MINIMUM. `>` instead of `>=` is invisible everywhere except at equality — and equality is
+    precisely where an operator who set the bar to their model's typical confidence lands, so the
+    off-by-one silently disables the intervention they configured.
+
+    Both directions, so neither comparison can be widened either: one ulp under the bar never kills.
+    """
+    import math
+
+    at_the_bar = AshaVerdict(status="stop", reason="hopeless", confidence=bar)
+    assert should_asha_kill(at_the_bar, enabled=True, threshold=bar,
+                            rank_underperforming=True) is True, f"confidence == threshold == {bar}"
+    if bar > 0.0:
+        just_under = AshaVerdict(status="stop", reason="hopeless",
+                                 confidence=math.nextafter(bar, 0.0))
+        assert should_asha_kill(just_under, enabled=True, threshold=bar,
+                                rank_underperforming=True) is False, f"just under {bar}"
+
+
 @pytest.mark.parametrize("confidence", [float("nan"), float("inf"), None, "high"])
 def test_non_finite_judge_confidence_cannot_kill_even_at_zero_threshold(confidence):
     # `min(1.0, NaN)` is 1.0 in Python: a non-finite confidence must be treated as INVALID, never as
@@ -686,9 +748,24 @@ def test_non_finite_judge_confidence_cannot_kill_even_at_zero_threshold(confiden
     assert should_asha_kill(verdict, enabled=True, threshold=0.0, rank_underperforming=True) is False
 
 
-def test_nan_threshold_fails_closed():
+@pytest.mark.parametrize("threshold", [float("nan"), None, object(), [0.8], "not a number"])
+def test_an_unreadable_threshold_fails_closed(threshold):
+    """An operator/Strategist knob that is not a usable number must SPARE the node, and must not
+    raise on the way there.
+
+    The NaN arm is deliberately an OUTCOME assertion, not a mechanism one: IEEE says
+    `1.0 >= nan` is already False, so `should_asha_kill`'s explicit `bar == bar` guard cannot change
+    the answer and a test written against it guards a dead branch. (It stays in the source as the
+    readable statement of intent, next to `_normalize_monitor_confidence`, whose NaN handling is
+    NOT redundant — `min(1.0, nan)` is 1.0.)
+
+    The arms with teeth are the non-numeric ones: `float(threshold)` raises TypeError/ValueError on
+    them, and the `except … return False` that turns that into "do not kill" is the only thing
+    between a mistyped knob and an exception raised inside the watchdog's tick — where the blanket
+    per-tick handler swallows it and the watcher just silently stops deciding.
+    """
     stop = AshaVerdict(status="stop", reason="hopeless", confidence=1.0)
-    assert should_asha_kill(stop, enabled=True, threshold=float("nan"),
+    assert should_asha_kill(stop, enabled=True, threshold=threshold,
                             rank_underperforming=True) is False
 
 
@@ -811,6 +888,38 @@ def test_kill_happens_only_on_a_confident_stop_verdict(tmp_path, monkeypatch, ve
         assert "sibling observations at the same resource" in signal.get("reason", "")
 
 
+@pytest.mark.parametrize("knob", ["none", "missing", "not-a-number", "bool"])
+def test_an_unset_kill_confidence_knob_never_becomes_a_zero_threshold(tmp_path, monkeypatch, knob):
+    """The fail-safe behind `_monitor_asha`'s deliberate no-`or`-coercion read of the knob.
+
+    `float(x or 0.0)`/`else 0.0` would turn an unset, None, non-numeric or bool `asha_live_kill_confidence`
+    into a ZERO bar — i.e. EVERY `stop` verdict kills, at any confidence the model happened to emit.
+    Now that the intervention ships on by default, that is the wrong direction to fail in, and it is a
+    silent one: nothing about a killed node says the threshold was zero. The documented default (0.8)
+    is what an absent/unreadable knob must resolve to.
+    """
+    wd, spec, curves = _kill_setup(tmp_path)
+    signal = {}
+    # A genuine 'stop', but nowhere near the 0.8 default. It kills iff the bar collapsed to zero.
+    judge = _JudgeClient({"status": "stop", "reason": "hard to say", "confidence": 0.1})
+    stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01, judge=judge)
+    if knob == "missing":
+        del stub._asha_live_kill_confidence          # never configured at all
+    else:
+        stub._asha_live_kill_confidence = {"none": None, "not-a-number": "0.9",
+                                           "bool": True}[knob]
+
+    _run_loop(stub, wd, spec, "max", signal, monkeypatch, finals=[0.8, 0.7, 0.6], curves=curves,
+              window=0.2)
+
+    assert judge.calls >= 1, "precondition: the rank gate held and the judge was consulted"
+    assert signal.get("kill") is not True, (
+        f"an {knob!r} kill-confidence knob became a zero threshold and a 0.1-confidence stop killed "
+        "the node")
+    rows = [d for (t, d) in stub.store.events if t == EV_ASHA_VERDICT]
+    assert rows and rows[0]["kill"] is False, rows
+
+
 def test_the_judge_is_never_consulted_where_the_rank_test_would_not_kill(tmp_path, monkeypatch):
     """The LLM cannot widen the kill set: with a judge that stops EVERYTHING, none of the cases the
     deterministic rank test spares even reaches it."""
@@ -856,9 +965,15 @@ def test_grace_window_is_re_armed_when_the_judge_spares_the_node(tmp_path, monke
     wd, spec, curves = _kill_setup(tmp_path)
     judge = _JudgeClient({"status": "watch", "reason": "still early", "confidence": 0.9})
     stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01, judge=judge)
+    # Wait for the durable ROWS, not for `judge.calls`: a SPARED verdict's append is deliberately
+    # unshielded, so cancelling the instant the second call returns can preempt the row it is about
+    # to write and read as `judge.calls == 2, ticks == 1` on a loaded host. Same property, no race.
+    def _rows(s):
+        return [d for (t, d) in s.store.events if t == EV_ASHA_VERDICT]
+
     _run_loop(stub, wd, spec, "max", {}, monkeypatch, finals=[0.8, 0.7, 0.6], curves=curves,
-              window=0.3, until=lambda s: judge.calls >= 2)
-    ticks = len([d for (t, d) in stub.store.events if t == EV_ASHA_VERDICT])
+              window=0.3, until=lambda s: len(_rows(s)) >= 2)
+    ticks = len(_rows(stub))
     assert judge.calls == ticks >= 1
     # Every consult costs a full grace window (>2 underperforming ticks) — never one call per tick.
     for row in [d for (t, d) in stub.store.events if t == EV_ASHA_VERDICT]:
@@ -1003,7 +1118,12 @@ def test_a_judged_kill_leaves_one_terminal_and_a_replay_that_never_calls_the_llm
     assert not [e for e in store.read_all() if e.type in ("node_evaluated", "node_failed")
                 and e.data.get("node_id") == 1]
 
-    # … and `_evaluate` then writes the ONE terminal, naming the watchdog's reason.
+    # … and the terminal `_evaluate` writes from that signal is spliced in HERE, by hand, so the rest
+    # of this test can assert what the durable LOG looks like around it (one terminal, splice-neutral
+    # diagnostics, offline replay). That the real writer produces exactly this row is a separate
+    # property with its own test — `test_the_engine_writes_the_one_terminal_the_watchdog_asked_for`
+    # below drives `engine/evaluate.py`'s `kill_signal` branch — because a test that appends the row
+    # it then asserts about proves nothing about the code that is supposed to append it.
     store.append("node_failed", {"node_id": 1, "generation": 0, "reason": "asha_underperforming",
                                  "error": "live watchdog stopped the run early: "
                                           + str(signal.get("reason", ""))[:400],
@@ -1042,6 +1162,82 @@ def test_a_judged_kill_leaves_one_terminal_and_a_replay_that_never_calls_the_llm
                        + [e for e in events if e.type != EV_ASHA_VERDICT]) == baseline
     # A duplicate terminal from a corrupt/replayed log still folds to the SAME node (first wins).
     assert _projection(events + [terminals[0]]) == baseline
+
+
+def _watchdog_killed_engine(tmp_path, *, reason: str):
+    """A REAL `Engine` on a real command-eval task, whose ASHA watchdog task is replaced by one that
+    immediately fills `kill_signal` and cancels — so `engine/evaluate.py` reaches its `kill_signal`
+    branch and writes the terminal itself.
+
+    The eval command sleeps; the watchdog's `cancel` tree-kills it, so the eval comes back with no
+    metric (`ok` False) exactly as it does after a real early kill.
+    """
+    import sys
+
+    from looplab.adapters.repo_task import EvalSpec, RepoTask
+    from looplab.engine.orchestrator import Engine
+    from looplab.events.eventstore import EventStore
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "run.py").write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    (repo / "params.txt").write_text("x=0\n", encoding="utf-8")
+    task = RepoTask(id="asha_kill", goal="raise the metric", direction="max",
+                    editable_path=str(repo), edit_surface=["*.txt"],
+                    eval=EvalSpec(command=[sys.executable, "run.py"],
+                                  metric={"kind": "stdout_json", "key": "metric"}))
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": task.id, "goal": "g", "direction": "max"})
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {}, "rationale": ""},
+                                  "code": ""})
+    researcher, developer = task.build_roles()
+    engine = Engine(run_dir, task=task, researcher=researcher, developer=developer,
+                    sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=2),
+                    role_factory=task.build_roles, asha_live=True, asha_live_kill=True,
+                    auto_install_deps=False)
+
+    async def _stop_at_once(_self, _node_id, _generation, _workdir, cancel, _spec, _direction,
+                            kill_signal=None, _log_snapshot=None, _log_plan=None):
+        kill_signal.update({"kill": True, "reason": reason,
+                            "terminal_reason": "asha_underperforming"})
+        cancel.set()
+
+    engine._monitor_asha = _stop_at_once.__get__(engine, type(engine))
+    return engine, store
+
+
+def test_the_engine_writes_the_one_terminal_the_watchdog_asked_for(tmp_path):
+    """The other half of the contract, driven through the REAL writer (`engine/evaluate.py`, the
+    `kill_signal.get("kill") and not ok` branch) rather than hand-appended by the test.
+
+    Two things must survive the handoff and neither is the watchdog's to enforce: the judge's own
+    words ride the terminal (they are the entire explanation an operator gets for a training that was
+    stopped early), and `terminal_reason` reaches the fold as `asha_underperforming` — degrading it to
+    the training monitor's default `monitor_broken` misattributes the kill to the other watchdog and
+    tells failure-reflection the wrong thing about WHY the node died.
+    """
+    from looplab.events.replay import fold
+
+    words = "flat at 0.01 while the peer was at 0.90"
+    engine, store = _watchdog_killed_engine(tmp_path, reason=words)
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1))
+
+    events = list(store.read_all())
+    terminals = [e for e in events if e.type in ("node_evaluated", "node_failed")
+                 and e.data.get("node_id") == 0]
+    assert len(terminals) == 1 and terminals[0].type == "node_failed", [e.type for e in events]
+    assert terminals[0].data["reason"] == "asha_underperforming", terminals[0].data
+    assert words in terminals[0].data["error"], terminals[0].data
+
+    state = fold(events)
+    assert state.nodes[0].status is NodeStatus.failed
+    assert state.nodes[0].error_reason == "asha_underperforming"
 
 
 def test_the_judge_reads_the_train_monitor_verdict_off_a_real_log(tmp_path):

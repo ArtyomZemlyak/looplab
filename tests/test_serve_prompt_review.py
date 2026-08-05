@@ -12,6 +12,7 @@ only the /command action-router is told to ACT.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,47 @@ def _start_env(tmp_path, monkeypatch):
     return TestClient(make_app(tmp_path)), spawned
 
 
+def _assert_child_consumes_the_launch_document(spawned, tmp_path, run_id: str) -> None:
+    """The premise every assertion below rests on: the child really reads `task.input.json`.
+
+    `_start_env` captures the argv, and until this existed nothing asserted it — so a launch that
+    stopped passing the canonical document (or passed a different one) would leave every
+    `_launch_doc` assertion in this section testing a file the engine never opens.
+    """
+    cmd = [str(part) for part in spawned["cmd"]]
+    assert cmd[:3] == [sys.executable, "-m", "looplab.cli"] and cmd[3] == "run", cmd
+    assert str(tmp_path / run_id / "task.input.json") in cmd, cmd
+    assert cmd[cmd.index("--out") + 1] == str(tmp_path / run_id), cmd
+
+
+def _toy_backend_baseline(monkeypatch):
+    """Pin this server's own `Settings` baseline to a NON-llm backend for one test.
+
+    F4's property is "the /api/start funnel INFERS backend=llm for a generative launch". Asserting
+    the resolved value against the live `Settings.backend` default cannot see that property while
+    that default is itself `llm` (since 2026-08-04): deleting `launch.py::_resolved_settings`'
+    `merged["backend"] = "llm"` leaves every launch document reading `llm` anyway, and a
+    NON-generative quadratic launch's document reads `llm` too — so the assertion discriminates
+    nothing. Under a `toy` baseline the inferred `llm` can only have come from the inference, and the
+    non-generative launch is visibly left alone.
+
+    Patched in both modules that build the baseline: `launch` decides the inference,
+    `routers/control.py` computes the env deviations against the same `Settings()`.
+    """
+    from looplab.core.config import Settings
+    from looplab.serve import launch
+    from looplab.serve.routers import control
+
+    class _ToyBaselineSettings(Settings):
+        backend: str = "toy"
+
+    probe = _ToyBaselineSettings()
+    assert probe.backend == "toy" and "backend" not in probe.model_fields_set, (
+        "the environment supplies a backend, so this baseline is not a neutral 'nobody chose one'")
+    for module in (launch, control):
+        monkeypatch.setattr(module, "Settings", _ToyBaselineSettings)
+
+
 def _launch_doc(tmp_path, run_id: str) -> dict:
     """The canonical unified launch document the spawned `looplab run` actually consumes."""
     return json.loads((tmp_path / run_id / "task.input.json").read_text(encoding="utf-8"))
@@ -137,12 +179,15 @@ def test_start_defaults_backend_llm_for_inline_generative_task(tmp_path, monkeyp
     (F4: the default lives in the /api/start funnel, so assistant/direct launches — which never pass
     through the genesis card — get it too, instead of NoOpRepoDeveloper silently no-oping).
 
-    `Settings.backend` itself defaults to "llm" since 2026-08-04, so the launch-time inference no
-    longer has to CHANGE the value — which is why the resolved `llm` stopped appearing in the child's
-    env (it is no longer a deviation from this server's baseline; see `_start_env`). The property is
-    unchanged: the spawned run's effective backend is `llm`, asserted on the document the child
-    reads. The inference itself is still exercised — it is what the preflight reports as a warning,
-    so deleting `launch.py::_resolved_settings`' backend block still goes red here."""
+    `Settings.backend` itself defaults to "llm" since 2026-08-04, so on a stock deployment the
+    inference resolves to the value the baseline would have produced anyway. Asserting `== "llm"`
+    against that baseline therefore asserts nothing about the inference: it holds with
+    `launch.py::_resolved_settings`' `merged["backend"] = "llm"` deleted, and it holds for a
+    non-generative launch too. So the baseline is pinned to `toy` here (`_toy_backend_baseline`) —
+    the only way the launch document can read `llm` under it is the inference doing its job, which is
+    also the state a deployment that sets its own `backend` default is in, and the reason the block
+    was kept rather than deleted when the product default flipped."""
+    _toy_backend_baseline(monkeypatch)
     client, spawned = _start_env(tmp_path, monkeypatch)
     task = _repo_task(tmp_path)
     pre = client.post("/api/start/preflight", json={"run_id": "gen", "task": task})
@@ -152,7 +197,11 @@ def test_start_defaults_backend_llm_for_inline_generative_task(tmp_path, monkeyp
 
     r = client.post("/api/start", json={"run_id": "gen", "task": task})
     assert r.status_code == 200
+    _assert_child_consumes_the_launch_document(spawned, tmp_path, "gen")
     assert _launch_doc(tmp_path, "gen")["settings"]["backend"] == "llm"
+    # Under a non-llm baseline the inferred value is a real deviation again, so it also travels in
+    # the child's env — the second channel, and the one that used to carry this property.
+    assert spawned["env"]["LOOPLAB_BACKEND"] == "llm"
 
 
 def test_start_respects_explicit_backend(tmp_path, monkeypatch):
@@ -190,17 +239,22 @@ def test_start_non_generative_task_gets_no_backend(tmp_path, monkeypatch):
     """A non-generative (offline-optimizable) inline task gets NO inferred backend — it stays on
     Settings' own default, and nothing is added to the child env.
 
-    "No env entry" alone stopped discriminating once `Settings.backend` defaulted to `llm`
-    (2026-08-04): a generative task's resolved `llm` is no longer a deviation either, so it has no
-    env entry now. The preflight's inferred-backend warning is what still tells the two apart, and
-    is asserted here as the negative half of
-    `test_start_defaults_backend_llm_for_inline_generative_task`."""
+    The negative half of `test_start_defaults_backend_llm_for_inline_generative_task`, and pinned
+    against the SAME `toy` baseline for the same reason: while the live `Settings.backend` default is
+    itself `llm`, this launch's document reads `llm` too and "no env entry" holds for a generative
+    launch as well, so neither channel tells the two kinds apart. Under a `toy` baseline the
+    difference is visible again — this document must still read the untouched baseline."""
+    _toy_backend_baseline(monkeypatch)
     client, spawned = _start_env(tmp_path, monkeypatch)
     task = {"benchmark": "quadratic", "goal": "min (x-3)^2", "direction": "min"}
     pre = client.post("/api/start/preflight", json={"run_id": "toy", "task": task})
     assert pre.status_code == 200 and pre.json()["warnings"] == []   # never inferred for this kind
+    assert pre.json()["preview"]["settings"]["backend"] == "toy"
     r = client.post("/api/start", json={"run_id": "toy", "task": task})
     assert r.status_code == 200
+    _assert_child_consumes_the_launch_document(spawned, tmp_path, "toy")
+    assert _launch_doc(tmp_path, "toy")["settings"]["backend"] == "toy", (
+        "a non-generative launch was given the generative backend")
     assert "LOOPLAB_BACKEND" not in (spawned["env"] or {})
 
 
@@ -208,8 +262,10 @@ def test_start_defaults_backend_llm_for_generative_task_file(tmp_path, monkeypat
     """The task_file path (a catalogue/genesis task_file card — no inline task dict) gets the same
     default: the file's JSON is read and normalized best-effort inside the shared predicate.
 
-    Asserted on the canonical launch document + the preflight's inference warning rather than the
-    child env — see `_start_env` for why `llm` no longer travels as an env deviation."""
+    Asserted on the canonical launch document + the preflight's inference warning, against the same
+    `toy` baseline the inline case uses — see `_toy_backend_baseline` for why comparing against the
+    live `Settings.backend` default cannot see this property at all."""
+    _toy_backend_baseline(monkeypatch)
     client, spawned = _start_env(tmp_path, monkeypatch)
     tf = tmp_path / "mytask.json"
     tf.write_text(json.dumps(_repo_task(tmp_path)), encoding="utf-8")
@@ -226,9 +282,11 @@ def test_start_task_file_read_parity_yaml_and_bom(tmp_path, monkeypatch):
     both of which the engine happily runs, must ALSO get the backend default (a raw json.loads
     silently skipped them, launching NoOpRepoDeveloper runs from valid files).
 
-    Asserted on the canonical launch document + the preflight's inference warning rather than the
-    child env — see `_start_env` for why `llm` no longer travels as an env deviation."""
+    Asserted on the canonical launch document + the preflight's inference warning, against the same
+    `toy` baseline the inline case uses — see `_toy_backend_baseline` for why comparing against the
+    live `Settings.backend` default cannot see this property at all."""
     import yaml
+    _toy_backend_baseline(monkeypatch)
     client, spawned = _start_env(tmp_path, monkeypatch)
     task = _repo_task(tmp_path)
     # a YAML unified config: the task lives under the `task:` block, next to a settings: block

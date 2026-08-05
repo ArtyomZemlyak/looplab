@@ -45,6 +45,16 @@ def test_both_indexes_use_the_shared_registry_and_bound(module):
     assert index.max_indexed_runs == module.MAX_INDEXED_RUNS
 
 
+def test_the_two_indexes_agree_on_the_lru_bound():
+    """`MAX_INDEXED_RUNS` is still spelled once PER MODULE, so comparing each index against its OWN
+    constant cannot see the two drifting apart — and drifting apart is the failure this seam exists
+    to prevent: one index keeps N runs hot while the other evicts all but the newest, and the
+    operator waiting behind the shrunken one just sees polls that never get faster. Pin them to each
+    other AND to the value, so shrinking either copy is a named failure."""
+    assert command_observation.MAX_INDEXED_RUNS == log_pages.MAX_INDEXED_RUNS == 8, (
+        command_observation.MAX_INDEXED_RUNS, log_pages.MAX_INDEXED_RUNS)
+
+
 @pytest.mark.parametrize("module", [command_observation, log_pages])
 @pytest.mark.parametrize("bad", [0, -1, True, False, 1.0, "8", None])
 def test_both_indexes_reject_the_same_bad_bounds(module, bad):
@@ -328,11 +338,60 @@ def test_the_projection_module_imports_no_router():
 
 def test_the_run_summary_cache_stays_on_appstate():
     """Where the reset/delete paths already invalidate it — a cache local to the projection module
-    would keep serving generation A's summary after a reset replaced the log."""
+    would keep serving generation A's summary after a reset replaced the log.
+
+    On the AST, because both halves of the old substring version were evadable at once: the module
+    DOCSTRING names `srv.summary_cache`, so the membership test held with every real access moved to
+    a module global; and the global scan only looked at `ast.Assign` targets whose NAME contains
+    "cache", so `_SUMMARIES: dict = {}` — an `AnnAssign`, differently named — passed both.
+    """
     from looplab.serve import run_projections
 
-    source = inspect.getsource(run_projections)
-    assert "srv.summary_cache" in source
-    module_level = [n for n in ast.parse(source).body if isinstance(n, ast.Assign)]
-    assert not [t for n in module_level for t in n.targets
-                if isinstance(t, ast.Name) and "cache" in t.id], "a second cache lives here now"
+    tree = ast.parse(inspect.getsource(run_projections))
+    accesses = [n for n in ast.walk(tree)
+                if isinstance(n, ast.Attribute) and n.attr == "summary_cache"
+                and isinstance(n.value, ast.Name) and n.value.id == "srv"]
+    assert len(accesses) >= 2, (
+        "the projections no longer both READ and WRITE `srv.summary_cache` — naming it in a "
+        f"docstring is not an access (found {len(accesses)})")
+
+    # And no module-level mutable state under ANY name: that is what a second cache would be.
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+            continue
+        names = [t.id for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                 if isinstance(t, ast.Name)]
+        assert not isinstance(node.value, (ast.Dict, ast.List, ast.Set, ast.Call, ast.DictComp,
+                                           ast.ListComp, ast.SetComp)), (
+            f"module-level mutable state `{names}` in run_projections.py — a cache here is outside "
+            "every reset/delete invalidation path")
+
+
+def test_the_summary_cache_is_the_one_appstate_can_invalidate(tmp_path, monkeypatch):
+    """And behaviourally: clearing `srv.summary_cache` — what the reset/delete paths do — must make
+    the next projection RE-FOLD. A cache the projection module owns keeps answering with generation
+    A's summary after a reset replaced the log, and nothing can reach it to say otherwise."""
+    from looplab.events.eventstore import EventStore
+    from looplab.serve import run_projections
+    from looplab.serve.server import make_app
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    srv = make_app(tmp_path).state.looplab
+
+    folds: list[int] = []
+    real_fold = run_projections.fold
+    monkeypatch.setattr(run_projections, "fold",
+                        lambda events: (folds.append(1), real_fold(events))[1])
+
+    assert run_projections.run_summaries(srv), "precondition: the run is projected at all"
+    assert len(folds) == 1 and srv.summary_cache, "precondition: it folded once and cached the result"
+    run_projections.run_summaries(srv)
+    assert len(folds) == 1, "precondition: an unchanged log is served from the cache"
+
+    srv.summary_cache.clear()                      # exactly what reset/delete do
+    run_projections.run_summaries(srv)
+    assert len(folds) == 2, (
+        "the projection answered from a cache AppState's invalidation cannot reach")

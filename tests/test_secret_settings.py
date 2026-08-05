@@ -242,6 +242,14 @@ def test_dotenv_key_wins_over_stored_secret(tmp_path, _restore_key, monkeypatch)
     TestClient(make_app(tmp_path))
     # os.environ is NOT primed from the store (so pydantic reads sk-from-dotenv from .env, not the store)
     assert os.environ.get("LOOPLAB_LLM_API_KEY") != "sk-from-store"
+    # …and the POSITIVE half, because the negative above also holds when NOTHING is read: the suite's
+    # repo-root `.env` guard (`tests/conftest.py::_no_repo_dotenv_in_tests`) is deliberately
+    # PATH-SCOPED, and a blanket `return {}` would blank this test's own `.env` too — leaving the
+    # assertion above green while the property it names ("the dotenv key wins") is untestable.
+    values, sources = SettingsStore(tmp_path)._process_secret_values()
+    assert values.get("llm_api_key") == "sk-from-dotenv", (
+        "the local .env is not reaching the operator-tier read at all", values, sources)
+    assert sources.get("llm_api_key") == "dotenv", sources
 
 
 def test_stored_secret_reaches_disk_before_the_rename_publishes_it(tmp_path, _restore_key, monkeypatch):

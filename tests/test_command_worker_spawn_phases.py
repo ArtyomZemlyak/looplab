@@ -239,8 +239,63 @@ def test_the_sequencer_is_held_by_the_admission_phase_alone():
     assert len(body) == 1 and isinstance(body[0], ast.With), (
         "the admission body is no longer ONE lock scope")
 
+    # WHICH context manager, not just that there is one: the shape survives being swapped for a
+    # `nullcontext()`, and an unserialized admission phase looks identical from the outside until
+    # two servers spawn two engines into the same run.
+    assert len(body[0].items) == 1, "the admission scope acquired a second context manager"
+    scope = body[0].items[0].context_expr
+    assert (isinstance(scope, ast.Call) and isinstance(scope.func, ast.Attribute)
+            and scope.func.attr == "sequence"
+            and isinstance(scope.func.value, ast.Name) and scope.func.value.id == "self"
+            and [getattr(arg, "id", None) for arg in scope.args] == ["rd"]), (
+        f"the admission body's ONE scope is `{ast.unparse(scope)}`, not `self.sequence(rd)`")
+
     spine = textwrap.dedent(inspect.getsource(RunCommandService._execute))
     assert "__enter__" not in spine and "sequence_held" not in spine
+
+
+def test_the_admission_body_actually_runs_inside_the_run_sequencer(tmp_path):
+    """And behaviourally, so the property above does not rest on AST shape alone: the durable writes
+    admission makes must land BETWEEN the sequencer's enter and its exit.
+
+    Swapping `self.sequence(rd)` for any do-nothing scope keeps every structural assertion green
+    while the decision→intent→spawn boundary runs completely unserialized across processes — and
+    nothing reports it, because a lost race only shows up as a second engine.
+    """
+    from contextlib import contextmanager
+
+    svc, rd = _service(tmp_path)
+    path, record = _record(svc, rd)
+    record["event_type"] = "not_a_control_event"          # rejected inside the scope: an EARLY exit
+    svc._save(path, record)
+
+    order: list[str] = []
+    real_sequence, real_save = svc.sequence, svc._save
+
+    @contextmanager
+    def recording_sequence(run_dir):
+        assert run_dir == rd, f"the sequencer was taken on {run_dir}, not the run being admitted"
+        order.append("enter")
+        with real_sequence(run_dir):
+            yield
+        order.append("exit")
+
+    def recording_save(target, payload):
+        order.append(f"save:{payload.get('status')}")
+        return real_save(target, payload)
+
+    svc.sequence, svc._save = recording_sequence, recording_save
+    try:
+        spec, admitted = svc._admit(rd, path, dict(record), COMMAND_ID)
+    finally:
+        svc.sequence, svc._save = real_sequence, real_save
+
+    assert (spec, admitted) == (None, admitted) and admitted is not None
+    assert svc._load(path)["status"] == "rejected", svc._load(path)
+    assert order and order[0] == "enter", f"admission started work outside the sequencer: {order}"
+    assert order[-1] == "exit", f"an early admission exit leaked the sequencer: {order}"
+    assert "save:rejected" in order[1:-1], (
+        f"the terminal write did not happen under the sequencer: {order}")
 
 
 # --- the admission phase's return contract ---------------------------------------------------

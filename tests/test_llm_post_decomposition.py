@@ -416,10 +416,18 @@ def test_no_policy_handler_returns_on_a_path_it_cannot_retry():
     misleading generic 'no response after retries'."""
     for fn in _policy_handlers() + [OpenAICompatibleClient._retry_or_raise]:
         tree = _body(fn)
+        # `ast.Call` is allowed ONLY for the dispatcher, whose single `return` IS the delegation to
+        # the selected handler. Allowing it for the six handlers too — which is what a blanket
+        # widening did — lets `return dict().get("stalled")` through: a call that evaluates to None,
+        # exactly the shape the message below forbids, in exactly the place it matters.
+        allowed = ((ast.Constant, ast.Name, ast.Call)
+                   if fn is OpenAICompatibleClient._retry_or_raise
+                   else (ast.Constant, ast.Name))
         for node in [n for n in ast.walk(tree) if isinstance(n, ast.Return)]:
-            assert isinstance(node.value, (ast.Constant, ast.Name, ast.Call)), (
-                f"{fn.__name__}: a retry decision must be a plain flag or a delegated call, not an "
-                "expression that could evaluate to None and read as 'no stall'")
+            assert isinstance(node.value, allowed), (
+                f"{fn.__name__}: a retry decision must be a plain flag"
+                + (" or a delegated call" if len(allowed) == 3 else "")
+                + ", not an expression that could evaluate to None and read as 'no stall'")
         assert isinstance(tree.body[-1], ast.Raise), (
             f"{fn.__name__} falls off its end without raising — an unclassified error would return "
             "None, which `_post` reads as 'retry, not stalled'")

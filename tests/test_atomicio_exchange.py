@@ -124,6 +124,57 @@ def test_a_missing_kernel_primitive_DEGRADES_where_the_no_replace_rename_REFUSES
     assert exc.value.errno == errno.ENOTSUP
 
 
+@pytest.mark.parametrize("failure", [
+    OSError(errno.ENOENT, "no libc in this image"),   # locked-down / non-glibc container
+    AttributeError("renameat2"),
+    ValueError("invalid restype"),
+])
+def test_a_probe_that_RAISES_degrades_too_not_only_a_missing_symbol(tmp_path, monkeypatch, failure):
+    """The other entrance to the degrade, and the one nothing reached.
+
+    `no_kernel_primitive` simulates a MISSING SYMBOL, which `getattr(libc, ..., None)` turns into an
+    early `return False` without ever entering the handler. So
+    `except (OSError, AttributeError, ValueError): return False` can be replaced by a bare `raise`
+    with every other test in this file still green — and it is not equivalent: loading libc through
+    `ctypes.CDLL` genuinely raises on a locked-down or non-glibc image, and the exception then escapes
+    a primitive whose entire contract is "report False, let the caller use its fallback".
+    """
+    def _boom(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(ctypes, "CDLL", _boom)
+
+    first = _bundle(tmp_path, "dist", "old")
+    second = _bundle(tmp_path, "staged", "new")
+
+    assert exchange_paths_if_supported(second, first) is False
+    assert (first / "index.html").read_text(encoding="utf-8") == "old", "nothing may have moved"
+    assert (second / "index.html").read_text(encoding="utf-8") == "new"
+
+
+def test_the_ui_publish_still_succeeds_when_the_probe_cannot_load_libc(tmp_path, monkeypatch):
+    """The consumer the soft-False exists for, end to end.
+
+    `serve/uibuild.py::_publish_staged_dist` spells the choice as
+    `dist.exists() and exchange_paths_if_supported(stage, dist)` — a False takes the ordered
+    retire -> publish -> delete fallback, which is correct on every filesystem. An EXCEPTION escapes
+    that guard instead and turns a publish the fallback handles perfectly into a failed
+    `looplab build-ui` with the old bundle still in place."""
+    from looplab.serve import uibuild
+
+    def _boom(*_args, **_kwargs):
+        raise OSError(errno.ENOENT, "no libc in this image")
+
+    monkeypatch.setattr(ctypes, "CDLL", _boom)
+
+    dist = _bundle(tmp_path, "dist", "old")
+    stage = _bundle(tmp_path, "staged", "new")
+    uibuild._publish_staged_dist(stage, dist, log=lambda _message: None)
+
+    assert (dist / "index.html").read_text(encoding="utf-8") == "new", "the new bundle never published"
+    assert not stage.exists(), "the staging name still holds a bundle"
+
+
 def test_the_exchange_leaves_durability_to_its_caller(tmp_path, monkeypatch):
     """Unlike `durable_no_replace_rename`, which bundles `strict_fsync_parent`.
 

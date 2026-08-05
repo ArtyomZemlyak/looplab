@@ -854,6 +854,41 @@ def test_unfinished_reset_after_holdout_rotates_hidden_epoch(tmp_path):
     assert fold(s.read_all()).nodes[0].holdout_metric is None
 
 
+def test_the_epoch_requeue_clears_the_eval_start_boundary_too(tmp_path):
+    """`_requeue_partition_bound_results` reopens every surviving incumbent as a FRESH lifecycle, so
+    it must clear `eval_started` for the same reason `_on_node_reset` does: the boundary describes
+    the attempt the rotation just abandoned.
+
+    The reset lives in TWO places (the epoch requeue and `node_reset`), and only the `node_reset`
+    copy was covered — so the epoch-rotation copy could be deleted outright with the whole replay
+    suite green. A stale `True` says "this generation reached the sandbox" about a generation that
+    has not run yet, which is exactly the fact the speculative-discard refund reads to decide whether
+    a miss was free.
+    """
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {
+        "run_id": "r", "task_id": "t", "direction": "min", "holdout_select": True})
+    _n(s, 0, 1.0)
+    s.append("node_eval_started", {"node_id": 0, "generation": 0})
+    s.append("holdout_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 1.2, "search_epoch": 0})
+    before = fold(s.read_all())
+    assert before.nodes[0].eval_started is True, "precondition: the boundary is durable"
+
+    # A new candidate closes the disclosed epoch and requeues node 0 onto the newly-hidden split.
+    s.append("node_created", {
+        "node_id": 1, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}}, "code": "new"})
+    st = fold(s.read_all())
+    assert st.search_epoch == 1 and st.nodes[0].attempt == 1, "precondition: the requeue ran"
+    assert st.nodes[0].eval_started is False, (
+        "the requeued lifecycle still claims the abandoned attempt's eval-start boundary")
+
+    # And the boundary lands again for the NEW generation, exactly as for a `node_reset` lifecycle.
+    s.append("node_eval_started", {"node_id": 0, "generation": 1})
+    assert fold(s.read_all()).nodes[0].eval_started is True
+
+
 def test_new_candidate_or_resume_after_disclosed_holdout_rotates_epoch(tmp_path):
     s = EventStore(tmp_path / "e.jsonl")
     s.append("run_started", {

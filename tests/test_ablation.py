@@ -134,12 +134,60 @@ def test_the_probe_wall_clock_is_returned_so_neither_loop_can_drop_it():
         assert "time.monotonic()" not in source, f"{name} re-grew its own probe timing"
 
 
-def test_ablation_event_budgets_the_probe_seconds(tmp_path):
-    """And behaviourally: the audit event carries a real, non-negative wall-clock for the probes it
-    ran, which is the number the fold charges against the eval budget."""
+# The clock the probe timing is measured against, stepped by a fixed amount per reading. A constant
+# (`return (res, 0.0, ...)`) is the whole property deleted while every shape assertion above stays
+# green, so the tests below pin the VALUE, not just that a number came back.
+PROBE_STEP = 2.5
+
+
+def _stub_ablation_clock(monkeypatch):
+    """`time.monotonic` in `engine.ablation` advancing exactly `PROBE_STEP` per reading, so one probe
+    is exactly `PROBE_STEP` seconds and N probes are exactly `N * PROBE_STEP`."""
+    import types
+
+    import looplab.engine.ablation as ablation
+
+    ticks = iter(range(10_000))
+    monkeypatch.setattr(
+        ablation, "time",
+        types.SimpleNamespace(monotonic=lambda: 1000.0 + PROBE_STEP * next(ticks)))
+
+
+def test_the_probe_reports_the_wall_clock_it_actually_measured(tmp_path, monkeypatch):
+    """The helper's own contract, against a stubbed clock: the seconds it returns are the elapsed
+    time of the probe it just awaited. A constant satisfies the tuple shape and the `>= 0` floor
+    both, and deletes the entire budgeting property."""
+    from looplab.engine.ablation import AblationMixin
+
+    _stub_ablation_clock(monkeypatch)
+
+    class _Host(AblationMixin):
+        async def _run_ablation_probe(self, code, workdir, parent_id, generation):
+            return f"result:{code}"
+
+        def _ablation_parent_current(self, parent_id, generation):
+            return True
+
+    res, seconds, current = anyio.run(
+        lambda: _Host()._timed_ablation_probe("src", tmp_path, 1, 0))
+    assert (res, current) == ("result:src", True)
+    assert seconds == PROBE_STEP, f"the probe reported {seconds}s for a {PROBE_STEP}s probe"
+
+
+def test_ablation_event_budgets_the_probe_seconds(tmp_path, monkeypatch):
+    """And behaviourally through the real loop: the audit event carries the summed wall-clock of the
+    probes it ran, which is the number the fold charges against the eval budget. Under the stubbed
+    clock every probe is exactly `PROBE_STEP`, so the event must read a POSITIVE whole multiple of it
+    — a floor of zero is a probe pass that spends entirely outside `max_eval_seconds`."""
+    _stub_ablation_clock(monkeypatch)
     anyio.run(_engine(tmp_path / "run", ablate_every=1).run)
     events = list(EventStore(tmp_path / "run" / "events.jsonl").read_all())
     scored = [e for e in events if e.type == "ablate" and e.data.get("impacts")]
     assert scored, "expected an ablation pass that actually probed"
-    assert all(isinstance(e.data.get("eval_seconds"), (int, float))
-               and e.data["eval_seconds"] >= 0 for e in scored), [e.data for e in scored]
+    for e in scored:
+        secs = e.data.get("eval_seconds")
+        assert isinstance(secs, (int, float)) and not isinstance(secs, bool), e.data
+        # Every scored impact came from a completed probe, so the pass ran at least that many.
+        assert secs >= PROBE_STEP * len(e.data["impacts"]), e.data
+        assert secs == PROBE_STEP * round(secs / PROBE_STEP), (
+            f"{secs}s is not a whole number of {PROBE_STEP}s probes", e.data)
