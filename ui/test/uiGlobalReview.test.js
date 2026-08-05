@@ -94,12 +94,17 @@ test('collapsed group drill-down preserves the exact active concept projection',
 })
 
 test('stale async resources are cancelled and run ids are encoded at every transport boundary', async () => {
-  // ConfigPanel.jsx and CardBoard.jsx split out of panels.jsx (doc 25 UI-04) and are named here so
-  // the raw-run-id URL rule keeps covering them; without that they would drop out of this scan.
-  const [shared, deadline, hooks, api, dock, inspector, panels, configPanel, cardBoard] = await Promise.all([
+  // ConfigPanel.jsx and CardBoard.jsx split out of panels.jsx (doc 25 UI-04), and the six modules
+  // after them split out of api.js (doc 25 UI-02). All of them are named here so the raw-run-id URL
+  // rule keeps covering them; without that they would drop out of this scan.
+  const [shared, deadline, hooks, api, dock, inspector, panels, configPanel, cardBoard,
+    apiClient, commandModel, commandStorage, commandProtocol, eventStream,
+    scopeReportActions] = await Promise.all([
     source('SharedAssistant.jsx'), source('requestDeadline.js'), source('hooks.js'),
     source('api.js'), source('Dock.jsx'), source('Inspector.jsx'), source('panels.jsx'),
     source('ConfigPanel.jsx'), source('CardBoard.jsx'),
+    source('apiClient.js'), source('commandModel.js'), source('commandStorage.js'),
+    source('commandProtocol.js'), source('eventStream.js'), source('scopeReportActions.js'),
   ])
   assert.match(deadline, /const controller = new AbortController\(\)/)
   assert.match(deadline, /setTimeout\([\s\S]*controller\.abort/)
@@ -108,7 +113,7 @@ test('stale async resources are cancelled and run ids are encoded at every trans
   assert.match(shared, /requestRef\.current !== timed/)
   assert.match(shared, /requestRef\.current\?\.controller\.abort\(\)/)
   assert.doesNotMatch(shared, /sharedLoadError = error =>[\s\S]{0,400}error\?*\.message/)
-  const apiShared = api.slice(api.indexOf("const path = '/api/assistant/shared'"))
+  const apiShared = apiClient.slice(apiClient.indexOf("const path = '/api/assistant/shared'"))
   assert.match(apiShared, /'\/api\/assistant\/shared'/)
   assert.match(apiShared, /'X-LoopLab-Share': String\(shareToken \|\| ''\)/,
     'the share bearer travels in a header, never in the URL that reaches history or access logs')
@@ -119,13 +124,18 @@ test('stale async resources are cancelled and run ids are encoded at every trans
   assert.match(hooks, /lastEventId: lastStreamEventId/)
   assert.match(hooks, /streamRef\.current\?\.abort\(\)/)
   assert.doesNotMatch(hooks, /new EventSource\(/)
-  for (const [name, body] of Object.entries({ api, dock, inspector, panels, configPanel, cardBoard })) {
+  for (const [name, body] of Object.entries({ api, dock, inspector, panels, configPanel, cardBoard,
+    apiClient, commandModel, commandStorage, commandProtocol, eventStream, scopeReportActions })) {
     assert.doesNotMatch(body, /`\/api\/runs\/\$\{(?!encodeURIComponent\()/,
       `${name} must not interpolate a raw run identity into a URL`)
   }
   // CardBoard.jsx is deliberately absent: every board mutation goes through a CONTROL.* helper, so it
-  // never names a run path itself. The modules that DO build one must use the encoding helper.
-  for (const body of [api, dock, inspector, panels, configPanel]) assert.match(body, /run(?:Node)?ApiPath\(/)
+  // never names a run path itself. So are commandModel/commandStorage/eventStream/scopeReportActions
+  // — the first two hold no URLs at all, the third takes the path from its caller, and the fourth
+  // addresses `/api/scope-report…`. The modules that DO build one must use the encoding helper.
+  for (const body of [api, dock, inspector, panels, configPanel, apiClient, commandProtocol]) {
+    assert.match(body, /run(?:Node)?ApiPath\(/)
+  }
 })
 
 test('early run creation and uncertain share mutations cannot replay user intent', async () => {

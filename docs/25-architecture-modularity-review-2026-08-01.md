@@ -7598,6 +7598,149 @@ AssistantBar.jsx 30.
 
 *Recommendation:* Split along the already-visible seams: commandStorage.js (envelopes/locks/launch transports), eventStream.js (parser + fetchEventStream), commandProtocol.js (submit/await/retry/jobAwait), scopeReportActions.js (the paid-action saga). util.js barrel keeps importers unchanged, matching the P5.2 precedent.
 
+*Resolution (2026-08-05) — the four recommended modules landed, plus two the recommendation could not
+have known were prerequisites; every line and comment moved verbatim and the barrel's export surface
+is byte-for-byte the same set.*
+
+**Every number is stale, and the concern sizes are wrong in both directions.** api.js was 2,860 lines,
+not 2,216 (+29% since the review). Re-measured on the live tree, the eight concerns are: the fetch
+client 212 lines (10-51, 1474-1547, 1650-1688, 1804-1824, 1996-2033 — the finding gives no range for
+this one); the sessionStorage persistence 483 lines, not "~550 lines (53-606)" — the contiguous 53-654
+block is 602 lines but 119 of them are shared vocabulary that is not storage; the SSE parser 1549-1648,
+exactly the 100 lines claimed but 165 lines lower in the file; the command protocol 737-1034 (298
+lines, 74 lines below the cited 663-960) **plus a 63-line generic job await at 2457-2519 the finding
+does not mention**; the report-refresh intent store 1036-1081 — **46 lines, not the 153 implied by
+962-1114**, a 3.3x overstatement (what now occupies that range is the paid concept-lens family, a
+ninth concern the finding does not list); the scope saga 2320-2647, 264 lines of code interleaved with
+that job await; CONTROL 1190-1328 (139); the Atlas sanitizers 2180-2265 (86, not 76).
+
+**The recommendation's four modules are not a closed set, and the missing two are the load-bearing
+ones.** All four need `_authHeaders` / `_throw` / `apiUrl` / `reviewReadPath` /
+`assertNotReviewMutation` / `get`, which lived in api.js — so as recommended, each of the four would
+have had to import the barrel back, which under this build's native ESM execution order is a load-time
+TDZ crash rather than a build error (the same trap recorded under UI-04). The fetch client therefore
+had to be hoisted DOWN first: `ui/src/apiClient.js` (234 lines) is the browser's security boundary in
+one file — which principal's credential travels, which namespace a read addresses, and where a review
+mutation is refused. The second addition is measured, not aesthetic: commandStorage and commandProtocol
+share exactly twelve names (`COMMAND_FAILED`, `COMMAND_ID_RE`, `COMMAND_PENDING`, `COMMAND_STATUSES`,
+`STORED_ERROR_CODES`, `STORED_ERROR_KEYS`, `UUID_V4_RE`, `commandEventForAction`,
+`createIdempotencyKey`, `hasOnlyKeys`, `safeIdentityText`, `validRunGeneration`) and neither sits below
+the other, so `ui/src/commandModel.js` (240 lines, **zero imports**) is the leaf they hoist into.
+`scopeGenerationErrorIdentity` lives there for the same reason and only that reason — it is pure, and
+both `jobAwait` and the scope saga annotate an error with it; keeping it beside the saga would have
+pointed commandProtocol UP at scopeReportActions, closing the cycle from the other side.
+
+The six modules are `apiClient.js` (234), `commandModel.js` (240), `commandStorage.js` (552),
+`commandProtocol.js` (375), `eventStream.js` (108), `scopeReportActions.js` (256); api.js is 1,240
+lines and re-exports all of them. The report-refresh intent store went into commandStorage.js rather
+than a seventh module: it is 46 lines of the same tab-scoped paid-identity persistence, built on the
+same `transportStorage` accessor. Nothing was reworded and no body changed; the launch timeout
+constants moved down beside the launch section they are the only readers of, since the constant block
+they used to sit in left with the vocabulary that needed sharing.
+
+**Rejected: `export *` in the barrel.** Siblings need names that were module-private (`_authHeaders`,
+`_throw`, `send`, `assertNotReviewMutation`, `commandJson`, `commandRead`, `storedRecord` …), so those
+declarations are now exported from their own module; `export *` would have carried all ~50 of them into
+api.js AND into util.js, and would have added the failure mode this split most needs to avoid — two
+modules exporting one name makes it AMBIGUOUS, which ESM resolves by silently omitting it. Explicit
+re-export lists keep the surface identical instead: **132 exported names before, 132 after, none added,
+none missing**, verified by diffing the export sets of the pre-split file and the barrel.
+
+**Rejected: making util.js the barrel**, as the recommendation words it. util.js already does
+`export * from './api.js'` and is untouched by this change, but sixteen other src modules and fourteen
+test files import `./api.js` DIRECTLY; routing the new modules through util.js instead would have broken
+every one of them. api.js is the barrel; util.js keeps working through it, which is what "importers are
+unchanged" actually requires here.
+
+**Not extracted: the CONTROL map (139 lines) and the cross-run Atlas sanitizers (86).** The finding
+names both as concerns but its recommendation asks for neither, and neither is a seam of the same kind.
+CONTROL is the action vocabulary a reader opens an API module to find, and it is the only remaining
+resident that reaches `runCommand`, `jobAwait` and the endpoint plumbing at once. The Atlas sanitizers
+look like they belong in `researchAtlasModel.js`, but that module opens with
+`import { boundedAtlasText, projectResearchAtlasSource } from './api.js'` and immediately re-exports
+them — so hosting them there while api.js keeps re-exporting them (ResearchAtlas.jsx takes
+`projectResearchAtlasSource` from api.js directly) is a barrel<->member cycle, the one shape this whole
+change exists to avoid. Untangling that means re-pointing ResearchAtlas.jsx too, which is a different
+change from this one.
+
+Bundling is unchanged, which was the risk. Measured across the split with `npm run build` +
+`npm run check:bundle`: 38 assets before and after, 35 manifest keys before and after with **no new
+manifest entry for any of the six modules**, and identical chunk counts in every closure
+(initial shell 6, owner List route 12, owner run DAG route 23, review DAG 19, Concepts 18, panel-hub
+increment 12). Total JS gzip 473,457 B -> 473,446 B (-11 B); initial shell 101,444 -> 101,526 (+82 B);
+owner run DAG route 357,890 -> 357,900 (+10 B); panel-hub increment 44,919 -> 44,920 (+1 B).
+`check:bundle` reports the same 13 pre-existing violations, including the same manifest static-import
+cycle it already had — the tree was over budget before this change and is over budget by 11 fewer bytes
+after it.
+
+**Adjudicated against UI-04's premise:** the "keep it to one reachability root or the chunk splits"
+rule that held for panels.jsx does NOT hold here, and asserting it would have been a claim I had not
+measured. api.js is reachable from index.html, so every module it imports is already in the eager
+graph. Built with a deliberate second importer (`import { commandRead } from './commandProtocol.js'`
+added to hooks.js), the bundle is byte-identical: 38 assets, 35 manifest keys, JS gzip 473,446 B,
+initial shell 101,526 B, owner run DAG 357,900 B, the same 13 violations. The single-importer test
+below is therefore a structural rule, not a byte rule — and the fact that the tree cannot feel the
+difference is precisely why it needs a test instead of a comment.
+
+Five source-reading assertions across four test files pointed api.js at code that had moved; all five
+went red on the first run and are re-pointed, not deleted. `requestDeadlineShapes.test.js` (its
+`commandFetch` slice), `runApiPathBoundary.test.js` (both the constructor slice and the ONE exemption
+in its scan-every-module grep), `runRouteSemantics.test.js` (the review-bearer parse) and
+`uiGlobalReview.test.js` (the `/api/assistant/shared` slice). One of them mattered more than the rest,
+because shrinking it is invisible rather than red: the COVERAGE list in
+`uiGlobalReview.test.js` — the raw-run-id-in-a-URL rule — gained all six modules, so the rule keeps
+covering the code that left; `run(?:Node)?ApiPath(` is additionally required of apiClient.js and
+commandProtocol.js, and commandModel/commandStorage/eventStream/scopeReportActions are deliberately
+excluded from that half (the first two hold no URLs at all, the third takes its path from the caller,
+the fourth addresses `/api/scope-report…`).
+
+The guard is `ui/test/apiBarrel.test.js` (6 tests). It does not hand-list the barrel's exports — it
+DERIVES them from real call sites (named imports of `./api.js` and `./util.js` across src and test:
+142 names from 55 files today), refuses to run on a derivation below 100 names or 20 files, pins six
+literal canaries (one per extracted module, each a name this split moved), then LOADS both barrels and
+checks each name resolves through them. The other five tests are the ones nothing else covers: that a
+review tab's capability — and never the stale owner token beside it — reaches fetch through all three
+transports that left api.js (`get`, `fetchEventStream`, and `getScopeReport`'s bounded command read),
+that the review read-only refusal still fires before `submitRunCommand` touches the wire, that no member
+imports the barrel, that no module outside {api.js, the six} imports a member, and that `_authHeaders`
+/ `_throw` / `apiPrefix` / `reviewReadPath` / `UUID_V4_RE` / `COMMAND_ID_RE` / `validRunGeneration` /
+`hasOnlyKeys` / `safeIdentityText` / `COMMAND_REQUEST_TIMEOUT_MS` are DEFINED once and re-derived
+nowhere.
+
+Verified by mutation on a throwaway copy of the tree (each break applied by a script that asserts its
+anchor appears exactly once; the copy's own baseline is 726 pass / 0 fail):
+
+* Drop `fetchEventStream` from the `./eventStream.js` re-export line. The guard fails at *every name a
+  consumer takes from the barrel really resolves through it* and at the credential test — and so do
+  four whole test FILES, which is worth writing down rather than claiming sole credit for: with
+  EXPLICIT re-export lists a dropped name is a link error (`ERR_NAMED_EXPORT_NOT_FOUND`) for every
+  static importer, a strictly stronger signal than the panels barrel gets, where RunView resolves by
+  string. `export *` would have had neither property.
+* Drop `genScopeReport`, whose only consumer is a `.jsx` the node suite never imports. The guard fails
+  first and names it; the collateral is `reportRefreshApi`/`researchAtlas` failing to link and four
+  ScopeReport UI behaviours going red for a reason that reads as unrelated.
+* Add `import { commandRead } from './commandProtocol.js'` to hooks.js. Of 726 tests exactly ONE
+  fails — *only the barrel and its own members import the extracted modules* — and, per the
+  measurement above, the build does not move by a single byte. This is the drift nothing else can see.
+* Re-derive `_authHeaders` inside eventStream.js, keeping the review branch and dropping the owner one
+  (the shape a hurried copy actually takes). Two failures: *the shared primitives are defined once*,
+  and `eventStream.test.js`'s owner-SSE test, which loses its `X-LoopLab-Token`.
+* Re-derive it the other way — eventStream.js reads `ll.owner-token` out of sessionStorage
+  unconditionally, so a review tab's SSE reconnect starts sending the owner credential. Three
+  failures: the behavioural credential test at
+  `/user/a/proxy/8765/api/review/events carried the owner credential out of a review tab`, the
+  shared-primitives pin, and `eventStream.test.js`'s review-SSE test.
+
+`npm test` 726 pass / 0 fail (720 before, plus this guard's 6). `npm run build` exits 0.
+
+What remains: all four recommended modules are done, so what is still open is what this resolution
+declined — the CONTROL map (139 lines) and the Atlas sanitizers (86, blocked behind the
+researchAtlasModel.js cycle above), plus the ~1,200-line endpoint residue the finding calls "every
+endpoint function", which is what an API module is for. The paid concept-lens family (106 lines,
+api.js:62-167 today) is a ninth concern neither the finding nor this change names; it is the closest
+thing left to a coherent extraction, and it would want a sibling of scopeReportActions.js rather than a
+seventh top-level module.
+
 #### UI-03 · HIGH · mergeable-entities · effort: large
 
 **RunView.jsx is a 2,000-line god-component; start-over recovery saga and repeated page-shell markup should be extracted**
