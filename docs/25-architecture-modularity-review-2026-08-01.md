@@ -4390,7 +4390,7 @@ leaves out of 1155** measured; changing `_COST_REFRESH_MAX_ATTEMPTS = 3` to `4` 
 produced exactly **2** — the implementation digest and that file's one manifest row. The inline
 comment the finding quotes is gone with the defect. What remains true, and is not a defect, is that a
 REAL semantic change to any shipped module still revokes every receipt: that is the digest's contract,
-and this change revokes them too (seven files moved).
+and this change revokes them too (eight modules moved).
 
 **REAL: `_validate_calibration_terminal` hardcodes the finalization suffix and the payload dicts.**
 Confirmed at the shifted line numbers — `expected_types` (a literal 12-tuple), `expected_tail_data`
@@ -4435,7 +4435,11 @@ was considered and rejected on the merits: `validated_speculation_gate_receipt` 
 to amortize, and a sound key would have to cover every byte the gate reads — six run directories'
 `events.jsonl`/`config.snapshot.json`/`task.snapshot.json` — via stat tuples for evidence this gate
 exists to distrust. Trading a fail-closed recomputation for a stat-tuple cache with no repeated call
-to pay for it is a worse gate, not a faster one.
+to pay for it is a worse gate, not a faster one. Both halves are DRIVEN rather than pinned:
+`test_one_validation_derives_each_expensive_identity_once` counts the two seams through a real
+validation, and the CLI test counts gate invocations and fails outright if the publish path reaches
+for `write_speculation_gate_receipt` again. Counting is the only way to see either — the outcome was
+identical with the double work, which is exactly why it survived.
 
 **Digest safety.** Every digest was measured against a fixed six-run corpus before and after:
 **1155 leaves compared, 15 differ**, and all 15 are implementation-manifest rows for the eight files
@@ -4462,7 +4466,7 @@ it is pre-existing rather than a regression. Left alone deliberately — making 
 changing the scheduling it is written to observe, which is a different change from this one.
 
 **One residue of the STALE half, found while re-verifying it and left deliberately.** The manifest has
-three non-module members. `serve/settings_ui_schema.json` turns out to be hashed SEMANTICALLY by
+two non-`.py` members. `serve/settings_ui_schema.json` turns out to be hashed SEMANTICALLY by
 accident and correctly — a JSON document is a valid Python expression, so `ast.parse` succeeds and a
 reindent does not revoke (measured). `pyproject.toml` does not parse, so it falls back to raw bytes as
 `_semantic_source` intends, and a comment or whitespace edit THERE still revokes every receipt.
