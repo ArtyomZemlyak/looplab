@@ -450,9 +450,22 @@ def _archive_forward(
     return archived_record
 
 
-def _reset_blocking(
-        srv, rd: Path, *, run_id: str, expected_generation: str,
-        operation_id: str, spawn_engine: Callable[..., Optional[int]]) -> dict[str, Any]:
+# --------------------------------------------------------------------------------- reset phases
+#
+# `_reset_blocking` is one durable transaction, not six operations that happen to run in order: a
+# phase is only correct under an exact set of ALREADY-HELD locks, so each states that set as a
+# "Lock precondition:" line and the driver keeps the whole `with` ladder in one readable place.
+# `tests/test_reset_phase_locks.py` pins both halves — the ladder's order, and that every phase is
+# reached holding exactly the locks its own docstring claims and no others.
+
+
+def _discover_or_rejoin(
+        srv, rd: Path, *, operation_id: str
+        ) -> tuple[Path, Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    """Locate this exact operation's durable receipt/marker, or prove the run does not exist.
+
+    Lock precondition: none held — the double-checked re-probe takes the sequencer itself.
+    """
     try:
         receipt_path = reset_receipt_path(srv, rd, operation_id)
         receipt = load_reset_receipt(receipt_path)
@@ -483,7 +496,16 @@ def _reset_blocking(
                 }) from exc
             if receipt is None and marker_hint is None and not (rd / "events.jsonl").exists():
                 raise HTTPException(404, "no such run")
+    return receipt_path, receipt, marker_hint
 
+
+def _flush_retained_paid_activity(
+        srv, rd: Path, receipt: Optional[dict[str, Any]],
+        marker_hint: Optional[dict[str, Any]]) -> None:
+    """Settle a retained paid-call activity before this operation takes any run lock.
+
+    Lock precondition: none held — deliberately BEFORE the sequencer (see below).
+    """
     # This pre-sequence hook can close a retained paid-call activity whose cleanup itself needs the
     # sequencer. Any marker already fences EventStore, and marker-only recovery proves this flush
     # completed before ownership publication, so never retry it through its own writer fence.
@@ -497,322 +519,350 @@ def _reset_blocking(
             if flushed is False:
                 raise HTTPException(409, "a paid call is awaiting durable accounting")
 
-    spawn_args: Optional[list[str]] = None
-    spawn_env: Optional[dict[str, str]] = None
-    launch_settings: Optional[dict[str, Any]] = None
-    with srv.commands.sequence(rd):
-        try:
-            receipt = load_reset_receipt(receipt_path)
-            marker = load_run_reset_marker(rd)
-            if receipt is not None:
-                _identity(
-                    receipt, operation_id=operation_id,
-                    run_id=rd.name, expected_generation=expected_generation)
-            if marker is not None:
-                if (marker.get("operation_id") != operation_id
-                        or marker.get("expected_generation") != expected_generation
-                        or marker.get("receipt_name") != receipt_path.name):
-                    if receipt is None or receipt.get("status") != "succeeded":
-                        raise HTTPException(409, {
-                            "code": "reset_operation_conflict",
-                            "operation_id": marker.get("operation_id"),
-                            "message": "Another Replay operation owns this run.",
-                        })
-                else:
-                    validate_reset_binding(
-                        srv, rd, marker, receipt_path, receipt)
-            for other_path, other in reset_receipts_for_run(srv, rd):
-                if (other_path != receipt_path
-                        and other.get("expected_generation") == expected_generation):
+
+def _resolve_reset_ownership(
+        srv, rd: Path, receipt_path: Path, *, operation_id: str, expected_generation: str
+        ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    """Re-read receipt+marker under the sequencer and reject every foreign owner of this generation.
+
+    Lock precondition: `srv.commands.sequence(rd)` held.
+    """
+    try:
+        receipt = load_reset_receipt(receipt_path)
+        marker = load_run_reset_marker(rd)
+        if receipt is not None:
+            _identity(
+                receipt, operation_id=operation_id,
+                run_id=rd.name, expected_generation=expected_generation)
+        if marker is not None:
+            if (marker.get("operation_id") != operation_id
+                    or marker.get("expected_generation") != expected_generation
+                    or marker.get("receipt_name") != receipt_path.name):
+                if receipt is None or receipt.get("status") != "succeeded":
                     raise HTTPException(409, {
                         "code": "reset_operation_conflict",
-                        "operation_id": other.get("id"),
-                        "message": "A different Replay operation already owns this generation.",
+                        "operation_id": marker.get("operation_id"),
+                        "message": "Another Replay operation owns this run.",
                     })
-        except ResetReceiptError as exc:
-            raise _receipt_http_error(operation_id, exc) from exc
-        except RunResetStorageError as exc:
+            else:
+                validate_reset_binding(
+                    srv, rd, marker, receipt_path, receipt)
+        for other_path, other in reset_receipts_for_run(srv, rd):
+            if (other_path != receipt_path
+                    and other.get("expected_generation") == expected_generation):
+                raise HTTPException(409, {
+                    "code": "reset_operation_conflict",
+                    "operation_id": other.get("id"),
+                    "message": "A different Replay operation already owns this generation.",
+                })
+    except ResetReceiptError as exc:
+        raise _receipt_http_error(operation_id, exc) from exc
+    except RunResetStorageError as exc:
+        raise HTTPException(503, {
+            "code": "reset_fence_unavailable",
+            "operation_id": operation_id,
+            "message": "Replay ownership cannot be inspected safely.",
+        }) from exc
+    return receipt, marker
+
+
+def _restore_existing_fence(
+        srv, rd: Path, receipt_path: Path, receipt: Optional[dict[str, Any]],
+        marker: Optional[dict[str, Any]], *, operation_id: str,
+        expected_generation: str) -> Optional[dict[str, Any]]:
+    """Re-publish the writer/delete fence a durable nonterminal receipt already earned.
+
+    Lock precondition: `srv.commands.sequence(rd)` held; acquires the run-config write lock and
+    then the event-log lock itself, in that order.
+    """
+    # Receipts written by the pre-marker implementation, or a manually lost marker, already
+    # represent durable nonterminal authority. Restore their exact writer/delete fence before
+    # any quiescence/pending response; fresh operations still publish only after full preflight.
+    if receipt is not None and receipt["status"] != "succeeded" and marker is None:
+        snap = rd / "config.snapshot.json"
+        try:
+            with (run_config_write_lock(snap, operation_id=operation_id),
+                  _interprocess_lock(
+                      Path(str(rd / "events.jsonl") + ".lock"), required=True)):
+                marker = load_run_reset_marker(rd)
+                if marker is None:
+                    marker = publish_run_reset_marker(
+                        rd, operation_id=operation_id,
+                        expected_generation=expected_generation,
+                        receipt_name=receipt_path.name)
+                validate_reset_binding(
+                    srv, rd, marker, receipt_path, receipt)
+        except EventStoreLockError as exc:
+            raise HTTPException(503, {
+                "code": "reset_writer_lock_unavailable",
+                "operation_id": operation_id,
+                "message": "Replay could not restore its event/config writer fence.",
+            }) from exc
+        except RunResetFenceError as exc:
+            raise HTTPException(409, {
+                "code": "reset_operation_conflict",
+                "operation_id": exc.operation_id,
+                "message": "Another Replay operation owns this run.",
+            }) from exc
+        except (ResetReceiptError, RunResetStorageError) as exc:
             raise HTTPException(503, {
                 "code": "reset_fence_unavailable",
                 "operation_id": operation_id,
-                "message": "Replay ownership cannot be inspected safely.",
+                "message": "Replay's existing durable authority cannot be fenced exactly.",
             }) from exc
+    return marker
 
-        # Receipts written by the pre-marker implementation, or a manually lost marker, already
-        # represent durable nonterminal authority. Restore their exact writer/delete fence before
-        # any quiescence/pending response; fresh operations still publish only after full preflight.
-        if receipt is not None and receipt["status"] != "succeeded" and marker is None:
-            snap = rd / "config.snapshot.json"
-            try:
-                with (run_config_write_lock(snap, operation_id=operation_id),
-                      _interprocess_lock(
-                          Path(str(rd / "events.jsonl") + ".lock"), required=True)):
-                    marker = load_run_reset_marker(rd)
-                    if marker is None:
-                        marker = publish_run_reset_marker(
-                            rd, operation_id=operation_id,
-                            expected_generation=expected_generation,
-                            receipt_name=receipt_path.name)
-                    validate_reset_binding(
-                        srv, rd, marker, receipt_path, receipt)
-            except EventStoreLockError as exc:
-                raise HTTPException(503, {
-                    "code": "reset_writer_lock_unavailable",
-                    "operation_id": operation_id,
-                    "message": "Replay could not restore its event/config writer fence.",
-                }) from exc
-            except RunResetFenceError as exc:
+
+def _admit_destructive_reset(
+        srv, rd: Path, receipt: Optional[dict[str, Any]], *, run_id: str) -> None:
+    """Refuse a not-yet-committed operation whose run is still busy, claimed, or moved.
+
+    Lock precondition: `srv.commands.sequence(rd)` held.
+    """
+    # Same checks as destructive_guard, expressed under the already-owned sequencer so two
+    # simultaneous copies of the SAME operation rejoin instead of the loser seeing a stale claim.
+    if receipt is None or receipt["phase"] == "prepared":
+        active = srv.commands._active_command_ids(rd)
+        if active:
+            raise HTTPException(
+                409, "cannot reset run: active command(s) " + ", ".join(active[:3]))
+        if srv.commands._recent_spawn_claim(rd):
+            raise HTTPException(409, "cannot reset run: an engine start is unresolved")
+        if srv.commands._finalize_incomplete(rd):
+            raise HTTPException(409, "cannot reset run: terminal projections are incomplete")
+        canonical = srv.run_dir(run_id)
+        if canonical != rd:
+            raise HTTPException(409, "run path changed during Replay validation")
+
+
+def _classify_launch_evidence(
+        srv, rd: Path, receipt_path: Path, receipt: Optional[dict[str, Any]], *,
+        operation_id: str) -> tuple[
+            Optional[dict[str, Any]], Optional[dict[str, Any]], Optional[str], bool]:
+    """Settle what a resumed receipt already did to the OS, as one of five evidence values.
+
+    Returns `(finished, receipt, launch_evidence, retry_exact_launch)`. A non-None `finished` is
+    this request's entire answer and the driver returns it unchanged.
+
+    Lock precondition: `srv.commands.sequence(rd)` and `run_lifecycle_lock_http(rd)` held — the
+    tri-state liveness probe is only meaningful while every other launch path is fenced out.
+    """
+    launch_evidence: Optional[str] = "absent" if receipt is None else None
+    retry_exact_launch = False
+    if receipt is not None:
+        try:
+            receipt, completed = complete_reset_if_observed(
+                srv, rd, receipt_path, receipt)
+        except (ResetReceiptError, RunResetStorageError) as exc:
+            raise HTTPException(503, {
+                "code": "reset_outcome_unknown",
+                "operation_id": operation_id,
+                "message": "Replay completion evidence is unavailable.",
+            }) from exc
+        if completed:
+            return receipt_result(receipt), receipt, launch_evidence, retry_exact_launch
+        if receipt["status"] == "superseded":
+            raise HTTPException(409, {
+                **receipt_result(receipt),
+                "code": "reset_operation_superseded",
+                "message": "Replay storage diverged after the operation was committed.",
+            })
+        if receipt["phase"] in {
+                "popen_pending", "popen_returned", "launch_uncertain"}:
+            evidence = srv.commands.observe_external_spawn(
+                rd, f"reset:{operation_id}")
+            if evidence == "mismatched":
                 raise HTTPException(409, {
-                    "code": "reset_operation_conflict",
-                    "operation_id": exc.operation_id,
-                    "message": "Another Replay operation owns this run.",
-                }) from exc
+                    "code": "reset_spawn_conflict",
+                    "operation_id": operation_id,
+                    "message": "Another engine launch owns this run.",
+                })
+            ownership = _engine_liveness(rd)
+            current_generation = srv.commands.run_generation_if_present(rd)
+            if (evidence in {"absent", "dead_or_cleared"}
+                    and ownership is False and not current_generation):
+                # The reset child writes the generation-defining setup_started event before
+                # Engine.run performs setup/provider/eval work. A definitively absent/dead
+                # exact owner plus an empty generation therefore remains before paid/eval
+                # effects; after acquiring engine.lock below, the exact launch is retryable.
+                retry_exact_launch = True
+                launch_evidence = evidence
+            else:
+                _pending(
+                    receipt,
+                    "Replay crossed the process-launch boundary; its replacement generation "
+                    "is not yet durably visible.")
+        else:
+            if receipt["phase"] == "archived":
+                cancel_preclaim = getattr(
+                    srv.commands, "cancel_external_preclaim", None)
+                try:
+                    if callable(cancel_preclaim):
+                        cancel_preclaim(rd, f"reset:{operation_id}")
+                except OSError as exc:
+                    raise HTTPException(503, {
+                        "code": "reset_spawn_claim_unavailable",
+                        "operation_id": operation_id,
+                        "message": "Replay's exact pre-launch claim could not be retired.",
+                    }) from exc
+            evidence = srv.commands.observe_external_spawn(
+                rd, f"reset:{operation_id}")
+            if evidence == "mismatched":
+                raise HTTPException(409, {
+                    "code": "reset_spawn_conflict",
+                    "operation_id": operation_id,
+                    "message": "Another engine launch owns this run.",
+                })
+            if evidence not in {"absent", "dead_or_cleared"}:
+                _pending(receipt, "Replay has an unresolved exact launch claim.")
+            launch_evidence = evidence
+    return None, receipt, launch_evidence, retry_exact_launch
+
+
+def _publish_and_archive(
+        srv, rd: Path, receipt_path: Path, receipt: Optional[dict[str, Any]], *,
+        operation_id: str, expected_generation: str, launch_evidence: Optional[str],
+        retry_exact_launch: bool) -> tuple[
+            Optional[dict[str, Any]], Optional[dict[str, Any]],
+            Optional[list[str]], Optional[dict[str, str]], Optional[dict[str, Any]]]:
+    """Publish ownership, freeze the launch, roll the archive forward, and pre-claim the spawn.
+
+    Returns `(finished, receipt, spawn_args, spawn_env, launch_settings)`. A non-None `finished` is
+    this request's entire answer and the driver returns it unchanged.
+
+    Lock precondition: ALL SIX held — `srv.commands.sequence(rd)`, `run_lifecycle_lock_http(rd)`,
+    `engine_write_lock_http(rd)`, and the run-config / event-log / span-index writer locks. Every
+    durable mutation this route makes happens here, so no part of it may be reached under a weaker
+    set; the caller's `try` maps a lock/fence failure to this route's 503/409 contract.
+    """
+    locked_marker = load_run_reset_marker(rd)
+    if locked_marker is not None:
+        if (locked_marker.get("operation_id") != operation_id
+                or locked_marker.get("expected_generation")
+                != expected_generation
+                or locked_marker.get("receipt_name") != receipt_path.name):
+            raise HTTPException(409, {
+                "code": "reset_operation_conflict",
+                "operation_id": locked_marker.get("operation_id"),
+                "message": "Another Replay operation owns this run.",
+            })
+        validate_reset_binding(
+            srv, rd, locked_marker, receipt_path, receipt)
+
+    prepared_record: Optional[dict[str, Any]] = None
+    if receipt is None or receipt["phase"] == "prepared":
+        _revalidate_reset_quiescence_locked(
+            srv, rd, expected_generation)
+    if receipt is None:
+        # Marker-only recovery repeats this deterministic preparation. No archive
+        # move or Popen can have happened before the prepared receipt existed.
+        prepared_record = _prepare_receipt(
+            srv, rd, expected_generation=expected_generation,
+            operation_id=operation_id)
+
+    # Publication order is deliberate: validation/staging first, exact writer
+    # fence second, and only then the prepared receipt becomes durable authority.
+    # A crash in the final gap leaves marker-only state that this exact op rebuilds.
+    if locked_marker is None:
+        try:
+            locked_marker = publish_run_reset_marker(
+                rd, operation_id=operation_id,
+                expected_generation=expected_generation,
+                receipt_name=receipt_path.name)
+        except RunResetStorageError as exc:
+            # If publication definitely left no authority, remove the exact staged
+            # task so a rejected attempt has no run-local residue. Ambiguous or
+            # durable marker state retains the frozen bytes for same-op recovery.
+            try:
+                marker_after = load_run_reset_marker(rd)
+                receipt_after = load_reset_receipt(receipt_path)
+            except (RunResetStorageError, ResetReceiptError):
+                marker_after = receipt_after = object()
+            if (marker_after is None and receipt_after is None
+                    and prepared_record is not None):
+                _discard_unpublished_task_stage(
+                    rd / prepared_record["task_stage"])
+            raise HTTPException(503, {
+                "code": "reset_outcome_unknown",
+                "operation_id": operation_id,
+                "message": "Replay's durable writer fence is unavailable.",
+            }) from exc
+    validate_reset_binding(
+        srv, rd, locked_marker, receipt_path, receipt)
+    if retry_exact_launch:
+        # Acquiring engine.lock after the tri-state liveness probe closes the
+        # last race with a late exact child. Recheck the event identity while its
+        # writer lock is held before durably authorizing the same Popen again.
+        current_generation = srv.commands.run_generation_if_present(rd)
+        if current_generation:
+            try:
+                receipt, completed = complete_reset_if_observed(
+                    srv, rd, receipt_path, receipt)
             except (ResetReceiptError, RunResetStorageError) as exc:
                 raise HTTPException(503, {
-                    "code": "reset_fence_unavailable",
+                    "code": "reset_outcome_unknown",
                     "operation_id": operation_id,
-                    "message": "Replay's existing durable authority cannot be fenced exactly.",
+                    "message": "Replay replacement evidence is unavailable.",
                 }) from exc
+            if completed:
+                return receipt_result(receipt), receipt, None, None, None
+            _pending(
+                receipt,
+                "Replay acquired new generation evidence that is not safely "
+                "correlated to this operation.")
+        receipt = _save_receipt(receipt_path, {
+            **receipt,
+            "status": "pending",
+            "phase": "archived",
+            "updated_at": time.time(),
+        }, operation_id=operation_id)
+    if receipt is None:
+        assert prepared_record is not None
+        receipt = _save_receipt(
+            receipt_path, prepared_record, operation_id=operation_id)
+        validate_reset_binding(
+            srv, rd, locked_marker, receipt_path, receipt)
 
-        # Same checks as destructive_guard, expressed under the already-owned sequencer so two
-        # simultaneous copies of the SAME operation rejoin instead of the loser seeing a stale claim.
-        if receipt is None or receipt["phase"] == "prepared":
-            active = srv.commands._active_command_ids(rd)
-            if active:
-                raise HTTPException(
-                    409, "cannot reset run: active command(s) " + ", ".join(active[:3]))
-            if srv.commands._recent_spawn_claim(rd):
-                raise HTTPException(409, "cannot reset run: an engine start is unresolved")
-            if srv.commands._finalize_incomplete(rd):
-                raise HTTPException(409, "cannot reset run: terminal projections are incomplete")
-            canonical = srv.run_dir(run_id)
-            if canonical != rd:
-                raise HTTPException(409, "run path changed during Replay validation")
+    spawn_args, spawn_env, launch_settings = _frozen_launch(
+        srv, rd, receipt, operation_id=operation_id)
+    receipt = _archive_forward(
+        rd, receipt_path, receipt, operation_id=operation_id)
+    if receipt["phase"] != "archived":
+        _pending(receipt, "Replay has not completed its archive phase.")
+    invalidate_span_index(rd / "spans.jsonl")
+    srv.invalidate_trace_view(rd)
 
-        with run_lifecycle_lock_http(rd):
-            if receipt is None or receipt["phase"] == "prepared":
-                _validate_reset_quiescence(srv, rd, expected_generation)
-            launch_evidence: Optional[str] = "absent" if receipt is None else None
-            retry_exact_launch = False
-            if receipt is not None:
-                try:
-                    receipt, completed = complete_reset_if_observed(
-                        srv, rd, receipt_path, receipt)
-                except (ResetReceiptError, RunResetStorageError) as exc:
-                    raise HTTPException(503, {
-                        "code": "reset_outcome_unknown",
-                        "operation_id": operation_id,
-                        "message": "Replay completion evidence is unavailable.",
-                    }) from exc
-                if completed:
-                    return receipt_result(receipt)
-                if receipt["status"] == "superseded":
-                    raise HTTPException(409, {
-                        **receipt_result(receipt),
-                        "code": "reset_operation_superseded",
-                        "message": "Replay storage diverged after the operation was committed.",
-                    })
-                if receipt["phase"] in {
-                        "popen_pending", "popen_returned", "launch_uncertain"}:
-                    evidence = srv.commands.observe_external_spawn(
-                        rd, f"reset:{operation_id}")
-                    if evidence == "mismatched":
-                        raise HTTPException(409, {
-                            "code": "reset_spawn_conflict",
-                            "operation_id": operation_id,
-                            "message": "Another engine launch owns this run.",
-                        })
-                    ownership = _engine_liveness(rd)
-                    current_generation = srv.commands.run_generation_if_present(rd)
-                    if (evidence in {"absent", "dead_or_cleared"}
-                            and ownership is False and not current_generation):
-                        # The reset child writes the generation-defining setup_started event before
-                        # Engine.run performs setup/provider/eval work. A definitively absent/dead
-                        # exact owner plus an empty generation therefore remains before paid/eval
-                        # effects; after acquiring engine.lock below, the exact launch is retryable.
-                        retry_exact_launch = True
-                        launch_evidence = evidence
-                    else:
-                        _pending(
-                            receipt,
-                            "Replay crossed the process-launch boundary; its replacement generation "
-                            "is not yet durably visible.")
-                else:
-                    if receipt["phase"] == "archived":
-                        cancel_preclaim = getattr(
-                            srv.commands, "cancel_external_preclaim", None)
-                        try:
-                            if callable(cancel_preclaim):
-                                cancel_preclaim(rd, f"reset:{operation_id}")
-                        except OSError as exc:
-                            raise HTTPException(503, {
-                                "code": "reset_spawn_claim_unavailable",
-                                "operation_id": operation_id,
-                                "message": "Replay's exact pre-launch claim could not be retired.",
-                            }) from exc
-                    evidence = srv.commands.observe_external_spawn(
-                        rd, f"reset:{operation_id}")
-                    if evidence == "mismatched":
-                        raise HTTPException(409, {
-                            "code": "reset_spawn_conflict",
-                            "operation_id": operation_id,
-                            "message": "Another engine launch owns this run.",
-                        })
-                    if evidence not in {"absent", "dead_or_cleared"}:
-                        _pending(receipt, "Replay has an unresolved exact launch claim.")
-                    launch_evidence = evidence
+    evidence = launch_evidence
+    if evidence is None:
+        _pending(receipt, "Replay launch evidence is unavailable.")
+    if evidence == "mismatched":
+        raise HTTPException(409, {
+            "code": "reset_spawn_conflict",
+            "operation_id": operation_id,
+            "message": "Another engine launch owns this run.",
+        })
+    if evidence not in {"absent", "dead_or_cleared"}:
+        _pending(receipt, "Replay has an unresolved exact launch claim.")
+    srv.commands.begin_external_spawn(
+        rd, f"reset:{operation_id}")
+    receipt = _save_receipt(receipt_path, {
+        **receipt,
+        "status": "pending",
+        "phase": "popen_pending",
+        "updated_at": time.time(),
+    }, operation_id=operation_id)
+    return None, receipt, spawn_args, spawn_env, launch_settings
 
-            # The required event/config locks close direct-CLI and HTTP writer races. The reset marker
-            # is published while both are owned, then every later writer checks it inside the same lock.
-            with engine_write_lock_http(rd):
-                if receipt is None and marker is None:
-                    _flush_reset_cost_evidence(srv, rd)
-                snap = rd / "config.snapshot.json"
-                try:
-                    with (run_config_write_lock(snap, operation_id=operation_id),
-                          _interprocess_lock(
-                              Path(str(rd / "events.jsonl") + ".lock"), required=True),
-                          span_index_write_guard(rd / "spans.jsonl", required=True)):
-                        locked_marker = load_run_reset_marker(rd)
-                        if locked_marker is not None:
-                            if (locked_marker.get("operation_id") != operation_id
-                                    or locked_marker.get("expected_generation")
-                                    != expected_generation
-                                    or locked_marker.get("receipt_name") != receipt_path.name):
-                                raise HTTPException(409, {
-                                    "code": "reset_operation_conflict",
-                                    "operation_id": locked_marker.get("operation_id"),
-                                    "message": "Another Replay operation owns this run.",
-                                })
-                            validate_reset_binding(
-                                srv, rd, locked_marker, receipt_path, receipt)
 
-                        prepared_record: Optional[dict[str, Any]] = None
-                        if receipt is None or receipt["phase"] == "prepared":
-                            _revalidate_reset_quiescence_locked(
-                                srv, rd, expected_generation)
-                        if receipt is None:
-                            # Marker-only recovery repeats this deterministic preparation. No archive
-                            # move or Popen can have happened before the prepared receipt existed.
-                            prepared_record = _prepare_receipt(
-                                srv, rd, expected_generation=expected_generation,
-                                operation_id=operation_id)
+def _launch_replacement_engine(
+        srv, rd: Path, receipt_path: Path, receipt: dict[str, Any], *, operation_id: str,
+        spawn_args: list[str], spawn_env: dict[str, str], launch_settings: dict[str, Any],
+        spawn_engine: Callable[..., Optional[int]]) -> dict[str, Any]:
+    """Cross the process-launch boundary, recording "cannot tell" as its own durable phase.
 
-                        # Publication order is deliberate: validation/staging first, exact writer
-                        # fence second, and only then the prepared receipt becomes durable authority.
-                        # A crash in the final gap leaves marker-only state that this exact op rebuilds.
-                        if locked_marker is None:
-                            try:
-                                locked_marker = publish_run_reset_marker(
-                                    rd, operation_id=operation_id,
-                                    expected_generation=expected_generation,
-                                    receipt_name=receipt_path.name)
-                            except RunResetStorageError as exc:
-                                # If publication definitely left no authority, remove the exact staged
-                                # task so a rejected attempt has no run-local residue. Ambiguous or
-                                # durable marker state retains the frozen bytes for same-op recovery.
-                                try:
-                                    marker_after = load_run_reset_marker(rd)
-                                    receipt_after = load_reset_receipt(receipt_path)
-                                except (RunResetStorageError, ResetReceiptError):
-                                    marker_after = receipt_after = object()
-                                if (marker_after is None and receipt_after is None
-                                        and prepared_record is not None):
-                                    _discard_unpublished_task_stage(
-                                        rd / prepared_record["task_stage"])
-                                raise HTTPException(503, {
-                                    "code": "reset_outcome_unknown",
-                                    "operation_id": operation_id,
-                                    "message": "Replay's durable writer fence is unavailable.",
-                                }) from exc
-                        validate_reset_binding(
-                            srv, rd, locked_marker, receipt_path, receipt)
-                        if retry_exact_launch:
-                            # Acquiring engine.lock after the tri-state liveness probe closes the
-                            # last race with a late exact child. Recheck the event identity while its
-                            # writer lock is held before durably authorizing the same Popen again.
-                            current_generation = srv.commands.run_generation_if_present(rd)
-                            if current_generation:
-                                try:
-                                    receipt, completed = complete_reset_if_observed(
-                                        srv, rd, receipt_path, receipt)
-                                except (ResetReceiptError, RunResetStorageError) as exc:
-                                    raise HTTPException(503, {
-                                        "code": "reset_outcome_unknown",
-                                        "operation_id": operation_id,
-                                        "message": "Replay replacement evidence is unavailable.",
-                                    }) from exc
-                                if completed:
-                                    return receipt_result(receipt)
-                                _pending(
-                                    receipt,
-                                    "Replay acquired new generation evidence that is not safely "
-                                    "correlated to this operation.")
-                            receipt = _save_receipt(receipt_path, {
-                                **receipt,
-                                "status": "pending",
-                                "phase": "archived",
-                                "updated_at": time.time(),
-                            }, operation_id=operation_id)
-                        if receipt is None:
-                            assert prepared_record is not None
-                            receipt = _save_receipt(
-                                receipt_path, prepared_record, operation_id=operation_id)
-                            validate_reset_binding(
-                                srv, rd, locked_marker, receipt_path, receipt)
-
-                        spawn_args, spawn_env, launch_settings = _frozen_launch(
-                            srv, rd, receipt, operation_id=operation_id)
-                        receipt = _archive_forward(
-                            rd, receipt_path, receipt, operation_id=operation_id)
-                        if receipt["phase"] != "archived":
-                            _pending(receipt, "Replay has not completed its archive phase.")
-                        invalidate_span_index(rd / "spans.jsonl")
-                        srv.invalidate_trace_view(rd)
-
-                        evidence = launch_evidence
-                        if evidence is None:
-                            _pending(receipt, "Replay launch evidence is unavailable.")
-                        if evidence == "mismatched":
-                            raise HTTPException(409, {
-                                "code": "reset_spawn_conflict",
-                                "operation_id": operation_id,
-                                "message": "Another engine launch owns this run.",
-                            })
-                        if evidence not in {"absent", "dead_or_cleared"}:
-                            _pending(receipt, "Replay has an unresolved exact launch claim.")
-                        srv.commands.begin_external_spawn(
-                            rd, f"reset:{operation_id}")
-                        receipt = _save_receipt(receipt_path, {
-                            **receipt,
-                            "status": "pending",
-                            "phase": "popen_pending",
-                            "updated_at": time.time(),
-                        }, operation_id=operation_id)
-                except EventStoreLockError as exc:
-                    raise HTTPException(503, {
-                        "code": "reset_writer_lock_unavailable",
-                        "operation_id": operation_id,
-                        "message": "Replay could not obtain all event/config writer locks.",
-                    }) from exc
-                except RunResetFenceError as exc:
-                    raise HTTPException(409, {
-                        "code": "reset_operation_conflict",
-                        "operation_id": exc.operation_id,
-                        "message": "Another Replay operation owns this run.",
-                    }) from exc
-                except RunResetStorageError as exc:
-                    raise HTTPException(503, {
-                        "code": "reset_fence_unavailable",
-                        "operation_id": operation_id,
-                        "message": "Replay's writer fence cannot be verified.",
-                    }) from exc
-
-    # The durable receipt and exact PID-less claim above serialize duplicates after command,
-    # lifecycle, engine, config, event and span locks are all released. launch_env then snapshots the
-    # current credential pair and holds only its publication fence across Popen.
-    assert (spawn_args is not None and spawn_env is not None
-            and launch_settings is not None and receipt is not None)
+    Lock precondition: NONE held — command, lifecycle, engine, config, event and span locks are all
+    released before this runs, and the sequencer is re-taken here only to record each outcome.
+    """
     popen_boundary_entered = False
     try:
         with srv.settings.launch_env(launch_settings) as current_env:
@@ -875,7 +925,16 @@ def _reset_blocking(
                        "replacement generation.",
             "remediation": "Retry this exact operation; never submit a new Replay.",
         }) from exc
+    return receipt
 
+
+def _await_replacement_generation(
+        srv, rd: Path, receipt_path: Path, receipt: dict[str, Any], *,
+        operation_id: str) -> dict[str, Any]:
+    """Poll briefly for the replacement generation the spawned child writes.
+
+    Lock precondition: none held; `complete_reset_if_observed` takes what it needs.
+    """
     deadline = time.monotonic() + min(
         3.0, max(0.1, float(getattr(srv.commands, "startup_timeout", 1.0))))
     while True:
@@ -896,6 +955,90 @@ def _reset_blocking(
     _pending(
         receipt,
         "Replay launch was accepted, but its replacement generation is not yet visible.")
+
+
+def _reset_blocking(
+        srv, rd: Path, *, run_id: str, expected_generation: str,
+        operation_id: str, spawn_engine: Callable[..., Optional[int]]) -> dict[str, Any]:
+    """Drive the Replay transaction's phases through their exact lock ladder.
+
+    The ladder, outermost first, is the whole reason this driver stays one function: command
+    sequencer -> run lifecycle -> engine.lock -> (run config, event log, span index). Each phase
+    below repeats the subset it requires as a "Lock precondition:" line; moving a call to a
+    different rung of this nesting changes what that phase is allowed to assume.
+    """
+    receipt_path, receipt, marker_hint = _discover_or_rejoin(
+        srv, rd, operation_id=operation_id)
+    _flush_retained_paid_activity(srv, rd, receipt, marker_hint)
+
+    spawn_args: Optional[list[str]] = None
+    spawn_env: Optional[dict[str, str]] = None
+    launch_settings: Optional[dict[str, Any]] = None
+    with srv.commands.sequence(rd):
+        receipt, marker = _resolve_reset_ownership(
+            srv, rd, receipt_path, operation_id=operation_id,
+            expected_generation=expected_generation)
+        marker = _restore_existing_fence(
+            srv, rd, receipt_path, receipt, marker,
+            operation_id=operation_id, expected_generation=expected_generation)
+        _admit_destructive_reset(srv, rd, receipt, run_id=run_id)
+
+        with run_lifecycle_lock_http(rd):
+            if receipt is None or receipt["phase"] == "prepared":
+                _validate_reset_quiescence(srv, rd, expected_generation)
+            finished, receipt, launch_evidence, retry_exact_launch = _classify_launch_evidence(
+                srv, rd, receipt_path, receipt, operation_id=operation_id)
+            if finished is not None:
+                return finished
+
+            # The required event/config locks close direct-CLI and HTTP writer races. The reset marker
+            # is published while both are owned, then every later writer checks it inside the same lock.
+            with engine_write_lock_http(rd):
+                if receipt is None and marker is None:
+                    _flush_reset_cost_evidence(srv, rd)
+                snap = rd / "config.snapshot.json"
+                try:
+                    with (run_config_write_lock(snap, operation_id=operation_id),
+                          _interprocess_lock(
+                              Path(str(rd / "events.jsonl") + ".lock"), required=True),
+                          span_index_write_guard(rd / "spans.jsonl", required=True)):
+                        (finished, receipt, spawn_args, spawn_env,
+                         launch_settings) = _publish_and_archive(
+                             srv, rd, receipt_path, receipt, operation_id=operation_id,
+                             expected_generation=expected_generation,
+                             launch_evidence=launch_evidence,
+                             retry_exact_launch=retry_exact_launch)
+                except EventStoreLockError as exc:
+                    raise HTTPException(503, {
+                        "code": "reset_writer_lock_unavailable",
+                        "operation_id": operation_id,
+                        "message": "Replay could not obtain all event/config writer locks.",
+                    }) from exc
+                except RunResetFenceError as exc:
+                    raise HTTPException(409, {
+                        "code": "reset_operation_conflict",
+                        "operation_id": exc.operation_id,
+                        "message": "Another Replay operation owns this run.",
+                    }) from exc
+                except RunResetStorageError as exc:
+                    raise HTTPException(503, {
+                        "code": "reset_fence_unavailable",
+                        "operation_id": operation_id,
+                        "message": "Replay's writer fence cannot be verified.",
+                    }) from exc
+                if finished is not None:
+                    return finished
+
+    # The durable receipt and exact PID-less claim above serialize duplicates after command,
+    # lifecycle, engine, config, event and span locks are all released. launch_env then snapshots the
+    # current credential pair and holds only its publication fence across Popen.
+    assert (spawn_args is not None and spawn_env is not None
+            and launch_settings is not None and receipt is not None)
+    receipt = _launch_replacement_engine(
+        srv, rd, receipt_path, receipt, operation_id=operation_id, spawn_args=spawn_args,
+        spawn_env=spawn_env, launch_settings=launch_settings, spawn_engine=spawn_engine)
+    return _await_replacement_generation(
+        srv, rd, receipt_path, receipt, operation_id=operation_id)
 
 
 async def durable_reset_run(
