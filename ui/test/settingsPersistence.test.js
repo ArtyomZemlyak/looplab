@@ -121,7 +121,7 @@ test('global Settings commits the settings ACK before the independent secret ACK
 })
 
 test('per-run Settings bounds reads, protects uncertain writes and rebases an ACK onto newer edits', () => {
-  const source = readFileSync(new URL('../src/panels.jsx', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../src/ConfigPanel.jsx', import.meta.url), 'utf8')
   assert.match(source, /const generation = \+\+loadGenerationRef\.current/)
   assert.match(source, /const configRequest = deadlineGet\(/)
   assert.match(source, /deadlineGet\(runApiPath\(runId, '\/config'\), PANEL_REQUEST_TIMEOUT_MS\)/)
@@ -151,7 +151,7 @@ test('per-run Settings bounds reads, protects uncertain writes and rebases an AC
 
 test('Settings loss guards and secret actions remain explicit and no recovery state retains a key', () => {
   const source = readFileSync(new URL('../src/Settings.jsx', import.meta.url), 'utf8')
-  const panelSource = readFileSync(new URL('../src/panels.jsx', import.meta.url), 'utf8')
+  const panelSource = readFileSync(new URL('../src/ConfigPanel.jsx', import.meta.url), 'utf8')
   const formSource = readFileSync(new URL('../src/SettingsForm.jsx', import.meta.url), 'utf8')
   const guardSource = readFileSync(new URL('../src/navigationLossGuard.js', import.meta.url), 'utf8')
   assert.match(source, /installNavigationLossGuard\(/)

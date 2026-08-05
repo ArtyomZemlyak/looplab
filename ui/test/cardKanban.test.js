@@ -180,7 +180,7 @@ test('HypothesisBoard keeps the hypothesis workflow as a graceful empty-Card fal
 })
 
 test('Card evidence chips retain the node-selection callback contract', async () => {
-  const source = await readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../src/CardBoard.jsx', import.meta.url), 'utf8')
   const card = source.slice(source.indexOf('function _CardKanbanCard'), source.indexOf('function _CardKanban('))
   assert.match(card, /aria-label=\{`Open evidence node #\$\{nid\}`\}/)
   assert.match(card, /onSelect\?\.\(nid\)/)
@@ -200,7 +200,7 @@ test('Card controls use only generation-fenced command helpers and never client 
 })
 
 test('Card optimistic controls retain uncertain commands and roll back only the failed operation', async () => {
-  const source = await readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../src/CardBoard.jsx', import.meta.url), 'utf8')
   const board = source.slice(source.indexOf('function _CardKanban('), source.indexOf('function _HypothesisFallback'))
   assert.match(board, /feedback\.kind === 'pending'[\s\S]*waiting-for-fold/)
   assert.match(board, /submissionMayHaveSucceeded[\s\S]*confirmation-unknown/)
@@ -209,7 +209,7 @@ test('Card optimistic controls retain uncertain commands and roll back only the 
 })
 
 test('An uncertain (confirmation-unknown) command does not freeze controls on the whole board', async () => {
-  const source = await readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../src/CardBoard.jsx', import.meta.url), 'utf8')
   const board = source.slice(source.indexOf('function _CardKanban('), source.indexOf('function _HypothesisFallback'))
   // globalPending — which drives controlsLocked on every OTHER card — must exclude the never-clearing
   // 'confirmation-unknown' pending, or one lost submission disables the entire board until reload.
@@ -217,7 +217,7 @@ test('An uncertain (confirmation-unknown) command does not freeze controls on th
 })
 
 test('Edit reflection prefers the durable event receipt and safely falls back for legacy folds', async () => {
-  const source = await readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../src/CardBoard.jsx', import.meta.url), 'utf8')
   const reflected = source.slice(
     source.indexOf('function cardControlReflected'), source.indexOf('function _cardWithOptimisticControls'))
   assert.match(reflected, /cardEditReflected\(card, patch, baseline, expectedEventSeq\)/)
@@ -259,9 +259,13 @@ test('Two chained Card edits reset the first receipt fence until the second edit
 })
 
 test('Card optimistic state is scoped to run generation and ignores late unmounted completions', async () => {
-  const source = await readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../src/CardBoard.jsx', import.meta.url), 'utf8')
   const board = source.slice(source.indexOf('function _CardKanban('), source.indexOf('function _HypothesisFallback'))
-  const owner = source.slice(source.indexOf('export function HypothesisBoard'), source.indexOf('// Module scope'))
+  // HypothesisBoard is the last declaration in CardBoard.jsx, so slicing to EOF still bounds these
+  // assertions to the owner component — they cannot be satisfied by the _CardKanban body above.
+  const ownerAt = source.indexOf('export function HypothesisBoard')
+  assert.ok(ownerAt > 0, 'HypothesisBoard must still live in CardBoard.jsx')
+  const owner = source.slice(ownerAt)
   assert.match(owner, /const scopeKey = `\$\{runId \|\| ''\}:\$\{runGeneration \|\| ''\}`/)
   assert.match(owner, /key=\{`cards:\$\{scopeKey\}`\}/)
   assert.match(board, /activeRef\.current = false/)
@@ -269,7 +273,7 @@ test('Card optimistic state is scoped to run generation and ignores late unmount
 })
 
 test('Each Card control draft re-seeds only from its own folded source (no cross-field clobber)', async () => {
-  const source = await readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../src/CardBoard.jsx', import.meta.url), 'utf8')
   const card = source.slice(source.indexOf('function _CardKanbanCard'), source.indexOf('function _CardKanban('))
   // Four independent effects, one per field — NOT one effect that resets all drafts on any dep change.
   assert.match(card, /useEffect\(\(\) => \{ setStatementDraft\(statement\) \}, \[card\.id, statement\]\)/)

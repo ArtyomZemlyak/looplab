@@ -94,9 +94,12 @@ test('collapsed group drill-down preserves the exact active concept projection',
 })
 
 test('stale async resources are cancelled and run ids are encoded at every transport boundary', async () => {
-  const [shared, deadline, hooks, api, dock, inspector, panels] = await Promise.all([
+  // ConfigPanel.jsx and CardBoard.jsx split out of panels.jsx (doc 25 UI-04) and are named here so
+  // the raw-run-id URL rule keeps covering them; without that they would drop out of this scan.
+  const [shared, deadline, hooks, api, dock, inspector, panels, configPanel, cardBoard] = await Promise.all([
     source('SharedAssistant.jsx'), source('requestDeadline.js'), source('hooks.js'),
     source('api.js'), source('Dock.jsx'), source('Inspector.jsx'), source('panels.jsx'),
+    source('ConfigPanel.jsx'), source('CardBoard.jsx'),
   ])
   assert.match(deadline, /const controller = new AbortController\(\)/)
   assert.match(deadline, /setTimeout\([\s\S]*controller\.abort/)
@@ -116,11 +119,13 @@ test('stale async resources are cancelled and run ids are encoded at every trans
   assert.match(hooks, /lastEventId: lastStreamEventId/)
   assert.match(hooks, /streamRef\.current\?\.abort\(\)/)
   assert.doesNotMatch(hooks, /new EventSource\(/)
-  for (const [name, body] of Object.entries({ api, dock, inspector, panels })) {
+  for (const [name, body] of Object.entries({ api, dock, inspector, panels, configPanel, cardBoard })) {
     assert.doesNotMatch(body, /`\/api\/runs\/\$\{(?!encodeURIComponent\()/,
       `${name} must not interpolate a raw run identity into a URL`)
   }
-  for (const body of [api, dock, inspector, panels]) assert.match(body, /run(?:Node)?ApiPath\(/)
+  // CardBoard.jsx is deliberately absent: every board mutation goes through a CONTROL.* helper, so it
+  // never names a run path itself. The modules that DO build one must use the encoding helper.
+  for (const body of [api, dock, inspector, panels, configPanel]) assert.match(body, /run(?:Node)?ApiPath\(/)
 })
 
 test('early run creation and uncertain share mutations cannot replay user intent', async () => {

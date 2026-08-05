@@ -349,7 +349,7 @@ test('displayed run generation participates in state dedupe and is published onl
 })
 
 test('Config restart is one server-owned durable command and config load failure is retryable', async () => {
-  const panels = await source('panels.jsx')
+  const panels = await source('ConfigPanel.jsx')
   const restart = panels.slice(panels.indexOf('const onPauseResume = async'),
     panels.indexOf('const setEvalCeiling = async'))
   assert.ok(restart.length > 0 && restart.length < 2000, 'the restart slice must actually bound one handler')
