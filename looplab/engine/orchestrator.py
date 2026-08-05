@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import NamedTuple, Optional
 
 import anyio
-import orjson
 
 from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
@@ -51,6 +50,10 @@ from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width,
                                    settled_width_refusal)
 from looplab.engine.audit import AuditMixin
 from looplab.engine.card_reservation import CardReservationMixin, _BuildReservation
+from looplab.engine.speculation_gate import (CalibrationRuntime,
+                                             _stable_effective_gpu_inventory,
+                                             guard_calibrated_role_factory,
+                                             narrow_runtime_envelope_errors)
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
 from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.crash_repair import CrashRepairMixin
@@ -106,12 +109,12 @@ from looplab.search.card_selection import (
 )
 from looplab.search.speculation_calibration import (
     SPECULATION_CALIBRATION_PROFILE_DIGEST,
-    SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+    # Re-exported, not used here since doc 25 ES-01 moved the envelope to engine/speculation_gate.py:
+    # the engine, the CLI and the tests all spell this on `engine.orchestrator`, and
+    # tests/test_calibration_profile_home.py pins that the name did not move out from under them.
+    SPECULATION_CALIBRATION_PROFILE_SETTINGS,  # noqa: F401
     SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS,
-    SPECULATION_CALIBRATION_SEEDS,
     SPECULATION_POLICY_SCOPE,
-    canonical_speculation_toy_task,
-    speculation_runtime_scope_digest,
 )
 from looplab.search.operators import merge_idea
 from looplab.search.policy import KIND_EXPAND, SearchPolicy
@@ -174,73 +177,6 @@ class SettledWidthPinError(RunStartPinError):
 _HEAD_BYPASS_LIMIT = 3
 
 
-def _stable_effective_gpu_inventory(raw) -> list[dict]:
-    """Canonical, resume-stable projection of ``effective_gpu_inventory``.
-
-    Free memory is deliberately excluded: it changes while unrelated jobs start and is not machine
-    identity.  The effective helper already applies CUDA_VISIBLE_DEVICES; this projection preserves its
-    logical indices and stable hardware identity only.
-    """
-    if not isinstance(raw, list):
-        return []
-    stable: list[dict] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            return []
-        index = item.get("index")
-        uuid = item.get("uuid")
-        pci_bus_id = item.get("pci_bus_id")
-        name = item.get("name")
-        total = item.get("mem_total_mib")
-        driver_version = item.get("driver_version")
-        cuda_driver_version = item.get("cuda_driver_version")
-        if (type(index) is not int or index < 0 or not isinstance(name, str)
-                or not name.strip() or type(total) is not int or total <= 0
-                or not isinstance(uuid, str) or not uuid.strip()
-                or not isinstance(pci_bus_id, str) or not pci_bus_id.strip()
-                or not isinstance(driver_version, str) or not driver_version.strip()
-                or type(cuda_driver_version) is not int or cuda_driver_version <= 0):
-            return []
-        stable.append({
-            "index": index,
-            "uuid": uuid.strip(),
-            "pci_bus_id": pci_bus_id.strip(),
-            "name": name.strip(),
-            "mem_total_mib": total,
-            "driver_version": driver_version.strip(),
-            "cuda_driver_version": cuda_driver_version,
-        })
-    stable.sort(key=lambda row: row["index"])
-    if (
-        len({row["index"] for row in stable}) != len(stable)
-        or len({row["uuid"] for row in stable}) != len(stable)
-        or len({row["pci_bus_id"] for row in stable}) != len(stable)
-    ):
-        return []
-    return stable
-
-
-def _calibration_role_pair_errors(task, researcher, developer) -> list[str]:
-    """Validate the two default-off purpose flags without accepting wrappers/subclasses."""
-    from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
-
-    errors: list[str] = []
-    if type(researcher) is not ToyResearcher:  # exact: a wrapper could make live/model calls
-        errors.append("researcher must be the exact ToyResearcher")
-    else:
-        if getattr(researcher, "calibration_concepts", False) is not True:
-            errors.append("ToyResearcher.calibration_concepts must be true")
-        if (researcher.bounds != task.bounds or researcher.step != task.step
-                or researcher.seed != task.seed):
-            errors.append("ToyResearcher must match the calibrated task bounds/step/seed")
-    if type(developer) is not ToyObjectiveDeveloper:
-        errors.append("developer must be the exact ToyObjectiveDeveloper")
-    else:
-        if getattr(developer, "calibration_gpu_probe", False) is not True:
-            errors.append("ToyObjectiveDeveloper.calibration_gpu_probe must be true")
-        if developer.noise != 0.0:
-            errors.append("ToyObjectiveDeveloper noise must be zero")
-    return errors
 
 
 class _InjectedNodePlan(NamedTuple):
@@ -791,125 +727,38 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._speculation_calibration_seed: Optional[int] = None
         self._speculation_runtime_scope_sha256 = ""
         _gate_receipt = None
+        # The narrow calibrated envelope's inputs, snapshotted where its closures used to be
+        # defined.  Safe to build once: none of these names is rebound after this point in
+        # __init__, so both call sites below see exactly what the closures would have read.
+        _calibration_runtime = CalibrationRuntime(
+            option_fields=frozenset(_fields), read_option=_opt,
+            recorded_runtime_scope=_speculation_runtime_scope_sha256,
+            card_driven_selection=card_driven_selection,
+            max_nodes=max_nodes,
+            speculation_depth=speculation_depth,
+            task=task,
+            researcher=researcher,
+            developer=developer,
+            policy=policy,
+            sandbox=sandbox,
+            crash_after=crash_after,
+            strategist=strategist,
+            deep_researcher=deep_researcher,
+            report_writer=report_writer,
+            developer_factory=developer_factory,
+            onboarder=onboarder,
+            proxy_scorer=proxy_scorer,
+            lesson_abstractor=lesson_abstractor,
+            dep_installer=dep_installer,
+        )
 
-        def _narrow_runtime_envelope_errors() -> tuple[list[str], str]:
-            """Validate the one runtime that calibration evidence actually measured."""
-            import sys
-            from looplab.adapters.toytask import ToyTask
-            from looplab.runtime.sandbox import SubprocessSandbox
-            from looplab.search.policy import GreedyTree
-            from looplab.tools.vectorstore import hash_embed
-
-            errors: list[str] = []
-            option_renames = {"policy": "policy_name"}
-            for setting, expected in SPECULATION_CALIBRATION_PROFILE_SETTINGS.items():
-                option_name = option_renames.get(setting, setting)
-                if option_name not in _fields:
-                    continue
-                actual = _opt(option_name)
-                try:
-                    # EngineOptions retains schema-native tuples while snapshots contain JSON arrays.
-                    matches_profile = orjson.dumps(
-                        actual, option=orjson.OPT_SORT_KEYS) == orjson.dumps(
-                            expected, option=orjson.OPT_SORT_KEYS)
-                except (TypeError, ValueError, orjson.JSONEncodeError):
-                    matches_profile = False
-                if not matches_profile:
-                    errors.append(f"{setting} must be {expected!r}, got {actual!r}")
-
-            if card_driven_selection is not True:
-                errors.append("card_driven_selection must be exactly true")
-            if type(max_nodes) is not int or not 1 <= max_nodes <= 64:
-                errors.append("max_nodes must be an integer in 1..64")
-            if type(speculation_depth) is not int or not 0 <= speculation_depth <= 64:
-                errors.append("speculation_depth must be an integer in 0..64")
-            if not self.run_dir.name.strip():
-                errors.append("run directory must have a non-empty run id")
-
-            expected_scope = ""
-            if type(max_nodes) is int and type(speculation_depth) is int:
-                try:
-                    expected_scope = speculation_runtime_scope_digest({
-                        **SPECULATION_CALIBRATION_PROFILE_SETTINGS,
-                        "max_nodes": max_nodes,
-                        "speculation_depth": speculation_depth,
-                        "speculation_gate_receipt": self.speculation_gate_receipt,
-                    })
-                except ValueError as exc:
-                    errors.append(f"runtime scope could not be constructed: {exc}")
-            if (
-                not expected_scope
-                or _speculation_runtime_scope_sha256 != expected_scope
-            ):
-                errors.append(
-                    "runtime scope digest must match the source-owned full Settings profile "
-                    "and live max_nodes")
-
-            if type(task) is not ToyTask:
-                errors.append("task must be the exact offline ToyTask")
-            else:
-                try:
-                    canonical_speculation_toy_task(task, require_seed_set=True)
-                except ValueError as exc:
-                    errors.append(str(exc))
-                errors.extend(_calibration_role_pair_errors(task, researcher, developer))
-            if (
-                type(policy) is not GreedyTree
-                or policy.n_seeds != len(SPECULATION_CALIBRATION_SEEDS)
-                or policy.max_nodes != max_nodes
-                or policy.debug_depth != 1
-                or policy.enable_merge is not True
-                or policy.merge_every != 3
-                or policy.max_merges != 2
-                or policy.ablate_every != 0
-                or policy.operator_bandit is not False
-            ):
-                errors.append("policy must be the canonical bounded GreedyTree")
-            if (
-                type(sandbox) is not SubprocessSandbox
-                or sandbox.python != sys.executable
-                or sandbox.max_output_bytes != 64_000
-                or sandbox.mem_bytes is not None
-                or sandbox.fsize_bytes is not None
-            ):
-                errors.append("sandbox must be the exact default trusted-local SubprocessSandbox")
-            for name, value in (
-                ("strategist", strategist), ("deep_researcher", deep_researcher),
-                ("report_writer", report_writer), ("developer_factory", developer_factory),
-                ("onboarder", onboarder), ("proxy_scorer", proxy_scorer),
-                ("lesson_abstractor", lesson_abstractor), ("dep_installer", dep_installer),
-            ):
-                if value is not None:
-                    errors.append(f"{name} must be disabled")
-            if self._embedder is not hash_embed:
-                errors.append("embedder must be the offline hash embedder")
-            if not callable(self.role_factory):
-                errors.append("role_factory must provide isolated calibrated Toy roles")
-            if crash_after is not None:
-                errors.append("crash_after is forbidden in the calibrated runtime")
-            return errors, expected_scope
-
-        def _guard_calibrated_role_factory() -> None:
-            original_role_factory = self.role_factory
-
-            def _calibrated_role_factory():
-                pair = original_role_factory()
-                if not isinstance(pair, tuple) or len(pair) != 2:
-                    raise RuntimeError("calibrated role_factory must return one role pair")
-                pair_errors = _calibration_role_pair_errors(task, pair[0], pair[1])
-                if pair_errors:
-                    raise RuntimeError(
-                        "calibrated role_factory escaped the purpose envelope: "
-                        + "; ".join(pair_errors))
-                return pair
-
-            self.role_factory = _calibrated_role_factory
 
         if self._speculation_gate_calibration:
             # Validate the bootstrap at the library boundary.  A caller cannot obtain the waiver by
             # constructing Engine directly with arbitrary roles/settings, and no run artifact exists
             # yet when these checks execute.
-            calibration_errors, expected_runtime_scope = _narrow_runtime_envelope_errors()
+            calibration_errors, expected_runtime_scope = narrow_runtime_envelope_errors(
+                self, _calibration_runtime)
             if self.speculation_gate_receipt is not None:
                 calibration_errors.append("speculation_gate_receipt must be unset")
 
@@ -941,7 +790,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     + "; ".join(calibration_errors)
                 )
 
-            _guard_calibrated_role_factory()
+            guard_calibrated_role_factory(self, task)
             self._speculation_gate_admitted = True  # depth=0 baseline and depth>0 treatment
             # SpeculationMixin's live enablement also requires a non-empty internal admission token.
             # This value is never serialized as a receipt digest for calibration evidence; the durable
@@ -1058,7 +907,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # a receipt earned on one measured runtime authorize a different one under the same
                 # name — and this lane's own workload is the toy the receipt measured, so pinning the
                 # source digest here costs nothing: a re-measurement is minutes, not a lost GPU run.
-                runtime_errors, expected_runtime_scope = _narrow_runtime_envelope_errors()
+                runtime_errors, expected_runtime_scope = narrow_runtime_envelope_errors(
+                    self, _calibration_runtime)
                 if (
                     runtime_errors
                     or type(_gate_receipt.get("admitted_depth")) is not int
@@ -1077,7 +927,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         "policy/depth-mismatched, runtime-scope/max-nodes-mismatched, or does "
                         "not pass the current scorer/search-quality gates"
                     )
-                _guard_calibrated_role_factory()
+                guard_calibrated_role_factory(self, task)
                 self._speculation_runtime_scope_sha256 = expected_runtime_scope
                 self._speculation_gate_receipt_digest = _gate_receipt["self_digest"]
                 self._speculation_implementation_digest = _gate_receipt["implementation_digest"]
