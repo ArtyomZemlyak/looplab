@@ -61,7 +61,12 @@ Score, …); the **Card lifecycle board** (1 card = 1 hypothesis), **cross-run m
     *without* a shared provider-call total, so research overlap is not counted against one budget.
     When active, a run-local broker divides the LLM total among `build`, `deep_research`,
     `novelty_dedup`, `enrichment`, and the fail-safe `engine` lane. The Strategist can durably
-    reallocate both totals and that lane map; operator pins win.
+    reallocate both totals and that lane map; operator pins win. Three of those lanes
+    (`deep_research`, `novelty_dedup`, `enrichment`) are capped at one concurrent request with or
+    without a total — a cap that describes the PRODUCER, so a lane earns it only when everything in
+    it runs beside the main task with nothing blocked on its latency. Foreground engine work that is
+    not a build (the per-eval repair loop, the per-eval inter-stage check) belongs in the uncapped
+    `engine` lane, and `core/llm_broker.py::BACKGROUND_LANE_PRODUCERS` enforces the split.
 
     GPU packing is concurrent inside one Run. Separate local Engine processes that share an OS-user
     filesystem namespace conservatively serialize GPU ownership through one crash-released pool lease;
@@ -111,7 +116,7 @@ Score, …); the **Card lifecycle board** (1 card = 1 hypothesis), **cross-run m
 | Part IV/V concept materialization · graph · bounded frame | `core/concepts.py`, `search/concept_projection.py`, `search/concept_graph.py`, `serve/concept_frame.py` |
 | Repo Developer: env-inspector + auto-validate | `tools/env_inspect.py`, `adapters/repo_write_tools.py` (re-exported via `repo_developer.py`) |
 | Sandbox seam (subprocess / Docker) · built-in eval watchdogs (loss/grad divergence · stall) | `runtime/sandbox.py` |
-| Training-log monitor (product `Settings`: watcher on **and** early-kill on — `train_monitor_kill=True`; bare `EngineOptions`: both off; the verdict is advisory until the kill switch is on, and then only a `broken` verdict at ≥ `train_monitor_kill_confidence`, about a stage the engine can IDENTIFY as a training stage, CONFIRMED by a second consecutive tick, acts) | `engine/train_monitor.py` |
+| Training-log monitor (product `Settings`: watcher on **and** early-kill on — `train_monitor_kill=True`; bare `EngineOptions`: both off; the verdict is advisory until the kill switch is on, and then only a `broken` verdict at ≥ `train_monitor_kill_confidence`, about a log the eval plan can PROVE is the run's own training — the single-command `eval.log` or a one-stage pipeline, never a stage of a multi-stage pipeline — CONFIRMED by a second consecutive parseable tick, acts) | `engine/train_monitor.py` |
 | ASHA live-curve watchdog: deterministic same-resource rank as EVIDENCE, LLM judge as the stop DECISION (consulted only inside the rank gate, so it can only narrow the stop set) | `engine/asha_monitor.py` |
 | Variance gate · multi-seed confirmation · CV · leakage · reward-hack | `trust/gate.py`, `trust/confirm.py`, `trust/cv.py`, `trust/leakage.py`, `trust/reward_hack.py` |
 | Cross-run memory · retrieval · harmonic index | `engine/memory.py`, `engine/lessons.py`, `tools/memora.py` |

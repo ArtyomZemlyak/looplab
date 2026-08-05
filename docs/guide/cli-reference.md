@@ -132,7 +132,9 @@ from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.
 
 Every example below that does **not** pass `--backend toy` needs a reachable LLM endpoint: `backend`
 defaults to `llm`, and the [endpoint preflight](llm-and-agents.md#endpoint-preflight-before-a-run-starts)
-refuses the run with an `LLMError` before the run directory is created if the model is not there.
+refuses the run with an `LLMError` before the event log exists if the model is not there. (The run
+directory itself is created first, to take `engine.lock` — but the refusal lands before any event,
+`config.snapshot.json` or `task.snapshot.json` is written, so there is no half-started run to clean up.)
 
 ```bash
 looplab init && looplab run looplab.yaml                  # scaffold a config, edit, run
@@ -172,8 +174,9 @@ from the folded `run_started` record;
 snapshot.
 
 **The concurrency WIDTHS are pinned too, and AUTO is what makes that safe.** `eval_parallel` and
-`llm_parallel` ship the AUTO sentinel `0`, and `speculation_depth` accepts `-1` for the same thing
-(it ships `0` = off). AUTO resolves off the **live box** (`_detect_gpu_ids`) — one evaluation per
+`llm_parallel` ship the AUTO sentinel `0`, and `speculation_depth` spells the same thing `-1` —
+which it has also **shipped** since 2026-08-05 (`0` is its explicit off switch). AUTO resolves off
+the **live box** (`_detect_gpu_ids`) — one evaluation per
 detected GPU, an LLM/build width derived from that, one prefetch per evaluation lane.
 `config.snapshot.json` therefore stores your *intent*, never the treatment the log
 was written under, so before this was pinned a 1-GPU run resumed on a 2-GPU host silently doubled its
@@ -182,7 +185,7 @@ mid-log. `run_started` now records the **resolved integers**, and resume applies
 
 | How the axis was spelled on the resume command | What resume does |
 |---|---|
-| **AUTO** (`0` for the two widths — which is their default — or `-1` for `speculation_depth`) | **Adopts** the width the log pinned — including on a *smaller* box. One treatment spans the whole log; a width above what the hardware can serve is bounded by the resource scheduler, not by silently rewriting the treatment. |
+| **AUTO** (`0` for the two widths, `-1` for `speculation_depth` — each of them that axis's default) | **Adopts** the width the log pinned — including on a *smaller* box. One treatment spans the whole log; a width above what the hardware can serve is bounded by the resource scheduler, not by silently rewriting the treatment. For `speculation_depth` the value adopted is the **last one the log recorded**, not `run_started`'s: AUTO may ratchet the depth down mid-run once the run has measured its own evaluations (see [Adaptive AUTO depth](configuration.md#adaptive-auto-depth)), and each such move is a durable `speculation_depth_settled` event. AUTO's own adaptation is therefore never read as an operator disagreement; a *spelled* depth never adapts at all. |
 | An **explicit** width equal to the pin | Proceeds unchanged. |
 | An **explicit** width that disagrees with the pin | **Fails closed**, naming the axis and both values, and writes nothing to the log it declined to trust. |
 | Any width, on an axis an operator already retuned mid-run through a durable `budget_extend` control event | **Left alone.** That override is re-applied every loop, so the launch flag has no effect on the running width and refusing over it would be a false alarm. |
@@ -218,11 +221,22 @@ already exists must stay resumable even when its recorded spec is one a newer va
 submit. Those refusals are printed as `warning: …` on stderr instead — the diagnosis survives, only the
 refusal is dropped (see the `eval.metric.path` note in [Tasks](tasks.md)).
 
-**The LLM endpoint preflight depends on what this resume can DO.** A resume that lifts a finished or
-stopped run back into the loop will propose again, so an unreachable endpoint is refused exactly as on
-`run`. A resume that lands on a wrap-up boundary — the run has an incomplete terminal projection, or a
-pending finalize — can only complete that wrap-up, so the same probe warns instead and names what the
-missing model costs; see [`finalize`](#finalize).
+**The LLM preflight depends on what this resume can DO.** A resume that lifts a finished or
+stopped run back into the loop will propose again, so an unreachable endpoint — or an unusable
+credential — is refused exactly as on `run`. A resume that lands on a wrap-up boundary — the run has an
+incomplete terminal projection, or a pending finalize — can only complete that wrap-up, so the same
+gates warn instead and name what the missing model costs; see [`finalize`](#finalize).
+
+Which of the two it is **is decided under the run's singleton lock**, together with the decision to lift.
+That matters because `resume` may have to *wait* for the lock: when the run is stopped, finished or
+mid-wrap-up, a previous owner can still be in its finalization tail, and this command waits up to 600 s
+for it (echoing `waiting for the engine lock on … — the previous owner is finishing up` while it does).
+The wait exists precisely to let that owner **finish its wrap-up** — the transition from "wrap-up only"
+to "liftable". Deciding before the wait meant a `resume` that had warned about a dead endpoint could
+come out of the wait, find a plainly finished run, lift it, and spend the remaining budget on identical
+empty fallback nodes at exit 0. So nothing is decided until the lock is held, and the promise is
+re-checked once more immediately before the loop starts: if the run was lifted out from under a wrap-up
+in between, the command refuses and tells you which one to run instead.
 
 ---
 
@@ -271,10 +285,32 @@ finalized RUN_DIR — wrapped up WITHOUT the model: …
 | **Degraded** | the end-of-run report is the literal placeholder `"(report unavailable)"`; nothing model-authored reaches cross-run memory (the reflection note and each curation log still record the run deterministically) |
 | **Irreversible** | each step is marked complete once attempted, so bringing the endpoint back and re-running `finalize` is a no-op — which is why the warning is printed **before** the wrap-up runs. Stop there if you want the written report and lessons |
 
+**Neither does an unusable credential.** The gate that runs one step before the endpoint probe —
+a key whose endpoint binding is missing or points somewhere else, a role bound to a connection profile
+whose `api_key_env` is unset — used to refuse here too, with the same result the paragraph above exists
+to prevent: exit 1, not one artifact, and the run stuck at `finalization_pending` with its spend
+stranded in `.llm-usage-outbox`. It now warns on exactly the same boundaries:
+
+```
+⚠ LLM credential unusable while wrapping up: the default target: LLM credential source contains an
+  incomplete key+endpoint pair; …
+  This run is over, so no proposal can degrade — wrapping it up anyway. What the missing model costs:
+    …
+  The wrap-up below runs with NO credential at all rather than sending this one somewhere it
+  is not bound to, so any call it does attempt is refused by the provider, not silently mis-sent.
+```
+
+That last line is the one difference between the two gates. A dead endpoint still lets every client be
+*built* (it fails at request time), while an unusable credential fails while the client is being
+constructed — so this wrap-up, and only this wrap-up, drops the credential entirely rather than
+carrying a key to a host it was not issued for. Your configuration is not modified; fix the pair and
+the next command uses it normally.
+
 The wrap-up-only entry points are `finalize`, and a `run`/`resume` that lands on a boundary it may only
 complete (`run has an incomplete terminal projection …` / `run has a pending finalize …`). A `resume`
 that would **lift** a finished or stopped run back into the loop can still propose, so it keeps the full
-refusal.
+refusal — and it classifies the boundary **under the singleton lock**, so a `finalize` that completes
+while that `resume` waits cannot turn its warning into a lift (see [`resume`](#resume)).
 
 ---
 
@@ -800,11 +836,13 @@ the evidence mixed. Legacy rows without the verifier payload remain
 explicit `claim_stance` separating literal proposition support from action guidance, so a confirmed negative
 fact is no longer inverted; legacy rows without the field keep the historical outcome mapping. This is still not
 an independent-evidence assessment: refs are attempts rather than independent evidence families. Identity is normalized statement text unless
-`--structured` is selected. Pure read; no LLM/endpoint.
+`--structured` is selected. `--scope` narrows every joined store (lessons, D8 research claims and, with
+`--pack`, concept capsules) to one task — the CLI spelling of the HTTP `/api/cross-run/claims?scope_task=`
+read. Pure read; no LLM/endpoint.
 
 ```bash
-looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structured] [--json]
-               [--governance-receipt]
+looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structured] [--scope TASK_ID]
+               [--json] [--governance-receipt]
 ```
 
 | Option | Default | Description |
@@ -815,8 +853,34 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structu
 | `--pack` | off | Render the hard claim-count-capped agent **context pack** (Step 5): pinned → ratified → mixed → support-only (`supported` wire state) → opposition-only (`refuted`) → insufficient; a caveat can replace the weakest non-pinned positive; omitted pins are counted explicitly. Concept tendencies are derived from the full retained pre-cap aggregate while the rendered labels remain bounded |
 | `--fuzzy` | off | Suggestion-grade bounded token-Jaccard complete-link merge: every pair must clear the threshold and share scope, polarity and maturity; it is non-transitive and never scope-agnostic, but remains display/review grouping rather than claim identity |
 | `--structured` | off | Group by the scope+polarity-safe **structured claim key** (`engine/claim_key.py`) instead of the display statement: claims from different tasks never merge, opposite-polarity assertions ("X helps" vs "X never helps") surface as a CONTRADICTION rather than collapsing, and grouping is O(n) exact-key (no transitive over-merge). Governance overlays by scope-precise `claim_uid` |
+| `--scope TASK_ID` | `""` (portfolio-wide) | Project only this task's evidence, filtering **every** joined store through the same access boundary the Atlas and HTTP reads use. **Required to obtain a usable `--governance-receipt` for a task-scoped claim** — see the projection rule below. Empty keeps the portfolio-wide read |
 | `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
-| `--governance-receipt` | off | With `--json`, emit `{claims, revision, structured}`. Use `--structured --json --governance-receipt` to obtain the exact UID/evidence-digest/revision inputs required by `claim-decide` |
+| `--governance-receipt` | off | With `--json`, emit `{claims, revision, structured, scope}`. Use `--structured --scope TASK_ID --json --governance-receipt` to obtain the exact UID/evidence-digest/revision inputs required by `claim-decide`. `scope` echoes the projection the digests describe, exactly as the HTTP claims response echoes `scope_task` |
+
+### The projection rule: review at the scope you decide at
+
+`evidence_digest` is a token for the **projection**, not for the claim alone: it commits the projection's
+whole-source health receipt (snapshot digest, producer-run counts, quarantine counters) alongside the claim's
+own support/oppose evidence. That is deliberate — a partial or quarantined source withholds exact one-sided
+states, so a decision taken over one must be refused once the omitted tail becomes readable and can flip the
+verdict. `claim-decide` always validates against the projection scoped to **its** `--scope`.
+
+So the scope you review at must be the scope you decide at:
+
+```bash
+# a task-scoped claim (every engine-produced claim carries its run's task_id)
+looplab claims MEMORY_DIR --scope blob_classification --structured --json --governance-receipt
+looplab claim-decide MEMORY_DIR "STATEMENT" --ratify --scope blob_classification \
+  --claim-uid ... --evidence-digest ... --expected-revision ... --action-id ...
+```
+
+Reviewing portfolio-wide (no `--scope`) and then deciding a task-scoped claim supplies a digest computed over
+a different source snapshot; `claim-decide` exits 2 with `claim_evidence_changed` and names the projection it
+validated against. A `--governance-receipt` taken without `--scope` over a portfolio that contains scoped
+claims warns about exactly this **on stderr** (stdout stays pure JSON), naming the scopes it found. Omit
+`--scope` on both halves only for a genuinely unscoped claim. This mirrors the HTTP pair
+(`GET /api/cross-run/claims?scope_task=T` then `POST /api/cross-run/claim-decide` with `scope: T`), which has
+always required the same pairing.
 
 Operator decisions (from `claim-decide`) are overlaid: a `[RATIFIED]`/`[REJECTED]`/`[PINNED]` marker is shown.
 Structured lookup prefers exact scope+metric, then scope-only, global metric and global. An unscoped decision
@@ -848,6 +912,13 @@ changes. Structured JSON exposes `decision_fresh`, while claims/context/tool tex
 stale-evidence, or unknown freshness separately so `RATIFIED`/`PINNED` never implies that the reviewed
 evidence digest is still current.
 
+The supplied `--evidence-digest` is validated against the claim projection scoped to **this command's**
+`--scope`, so it must come from a `claims` read taken at that same scope (see
+[the projection rule](#the-projection-rule-review-at-the-scope-you-decide-at)). A digest taken from a
+different projection — in particular the portfolio-wide default — exits 2 with `claim_evidence_changed`; the
+refusal names the scope it validated against and that projection's current digest, so a mis-scoped review is
+distinguishable from evidence that genuinely moved.
+
 ```bash
 looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) \
   --claim-uid UID --evidence-digest DIGEST --expected-revision N --action-id ID \
@@ -862,10 +933,10 @@ looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) \
 | `--reject` | — | Mark `operator-rejected`; remains human-visible and may remain in top-level claim totals, but is excluded from active context, Atlas contradictions, agent-tool and hybrid-retrieval projections |
 | `--pin` | — | Mark `operator-pinned`; pinned claims receive first retention priority in bounded context packs. The hard claim-count cap still applies, and any omitted pin count is surfaced explicitly |
 | `--note` | `""` | Optional rationale recorded with the decision |
-| `--scope` | `""` | Exact task scope from the reviewed structured claim. It must participate in the supplied UID and will not reach a same-worded claim in another task; empty is valid only for a genuinely unscoped live claim. Portfolio-wide fallback writes remain a low-level migration capability, not a target the strict CLI fabricates from one scoped observation |
+| `--scope` | `""` | Exact task scope from the reviewed structured claim. It must participate in the supplied UID and will not reach a same-worded claim in another task; empty is valid only for a genuinely unscoped live claim. It also selects the projection the evidence digest is validated against, so it must equal the `claims --scope` used to review. Portfolio-wide fallback writes remain a low-level migration capability, not a target the strict CLI fabricates from one scoped observation |
 | `--metric` | `""` | Metric qualifier from the reviewed structured claim; participates in the stable UID |
 | `--claim-uid` | *(required)* | Stable UID from the exact reviewed structured claim; must recompute from statement/scope/metric and still exist live |
-| `--evidence-digest` | *(required)* | Evidence digest from the reviewed claim; a changed lesson/research snapshot rejects the write |
+| `--evidence-digest` | *(required)* | Evidence digest from the reviewed claim, taken from a `claims` read at this same `--scope`; a changed lesson/research snapshot — including a change only to the source's completeness receipt — rejects the write |
 | `--expected-revision` | *(required)* | Claim-governance revision observed with the reviewed projection; stale concurrent policy writes reject the append |
 | `--action-id` | *(required)* | Stable idempotency id. A lost-response retry returns the original durable receipt before CAS/freshness revalidation |
 
@@ -882,6 +953,20 @@ owner HTTP governance. The deprecated `--apply` spelling exits 2 **before model 
 mutation** and never re-runs an LLM batch for immediate application. Needs a reachable LLM. The on-demand
 companion to finalize-time `cross_run_curation`. Its required action id has the same durable begun/terminal
 recovery contract as `concept-steward`.
+
+A proposal carries the claim's `statement`, `claim_uid`, `scope`, `metric` and suggested decision — **not** an
+evidence digest, which is a property of a projection rather than of a proposal. To act on one, re-read the
+claim at the proposal's own scope and use that receipt's digest:
+
+```bash
+looplab claim-steward MEMORY_DIR --action-id review-1 --json          # proposals carry scope + claim_uid
+looplab claims MEMORY_DIR --scope <proposal scope> --structured --json --governance-receipt
+looplab claim-decide MEMORY_DIR "<statement>" --ratify --scope <proposal scope> \
+  --claim-uid ... --evidence-digest ... --expected-revision ... --action-id ...
+```
+
+That re-read is the point of the propose/ratify split: the operator ratifies the evidence that is live at the
+moment of the write, not the evidence the steward happened to see.
 
 ```bash
 looplab claim-steward MEMORY_DIR --action-id ID [--apply] [--model M] [--max-proposals 10] [--json]
@@ -1033,6 +1118,14 @@ looplab bench TASK.json [TASK2.json ...] [OPTIONS]
 | `--out DIR` | `runs/bench` | Output directory for the runs + `benchmark.json` |
 | `--backend toy\|llm` | `toy` | Role backend |
 | `--max-nodes N` | `8` | Node budget per task |
+
+What is reproducible on the toy backend: every **scientific** field (`best_metric`, `best_node`,
+`nodes`/`evaluated`/`failed`, `reward_hack_flags`, `stop_reason`) and the folded `RunState`.
+`benchmark.json` is never byte-identical — it records `eval_seconds`/`wall_seconds` — and the event
+log's byte ORDER additionally depends on cross-run memory: the first suite run against an empty
+`LOOPLAB_MEMORY_DIR` has no prior lessons and so lacks one `lessons_reconciled` event that every
+later suite has. Pin `LOOPLAB_MEMORY_DIR` to a fresh (or pre-warmed) directory per suite when you
+need log-byte comparability.
 
 ---
 

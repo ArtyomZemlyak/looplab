@@ -39,8 +39,10 @@ looplab run examples/code_regression_task.json --backend llm --max-nodes 6
 
 ### Endpoint preflight (before a run starts)
 
-**A run whose endpoint is not reachable is refused before it starts** — no run directory, no event log,
-no `run_finished` event, nothing to resume. You get an `LLMError` on the command line and a non-zero exit:
+**A run whose endpoint is not reachable is refused before it starts** — no event log, no `run_finished`
+event, nothing to resume. (The run *directory* is created a moment earlier, to take `engine.lock`; the
+refusal leaves it holding nothing but that empty lock file, and `resume` rejects it with
+`no run found … (no events.jsonl)`.) You get an `LLMError` on the command line and a non-zero exit:
 
 ```
 LLM endpoint preflight failed: researcher (qwen3:8b at http://localhost:11434/v1): <transport error>.
@@ -80,6 +82,26 @@ what the missing model degrades (`(report unavailable)` for the report, nothing 
 cross-run memory), **before** the wrap-up starts, because those steps are marked complete once attempted
 and a later `finalize` will not redo them. See [`finalize`](cli-reference.md#finalize) for the full
 artifact-by-artifact list.
+
+**The credential check is softened the same way, and it has to be.** The gate one step earlier
+(`validate_bound_profiles`, below) refuses a run whose key/endpoint pair is unusable, and on a wrap-up
+entry that refusal is the identical dead end: exit 1, no artifacts, `finalization_pending` forever. It
+therefore warns on the same boundaries, with the same list of what a missing model costs — plus one
+extra line, because the two gates fail at different moments. An unreachable endpoint still *builds* its
+clients and fails at request time; an unusable credential fails inside `make_llm_client`, so warning
+alone would only move the same error into role construction a few lines later. The wrap-up therefore
+runs with **no credential at all** rather than with one bound somewhere else: whatever calls it does
+attempt are refused by the provider instead of carrying a key to a host it was not issued for. Your
+configuration is untouched — only that one wrap-up's transport is degraded.
+
+**Which boundary a command is on is decided under the run's singleton lock**, not before it. `resume`
+is the only entry point that is wrap-up-only *sometimes*: it LIFTS a stopped or finished run back into
+the loop (new work — a dead endpoint must refuse) but may only complete an existing wrap-up on a
+`pending_finalize` / `finalization_pending` boundary. When it has to wait for a previous owner to
+release `engine.lock`, that wait exists precisely to let the owner *finish* its wrap-up — so a decision
+made before the wait can be stale by the time the run is lifted. Both the probe and the lift now read
+one fold taken after the lock is held, and every command re-checks the promise once more immediately
+before entering the loop.
 
 ### Endpoint options
 
@@ -163,7 +185,9 @@ export LOOPLAB_LLM_API_KEY_CODER=sk-...
 Roles you can bind: `propose`, `implement`, `repair`, `strategy`, `pilot`, `researcher`,
 `developer`, `strategist`, `compressor`, `embed`. An unknown role name, a missing profile, or a
 literal key inside a profile is refused at startup rather than silently ignored, and a bound profile
-whose variable is unset stops the run **before its first paid call**.
+whose variable is unset stops the run **before its first paid call** — except on a wrap-up-only entry
+point, where it warns and the wrap-up runs credential-free (see
+[Endpoint preflight](#endpoint-preflight-before-a-run-starts)).
 
 ## External coding agents
 
@@ -283,14 +307,51 @@ the whole run** on the *first* such crash (an `EV_PAUSE`) rather than rapid-firi
 nodes — resume once the endpoint is back.
 
 The same circuit-breaker covers a provider that stops working **mid-run**, during an *inline repair*
-rather than a build. A failed repair *call* is not a repair: the Developer returns the in-band
-`(developer error: …)` sentinel instead of code, so the engine records **no** `node_repaired`
-(the attempt isn't spent, nothing is written to the workdir, the anti-stuck counter is untouched),
-terminalizes that node with `reason="developer_crash"` naming the provider failure, and appends the
-run-level pause. Without it, a provider error string was committed as the node's code and
-re-evaluated: one real run turned an out-of-credits `402` into **2345 `node_repaired` events on a
-single node over 3.5 hours**. Use `looplab timings RUN_DIR` to see where a run's wall-clock actually
+rather than a build. A failed repair *call* is not a repair, in any of the four ways the call can
+fail to produce one: the Developer returns the in-band `(developer error: …)` sentinel, the call
+**raises** (an LLM client that throws on a 401/402 — normalized into the same sentinel), it answers
+with something that is **not a program at all** (a comment-only or docstring-only reply, which would
+otherwise exit 0 and be reported to you as "printed no metric"), or it answers with something that
+is **not Python** several times over. In each case the engine records **no** `node_repaired` (the
+attempt isn't spent and nothing is written to the workdir), terminalizes that node with
+`reason="developer_crash"` naming the provider failure, and appends the run-level pause.
+
+**The crash-triage judge runs on that same endpoint**, and it is what decides whether to keep
+repairing — so "the judge did not answer" must never mean "keep repairing". A transport failure, a
+refusal, or an emit that cannot be parsed is an `unanswerable` verdict, and it takes the identical
+exit: node terminalized `developer_crash`, one run-level pause naming the provider, `resume` once it
+is back. Without these, a provider error string was committed as the node's code and re-evaluated:
+one real run turned an out-of-credits `402` into **2345 `node_repaired` events on a single node over
+3.5 hours**. Use `looplab timings RUN_DIR` to see where a run's wall-clock actually
 went (LLM vs eval vs repair vs tools, per node).
+
+### …and the same breaker on the **proposal** path
+
+The Researcher degrades too, and until 2026-08-05 nothing noticed. When its provider is unreachable
+the role returns a **degraded fallback Idea** — no params, no hypothesis, the transport error where
+the rationale should be (`fallback (agent parse failed: …)`). That is not a weak experiment, it is the
+*absence* of one, but the engine used to build it: a run whose endpoint died after node 0 produced
+three more nodes with byte-identical bounds-midpoint params, spliced the error string into the
+hypothesis board, the node rationale and the research memo, wrote the "winner" into **cross-run
+memory**, and printed `finished=True … BEST node 3` with `run_finished` carrying no reason at all.
+
+The Researcher's fallback now carries the same kind of in-band sentinel the Developer's crash does
+(`agents/roles.py::RESEARCHER_FALLBACK_PREFIX`), and the engine refuses it at every lane that turns a
+proposal into work — before any `card_added`, before any node id. It then appends a **run-level pause**
+naming the provider and what to fix, exactly like `developer_crash`:
+
+```
+auto-paused: the Researcher's LLM provider failed, so it returned a degraded FALLBACK instead of a
+proposal — agent parse failed: LLM request to http://… failed: Connection error. Nothing was
+proposed, so no node was built. Fix the endpoint/credentials and `looplab resume`; the run keeps
+every experiment it already has.
+```
+
+Because the run **freezes rather than finishes**, a run whose proposals were all fallbacks cannot
+report a champion, write a report, or add a case to cross-run memory — there is nothing to report on.
+Experiments that already completed are untouched, and `looplab resume` continues from them.
+This is the *second* line of defence; the first is the endpoint preflight above, which refuses to
+start a run against an endpoint that is already dead.
 
 ## Signal delivery (agent synergy)
 
@@ -303,7 +364,7 @@ but nothing injects it into a prompt"* — the same class the hint registry
 | Signal | Folded into | Reaches | How |
 |---|---|---|---|
 | **Trust flags** (reward-hack / leakage) | `RunState.reward_hacks` | Researcher | a trust-reflection line in the proposal hint (`digest.trust_reflection`) — "a recent solution was flagged for X; avoid it if unintended" |
-| **Watchdog signals** (train-monitor / ASHA rank) | *not folded* — DIAGNOSTIC events read from `store.read_all()` | Researcher | a watchdog-reflection line in the proposal hint (`digest.watchdog_reflection`) |
+| **Watchdog signals** (train-monitor / ASHA rank) | *not folded* — DIAGNOSTIC events read from `store.read_all()` | Researcher | a watchdog-reflection line in the proposal hint (`digest.watchdog_reflection`), naming the eval PHASE the verdict was about (`log_role`/`stage` on the alert row) rather than calling every verdict "training" |
 | **Crash-triage verdict** | `Node.triage_rationale` | Researcher | the failure line in the experiments digest + the failure-reflection hint carry the LLM's *why*, not just the error kind |
 | **Foresight calibration** | `RunState.foresight_selected` | the world model | a track-record line in `_memory_brief` — "of your last N predict-before-execute picks, K beat the parent" (closes the predict→outcome loop) |
 | **Deep-research memo** | `RunState.research` | Researcher | a one-line takeaway in the state brief **plus** a `read_research_memo` tool to pull the full findings/claims on demand |

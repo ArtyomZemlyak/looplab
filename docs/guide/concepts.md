@@ -408,11 +408,15 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
 - **debug / repair** — on a crash, hand the failing code + stderr back to fix it. Mechanical crashes
   can be repaired **in place** within the same eval (`inline_repair`), which doesn't consume the
   node budget; deeper failures get a structured "reproduce then fix" directive (`deep_repair`).
-  In-place repairs are **apportioned into two ledgers**: reconciling the code with the *installed*
-  libraries (a moved import, a removed API, a version migration) is a different resource from
-  changing the experiment, and `inline_repair_attempts` bounds each — otherwise a repo with a
-  year-stale `requirements.txt` spends every node's whole allowance re-paying the same migration
-  and never reaches its own research question.
+  **What stops the repair loop is a model, not a heuristic**: the crash-triage model is asked once
+  per attempt (the call the loop already made) and is shown this node's whole repair history — what
+  failed, what each fix claimed, which files it actually changed, how far the pipeline got — so it
+  can answer "I no longer know how to fix this". `inline_repair_attempts` is a hard backstop behind
+  it, and anything meaning the judge *could not answer* (a dead endpoint, an unparseable verdict)
+  stops the node and pauses the run naming the provider rather than repairing blind. The budget has
+  to be generous enough for the real case it protects: a repo with a year-stale `requirements.txt`
+  legitimately spends several repairs re-paying migrations before it can reach its own research
+  question.
 - **ablation-driven refinement** — neutralize a parameter (or a whole code block with
   `ablate_code_blocks`) to find the highest-impact lever, then refine it (`ablate_every`).
 - **merge / ensemble** — recombine two parents: a param mean, or a code-recombination ensemble
@@ -565,18 +569,17 @@ untrusted tier.
   the separate atomic `card_scoring` treatment (explore/balanced/exploit plus bounded novelty and
   coverage weights); it ranks only Cards that have already passed durable readiness and live-anchor
   checks.
-- **Speculative pre-build** (`speculation_depth`, `0` = off by default) — while the current
-  experiments evaluate, the Card the scorer predicts you will pick next can *already be built* by an
-  isolated second Researcher/Developer pair. `-1` = AUTO resolves to the settled `eval_parallel` (one
-  prefetch per evaluation lane); AUTO settles to *off* where a prefetch cannot help — a build whose
+- **Speculative pre-build** (`speculation_depth`, `-1` = AUTO = **on by default** since 2026-08-05) —
+  while the current experiments evaluate, the Card the scorer predicts you will pick next can
+  *already be built* by an isolated second Researcher/Developer pair. AUTO resolves to the settled
+  `eval_parallel` (one prefetch per evaluation lane, clamped `1`–`64`); `0` is the explicit off
+  switch. AUTO settles itself back to *off* where a prefetch cannot pay for itself — a build whose
   roles call no LLM (`--backend toy`), a policy other than `greedy`, a run directory with no run id —
   rather than refusing the run the way a spelled depth would. This is the half of the Card lane that
   `card_driven_selection` alone does not buy: speculation needs both, and at depth `0` nothing
   pre-builds. A prediction that misses is discarded *before* it reaches a sandbox — a
   `node_failed(reason=superseded)` with zero eval seconds — and its node-budget slot is refunded when
-  it can prove it never ran. **It is on by default** since 2026-08-05 (`speculation_depth` ships `-1` = AUTO), and settles
-  itself back to off where a prefetch cannot pay for itself — a build that calls no LLM, a
-  policy other than `greedy`, a run with no id: see
+  it can prove it never ran. See
   [what blocked speculation from being the default](configuration.md#what-blocked-speculation-from-being-the-default-fixed-2026-08-05).
 - **Unified agent** (`unified_agent`, on by default) — one LLM identity plays Researcher +
   Developer (+ Strategist) across stages, choosing its model/toolset per stage and driving the next

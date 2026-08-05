@@ -185,7 +185,7 @@ looplab run examples/toy_task.json --out runs/c --max-nodes 12 --crash-after 3 -
 looplab resume runs/c --task-file examples/toy_task.json --max-nodes 12
 #   -> replays the log, continues from the frontier, finishes cleanly
 #   (`--backend toy` keeps this offline; without it the run needs a reachable LLM endpoint, which
-#    the pre-run preflight checks before the run directory is even created)
+#    the pre-run preflight checks before a single event is written)
 ```
 
 ## Docker is optional

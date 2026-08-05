@@ -43,7 +43,11 @@ runs/demo/
 ├── events.jsonl          # append-only event log — replay authority for RunState
 ├── config.snapshot.json  # the exact resolved settings (secret-masked)
 ├── task.snapshot.json    # canonical resolved task after overlays + comparison normalization; resume input
+├── engine.lock           # single-writer lock — taken for the whole run
+├── nodes/                # one workdir per candidate (its code, logs, artifacts)
 ├── tree.html             # static lineage view
+├── trace.json            # end-of-run trace projection
+├── readmodel.sqlite      # derived read model for the UI (rebuildable from the log)
 └── spans.jsonl           # diagnostic trace spans (never read by replay)
 ```
 
