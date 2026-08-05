@@ -320,6 +320,33 @@ def test_the_bundle_is_frozen_so_a_shared_one_cannot_be_mutated_under_another_ca
         FULL["max_turns"] = 1             # type: ignore[index]
 
 
+def test_the_cost_roll_up_still_reaches_the_compressor_through_the_bundle():
+    """MONEY. The D11 compressor client rides `summary_client` INSIDE the bundle, and the engine's
+    cost roll-up walks there by attribute name (`costs._CHILD_ATTRS`) — a `dict` branch it no longer
+    matches, since a `LoopOptions` is a Mapping and not a dict. Reaching it by attribute is what
+    keeps every compression call billed; if it stopped, the spend would simply vanish from the ledger
+    rather than fail, which is the failure mode nobody notices.
+    """
+    from looplab.engine.costs import find_cost_accountants
+
+    class _Accountant:
+        pass
+
+    class _Client:
+        def __init__(self, accountant):
+            self.accountant = accountant
+
+    accountant = _Accountant()
+
+    class _Researcher:
+        loop_opts = LoopOptions(self_plan=True, summary_client=_Client(accountant))
+
+    class _Engine:
+        researcher = _Researcher()
+
+    assert find_cost_accountants(_Engine()) == [accountant]
+
+
 def test_unset_is_falsy_so_an_empty_bundle_keeps_the_legacy_or_fallback():
     """Several sites read `getattr(self, "loop_opts", {}) or {}`. An empty bundle has to stay falsy
     or that idiom silently changes which object is spread."""
