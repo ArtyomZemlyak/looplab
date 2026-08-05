@@ -6,7 +6,11 @@ LINEAGE (all `dcl-*` variants -> one family, so concentration reads the branch n
 analytics are deterministic over (RunState, graph, tags); and the *uncovered winning-region* alarm fires
 on the exact regions the `rubertlite` run never entered, from the first node — the decisive PART IV
 signal. The pure analytics never write events or choose a champion themselves; engine-owned producers
-persist their bounded inputs/receipts and live admission/cue consumers apply them."""
+persist their bounded inputs/receipts and live admission/cue consumers apply them.
+
+Named for the SUBSYSTEM, not one file: doc 25 SE-09 split `search/concept_graph.py` into the five
+modules imported below, and these tests span all of them. `tests/test_concept_module_split.py` is
+the separate guard on the split's own shape."""
 from __future__ import annotations
 
 from pathlib import Path
