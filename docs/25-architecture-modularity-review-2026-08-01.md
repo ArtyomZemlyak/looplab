@@ -2101,6 +2101,85 @@ node-idless spans `unscoped` rather than bleeding a later span's id onto them, a
 that neither view re-derives `_tree(...)[0]`, and the indexed-vs-unindexed equivalence the finding
 asked for — run on the orphan-headed shape that broke. Teeth-tested against 5 breaks, all biting.
 
+*Resolution, second cut (2026-08-05) — the FOURTH site, which the note above was silent about.*
+
+The *Locations* line names `span_index.py:388-421` as "a fourth root-resolution" and the
+*Recommendation* says to route it through the shared helper too. The first cut routed the two VIEWS
+and then accounted for what it had left alone — `_bounded_node_trace_tail` and `SpanIndex.node_tids`,
+which are genuinely a different rule — while simply not mentioning `SpanIndex._rows_for_node`, which
+is the SAME rule. Silence in a resolution note reads as "handled". It was not handled.
+
+`traceview.trace_root_span(spans)` is now the one root resolution; `trace_root_node_id` delegates to
+it and `_rows_for_node` calls it. Three callers, one rule.
+
+**The two orderings really do disagree, and the disagreement is in the logs on disk.**
+`_rows_for_node` took the first root in FILE order. File order is CLOSE order — `spans.jsonl` is
+written when a span ENDS — while the views take the earliest `start`, so the span that OPENED a trace
+is usually written LAST and concurrent spans finish out of the order they began. Surveying every run
+directory under `runs/` that has a non-empty `spans.jsonl` (43 of them, 69,323 spans, 2,538 traces),
+at every prefix the incremental index passes through: in `runs/live-deps4-0804`, trace
+`c49e58adeb726df798e4d6182855ab7d`, five concurrent `concept_coverage` generations under one
+still-open operation span were written in the order their `start`s read …183.883 / …183.880 /
+…183.879, and for four consecutive index states the two rules named DIFFERENT root spans. Multi-root
+traces are ordinary, not exotic: one `trace_id` spans a whole sequence of operations, and the largest
+real orphan set is 7,043 roots in a single trace (`runs/rubert-dr-0804`).
+
+**What an operator would have seen: nothing, today. This is a LATENT defect, not a live one.** The
+root only decides the generation FENCE, and only 269 of those 69,323 spans carry a `generation` at
+all (on `create_node` / `evaluate` / `train_monitor` roots). 100 traces have a generation-carrying
+root; every one of them has exactly ONE root, so nothing there is left to choose between. The four
+roots that did disagree carry neither `node_id` nor `generation`, so `_rows_for_node` never reaches
+them. No number on any log on disk is wrong — the RULE was, and a resolution note owes the reader
+which of those two it is.
+
+**What it costs where it IS reachable**, measured on the constructed shape: `light_spans_for_node` /
+`node_span_count` feed `appstate.node_trace_view`, i.e. `/api/runs/{id}/nodes/{nid}/trace?attempt=N`
+— the node trace card's span TREE, its token/cost `rollup`, and the `total_spans` receipt behind
+"showing X of Y". On a trace whose earliest-`start` root is a `generation: 1` `evaluate` span and
+whose first-in-file root is a short concurrent orphan, attempt 1 gets `[]` and `total_spans: 0` while
+attempt 0 — a lifecycle that never existed — gets both spans, and `build_trace_view` reading the same
+trace through the shared rule attributes both to the node from the generation-1 root. Two mechanisms
+put a generation-carrying root beside another root: a span QUARANTINED by `_scan_light` (dropped but
+still consumed) permanently orphans its children, and one `trace_id` covers several operations.
+
+One behaviour deliberately changed: a ROOTLESS trace (a `parent_id` cycle, reachable only from a
+corrupt/crafted source) used to fall back to `trace_rows[0]` and read ITS `generation` as the whole
+trace's. The shared rule declines to name a root there, exactly as `_tree` already returns no roots,
+so the fence falls to the unstamped default instead of an arbitrary span's stamp.
+
+**Not made heavier, and not made able to fail where it degraded.** `trace_root_span` takes the light
+dicts the index ALREADY holds, so the fence gains no disk read, no dependency on `spans.jsonl` being
+complete, and no new failure mode; a truncated or quarantined source simply indexes fewer rows, as
+before. It deliberately does NOT build `_tree`'s forest, which copies every span dict, and is pinned
+against `_tree(...)[0]` instead. Timed on the largest real log (`runs/rubertlite-dense-retrieval`,
+260 MB, 43,384 spans, 981 traces, 82 nodes): cold index build 70.4 s → 70.6 s (that path is
+untouched), and the whole `node_trace_view` a request serves went 40.1 ms → 39.9 ms median per node.
+The fence itself is ~0.12 ms of that.
+
+**The guard now discovers instead of enumerating.** The first cut's structural guard hard-coded the
+pair `("build_trace_view", "build_conversation")` by name — which is precisely why the fourth site
+went on re-deriving underneath a green suite. `test_no_site_re_derives_the_trace_root` scans every
+`looplab/**/*.py` for two AST fingerprints, each followed through a hoisting variable (the original
+copy was `f = _tree(...)` then `f[0]`, one line apart, so an inline-only guard would have missed the
+bug it exists for): a function that reads BOTH the `"span_id"` and `"parent_id"` keys AND asks whether
+a span's parent is PRESENT in some collection, or any subscript of a `_tree(...)` forest.
+`build_conversation`'s structural `parent_id is None` is a narrower question and stays legal. The
+blind spot is stated in the test: a re-derivation that never mentions `parent_id` is invisible to any
+source scan, and what holds that line is the behavioural equivalence beside it.
+
+`tests/test_span_index.py` 38 → 43. Teeth, on a throwaway copy of the tree: the five source mutations
+all go red (a new view re-deriving inline, the same hoisted into a local, `_tree(...)[0]` in a new
+`serve` projection, the original `f = _tree(...)`/`f[0]` spelling, and `_rows_for_node` reverted), and
+the reverted `_rows_for_node` fails the BEHAVIOURAL test too — the fence and the view disagreeing —
+not only the scan. Mutating the shared helper itself back to file order (`roots[0]` instead of the
+earliest `start`) is caught by three more, including the `_tree` equivalence sweep. All biting.
+
+Independently checked for silence: every projection this could touch — the whole-run light view, the
+indexed light view, per-node views at generations `None`/0/1, and `build_conversation` — was digested
+before and after over the 40 real run dirs the index will load, 676 projections, all identical. The
+change is behaviour-preserving on every log on disk, which is the same statement as "latent" from the
+other side.
+
 #### EV-11 · LOW · duplication · effort: small
 
 **Authoritative-provenance set spelled inline twice in _materialize_concept_deltas and again as a module constant**
