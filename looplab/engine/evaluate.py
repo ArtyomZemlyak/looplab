@@ -280,6 +280,172 @@ class EvaluateMixin:
                                     submission_file=self._graded_output_name())
         return sigs
 
+    def _trust_scan_surface(self, node) -> str:
+        """The exact bytes every trust detector reads for one node — and the bytes `code_digest`
+        commits to. A rule with a name because the two are the SAME string by construction: a
+        caller that re-derived the surface for the digest could hash something the scans never saw.
+        """
+        # Scan the WHOLE solution surface, not just solution.py — a patch-gated multi-file
+        # agent can hide answer-key access / leakage / the real computation in an in-surface
+        # helper module that solution.py imports. Concatenate node.files so the reward-hack /
+        # leakage / critic scans cover the imported code too (not only the clean entrypoint).
+        return node.code + "".join(
+            f"\n\n# --- {fn} ---\n{src}" for fn, src in (node.files or {}).items()
+            if str(fn).replace("\\", "/").lower() != "solution.py")
+
+    def _trust_scan_signals(self, node, res, state, workdir, scan_src: str) -> list[dict]:
+        """Every trust finding for one evaluated node, in the order the union event carries them.
+
+        The reward-hack half (detectors + the hardened exploit suite + the workdir write audit)
+        followed by `_trust_gate_signals`' leakage/critic half. Extracted from `_evaluate` (doc 25
+        ES-03) for the reason its sibling was: as ~45 inline lines inside the terminal's
+        `_write_lock` block, the only way to observe that any of it ran was to drive a whole run.
+
+        ORDER IS PART OF THE CONTRACT — the reward-hack signals concatenate AHEAD of the gate
+        signals, and one `reward_hack_suspected` carries the union, so a reader of the stored
+        evidence sees the same sequence it always did.
+
+        Returns the findings; it does NOT append. The caller owns the event, because the payload
+        also binds the schema version and the digest of `scan_src` (see the call site).
+        """
+        sigs: list[dict] = []
+        if self.reward_hack_detect:
+            from looplab.trust.reward_hack import detect_reward_hacks
+            protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
+            # The grader-IMPORT waiver keys on the task genuinely MATERIALIZING
+            # grader.py (an ASSET → calling `grader.score(...)` is the documented
+            # grading contract, e.g. the in-workdir mlebench brief). Pass it explicitly
+            # instead of letting the detector infer it from `protected`: that union also
+            # carries the operator's protect list, and a merely-PROTECTED grader.py
+            # (protect=["grader.py"], no asset) means "hands off", not "import me" —
+            # inference from the union would wrongly waive the import tells for it.
+            sigs += detect_reward_hacks(
+                scan_src, res.metric, state.direction,
+                protected_names=protected, stdout=res.stdout,
+                # Match the asset key NORMALIZED (path separators + case), exactly like
+                # the detector normalizes `protected_names` — the inference this call
+                # replaced got that normalization for free, so 'Grader.py' or a
+                # backslashed key must keep sanctioning the import here too.
+                grader_import_ok=any(str(a).replace("\\", "/").lower() == "grader.py"
+                                     for a in (self._assets or ())))
+            # 4.3: also apply the hardened exploit ruleset grown by `looplab harden`
+            # (hacker-fixer-solver) — each previously-discovered exploit stays guarded.
+            if self._exploit_suite is not None:
+                sigs += self._exploit_suite.scan(scan_src)
+            # 4.4 sandbox instrumentation (RewardHackingAgents recipe): flag RUNTIME
+            # writes to protected/frozen files — behavioral evidence a static scan of the
+            # code can miss (a write via a helper, os.system, a template). Compares the
+            # workdir against the assets/protected set the engine placed there.
+            if self._workdir_audit:
+                sigs += self._audit_workdir_writes(workdir, protected)
+        # …and the leakage + critic gates, which are a NAMED rule (`_trust_gate_signals`)
+        # rather than two more `sigs +=` lines: as inline concatenations, silencing them
+        # was invisible to every trust test that does not drive a whole run. See that
+        # method's docstring.
+        sigs += self._trust_gate_signals(node, scan_src)
+        return sigs
+
+    def _eval_intervention_seen(self, node_id: int, generation: int, start_seq: int,
+                                card_id) -> str | None:
+        """The ONE post-start intervention this eval's watcher has seen, or None.
+
+        A method rather than a closure inside `_evaluate` (doc 25 ES-03): it needs only the
+        lifecycle it is watching, and as a closure it was 58 lines in the middle of the attempt
+        loop where nothing could call it directly. `card_id` is passed in rather than read off
+        `node` because the caller holds the node — within one attempt `node` is not rebound until
+        after the task group closes, so reading it once up front is the same value the closure saw.
+
+        Runs in a worker THREAD (`_watch_for_intervention`'s tick), so it only reads.
+        """
+        intervention = None
+        current_events = self.store.read_all()
+        operator_drop_ids: list[str] = []
+        for e in current_events:
+            if e.seq <= start_seq:
+                continue
+            if e.type == EV_CARD_DROPPED:
+                # Only the explicit operator stop affordance is an active cancel.
+                # Engine/freshness drops deliberately burn to terminal as evidence.
+                drop_id = e.data.get("id")
+                if (isinstance(drop_id, str) and drop_id
+                        and e.data.get("dropped_by") == "operator"):
+                    operator_drop_ids.append(drop_id)
+                continue
+            if e.data.get("node_id") != node_id:
+                continue
+            raw_generation = e.data.get("generation")
+            # Controls name the lifecycle they intend to mutate. Missing stamps are
+            # legacy generation-0 only; a stale gen-0 click must never cancel a gen-1
+            # worker merely because the numeric node id was reused after reset.
+            if raw_generation is None:
+                if generation != 0:
+                    continue
+            else:
+                if isinstance(raw_generation, bool):
+                    continue
+                try:
+                    event_generation = int(raw_generation)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if (isinstance(raw_generation, float)
+                        and not raw_generation.is_integer()):
+                    continue
+                if event_generation != generation:
+                    continue
+            if e.type == EV_NODE_RESET:
+                return "reset"
+            if e.type == EV_NODE_ABORT:
+                intervention = "abort"
+        if (intervention is None and operator_drop_ids
+                and isinstance(card_id, str) and card_id):
+            # Fold only once an explicit post-start operator drop exists AND this node
+            # actually carries a Card identity to match — a card-less worker can never
+            # be a drop target (`_card_identity_spellings` returns nothing for a missing
+            # id), so skipping the fold there is behaviour-preserving, not just cheaper.
+            # This follows merge chains added before or during the eval without making
+            # every 300 ms watcher poll replay the complete run. Any corrupt/ambiguous
+            # ownership is deliberately a no-op rather than a kill of the wrong worker.
+            try:
+                active_spellings = _card_identity_spellings(
+                    fold(current_events), card_id)
+            except Exception:  # noqa: BLE001 - active cancellation must fail closed
+                active_spellings = frozenset()
+            if any(drop_id in active_spellings for drop_id in operator_drop_ids):
+                intervention = "card_drop"
+        return intervention
+
+    async def _watch_for_intervention(self, node_id: int, generation: int, start_seq: int,
+                                      card_id, cancel, seen: dict) -> None:
+        """Poll for a mid-eval intervention and, on the first one, cancel the in-flight eval.
+
+        The verdict travels back to `_evaluate` in `seen["kind"]` rather than through `nonlocal`,
+        which is what lets this be a method at all (doc 25 ES-03). Same shape as the watchdogs'
+        `kill_signal`, and for the same reason: a sibling task in the eval's task group cannot
+        rebind the driver's locals, so the ONE thing it decides is handed over in a dict the driver
+        reads after the group closes. Writes `kind` at most once — the loop returns on the first
+        non-None verdict — so the driver never has to reconcile two.
+        """
+        while True:
+            await anyio.sleep(0.3)
+            if cancel.is_set():
+                return
+            # Its OWN limiter, never anyio's shared default. Every `run_sync` in the
+            # engine draws on that shared 40-token pool, and each in-flight eval's
+            # `_run_eval` worker holds a token for the eval's whole (often multi-hour)
+            # duration — so at `eval_parallel` near or above 40 (the config allows up
+            # to 1024; 0 = AUTO = GPU count) the evals pin every token and this tick
+            # queues BEHIND them. Operator abort/reset and both watchdog kills then go
+            # blind until an eval finishes on its own, and over-admitted evals sit on
+            # reserved GPUs while queued. A tick is a short poll, so a small dedicated
+            # pool is always immediately available for it.
+            intervention = await anyio.to_thread.run_sync(
+                self._eval_intervention_seen, node_id, generation, start_seq, card_id,
+                limiter=_watch_limiter())
+            if intervention is not None:
+                seen["kind"] = intervention
+                cancel.set()
+                return
+
     async def _evaluate(self, node_id: int, limiter: anyio.CapacityLimiter,
                         max_es: Optional[float] = None) -> None:
         async with limiter:
@@ -528,93 +694,18 @@ class EvaluateMixin:
                 # Event, which tree-kills the in-flight subprocess (sandbox._run_argv). The pre-eval
                 # skip only catches not-yet-started nodes — this kills a running one.
                 cancel = threading.Event()
-                aborted = False
-                superseded = False
-                operator_card_dropped = False
+                # The watcher's verdict, handed back through a dict because a sibling task in the
+                # group cannot rebind this frame's locals (see `_watch_for_intervention`). Read
+                # into `aborted`/`superseded`/`operator_card_dropped` once the group has closed;
+                # nothing inside it consults them.
+                _seen: dict = {}
                 kill_signal: dict = {}       # filled by the training monitor if it kills a broken run (Phase 3)
+                # The Card identity this worker can be dropped through, read while `node` is still
+                # the fold this attempt started from — it is not rebound until after the group.
+                _card_id = getattr(getattr(node, "idea", None), "card_id", None)
                 async with anyio.create_task_group() as _tg:
-                    def _intervention_seen() -> str | None:
-                        intervention = None
-                        card_id = getattr(getattr(node, "idea", None), "card_id", None)
-                        current_events = self.store.read_all()
-                        operator_drop_ids: list[str] = []
-                        for e in current_events:
-                            if e.seq <= start_seq:
-                                continue
-                            if e.type == EV_CARD_DROPPED:
-                                # Only the explicit operator stop affordance is an active cancel.
-                                # Engine/freshness drops deliberately burn to terminal as evidence.
-                                drop_id = e.data.get("id")
-                                if (isinstance(drop_id, str) and drop_id
-                                        and e.data.get("dropped_by") == "operator"):
-                                    operator_drop_ids.append(drop_id)
-                                continue
-                            if e.data.get("node_id") != node_id:
-                                continue
-                            raw_generation = e.data.get("generation")
-                            # Controls name the lifecycle they intend to mutate. Missing stamps are
-                            # legacy generation-0 only; a stale gen-0 click must never cancel a gen-1
-                            # worker merely because the numeric node id was reused after reset.
-                            if raw_generation is None:
-                                if generation != 0:
-                                    continue
-                            else:
-                                if isinstance(raw_generation, bool):
-                                    continue
-                                try:
-                                    event_generation = int(raw_generation)
-                                except (TypeError, ValueError, OverflowError):
-                                    continue
-                                if (isinstance(raw_generation, float)
-                                        and not raw_generation.is_integer()):
-                                    continue
-                                if event_generation != generation:
-                                    continue
-                            if e.type == EV_NODE_RESET:
-                                return "reset"
-                            if e.type == EV_NODE_ABORT:
-                                intervention = "abort"
-                        if (intervention is None and operator_drop_ids
-                                and isinstance(card_id, str) and card_id):
-                            # Fold only once an explicit post-start operator drop exists AND this node
-                            # actually carries a Card identity to match — a card-less worker can never
-                            # be a drop target (`_card_identity_spellings` returns nothing for a missing
-                            # id), so skipping the fold there is behaviour-preserving, not just cheaper.
-                            # This follows merge chains added before or during the eval without making
-                            # every 300 ms watcher poll replay the complete run. Any corrupt/ambiguous
-                            # ownership is deliberately a no-op rather than a kill of the wrong worker.
-                            try:
-                                active_spellings = _card_identity_spellings(
-                                    fold(current_events), card_id)
-                            except Exception:  # noqa: BLE001 - active cancellation must fail closed
-                                active_spellings = frozenset()
-                            if any(drop_id in active_spellings for drop_id in operator_drop_ids):
-                                intervention = "card_drop"
-                        return intervention
-                    async def _watch():
-                        nonlocal aborted, operator_card_dropped, superseded
-                        while True:
-                            await anyio.sleep(0.3)
-                            if cancel.is_set():
-                                return
-                            # Its OWN limiter, never anyio's shared default. Every `run_sync` in the
-                            # engine draws on that shared 40-token pool, and each in-flight eval's
-                            # `_run_eval` worker holds a token for the eval's whole (often multi-hour)
-                            # duration — so at `eval_parallel` near or above 40 (the config allows up
-                            # to 1024; 0 = AUTO = GPU count) the evals pin every token and this tick
-                            # queues BEHIND them. Operator abort/reset and both watchdog kills then go
-                            # blind until an eval finishes on its own, and over-admitted evals sit on
-                            # reserved GPUs while queued. A tick is a short poll, so a small dedicated
-                            # pool is always immediately available for it.
-                            intervention = await anyio.to_thread.run_sync(
-                                _intervention_seen, limiter=_watch_limiter())
-                            if intervention is not None:
-                                superseded = intervention == "reset"
-                                operator_card_dropped = intervention == "card_drop"
-                                aborted = intervention in {"abort", "card_drop"}
-                                cancel.set()
-                                return
-                    _tg.start_soon(_watch)
+                    _tg.start_soon(self._watch_for_intervention, node_id, generation, start_seq,
+                                   _card_id, cancel, _seen)
                     # Training-log monitor (ON by default in the product Settings since 2026-08-04;
                     # still off in a bare `Engine(...)`/`EngineOptions`): a sibling task that tails this eval's live
                     # training log on a timer while it runs in the worker thread, asks the Developer to
@@ -680,6 +771,13 @@ class EvaluateMixin:
                         return
                     cancel.set()                  # eval finished on its own …
                     _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
+                # Settle the watcher's ONE verdict now the group has closed. Same three questions the
+                # watcher used to answer by assigning three `nonlocal`s; asking them here keeps the
+                # branch order below (`superseded` -> `aborted` -> watchdog kill) unchanged.
+                _intervention = _seen.get("kind")
+                superseded = _intervention == "reset"
+                operator_card_dropped = _intervention == "card_drop"
+                aborted = _intervention in {"abort", "card_drop"}
                 total_eval = round(total_eval + (time.time() - _t0), 3)   # cumulative eval cost (#2)
                 # STALL SALVAGE: a stage the stall-watchdog tree-killed AFTER it had already printed its
                 # metric (a completed train+eval that only hung on teardown — a distributed finalize
@@ -1156,48 +1254,11 @@ class EvaluateMixin:
                     # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
                     # emission does not rewrite the metric, but the folded trust_gate policy
                     # can exclude high-precision signals from champion/breeding under gate/block.
-                    sigs = []
-                    # Scan the WHOLE solution surface, not just solution.py — a patch-gated multi-file
-                    # agent can hide answer-key access / leakage / the real computation in an in-surface
-                    # helper module that solution.py imports. Concatenate node.files so the reward-hack /
-                    # leakage / critic scans cover the imported code too (not only the clean entrypoint).
-                    scan_src = node.code + "".join(
-                        f"\n\n# --- {fn} ---\n{src}" for fn, src in (node.files or {}).items()
-                        if str(fn).replace("\\", "/").lower() != "solution.py")
-                    if self.reward_hack_detect:
-                        from looplab.trust.reward_hack import detect_reward_hacks
-                        protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
-                        # The grader-IMPORT waiver keys on the task genuinely MATERIALIZING
-                        # grader.py (an ASSET → calling `grader.score(...)` is the documented
-                        # grading contract, e.g. the in-workdir mlebench brief). Pass it explicitly
-                        # instead of letting the detector infer it from `protected`: that union also
-                        # carries the operator's protect list, and a merely-PROTECTED grader.py
-                        # (protect=["grader.py"], no asset) means "hands off", not "import me" —
-                        # inference from the union would wrongly waive the import tells for it.
-                        sigs += detect_reward_hacks(
-                            scan_src, res.metric, state.direction,
-                            protected_names=protected, stdout=res.stdout,
-                            # Match the asset key NORMALIZED (path separators + case), exactly like
-                            # the detector normalizes `protected_names` — the inference this call
-                            # replaced got that normalization for free, so 'Grader.py' or a
-                            # backslashed key must keep sanctioning the import here too.
-                            grader_import_ok=any(str(a).replace("\\", "/").lower() == "grader.py"
-                                                 for a in (self._assets or ())))
-                        # 4.3: also apply the hardened exploit ruleset grown by `looplab harden`
-                        # (hacker-fixer-solver) — each previously-discovered exploit stays guarded.
-                        if self._exploit_suite is not None:
-                            sigs += self._exploit_suite.scan(scan_src)
-                        # 4.4 sandbox instrumentation (RewardHackingAgents recipe): flag RUNTIME
-                        # writes to protected/frozen files — behavioral evidence a static scan of the
-                        # code can miss (a write via a helper, os.system, a template). Compares the
-                        # workdir against the assets/protected set the engine placed there.
-                        if self._workdir_audit:
-                            sigs += self._audit_workdir_writes(workdir, protected)
-                    # …and the leakage + critic gates, which are a NAMED rule (`_trust_gate_signals`)
-                    # rather than two more `sigs +=` lines: as inline concatenations, silencing them
-                    # was invisible to every trust test that does not drive a whole run. See that
-                    # method's docstring.
-                    sigs += self._trust_gate_signals(node, scan_src)
+                    # Both the surface and the findings over it are NAMED rules (doc 25 ES-03) — the
+                    # `code_digest` below must be the digest of the exact bytes that were scanned, so
+                    # the surface is read once, here, and handed to the scan.
+                    scan_src = self._trust_scan_surface(node)
+                    sigs = self._trust_scan_signals(node, res, state, workdir, scan_src)
                     if sigs:
                         # P1-7 versioned TrustEvidence: bind the evidence to a schema version + a digest
                         # of the exact scanned surface (provenance — which bytes produced these signals),
