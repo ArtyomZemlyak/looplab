@@ -909,8 +909,17 @@ def test_an_unset_kill_confidence_knob_never_becomes_a_zero_threshold(tmp_path, 
         stub._asha_live_kill_confidence = {"none": None, "not-a-number": "0.9",
                                            "bool": True}[knob]
 
+    # SETTLE on the verdict row instead of a fixed 0.2s slice. This test's precondition is that the
+    # judge was actually consulted, and a fixed window makes that a race the loaded full-suite run
+    # loses: observed failing once in a 17-minute serial gate ("precondition: ... the judge was
+    # consulted", judge.calls == 0) while passing 6/6 standalone. The predicate is the VERDICT row,
+    # not `judge.calls`: the row is appended strictly AFTER `kill = stop_decided and
+    # claim_watchdog_kill(...)`, so the "no kill" assertion below cannot pass merely because the loop
+    # stopped before the decision was made. Its sibling
+    # `test_the_judge_is_never_consulted_where_the_rank_test_would_not_kill` keeps its fixed window
+    # on purpose — it proves an ABSENCE, and there is no event whose arrival could settle that.
     _run_loop(stub, wd, spec, "max", signal, monkeypatch, finals=[0.8, 0.7, 0.6], curves=curves,
-              window=0.2)
+              until=lambda s: any(t == EV_ASHA_VERDICT for (t, _d) in s.store.events))
 
     assert judge.calls >= 1, "precondition: the rank gate held and the judge was consulted"
     assert signal.get("kill") is not True, (
