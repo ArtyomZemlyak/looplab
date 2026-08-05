@@ -61,7 +61,7 @@ What the check actually does (`looplab/agents/preflight.py`):
 
 | | |
 |---|---|
-| **When** | In the engine constructor, immediately after the credential check and **before any role is built** — so `run`, `resume`, `finalize` and the UI's spawned engines all go through it |
+| **When** | In the engine constructor, immediately after the credential check and **before any role is built** — so `run`, `resume`, `finalize` and the UI's spawned engines all go through it. It **refuses** wherever the command can still start work, and **warns** on a wrap-up-only entry point (below) |
 | **Cost** | One four-token completion per **distinct** target, not one per role. The ordinary single-model run pays exactly one; roles that differ only in credential are still probed separately |
 | **Bounds** | A 60 s whole-call wall guard and 2 retries. A refused connection, bad DNS or 401 is not retried at all, so the common failure is instant; the retries only forgive a transient 429/5xx |
 | **Shape** | The same probe (no stream, no cache, no reasoning) that the Web UI's `/api/llm/health` card issues, so a green card and a startable run mean the same thing |
@@ -69,6 +69,17 @@ What the check actually does (`looplab/agents/preflight.py`):
 
 A failure lists **every** unreachable role/target, not just the first, so one restart can fix a
 multi-provider setup. Run `looplab smoke` first if you want the same answer without launching anything.
+
+**Wrapping up a run that is already over is never refused.** Every sentence of the reasoning above is
+about a *proposal*, and a run past its terminal boundary makes none — it can only turn work already paid
+for into the report, the lessons, the cost roll-up and `tree.html`. Refusing there would cost the
+operator every artifact that needs no model at all and leave the run `finalization_pending` forever,
+with its spend stranded in `.llm-usage-outbox`. So `finalize` — and a `run`/`resume` that lands on a
+wrap-up boundary — runs the same probe through `wrap_up_endpoint_warning` instead: it proceeds and names
+what the missing model degrades (`(report unavailable)` for the report, nothing model-authored in
+cross-run memory), **before** the wrap-up starts, because those steps are marked complete once attempted
+and a later `finalize` will not redo them. See [`finalize`](cli-reference.md#finalize) for the full
+artifact-by-artifact list.
 
 ### Endpoint options
 

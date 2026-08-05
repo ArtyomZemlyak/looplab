@@ -89,6 +89,14 @@ _PIP_NAME: dict[str, str] = {
     "evaluate": "evaluate",
     "datasets": "datasets",
     "accelerate": "accelerate",
+    # Experiment loggers. Added 2026-08-05 from a live dense-retrieval run: the repo's Lightning
+    # trainer builds a `TensorBoardLogger`, tensorboard was absent, and the node spent a whole repair
+    # attempt on it — the ONE resource repairs are budgeted in. A logger is pure instrumentation, so
+    # installing it is strictly safer than letting the agent rewrite the trainer to drop logging (its
+    # other way out), which silently costs the run its training curves and with them the live ASHA
+    # and train-monitor signals. `tensorboardX` is the same contract under the older import name.
+    "tensorboard": "tensorboard",
+    "tensorboardX": "tensorboardX",
     "tensorflow": "tensorflow",
     "keras": "keras",
     "jax": "jax",

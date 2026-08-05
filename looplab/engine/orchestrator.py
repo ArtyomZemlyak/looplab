@@ -4971,14 +4971,40 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         local Python (`task.build_roles()` — the Toy/templated roles) and finishes in microseconds.
         Total by construction: an exotic role that raises on attribute access still answers "no LLM",
         which only ever costs fan-out, never correctness.
+
+        THE FACADE HAS TO BE OPENED, and this is where the first version got it wrong. Under the
+        shipped `unified_agent=True`, `self.researcher IS self.developer` — one `UnifiedAgent` — and
+        its `client`/`is_code_generating` forwarders come from `WrapsDeveloper`, so they describe the
+        DEVELOPER stage only (`agents/unified_agent.py::_wrapped` -> `_active_developer`). On every
+        task whose Developer is a fixed template but whose Researcher is an `LLMResearcher` —
+        classification, regression, timeseries — both probes therefore read the same client-less
+        template and the whole product default answered "no LLM" while calling the provider once per
+        node. Measured on `examples/classification_task.json` with stock Settings: `run_started`
+        recorded no `speculation_depth` at all (AUTO had settled to 0) even though the run's own
+        `llm_usage` rows show the Researcher on the wire before the first node existed. So descend
+        into the facade's own per-stage backends as well.
         """
+        seen: list = []
         for role in (getattr(self, "researcher", None), getattr(self, "developer", None)):
-            if role is None:
+            if role is None or any(role is other for other in seen):
                 continue
+            seen.append(role)
             try:
                 if getattr(role, "client", None) is not None:
                     return True
                 if getattr(role, "is_code_generating", False):
+                    return True
+                # A composing facade (UnifiedAgent) exposes its stages PUBLICLY, for the same reason
+                # the cost roll-up walks them: `researcher`/`developer` are the per-stage backends and
+                # `stage_clients` holds the clients no backend owns (strategy, pilot). Guard against
+                # self-reference so a role that names itself cannot loop.
+                for stage in (getattr(role, "researcher", None), getattr(role, "developer", None)):
+                    if stage is None or stage is role:
+                        continue
+                    if (getattr(stage, "client", None) is not None
+                            or getattr(stage, "is_code_generating", False)):
+                        return True
+                if any(client is not None for client in (getattr(role, "stage_clients", None) or ())):
                     return True
             except Exception:  # noqa: BLE001 — a proxy/property that raises is not evidence of an LLM
                 continue
@@ -5029,6 +5055,37 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         re-entry can prefer the log's pinned depth over a value re-derived from a different box
         (invariant #6) instead of refusing the resume — see `_require_pinned_speculation_receipt`.
         Anything unparseable degrades to OFF: hardware must never be able to turn speculation ON.
+
+        AUTO ALSO SETTLES TO OFF in three cases, all of them "this run cannot usefully prefetch".
+        Every one of them is AUTO-only: an EXPLICITLY spelled depth is honoured (or refused) exactly
+        as before, including the hidden calibration bootstrap, which spells ``speculation_depth=1`` on
+        the Toy adapter and must keep getting it.
+
+        1. A BUILD THAT CALLS NO LLM (`_build_calls_an_llm`, the same test and the same reasoning
+           `_resolve_llm_parallel` applies to the build axis one method up). A prefetch exists to
+           overlap the Developer's PROVIDER LATENCY with the running evaluation; a Toy/templated build
+           is pure local Python that finishes in microseconds, so the backlog buys nothing — and it
+           costs the property CLAUDE.md invariant #1 and `bench.py`'s "deterministic for the toy
+           backend" both state. MEASURED, on the documented offline smoke: with AUTO reaching depth 1
+           there, 8 identical runs produced TWO event orders (5x129 events, 3x126). The folded state,
+           champion and every metric were IDENTICAL in all eight — the divergence is a wall-clock race
+           between the producer and the eval terminal, where an eval that finishes first closes the
+           admitted batch and the in-flight head is acknowledged `skipped="stale"` and re-requested,
+           three extra rows. Nothing is mis-selected and nothing is double-paid, but the log's BYTES
+           stop being reproducible, and unlike the build-width case there is no smaller width to fall
+           back to: depth 1 IS the minimum. So the fix has to be the same one 5f86626d made for
+           builds — do not turn the overlap on where there is no latency to overlap.
+        2. A POLICY OTHER THAN ``greedy``, and 3. A RUN DIRECTORY WITH NO RUN ID. The admission block
+           in ``__init__`` raises ``ValueError`` for both (the speculative freshness test asks the
+           policy for the counterfactual next action and greedy is the only one the Card scorer was
+           built against; the run id is half of the re-entry identity check). Those refusals are right
+           for an operator who ASKED for a depth — they name a configuration that cannot do what was
+           requested — but wrong for a DEFAULT: refusing would mean ``looplab run --policy mcts`` (or
+           evolutionary/asha/bohb) no longer starts at all, i.e. a default flip that silently retires
+           four of the five shipped policies.
+
+        Same direction as the unparseable case above, and as the eval axis settling to 1 for a task
+        that declares itself CPU-locked: AUTO narrows itself to what the run can actually serve.
         """
         try:
             depth = int(value)
@@ -5036,6 +5093,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return 0, False
         if depth != -1:
             return depth, False
+        if (not self._build_calls_an_llm()
+                or getattr(self, "_policy_name", "") != SPECULATION_POLICY_SCOPE
+                or not self.run_dir.name.strip()):
+            # Report AUTO=False as well: the run is not speculating, so there is no AUTO treatment
+            # for re-entry to adopt, and a log that pinned a positive depth must still fail closed
+            # here rather than silently adopting it into a policy or a role set the treatment was
+            # never measured on.
+            return 0, False
         return min(64, max(1, int(self._eval_parallel))), True
 
     def _reconfigure_llm_broker(self, value) -> None:

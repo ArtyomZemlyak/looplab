@@ -1097,6 +1097,31 @@ class Settings(BaseSettings):
     #        The resolution happens once, in `Engine.__init__`, and it is the RESOLVED integer that is
     #        pinned by run_started, so replay/resume never re-derive a treatment from a different box.
     #    0 = off.  1..64 = that exact backlog cap (an explicit value always overrides AUTO).
+    # THE DEFAULT STAYS 0, AND THAT IS A BLOCKED CHANGE, NOT A PREFERENCE (2026-08-05). Flipping it
+    # to -1 (AUTO) is the operator's standing request and everything around it is ready — AUTO
+    # resolution, the run_started pin, the node-budget refund, and the three AUTO settle-to-off rules
+    # in `Engine._resolve_speculation_depth`. What blocks it is a defect in the Card DEBUG anchor that
+    # only a default could make everyone's problem:
+    #
+    #   `events/replay.py::_card_debuggable_leaf_ids` disqualifies a failed node the moment it has ANY
+    #   child. A receipt-bound `debug` Card's own work item IS such a child, so the instant its node
+    #   exists the Card's anchor dies and it folds to `action_receipt_incomplete`. Nothing noticed
+    #   while speculation was off, because the ordinary lane never re-checks a Card after its node
+    #   exists. The L5 freshness gate does — that is its whole job — so EVERY speculative debug
+    #   prefetch is superseded on sight, and the lane then authors a fresh unselectable Card per loop
+    #   turn until the runaway guard trips with "node creation not converging".
+    #
+    # Measured on a real 2-GPU run (`runs/rubert-dr-0805`, launched at AUTO): 2 nodes of a 12-node
+    # budget, then stuck. Reproduced offline at depth 1 on a task whose first node crashes: 2 nodes
+    # and 88 dead Cards, where the identical task with speculation off runs 12/12. Any run whose node
+    # FAILS reaches this, which on a real repo task is routine — so as a default it ends healthy runs
+    # early and blames the wrong thing.
+    #
+    # Fix the anchor first: a Card's own evidence nodes must not disqualify its own parent, and a
+    # discarded prefetch (`search/card_selection.py::is_unevaluated_speculative_discard` — already the
+    # run's single answer to "did this node spend budget") must not count as a child at all, since the
+    # Card lane's own policy view already hides it. Then flip this to -1.
+    #    -1 = AUTO. 0 = off (the default).  1..64 = that exact backlog cap.
     speculation_depth: int = Field(default=0, ge=-1, le=64)
     # Local evidence receipt produced by ``looplab speculation-gate``.  OPTIONAL, and deliberately
     # absent from the curated Settings UI.  It is the calibration BENCHMARK's receipt (scorer

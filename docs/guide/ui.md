@@ -245,14 +245,17 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   Read/compare/merge/write is covered by its own equivalent local/interprocess locking contract (separate from
   global Settings), and a stale editor receives a
   structured `run_config_revision_conflict` instead of overwriting a newer snapshot.
-- **Settings page** — a versioned, server-owned editor catalogue with 158 of the 194 direct
+- **Settings page** — a versioned, server-owned editor catalogue with 162 of the 194 direct
   `Settings` fields in 10 groups (the live counts are
   `serve/settings_ui_schema.py::SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT` /
   `…_SETTINGS_FIELD_COUNT`; note the docs↔code parity test `tests/test_config_docs_sync.py` pins
   [configuration.md](configuration.md), **not** this page, so re-read those constants before quoting
   them). The default **Essential** view contains 18 high-frequency keys, while
   search spans the complete catalogue. It is intentionally curated, not an exhaustive mirror: fields outside
-  the catalogue remain configurable through environment/config inputs and are preserved by sparse writes.
+  the catalogue remain configurable through environment/config inputs and are preserved by sparse writes —
+  but which ones those are is reconciled against the live model at load, with a written reason per omission
+  (`SETTINGS_UI_SCHEMA_UNCURATED_FIELDS`), and each row pins the default its help text was reviewed against
+  so a flipped default cannot leave the copy behind.
   The packaged catalogue is v1 and its HTTP/editor contract is v2; the schema's weak ETag is a semantic cache
   revision, not a settings mutation token.
   The **API key**

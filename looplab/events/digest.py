@@ -291,8 +291,13 @@ def watchdog_reflection(events, max_shown: int = 2, *, state: RunState | None = 
     so they never reach `state`; this reads them straight off the raw event rows (the caller passes
     `store.read_all()`), keeps only the LATEST observation per node so a chatty log can't flood the
     prompt, and bounds to the most-recent `max_shown` nodes. Complements `_failure_reflection` (which
-    surfaces the TERMINAL reason of a killed/failed node): with the default config both watchdog kills
-    are OFF, so the flagged node usually runs to completion and its live curve would otherwise be lost.
+    surfaces the TERMINAL reason of a killed/failed node): both watchdog kills ship ON since
+    2026-08-04, but each is narrow BY CONSTRUCTION and most flags do NOT kill — the train monitor acts
+    only on a 'broken' verdict at or above `train_monitor_kill_confidence` (a plateau is 'watch'), and
+    ASHA only past its grace window with `asha_live_min_siblings` finished same-resource peers and an
+    LLM judge's stop verdict. So the flagged node still usually runs to completion, and without this
+    its live curve would be lost — the reason this digest exists is unchanged by the flip; only the
+    "kills are off" premise was.
     Advisory wording (the watchdogs are heuristics). "" when there's nothing to say — so the prompt is
     byte-identical when off or quiet. Pure; extracted here so `tests/test_signal_delivery.py` exercises
     it directly."""

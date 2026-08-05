@@ -171,6 +171,26 @@ from the folded `run_started` record;
 `trust_gate_changed` owns later trust-gate edits. Those event-pinned semantics win over a stale or hand-edited
 snapshot.
 
+**The concurrency WIDTHS are pinned too, and AUTO is what makes that safe.** `eval_parallel` and
+`llm_parallel` ship the AUTO sentinel `0`, and `speculation_depth` accepts `-1` for the same thing
+(it ships `0` = off). AUTO resolves off the **live box** (`_detect_gpu_ids`) — one evaluation per
+detected GPU, an LLM/build width derived from that, one prefetch per evaluation lane.
+`config.snapshot.json` therefore stores your *intent*, never the treatment the log
+was written under, so before this was pinned a 1-GPU run resumed on a 2-GPU host silently doubled its
+eval concurrency and flipped the build spine from the serial one to the concurrent-append seam
+mid-log. `run_started` now records the **resolved integers**, and resume applies one rule per axis:
+
+| How the axis was spelled on the resume command | What resume does |
+|---|---|
+| **AUTO** (`0` for the two widths — which is their default — or `-1` for `speculation_depth`) | **Adopts** the width the log pinned — including on a *smaller* box. One treatment spans the whole log; a width above what the hardware can serve is bounded by the resource scheduler, not by silently rewriting the treatment. |
+| An **explicit** width equal to the pin | Proceeds unchanged. |
+| An **explicit** width that disagrees with the pin | **Fails closed**, naming the axis and both values, and writes nothing to the log it declined to trust. |
+| Any width, on an axis an operator already retuned mid-run through a durable `budget_extend` control event | **Left alone.** That override is re-applied every loop, so the launch flag has no effect on the running width and refusing over it would be a false alarm. |
+
+A log written before widths were pinned records none, and resume then keeps this process's own startup
+resolution — byte-identical to the pre-pin behaviour, because inventing a width for a legacy log would
+be exactly the re-derivation the pin exists to prevent.
+
 **A positive-depth run pins its speculation LANE, not a receipt.** On any workload other than the shipped
 quadratic Toy adapter the run takes the **product lane**: `run_started` pins the search *treatment*
 (`card_driven_selection`, the resolved `speculation_depth`, the `greedy` policy scope) plus a lane token,
@@ -198,6 +218,12 @@ already exists must stay resumable even when its recorded spec is one a newer va
 submit. Those refusals are printed as `warning: …` on stderr instead — the diagnosis survives, only the
 refusal is dropped (see the `eval.metric.path` note in [Tasks](tasks.md)).
 
+**The LLM endpoint preflight depends on what this resume can DO.** A resume that lifts a finished or
+stopped run back into the loop will propose again, so an unreachable endpoint is refused exactly as on
+`run`. A resume that lands on a wrap-up boundary — the run has an incomplete terminal projection, or a
+pending finalize — can only complete that wrap-up, so the same probe warns instead and names what the
+missing model costs; see [`finalize`](#finalize).
+
 ---
 
 ## `stop`
@@ -224,6 +250,31 @@ looplab finalize RUN_DIR [--task-file TASK.json]
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory to stop and wrap up |
 | `--task-file PATH` | `RUN_DIR/task.snapshot.json` | Explicit task definition for recovery of a legacy run whose canonical task snapshot is absent |
+
+**A dead LLM endpoint does not block the wrap-up.** `backend` defaults to `llm`, and the
+[endpoint preflight](llm-and-agents.md#endpoint-preflight-before-a-run-starts) refuses a run whose model
+is unreachable — but a run that is already over makes no proposals, so there is nothing there for a
+missing model to degrade into a false success. On a **wrap-up-only** entry point the same probe warns
+instead of refusing and the wrap-up proceeds:
+
+```
+⚠ LLM endpoint unreachable while wrapping up: the default target (deepseek-v4-flash at http://…): …
+  This run is over, so no proposal can degrade — wrapping it up anyway. What the missing model costs:
+    · end-of-run report → the placeholder "(report unavailable)", not the written report
+    · cross-run lessons, skills and curation → nothing the model would have authored; …
+finalized RUN_DIR — wrapped up WITHOUT the model: …
+```
+
+| | Without a reachable model |
+|---|---|
+| **Still written** | budget summary, diversity archive, case + concept capsule, LLM cost roll-up, `readmodel.sqlite`, `trace.json`, `tree.html`, and the `finalization_finished` completion marker — none of them need a model |
+| **Degraded** | the end-of-run report is the literal placeholder `"(report unavailable)"`; nothing model-authored reaches cross-run memory (the reflection note and each curation log still record the run deterministically) |
+| **Irreversible** | each step is marked complete once attempted, so bringing the endpoint back and re-running `finalize` is a no-op — which is why the warning is printed **before** the wrap-up runs. Stop there if you want the written report and lessons |
+
+The wrap-up-only entry points are `finalize`, and a `run`/`resume` that lands on a boundary it may only
+complete (`run has an incomplete terminal projection …` / `run has a pending finalize …`). A `resume`
+that would **lift** a finished or stopped run back into the loop can still propose, so it keeps the full
+refusal.
 
 ---
 

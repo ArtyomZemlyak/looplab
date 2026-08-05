@@ -503,7 +503,8 @@ class EvaluateMixin:
                                 cancel.set()
                                 return
                     _tg.start_soon(_watch)
-                    # Training-log monitor (off by default): a sibling task that tails this eval's live
+                    # Training-log monitor (ON by default in the product Settings since 2026-08-04;
+                    # still off in a bare `Engine(...)`/`EngineOptions`): a sibling task that tails this eval's live
                     # training log on a timer while it runs in the worker thread, asks the Developer to
                     # judge its health, and records the verdict (advisory unless kill is enabled).
                     # Cancelled with the eval by `_tg.cancel_scope.cancel()` below. Gated on the
@@ -518,7 +519,8 @@ class EvaluateMixin:
                             f" Experiment: {_rationale}" if _rationale else "")
                         _tg.start_soon(self._monitor_training, node_id, generation, workdir, cancel,
                                        _mon_ctx, kill_signal, _log_snapshot, _log_plan)
-                    # ASHA live-curve rank watchdog (off by default): a sibling task that reads the live
+                    # ASHA live-curve rank watchdog (ON by default in the product Settings since
+                    # 2026-08-04; still off in a bare `Engine(...)`): a sibling task that reads the live
                     # log's latest INTERMEDIATE metric and ranks it against finished siblings; advisory
                     # unless asha_live_kill. Same command-eval gate (needs a live log + the metric spec).
                     if getattr(self, "_asha_live", False) and isinstance(getattr(self, "_eval_spec", None), dict):

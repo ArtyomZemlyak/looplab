@@ -560,6 +560,18 @@ untrusted tier.
   the separate atomic `card_scoring` treatment (explore/balanced/exploit plus bounded novelty and
   coverage weights); it ranks only Cards that have already passed durable readiness and live-anchor
   checks.
+- **Speculative pre-build** (`speculation_depth`, `0` = off by default) — while the current
+  experiments evaluate, the Card the scorer predicts you will pick next can *already be built* by an
+  isolated second Researcher/Developer pair. `-1` = AUTO resolves to the settled `eval_parallel` (one
+  prefetch per evaluation lane); AUTO settles to *off* where a prefetch cannot help — a build whose
+  roles call no LLM (`--backend toy`), a policy other than `greedy`, a run directory with no run id —
+  rather than refusing the run the way a spelled depth would. This is the half of the Card lane that
+  `card_driven_selection` alone does not buy: speculation needs both, and at depth `0` nothing
+  pre-builds. A prediction that misses is discarded *before* it reaches a sandbox — a
+  `node_failed(reason=superseded)` with zero eval seconds — and its node-budget slot is refunded when
+  it can prove it never ran. **It is not on by default yet**, and that is a blocked change rather than
+  a preference: see
+  [Why speculation is not on by default yet](configuration.md#why-speculation-is-not-on-by-default-yet).
 - **Unified agent** (`unified_agent`, on by default) — one LLM identity plays Researcher +
   Developer (+ Strategist) across stages, choosing its model/toolset per stage and driving the next
   macro action within a *pure legal-action gate* that keeps pipeline discipline. Set

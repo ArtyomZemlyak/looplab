@@ -253,6 +253,54 @@ def test_auto_build_width_still_follows_the_box_for_an_llm_backed_build(tmp_path
     assert agentic._llm_parallel == 4
 
 
+def test_the_unified_agent_facade_does_not_hide_an_llm_backed_researcher(tmp_path, monkeypatch):
+    """The shipped `unified_agent=True` shape, which the first version of this predicate misread.
+
+    In unified mode `researcher IS developer` — one `UnifiedAgent` — and its
+    `client`/`is_code_generating` forwarders come from `WrapsDeveloper`, so they describe the
+    DEVELOPER stage only. On every adapter with a TEMPLATED Developer but an `LLMResearcher`
+    (classification, regression, timeseries) both of `_build_calls_an_llm`'s probes therefore read
+    the same client-less template, the whole product default answered "no LLM", and AUTO pinned the
+    build width to 1 while the run called the provider once per node. Verified against a real run of
+    `examples/classification_task.json`, whose `llm_usage` rows show the Researcher on the wire
+    before the first node existed. The stand-in below reproduces exactly that shape: one object for
+    both roles, no client of its own, an LLM-backed `researcher` stage and a templated `developer`.
+    """
+    monkeypatch.setattr(_orch, "_detect_gpu_ids", lambda: [0, 1, 2, 3])
+    _gpu_capable(monkeypatch)
+    task = ToyTask()
+
+    class _Facade:
+        """`UnifiedAgent`'s shape: public per-stage backends, a Developer-facing `client` forwarder."""
+
+        def __init__(self):
+            self.researcher = ToyResearcher(task.bounds)
+            self.researcher.client = object()      # the LLMResearcher marker
+            self.developer = ToyObjectiveDeveloper()   # a template: no client, not code-generating
+            self.stage_clients = []
+
+        @property
+        def client(self):                          # WrapsDeveloper: delegates to the DEVELOPER
+            return getattr(self.developer, "client", None)
+
+    facade = _Facade()
+    assert facade.client is None and not getattr(facade, "is_code_generating", False)
+    engine = Engine(tmp_path / "unified", task=task, researcher=facade, developer=facade,
+                    sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=2),
+                    eval_parallel=0, llm_parallel=0)
+    assert engine._build_calls_an_llm() is True
+    assert engine._llm_parallel == 4
+
+    # …and the offline shape stays offline: the same facade with NO client anywhere still answers no,
+    # so `--backend toy` keeps its serial, byte-reproducible build spine.
+    facade.researcher.client = None
+    offline = Engine(tmp_path / "unified-offline", task=task, researcher=facade, developer=facade,
+                     sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=2),
+                     eval_parallel=0, llm_parallel=0)
+    assert offline._build_calls_an_llm() is False
+    assert offline._llm_parallel == 1
+
+
 def test_an_explicitly_spelled_toy_width_is_still_honoured(tmp_path, monkeypatch):
     # The narrowing is a resolution of AUTO, not a veto: an operator who asks a toy run to fan out
     # (a concurrency test) gets the fan-out, and its nondeterministic byte order with it.

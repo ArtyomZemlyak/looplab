@@ -55,8 +55,20 @@ def _repo_task(tmp_path, *, body: str = 'import json; print(json.dumps({"metric"
     )
 
 
-def _engine(run_dir, task, **kwargs) -> Engine:
+def _engine(run_dir, task, *, llm_roles: bool = False, **kwargs) -> Engine:
+    """One Engine over `task`'s own roles.
+
+    `llm_roles=True` marks the Developer as code-generating, which is what a real RepoTask
+    Developer declares under `backend="llm"`. It matters only for AUTO widths: since 2026-08-05
+    `speculation_depth=-1` settles to 0 when NO role calls a provider
+    (`Engine._build_calls_an_llm`), because a prefetch exists to overlap provider latency and a
+    role pair built with no client has none. `task.build_roles()` here takes no client, so the
+    default fixture is exactly that "nothing to overlap" case — the AUTO-WIDTH tests below have to
+    opt in to be testing the width at all rather than the settle-to-off rule.
+    """
     researcher, developer = task.build_roles()
+    if llm_roles:
+        developer.is_code_generating = True
     return Engine(
         run_dir,
         task=task,
@@ -457,7 +469,7 @@ def test_auto_depth_follows_the_settled_eval_width(tmp_path, monkeypatch):
     task = _repo_task(tmp_path)
     # Explicit eval_parallel: AUTO depth is exactly that width.
     engine = _engine(
-        tmp_path / "auto-explicit-width", task,
+        tmp_path / "auto-explicit-width", task, llm_roles=True,
         card_driven_selection=True, speculation_depth=-1, eval_parallel=3)
     assert engine._eval_parallel == 3
     assert engine.speculation_depth == 3
@@ -469,13 +481,13 @@ def test_auto_depth_follows_the_settled_eval_width(tmp_path, monkeypatch):
     import looplab.engine.orchestrator as orchestrator
     monkeypatch.setattr(orchestrator, "_detect_gpu_ids", lambda: [0, 1, 2, 3])
     gpu_auto = _engine(
-        tmp_path / "auto-gpu-width", task,
+        tmp_path / "auto-gpu-width", task, llm_roles=True,
         card_driven_selection=True, speculation_depth=-1, eval_parallel=0)
     assert gpu_auto._eval_parallel == 4 and gpu_auto.speculation_depth == 4
 
     monkeypatch.setattr(orchestrator, "_detect_gpu_ids", lambda: [])
     cpu_auto = _engine(
-        tmp_path / "auto-cpu-width", task,
+        tmp_path / "auto-cpu-width", task, llm_roles=True,
         card_driven_selection=True, speculation_depth=-1, eval_parallel=0)
     assert cpu_auto._eval_parallel == 1 and cpu_auto.speculation_depth == 1
 
@@ -493,7 +505,7 @@ def test_auto_depth_follows_the_settled_eval_width(tmp_path, monkeypatch):
 def test_auto_depth_is_clamped_and_never_reaches_the_durable_log_unresolved(tmp_path):
     task = _repo_task(tmp_path)
     wide = _engine(
-        tmp_path / "auto-clamped", task,
+        tmp_path / "auto-clamped", task, llm_roles=True,
         card_driven_selection=True, speculation_depth=-1, eval_parallel=1024)
     assert wide.speculation_depth == 64                    # clamped to the field ceiling
     pinned = wide._run_start_pinned_values()
@@ -504,7 +516,7 @@ def test_auto_depth_adopts_the_pinned_depth_on_a_differently_sized_box(tmp_path)
     """Invariant #6: the run_started record wins over a live AUTO re-resolution."""
     task = _repo_task(tmp_path)
     run_dir = tmp_path / "auto-resume"
-    first = _engine(run_dir, task, card_driven_selection=True,
+    first = _engine(run_dir, task, llm_roles=True, card_driven_selection=True,
                     speculation_depth=-1, eval_parallel=4)
     assert first.speculation_depth == 4
     first.store.append("run_started", {
@@ -515,7 +527,7 @@ def test_auto_depth_adopts_the_pinned_depth_on_a_differently_sized_box(tmp_path)
     })
 
     # Same run, resumed on a two-lane box: AUTO re-resolves to 2, the log says 4, the log wins.
-    resumed = _engine(run_dir, task, card_driven_selection=True,
+    resumed = _engine(run_dir, task, llm_roles=True, card_driven_selection=True,
                       speculation_depth=-1, eval_parallel=2)
     assert resumed.speculation_depth == 2
     resumed._require_pinned_speculation_receipt(fold(resumed.store.read_all()))
@@ -587,11 +599,34 @@ def test_a_speculative_build_must_not_consume_an_evaluation_before_confirmation(
 
 
 def test_the_invariant_is_wired_at_the_single_dispatch_funnel():
-    """A helper nobody calls is a hope, not an invariant — pin the call site itself."""
-    source = inspect.getsource(Engine._evaluate)
-    assert "_assert_speculative_selection_confirmed" in source
+    """A helper nobody calls is a hope, not an invariant — pin the call site itself.
+
+    Pinned on the AST, not on the method NAME appearing in `_evaluate`'s source: `_evaluate` carries a
+    why-comment naming this helper, so a substring test is satisfied with the call deleted outright,
+    and satisfied again with the call moved AFTER the workdir — the one ordering it exists to forbid.
+    """
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(Engine._evaluate)))
+    calls = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+             and node.func.attr == "_assert_speculative_selection_confirmed"
+             and isinstance(node.func.value, ast.Name) and node.func.value.id == "self"]
+    assert len(calls) == 1, (
+        f"`_evaluate` must CALL the invariant exactly once (found {len(calls)}); "
+        "a comment naming it is not a call site")
+    assert [ast.unparse(arg) for arg in calls[0].args] == ["state", "node"], (
+        f"the funnel calls it as `{ast.unparse(calls[0])}` — the folded state and node are what it judges")
+
     # It must run BEFORE anything that can start a sandbox: the workdir is the first such step.
-    assert source.index("_assert_speculative_selection_confirmed") < source.index('"nodes"')
+    workdirs = [node for node in ast.walk(tree)
+                if isinstance(node, ast.Constant) and node.value == "nodes"]
+    assert workdirs, "`_evaluate` no longer builds the node workdir under `nodes/`"
+    assert calls[0].lineno < min(node.lineno for node in workdirs), (
+        "the invariant is checked AFTER the workdir is derived — an unconfirmed prediction can "
+        "already be on its way into a sandbox")
+
     # `assert` statements vanish under `python -O`; this one must not.
     body = inspect.getsource(Engine._assert_speculative_selection_confirmed)
     assert "raise SpeculativeEvaluationInvariantError" in body
