@@ -570,8 +570,11 @@ button { font: inherit; }
 .hyp-stmt { min-width: 0; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
 .hyp-src { display: inline-flex; vertical-align: -1px; color: var(--fg-dim); }
 
-/* L6 Card lifecycle board. Seven frozen lanes stay visible; future derived statuses are inserted before
-   Dropped and the column rail scrolls horizontally instead of compressing the safe DTO into unreadable cards. */
+/* L6 Card lifecycle board. Six frozen lanes stay visible (`coded` is unreachable from the projection and
+   now renders only if occupied); future derived statuses are inserted before Dropped and the column rail
+   scrolls horizontally instead of compressing the safe DTO into unreadable cards. The board therefore has
+   an intrinsic MINIMUM width that grows with the lane count — 6 x 225px + 5 x 8px = 1390px — which is why
+   its panel takes the wider `size="board"` shell rather than the 1100px reading width (PanelShell.jsx). */
 .card-projection-note { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; padding: 6px 8px;
   border: 1px solid color-mix(in srgb, var(--working) 55%, var(--line)); border-radius: 7px;
   background: color-mix(in srgb, var(--working) 7%, var(--bg-2)); color: var(--working-text); font-size: 11px; }
@@ -588,6 +591,11 @@ button { font: inherit; }
 .card-col.card-dropped .card-col-h { color: var(--fg-mut); }
 .card-kanban-card { min-width: 0; margin-bottom: 6px; padding: 7px; border: 1px solid var(--border);
   border-radius: 7px; background: var(--bg-3); font-size: 11px; overflow-wrap: anywhere; }
+/* The Evaluated lane holds finished work, not successful work: a crashed node and a superseded
+   speculative prefetch land there beside a real result. Mark the ones that produced nothing so the lane
+   is scannable — the chip carries the words, this carries the shape (never colour alone). */
+.card-kanban-card.card-outcome-failed { border-left: 3px solid var(--fail); }
+.card-kanban-card.card-outcome-discarded { border-left: 3px solid var(--fg-mut); }
 .card-kanban-stmt { display: flex; align-items: flex-start; gap: 4px; font-size: 12px; line-height: 1.35; }
 .card-kanban-stmt > span:last-child { min-width: 0; }
 .card-kanban-meta, .card-kanban-tags, .card-kanban-blockers, .card-kanban-evidence {
@@ -2246,6 +2254,10 @@ pre.code.event-json { max-height: 220px; }
 .assistant-direct-confirm .asst-perm-actions { position: sticky; bottom: 0; z-index: 1;
   padding-top: 8px; background: var(--bg-1); }
 .assistant-direct-identity { white-space: normal; overflow-wrap: anywhere; word-break: break-all; }
+/* Between the phone rule below (which goes full-bleed) and a desktop window there is a wide band the
+   JupyterHub proxy lands in: the LoopLab page is already inside JH's chrome, so 36px of backdrop on each
+   side is 72px the panel does not get. Give it back before the content has to scroll. */
+@media (max-width: 1100px) { .overlay { padding: 16px; } }
 @media (max-width: 900px) {
   .overlay > .panel .btn.sm,
   .overlay > .panel .conv-toggle .seg,

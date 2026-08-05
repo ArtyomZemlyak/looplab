@@ -2778,12 +2778,30 @@ const _CARD_COLUMNS = [
   ['built-awaiting-commit', 'Awaiting commit', 'build finished; durable node commit is pending'],
   ['coded', 'Coded', 'code exists and is waiting to run'],
   ['running', 'Running', 'evaluation is in flight'],
-  ['evaluated', 'Evaluated', 'evidence has reached a verdict'],
+  // NOT "reached a verdict": this lane is the projection's `else` branch (`events/replay.py::
+  // _derive_cards` step 6) — evidence exists, none of it is pending, and it is not all gate-excluded.
+  // A Card whose only node CRASHED or was SUPERSEDED before it ran lands here too, so the lane means
+  // "the work is over" and the per-card outcome chip below says whether anything came of it. Measured
+  // on the 46 local runs: 15 of the 113 Cards in this lane have no successful evidence node at all.
+  ['evaluated', 'Evaluated', 'work is terminal — each Card says whether it produced a result'],
   ['gated', 'Gated', 'trust or breeding gates exclude the available evidence'],
   ['dropped', 'Dropped', 'operator or engine removed the work item'],
 ]
+// Lanes that stay visible while empty, so the operator can see the pipeline's shape rather than a
+// board that reflows on every fold. `coded` is deliberately NOT one of them: `_derive_cards` collapses
+// every pending node straight to `running` and documents that the lane is unreachable, so it was 225px
+// of guaranteed-empty column on every board (0 of 257 Cards across the 46 local runs). It keeps its
+// entry above, so the day the projection splits the pending branch on `Node.eval_started` the lane
+// re-appears by itself — the same "occupied or nothing" rule the two speculative lanes already use.
 const _CARD_FROZEN_STATUSES = new Set(['proposed', 'building', 'coded', 'running', 'evaluated', 'gated', 'dropped'])
-const _CARD_OPTIONAL_STATUSES = new Set(['speculating', 'built-awaiting-commit'])
+const _CARD_OPTIONAL_STATUSES = new Set(['speculating', 'built-awaiting-commit', 'coded'])
+// Failure reasons that mean "this work was called off", not "this idea failed". Mirrors the fold's own
+// split — `events/replay.py::_FAILURE_SPIKE_IGNORED_REASONS` — which is what stops a superseded
+// speculative prefetch from counting toward the run's failure spike. Kept verbatim rather than
+// re-derived: the two must agree about what a discard is, and this file cannot import the Python set.
+const _CARD_DISCARD_REASONS = new Set([
+  'aborted', 'cancelled', 'card_dropped', 'proxy_skipped', 'superseded',
+])
 const _CARD_ICON = {
   researcher: 'search', deep_research: 'bulb', human: 'user', strategist: 'compass',
   operator: 'user', engine: 'bot', novelty: 'bulb',
@@ -2824,6 +2842,43 @@ function _cardLanes(cards) {
     .map(status => [status, _cardStatusLabel(status), 'new derived lifecycle status'])
   const dropped = configured.find(([status]) => status === 'dropped')
   return [...configured.filter(([status]) => status !== 'dropped'), ...extra, dropped].filter(Boolean)
+}
+
+// What actually became of a Card's work, read from the evidence nodes the DTO already links to.
+//
+// The lifecycle `status` cannot answer this: `evaluated` is the projection's catch-all for "terminal
+// and not gate-excluded", so a crashed node, a speculative node superseded before it ever started, and
+// a node that produced a real metric are indistinguishable on the board. They were rendered
+// identically — same lane, same green heading, and (with `verdict` still `open`, which the meta row
+// hides) not one visible difference between them. Derived here, never folded: the fold owns the lane,
+// this owns the outcome.
+//
+// Returns null when there is nothing to say (no evidence yet — the Proposed lane already says that),
+// and reports `unknown` rather than guessing when the node projection is unavailable to this viewer.
+function _cardWorkOutcome(card, nodes) {
+  const evidence = _cardNodes(card.evidence)
+  if (evidence.length === 0) return null
+  if (!isRecord(nodes)) return { kind: 'unknown' }
+  const linked = evidence.map(id => nodes[String(id)]).filter(isRecord)
+  if (linked.length !== evidence.length) return { kind: 'unknown' }
+  if (linked.some(node => node.status === 'evaluated')) return { kind: 'result' }
+  // Anything still in flight is the Running lane's story, not an outcome.
+  if (linked.some(node => node.status !== 'failed')) return null
+  const reasons = [...new Set(linked
+    .map(node => _cardText(node.error_reason))
+    .map(reason => (reason || 'unreported').toLowerCase()))].slice(0, 3)
+  return {
+    kind: reasons.every(reason => _CARD_DISCARD_REASONS.has(reason)) ? 'discarded' : 'failed',
+    reasons,
+  }
+}
+
+const _CARD_OUTCOME_CHIP = {
+  // `alarm` (not `warn`) for a real failure: the operator is scanning a lane of finished work for the
+  // ones that produced nothing, and `warn` is already spent on ordinary selection blockers.
+  failed: ['alarm', 'no result', 'every evidence node for this Card failed'],
+  discarded: ['warn', 'discarded', 'this work was called off before it produced a result'],
+  unknown: ['', 'outcome unknown', 'the evidence nodes are not in this projection'],
 }
 
 function _cardOrder(a, b) {
@@ -2909,7 +2964,7 @@ function _CardProjectionNotice({ projection, cards }) {
 }
 
 function _CardKanbanCard({
-  card, receipt, onSelect, onClose, onControl, controlState, controlsLocked,
+  card, receipt, outcome, onSelect, onClose, onControl, controlState, controlsLocked,
 }) {
   const statement = _cardText(card.statement) || `Card ${card.id}`
   const source = _cardText(card.source)
@@ -3040,7 +3095,9 @@ function _CardKanbanCard({
   // This is deliberately Card-scoped: the backend receives one Card id, so siblings that happen to
   // share a seed remain unchanged. The control changes the Card's research verdict, not its work lane.
   const abandonCard = () => control('abandon', {}, { verdict: 'abandoned' })
-  return <article className="card-kanban-card" data-card-id={card.id} aria-label={statement}
+  const outcomeChip = outcome && _CARD_OUTCOME_CHIP[outcome.kind]
+  return <article className={'card-kanban-card' + (outcomeChip ? ` card-outcome-${outcome.kind}` : '')}
+    data-card-id={card.id} data-outcome={outcome?.kind} aria-label={statement}
     aria-busy={ownPending ? 'true' : undefined}>
     <div className="card-kanban-stmt">
       <span className="hyp-src" title={source ? `source: ${source}` : 'source unavailable'}>
@@ -3050,6 +3107,8 @@ function _CardKanbanCard({
     </div>
     <div className="card-kanban-meta">
       <span className="chip xs" title="durable Card identity">{card.id}</span>
+      {outcomeChip && <span className={('chip xs ' + outcomeChip[0]).trim()} title={outcomeChip[2]}>
+        {outcomeChip[1]}{outcome.reasons?.length ? ` · ${outcome.reasons.join(', ')}` : ''}</span>}
       {verdict && verdict !== 'open' && <span
         className={'chip xs ' + (verdict === 'supported' ? 'ok' : verdict === 'abandoned' ? 'warn' : '')}
         title={`research verdict: ${verdict} (distinct from the work status)`}>{verdict}</span>}
@@ -3360,7 +3419,7 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
     }, onToast)
     if (feedback.kind === 'success') setAddDraft('')
   }
-  return <Panel title="Cards" sub={sub} onClose={onClose} wide>
+  return <Panel title="Cards" sub={sub} onClose={onClose} size="board">
     <_CardProjectionNotice projection={projection} cards={visibleCards} />
     {canAdd && <div className="toolbar" style={{ marginBottom: 10, gap: 6 }}>
       <input className="text" style={{ flex: 1 }} aria-label="New hypothesis"
@@ -3380,6 +3439,7 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
           </h3>
           {rows.map(card => <_CardKanbanCard key={card.id} card={card}
             receipt={isRecord(receipts[card.id]) ? receipts[card.id] : null}
+            outcome={_cardWorkOutcome(card, state.nodes)}
             controlState={optim[card.id]} controlsLocked={globalPending && !optim[card.id]?.pending}
             onSelect={onSelect} onClose={onClose}
             onControl={typeof runId === 'string' && runId ? cardControl : null} />)}
