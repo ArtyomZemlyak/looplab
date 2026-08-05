@@ -271,6 +271,49 @@ class _InjectedNodePlan(NamedTuple):
     implementation_ref: Optional[str]
 
 
+def _run_terminal_gate(state) -> bool:
+    """Whether the RUN has stopped accepting new eval work (doc 25 ES-06).
+
+    Written out at three eval-dispatch sites. `getattr` defaults are kept: two of the three read a
+    state the caller re-folded mid-loop, and a folded `RunState` always carries these three, so the
+    defaults cannot change a live decision — they only keep a hand-built test stub from raising.
+    """
+    return bool(
+        getattr(state, "paused", False)
+        or getattr(state, "finished", False)
+        or getattr(state, "stop_requested", None)
+    )
+
+
+def _eval_admission_current(state, node, generation, max_es) -> bool:
+    """Whether *node* may still be handed to an eval, re-checked after a bounded wait.
+
+    The same eight clauses were spelled at three dispatch sites — twice affirmatively and once
+    NEGATED inline — so the serial and parallel branches could drift on what "still admissible"
+    means while every test stayed green (doc 25 ES-06). Each clause is load-bearing:
+
+    * `node is None` / `attempt != generation` — the node was rebuilt while we waited, so the
+      reservation belongs to a lifecycle that no longer exists.
+    * `status is not pending` — something already terminated it; a second eval would breach the
+      one-terminal-event-per-node invariant.
+    * `tombstoned` / `id in aborted_nodes` — operator or engine withdrew it mid-wait.
+    * the run terminal gate — pause/stop/finish landed during the wait.
+    * `total_eval_seconds >= max_es` — the run's eval budget was spent while we waited.
+
+    Returns True only when ALL hold; callers keep their own refusal handling, which genuinely
+    differs per branch (skip / drop the candidate / stop admitting entirely).
+    """
+    return bool(
+        node is not None
+        and node.attempt == generation
+        and getattr(node, "status", NodeStatus.pending) is NodeStatus.pending
+        and not getattr(node, "tombstoned", False)
+        and node.id not in state.aborted_nodes
+        and not _run_terminal_gate(state)
+        and not (max_es is not None and state.total_eval_seconds >= max_es)
+    )
+
+
 def _detect_gpu_ids() -> list[int]:
     """Best-effort list of usable GPU ordinals for the per-eval GPU pinning + `max_parallel=0` AUTO
     (evaluate.py). Honors an existing `CUDA_VISIBLE_DEVICES` (respect an operator/scheduler that already
@@ -3690,21 +3733,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 if self._skip_if_aborted(a, waiting):
                                     skip_eval = True
                                     break
-                                terminal = bool(
-                                    getattr(waiting, "paused", False)
-                                    or getattr(waiting, "finished", False)
-                                    or getattr(waiting, "stop_requested", None)
-                                )
-                                lifecycle_current = bool(
-                                    live is not None
-                                    and live.attempt == generation
-                                    and live.status is NodeStatus.pending
-                                    and not live.tombstoned
-                                    and live.id not in waiting.aborted_nodes
-                                    and not terminal
-                                    and not (max_es is not None
-                                             and waiting.total_eval_seconds >= max_es)
-                                )
+                                lifecycle_current = _eval_admission_current(
+                                    waiting, live, generation, max_es)
                                 if not lifecycle_current:
                                     if live is not None and live.id in waiting.aborted_nodes:
                                         self._skip_if_aborted(a, waiting)
@@ -3725,21 +3755,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                     reservation = None
                                     skip_eval = True
                                     break
-                                terminal = bool(
-                                    getattr(admitted, "paused", False)
-                                    or getattr(admitted, "finished", False)
-                                    or getattr(admitted, "stop_requested", None)
-                                )
-                                if (
-                                    live is None
-                                    or live.attempt != generation
-                                    or live.status is not NodeStatus.pending
-                                    or live.tombstoned
-                                    or live.id in admitted.aborted_nodes
-                                    or terminal
-                                    or (max_es is not None
-                                        and admitted.total_eval_seconds >= max_es)
-                                ):
+                                if not _eval_admission_current(
+                                        admitted, live, generation, max_es):
                                     self._release_gpus(reservation.get("gpu_ids"))
                                     reservation = None
                                     if live is not None and live.id in admitted.aborted_nodes:
@@ -3892,22 +3909,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                     pending.pop(chosen_index)
                                     slots.release()
                                     continue
-                                terminal_gate = bool(
-                                    getattr(admitted, "paused", False)
-                                    or getattr(admitted, "finished", False)
-                                    or getattr(admitted, "stop_requested", None)
-                                )
-                                lifecycle_current = bool(
-                                    live is not None
-                                    and live.attempt == chosen_node.attempt
-                                    and getattr(live, "status", NodeStatus.pending)
-                                    is NodeStatus.pending
-                                    and not getattr(live, "tombstoned", False)
-                                    and live.id not in admitted.aborted_nodes
-                                    and not terminal_gate
-                                    and not (max_es is not None
-                                             and admitted.total_eval_seconds >= max_es)
-                                )
+                                terminal_gate = _run_terminal_gate(admitted)
+                                lifecycle_current = _eval_admission_current(
+                                    admitted, live, chosen_node.attempt, max_es)
                                 if (
                                     not lifecycle_current
                                     or not self._node_resource_reservation_is_current(

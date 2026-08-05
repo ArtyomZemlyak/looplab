@@ -632,6 +632,23 @@ of naming a location that has now moved once.
 
 *Recommendation:* Extract `_eval_admission_current(state, node, generation, max_es) -> bool` (and a `_release_and_skip(reservation)` helper) used by all three sites; the parallel branch's getattr-defensive variants can be folded in since RunState always has those attributes.
 
+*Resolution (2026-08-05):* `_eval_admission_current` + `_run_terminal_gate` are module-level in
+`orchestrator.py`; all three dispatch sites call them. The duplication was real and worse than the
+finding says — the third copy is the predicate NEGATED inline, so a reader comparing the branches has
+to invert eight clauses in their head to see they are the same rule.
+
+Two parts of the recommendation declined. `_release_and_skip(reservation)` is not extracted: each
+site's refusal is already one line and they genuinely MEAN different things — skip this eval, drop the
+candidate from the pending list, or stop admitting entirely — so one helper would have to take a mode
+flag that re-splits at the call site anyway. And the `getattr` defaults are KEPT rather than folded
+in: the finding is right that a folded `RunState`/`Node` always carries those fields, so they cannot
+change a live decision, but they are what lets a hand-built test stub exercise the fence without
+raising, and removing them buys nothing.
+
+The guard's real target is a FOURTH copy, so it AST-scans for any other function mentioning
+`aborted_nodes` + `total_eval_seconds` + `tombstoned` together. Teeth: deleting the `aborted_nodes`
+clause fails it.
+
 #### ES-07 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-02)**
 
 **Eight hand-rolled `for _attempt in range(64)` tail-CAS retry loops with no shared helper**
