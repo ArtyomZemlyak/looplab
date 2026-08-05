@@ -1145,6 +1145,36 @@ paid-retry exposure is the KNOWN GAP already documented on `_maybe_snapshot_conc
 
 *Recommendation:* Split each cue into a small method (or a list of (gate, render) callables) returning (hint_fragment, steering_entries); _set_complexity_hint becomes a loop that concatenates fragments and stamps the researcher once. This keeps byte-identical output while making cue addition/removal local, and lets test_signal_delivery reference cue functions instead of substrings.
 
+*Resolution (2026-08-05):* Done as recommended. Fifteen `_cue_*` methods, each returning
+`(hint_fragment, steering_entries)` under a uniform `(state, parent, researcher)` signature, listed
+in `PROPOSAL_CUES`; `_set_complexity_hint` is a loop plus the tail that stamps the researcher.
+
+Two things the mechanical description hides. **The cue ORDER is a contract twice over** — `hint` is
+prompt text the Researcher reads top-down, and `steering` becomes the Card's public
+`_steering_context` list — so a driver that sorted or set-collected the fragments would be a
+behaviour change with every fragment byte-identical. It is pinned as a literal, and the guard proves
+the pin bites by reordering two cues and by making the driver `sorted()`. **Two steering appends stay
+in the driver on purpose**: `sweep` and `strategy` contribute no hint TEXT (sweep stamps its own
+`_sweep_hint` attribute) and run AFTER the `_complexity_hint` stamp, so they are the tail, not cues.
+The guard pins them BY KIND rather than banning inline appends outright — a new text cue appending
+inline still fails.
+
+`_cue_cross_run_advisory` is the one cue with a side effect beyond its fragment, which is why it
+takes the researcher: it stamps `_cross_run_advisory_receipt`, the provenance tie between the node
+and the corpus its text came from. Computing the text without stamping would be worse than not
+computing it, so the side effect travels with the cue rather than being hoisted.
+
+Byte-identity was VERIFIED, not asserted: a scratch harness loaded the pre-split module alongside the
+new one and compared `_complexity_hint`, `_steering_context`, `_sweep_hint` and
+`_cross_run_advisory_receipt` across 400 randomised gate/state combinations — zero mismatches. That
+harness needs both versions of the module, so it cannot ship; what ships is
+`tests/test_proposal_cue_registry.py` (24), which pins the structure that keeps it true: the two-way
+registry scan (an unlisted cue is silently DEAD — the driver calls only what the tuple names), the
+order, the driver staying a driver, and that every cue returns the empty pair rather than `None`
+when gated off. The order test uses a real steering `kind`, because `normalize_steering_context`
+enforces a closed vocabulary and drops the whole snapshot on an unknown one — invented kinds would
+have compared an empty list to an empty list and proved nothing.
+
 #### EC-09 · MEDIUM · under-decomposition · effort: medium
 
 **strategy.py mixes four loosely-related subsystems; _concept_coverage_snapshot alone is ~240 lines**
