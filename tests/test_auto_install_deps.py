@@ -84,6 +84,30 @@ def test_the_retrieval_stack_is_installable_not_read_as_a_code_bug():
     assert deps.pip_package("faiss") == "faiss-cpu"
 
 
+def test_the_traceback_does_not_always_name_the_missing_library():
+    """The blind spot this scan HAS, and why the allowlist alone was never enough — an entry only
+    helps when `missing_modules` can see the name. Both shapes are verbatim from
+    `runs/rubert-dr-0805` node 0, and both cost that node a whole repair attempt:
+
+      * a library that GUARDS an optional dependency degrades it into something else entirely
+        (`transformers` → `is_accelerate_available()` → a bare NameError), so the distribution
+        appears nowhere in the exception;
+      * a library that re-raises its own missing-dependency error in prose rather than the
+        canonical wording.
+
+    `deps.triage_install_candidates` (see `tests/test_repair_budget_apportionment.py`) is the path
+    that reaches these, using the crash-triage agent's diagnosis as the source of the NAME while
+    keeping the traceback as the source of the EVIDENCE."""
+    guarded = ("  File \"/opt/conda/lib/python3.11/site-packages/transformers/modeling_utils.py\", "
+               "line 3736, in get_init_context\n    init_contexts = [no_init_weights(), "
+               "init_empty_weights()]\nNameError: name 'init_empty_weights' is not defined\n")
+    in_prose = ("ModuleNotFoundError: Neither `tensorboard` nor `tensorboardX` is available. "
+                "Try `pip install`ing either.\n")
+    assert deps.missing_modules(guarded) == []          # accelerate is nowhere in it
+    assert deps.missing_modules(in_prose) == []         # not the "No module named 'X'" wording
+    assert deps.is_installable("accelerate") and deps.is_installable("tensorboard")
+
+
 # ----------------------------------------------------------------- engine: install-then-rerun
 class _MissingLibThenInstalled:
     """First eval raises ModuleNotFoundError for a 'known' lib; once the injected installer drops a

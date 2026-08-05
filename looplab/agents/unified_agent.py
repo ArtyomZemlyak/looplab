@@ -293,6 +293,17 @@ class UnifiedAgent(WrapsDeveloper):
         "still reaches you, the install failed (offline / not on PyPI / a typo'd or local module) — "
         "prefer 'repair' (switch to an available library or fix the import) over 'reject_idea' unless "
         "the approach itself is unsound.\n"
+        "Also classify WHAT THE REPAIR WOULD CHANGE, in `repair_class`:\n"
+        "  - 'environment': the fix only reconciles the existing code with the INSTALLED libraries — "
+        "a moved import, a removed/renamed API, a major-version migration, a symbol an absent "
+        "optional dependency left undefined. The experiment itself is unchanged.\n"
+        "  - 'experiment': anything else — the node's own logic, a modelling decision, a run that was "
+        "too slow or too memory-hungry. When in doubt, say 'experiment'.\n"
+        "If the crash is caused by a library that is simply NOT INSTALLED — including one that "
+        "degraded into a NameError or AttributeError because the library guards it behind an "
+        "availability check — put ONLY that distribution's name in `missing_dependency` (e.g. "
+        "\"accelerate\"); the engine installs it and re-runs. Leave it empty for anything you would "
+        "fix by editing code.\n"
         "Consult the run if useful (read the code, find analogous experiments), then call "
         "`triage_crash` exactly once with your `action` and a one-sentence `rationale`."
     )
@@ -306,6 +317,12 @@ class UnifiedAgent(WrapsDeveloper):
         effects: the CALLER performs the repair and records the events."""
         if self._pilot_client is None:
             return None                       # no triage model -> engine uses the rule-based fallback
+        # DEFERRED (function-local) import of the repair-class registry: `agents` sits BELOW the
+        # engine, and re-spelling the vocabulary here is exactly the silent-typo failure the
+        # registry exists to prevent — the engine's budget apportionment keys on these strings.
+        # `engine/triage.py` is pure (stdlib-only at module scope), so this cannot cycle; keeping it
+        # call-local mirrors the `agents` -> `search` rule and adds no import-time edge upward.
+        from looplab.engine.triage import REPAIR_CLASSES, DEFAULT_REPAIR_CLASS, coerce_repair_class
         code_tail = (getattr(node, "code", "") or "")[-1500:]
         messages = [
             {"role": "system", "content": render(self.prompts, "triage_system", self._TRIAGE_SYSTEM)},
@@ -322,6 +339,18 @@ class UnifiedAgent(WrapsDeveloper):
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["repair", "abandon", "reject_idea"],
                            "description": "repair in place | abandon node | reject the whole idea."},
+                # The repair-class contract (engine/triage.py::REPAIR_CLASSES) — the enum is read
+                # from the registry, never re-spelled here, because the engine's budget
+                # apportionment keys on these exact strings.
+                "repair_class": {"type": "string", "enum": list(REPAIR_CLASSES),
+                                 "description": "environment = only reconciles the code with the "
+                                                "installed libraries (moved import, removed/renamed "
+                                                "API, version migration, absent dependency); "
+                                                "experiment = changes the experiment or its own logic."},
+                "missing_dependency": {"type": "string",
+                                       "description": "Distribution name to install, ONLY when the "
+                                                      "crash is caused by a library that is not "
+                                                      "installed. Empty otherwise."},
                 "rationale": {"type": "string"}},
                 "required": ["action"]}}}
 
@@ -329,10 +358,18 @@ class UnifiedAgent(WrapsDeveloper):
             action = str((args or {}).get("action", "")).strip()
             if action not in ("repair", "abandon", "reject_idea"):
                 action = "repair"             # default to the cheap, safe action on a malformed emit
-            return {"action": action, "rationale": str((args or {}).get("rationale", ""))[:300]}
+            # `repair_class` fails closed to "experiment" (the budgeted resource) on an absent or
+            # malformed emit; `missing_dependency` is a NAME, not a command — the engine still
+            # requires its own allowlist + traceback corroboration + an absence check before any
+            # install (runtime/deps.py::triage_install_candidates), so a hallucinated value here
+            # can at worst be ignored.
+            return {"action": action, "rationale": str((args or {}).get("rationale", ""))[:300],
+                    "repair_class": coerce_repair_class((args or {}).get("repair_class")),
+                    "missing_dependency": str((args or {}).get("missing_dependency", ""))[:100]}
 
         def _fallback(_messages) -> dict:
-            return {"action": "repair", "rationale": "fallback: attempt repair"}
+            return {"action": "repair", "rationale": "fallback: attempt repair",
+                    "repair_class": DEFAULT_REPAIR_CLASS, "missing_dependency": ""}
 
         # Binding only with a run state is what enables read_code / find_analogous on it; on any
         # transport failure triage degrades to the safe "attempt repair" action.

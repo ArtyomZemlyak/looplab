@@ -1,6 +1,7 @@
 """Pure triage/fingerprint helpers for the engine loop (extracted from orchestrator.py):
 workspace drift fingerprinting (`_dir_fingerprint` / `_shallow_fingerprint`), failure
 classification (`_failure_reason`), the anti-stuck error normalizer (`_normalize_error_sig`),
+the repair-class contract (`REPAIR_CLASSES` / `coerce_repair_class` / `_environment_failure`),
 the deterministic crash-triage fallback (`_rule_triage` + `_MECHANICAL_MARKERS`), the env-prep
 round bound (`_MAX_DEP_ROUNDS`), and the D1 holdout partition (`_holdout_indices`). All are
 pure module-level functions/constants — no engine state, no event-log writes — so they stay
@@ -198,19 +199,97 @@ _MECHANICAL_MARKERS = (
     "is not defined", "no attribute",
 )
 
+# --- The repair-class contract -----------------------------------------------------------------
+# WHAT a repair spends, as opposed to whether to repair at all. Two repairs can be equally
+# "mechanical" and still be completely different resources:
+#
+#   "environment" — the repair only RECONCILES the authored code with the installed environment: a
+#     removed/renamed library API, a moved import, an absent optional dependency, a major-version
+#     migration. The experiment is unchanged; the node is paying off a debt it did not incur (a
+#     year-stale `requirements.txt` against today's site-packages).
+#   "experiment"  — everything else: the node's own logic, a modelling decision, a too-slow or
+#     too-hungry run. This is the repair the operator budgeted for.
+#
+# Measured on `runs/rubert-dr-0805` node 0 (`inline_repair_attempts: 6`): SIX consecutive repairs
+# were PL-2.x / transformers / accelerate migrations — the triage rationale said "mechanical" every
+# single time — and the first genuine research question (a DDP `find_unused_parameters` modelling
+# decision) arrived with the budget already spent. A repo whose pinned deps are a year stale could
+# therefore never reach its own research question: every node re-pays the same migration.
+# `engine/evaluate.py` apportions the budget on this class — see the ledger comment there for how
+# it stays bounded (the pathological 2345-repair runaway is bounded by the SAME guards, because an
+# environment repair still has to move the failure forward to be charged as one).
+#
+# Registry: the SINGLE spelling of the class vocabulary. It is a duck-typed seam across three
+# sites — the triage agent's emit schema (`agents/unified_agent.py::triage_crash`), the engine's
+# coercion of the agent's answer (`engine/crash_repair.py::_triage_crash`) and the deterministic
+# fallback below — so a typo'd literal would silently disable the apportionment. Adding a class
+# means updating this tuple and `tests/test_repair_budget_apportionment.py`, which scans the
+# schema against it.
+REPAIR_CLASSES = ("environment", "experiment")
+# Fail-closed default: an absent, malformed or unknown class charges the EXPERIMENT budget, so a
+# model that never fills the field (or a log written before the field existed) behaves exactly as
+# the engine did before the split.
+DEFAULT_REPAIR_CLASS = "experiment"
+
+
+def coerce_repair_class(value) -> str:
+    """Normalize a triage-supplied repair class to a member of `REPAIR_CLASSES` (fail-closed to
+    `DEFAULT_REPAIR_CLASS`). One spelling of "is this a real class?" for every reader."""
+    v = str(value or "").strip().lower()
+    return v if v in REPAIR_CLASSES else DEFAULT_REPAIR_CLASS
+
+
+# Environment-reconciliation signatures — the ENGINE's own reading of the traceback, used to
+# corroborate the agent's `repair_class` (and to classify at all on the rule path). Deliberately
+# narrow: the exemption it unlocks is a second budget, so it answers "environment" only for the
+# shapes where the code and the INSTALLED library provably disagree.
+#   * an import/module failure of any wording — the classic moved-or-absent module;
+#   * a REMOVAL/deprecation announcement, which is a library telling you its API changed under you
+#     (`NotImplementedError: Support for 'validation_epoch_end' has been removed in v2.0.0`);
+#   * an unresolved name or a signature mismatch RAISED INSIDE AN INSTALLED PACKAGE — the frame is
+#     in site-packages, so the disagreement is with the library's own code, not with the node's.
+# Everything else — including a RuntimeError raised inside a library, e.g. DDP's
+# `find_unused_parameters` complaint, which is a modelling decision wearing a library's voice —
+# is experiment work.
+_ENV_IMPORT_MARKERS = ("ModuleNotFoundError", "ImportError", "No module named",
+                       "cannot import name")
+_ENV_REMOVAL_MARKERS = ("has been removed in", "was removed in", "no longer exists",
+                        "no longer supported", "is no longer available", "has been renamed")
+_ENV_API_MARKERS = ("is not defined", "has no attribute", "unexpected keyword argument",
+                    "missing 1 required positional argument", "takes no arguments",
+                    "got multiple values for")
+_INSTALLED_FRAME = ("site-packages", "dist-packages")
+
+
+def _environment_failure(error: str) -> bool:
+    """True iff the traceback shows the code disagreeing with the INSTALLED environment rather than
+    with itself. Pure and conservative — see `_ENV_*` above for the three admitted shapes."""
+    err = error or ""
+    if any(m in err for m in _ENV_IMPORT_MARKERS) or any(m in err for m in _ENV_REMOVAL_MARKERS):
+        return True
+    return (any(m in err for m in _INSTALLED_FRAME)
+            and any(m in err for m in _ENV_API_MARKERS))
+
 
 def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> dict:
     """Deterministic crash-triage fallback (no LLM): repair a clear MECHANICAL crash — or a TIMEOUT
     (too slow, not a wrong idea -> reduce compute) — while attempts remain, otherwise abandon.
     Conservatively NEVER returns "reject_idea" — killing a whole idea lineage is a strong call
     reserved for the LLM agent, so the rule path stays safe with the unified agent off (it only ever
-    repairs obvious mechanical crashes / timeouts or abandons)."""
+    repairs obvious mechanical crashes / timeouts or abandons).
+
+    Carries the same `repair_class` contract as the agent path (its OWN reading of the traceback,
+    which is also what corroborates the agent's answer), so budget apportionment does not silently
+    switch off when no triage model is wired. A timeout/OOM is always experiment work: the code was
+    too slow or too big for the budget, which is the node's own decision, not the environment's."""
     err = error or ""
     if reason in ("timeout", "oom") and attempt <= max_attempts:
         why = ("timeout — reduce compute to fit the budget (rule-based)" if reason == "timeout"
                else "OOM-killed — reduce memory: batch/model size or subsample to fit the pod limit (rule-based)")
-        return {"action": "repair", "rationale": why}
+        return {"action": "repair", "rationale": why, "repair_class": "experiment"}
     mechanical = any(s in err for s in _MECHANICAL_MARKERS)
+    cls = "environment" if _environment_failure(err) else DEFAULT_REPAIR_CLASS
     if reason == "crash" and mechanical and attempt <= max_attempts:
-        return {"action": "repair", "rationale": "mechanical crash (rule-based)"}
-    return {"action": "abandon", "rationale": "non-mechanical failure or attempts exhausted (rule-based)"}
+        return {"action": "repair", "rationale": "mechanical crash (rule-based)", "repair_class": cls}
+    return {"action": "abandon", "repair_class": cls,
+            "rationale": "non-mechanical failure or attempts exhausted (rule-based)"}

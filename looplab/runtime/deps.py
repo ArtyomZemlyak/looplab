@@ -130,6 +130,186 @@ def missing_modules(stderr: str) -> list[str]:
     return list(seen)
 
 
+# --- A missing distribution that never reaches `missing_modules` -------------------------------
+# A library may DEGRADE an absent optional dependency into something that is not an import error at
+# all, and then the module name appears nowhere in the exception. Live 2026-08-05
+# (`runs/rubert-dr-0805` node 0): `transformers` guards `init_empty_weights` /
+# `find_tied_parameters` behind `is_accelerate_available()`, so an absent `accelerate` surfaced as
+#     NameError: name 'init_empty_weights' is not defined
+# with the word "accelerate" nowhere in the traceback. `accelerate` was already on the allowlist
+# above and would have been installed automatically had the failure named it; instead the node spent
+# TWO of its six repair attempts hand-patching the symbol. The crash-triage agent DIAGNOSED it
+# correctly both times ("mechanical transformers/accelerate version mismatch … ensure accelerate
+# import") and had no way to act, because the engine only ever installs what the TRACEBACK names.
+#
+# `triage_install_candidates` is that missing path: the triage's own naming of a distribution is
+# admitted as evidence, but only in conjunction with the traceback. It is FAIL-CLOSED by
+# construction — see its docstring for the conditions, none of which authorizes an install on its
+# own, plus the caller-side last one (the distribution must actually be ABSENT).
+
+# The traceback shapes an unresolved name takes. Each captures the name itself, so the same scan
+# both PROVES the failure is unresolved-name shaped and yields the identifiers to join on.
+_UNRESOLVED_RES = (
+    _MISSING_RE,                                                     # ModuleNotFoundError
+    re.compile(r"cannot import name ['\"]([\w][\w\.]*)['\"]"),       # renamed/moved API
+    re.compile(r"name ['\"]([\w][\w\.]*)['\"] is not defined"),      # NameError — the degraded guard
+    re.compile(r"has no attribute ['\"]([\w][\w\.]*)['\"]"),         # AttributeError
+)
+# A library that re-raises its own "you need X" error, without the canonical wording: the exception
+# CLASS is still the tell (`ModuleNotFoundError: Neither `tensorboard` nor `tensorboardX` is
+# available.`), as is a pip hint it prints alongside.
+_IMPORT_SHAPE = ("ModuleNotFoundError", "ImportError", "pip install")
+# Identifiers a traceback points at, beyond the unresolved name: the installed packages on its
+# frames (`/site-packages/transformers/modeling_utils.py`) and the names its message quotes
+# (backticks included — Lightning quotes that way). These make the JOIN below meaningful without
+# admitting arbitrary prose.
+_FRAME_RE = re.compile(r"[/\\](?:site|dist)-packages[/\\]([\w][\w\.]*)(?:[/\\]([\w]+))?")
+_QUOTED_RE = re.compile(r"[`'\"]([A-Za-z_][\w\.]*)[`'\"]")
+# Identifier-ish tokens in a triage rationale / structured field. Distribution spellings (`-`) and
+# dotted module paths both count; the allowlist lookup normalizes them.
+_TOKEN_RE = re.compile(r"[A-Za-z_][\w\.-]{1,60}")
+
+
+def _normal(name: str) -> str:
+    """Fold the spellings of one distribution together: import name (`sentence_transformers`), pip
+    name (`sentence-transformers`) and case are the same thing to the allowlist."""
+    return str(name or "").strip().strip(".").replace("-", "_").lower()
+
+
+def _alias_map() -> dict[str, str]:
+    """{normalized import name | normalized pip name -> import name}. Derived from `_PIP_NAME` on
+    every call, NOT cached at import: the allowlist above is documented as the one place to add a
+    library, and tests extend it at runtime — a cached map would silently keep answering "not on the
+    list" for the new entry. It is ~70 entries; the scan runs at most once per repair."""
+    out: dict[str, str] = {}
+    for imp, pip in _PIP_NAME.items():
+        out.setdefault(_normal(imp), imp)
+        out.setdefault(_normal(pip), imp)
+    return out
+
+
+def named_installable(text: str) -> list[str]:
+    """Allowlisted IMPORT names that `text` names, by either spelling (`sentence-transformers` and
+    `sentence_transformers` both resolve to `sentence_transformers`). De-duplicated, first-seen
+    order. Pure text: the caller decides whether naming a package is enough to install it."""
+    aliases = _alias_map()
+    out: dict[str, None] = {}
+    for tok in _TOKEN_RE.findall(text or ""):
+        # A dotted path names its top-level distribution too (`transformers.utils` -> transformers).
+        for cand in (tok, tok.split(".", 1)[0]):
+            imp = aliases.get(_normal(cand))
+            if imp:
+                out.setdefault(imp, None)
+    return list(out)
+
+
+def traceback_names(traceback: str) -> set[str]:
+    """The identifiers a traceback POINTS AT: the names it reports as unresolved, the installed
+    packages on its frames, and the identifiers its message quotes. Normalized (see `_normal`), so
+    a triage that quotes any of them can be matched case- and spelling-insensitively."""
+    names: set[str] = set()
+    for rx in _UNRESOLVED_RES:
+        for m in rx.findall(traceback or ""):
+            names.add(_normal(m))
+            names.add(_normal(m.split(".", 1)[0]))
+    for pkg, mod in _FRAME_RE.findall(traceback or ""):
+        names.add(_normal(pkg))
+        if mod:
+            names.add(_normal(mod))
+    for q in _QUOTED_RE.findall(traceback or ""):
+        names.add(_normal(q))
+        names.add(_normal(q.split(".", 1)[0]))
+    names.discard("")
+    return names
+
+
+def unresolved_name_failure(traceback: str) -> bool:
+    """True iff the traceback shows a failure of the shape an ABSENT distribution produces: an
+    unresolved module/symbol/attribute, or a library re-raising its own missing-dependency error.
+    A shape mismatch, a CUDA OOM, a metric disagreement — anything else — is False, so no triage
+    rationale can turn it into an install."""
+    tb = traceback or ""
+    return (any(rx.search(tb) for rx in _UNRESOLVED_RES)
+            or any(marker in tb for marker in _IMPORT_SHAPE))
+
+
+def _tokens(text: str) -> set[str]:
+    """Normalized identifier-ish tokens of a triage text, dotted paths also reduced to their
+    top-level name (`transformers.utils` -> {transformers_utils…, transformers})."""
+    out: set[str] = set()
+    for tok in _TOKEN_RE.findall(text or ""):
+        out.add(_normal(tok))
+        out.add(_normal(tok.split(".", 1)[0]))
+    out.discard("")
+    return out
+
+
+def triage_install_candidates(named: str, rationale: str, traceback: str) -> list[str]:
+    """Import names to offer for install when a missing distribution degraded into a failure that
+    is NOT an import error (see the block comment above). `named` is the triage's STRUCTURED
+    missing-dependency field, `rationale` its free text. FAIL CLOSED — a candidate needs the
+    traceback and the triage to point at it JOINTLY, which they can do in exactly two ways:
+
+      A. the triage NAMES it in its structured field, and its rationale demonstrably describes this
+         traceback (it mentions at least one identifier the traceback points at — the unresolved
+         symbol, a package on its frames, a name its message quotes). This is the `accelerate` case:
+         the distribution appears nowhere in the traceback, so only the agent can supply the name,
+         and the rationale is what proves the agent was reading THIS failure.
+      B. the traceback AND the rationale both name it. This is the `tensorboard` case: the library
+         re-raised its own missing-dependency error naming the package in prose
+         (``Neither `tensorboard` nor `tensorboardX` is available``), which the canonical
+         `missing_modules` scan cannot parse, while the triage independently named the same package.
+
+    Over both paths: the failure must be unresolved-name shaped (`unresolved_name_failure`) — a
+    shape mismatch, an OOM or a metric disagreement never installs anything, whatever the triage
+    says — and the name must be on the curated allowlist, so an off-list name stays a code bug.
+    Free rationale text alone can NEVER mint a candidate: a rationale mentioning "the installed
+    Lightning version" while the traceback names `pytorch_lightning` must not install `lightning`.
+
+    The CALLER adds the last and decisive condition: the distribution must actually be ABSENT from
+    the eval interpreter (`is_present`), so a diagnosis that merely mentions an installed package
+    installs nothing."""
+    if not unresolved_name_failure(traceback):
+        return []
+    pointed = traceback_names(traceback)
+    out: dict[str, None] = {}
+    if pointed & _tokens(f"{named or ''}\n{rationale or ''}"):     # A: the triage is about THIS failure
+        for m in named_installable(named):
+            out.setdefault(m, None)
+    for m in named_installable(rationale):                         # B: named by BOTH, independently
+        if _normal(m) in pointed:
+            out.setdefault(m, None)
+    return list(out)
+
+
+def is_present(module: str, *, python: Optional[str] = None, timeout: float = 30.0) -> bool:
+    """True iff the EVAL interpreter can resolve `module` — i.e. installing it would be a no-op.
+
+    FAIL CLOSED: any doubt (a launch failure, a timeout, a name that resolves to nothing useful)
+    answers True, so the caller installs only what is provably absent. `find_spec` locates the
+    module without importing it, so a heavyweight or broken package is not executed just to ask.
+    """
+    name = str(module or "").split(".", 1)[0]
+    if not name.isidentifier():
+        return True
+    probe = ("import importlib.util as u, sys\n"
+             "try:\n"
+             "    sys.exit(0 if u.find_spec(sys.argv[1]) is not None else 1)\n"
+             "except Exception:\n"
+             "    sys.exit(0)\n")            # unreadable/broken install -> "present", never install over it
+    try:
+        # Same secret scrub as `install()` below — site initialization (.pth files) runs arbitrary
+        # code in any interpreter spawn, so this child gets no more environment than that one does.
+        proc = subprocess.run([python or sys.executable, "-c", probe, name],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=timeout, env={k: v for k, v in os.environ.items()
+                                                    if k.upper().startswith("PIP_")
+                                                    or not is_secret_env(k, v)})
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return proc.returncode == 0
+
+
 def is_installable(module: str) -> bool:
     """True iff `module` is a known data-science package we'll auto-install (allowlist). A name
     that isn't here is treated as a code bug (typo / missing local module), not an install."""

@@ -7,9 +7,11 @@ method bodies are verbatim moves and read engine attributes freely (`researcher`
 
 The cluster: `_triage_crash` (LLM crash-triage verdict — instance-monkeypatched by tests, which
 a mixin preserves), `_repair_error_context` (ancestral repair chain + hint directives for the
-repair prompt), `_prepare_env` (dependency self-prep on ModuleNotFoundError). The rule-based
-fallback `_rule_triage` is imported from its canonical home (engine/triage.py); agents/digest
-deps stay lazy, method-local imports."""
+repair prompt), `_prepare_env` (dependency self-prep on ModuleNotFoundError) and its sibling
+`_prepare_env_from_triage` (the same self-prep for a missing library the traceback never NAMES —
+see its docstring), sharing one install tail in `_install_missing`. The rule-based fallback
+`_rule_triage` and the repair-class coercion `coerce_repair_class` are imported from their
+canonical home (engine/triage.py); agents/digest deps stay lazy, method-local imports."""
 from __future__ import annotations
 
 import sys
@@ -18,7 +20,7 @@ from typing import Optional
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import RunState, normalize_researcher_footprint
-from looplab.engine.triage import _rule_triage
+from looplab.engine.triage import _rule_triage, coerce_repair_class
 
 
 class CrashRepairMixin:
@@ -27,7 +29,7 @@ class CrashRepairMixin:
 
     @in_llm_lane("build")
     def _triage_crash(self, state: RunState, node, error: str, attempt: int,
-                      reason: str = "crash") -> dict:
+                      reason: str = "crash", *, charged_attempt: Optional[int] = None) -> dict:
         """Decide what to do with a just-failed node BEFORE spending another eval:
         {"action": "repair"|"abandon"|"reject_idea", "rationale": str}. Base mode: the unified
         agent decides (it can consult the run via its pilot tools — read_code / find_analogous —
@@ -37,7 +39,13 @@ class CrashRepairMixin:
 
         `reason` (crash|timeout) is surfaced to both paths so a timeout is triaged as "too slow ->
         reduce compute" rather than mis-read as a wrong idea (a missing KNOWN lib never reaches here
-        — env-prep installs it and re-runs first)."""
+        — env-prep installs it and re-runs first).
+
+        `attempt` is the repair attempt NUMBER (what the agent and the trace see); `charged_attempt`
+        is that number as the EXPERIMENT budget counts it — the two diverge once a repair has been
+        charged to the environment ledger instead (`engine/evaluate.py`). Only the rule path's own
+        cap compares against a budget, so only it reads the charged number; defaulting to `attempt`
+        keeps every other caller on the historical behaviour."""
         # Tag the failure kind so the LLM agent (and the rule's marker scan) see crash vs timeout.
         tagged = f"[failure kind: {reason}]\n{error}"
         fn = getattr(self.researcher, "triage_crash", None)
@@ -60,7 +68,15 @@ class CrashRepairMixin:
                 with self.tracer.span("triage", attempt=attempt, reason=reason):
                     out = fn(node, tagged, attempt, state=state, brief=brief)
                 if isinstance(out, dict) and out.get("action") in ("repair", "abandon", "reject_idea"):
-                    return {"action": out["action"], "rationale": str(out.get("rationale", ""))[:300]}
+                    # `repair_class` (which BUDGET the repair spends) and `missing_dependency` (a
+                    # library the agent says is absent) are part of the verdict, so they are carried
+                    # here rather than re-derived downstream. Both fail closed: an agent that emits
+                    # neither is coerced to the historical behaviour — the experiment budget, and no
+                    # install. The engine never acts on `missing_dependency` alone (see
+                    # runtime/deps.py::triage_install_candidates).
+                    return {"action": out["action"], "rationale": str(out.get("rationale", ""))[:300],
+                            "repair_class": coerce_repair_class(out.get("repair_class")),
+                            "missing_dependency": str(out.get("missing_dependency", ""))[:100]}
             except BudgetExceeded:      # the hard budget stop must propagate, not degrade to the rule
                 raise
             except Exception:  # noqa: BLE001 - agent triage is best-effort; fall through to the rule
@@ -68,7 +84,8 @@ class CrashRepairMixin:
         # 0 = unlimited attempts -> pass a large cap so the rule path keeps repairing mechanical
         # crashes (the anti-stuck guard, not a count, stops a genuinely stuck node).
         cap = self._inline_repair_attempts or 10**9
-        return _rule_triage(reason, error, attempt, cap)
+        return _rule_triage(reason, error,
+                            attempt if charged_attempt is None else charged_attempt, cap)
 
     def _repair_error_context(self, reason: str, error: str,
                               state: Optional[RunState] = None, node=None) -> str:
@@ -148,6 +165,15 @@ class CrashRepairMixin:
         # it through a multi-minute pip install (max_parallel>1). Only contend for the lock when there
         # is real installable work.
         candidates = [m for m in deps.missing_modules(stderr) if deps.is_installable(m)]
+        return self._install_missing(candidates)
+
+    def _install_missing(self, candidates: list[str]) -> list[str]:
+        """Install the ALLOWLISTED import names in `candidates` that this run has not already tried,
+        returning the pip packages that installed cleanly. The shared tail of both env-prep entry
+        points — the traceback-driven `_prepare_env` and the triage-driven
+        `_prepare_env_from_triage` — so `_dep_lock`, the once-per-module `_dep_attempted` cache, the
+        injected installer seam and the install span have exactly one implementation."""
+        from looplab.runtime import deps
         if not candidates:
             return []
         with self._dep_lock:
@@ -168,3 +194,38 @@ class CrashRepairMixin:
                 if getattr(res, "ok", False):
                     installed.append(pkg)
             return installed
+
+    def _prepare_env_from_triage(self, triage: dict, stderr: str) -> list[str]:
+        """Environment self-prep for a missing library the TRACEBACK NEVER NAMES.
+
+        `_prepare_env` above can only install what the traceback reports as missing, which misses
+        the whole class of failures where a library DEGRADES an absent optional dependency into
+        something else. Live 2026-08-05 (`runs/rubert-dr-0805` node 0): `transformers` guards
+        `init_empty_weights`/`find_tied_parameters` behind `is_accelerate_available()`, so an absent
+        `accelerate` — already on the install allowlist — surfaced as a bare
+        `NameError: name 'init_empty_weights' is not defined` with the word "accelerate" nowhere in
+        the exception. Env-prep saw nothing installable, and the node spent TWO of its six repair
+        attempts hand-patching symbols instead. The crash-triage agent named the cause correctly
+        both times and had no way to act on it.
+
+        So the agent's verdict becomes an admissible SOURCE of the name — never on its own:
+        `deps.triage_install_candidates` requires the traceback to be unresolved-name shaped and the
+        triage to point at that same traceback (its docstring is the contract), and we additionally
+        install only what is provably ABSENT from the eval interpreter. Returns the pip packages
+        installed (empty => nothing to do, and the caller proceeds to a normal code repair)."""
+        from looplab.runtime import deps
+        named = deps.triage_install_candidates(
+            str(triage.get("missing_dependency", "") or ""),
+            str(triage.get("rationale", "") or ""), stderr or "")
+        if not named:
+            return []
+        python = getattr(self.sandbox, "python", sys.executable)
+        # The decisive filter, and the one the agent cannot influence: a package that is already
+        # importable is not the cause of anything, so naming it installs nothing. Probed against the
+        # EVAL interpreter (`find_spec`, no import) and fail-closed to "present" on any doubt.
+        # `_dep_attempted` is consulted FIRST (an unlocked read; `_install_missing` re-checks it
+        # under `_dep_lock`) purely to skip the probe for a module this run already tried — an agent
+        # that keeps naming the same failed install would otherwise spawn one per repair.
+        absent = [m for m in named
+                  if m not in self._dep_attempted and not deps.is_present(m, python=python)]
+        return self._install_missing(absent)

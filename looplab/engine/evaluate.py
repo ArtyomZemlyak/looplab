@@ -44,7 +44,8 @@ def _watch_limiter() -> "anyio.CapacityLimiter":
     if _WATCH_LIMITER is None:
         _WATCH_LIMITER = anyio.CapacityLimiter(_WATCH_THREADS)
     return _WATCH_LIMITER
-from looplab.engine.triage import _MAX_DEP_ROUNDS, _failure_reason, _normalize_error_sig
+from looplab.engine.triage import (_MAX_DEP_ROUNDS, _environment_failure, _failure_reason,
+                                   _normalize_error_sig)
 from looplab.events.replay import fold
 from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.events.types import (EV_CARD_DROPPED, EV_DEPS_INSTALLED, EV_NODE_ABORT,
@@ -125,7 +126,7 @@ class EvaluateMixin:
         THE SAME PREDICATE, both sides of the lifecycle. Confirmation is the durable
         ``card_build_done`` link (`state.speculative_nodes`) binding this exact attempt-zero lifecycle
         to the Card it was built for — the pre-terminal half of the very fact
-        `search/card_selection.py::is_unevaluated_speculative_discard` proves post-terminal before it
+        `core/models.py::is_unevaluated_speculative_discard` proves post-terminal before it
         refunds a slot (both go through `_durable_speculative_lifecycle`). This method deliberately
         introduces NO third spelling: it calls `SpeculationMixin._speculative_link_matches`, the
         engine's own one, already used by `_run_card_session`'s admission gate.
@@ -363,7 +364,9 @@ class EvaluateMixin:
             # Hybrid crash repair: each attempt runs the eval (with the mid-eval abort watcher) and,
             # if it CRASHES, the agent triages it and may repair the code IN PLACE and re-run — all
             # within this one node (no new tree node, no max_nodes spent). At most
-            # `inline_repair_attempts` repairs; then the node fails normally and stays eligible for the
+            # `inline_repair_attempts` repairs OF THE EXPERIMENT (the ledger comment below the
+            # anti-stuck ledger explains the second, environment-reconciliation ledger the same
+            # number bounds); then the node fails normally and stays eligible for the
             # budgeted inter-node debug operator. Exactly ONE terminal event (node_evaluated/node_failed)
             # is emitted at the end so first_terminal budget accounting and resume re-entry are intact;
             # only NON-terminal `node_repaired` events are written mid-loop.
@@ -386,6 +389,22 @@ class EvaluateMixin:
             # the comment at the update site for why a streak is the wrong shape.
             stuck_seen: dict = {}
             stuck_n = 0
+            # APPORTIONED repair budget. `inline_repair_attempts` is what the operator budgets for
+            # REPAIRING THE EXPERIMENT; a repair that only reconciles the authored code with the
+            # installed libraries (`engine/triage.py::REPAIR_CLASSES`) is a different resource and
+            # draws on its own ledger of the same size, so a stale `requirements.txt` cannot consume
+            # the research allowance. Measured on `runs/rubert-dr-0805` node 0: with
+            # `inline_repair_attempts: 6`, all six went on PL-2.x/transformers/accelerate migrations
+            # (the triage rationale said "mechanical" every time) and the first genuine research
+            # question — a DDP `find_unused_parameters` modelling decision — arrived with nothing
+            # left. `env_repairs` counts the exempted ones; `attempt` keeps counting ALL of them, so
+            # the `node_repaired` attempt numbers stay a dense sequence and every existing reader is
+            # unaffected.
+            env_repairs = 0
+            # Best pipeline depth any attempt has reached (stages passed/reused before the failure).
+            # Reaching a LATER stage is the other evidence a repair did real work, alongside a
+            # never-before-seen error signature — see `_progress` at the gate below.
+            best_depth = -1
             # Multi-stage reuse across repair attempts: `next_start` is the stage to run FROM on the next
             # eval — _UNSET on the first eval (derives node.rerun_stage), then set by the safe-reuse
             # predicate after each repair (a stage name = reuse the completed earlier stages, e.g. skip
@@ -683,12 +702,36 @@ class EvaluateMixin:
                     if spent + total_eval >= max_es:
                         triage_outcome = ("abandon", "eval budget exhausted during inline repair")
                         break
+                # FORWARD PROGRESS: evidence that the repairs are doing real work rather than
+                # circling. Two shapes, both read off state that already exists — a signature this
+                # node has never produced before (the `stuck_seen` ledger's first sighting, using
+                # the SAME normalizer the anti-stuck guard uses, so there is no second notion of
+                # "the same failure"), or a pipeline depth no earlier attempt reached. This is what
+                # keeps the environment ledger from becoming a second runaway: in the 2345-repair
+                # incident every failure normalized to ONE signature, so it buys exactly one exempt
+                # attempt no matter how the agent labels it, and the anti-stuck guard still
+                # terminalizes the node.
+                _depth = len([s for s in (res.stages or [])
+                              if isinstance(s, dict) and s.get("status") in ("ok", "reused")])
+                _progress = stuck_n <= 1 or _depth > best_depth
+                best_depth = max(best_depth, _depth)
+                # Two ledgers, one number: `charged` are the repairs that changed the EXPERIMENT,
+                # `env_repairs` the ones that only reconciled it with the installed libraries. Each
+                # is bounded by `inline_repair_attempts` (0 = both unlimited — unchanged behaviour,
+                # the anti-stuck guard is then the only bound), so the worst case per node is 2N
+                # repairs and the environment half additionally has to move the failure forward
+                # every single time.
+                charged = attempt - env_repairs
+                budget_left = (not self._inline_repair_attempts
+                               or charged < self._inline_repair_attempts)
+                env_left = (not self._inline_repair_attempts
+                            or env_repairs < self._inline_repair_attempts)
                 # Inline-repair gate: feature on, repairable reason, a Developer that can repair, and
                 # something to repair (whole-file code, multi-file edits, or a repo). The attempt CAP is
                 # skipped when unlimited (_inline_repair_attempts == 0); the anti-stuck guard bounds it.
                 if (not self._inline_repair
                         or reason not in self._inline_repair_reasons
-                        or (self._inline_repair_attempts and attempt >= self._inline_repair_attempts)
+                        or not (budget_left or (env_left and _progress))
                         or stuck_n >= self._inline_repair_stuck_repeat
                         or not callable(getattr(self.developer, "repair", None))
                         or not (node.code or node.files or self._repo_spec)):
@@ -696,7 +739,8 @@ class EvaluateMixin:
                         triage_outcome = ("abandon", f"the same error signature has now failed this "
                                                      f"node {stuck_n}x — stuck, abandoning")
                     break
-                triage = self._triage_crash(state, node, err, attempt + 1, reason=reason)
+                triage = self._triage_crash(state, node, err, attempt + 1, reason=reason,
+                                            charged_attempt=charged + 1)
                 action = triage.get("action", "repair")
                 if action == "abandon":
                     triage_outcome = ("abandon", triage.get("rationale", ""))
@@ -704,6 +748,42 @@ class EvaluateMixin:
                 if action == "reject_idea":   # the idea itself is wrong -> mark the lineage; steer to a new idea
                     reason = "idea_rejected"
                     triage_outcome = ("reject_idea", triage.get("rationale", ""))
+                    break
+                # A library the traceback never NAMED. `_prepare_env` above installs only what the
+                # crash reports as missing; when a library degrades an absent dependency into a
+                # NameError/AttributeError (an `is_x_available()` guard), the agent's diagnosis is
+                # the only place the name exists. Considered BEFORE the ledger decision below,
+                # because an install is not a code repair: it spends no attempt on either ledger
+                # (exactly like the traceback-driven round above), so an exhausted budget must not
+                # be what stops the engine from making the node runnable. Bounded by the same
+                # `_MAX_DEP_ROUNDS` + once-per-module `_dep_attempted` cache; the fail-closed
+                # conditions live with the extraction (runtime/deps.py).
+                if self._auto_install_deps and dep_rounds < _MAX_DEP_ROUNDS:
+                    installed = await anyio.to_thread.run_sync(
+                        self._prepare_env_from_triage, triage, err)
+                    if installed:
+                        dep_rounds += 1
+                        async with self._write_lock:
+                            self.store.append(EV_DEPS_INSTALLED, {
+                                "node_id": node_id, "generation": generation,
+                                "packages": installed, "round": dep_rounds, "source": "triage"})
+                        continue   # re-run with the library present (no repair attempt spent)
+                # Which ledger this repair spends. An exemption needs THREE independent signals to
+                # agree — the agent's structured class, the engine's own reading of the traceback
+                # (`_environment_failure`, which never takes the agent's word for it), and forward
+                # progress — plus room in the ledger. Any disagreement charges the experiment budget,
+                # which is the fail-closed direction: the worst case of a wrong "experiment" call is
+                # today's behaviour.
+                repair_class = ("environment"
+                                if (triage.get("repair_class") == "environment" and _progress
+                                    and env_left and _environment_failure(err))
+                                else "experiment")
+                if repair_class == "experiment" and not budget_left:
+                    triage_outcome = ("abandon", f"inline repair has spent its "
+                                                 f"{self._inline_repair_attempts} experiment "
+                                                 "attempt(s); this failure is not environment "
+                                                 "reconciliation, so there is no separate budget "
+                                                 "left to draw on")
                     break
                 # action == "repair": fix the code in place and re-eval (no new node, no budget spent).
                 # Snapshot the PRE-repair file set now (node is still the pre-repair fold) so we can
@@ -801,6 +881,8 @@ class EvaluateMixin:
                         repaired_footprint["gpu_mem_mib"] = min(
                             repaired_footprint["gpu_mem_mib"], min(held_mem))
                 attempt += 1
+                if repair_class == "environment":
+                    env_repairs += 1
                 async with self._write_lock:
                     repair_payload = {
                         "node_id": node_id, "generation": generation,
@@ -808,6 +890,11 @@ class EvaluateMixin:
                         "files": repaired_files,
                         "deleted": repaired_deleted,
                         "error_in": err, "triage_action": "repair",
+                        # WHICH ledger paid for this repair (additive; the fold ignores it). Without
+                        # it the operator cannot see why a node with `inline_repair_attempts: 6`
+                        # made more than six repairs, and the split is not reconstructable from the
+                        # log afterwards — the rationale is free text, deliberately not a contract.
+                        "repair_class": repair_class,
                         "rationale": str(triage.get("rationale", ""))[:300]}
                     if repaired_footprint is not None:
                         repair_payload.update({
