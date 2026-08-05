@@ -3249,6 +3249,47 @@ for a single named record).
 
 *Recommendation:* Extract a CommandTracker (stage/persist/observe/reconcile one turn) used by _control, _apply_plan and _reconcile_pending, and split report-refresh reconciliation into its own method; rendering helpers can move to tui_format.
 
+*Resolution (2026-08-05):* Split the reconciliation, unified the staging prologue, **rejected the
+CommandTracker** — with the measurement that says why.
+
+DONE, the headline. `_reconcile_report_refresh` now owns the paid-receipt protocol end to end and
+`_reconcile_pending`'s loop body runs the generic command protocol only; the two `unresolved = True`
+assignments the branch used to make became the method's return value, and the loop folds it back.
+The protocols really were different systems sharing a `for`: the paid one identifies a row by its own
+durable idempotency key (there is no server-issued command id yet), re-asks with `refresh_report`,
+and treats a 200 saying `ok` as NOT yet success unless it carries a valid event receipt for the
+expected generation.
+
+DONE, unlisted but the same duplication the finding is pointing at. Both submit paths wrote the
+pre-POST staging prologue separately — append, index, `_persist`, and on failure mark the row failed
+— including the failure string, in the one place where the wording IS the promise ("nothing was
+submitted"). That is now `_stage_action_turn` plus the `_STAGE_COMMAND_FAILURE` constant, with the
+rendering left at the call sites, which is where the two genuinely differ.
+
+REJECTED: the CommandTracker itself. The three sites do not share the taxonomy the recommendation
+assumes. Measured on the tree: the unknown-status arm is *terminal-failed* at submit time
+(`_apply_plan`, `_control`) and *keep-pending* at reconcile time (`_reconcile_pending`) — a
+deliberate difference, since believing an unrecognised status during reconciliation would resolve a
+row whose command may still be running. Staging is unconditional in `_apply_plan` but conditional on
+`history is not None` in `_control` (the dashboard calls it with no chat). `_control` returns the raw
+command record to its caller and, on an ambiguous transport failure, synthesises
+`{**staged_turn["command"], "status": "executing"}`; `_apply_plan` returns nothing and instead uses
+the verdict to decide whether the REST of the ordered plan is submitted. A tracker covering all three
+needs a verdict hook, a render hook and a staging flag, i.e. three parameters standing in for the
+three bodies — no net reduction in a path where a mistake loses an idempotency key.
+
+Guards: `tests/test_tui_report_refresh_protocol.py` (16). Nothing pinned the extracted behaviour
+before — every existing reconciliation test drives `_reconcile_pending` from the outside and passes
+whether the protocols are separate or interleaved. Verified by breaking each property on a scratch
+copy: making the transient-failure arm return resolved, making the pending-code arm return resolved,
+and dropping the caller's `unresolved` fold each failed only the new tests (1, 9, 10 of them) and
+left the rest of `test_tui.py` green. Removing `_stage_action_turn`'s refusal failed the new paid-path
+test together with its two existing command siblings. The structural guards scan `ast.unparse` output
+with the docstring popped, because both docstrings describe the *other* protocol on purpose and a
+raw `inspect.getsource` scan matches its own explanation.
+
+Not done: moving rendering helpers to `tui_format`, and the ~880-line class itself.
+
 #### SC-16 · LOW · over-engineering · effort: small
 
 **Micro over-engineering in deletion_service and run_commands helper wrappers**

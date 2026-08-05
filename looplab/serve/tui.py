@@ -54,6 +54,9 @@ _REPORT_PENDING_CODES = {
     "job_contact_lost", "job_authorization_lost", "job_unknown", "job_timeout", "job_protocol_error",
     "report_refresh_uncertain", "report_refresh_protocol_error",
 }
+# What the operator is told when the pre-POST row could not be persisted. Both submit paths said
+# this in their own words; the wording is the promise that nothing was sent, so it is one constant.
+_STAGE_COMMAND_FAILURE = "could not durably stage command identity; nothing was submitted"
 
 
 def _url_id(value: Any) -> str:
@@ -626,12 +629,11 @@ class Tui:
                         "expected_generation": expected_generation,
                         "idempotency_key": key,
                     }
-                    history.append(turn)
-                    staged_index = len(history) - 1
-                    if self._persist(run_id, turn) is False:
-                        turn["status"] = "failed"
-                        turn["error"] = (
-                            "could not durably stage report identity; no paid work was submitted")
+                    staged_index = self._stage_action_turn(
+                        run_id, history, turn,
+                        failure="could not durably stage report identity; "
+                                "no paid work was submitted")
+                    if staged_index is None:
                         self.console.print(_command_failure_line(label, turn["error"]))
                         return
                     result = self.api.refresh_report(
@@ -660,11 +662,9 @@ class Tui:
                     turn["command"] = _staged_command(
                         str(action.get("type") or ""), action.get("data") or {}, key,
                         expected_generation)
-                    history.append(turn)
-                    staged_index = len(history) - 1
-                    if self._persist(run_id, turn) is False:
-                        turn["status"] = "failed"
-                        turn["error"] = "could not durably stage command identity; nothing was submitted"
+                    staged_index = self._stage_action_turn(
+                        run_id, history, turn, failure=_STAGE_COMMAND_FAILURE)
+                    if staged_index is None:
                         self.console.print(_command_failure_line(label, turn['error']))
                         return
                     result = self.api.run_command(
@@ -739,11 +739,9 @@ class Tui:
                 "status": "pending",
                 "command": _staged_command(etype, data, key, expected_generation),
             }
-            history.append(staged_turn)
-            staged_index = len(history) - 1
-            if self._persist(run_id, staged_turn) is False:
-                staged_turn["status"] = "failed"
-                staged_turn["error"] = "could not durably stage command identity; nothing was submitted"
+            staged_index = self._stage_action_turn(
+                run_id, history, staged_turn, failure=_STAGE_COMMAND_FAILURE)
+            if staged_index is None:
                 self.console.print(f"[red]{etype} failed: {staged_turn['error']}[/red]")
                 return {"status": "failed", "error": staged_turn["error"], "event_type": etype}
         try:
@@ -786,6 +784,99 @@ class Tui:
                 return {**staged_turn["command"], "status": "executing", "error": str(e)}
             return {"status": "failed", "error": str(e), "event_type": etype}
 
+    def _stage_action_turn(self, run_id: str, history: list, turn: dict, *,
+                           failure: str) -> Optional[int]:
+        """Durably stage one pre-POST action row; return its index, or None if it did not land.
+
+        Nothing may be submitted until the row's identity is on disk: a POST whose idempotency key
+        and intent were never persisted cannot be reconciled after a crash, so ordered — or, for a
+        report refresh, PAID — work would be un-recoverable with no row saying it was ever asked for.
+        Both submit paths wrote this prologue separately (doc 25 SC-15), down to the failure string,
+        so the invariant had three copies and one place to drift.
+
+        On failure the caller gets None and the row is already marked failed with `failure`; the
+        RENDERING stays at the call site, which is where the two paths genuinely differ (indented
+        chat lines under a plan step vs a top-level control line).
+        """
+        history.append(turn)
+        index = len(history) - 1
+        if self._persist(run_id, turn) is False:
+            turn["status"] = "failed"
+            turn["error"] = failure
+            return None
+        return index
+
+    def _reconcile_report_refresh(self, run_id: str, turn: dict, action: dict, *,
+                                  action_index: int) -> bool:
+        """Reconcile ONE persisted pending ``__refresh_report__`` row; True once it is terminal.
+
+        This is the paid-receipt protocol, and it is not the generic command protocol
+        ``_reconcile_pending`` runs for every other row: the identity is the row's own
+        ``report_refresh`` intent (a durable idempotency key + expected generation) rather than a
+        server-issued command id, the request that re-asks is ``refresh_report`` rather than
+        ``get_run_command``, and a 200 that merely says ``ok`` is NOT yet success — it must carry a
+        valid durable event receipt for the expected generation (``_report_success``), otherwise the
+        row is failed rather than believed. Interleaving the two in one loop body made each protocol
+        read as the other's special case (doc 25 SC-15).
+
+        Returning False means the outcome is still UNKNOWN, so the caller keeps the run gated
+        against another ordered action; every terminal verdict (done or failed) is persisted here as
+        a ``command_status`` row before returning True.
+        """
+        label = action.get("label") or "refresh report"
+        intent = (turn.get("report_refresh")
+                  if isinstance(turn.get("report_refresh"), dict) else {})
+        try:
+            generation = normalize_run_generation(intent.get("expected_generation"))
+            key = str(intent.get("idempotency_key") or "")
+            if not key or len(key) > 512:
+                raise ValueError("invalid report identity")
+        except (ApiError, ValueError):
+            turn["status"] = "failed"
+            turn["error"] = (
+                "pending report refresh has no durable identity; no new paid work was submitted")
+            self._persist_command_status(run_id, turn, action_index=action_index)
+            self.console.print(_command_failure_line(label, turn["error"]))
+            return True
+        try:
+            result = self.api.refresh_report(
+                run_id, expected_generation=generation, idempotency_key=key)
+        except ApiError as exc:
+            if command_error_transient(exc) or exc.status in (401, 403):
+                self.console.print(
+                    f"  [yellow]…[/yellow] {_esc(label)} — same-report status unavailable")
+                return False
+            turn["status"] = "failed"
+            turn["error"] = str(exc)
+            self._persist_command_status(run_id, turn, action_index=action_index)
+            self.console.print(_command_failure_line(label, turn["error"]))
+            return True
+        if isinstance(result, dict) and result.get("ok") is True \
+                and not _report_success(result, generation):
+            result = {
+                "ok": False, "code": "report_refresh_protocol_error",
+                "error": "report refresh returned no valid durable event receipt",
+            }
+        code = str(result.get("code") or "") if isinstance(result, dict) else ""
+        if isinstance(result, dict) and result.get("ok") is True:
+            turn["status"] = "done"
+            turn.pop("error", None)
+            turn.pop("report_code", None)
+            self._persist_command_status(run_id, turn, action_index=action_index)
+            self.console.print(f"  [green]✓[/green] [cyan]{_esc(label)}[/cyan]")
+        elif code in _REPORT_PENDING_CODES:
+            turn["report_code"] = code
+            turn["error"] = str(result.get("error") or "report outcome remains uncertain")
+            return False
+        else:
+            turn["status"] = "failed"
+            turn["report_code"] = code
+            turn["error"] = str(
+                result.get("error") or "report refresh returned no confirmed success")
+            self._persist_command_status(run_id, turn, action_index=action_index)
+            self.console.print(_command_failure_line(label, turn["error"]))
+        return True
+
     def _reconcile_pending(self, run_id: str, history: list) -> bool:
         """Refresh persisted pending action rows before allowing another ordered action.
 
@@ -803,59 +894,11 @@ class Tui:
                 continue
             action = turn.get("action") if isinstance(turn.get("action"), dict) else {}
             if action.get("type") == "__refresh_report__":
-                label = action.get("label") or "refresh report"
-                intent = (turn.get("report_refresh")
-                          if isinstance(turn.get("report_refresh"), dict) else {})
-                try:
-                    generation = normalize_run_generation(intent.get("expected_generation"))
-                    key = str(intent.get("idempotency_key") or "")
-                    if not key or len(key) > 512:
-                        raise ValueError("invalid report identity")
-                except (ApiError, ValueError):
-                    turn["status"] = "failed"
-                    turn["error"] = (
-                        "pending report refresh has no durable identity; no new paid work was submitted")
-                    self._persist_command_status(run_id, turn, action_index=action_index)
-                    self.console.print(_command_failure_line(label, turn["error"]))
-                    continue
-                try:
-                    result = self.api.refresh_report(
-                        run_id, expected_generation=generation, idempotency_key=key)
-                except ApiError as exc:
-                    if command_error_transient(exc) or exc.status in (401, 403):
-                        unresolved = True
-                        self.console.print(
-                            f"  [yellow]…[/yellow] {_esc(label)} — same-report status unavailable")
-                        continue
-                    turn["status"] = "failed"
-                    turn["error"] = str(exc)
-                    self._persist_command_status(run_id, turn, action_index=action_index)
-                    self.console.print(_command_failure_line(label, turn["error"]))
-                    continue
-                if isinstance(result, dict) and result.get("ok") is True \
-                        and not _report_success(result, generation):
-                    result = {
-                        "ok": False, "code": "report_refresh_protocol_error",
-                        "error": "report refresh returned no valid durable event receipt",
-                    }
-                code = str(result.get("code") or "") if isinstance(result, dict) else ""
-                if isinstance(result, dict) and result.get("ok") is True:
-                    turn["status"] = "done"
-                    turn.pop("error", None)
-                    turn.pop("report_code", None)
-                    self._persist_command_status(run_id, turn, action_index=action_index)
-                    self.console.print(f"  [green]✓[/green] [cyan]{_esc(label)}[/cyan]")
-                elif code in _REPORT_PENDING_CODES:
+                # The paid-receipt protocol lives in its own method; the loop body below is the
+                # generic command protocol ONLY (doc 25 SC-15).
+                if not self._reconcile_report_refresh(run_id, turn, action,
+                                                      action_index=action_index):
                     unresolved = True
-                    turn["report_code"] = code
-                    turn["error"] = str(result.get("error") or "report outcome remains uncertain")
-                else:
-                    turn["status"] = "failed"
-                    turn["report_code"] = code
-                    turn["error"] = str(
-                        result.get("error") or "report refresh returned no confirmed success")
-                    self._persist_command_status(run_id, turn, action_index=action_index)
-                    self.console.print(_command_failure_line(label, turn["error"]))
                 continue
             command = turn.get("command") or {}
             command_id = command.get("id")
