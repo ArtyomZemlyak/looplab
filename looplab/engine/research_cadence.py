@@ -582,7 +582,7 @@ class ResearchCadenceMixin:
         # since a declined merge leaves no durable record to compare against. The cost is bounded to
         # one extra pass per resume. Closing it means what the deep-research path did — a durable
         # attempt receipt claimed BEFORE the provider call (`_record_research_attempt`,
-        # `lessons._paid_curation_attempt`) — because an eventual `hypothesis_merged` is not a
+        # `curation_protocol._paid_curation_attempt`) — because an eventual `hypothesis_merged` is not a
         # payment fence: it only exists when the answer was yes.
         if n < 4 or (n - getattr(self, "_last_hyp_merge_n", -1)) < 2:
             return state
