@@ -355,8 +355,9 @@ refusal, or an emit that cannot be parsed is an `unanswerable` verdict, and it t
 exit: node terminalized `developer_crash`, one run-level pause naming the provider, `resume` once it
 is back. Without these, a provider error string was committed as the node's code and re-evaluated:
 one real run turned an out-of-credits `402` into **2345 `node_repaired` events on a single node over
-3.5 hours**. Use `looplab timings RUN_DIR` to see where a run's wall-clock actually
-went (LLM vs eval vs repair vs tools, per node).
+3.5 hours**. Use [`looplab timings RUN_DIR`](cli-reference.md#timings) to see where a run's
+wall-clock actually went (LLM vs eval vs repair vs tools, per node **and** run-level, reconciled
+against the run's real duration with the untraced remainder named).
 
 ### …and the same breaker on the **proposal** path
 

@@ -863,7 +863,10 @@ only — `replay` never reads them.
 **Per-operation traces.** A node's own work (propose → implement → repair, then evaluate/training)
 is one trace, shown under the node. But every OTHER LLM sub-operation runs in its **own** named trace
 (`new_trace`) — `strategist_consult`, `hypothesis_merge`, `deep_research`, `report`, `lessons_distill`/
-`lessons_refresh`, and the two Researcher ranking steps — `hyp_prioritize` behind `hypothesis_ranked`
+`lessons_refresh`, `card_build` (the Card-speculation producer — it has no node yet, so it is
+run-level by construction, and until 2026-08-05 it opened no span at all, which made the whole
+speculative Developer call invisible to `spans.jsonl` and to `looplab timings` while the cost ledger
+still billed it), and the two Researcher ranking steps — `hyp_prioritize` behind `hypothesis_ranked`
 (board prioritization) and `foresight_rank` behind `foresight_selected` (idea predict-before-execute). The event
 that operation emits is **stamped with that trace's id** (the event store reads the active span's ids
 on append; a telemetry event whose op-span already closed carries the captured id explicitly), so the

@@ -564,6 +564,32 @@ class SpeculationMixin:
         key = self._request_key(request)
         if key is None:
             return SpecBuildResult("", 0, {}, False, error="malformed request")
+        # ONE named span for the whole producer turn. Without it this work was invisible to every
+        # trace consumer, not merely unattributed: the helpers in `core/tracing.py` key off the
+        # `_current_tracer` contextvar, which ONLY a live `Tracer.span` sets, and this method runs on
+        # a worker thread that `_start_head_producer` spawns from the main loop with no span open —
+        # so every `generation()` the Developer opened inside it silently no-opped. Measured on two
+        # real runs: the entire Card build vanished from `spans.jsonl` (238 s of one 28-minute run,
+        # 21 min of one 37-minute run) while the cost ledger billed every call it made, which is what
+        # made `looplab timings` account for ~13% of the wall clock. The serial path has had this
+        # since the beginning (`orchestrator.py::_create_node` opens `create_node`); speculation is
+        # the path that never got it, and speculation now ships on.
+        # `_op_span` (new_trace=True), not a child span, exactly like `propose` in the sibling
+        # producer `_prepare_raw_card_stage`: an `anyio.to_thread` worker inherits a COPY of the
+        # spawning context, so a child span would splice a background producer into whatever
+        # unrelated operation the main task happened to hold open. No `node_id` either — the node
+        # does not exist yet, which is precisely why this cost is run-level and not per-node.
+        with self._op_span("card_build"):
+            return self._produce_requested_card(request, key, roles)
+
+    def _produce_requested_card(
+        self,
+        request: Mapping[str, Any],
+        key: tuple[str, int],
+        roles: tuple[Any, Any],
+    ) -> SpecBuildResult:
+        """The producer turn itself, split out only so `_build_requested_card` is its traced shell."""
+
         card_id, generation = key
         researcher, developer = roles
         # The isolated pair is reused sequentially. Clear every per-build side channel before even
