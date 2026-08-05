@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { sessionReadSuperseded } from '../src/assistantSessionModel.js'
 
 const assistantSource = () => readFile(new URL('../src/AssistantBar.jsx', import.meta.url), 'utf8')
 const section = (source, start, end) => source.slice(source.indexOf(start), source.indexOf(end))
@@ -21,7 +22,14 @@ test('session selection commits only a current, bounded read and preserves the p
     'an ordinary reselect of current A must supersede a pending B read without launching a late A GET')
   assert.match(open, /const currentNeedsRecovery = id === sidRef\.current && !!danglingAssistantTurn\(msgs\)[\s\S]*?&& !currentNeedsRecovery/,
     'reselecting an observe-only dangling chat must be able to promote it to exact recovery')
-  assert.match(open, /seq !== openSessionSeqRef\.current/)
+  // Doc 25 UI-05. The epoch comparison moved into `assistantSessionModel.js::sessionReadSuperseded`,
+  // which is where its truth table is now driven. What this file still owns is that the claimed epoch
+  // reaches that decision from THIS operation — a fence handed the wrong `seq` is green everywhere.
+  assert.match(open, /choiceSeq: openSessionSeqRef\.current/)
+  assert.match(open, /sessionReadSuperseded\(\{[\s\S]*?sessionId: id, seq,/,
+    'the fence must be asked about the epoch this read claimed, not the current one')
+  assert.equal(sessionReadSuperseded({ mounted: true, sessionId: 'a', seq: 7, choiceSeq: 8 }),
+    'newer-choice', 'a read issued under an older choice epoch can never commit')
   assert.match(open, /sessionRead = observingLiveSession \? null\s*: \{ seq, id, allowsRecovery: !observeOnly, promise: null \}[\s\S]*?openSessionPendingRef\.current = sessionRead/)
   assert.match(open, /requestedAllowsRecovery = options\.observeOnly !== true[\s\S]*?matchingRead\.allowsRecovery \|\| !requestedAllowsRecovery[\s\S]*?return matchingRead\.promise/,
     'same-target reads dedupe only when the pending operation is at least as authoritative')
@@ -197,8 +205,17 @@ test('Assistant reply completion is owned by one exact attempt and one exact use
   assert.match(source, /const activeReplyAttemptRef = useRef\(null\)/)
   assert.match(source, /const replyAttemptCurrent = \(attempt, id\) => replyAttemptOwned\(attempt, id\) && runningRef\.current/)
   assert.match(open, /const reattachAttempt = \{\}[\s\S]*?activeReplyAttemptRef\.current = reattachAttempt/)
-  assert.match(open, /seq !== openSessionSeqRef\.current \|\| sidRef\.current !== id[\s\S]*?openSessionPendingRef\.current !== sessionRead/,
+  // Doc 25 UI-05. The longhand conjunction became `readSuperseded({ requireVisible: true })`. The
+  // property is unchanged and is checked in two halves: the progress await is fenced AFTER it returns
+  // (here), and `requireVisible` really is what rejects a chat that stopped being visible (driven).
+  const progressRead = open.indexOf('await boundedRequest(signal => assistantProgress(id, { signal }), 8000)')
+  const progressFence = open.indexOf('readSuperseded({ requireVisible: true })', progressRead)
+  const reattach = open.indexOf('activeReplyAttemptRef.current = reattachAttempt', progressFence)
+  assert.ok(progressRead >= 0 && progressFence > progressRead && reattach > progressFence,
     'the progress await must retain the session-selection sequence fence')
+  assert.equal(sessionReadSuperseded({
+    mounted: true, sessionId: 'a', seq: 7, choiceSeq: 7, requireVisible: true, visibleSessionId: 'b',
+  }), 'not-visible', 'a reattach may not bind a session that is no longer the visible one')
   assert.match(open, /sessionRead = observingLiveSession \? null\s*: \{ seq, id, allowsRecovery: !observeOnly, promise: null \}[\s\S]*?finally \{[\s\S]*?openSessionPendingRef\.current === sessionRead/,
     'the selected transcript must own the progress-read window so Send cannot replace its token')
   assert.match(open, /recoverReply\(id, arr\.length \+ 1, dangling, reattachAttempt/)

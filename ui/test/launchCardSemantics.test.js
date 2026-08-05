@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { sessionDeleteBlock, sessionReadSuperseded } from '../src/assistantSessionModel.js'
 
 const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
 
@@ -145,16 +146,31 @@ test('proposal chat and in-memory draft ownership are passed into the card', asy
     'startup recovery must be session-scoped even when a fork copies proposal_id')
   assert.match(chat, /onDraftChange=\{draft => onLaunchDraft\?\.\(draftKey, draft\)\}/)
   assert.match(assistant, /sidRef\.current = id; setSid\(id\); setMsgs\(\[\]\); setPreview\(''\)/)
-  assert.match(assistant, /if \(!mountedRef\.current \|\| seq !== openSessionSeqRef\.current \|\| sidRef\.current !== id/,
+  // Doc 25 UI-05. The longhand fence became `readSuperseded({ requireVisible: true })` over the shared
+  // `assistantSessionModel.js` decision. The property this file cares about is the one that keeps a
+  // draft key honest: a read that comes back for a chat that is no longer the visible one must lose.
+  assert.match(assistant, /if \(readSuperseded\(\{ requireVisible: true \}\)\) \{\s*\n\s*return \{ ok: false, sessionId: id, reason: 'superseded' \}/,
     'a delayed session read must never render the previous session under a new draft key')
-  assert.match(assistant, /sessionDeleteTombstonesRef\.current\.has\(String\(id\)\)[\s\S]{0,200}?reason: 'superseded'/,
+  assert.equal(sessionReadSuperseded({
+    mounted: true, sessionId: 'a', seq: 1, choiceSeq: 1, requireVisible: true, visibleSessionId: 'b',
+  }), 'not-visible')
+  assert.match(assistant, /deleted: sessionDeleteTombstonesRef\.current\.has\(String\(id\)\),[\s\S]{0,400}?if \(readSuperseded\(\)\) return \{ ok: false, sessionId: id, reason: 'superseded' \}/,
     'a session deleted while its read was in flight must not be rendered either')
+  assert.equal(sessionReadSuperseded({
+    mounted: true, sessionId: 'a', seq: 1, choiceSeq: 1, deleted: true,
+  }), 'deleted', 'a tombstone must beat an otherwise perfectly current read')
   assert.doesNotMatch(assistant, /setMsgs\(\[\]\); setLaunchDrafts\(\{\}\)/,
     'New chat must not erase drafts belonging to still-existing sessions')
-  // The guard became a named predicate consulted BEFORE the request rather than inline ordering.
-  assert.match(assistant, /const deleteSessionBlock = \(id\) => \{\n\s*const unresolved = listLaunchTransports\(\)/,
+  // The guard became a named predicate consulted BEFORE the request rather than inline ordering, and
+  // then (doc 25 UI-05) split: the facts are observed in the component, the ORDER they are weighed in
+  // is `assistantSessionModel.js`. Both halves have to hold — an unresolved startup transport has to
+  // reach the decision, and the decision has to rank it above every other reason to wait.
+  assert.match(assistant, /const deleteSessionBlock = \(id\) => \{[\s\S]*?launchRecovery: listLaunchTransports\(\)\s*\n\s*\.find\(item => launchDraftSession\(item\.identity\) === String\(id\)\) \|\| null,/,
     'a chat that owns unresolved startup recovery must not be deletable')
-  assert.match(assistant, /Check or release startup recovery/)
+  assert.match(sessionDeleteBlock({
+    launchRecovery: { runId: 'demo' }, shareActionOwned: true, forkOwned: true, openPending: true,
+    turnActive: true, publiclyShared: true, alreadyDeleting: true,
+  }).message, /^Check or release startup recovery for “demo” before deleting this chat$/)
   const confirmDelete = assistant.slice(assistant.indexOf('const confirmDeleteSession = async'),
     assistant.indexOf('const acceptDeletedSession'))
   assert.ok(confirmDelete.indexOf('const block = deleteSessionBlock(id)') >= 0

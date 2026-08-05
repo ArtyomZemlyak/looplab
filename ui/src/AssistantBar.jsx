@@ -26,6 +26,9 @@ import {
 import { assistantDirectDecision, assistantDirectPresentation } from './assistantDirectPolicy.js'
 import { shareActionBlock, shareActionFailure, shareSnapshotAudience } from './assistantShareModel.js'
 import {
+  sessionDeleteBlock, sessionDeleteFailure, sessionReadSuperseded,
+} from './assistantSessionModel.js'
+import {
   assistantRecoveryFailure, assistantRecoveryPayload, assistantReplyCompletesTurn, assistantTurnIndex,
   danglingAssistantTurn,
   unavailableAssistantRecovery,
@@ -1160,16 +1163,23 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       openSessionPendingRef.current = sessionRead
       setOpeningSid(String(id))
     }
+    // Every await below re-reads the same facts, so the observation is gathered in one place and the
+    // decision made in another (`assistantSessionModel.js`). `requireVisible` is the only thing the
+    // three sites disagree about, and it is now an argument rather than a conjunct someone has to
+    // notice is missing.
+    const readSuperseded = (options = {}) => sessionReadSuperseded({
+      mounted: mountedRef.current, sessionId: id, seq, choiceSeq: openSessionSeqRef.current,
+      token: sessionRead, pendingToken: openSessionPendingRef.current,
+      visibleSessionId: sidRef.current,
+      deleted: sessionDeleteTombstonesRef.current.has(String(id)),
+      ...options,
+    })
     const shareMetaRead = beginShareMetaRead(id)
     try {
       // Keep the current transcript intact until the target is known to exist. The sequence fence
       // rejects a slow A response after the user has already selected B (or started a new chat).
       const s = await boundedRequest(signal => assistantGet(id, { signal }))
-      if (!mountedRef.current || seq !== openSessionSeqRef.current
-          || sessionDeleteTombstonesRef.current.has(String(id))
-          || (sessionRead && openSessionPendingRef.current !== sessionRead)) {
-        return { ok: false, sessionId: id, reason: 'superseded' }
-      }
+      if (readSuperseded()) return { ok: false, sessionId: id, reason: 'superseded' }
       const arr = s.messages == null ? [] : s.messages
       if (!Array.isArray(arr)) throw new Error('Invalid Assistant session transcript')
       // assistant_get carries authoritative public-link terms, so compact views can warn about a
@@ -1209,9 +1219,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           progressKnown = true
         } catch { /* offline: observe only */ }
       }
-      if (!mountedRef.current || seq !== openSessionSeqRef.current || sidRef.current !== id
-          || sessionDeleteTombstonesRef.current.has(String(id))
-          || (sessionRead && openSessionPendingRef.current !== sessionRead)) {
+      if (readSuperseded({ requireVisible: true })) {
         return { ok: false, sessionId: id, reason: 'superseded' }
       }
       // Reattach only when the durable transcript identifies the exact pending user turn. Progress
@@ -1341,11 +1349,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       }
       return { ok: true, sessionId: id, messages: arr, loaded: true }
     } catch (e) {
-      if (!mountedRef.current || seq !== openSessionSeqRef.current
-          || sessionDeleteTombstonesRef.current.has(String(id))
-          || (sessionRead && openSessionPendingRef.current !== sessionRead)) {
-        return { ok: false, sessionId: id, reason: 'superseded' }
-      }
+      if (readSuperseded()) return { ok: false, sessionId: id, reason: 'superseded' }
       // The stored/opened session no longer exists (deleted here or in another tab, run-root reset).
       // Don't leave the dead id in `sid`/localStorage — that wedges the chat (every send targets the
       // 404'd session). Drop it back to a fresh composer.
@@ -1614,34 +1618,23 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     activateComposer(NEW_CHAT_COMPOSER_KEY, { clear: true })
     storageRemove('ll.asstSid')
   }
+  // Each fact is observed here; which one wins is decided in `assistantSessionModel.js`, because the
+  // ORDER of the refusals is what the operator is actually told and it is not visible from any one of
+  // these reads.
   const deleteSessionBlock = (id) => {
-    const unresolved = listLaunchTransports()
-      .find(item => launchDraftSession(item.identity) === String(id))
-    if (unresolved) {
-      return {
-        message: `Check or release startup recovery${unresolved.runId ? ` for “${unresolved.runId}”` : ''} before deleting this chat`,
-        revealRecovery: sidRef.current === id,
-      }
-    }
-    if (shareActionSessionRef.current === id) {
-      return { message: 'Wait for the current share action before deleting this chat' }
-    }
-    if (forkActionSessionRef.current === id) {
-      return { message: 'Wait for this chat to finish forking before deleting it' }
-    }
-    if (String(openSessionPendingRef.current?.id || '') === String(id)) {
-      return { message: 'Wait for this chat to finish opening before deleting it' }
-    }
-    if (id === sidRef.current && (turnCaptureRef.current || runningRef.current
-        || busy || pending.length > 0)) {
-      return { message: 'Stop or finish the current Assistant turn before deleting this chat' }
-    }
     const listedSession = sessions.find(session => session.id === id)
-    if (listedSession?.shared || shareUnknownSids.has(id) || shareCopyFallbacks[id]) {
-      return { message: 'Unshare this chat before deleting it so every public link is explicitly revoked' }
-    }
-    if (deletingSessionsRef.current.has(id)) return { duplicate: true }
-    return null
+    return sessionDeleteBlock({
+      launchRecovery: listLaunchTransports()
+        .find(item => launchDraftSession(item.identity) === String(id)) || null,
+      isCurrentSession: sidRef.current === id,
+      shareActionOwned: shareActionSessionRef.current === id,
+      forkOwned: forkActionSessionRef.current === id,
+      openPending: String(openSessionPendingRef.current?.id || '') === String(id),
+      turnActive: id === sidRef.current && (turnCaptureRef.current || runningRef.current
+        || busy || pending.length > 0),
+      publiclyShared: !!(listedSession?.shared || shareUnknownSids.has(id) || shareCopyFallbacks[id]),
+      alreadyDeleting: deletingSessionsRef.current.has(id),
+    })
   }
   const reportDeleteSessionBlock = block => {
     if (!block) return
@@ -1740,28 +1733,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           restored.splice(Math.min(deletedIndex, restored.length), 0, deletedSession)
           return restored
         })
-        const shared = finalError?.code === 'assistant_delete_shared'
-        const incomplete = finalError?.code === 'assistant_delete_incomplete'
-        const stillStopping = finalError?.code === 'assistant_delete_busy'
-        const forkInProgress = finalError?.code === 'assistant_delete_fork_in_progress'
-        const message = shared
-          ? 'This chat still has an active public link. Unshare it first, then delete the chat.'
-          : forkInProgress
-          ? 'This chat is still being forked. It is shown again; try deleting it after the fork finishes.'
-          : stillStopping
-          ? 'The live Assistant turn is still stopping. The chat is shown again; try deleting it again shortly.'
-          : incomplete
-          ? 'The server could not completely remove the chat. Close anything using its files and try again.'
-          : finalAmbiguous && listedPresence === true
-            ? 'Neither bounded deletion attempt was confirmed, and the chat still appears available. You can try again.'
-            : finalAmbiguous
-              ? 'Neither bounded deletion attempt was confirmed. The chat is shown again for safety; retry or refresh.'
-              : 'The chat was not deleted. It is shown again; you can cancel or try again.'
-        flash(shared ? 'Unshare this chat before deleting it'
-          : forkInProgress ? 'Wait for this chat to finish forking before deleting it'
-          : stillStopping ? 'Assistant work is still stopping'
-          : incomplete ? 'Assistant chat was not completely removed' : 'Could not confirm chat deletion')
-        if (mountedRef.current) setDeleteConfirmError(message)
+        const failure = sessionDeleteFailure({
+          code: finalError?.code, ambiguous: finalAmbiguous, listedPresence,
+        })
+        flash(failure.notice)
+        if (mountedRef.current) setDeleteConfirmError(failure.detail)
       }
     }
     finally {
