@@ -1256,6 +1256,15 @@ structural pin is AST (`called_names`), and it counts: `_maybe_snapshot_concept_
 effects rather than the four calls — a driver that stopped calling a step still returns a well-formed
 snapshot dict, so only the log can tell.
 
+One EXISTING pin was stranded by the move and re-pointed here, which is the hazard CLAUDE.md names:
+`test_options_divergence.py::test_part_iv_comments_distinguish_fold_storage_from_live_steering` reads
+`engine/strategy.py` looking for two Part IV rationale comments ("product `Settings` is ON", "can
+steer later proposals") that travelled with the concept cadence. It now reads
+`engine/concept_cadence.py` for both, and its negative pin — the retracted "audit-only, so the flag
+being off by default is harmless" claim — is asserted against BOTH files, because a revert could put
+it in either. Re-verified by deleting the pinned comment on a scratch copy: the assertion fires. It
+was caught only by the full-suite run; the targeted runs never touched that file.
+
 Teeth-tested against 8 breaks on a scratch tree, all biting at the intended assertion. Dropping the
 projection half of the predicate fails the two stale-projection cases here plus the pre-existing
 abort tests in `test_coverage`/`test_concept_pivot`; deleting the post-fold gate site fails the
