@@ -1685,6 +1685,41 @@ def test_validator_recomputes_source_self_current_environment_and_implementation
     assert not _validate(oversized)
 
 
+def test_one_validation_derives_each_expensive_identity_once(tmp_path):
+    """The recomputation half of doc 25 SE-01, DRIVEN with counting seams.
+
+    The validator used to derive the implementation digest and the environment fingerprint, then
+    call `speculation_quality_gate`, which derived both AGAIN — so a single validation parsed every
+    shipped `.py` twice and walked the installed distributions twice. Counting is the only way to
+    see it: the outcome was identical either way, which is exactly why it survived.
+
+    The identity the recomputation receives must also be the SAME value, not merely an equal one:
+    the counted stub answers once, so a second derivation would fail the gate's own comparison
+    rather than quietly cost time.
+    """
+    pairs = _pairs(tmp_path / "runs")
+    receipt = _write_receipt(tmp_path / "receipt.json", pairs)
+
+    impl_calls, env_calls = [], []
+
+    def counted_impl():
+        impl_calls.append(True)
+        return _IMPL_A()
+
+    def counted_env():
+        env_calls.append(True)
+        return dict(_ENV)
+
+    assert quality.validate_speculation_gate_receipt(
+        receipt,
+        gpu_inventory=_GPU,
+        implementation_digest_fn=counted_impl,
+        environment_fingerprint=counted_env,
+    )
+    assert impl_calls == [True], f"implementation digest derived {len(impl_calls)} times"
+    assert env_calls == [True], f"environment fingerprint derived {len(env_calls)} times"
+
+
 def test_published_pair_threshold_is_the_one_the_gate_enforces():
     """`min_pairs` rides in every stored receipt as a published threshold. It used to be a hand-typed
     3 while the gate independently checked `len(SPECULATION_CALIBRATION_SEEDS)` — the same number by

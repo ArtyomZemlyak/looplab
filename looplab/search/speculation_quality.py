@@ -33,6 +33,21 @@ from looplab.core.atomicio import strict_atomic_write_text
 from looplab.core.config import RUN_START_PINNED_FIELDS
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT, finite_metric
 from looplab.core.hardware import effective_gpu_inventory
+# The finalization protocol and the run-start setup identity are the ENGINE WRITER's, read back here.
+# Both live below `search` (`events/` and `core/`) rather than in the engine because `search` may not
+# import `engine` — the edge doc 25 XP-07 closed and `tests/test_calibration_profile_home.py` pins at
+# zero. Importing them is what makes writer and validator one spelling instead of two (doc 25 SE-01).
+from looplab.core.setup_identity import setup_config_hash, setup_manifest_digest
+from looplab.events.finalize_protocol import (
+    FINALIZE_BUDGET_FIELDS,
+    FINALIZE_STEP_ABANDONED,
+    FINALIZE_STEP_BEGUN,
+    FINALIZE_STEP_BUDGET,
+    FINALIZE_STEP_COMPLETE,
+    FINALIZE_STEP_REFLECTION,
+    FINALIZE_STEP_REFLECTION_BEGUN,
+    QUIET_FINALIZATION_SUFFIX,
+)
 from looplab.core.models import (
     CARD_ACTION_DIGEST_V2_FIELDS,
     Event,
@@ -563,25 +578,20 @@ def _validate_calibration_setup(
     if started_data.get("dirty_inputs") != []:
         raise ValueError("calibration fresh Toy dirty_inputs must be exactly empty")
 
-    # Mirror Engine._setup_phase/_setup_manifest rather than trusting a hand-authored config hash.
+    # Re-derive Engine._setup_phase/_setup_manifest's two identities through the SHARED derivation
+    # (`core/setup_identity`) rather than a hand-copied one. Copying it here is what made this a
+    # byte-level mirror of the writer: the config hash dumps the task payload UNSORTED while the
+    # manifest's inner hash dumps it SORTED, and a copy made from memory gets that backwards into a
+    # self-consistent digest no honest run produces (doc 25 SE-01). `provenance` stays `{}` because
+    # the fresh offline Toy has no data assets — that is a fact about the calibration workload, so it
+    # is supplied here rather than assumed by the shared helper.
     try:
-        import orjson
         from looplab.adapters.toytask import ToyTask
 
         task_model = ToyTask.model_validate(dict(canonical_task))
         task_payload = task_model.model_dump(mode="json")
-        config_hash = hashlib.sha256(orjson.dumps(task_payload)).hexdigest()[:12]
-        manifest_config_hash = hashlib.sha256(orjson.dumps(
-            task_payload, option=orjson.OPT_SORT_KEYS,
-        )).hexdigest()[:12]
-        setup_manifest = hashlib.sha256(orjson.dumps(
-            {
-                "config": manifest_config_hash,
-                "workspace": started_data["workspace"],
-                "provenance": {},
-            },
-            option=orjson.OPT_SORT_KEYS,
-        )).hexdigest()[:16]
+        config_hash = setup_config_hash(task_payload)
+        setup_manifest = setup_manifest_digest(task_payload, started_data["workspace"], {})
     except Exception as exc:
         raise ValueError(f"calibration setup identity could not be reconstructed: {exc}") from exc
     if (
@@ -712,6 +722,17 @@ def _validate_calibration_event_envelope(events: Sequence[Event], state) -> None
         raise ValueError("quality evidence has an open or inconsistent Card-build queue")
 
 
+# Payload fields a finalize-step marker carries ONLY under the offline calibration profile, keyed by
+# step. Reflection is disabled there (`memory_dir` unset, `reflection_priors` off), and the writer's
+# disabled branch records that as `outcome: "disabled"` on both of its markers. This is deliberately
+# NOT in `events/finalize_protocol.py`: the protocol says which steps appear in which order, while
+# what a step's payload says about a run belongs to the profile that produced it.
+_CALIBRATION_STEP_PAYLOAD: Mapping[str, Mapping[str, Any]] = MappingProxyType({
+    FINALIZE_STEP_REFLECTION_BEGUN: MappingProxyType({"outcome": "disabled"}),
+    FINALIZE_STEP_REFLECTION: MappingProxyType({"outcome": "disabled"}),
+})
+
+
 def _validate_calibration_terminal(events: Sequence[Event], state) -> None:
     """Require the exact clean modern finalization suffix of the launch-only calibration path."""
 
@@ -753,9 +774,10 @@ def _validate_calibration_terminal(events: Sequence[Event], state) -> None:
     ]
     if len(scoped_steps) != len(finalize_steps):
         raise ValueError("quality evidence contains a foreign finalization scope")
-    begun = [event for event in scoped_steps if event.data.get("step") == "begun"]
-    complete = [event for event in scoped_steps if event.data.get("step") == "complete"]
-    abandoned = [event for event in scoped_steps if event.data.get("step") == "abandoned"]
+    begun = [event for event in scoped_steps if event.data.get("step") == FINALIZE_STEP_BEGUN]
+    complete = [event for event in scoped_steps if event.data.get("step") == FINALIZE_STEP_COMPLETE]
+    abandoned = [
+        event for event in scoped_steps if event.data.get("step") == FINALIZE_STEP_ABANDONED]
     if len(begun) != 1 or len(complete) != 1 or abandoned:
         raise ValueError("quality evidence lacks one complete un-abandoned finalization scope")
     begun_data = begun[0].data
@@ -788,29 +810,25 @@ def _validate_calibration_terminal(events: Sequence[Event], state) -> None:
     if incomplete_finalize_scope(events) is not None:
         raise ValueError("quality evidence retains a pending finalization scope")
 
-    expected_types = (
-        EV_FINALIZE_STEP,
-        EV_RUN_FINISHED,
-        EV_BUDGET,
-        EV_FINALIZE_STEP,
-        EV_DIVERSITY_ARCHIVE,
-        EV_FINALIZE_STEP,
-        EV_FINALIZE_STEP,
-        EV_FINALIZE_STEP,
-        EV_FINALIZE_STEP,
-        EV_FINALIZE_STEP,
-        EV_FINALIZATION_FINISHED,
-        EV_FINALIZE_STEP,
-    )
-    if finish.seq < 1 or len(events) != finish.seq + 11:
+    # The suffix SHAPE is the finalization protocol's, not this validator's. `engine/finalize.py`
+    # writes it and `events/finalize_protocol.py::QUIET_FINALIZATION_SUFFIX` is the one spelling both
+    # sides read; hand-copying it here is what made every engine finalize change break this gate in
+    # lockstep, and silently — the refusal below says "evidence", never "the protocol moved"
+    # (doc 25 SE-01). What stays LOCAL is the calibration profile's own payload detail: reflection is
+    # off in that profile, so its two markers carry `outcome: "disabled"`, which is a fact about the
+    # profile rather than about the protocol.
+    expected_types = tuple(event_type for event_type, _step in QUIET_FINALIZATION_SUFFIX)
+    if finish.seq < 1 or len(events) != finish.seq + len(QUIET_FINALIZATION_SUFFIX) - 1:
         raise ValueError("quality evidence lacks the exact terminal finalization suffix")
+    # `begun` is the row immediately before the finish, so the suffix starts one seq earlier. Every
+    # positional read below is safe only because this type comparison has already matched the table.
     suffix = events[finish.seq - 1:]
     if tuple(event.type for event in suffix) != expected_types:
         raise ValueError("quality evidence terminal finalization order differs")
 
     expected_begun = {
         "scope": scope,
-        "step": "begun",
+        "step": FINALIZE_STEP_BEGUN,
         "finish_data": {},
         "finish_report_planned": False,
         "after_seq": finish.seq - 2,
@@ -827,14 +845,14 @@ def _validate_calibration_terminal(events: Sequence[Event], state) -> None:
     expected_eval_s = round(float(getattr(state, "total_eval_seconds", 0.0)), 3)
     if (
         not isinstance(suffix[2].data, dict)
-        or set(budget) != {
-            # `elapsed_s` is the RUN's wall clock, read from the log's own first/last `ts` so it is
-            # correct across a stop-then-`finalize` process boundary; `process_s` is the measurement
-            # the finalizing PROCESS made. Both are checked for shape only — a wall clock is not
-            # reproducible from a fold, unlike every other field here.
-            "elapsed_s", "process_s", "eval_s", "nodes", "speculation",
-            "finalize_scope", "finish_seq",
-        }
+        # The writer mints this payload through `finalize_protocol.budget_receipt`, whose key set is
+        # `FINALIZE_BUDGET_FIELDS`. Comparing against the shared constant rather than a local copy is
+        # what keeps a field added on the writer side from silently refusing every run (doc 25 SE-01).
+        # `elapsed_s` is the RUN's wall clock, read from the log's own first/last `ts` so it is
+        # correct across a stop-then-`finalize` process boundary; `process_s` is the measurement
+        # the finalizing PROCESS made. Both are checked for shape only — a wall clock is not
+        # reproducible from a fold, unlike every other field here.
+        or set(budget) != set(FINALIZE_BUDGET_FIELDS)
         or _finite_metric(budget.get("elapsed_s")) is None
         or float(budget["elapsed_s"]) < 0.0
         or _finite_metric(budget.get("process_s")) is None
@@ -850,7 +868,7 @@ def _validate_calibration_terminal(events: Sequence[Event], state) -> None:
         or budget.get("finish_seq") != finish.seq
     ):
         raise ValueError("quality evidence budget finalization receipt differs from folded state")
-    if suffix[3].data != {"scope": scope, "step": "budget"}:
+    if suffix[3].data != {"scope": scope, "step": FINALIZE_STEP_BUDGET}:
         raise ValueError("quality evidence budget finalization marker differs")
 
     from looplab.search.archive import DiversityArchive
@@ -861,14 +879,13 @@ def _validate_calibration_terminal(events: Sequence[Event], state) -> None:
     }
     if suffix[4].data != expected_archive:
         raise ValueError("quality evidence diversity finalization receipt differs from folded state")
-    expected_tail_data = (
-        {"scope": scope, "step": "diversity"},
-        {"scope": scope, "step": "case"},
-        {"scope": scope, "step": "reflection_begun", "outcome": "disabled"},
-        {"scope": scope, "step": "reflection", "outcome": "disabled"},
-        {"scope": scope, "step": "llm_cost"},
-        {"finish_seq": finish.seq},
-        {"scope": scope, "step": "complete"},
+    # The remaining rows are pure markers, so their payloads follow from the protocol table above.
+    # `EV_FINALIZATION_FINISHED` (the one non-`finalize_step` row, marked `None` in the table) is the
+    # exact-finish acknowledgement and carries the finish seq instead of a scope/step pair.
+    expected_tail_data = tuple(
+        {"scope": scope, "step": step, **_CALIBRATION_STEP_PAYLOAD.get(step, {})}
+        if step is not None else {"finish_seq": finish.seq}
+        for _event_type, step in QUIET_FINALIZATION_SUFFIX[5:]
     )
     if tuple(event.data for event in suffix[5:]) != expected_tail_data:
         raise ValueError("quality evidence terminal finalization checklist differs")
@@ -2814,13 +2831,31 @@ def write_speculation_gate_receipt(
 ) -> dict[str, Any]:
     """Atomically publish a passing canonical v1 receipt; failing evidence is never published."""
 
-    body = speculation_quality_gate(
+    return publish_speculation_gate_receipt(path, speculation_quality_gate(
         pairs,
         require_gpu=require_gpu,
         gpu_inventory=gpu_inventory,
         implementation_digest_fn=implementation_digest_fn,
         environment_fingerprint=environment_fingerprint,
-    )
+    ))
+
+
+def publish_speculation_gate_receipt(
+    path: str | Path, body: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Self-digest and atomically publish an ALREADY-COMPUTED gate body; a failing one is refused.
+
+    Split out of `write_speculation_gate_receipt` so a caller that has just run the gate — the
+    `speculation-gate` CLI, which has to render a FAILING report before deciding to publish — does
+    not run it a second time. On the real calibration corpus that second run re-parses six run
+    directories (up to 64 MiB of events each), re-executes the scorer matrix, and re-derives the
+    whole-source implementation digest; the CLI paid for all of it twice (doc 25 SE-01).
+
+    Publishing from a body the caller computed is not a new forgery surface: a receipt's authority
+    comes from `validated_speculation_gate_receipt` recomputing the entire gate from the raw run
+    directories at READ time, not from who assembled the bytes at write time. `passed is not True`
+    is still refused here, so the "failing evidence is never published" contract is unchanged.
+    """
     if body.get("passed") is not True:
         raise ValueError("speculation quality gate did not pass; refusing to publish a receipt")
     receipt = {**body, "self_digest": _self_digest(body)}
@@ -2872,13 +2907,28 @@ def validated_speculation_gate_receipt(
             return None
         if receipt["self_digest"] != _self_digest(receipt):
             return None
+        # Both identities are computed ONCE here and handed to the recomputation below, which would
+        # otherwise derive each a second time inside `speculation_quality_gate`. Neither is cheap:
+        # the implementation digest reads and PARSES every shipped `.py`, and the environment
+        # fingerprint walks the installed distributions — so one validation used to do both twice
+        # (doc 25 SE-01). Passing them down is also strictly more correct than recomputing: a tree or
+        # environment that changed between the two derivations can no longer make the receipt fail a
+        # comparison against an identity that no longer exists.
         current_implementation = _implementation_digest(implementation_digest_fn)
         if receipt.get("implementation_digest") != current_implementation:
             return None
-        current_environment = _environment_digest(
+        current_fingerprint = (
             speculation_environment_fingerprint()
             if environment_fingerprint is None else environment_fingerprint
         )
+        # A caller may supply the seam as a CALLABLE (`_environment_digest` resolves one). Resolve it
+        # here so the digest compared above and the fingerprint handed to the recomputation are the
+        # same VALUE — a callable invoked twice is exactly the second derivation this hoist removes,
+        # and one that answered differently each time would compare against an identity the
+        # recomputation never saw.
+        if callable(current_fingerprint):
+            current_fingerprint = current_fingerprint()
+        current_environment = _environment_digest(current_fingerprint)
         if receipt.get("environment_sha256") != current_environment:
             return None
         if receipt.get("policy_scope") != SPECULATION_POLICY_SCOPE:
@@ -2924,12 +2974,15 @@ def validated_speculation_gate_receipt(
                 return None
             source_pairs.append((baseline_dir, treatment_dir))
 
+        # The two identities validated above, forwarded rather than re-derived — see the note there.
+        # `implementation_digest_fn` is a seam returning a digest, so the already-validated digest is
+        # handed back through the same seam; the gate re-checks its shape exactly as before.
         recomputed = speculation_quality_gate(
             source_pairs,
             require_gpu=receipt["require_gpu"],
             gpu_inventory=gpu_inventory,
-            implementation_digest_fn=implementation_digest_fn,
-            environment_fingerprint=environment_fingerprint,
+            implementation_digest_fn=lambda: current_implementation,
+            environment_fingerprint=current_fingerprint,
         )
         stored_body = {key: value for key, value in receipt.items() if key != "self_digest"}
         # Equality covers every source digest and raw metric. `passed` is not consulted until after the
@@ -2966,6 +3019,7 @@ __all__ = [
     "SPECULATION_QUALITY_THRESHOLDS",
     "SPECULATION_RUN_ANALYSIS_SCHEMA",
     "analyze_speculation_run",
+    "publish_speculation_gate_receipt",
     "speculation_budget_observation",
     "speculation_environment_fingerprint",
     "speculation_implementation_digest",

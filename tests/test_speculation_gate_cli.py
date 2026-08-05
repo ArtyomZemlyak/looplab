@@ -80,16 +80,29 @@ def test_speculation_gate_cli_writes_passing_receipt(tmp_path, monkeypatch):
         "calibration_profile_digest": "sha256:" + "f" * 64,
     }
 
+    gate_calls = []
+
     def _gate(pairs, **kwargs):
+        gate_calls.append((list(pairs), kwargs))
         observed["gate"] = (pairs, kwargs)
         return report
 
-    def _write(path, pairs, **kwargs):
-        observed["write"] = (Path(path), pairs, kwargs)
+    def _publish(path, body):
+        observed["publish"] = (Path(path), body)
         return receipt
 
     monkeypatch.setattr(quality, "speculation_quality_gate", _gate)
-    monkeypatch.setattr(quality, "write_speculation_gate_receipt", _write)
+    monkeypatch.setattr(quality, "publish_speculation_gate_receipt", _publish)
+    # The whole point of the split (doc 25 SE-01): the CLI must PUBLISH the body it already
+    # computed. Re-entering `write_speculation_gate_receipt` would run the entire gate a second
+    # time — six run directories re-parsed, the scorer matrix re-executed — so reaching for it here
+    # is a hard failure rather than a silent doubling.
+    monkeypatch.setattr(
+        quality,
+        "write_speculation_gate_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("the CLI must not recompute the gate to publish it")),
+    )
     run_dirs = [tmp_path / f"run-{index}" for index in range(6)]
     result = CliRunner().invoke(app, [
         "speculation-gate",
@@ -98,12 +111,23 @@ def test_speculation_gate_cli_writes_passing_receipt(tmp_path, monkeypatch):
     ])
 
     assert result.exit_code == 0, result.output
+    assert observed["gate"][0] == list(zip(run_dirs[0::2], run_dirs[1::2]))
     assert observed["gate"][1] == {"require_gpu": True}
-    assert observed["write"][0] == output
-    assert observed["write"][1] == list(zip(run_dirs[0::2], run_dirs[1::2]))
-    assert observed["write"][2] == {"require_gpu": True}
+    assert len(gate_calls) == 1, f"the gate ran {len(gate_calls)} times, not once"
+    assert observed["publish"][0] == output
+    # The published body is the SAME object the gate returned — not a re-derivation of it.
+    assert observed["publish"][1] is report
     assert receipt["self_digest"] in result.output
     assert json.loads(result.output)["receipt"] == str(output.resolve())
     assert '"calibration_seeds"' in result.output
     assert '"admitted_max_nodes": 8' in result.output
     assert receipt["runtime_scope_sha256"] in result.output
+
+
+def test_the_publisher_still_refuses_a_failing_body(tmp_path):
+    """`publish_speculation_gate_receipt` carries the contract it was split out of: a body that did
+    not pass is never written, whoever computed it."""
+    output = tmp_path / "receipt.json"
+    with pytest.raises(ValueError, match="did not pass"):
+        quality.publish_speculation_gate_receipt(output, {"passed": False, "errors": ["nope"]})
+    assert not output.exists()

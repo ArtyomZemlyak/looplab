@@ -78,6 +78,7 @@ from looplab.engine.finalize import (
     mark_finish_report_complete,
     scoped_finish_report,
 )
+from looplab.events.finalize_protocol import FINALIZE_STEP_BEGUN
 from looplab.engine.holdout import HoldoutGrader
 from looplab.engine.lessons import LessonMemory
 from looplab.engine.options import EngineOptions
@@ -97,6 +98,7 @@ from looplab.core.advisory_payloads import bounded_cross_run_advisory_receipt
 from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
 from looplab.core.errors import ConfigRefusal, EnvironmentRefusal, OperatorRefusal
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
+from looplab.core.setup_identity import setup_config_hash, setup_manifest_digest
 from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limits,
                                      in_llm_lane, llm_broker_scope, llm_lane_scope)
 from looplab.search.card_selection import (
@@ -1408,11 +1410,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         scope = scope or f"finalize:{secrets.token_hex(16)}"
         already_begun = any(
             event.type == EV_FINALIZE_STEP and (event.data or {}).get("scope") == scope
-            and (event.data or {}).get("step") == "begun" for event in self.store.read_all())
+            and (event.data or {}).get("step") == FINALIZE_STEP_BEGUN
+            for event in self.store.read_all())
         if not already_begun:
             payload = {
                 "scope": scope,
-                "step": "begun",
+                "step": FINALIZE_STEP_BEGUN,
                 "finish_data": dict(data),
                 "finish_report_planned": bool(finish_report_planned),
             }
@@ -1449,7 +1452,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             event for event in reversed(events)
             if event.type == EV_FINALIZE_STEP
             and (event.data or {}).get("scope") == scope
-            and (event.data or {}).get("step") == "begun"
+            and (event.data or {}).get("step") == FINALIZE_STEP_BEGUN
         )
         try:
             finished = self.store.append(
@@ -2615,9 +2618,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 def _ev(name, **kv):
                     if _su is not None:
                         _su.event(name, **kv)
-                cfg_hash = hashlib.sha256(
-                    orjson.dumps(self.task.model_dump(mode="json"))
-                ).hexdigest()[:12]
+                cfg_hash = setup_config_hash(self.task.model_dump(mode="json"))
                 # Reproducibility (item #4): pin the editable repo(s)+data fingerprint at start so a
                 # resume can tell whether the source workspace changed underneath.
                 _ev("workspace_fingerprint")
@@ -6457,16 +6458,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         `setup_done` to the exact inputs so a pre-node resume re-runs preflight (leakage!) when they
         changed rather than trusting a stale boolean. Deterministic (pure content hashes), so an
         unchanged workspace yields the recorded digest and never loops. `wf` may be passed to reuse an
-        already-computed fingerprint. Both hashlib + orjson are imported for the setup block above."""
-        cfg = hashlib.sha256(orjson.dumps(self.task.model_dump(mode="json"),
-                                          option=orjson.OPT_SORT_KEYS)).hexdigest()[:12]
+        already-computed fingerprint.
+
+        The hashing itself is `core/setup_identity.setup_manifest_digest` — the quality reader
+        re-derives this exact digest to prove calibration evidence came from the shipped writer, and
+        `search` may not import the engine, so the derivation lives where both can reach it
+        (doc 25 SE-01)."""
         wf = self._workspace_fingerprint() if wf is None else wf
         prov = {name: hashlib.sha256(
                     c.encode("utf-8") if isinstance(c, str) else bytes(c)).hexdigest()[:16]
                 for name, c in (self._assets or {}).items()}
-        return hashlib.sha256(orjson.dumps(
-            {"config": cfg, "workspace": wf, "provenance": prov},
-            option=orjson.OPT_SORT_KEYS)).hexdigest()[:16]
+        return setup_manifest_digest(self.task.model_dump(mode="json"), wf, prov)
 
     def _env_fingerprint(self) -> dict:
         """Use the same source-owned environment identity as the quality receipt validator.
