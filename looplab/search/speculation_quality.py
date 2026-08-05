@@ -2026,6 +2026,37 @@ def _total_predicate(predicate, state, node, *, on_error: bool) -> bool:
         return on_error
 
 
+# The `node_failed.reason` values that mean "the BUILD LIFECYCLE threw this node away", as opposed to
+# "the experiment ran and produced a failure". Every one is written by
+# `engine/orchestrator.py::_fail_reserved_build` or by the speculation commit terminal beside it; none
+# of them is ever the outcome of an evaluation.
+#
+# A REGISTRY, guarded two-way by `tests/test_speculation_product_admission.py`, for the reason every
+# other duck-typed seam in this codebase is (CLAUDE.md): the producers are string literals at ~13 call
+# sites, so a new discard reason added there and not here would silently hand out a FALSE ALL-CLEAR on
+# the one signal that is supposed to notice speculation regressing. The observation's TOTAL contract
+# says an unreadable state may over-report and must never under-report; this set is where that promise
+# is kept for the discard axis, since an unrecognised reason falls through to the "did it ever run"
+# test rather than being trusted.
+#
+# `events/replay.py::_FAILURE_SPIKE_IGNORED_REASONS` draws a neighbouring line for a different
+# question ("is the SEARCH failing?"), and deliberately does not coincide: `card_dropped`/`aborted`
+# are operator intent, not build-lifecycle discards, and `build_crash` is a genuine build failure that
+# the spike counter should see.
+SPECULATION_DISCARD_REASONS: frozenset[str] = frozenset({
+    "superseded",               # freshness gate, a lost commit CAS, a replay-rejected creation
+    "frozen",                   # the Card lane closed under the subject while it was being built
+    "build_batch_cancelled",    # a sibling's crash stopped the rest of an atomically-claimed lane
+    "build_crash",              # the build itself raised (concurrent fan-out's guarded terminal)
+    "build_interrupted",        # a process died mid-build; recovery closed the reservation
+    "proposal_rejected",        # the proposal never formed a bounded, ownable action
+})
+# NOT here: "reproposed" (a `_drop_card_once` CARD reason, never a node terminal), and every reason a
+# node that reached EVALUATION can carry — "crash", "timeout", "developer_crash", "aborted",
+# "card_dropped", "gpu_unavailable", "proxy_skipped". Those are experiment outcomes and operator
+# intent; counting them is precisely the defect.
+
+
 def speculation_budget_observation(state) -> dict[str, int]:
     """Per-run answer to "is speculation costing this run real experiment budget?".
 
@@ -2085,7 +2116,53 @@ def speculation_budget_observation(state) -> dict[str, int]:
             if getattr(nodes.get(node_id), "status", None) is status
         }
 
-    discarded = _with_status(NodeStatus.failed)
+    def _never_ran(node) -> bool:
+        """Is there NO durable receipt that this node's evaluation ever started?
+
+        Three independent facts, ANDed because each alone can be absent for a benign reason: the
+        eval-start boundary (`node_eval_started`, absent on logs written before it existed), charged
+        eval seconds (zero for a killed eval), and stage rows (written inside the terminal's own
+        write-lock, so a killed eval has none). Exactly the receipts
+        `is_unevaluated_speculative_discard` calls its execution CORROBORATION, so the two halves of
+        this summary cannot disagree about what "never ran" means.
+        """
+        try:
+            return not (
+                getattr(node, "eval_started", False) is True
+                or (getattr(node, "eval_seconds", 0) or 0) > 0
+                or getattr(node, "stages", None)
+            )
+        except Exception:  # noqa: BLE001 — TOTAL (see the docstring): unreadable -> assume a discard
+            return True
+
+    def _discard_terminal(node) -> bool:
+        try:
+            reason = str(getattr(node, "error_reason", "") or "").strip().lower()
+        except Exception:  # noqa: BLE001 — TOTAL: an unreadable reason falls back to the ran-test
+            return False
+        return reason in SPECULATION_DISCARD_REASONS
+
+    # A DISCARD is a speculative build the BUILD LIFECYCLE threw away — not merely a speculative node
+    # that failed. This used to be `_with_status(NodeStatus.failed)`, i.e. ANY failure, and with
+    # speculation shipping ON that made `charged_discards` positive for every crashing experiment:
+    # `/tmp/ll-s2b/run` reported `discarded: 1, charged_discards: 1` where the "discard" was node 0, a
+    # real experiment that ran five evaluations and died on a CUDA device-side assert. The docstring
+    # below sells `charged_discards` as the speculation regression signal that is "zero while the
+    # refund holds"; a signal every ordinary crash trips measures crashes, not speculation.
+    #
+    # Two ways in, so the fail-safe direction is preserved everywhere it cost nothing. A terminal
+    # written by the build lifecycle (`SPECULATION_DISCARD_REASONS`) is a discard whether or not it
+    # had already burned evaluation time — that case, a prefetch superseded mid-eval, is the most
+    # expensive one there is and `is_unevaluated_speculative_discard` deliberately refuses to refund
+    # it. And a failed speculative node with NO execution receipt at all is a discard whatever its
+    # reason says, which keeps every pre-dispatch failure this observation used to catch (e.g.
+    # `parent_unavailable`) without having to enumerate them. The only thing that stops counting is
+    # the case the defect was about: a speculative node that RAN and whose terminal is the
+    # experiment's own outcome.
+    discarded = {
+        node_id for node_id in _with_status(NodeStatus.failed)
+        if _discard_terminal(nodes.get(node_id)) or _never_ran(nodes.get(node_id))
+    }
     abandoned = _with_status(NodeStatus.pending)
     evaluated = _with_status(NodeStatus.evaluated)
     refunded = {

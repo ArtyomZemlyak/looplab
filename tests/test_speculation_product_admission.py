@@ -16,6 +16,7 @@ protecting, so the fence is gone. What these tests pin is what replaced it:
 from __future__ import annotations
 
 import inspect
+import pathlib
 import sys
 
 import anyio
@@ -755,3 +756,105 @@ def test_an_ordinary_node_and_a_confirmed_speculative_node_are_unaffected(tmp_pa
     state.speculative_nodes[node_id] = {"card_id": "card-1", "generation": 7}
     with pytest.raises(SpeculativeEvaluationInvariantError):
         engine._assert_speculative_selection_confirmed(state, state.nodes[node_id])
+
+
+# --------------------------------------------------------------------------- #
+# Defect C: `charged_discards` counted ANY failed speculative node, so with speculation shipping ON
+# every crashing experiment tripped the one signal that is supposed to notice speculation regressing.
+# Live evidence: /tmp/ll-s2b/run reported `discarded: 1, charged_discards: 1` where the "discard" was
+# node 0 — a real experiment that ran five evaluations and died on a CUDA device-side assert.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_real_experiment_that_crashed_is_not_a_speculative_discard(tmp_path):
+    task = _repo_task(tmp_path)
+    engine = _engine(tmp_path / "crashed-experiment", task,
+                     card_driven_selection=True, speculation_depth=1)
+    node_id = _speculative_node_without_its_link(engine, task)
+    state = fold(engine.store.read_all())
+    state.speculative_nodes[node_id] = {"card_id": "card-1", "generation": 0}
+    node = state.nodes[node_id]
+    # Exactly the live shape: a committed prefetch that RAN, repaired, and crashed on its own merits.
+    state.nodes[node_id] = node.model_copy(update={
+        "status": node.status.__class__.failed,
+        "error": "RuntimeError: CUDA error: device-side assert triggered\n",
+        "error_reason": "crash",
+        "eval_seconds": 0.196,
+        "eval_started": True,
+        "eval_start_boundary": True,
+    })
+    observed = quality.speculation_budget_observation(state)
+    assert observed["discarded"] == 0, (
+        "a speculative node that ran and crashed is an EXPERIMENT RESULT, not a discarded prediction")
+    assert observed["charged_discards"] == 0, (
+        "`charged_discards` is documented as zero while the refund holds; an ordinary crash must not "
+        "make it positive or the signal measures crashes instead of speculation")
+
+    # …while the build lifecycle throwing the same node away IS a discard, even mid-evaluation.
+    state.nodes[node_id] = state.nodes[node_id].model_copy(update={
+        "error_reason": "superseded", "error": "superseded by Card freshness gate"})
+    superseded = quality.speculation_budget_observation(state)
+    assert superseded["discarded"] == 1 and superseded["charged_discards"] == 1
+
+    # …and a speculative node that never ran at all stays a discard whatever its reason says, which
+    # is what keeps every pre-dispatch failure visible without enumerating them.
+    state.nodes[node_id] = state.nodes[node_id].model_copy(update={
+        "error_reason": "parent_unavailable", "error": "parent is missing or aborted",
+        "eval_seconds": 0.0, "eval_started": False})
+    pre_dispatch = quality.speculation_budget_observation(state)
+    assert pre_dispatch["discarded"] == 1 and pre_dispatch["charged_discards"] == 1
+
+
+def test_every_build_lifecycle_discard_reason_is_registered():
+    """Two-way scan of `SPECULATION_DISCARD_REASONS` against the terminals that actually write them.
+
+    The producers are string literals at ~13 call sites of `_fail_reserved_build`. A new discard
+    reason added there and not to the registry would hand out a FALSE ALL-CLEAR on `charged_discards`
+    — silently, because the observation would simply stop counting that build. Same registry
+    discipline, and same reason, as every other duck-typed seam in CLAUDE.md's list.
+    """
+    import ast
+
+    import looplab.engine.orchestrator as orchestrator_module
+    import looplab.engine.speculation as speculation_module
+
+    written: set[str] = set()
+    for module in (orchestrator_module, speculation_module):
+        # utf-8-sig: `orchestrator.py` carries a BOM, which `ast.parse` refuses.
+        tree = ast.parse(pathlib.Path(module.__file__).read_text(encoding="utf-8-sig"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "_fail_reserved_build"):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg != "reason":
+                    continue
+                for constant in ast.walk(keyword.value):
+                    if isinstance(constant, ast.Constant) and isinstance(constant.value, str):
+                        written.add(constant.value)
+        # The speculative COMMIT terminal writes its reason as a plain `node_failed` payload rather
+        # than through the helper, so read those literals too — otherwise the scan is blind to the
+        # exact path a superseded prefetch takes.
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key, value in zip(node.keys, node.values):
+                if (isinstance(key, ast.Constant) and key.value == "reason"
+                        and isinstance(value, ast.Constant) and isinstance(value.value, str)):
+                    written.add(value.value)
+
+    assert "superseded" in written, "no `_fail_reserved_build(reason=...)` literals found — blind scan"
+    # Every reason a NEVER-DISPATCHED build lifecycle can carry must be registered. Terminals written
+    # for a node that reached evaluation (`aborted`, `card_dropped`, `gpu_unavailable`, …) are
+    # deliberately NOT discards, so the assertion is one-directional on the lifecycle reasons only.
+    lifecycle = {reason for reason in written
+                 if reason.startswith("build_") or reason in {
+                     "superseded", "frozen", "proposal_rejected"}}
+    missing = lifecycle - quality.SPECULATION_DISCARD_REASONS
+    assert not missing, (
+        f"build-lifecycle discard reason(s) {sorted(missing)} are written but not registered — "
+        "`charged_discards` would silently stop counting those discards")
+    # …and the other direction: a registered reason nobody writes any more is dead weight that makes
+    # the set look more complete than it is.
+    stale = quality.SPECULATION_DISCARD_REASONS - written
+    assert not stale, f"registered but written by no engine terminal: {sorted(stale)}"

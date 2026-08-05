@@ -149,6 +149,61 @@ def test_a_future_default_flip_that_adds_no_row_fails_the_guard(monkeypatch):
     assert "help" in message                                 # tells the reader what to re-read
 
 
+def test_a_deleted_settings_field_cannot_leave_its_exemption_behind(monkeypatch):
+    """The reconciliation's OTHER arm, and the one no test drove: a `SETTINGS_UI_SCHEMA_UNCURATED_FIELDS`
+    entry naming a knob that no longer exists.
+
+    Its covered sibling (`test_a_new_settings_field_cannot_pass_the_guard_by_bumping_a_count`) drives
+    the `unreviewed` arm, which is why the pair reads as covered — a mutation audit on 2026-08-05
+    confirmed that making the `ghosts` raise a no-op leaves the whole settings surface green. The
+    cost is a one-way ratchet: the exemption list only ever grows, and every stale line makes the
+    NEXT reader trust a written-down reason for a field that has not existed for months. It is the
+    live case, too — a Settings field was deleted in this tree on 2026-08-05.
+    """
+    from looplab.serve import settings_ui_schema as schema
+
+    # Whichever exempt field the list happens to carry — naming one here would make this test a
+    # second place to edit every time the curation changes.
+    doomed = sorted(set(schema.SETTINGS_UI_SCHEMA_UNCURATED_FIELDS) & set(Settings.model_fields))[0]
+    monkeypatch.delitem(Settings.model_fields, doomed)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        schema._load_schema()
+    message = str(excinfo.value)
+    assert doomed in message                                 # names the stale entry, not just "changed"
+    assert "SETTINGS_UI_SCHEMA_UNCURATED_FIELDS" in message
+    assert "take its exemption with it" in message
+
+
+def test_a_row_that_ships_with_no_pinned_default_at_all_fails_the_guard(tmp_path, monkeypatch):
+    """`_check_pinned_default`'s FIRST arm, the one the packaged catalogue can never exercise.
+
+    Its sibling — `test_a_future_default_flip_that_adds_no_row_fails_the_guard` — drives the
+    MISMATCH arm, and `test_every_row_pins_the_default_it_was_reviewed_against` reads `row["default"]`
+    off a file that currently always has it, so neither notices when the key is simply absent. A
+    mutation audit confirmed the arm survives being turned into a silent `return`: a new row would
+    then ship with no pin, and the next default flip under it would go unreviewed — which is the
+    exact failure (`card_driven_selection` telling operators to opt in to something already on) this
+    whole guard was built for.
+    """
+    from looplab.serve import settings_ui_schema as schema
+
+    catalogue = json.loads(_CATALOGUE.read_text(encoding="utf-8"))
+    unpinned = catalogue["groups"][0]["fields"][0]
+    key = unpinned["key"]
+    assert unpinned.pop("default", None) is not None, "the packaged row already had no pin"
+    unreviewed = tmp_path / "settings_ui_schema.json"
+    unreviewed.write_text(json.dumps(catalogue), encoding="utf-8")
+    monkeypatch.setattr(schema, "_SCHEMA_PATH", unreviewed)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        schema._load_schema()
+    message = str(excinfo.value)
+    assert repr(key) in message                              # names the row that needs the pin
+    assert "does not pin the default" in message
+    assert '"default"' in message                            # and how to fix it
+
+
 def test_every_row_pins_the_default_it_was_reviewed_against():
     """The pin is a review of that row's copy, not a formality: today every row and the model agree."""
     from looplab.serve import settings_ui_schema as schema
@@ -156,6 +211,9 @@ def test_every_row_pins_the_default_it_was_reviewed_against():
     for key, row in _rows().items():
         field = Settings.model_fields[key]
         shipped = field.default_factory() if field.default_factory is not None else field.default
+        # Presence first, and with its own message: the mismatch assertion below KeyErrors on an
+        # absent pin, which reads as a broken test rather than as the missing review it is.
+        assert "default" in row, f"settings-form row {key!r} pins no default"
         if key in schema._HOME_RELATIVE_DEFAULT_FIELDS:
             assert row["default"].startswith("~/")           # portable, still checked at load
             continue

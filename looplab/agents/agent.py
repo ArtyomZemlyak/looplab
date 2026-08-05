@@ -25,6 +25,7 @@ from looplab.agents.roles import (
     _attention_points, _clamp_fill,
     _hypothesis_system_suffix,
     _researcher_capability_suffix, _state_brief, collect_hint_cues,
+    researcher_fallback_rationale,
     RESEARCHER_PROMPT_CUES)
 # The tool-loop machinery was split into `agents.tool_loop`. The moved names below are RE-IMPORTED
 # here under their original names because callers and tests import AND monkeypatch them THROUGH this
@@ -240,8 +241,11 @@ class ToolUsingResearcher:
 
         def _degraded(e: BaseException) -> Idea:
             why = f"{cause or e}"[:300]
+            # Through the shared sentinel (`roles.py::RESEARCHER_FALLBACK_PREFIX`), so the engine's
+            # proposal-path circuit breaker recognises this the same way it recognises the plain
+            # Researcher's. Byte-identical text — only the construction is now shared.
             return Idea(operator="draft", params={},
-                        rationale=f"fallback (agent parse failed: {why})")
+                        rationale=researcher_fallback_rationale("agent parse failed", why))
 
         # Through the shared salvage (doc 25 AG-05), which widens what degrades here from `ParseError`
         # alone to everything-but-`BudgetExceeded`. That matches the contract `propose` above already

@@ -8,6 +8,7 @@ by the main engine task.  The mixin is inert unless both Card selection and a po
 from __future__ import annotations
 
 import functools
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
@@ -33,9 +34,11 @@ from looplab.events.types import (
     EV_LLM_COST,
     EV_LLM_USAGE,
     EV_NODE_BUILDING,
+    EV_NODE_CREATED,
     EV_NODE_FAILED,
     EV_PAUSE,
     EV_POLICY_DECISION,
+    EV_SPECULATION_DEPTH_SETTLED,
 )
 from looplab.search.card_selection import (
     CARD_FRESHNESS_SUPERSEDED_ERROR,
@@ -47,6 +50,8 @@ from looplab.search.card_selection import (
     speculative_card_is_fresh,
     speculative_raw_actions,
 )
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -128,6 +133,150 @@ class SpeculationMixin:
             and getattr(self, "_speculation_gate_admitted", False) is True
             and bool(getattr(self, "_speculation_gate_receipt_digest", ""))
         )
+
+    # --------------------------------------------------------------- adaptive AUTO depth
+    #
+    # AUTO resolves the depth AT STARTUP from the settled eval width — "how many experiments can run
+    # at once" — which answers a capacity question and not the one that decides whether a prefetch
+    # PAYS. A prefetch exists to overlap the Developer's PROVIDER latency with a RUNNING evaluation.
+    # When the evaluation finishes in 0.1 s there is nothing to overlap and there never was.
+    #
+    # MEASURED, same task, same defaults, same command, both arms 8/8 nodes and the identical
+    # champion (node 7, metric 0.925):
+    #
+    #     AUTO -> depth 1 : 109 LLM calls, 1,265,911 tokens, 2348.8 s wall
+    #     speculation_depth=0 :  75 LLM calls,   817,201 tokens, 2448.6 s wall
+    #
+    # 45% more calls and 55% more tokens for a 4% wall-clock saving, and the overhead was NOT waste
+    # from wrong predictions (one stale prefetch in nine requests) — it is fixed Card-lane cost.
+    #
+    # This is the third case of a rule AUTO already applies twice: it settles ITSELF to off where a
+    # prefetch cannot help (a build whose roles call no LLM has no provider latency to overlap; a
+    # policy the Card scorer was never built against cannot be asked for the counterfactual). "The
+    # evaluations are too short to hide a build behind" is the same argument from the other side, and
+    # the only difference is that the evidence for it does not exist until the run has measured it.
+    #
+    # THE PROPERTY THIS MUST NOT BREAK is engine invariant #3, not "resolve once at startup". Pinning
+    # the resolved integer was one cheap way to make a resume reproduce the treatment; the actual
+    # requirement is that every side effect is gated on a durable event. So the depth is allowed to
+    # move, and each move appends `speculation_depth_settled` carrying the RESOLVED integer plus the
+    # evidence — the fold READS the outcome and re-measures nothing, so a resume on a different host
+    # continues under the treatment this run chose (`replay.py::_on_speculation_depth_settled`).
+    #
+    # A ONE-WAY RATCHET, evaluated against a fully adaptive rule and chosen over it:
+    #   * it cannot thrash. A symmetric rule oscillates with every slow-then-fast node, and each
+    #     oscillation is a durable change to the run's SEARCH TREATMENT, not a tuning knob;
+    #   * the harm is asymmetric. Prefetching on a fast task costs tokens for nothing (measured
+    #     above); not prefetching on a slow one costs some wall clock and nothing else;
+    #   * it bounds the log. At most `depth` transitions per run, each strictly smaller.
+    # AUTO-ONLY, like every other AUTO settling rule here: a SPELLED depth is honoured as spelled.
+    _ADAPTIVE_DEPTH_MIN_SAMPLES = 2
+    # How much of a build one evaluation must be able to hide before the prefetch earns its fixed
+    # cost. A depth-1 prefetch can save at best `min(build, eval)` per node, so at this ratio the
+    # ceiling on the saving is ~9% of a node's wall clock — already about double the 4% actually
+    # measured above, which is why anything below it is not a close call. Deliberately a RATIO of two
+    # measured quantities and not an absolute number of seconds: "fast" only means anything relative
+    # to the provider latency the overlap is supposed to hide, and a run whose builds are slow because
+    # the endpoint is slow should keep prefetching at eval durations a fast endpoint would not justify.
+    _ADAPTIVE_DEPTH_MIN_EVAL_FRACTION = 0.1
+
+    @staticmethod
+    def _median(values: list[float]) -> float:
+        ordered = sorted(values)
+        middle = len(ordered) // 2
+        if not ordered:
+            return 0.0
+        return (ordered[middle] if len(ordered) % 2
+                else (ordered[middle - 1] + ordered[middle]) / 2.0)
+
+    def _measured_build_seconds(self, events) -> list[float]:
+        """Per-node build wall time, read off the log's own `node_building` -> `node_created` pair.
+
+        MEDIAN, not mean, on both axes: one repaired node or one retried build is an outlier that a
+        mean would let decide the run's treatment.
+        """
+        started: dict[int, float] = {}
+        spans: list[float] = []
+        for event in events:
+            node_id = (event.data or {}).get("node_id")
+            if type(node_id) is not int:
+                continue
+            if event.type == EV_NODE_BUILDING:
+                started[node_id] = float(event.ts or 0.0)
+            elif event.type == EV_NODE_CREATED and node_id in started:
+                span = float(event.ts or 0.0) - started.pop(node_id)
+                if span > 0:
+                    spans.append(span)
+        return spans
+
+    def _settle_speculation_depth(self, state: RunState, events=None) -> bool:
+        """Ratchet AUTO depth down once the run's own measurements say a prefetch cannot pay.
+
+        Returns True when a durable settle landed (the caller must re-fold). See the block comment
+        above for the rule, the measurement behind it and why it is a one-way ratchet.
+        """
+        if not getattr(self, "_speculation_depth_auto", False):
+            return False                          # a SPELLED depth is honoured as spelled
+        current = int(getattr(self, "speculation_depth", 0) or 0)
+        if current <= 0:
+            return False
+        # QUIESCENT ONLY. Turning the depth to 0 makes `_speculation_enabled()` False, and with it the
+        # whole lane that SERVES an outstanding prefetch: an open request head would keep its physical
+        # node reservation forever with nothing left able to close it, which leaks the budget and
+        # stalls the run — the same shape as the defect this change sits next to. So the ratchet may
+        # only fire when there is no head request, no build marker and nothing in flight in this
+        # process. Costs nothing: the loop reaches this point once per turn and a fast task is
+        # quiescent between batches constantly.
+        if (self._head_request(state) is not None
+                or state.buildings
+                or getattr(self, "_spec_build_inflight", None)
+                or getattr(self, "_spec_builds", None)):
+            return False
+        evals = [float(node.eval_seconds or 0.0) for node in state.nodes.values()
+                 if node.status is NodeStatus.evaluated and node.eval_seconds is not None]
+        if len(evals) < self._ADAPTIVE_DEPTH_MIN_SAMPLES:
+            return False                          # one fast node must not switch off the treatment
+        events = self.store.read_all() if events is None else events
+        builds = self._measured_build_seconds(events)
+        if len(builds) < self._ADAPTIVE_DEPTH_MIN_SAMPLES:
+            return False
+        eval_median = self._median(evals)
+        build_median = self._median(builds)
+        if build_median <= 0:
+            return False
+        ratio = eval_median / build_median
+        if ratio >= self._ADAPTIVE_DEPTH_MIN_EVAL_FRACTION:
+            return False
+        payload = {
+            "depth": 0,
+            "previous": current,
+            "reason": (
+                "measured evaluations are too short to overlap a build: a prefetch exists to hide "
+                "the Developer's provider latency behind a RUNNING evaluation, and there is none "
+                "here to hide it behind"),
+            # The decision's whole input, so `looplab inspect`/the report can show WHY and the fold
+            # never has to re-derive anything from the box it is replaying on.
+            "evidence": {
+                "eval_samples": len(evals),
+                "build_samples": len(builds),
+                "median_eval_seconds": round(eval_median, 6),
+                "median_build_seconds": round(build_median, 6),
+                "eval_fraction_of_build": round(ratio, 6),
+                "min_eval_fraction": self._ADAPTIVE_DEPTH_MIN_EVAL_FRACTION,
+            },
+        }
+        self.store.append(EV_SPECULATION_DEPTH_SETTLED, payload)
+        self.speculation_depth = 0
+        # SAY SO. A run whose depth silently drops has changed its SEARCH TREATMENT, and the operator
+        # comparing two runs' token bills deserves to know which one prefetched. WARNING for the same
+        # reason the GPU-pool lease wait is at WARNING: it is not an error, but a silent one gets
+        # debugged as something else.
+        _LOG.warning(
+            "speculation depth %d -> 0: median evaluation %.3gs is only %.2g%% of a median build "
+            "(%.3gs), so a prefetch has no provider latency to overlap. Recorded as "
+            "speculation_depth_settled in the event log; `-s speculation_depth=%d` keeps it on.",
+            current, eval_median, ratio * 100.0, build_median, current)
+        return True
 
     @staticmethod
     def _proposal_authority_seq(events: list) -> int:

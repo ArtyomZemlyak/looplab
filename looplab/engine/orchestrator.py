@@ -47,7 +47,8 @@ from looplab.events.types import (
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED,
     EV_ENV_CHANGED, EV_WORKSPACE_CHANGED)
 from looplab.engine.ablation import AblationMixin
-from looplab.engine.widths import EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width
+from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width,
+                                   settled_width_refusal)
 from looplab.engine.audit import AuditMixin
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
 from looplab.engine.costs import bind_cost_accountants
@@ -58,7 +59,8 @@ from looplab.engine.evaluate import EvaluateMixin
 from looplab.engine.node_build import NodeBuildMixin, developer_crash_records
 from looplab.engine.proposal_cues import ProposalCuesMixin, normalize_steering_context
 from looplab.engine.resources import (ResourceSchedulingMixin, cuda_visible_device_tokens,
-                                      default_gpu_host_lease_path, detect_gpu_inventory)
+                                      default_gpu_host_lease_path, detect_gpu_inventory,
+                                      schedulable_cuda_tokens)
 from looplab.engine.speculation import SpeculationMixin
 from looplab.engine.train_monitor import TrainingMonitorMixin
 from looplab.engine.asha_monitor import AshaMonitorMixin
@@ -79,11 +81,13 @@ from looplab.engine.lessons import LessonMemory
 from looplab.engine.options import EngineOptions
 from looplab.engine.workspace import WorkspaceSeeder
 # Pure triage/fingerprint helpers extracted to looplab/engine/triage.py, imported back under
-# their original names so `looplab.engine.orchestrator._normalize_error_sig`, `._holdout_indices`
-# (& friends) stay importable — tests import them from this module path.
+# their original names so `looplab.engine.orchestrator._rule_triage`, `._holdout_indices`
+# (& friends) stay importable — tests import them from this module path. (`_normalize_error_sig`
+# was re-exported here too until 2026-08-05; the error-signature guard it served was replaced by
+# the triage model's own stop decision — see `engine/triage.py`'s module docstring.)
 from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa: F401
                                    _dir_fingerprint, _failure_reason, _holdout_indices,
-                                   _normalize_error_sig, _rule_triage, _shallow_fingerprint)
+                                   _rule_triage, _shallow_fingerprint)
 from looplab.core.models import (
     Idea, Node, NodeStatus, RunState, card_action_digest, card_ownership_receipt,
     durable_idea_payload, idea_proposal_ref, normalize_researcher_footprint, is_developer_error)
@@ -113,7 +117,8 @@ from looplab.search.policy import KIND_EXPAND, SearchPolicy
 # which imports those symbols from their canonical sources — so they are no longer imported here.
 from looplab.core.profile import profile_dataset
 from looplab.events.replay import fold
-from looplab.agents.roles import Developer, Researcher
+from looplab.agents.roles import (Developer, Researcher, is_researcher_fallback,
+                                  researcher_fallback_cause)
 from looplab.runtime.sandbox import Sandbox
 from looplab.core.tracing import JsonlSpanExporter, Tracer
 
@@ -283,7 +288,14 @@ def _detect_gpu_ids() -> list[int]:
     """
     cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
     if cvd is not None:
-        ids = cuda_visible_device_tokens(cvd) or []
+        # `schedulable_cuda_tokens` applies CUDA's OWN left-to-right truncation of an ordinal fence,
+        # so this count is what a child process will actually see rather than how many ids were typed.
+        # That matters because the count is a WIDTH: AUTO derives `eval_parallel` from it and
+        # `run_started` pins the resolved integer permanently, so `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
+        # on a two-GPU box used to make a transient env typo the run's durable treatment — one every
+        # later resume on the real box then ADOPTS (invariant #6). UUID/MIG fences and un-probeable
+        # boxes are left exactly as spelled; see the helper for why it fails open everywhere else.
+        ids = schedulable_cuda_tokens(cuda_visible_device_tokens(cvd)) or []
         # Ordinals INSIDE this fenced view are 0..n-1 regardless of the physical ids named in the var.
         return list(range(len(ids)))
     try:
@@ -474,7 +486,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         speculation_gate_receipt = _opt("speculation_gate_receipt")
         inline_repair = _opt("inline_repair")
         inline_repair_attempts = _opt("inline_repair_attempts")
-        inline_repair_stuck_repeat = _opt("inline_repair_stuck_repeat")
         inline_repair_reasons = _opt("inline_repair_reasons")
         inline_repair_retrain_cap = _opt("inline_repair_retrain_cap")
         auto_install_deps = _opt("auto_install_deps")
@@ -578,7 +589,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # Hybrid in-node crash repair (triage + inline repair). See Settings.inline_repair.
         self._inline_repair = inline_repair
         self._inline_repair_attempts = max(0, int(inline_repair_attempts))   # 0 = unlimited
-        self._inline_repair_stuck_repeat = max(2, int(inline_repair_stuck_repeat))
         self._inline_repair_reasons = tuple(inline_repair_reasons or ("crash",))
         self._inline_repair_retrain_cap = max(0, int(inline_repair_retrain_cap))
         # Environment self-prep (deps.py): auto-install a missing KNOWN library and re-run, instead
@@ -1158,6 +1168,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._run_setup_lock = _threading.Lock()   # _run_eval runs on parallel worker threads; the
         #   check-then-set on _run_setup_done races without this, launching run_setup (pip) N times
         self._drift_warned = False   # one-shot guard for the #8 drift-coverage warning
+        # Serial Card-claim refusal ledger (see `_refuse_card_claim` / `_note_card_claim_refusal`):
+        # the last refusal's reason, the exact lane it refused, and how many CONSECUTIVE turns it has
+        # refused that lane. Local, not replayed — the retirement it drives IS durable.
+        self._card_claim_refusal: Optional[str] = None
+        self._card_claim_refusal_lane: Optional[tuple] = None
+        self._card_claim_refusal_turns = 0
         # Fail loud at START, not mid-sweep: the untrusted tier needs docker, so verify it once
         # here instead of re-discovering (and re-scanning PATH) on every eval's make_docker_wrap.
         if trust_mode in ("untrusted", "hostile"):
@@ -1517,8 +1533,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         start = time.time()
         # Creation-level runaway guard: if the loop keeps CREATING nodes while NO node reaches a
         # terminal (evaluated/failed), it is spinning — e.g. `fold` returning empty `nodes` makes
-        # `_create_node` re-mint id 0 forever (the 184MB node_created(0) spin). The eval loop has its
-        # own anti-stuck guard, but node CREATION had none. Local counters (not replayed) → on trip we
+        # `_create_node` re-mint id 0 forever (the 184MB node_created(0) spin). The eval loop bounds
+        # its own inline-repair runaway (the triage model's stop verdict + `inline_repair_attempts`),
+        # but node CREATION had nothing. Local counters (not replayed) → on trip we
         # append run_finished (which IS replayed), so resume sees a cleanly-finished run.
         #
         # It charges nodes actually MINTED, counted from the LOG (`node_created` rows), not from the
@@ -1711,6 +1728,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 continue
 
             if self._speculation_enabled():
+                # AUTO depth re-resolves HERE, on a stable decision prefix with no head request and
+                # no build in flight yet, so a settle can never land between a prefetch's request and
+                # its commit. It appends a durable event and returns True; re-enter so every gate
+                # below reads the new treatment from a fresh fold rather than from this stale one.
+                if self._settle_speculation_depth(state, events=decision_events):
+                    continue
                 # Crash-prefix cleanup and the durable Card-build queue both precede cadences and
                 # empty-action finalization. Otherwise request->node_building->crash can finish the run
                 # with its exact request head still unacknowledged.
@@ -1824,6 +1847,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     creates, state, created_no_terminal=_created_no_terminal,
                     no_mint_turns=_no_mint_turns,
                     decision_seq=decision_seq, max_es=max_es, max_s=max_s, start=start)
+                # Any run-global pause a build QUEUED must become durable here, on the main task,
+                # before the next fold. The branch has nine exits and only two of them drained,
+                # which was adequate while the only producer was `_create_node`'s developer-crash
+                # breaker (a worker-thread queue that always returns through one of those two). The
+                # proposal-path breaker (`_refuse_degraded_proposal`) queues from
+                # `_prepare_node_idea`, reachable from exits that never drained — and the branch
+                # RESETS the queue on its next entry, so the pause would be silently dropped and the
+                # run would keep paying for proposals against a dead provider. `_drain_create_pause`
+                # empties the queue, so the inner drains stay exactly as they were.
+                if getattr(self, "_pending_create_pause", None):
+                    self._drain_create_pause()
                 if _signal == "break":
                     break
                 continue
@@ -1899,10 +1933,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # reaches it. The reason names what actually happened instead of blaming node creation.
         _no_mint_turns += 1
         if _no_mint_turns > _runaway_cap:
+            # The reason names the CAUSE, not just the symptom. "N action(s) planned for M turns
+            # without creating a node" describes what the counter saw; an operator cannot act on it,
+            # and the same log's `budget.speculation` already recorded `producer_failed: 1`. The
+            # diagnosis reads that same folded state, so the terminal and the budget summary agree.
+            _why = self._create_stall_diagnosis(creates, state)
             if self._finish_with_report_if_quiescent(state, {
                     "reason": (
                         f"stuck: {len(creates)} action(s) planned for "
-                        f"{_no_mint_turns} consecutive loop turns without creating a node")},
+                        f"{_no_mint_turns} consecutive loop turns without creating a node"
+                        + (f" — {_why}" if _why else ""))},
                     after_seq=decision_seq):
                 return "break", state, _no_mint_turns
             return "continue", state, _no_mint_turns
@@ -1934,6 +1974,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # batch here only creates stale inventory if the first fast eval moves best.
                     one = stageable[:1]
                     if self._stage_card_creates(one, state):
+                        return "continue", state, _no_mint_turns
+                    if self._create_paused:
+                        # …but a staging attempt that GATED the run is not a "rejected" one. The
+                        # serial compatibility try below would propose again against the same dead
+                        # provider and pay for a second identical refusal. Hand the loop back so it
+                        # re-folds, sees `paused`, and stops.
                         return "continue", state, _no_mint_turns
                     # A rejected staging attempt gets one ordinary serial compatibility try;
                     # it must not poll the same paid proposal outside the runaway accounting.
@@ -1973,7 +2019,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 return "continue", state, _no_mint_turns
             _card_reservations = self._claim_existing_card_builds(creates)
             if _card_reservations is None:
+                # A refused claim used to be an unconditional retry, which is right for a transient
+                # refusal and a SPIN for a permanent one. Count it; the ledger retires a lane that has
+                # answered the same way for `_CARD_CLAIM_RETIRE_AFTER` turns so selection can move on.
+                self._note_card_claim_refusal(
+                    [self._canonical_card_id(a.get(META_CARD_ID)) or "" for a in creates])
                 return "continue", state, _no_mint_turns
+            self._card_claim_refusal_lane = None      # a claim landed: this lane is not stalled
+            self._card_claim_refusal_turns = 0
         _card_reservation_by_id = {
             reservation.card_id: reservation
             for reservation in (_card_reservations or [])
@@ -2007,6 +2060,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     self._pending_batch_dropped = []
                     self._pending_batch_novelty_gated = []
                     continue
+                # Third and last lane that reserves a node from a proposal without crossing
+                # `_prepare_node_idea`'s `_link` funnel. A dead provider hands the shared batch
+                # researcher N degraded FALLBACKS at once, which is how the same non-proposal used to
+                # become several byte-identical nodes in one chunk. MAIN TASK — this is the loop task,
+                # before any `start_soon`.
+                if any(self._refuse_degraded_proposal(_idea, main_task=True) for _idea in _ideas):
+                    self._record_dropped_batch_cards(_dropped_batch)
+                    self._pending_batch_dropped = []
+                    self._pending_batch_novelty_gated = []
+                    break
                 _chunk = _chunk[:len(_ideas)]
                 for _a in _chunk:               # surface the audit events only for what we build
                     if "_scores" in _a:
@@ -2390,11 +2453,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         """
         return {"eval_parallel": self._eval_parallel, "llm_parallel": self._llm_parallel}
 
-    def _repin_settled_widths(self, entry: RunState) -> None:
+    def _repin_settled_widths(self, entry: RunState, *, source: Optional[str] = None) -> None:
         """Restore the widths ``run_started`` pinned, or refuse a re-entry that contradicts them.
 
         Called at the same re-entry boundaries as `_require_pinned_speculation_receipt` and, like it,
-        BEFORE any append — a refusal must leave the log it declined to trust untouched.
+        BEFORE any append — a refusal must leave the log it declined to trust untouched.  "Before any
+        append" is a promise only the CALLER can keep: reaching `Engine.run` is already past the
+        CLI's own reopen/resume writes, so `cli/run_cmds.py::_preflight_settled_widths` runs this at
+        the same four command-level boundaries the speculation receipt is authorized at.  This
+        in-engine call stays as the backstop for every other entry point.
+
+        ``source`` names the surface whose knob the operator must actually change, and is passed only
+        by the CLI, which is the only layer that knows: `run` writes `config.snapshot.json` from its
+        launch settings and never reads it back, while `resume` restores the run's settings FROM that
+        snapshot.  Naming the wrong one sends the operator to edit a file with no effect on the
+        command they ran, so `engine/widths.py::SETTLED_WIDTH_SOURCES` owns the mapping and ``None``
+        keeps the generic phrasing a library ``Engine(...)`` caller gets.
 
         Deliberately NOT called per loop iteration: `_apply_control_overrides` re-applies an
         operator's `budget_extend` widths on every turn, so a per-iteration re-pin would either undo
@@ -2429,13 +2503,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                else ("parallel_build", "llm_parallel"))):
                 continue
             raise SettledWidthPinError(
-                f"cannot resume this run at {axis}={resolved}: run_started pinned {recorded}. "
-                "The run-start record owns the width its log was written under (engine invariant "
-                f"#6) — a change here would splice two execution treatments into one log with "
-                f"nothing recording the change. Put {axis} back to {recorded} (or to 0 = AUTO, which "
-                "adopts the pin) in this run's config.snapshot.json / launch settings, or change the "
-                "width durably with a `budget_extend` control event, which the log DOES record."
-            )
+                settled_width_refusal(axis, resolved=resolved, recorded=recorded, source=source))
 
     def _setup_phase(self, state: RunState) -> None:
         # Per-RUN reset of the dep-install circuit breaker: it is a module global, so in the long-lived
@@ -2787,6 +2855,74 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._pending_create_pause = []
         if pending:
             self.store.append(EV_PAUSE, pending[0])
+
+    # ---- the proposal path's provider circuit breaker (the twin of `developer_crash`) ----------
+    #
+    # A dead provider is handled correctly on the REPAIR path and in `_create_node`'s
+    # developer_crash breaker: the node is FAILED and the run is PAUSED with a reason naming the
+    # provider, so `looplab resume` picks it up once the endpoint is back. The RESEARCHER/proposal
+    # path had no equivalent, and every role degrades on purpose, so the failure was invisible:
+    # `/tmp/ll-s4b/run` (provider killed after node 0 evaluated) built three more nodes with
+    # byte-identical bounds-midpoint params, spliced the transport error into the hypothesis board,
+    # the node rationale, the research memo and the DURABLE CROSS-RUN CASE, declared a champion over
+    # them, and finished with no reason at all and exit 0.
+    #
+    # PAUSE ON THE FIRST ONE, exactly like developer_crash, and for the identical argument: the
+    # fallback is produced only after the role's own retries (the plain Researcher re-prompts with the
+    # parse error, the agentic one runs a whole tool loop and then a forced emit), so a Researcher that
+    # still cannot state a hypothesis has hit something a NEW node cannot fix. Proposing again just
+    # mints more identical dead nodes. Freeze rather than finish, so a plain `resume` continues once
+    # the cause is resolved — and so the run cannot report a champion or write a cross-run case over
+    # experiments that were never proposed.
+    _PROPOSAL_CRASH_PAUSE = (
+        "auto-paused: the Researcher's LLM provider failed, so it returned a degraded FALLBACK "
+        "instead of a proposal — {cause}. Nothing was proposed, so no node was built. Fix the "
+        "endpoint/credentials and `looplab resume`; the run keeps every experiment it already has.")
+
+    def _degraded_proposal_pause(self, idea) -> Optional[str]:
+        """The operator-facing pause reason for a degraded proposal, or None if this is a real one."""
+        if not is_researcher_fallback(idea):
+            return None
+        return self._PROPOSAL_CRASH_PAUSE.format(
+            cause=researcher_fallback_cause(idea) or "no cause was captured")
+
+    def _refuse_degraded_proposal(self, idea, *, main_task: bool) -> bool:
+        """Refuse a role's degraded FALLBACK as a proposal, and gate the run. True when refused.
+
+        ``main_task`` picks the append discipline, and the choice is load-bearing in the same way
+        `node_build.py::developer_crash_records` documents for its five sites. The staging lane runs
+        on the MAIN task and appends EV_PAUSE directly, so the very next fold sees `paused` and no
+        further paid proposal is attempted. `_prepare_node_idea` can run in a build WORKER thread
+        (the `llm_parallel` fan-out), where EV_PAUSE is a run-global FOLDED event outside invariant
+        #1's own-node worker seam — it queues and the main task appends it after the join.
+
+        NODE-LESS on purpose, both ways. `replay.py::_on_pause` reads a pause that NAMES a node as the
+        scoped developer-crash breaker and DROPS it unless that node is already `failed` with
+        `error_reason == "developer_crash"` — so a node id here (there is no node: the proposal was
+        refused before any reservation) would append a pause the fold silently ignores, which is the
+        same class of invisible failure as the defect itself. A node-less pause is the run-global gate,
+        exactly like an operator STOP, which is what a dead provider actually is.
+        """
+        reason = self._degraded_proposal_pause(idea)
+        if reason is None:
+            return False
+        if getattr(self, "_create_paused", False):
+            # ONE gate per turn. A single turn can reach this twice — the staging lane refuses the
+            # proposal, and the create branch then falls through to its "one ordinary serial
+            # compatibility try", which proposes again and refuses again. Both are correct refusals;
+            # two identical `pause` rows for one dead provider are just noise in the log the operator
+            # reads. Measured on the live reproduction (`/tmp/ll-fixb/run`): seq 10 and 11, identical.
+            return True
+        self._create_paused = True     # stop the rest of any create batch, like developer_crash
+        if main_task:
+            if not fold(self.store.read_all()).paused:
+                self.store.append(EV_PAUSE, {"reason": reason})
+        else:
+            # Same queue and same drain as `_request_create_pause`; only the payload differs.
+            if not isinstance(getattr(self, "_pending_create_pause", None), list):
+                self._pending_create_pause = []
+            self._pending_create_pause.append({"reason": reason})
+        return True
 
     def _reentry_repin(self) -> bool:
         _events = self.store.read_all()
@@ -4666,6 +4802,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
             staged: list[str] = []
             for action, idea, source, at_node, steering, advisory_receipt in prepared:
+                # The BATCH lane reaches here without passing `_prepare_node_idea`'s `_link` funnel
+                # (`_consume_batch_proposal` hands its Ideas straight to the stager), so the proposal
+                # circuit breaker is repeated for it. MAIN TASK: both callers of `_stage_card_creates`
+                # — the create branch and `_run_card_session`'s raw lane — run there, so the pause is
+                # appended immediately and the very next fold stops the run before another paid
+                # proposal. Live: this is the lane that authored `/tmp/ll-s4b/run`'s poisoned Cards.
+                if self._refuse_degraded_proposal(idea, main_task=True):
+                    break
                 card_id = self._stage_prepared_card(
                     action,
                     idea,
@@ -4687,6 +4831,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._pending_batch_dropped = []
             self._pending_batch_telemetry = []
             self._pending_batch_novelty_gated = []
+            # The single-action lane reaches the proposal circuit breaker through
+            # `_prepare_node_idea`'s `_link`, which uses the WORKER discipline (it cannot know which
+            # task it is on) and therefore only QUEUES the run-global pause. Both callers of this
+            # method — the create branch and `_run_card_session`'s raw lane — are the MAIN task, so
+            # this is where that queue becomes durable. Without it the pause is dropped on the next
+            # loop turn's queue reset and the run keeps paying for proposals against a dead provider.
+            if getattr(self, "_pending_create_pause", None):
+                self._drain_create_pause()
             # Node-oriented telemetry cannot truthfully be emitted until a Node exists.  Clear the
             # primary pair so it cannot leak onto a later repair/legacy build; the staged Card already
             # owns its immutable proposal and steering receipts.
@@ -4794,9 +4946,31 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         )
         if (self._card_statement(idea) != card.seed_statement
                 or rebuilt_action != receipt_action):
-            return None
+            # PERMANENT, not transient — and the only refusal here that is. Every check above tests
+            # this claim against a MOVING world (a reset, an abort, a replaced parent); this one tests
+            # the Card against ITSELF, so it answers the same way on every future turn. The live
+            # instance: `_clamp_fill` bounds-clamped a param that its own `space` grid also names, so
+            # the durable action was not a FIXED POINT of `Idea`'s validators and rebuilding the Idea
+            # from the Card produced a different `params`. Naming it is what turns the resulting
+            # forever-refusal into a bounded retirement instead of a spin (`_note_card_claim_refusal`).
+            return self._refuse_card_claim(
+                f"{card_id}'s durable action cannot be rebuilt from its own receipt "
+                f"(the Card and its ownership digest disagree) — it can never be claimed")
         return _BuildReservation(
             state, node_id, kind, parents, parent_generations, card_id, idea)
+
+    def _refuse_card_claim(self, reason: str) -> None:
+        """Record WHY the serial Card claim refused, then refuse (always ``None``).
+
+        The claim has ~10 refusal exits and every one of them used to be an anonymous `return None`.
+        The caller's only recourse was to re-select and try again next turn, which is right for the
+        transient refusals (a lost tail CAS, a selection that moved under a concurrent control) and a
+        SPIN for the permanent ones. The engine knew the difference and threw it away; this keeps it,
+        so `_handle_create_actions` can retire a lane that will never be claimable and the terminal
+        can name a cause the operator can act on instead of "no node was created".
+        """
+        self._card_claim_refusal = reason
+        return None
 
     def _claim_existing_card_builds(
         self, actions: list[dict],
@@ -4807,29 +4981,34 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         would make the first pending node engage the evaluate-all forced gate and invalidate its
         siblings. The whole lane is therefore revalidated under ``_id_lock`` and its ``node_building``
         owners are appended as one tail-CAS group before any slow Developer work begins.
+
+        Every refusal path names itself through `_refuse_card_claim`; see there for why.
         """
         if not actions:
             return []
+        self._card_claim_refusal = None
         with self._id_lock:
             events = self.store.read_all()
             state = fold(events)
             self._refresh_speculation_budget(state, events=events)
             if self._node_reservation_slots_remaining(state, events=events) < len(actions):
-                return None
+                return self._refuse_card_claim(
+                    "the node-reservation budget has no physical slot left for this lane")
             try:
                 max_nodes = max(0, int(self.policy.max_nodes))
             except (TypeError, ValueError, OverflowError):
-                return None
+                return self._refuse_card_claim("the policy's node ceiling is not a usable integer")
             remaining = max_nodes - card_budget_used(state)
             if remaining < len(actions):
-                return None
+                return self._refuse_card_claim("the Card node budget is spent")
 
             requested_ids: list[str] = []
             for action in actions:
                 raw_card_id = action.get(META_CARD_ID)
                 card_id = self._canonical_card_id(raw_card_id)
                 if card_id is None or raw_card_id != card_id or card_id in requested_ids:
-                    return None
+                    return self._refuse_card_claim(
+                        f"the selected lane names an unusable or duplicated Card id ({raw_card_id!r})")
                 requested_ids.append(card_id)
 
             try:
@@ -4847,19 +5026,23 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             state, self.policy, max_nodes, scoring=treatment)
                     ]
             except Exception:  # policy/Card hooks must never weaken the ownership boundary
-                return None
+                return self._refuse_card_claim("the Card selector raised while revalidating the lane")
             if requested_ids != current_ids:
-                return None
+                return self._refuse_card_claim(
+                    f"selection moved between scoring and claiming ({requested_ids} -> {current_ids})")
 
             first_node_id = self._node_id_ceiling(events, state)
             reservations: list[_BuildReservation] = []
             for offset, (action, card_id) in enumerate(zip(actions, requested_ids)):
                 card = live.get(card_id)
                 if card is None:
-                    return None
+                    return self._refuse_card_claim(f"{card_id} is no longer a live selectable Card")
                 reservation = self._prepare_existing_card_claim(
                     events, state, action, card, first_node_id + offset)
                 if reservation is None:
+                    if not self._card_claim_refusal:
+                        self._card_claim_refusal = (
+                            f"{card_id} failed claim revalidation against the current snapshot")
                     return None
                 reservations.append(reservation)
 
@@ -4876,13 +5059,80 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 self.store.append_many(
                     records, expected_last_seq=events[-1].seq if events else -1)
             except EventStoreConcurrencyError:
-                return None
+                return self._refuse_card_claim("the event-log tail moved during the claim (retryable)")
+            self._card_claim_refusal = None
             return reservations
 
     def _claim_existing_card_build(self, action: dict):
         """Compatibility wrapper for callers that claim one selected Card."""
         reservations = self._claim_existing_card_builds([action])
         return reservations[0] if reservations else None
+
+    # How many CONSECUTIVE turns the same serial Card lane may be refused before the engine retires
+    # it. Not one: a refusal is legitimately transient (a lost tail CAS, a selection that moved under
+    # a concurrent operator control), and giving up on the first would throw away real work items.
+    # Small, though — the runaway cap is `max_nodes*3 + 50` turns, and burning all of them re-scoring
+    # a lane that answers the same way every time is exactly the 74-turns-in-one-second spin. Three
+    # rides out a CAS race and still bounds the stall at three turns instead of ~75.
+    _CARD_CLAIM_RETIRE_AFTER = 3
+
+    def _note_card_claim_refusal(self, card_ids: list[str]) -> bool:
+        """Count one refusal of this exact lane; retire the lane once it is provably not transient.
+
+        The anti-spin half of the `producer_failed` defect. A Card the isolated producer gave up on is
+        barred from speculative re-election (`speculation.py::_election_excluded_card_ids`) and must be
+        built by the ordinary serial Developer — but if the serial claim ALSO refuses, nothing removes
+        the Card from selection, so the next turn re-selects it, re-refuses, and the loop free-spins
+        until the no-mint runaway cap trips and reports "stuck: N action(s) planned … without creating
+        a node". Measured live: 74 loop turns inside one second, a run that reached 2 of 8 nodes where
+        the same command with `speculation_depth=0` reached 8 of 8.
+
+        Retirement is a durable `card_auto_dropped` carrying the refusal reason, so the board loses the
+        unbuildable work item, selection moves to the next Card, and the operator can read WHY in the
+        log. Returns True when the lane was retired (the caller has made progress and must re-fold).
+        """
+        key = tuple(card_ids)
+        if getattr(self, "_card_claim_refusal_lane", None) != key:
+            self._card_claim_refusal_lane = key
+            self._card_claim_refusal_turns = 0
+        self._card_claim_refusal_turns += 1
+        if self._card_claim_refusal_turns < self._CARD_CLAIM_RETIRE_AFTER:
+            return False
+        reason = (getattr(self, "_card_claim_refusal", None)
+                  or "the serial Card claim refused it repeatedly")
+        for card_id in card_ids:
+            self._drop_card_once(
+                card_id,
+                reason=f"unclaimable after {self._card_claim_refusal_turns} turns: {reason}",
+            )
+        self._card_claim_refusal_lane = None
+        self._card_claim_refusal_turns = 0
+        return True
+
+    def _create_stall_diagnosis(self, creates: list[dict], state: RunState) -> str:
+        """Name what is actually blocking a create lane that plans work and mints nothing.
+
+        The terminal used to say only "N action(s) planned for M consecutive loop turns without
+        creating a node" — a SYMPTOM, and one the operator cannot act on, while the very same log's
+        `budget.speculation` recorded `producer_failed: 1`. The engine knew the cause and published
+        the symptom. This assembles the cause from the same folded state the budget summary reads.
+        """
+        notes: list[str] = []
+        card_ids = [
+            card_id for action in creates
+            if (card_id := self._canonical_card_id(action.get(META_CARD_ID))) is not None
+        ]
+        gave_up = [card_id for card_id in card_ids
+                   if card_id in self._producer_failed_card_ids(state)]
+        if gave_up:
+            notes.append(
+                f"the isolated speculative producer gave up on {', '.join(gave_up)} "
+                "(card_build_done:producer_failed), so only the serial Developer can build it")
+        if (refusal := getattr(self, "_card_claim_refusal", None)):
+            notes.append(f"the serial Card claim refused: {refusal}")
+        if not card_ids and self._speculation_enabled():
+            notes.append("the raw-proposal staging lane produced no durable Card")
+        return "; ".join(notes)
 
     def _drop_card_once(self, card_id: Optional[str], *, reason: str,
                         dropped_by: str = "engine") -> None:
@@ -5255,8 +5505,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return None
         _kind, parents, parent_generations = parent_snapshot
 
-        def _link(candidate) -> Optional[Idea]:
+        def _link(candidate, *, proposed: bool = True) -> Optional[Idea]:
             if candidate is None:
+                return None
+            # The proposal path's provider circuit breaker, at the ONE funnel every proposal
+            # (draft/improve/debug and a preproposed batch idea) passes through before a Card or a
+            # node id exists. A degraded FALLBACK is the ABSENCE of a proposal, so nothing downstream
+            # — the Card statement, the hypothesis board, the node rationale, the cross-run case —
+            # may be minted from it. See `_refuse_degraded_proposal`.
+            #
+            # `proposed=False` for the two MECHANICAL ideas, which no Researcher authored: the merge
+            # operator's mean/ensemble Idea, and the repair path's copy of the failing parent's Idea.
+            # The copy is why this flag exists rather than an unconditional check — it inherits the
+            # PARENT's rationale, so replaying or resuming a log written before this change (one whose
+            # nodes already carry `fallback (…)` rationales, e.g. `/tmp/ll-s4b/run`) would debug such a
+            # node and raise a provider pause naming a failure that is not happening now.
+            if proposed and self._refuse_degraded_proposal(candidate, main_task=False):
                 return None
             linked = (candidate if isinstance(candidate, Idea)
                       else Idea.model_validate(candidate)).model_copy(deep=True)
@@ -5339,7 +5603,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             parents = list(action["parent_ids"])
             pnodes = [state.nodes[node_id] for node_id in parents]
             return _link(self._ensemble_idea(pnodes) if self._merge_mode == "ensemble"
-                         else merge_idea(pnodes))
+                         else merge_idea(pnodes), proposed=False)
 
         parent = state.nodes[action["parent_id"]]
         if kind == "debug":
@@ -5347,7 +5611,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if callable(repair) and parent.error and (parent.code or parent.files or self._repo_spec):
                 idea = parent.idea.model_copy(deep=True)
                 idea.operator = "debug"
-                return _link(idea)
+                return _link(idea, proposed=False)   # the PARENT's idea, not a fresh proposal
             self._set_complexity_hint(state, parent, researcher=researcher)
             # A repair proposal should not be pushed toward an unrelated direction.
             self._stamp_novelty_hint(state, "balanced", researcher=researcher)

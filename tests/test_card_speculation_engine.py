@@ -54,10 +54,12 @@ from looplab.events.types import (
     EV_RUN_FINISHED,
     EV_RUN_REOPENED,
     EV_RUNG_PROMOTED,
+    EV_SPECULATION_DEPTH_SETTLED,
 )
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search.card_selection import (
     CARD_FRESHNESS_SUPERSEDED_ERROR,
+    META_CARD_ID,
     card_budget_used,
     speculative_card_actions,
 )
@@ -2483,3 +2485,133 @@ def test_a_paid_result_survives_a_close_that_exhausts_its_cas_retries(tmp_path, 
     assert len([event for event in events if event.type == EV_CARD_BUILD_DONE]) == 1
     assert len([event for event in events if event.type == EV_NODE_CREATED]) == 1
     assert fold(events).card_builds_done == 1
+
+
+# --------------------------------------------------------------------------- #
+# Defect A: a producer_failed Card whose serial claim also refuses must not free-spin the run.
+# Live evidence: /tmp/ll-s1/spec — 74 loop turns inside one second, then "stuck: 1 action(s)
+# planned for 75 consecutive loop turns without creating a node" at 2 of 8 nodes, where the same
+# command with `-s speculation_depth=0` reached 8 of 8.
+# --------------------------------------------------------------------------- #
+
+
+def _unclaimable_card(engine: Engine, card_id: str) -> None:
+    """Register one durable Card whose stored action is NOT a fixed point of `Idea`'s validators.
+
+    Reproduces exactly what the live run wrote: a `params` value its own `space` grid forbids, which
+    `Idea` snaps back on every reconstruction, so `_prepare_existing_card_claim` compares the rebuilt
+    action against the receipt, disagrees, and refuses — identically, forever. Written through the
+    ordinary payload builder so the receipt/digest are genuine; only the params/space pair is skewed
+    (the writer-side producer of that skew is fixed in `roles.py::_clamp_fill`).
+    """
+    idea = Idea(operator="draft", params={"x": 0.25, "y": -1.0},
+                rationale=f"unclaimable {card_id}",
+                hypothesis=f"unclaimable {card_id} improves the objective",
+                card_id=card_id)
+    # Attach the grid AFTER validation, the way a direct `params` mutation used to: constructing with
+    # both would let `_clamp_params_to_space` normalize it and there would be nothing to reproduce.
+    idea.space = {"x": [0.8, 0.9]}
+    action = Engine._card_action(idea, [], {}, None, None, scored_against_empty=True)
+    statement = Engine._card_statement(idea)
+    assert statement is not None
+    engine.store.append("card_added", Engine._card_added_payload(
+        card_id, statement, action, idea, source="researcher", at_node=0))
+
+
+def test_serial_claim_names_a_permanent_refusal_instead_of_returning_a_bare_none(tmp_path):
+    engine, _producer = _engine(tmp_path / "claim-refusal-named", depth=0)
+    _start(engine)
+    _unclaimable_card(engine, "card-bad")
+    state = fold(engine.store.read_all())
+    actions = engine._select_actions(state)
+    assert [action.get("_card_id") for action in actions] == ["card-bad"]
+
+    assert engine._claim_existing_card_builds(actions) is None
+    assert "card-bad" in (engine._card_claim_refusal or "")
+    assert "cannot be rebuilt" in engine._card_claim_refusal
+    # It is DETERMINISTIC: re-scoring the same lane cannot change the answer, which is why the loop
+    # spun. Prove the permanence rather than assuming it.
+    assert engine._claim_existing_card_builds(engine._select_actions(state)) is None
+
+
+def test_a_permanently_unclaimable_card_lane_retires_instead_of_spinning(tmp_path):
+    engine, _producer = _engine(tmp_path / "claim-refusal-retires", depth=0)
+    _start(engine)
+    _unclaimable_card(engine, "card-bad")
+    state = fold(engine.store.read_all())
+    actions = engine._select_actions(state)
+    ids = [action["_card_id"] for action in actions]
+
+    for turn in range(1, Engine._CARD_CLAIM_RETIRE_AFTER):
+        assert engine._claim_existing_card_builds(actions) is None
+        # A refusal is legitimately transient (a lost tail CAS, a moved selection); the first ones
+        # must NOT throw away a real work item.
+        assert engine._note_card_claim_refusal(ids) is False, f"retired too eagerly on turn {turn}"
+        assert fold(engine.store.read_all()).cards["card-bad"].status != "dropped"
+
+    assert engine._claim_existing_card_builds(actions) is None
+    assert engine._note_card_claim_refusal(ids) is True
+    retired = fold(engine.store.read_all())
+    assert retired.cards["card-bad"].status == "dropped"
+    assert "unclaimable after" in (retired.cards["card-bad"].dropped_reason or "")
+    # …and the board has moved on: selection now plans fresh RAW work instead of re-electing it.
+    follow_on = engine._select_actions(retired)
+    assert follow_on and all("_card_id" not in action for action in follow_on)
+
+
+def test_a_successful_claim_clears_the_refusal_ledger(tmp_path):
+    """The ledger counts CONSECUTIVE refusals of one lane. A claim that lands is progress, so a
+    later unrelated refusal must start from zero — otherwise a long healthy run would eventually
+    retire a Card for refusals spread across hours."""
+    engine, _producer = _engine(tmp_path / "claim-refusal-resets", depth=0)
+    _start(engine)
+    _unclaimable_card(engine, "card-bad")
+    state = fold(engine.store.read_all())
+    assert engine._note_card_claim_refusal(["card-bad"]) is False
+    assert engine._note_card_claim_refusal(["card-bad"]) is False
+    engine._card_claim_refusal_lane = None      # what the create branch does after a claim lands
+    engine._card_claim_refusal_turns = 0
+    assert engine._note_card_claim_refusal(["card-bad"]) is False
+    assert fold(engine.store.read_all()).cards["card-bad"].status != "dropped"
+
+
+def test_the_stuck_terminal_names_the_producer_give_up_the_budget_already_recorded(tmp_path):
+    """`budget.speculation` recorded `producer_failed: 1` in the very log whose terminal said only
+    "no node was created". The terminal must name the cause the engine already knew."""
+    engine, _producer = _engine(tmp_path / "stall-diagnosis")
+    _start(engine)
+    _mark_producer_failed(engine, "card-pf", x=0.15)
+    state = fold(engine.store.read_all())
+    engine._card_claim_refusal = "card-pf is no longer a live selectable Card"
+
+    why = engine._create_stall_diagnosis([{META_CARD_ID: "card-pf", "kind": "draft"}], state)
+    assert "producer_failed" in why and "card-pf" in why
+    assert "no longer a live selectable Card" in why
+
+
+def test_a_ratcheted_run_resumes_through_the_real_pin_check(tmp_path, monkeypatch):
+    """AUTO's own adaptation must not read as an OPERATOR disagreement and fail closed.
+
+    `_require_pinned_speculation_receipt` refuses a resume whose depth differs from the one the log
+    pinned — that is invariant #6 and it is what keeps a config edit from changing a live run's search
+    treatment. A depth that MOVES has to pass through the same check, and it does, because the check
+    reads the FOLDED depth (`run_started` ∧ every settle row) rather than `run_started` alone. This
+    drives the real method rather than asserting the arithmetic, because the failure it guards against
+    is exactly "the check and the value drifted apart".
+    """
+    engine, _producer = _engine(tmp_path / "ratchet-resume")
+    _start(engine)
+    assert engine._speculation_enabled() is True
+    engine._speculation_depth_auto = True          # AUTO is what run_started's depth 1 came from
+
+    engine.store.append(EV_SPECULATION_DEPTH_SETTLED, {"depth": 0, "previous": 1})
+    entry = fold(engine.store.read_all())
+    assert entry.speculation_depth == 0
+
+    # A second process over the same run dir: AUTO re-resolves 1 off this box, and must adopt 0.
+    resumed, _second = _engine(tmp_path / "ratchet-resume")
+    resumed._speculation_depth_auto = True
+    assert resumed.speculation_depth == 1
+    resumed._require_pinned_speculation_receipt(entry)      # must NOT raise
+    assert resumed.speculation_depth == 0
+    assert resumed._speculation_enabled() is False
