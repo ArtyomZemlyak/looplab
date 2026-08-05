@@ -1548,7 +1548,7 @@ export function ConfigPanel({
 // settings field is `prompt_dir`, singular, and `LOOPLAB_* ` env names map 1:1 onto flat field names
 // — so the derived `LOOPLAB_PROMPTS_DIR` this panel used to print is a variable nothing reads. An
 // operator who followed that hint set it, saw the tab stay empty, and concluded prompts do not exist.
-const AUTHORING_KIND_ENV = { prompts: 'LOOPLAB_PROMPTS_DIR', skills: 'LOOPLAB_SKILLS_DIR', knowledge: 'LOOPLAB_KNOWLEDGE_DIR' }
+const AUTHORING_KIND_ENV = { prompts: 'LOOPLAB_PROMPT_DIR', skills: 'LOOPLAB_SKILLS_DIR', knowledge: 'LOOPLAB_KNOWLEDGE_DIR' }
 
 const AUTHORING_KIND_PURPOSE = {
   prompts: {

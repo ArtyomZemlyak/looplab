@@ -120,8 +120,11 @@ def test_llm_cache_serves_stored_body(monkeypatch):
     # cached entry, since complete_text mutates the message in place). Cache-hit telemetry is
     # deliberately zeroed so the same provider call is not charged or traced twice.
     assert out["choices"] == body["choices"] and out is not body and calls["n"] == 0
+    # `priced` joins the zeroed set rather than being exempt from it: a cache hit is not a provider
+    # call, so there is no spend to have been priced OR left unpriced, and reporting it as unpriced
+    # would put a "spend is unknown" marker on a request that spent nothing.
     assert out["usage"] == {
-        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0,
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0, "priced": 0,
     }
     out["choices"][0]["message"]["content"] = "MUTATED"
     assert c._cache.peek(ck) == body          # `peek`: the STORED entry, no copy, no bump
