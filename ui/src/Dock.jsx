@@ -13,7 +13,8 @@ import { runLifecycle } from './runIndex.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { DataTable } from './accessibility.jsx'
-import { tracePartial, traceUnavailable } from './traceProjection.js'
+import { NODE_TRACE_SPAN_WINDOW, NODE_TRACE_SPAN_WINDOW_MAX, tracePartial,
+  traceUnavailable } from './traceProjection.js'
 import { crossRunPriorNarration } from './crossRunPrior.js'
 import { buildingGenerations, buildingMarkers } from './buildingModel.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
@@ -386,7 +387,6 @@ function collectThinking(trace, nid) {
 // reading a dead "projection is partial" notice. TRACE_LIMIT_MAX matches the /trace/tail server cap.
 const TRACE_LIMIT_DEFAULT = 40
 const TRACE_LIMIT_MAX = 400
-const NODE_TRACE_CAP_MAX = 4096
 
 function LiveTrace({ runId, generation, active }) {
   const scope = `${runId}:${generation || 'pending'}`
@@ -745,8 +745,11 @@ function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt = null, auto
   const [nodeTraceNonce, setNodeTraceNonce] = useState(0)
   // Use the server's documented default explicitly, then double to its bounded ceiling.
   // This removes the special zero/default request path without changing the first response window.
-  const [nodeTraceLimit, setNodeTraceLimit] = useState(512)
-  const loadMoreNodeTrace = () => setNodeTraceLimit(value => Math.min(value * 2, NODE_TRACE_CAP_MAX))
+  // Both constants come from traceProjection.js so this surface and the node Inspector page the same
+  // route to the same ceiling — a second local copy is how the two drifted apart before.
+  const [nodeTraceLimit, setNodeTraceLimit] = useState(NODE_TRACE_SPAN_WINDOW)
+  const loadMoreNodeTrace = () =>
+    setNodeTraceLimit(value => Math.min(value * 2, NODE_TRACE_SPAN_WINDOW_MAX))
   // Keep the inline evidence on the same attempt as the row destination. An unstamped legacy
   // node_created after a reset is ambiguous, so it keeps its rationale but does not guess a trace.
   const traceGeneration = e.type === 'node_created' ? nodeCreatedAttempt : eventNodeAttempt(e)
@@ -828,7 +831,7 @@ function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt = null, auto
           </div>}
           {hasTrace && nodeTrace != null && <NodeTrace spans={nodeSpans}
             projection={nodeTrace.projection} runId={runId} onRetry={retryNodeTrace}
-            onLoadMore={nodeTraceLimit < NODE_TRACE_CAP_MAX ? loadMoreNodeTrace : undefined} />}
+            onLoadMore={nodeTraceLimit < NODE_TRACE_SPAN_WINDOW_MAX ? loadMoreNodeTrace : undefined} />}
           {opTraceId && <OpTrace runId={runId} traceId={opTraceId} />}
         </div>}
       </div>
