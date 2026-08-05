@@ -579,14 +579,47 @@ def _node_id_of(span: dict) -> Optional[int | str]:
     return attributes.get("node_id") if isinstance(attributes, dict) else None
 
 
-def trace_root_node_id(spans: list[dict], *, _normalized: bool = False) -> Optional[int | str]:
-    """The node a trace as a whole belongs to: the `node_id` of its ROOT span, or None.
+def trace_root_span(spans: list[dict], *, _normalized: bool = False) -> Optional[dict]:
+    """The ROOT span of one trace — the ONE root-resolution rule (doc 25 EV-10). None if rootless.
 
     ROOT means "parent not present in this trace" — a true `parent_id is None` span OR an ORPHAN
     whose parent is missing. The orphan case is not exotic, it is the normal LIVE shape: an operation
     span is written only on CLOSE and `create_node` closes at node END, so for the whole life of a
-    node its trace has no root on disk and every span in it is an orphan. `_tree` already defines
-    roots this way, which is why this delegates rather than re-deriving the rule.
+    node its trace has no root on disk and every span in it is an orphan. A span QUARANTINED by the
+    index (`span_index._scan_light` drops a record that fails `_normalize_span` but still consumes
+    it) orphans its children the same way, and that orphan outlives its parent's close.
+
+    A trace routinely holds SEVERAL roots — one trace_id spans a whole sequence of operations, and
+    every span under a still-open parent is an orphan until that parent closes — so "the root" is a
+    CHOICE among them. The choice is the earliest `start`, NEVER file order: spans.jsonl is written
+    in CLOSE order, so the span that OPENED a trace is usually written LAST, and concurrent spans
+    finish out of the order they began. Measured on a real log: in `runs/live-deps4-0804`, trace
+    `c49e58adeb726df798e4d6182855ab7d`, a concurrent LLM fan-out under one open operation span made
+    the two orders pick DIFFERENT roots at four consecutive index states.
+
+    Equivalent to `_tree(spans, ...)[0]` by construction — `_tree` collects exactly this root set and
+    sorts each level by `start`, and both `min` and that stable sort keep the FIRST minimum in
+    `by_id` order — but derived WITHOUT building the forest, because the forest copies every span
+    dict (`{**s, "children": []}`) and this runs on `span_index`'s per-node read path over a file
+    that is routinely hundreds of MB. `tests/test_span_index.py` pins the two against each other.
+
+    Read-only: this returns a span from `spans`, not a `_tree` node, so it carries no `children`.
+    """
+    if not _normalized:
+        spans = _normalize_spans(spans)
+    # Keyed by span_id exactly as `_tree` does, so a duplicated span_id collapses to its LAST
+    # occurrence in both — the root set must not depend on which of the two derivations you asked.
+    by_id = {s["span_id"]: s for s in spans}
+    roots = [s for s in by_id.values() if s.get("parent_id") not in by_id]
+    # Rootless means every span's parent is present, which in a finite set means a CYCLE (only
+    # reachable from a corrupt/crafted spans.jsonl). `_tree` returns no roots there rather than
+    # nominating an arbitrary span, and so does this: a caller that cannot name a root must fall
+    # back explicitly, not silently read one span's attributes as if they were the trace's.
+    return min(roots, key=lambda s: s.get("start", 0.0)) if roots else None
+
+
+def trace_root_node_id(spans: list[dict], *, _normalized: bool = False) -> Optional[int | str]:
+    """The node a trace as a whole belongs to: the `node_id` of its ROOT span, or None.
 
     The ONE definition, because two of them disagreed (doc 25 EV-10). `build_conversation` derived
     attribution from its structural `root` (strictly `parent_id is None`) while `build_trace_view`
@@ -598,8 +631,8 @@ def trace_root_node_id(spans: list[dict], *, _normalized: bool = False) -> Optio
     Never a full ancestor walk: that would bleed one node's id across a shared trace, which is the
     thing per-span stamping exists to prevent.
     """
-    forest = _tree(spans, _normalized=_normalized)
-    return _node_id_of(forest[0]) if forest else None
+    root = trace_root_span(spans, _normalized=_normalized)
+    return _node_id_of(root) if root is not None else None
 
 
 def effective_node_id(span: dict, trace_root_nid: Optional[int | str]) -> Optional[int | str]:

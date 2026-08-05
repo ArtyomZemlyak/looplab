@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -971,26 +972,22 @@ def test_the_attribution_root_accepts_an_orphan_but_the_structural_root_does_not
     assert structural is not None and structural["span_id"] == "true-root"
 
 
-def test_no_view_re_derives_the_attribution_rule():
-    """Both projections must go through the shared helpers. A site that re-derives `_node_id_of(...)
-    or trace-root` gets its own copy of the rule, which is how these two drifted apart under a
-    comment claiming they had not."""
-    import ast
-    import inspect
-    import textwrap
+def test_both_views_attribute_through_the_shared_rule():
+    """The two projections reach attribution through `trace_root_node_id`/`effective_node_id`.
+
+    Comment-proof (`called_names` resolves real `ast.Call` nodes), but still an ENUMERATION of the two
+    views — and that is exactly what it can and cannot do. It says these two have not stopped calling
+    the shared rule; it says nothing about a THIRD site, which is the failure that actually happened.
+    `test_no_site_re_derives_the_trace_root` below is the half that discovers rather than enumerates.
+    """
+    from _source_scan import called_names
 
     from looplab.events import traceview
 
     for name in ("build_trace_view", "build_conversation"):
-        source = textwrap.dedent(inspect.getsource(getattr(traceview, name)))
-        assert "trace_root_node_id(" in source, f"{name} no longer uses the shared root rule"
-        assert "effective_node_id(" in source, f"{name} no longer uses the shared attribution"
-        # `_tree(...)[0]` is the old hand-rolled root derivation.
-        tree_roots = [node for node in ast.walk(ast.parse(source))
-                      if isinstance(node, ast.Subscript)
-                      and isinstance(node.value, ast.Call)
-                      and isinstance(node.value.func, ast.Name) and node.value.func.id == "_tree"]
-        assert not tree_roots, f"{name} re-derives the trace root from _tree(...)[...]"
+        calls = called_names(getattr(traceview, name))
+        assert "trace_root_node_id" in calls, f"{name} no longer uses the shared root rule"
+        assert "effective_node_id" in calls, f"{name} no longer uses the shared attribution"
 
 
 def test_indexed_and_unindexed_conversations_agree_on_an_orphan_headed_trace(tmp_path):
@@ -1028,3 +1025,251 @@ def test_an_unstamped_root_leaves_its_node_idless_spans_unscoped():
     assert "drifter" in _names(view["unscoped"]), sorted(view["nodes"])
     assert "drifter" not in _names(view["nodes"].get("4", []))
     assert "stamped" in _names(view["nodes"]["4"])       # its OWN stamp still places it
+
+
+# --- ...and the FOURTH copy, which the first cut left behind (doc 25 EV-10, second cut) ----------
+#
+# EV-10's *Locations* names `span_index.py:388-421` as "a fourth root-resolution" and its
+# *Recommendation* says to route it through the shared helper too; the first cut fixed the two VIEWS
+# and its resolution note simply did not mention this one. The two derivations are not the same rule:
+# `_rows_for_node` took the first root in FILE order, and file order is CLOSE order — spans.jsonl is
+# written when a span ENDS — while the views take the earliest `start`. So the span that OPENED a
+# trace is usually written LAST, and concurrent spans finish out of the order they began.
+
+def _fan_out_trace():
+    """The measured real shape, plus the `generation` stamp that makes the choice matter.
+
+    Modelled on `runs/live-deps4-0804`, trace `c49e58adeb726df798e4d6182855ab7d`: five concurrent LLM
+    generations under one still-open operation span, closing in a different order than they started
+    (starts …183.883 / …183.880 / …183.879 written in that order). Across four consecutive index
+    states the file-order root and the earliest-`start` root were different spans — so the divergence
+    is not hypothetical, it is in the logs on disk.
+
+    Here the earliest-`start` root is the lifecycle root that carries `generation`, and the
+    first-in-file root is a short concurrent child whose own parent is absent (still open, or
+    QUARANTINED — `_scan_light` drops a record that fails `_normalize_span` but still consumes it,
+    which orphans its children permanently). Which root you pick decides which ATTEMPT the whole
+    trace is fenced to."""
+    return [
+        # closed first, so written first — but started LAST
+        {"name": "concurrent-gen", "kind": "generation", "trace_id": "T", "span_id": "gen-b",
+         "parent_id": "gone", "run_id": "demo", "start": 200.0, "duration_s": 1.0,
+         "status": "OK", "events": [], "attributes": {"node_id": 0, "input": []}},
+        # closed last, so written last — but started FIRST, and carries the lifecycle stamp
+        {"name": "evaluate", "kind": "operation", "trace_id": "T", "span_id": "eval-root",
+         "parent_id": None, "run_id": "demo", "start": 100.0, "duration_s": 300.0,
+         "status": "OK", "events": [], "attributes": {"node_id": 0, "generation": 1}},
+    ]
+
+
+def _file_order_root(spans):
+    """The rule `_rows_for_node` used before the extraction, written out once here so the tests can
+    show the two answers rather than assert one."""
+    span_ids = {s.get("span_id") for s in spans}
+    return next((s for s in spans if s.get("parent_id") not in span_ids), spans[0])
+
+
+def test_file_order_and_start_order_pick_different_roots_on_a_concurrent_fan_out():
+    """The disagreement itself, before any consequence: the two orderings name different spans."""
+    from looplab.events.traceview import _normalize_spans, trace_root_span
+
+    spans = _normalize_spans(_fan_out_trace())
+    assert _file_order_root(spans)["span_id"] == "gen-b"          # what span_index used to read
+    assert trace_root_span(spans, _normalized=True)["span_id"] == "eval-root"
+
+
+def test_the_generation_fence_reads_the_root_the_views_attribute_from(tmp_path):
+    """The consequence, driven through the real index and the real view.
+
+    `light_spans_for_node` / `node_span_count` feed `appstate.node_trace_view`, i.e. the
+    `/api/runs/{id}/nodes/{nid}/trace?attempt=N` card: its span TREE, its token/cost `rollup` and the
+    `total_spans` receipt behind "showing X of Y". Fencing off `gen-b` (no `generation` → 0) instead
+    of `eval-root` (generation 1) hands attempt 1 an empty tree and a zeroed rollup while attributing
+    the spans to an attempt-0 lifecycle that never existed — and `build_trace_view`, reading the same
+    trace through the shared rule, disagrees with it."""
+    from looplab.events.traceview import _normalize_spans, trace_root_span
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    idx = get_index(_write_spans(rd, _fan_out_trace()))
+
+    # The view's root for this trace is the stamped lifecycle root...
+    root = trace_root_span(_normalize_spans(_fan_out_trace()), _normalized=True)
+    assert root["attributes"]["generation"] == 1
+    # ...so the fence must agree: generation 1 holds the node's spans, generation 0 holds none.
+    assert [row["name"] for row in idx.light_spans_for_node(0, generation=1)] == [
+        "concurrent-gen", "evaluate"]
+    assert idx.node_span_count(0, generation=1) == 2
+    assert idx.light_spans_for_node(0, generation=0) == []
+    assert idx.node_span_count(0, generation=0) == 0
+    # The unfenced read is unchanged — the fence is the only thing the root decides here.
+    assert idx.node_span_count(0) == 2
+
+
+def test_a_rootless_trace_does_not_nominate_an_arbitrary_span(tmp_path):
+    """A parent_id CYCLE (corrupt/crafted source only) has no root. The old fallback took
+    `trace_rows[0]` and read ITS `generation` as the whole trace's — so a corrupt log could file a
+    node's spans under a lifecycle number found on one arbitrary span. The shared rule declines to
+    name a root, the view already reached the same verdict, and the fence lands on the documented
+    unstamped default instead."""
+    from looplab.events.traceview import _normalize_spans, trace_root_span
+
+    spans = [
+        {"name": "a", "kind": "operation", "trace_id": "C", "span_id": "a", "parent_id": "b",
+         "run_id": "demo", "start": 1.0, "attributes": {"node_id": 0, "generation": 3}},
+        {"name": "b", "kind": "operation", "trace_id": "C", "span_id": "b", "parent_id": "a",
+         "run_id": "demo", "start": 2.0, "attributes": {"node_id": 0}},
+    ]
+    assert trace_root_span(_normalize_spans(spans), _normalized=True) is None
+    assert _tree(spans) == []                                  # the view reaches the same verdict
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    idx = get_index(_write_spans(rd, spans))
+    assert idx.node_span_count(0, generation=0) == 2            # the unstamped default...
+    assert idx.node_span_count(0, generation=3) == 0            # ...not span `a`'s own stamp
+
+
+def test_the_shared_root_is_the_span_the_forest_puts_first():
+    """`trace_root_span` skips `_tree`'s forest for speed (the forest copies every span dict, and this
+    runs on the per-node read path over a hundreds-of-MB file). That is only safe while the two agree
+    — including on the details nobody thinks about: `start` ties, duplicate span_ids (both collapse to
+    the LAST occurrence), orphans, and several roots in one trace."""
+    from looplab.events.traceview import _normalize_spans, trace_root_span
+
+    def span(sid, parent, start, **attrs):
+        return {"name": sid, "kind": "operation", "trace_id": "T", "span_id": sid,
+                "parent_id": parent, "run_id": "demo", "start": start, "attributes": attrs}
+
+    shapes = [
+        _fan_out_trace(),
+        _live_trace(),
+        [],                                                                # nothing at all
+        [span("r", None, 0.0), span("c", "r", 1.0)],                       # one plain root
+        [span("late", None, 9.0), span("early", None, 1.0)],               # two TRUE roots
+        [span("a", None, 5.0), span("b", None, 5.0), span("c", None, 5.0)],  # a three-way tie
+        [span("x", "missing", 2.0), span("y", "missing", 1.0)],            # orphans only
+        [span("dup", None, 9.0), span("dup", None, 1.0)],                  # duplicate span_id
+        [span("only", "self-parent", 1.0)],                                # a lone orphan
+        [span("a", "b", 1.0), span("b", "a", 2.0)],                        # a cycle: no root
+    ]
+    # A randomized sweep on top of the named shapes, because the interesting disagreements are in
+    # the COMBINATIONS (a tie among orphans while a true root exists later, and so on).
+    rng = random.Random(20260805)
+    for _ in range(400):
+        sids = [f"s{i}" for i in range(rng.randint(1, 6))]
+        shapes.append([span(sid, rng.choice([None, "absent", *sids]), rng.choice([0.0, 1.0, 2.0]))
+                       for sid in sids])
+
+    for shape in shapes:
+        normalized = _normalize_spans(shape)
+        forest = _tree(normalized, _normalized=True)
+        shared = trace_root_span(normalized, _normalized=True)
+        # `start` as well as the id: the duplicate-span_id shape collapses to ONE id either way, so
+        # comparing ids alone would not notice the two disagreeing about WHICH duplicate survived.
+        def ident(node):
+            return None if node is None else (node["span_id"], node.get("start"))
+        assert ident(shared) == ident(forest[0] if forest else None), shape
+
+
+def test_no_site_re_derives_the_trace_root():
+    """The guard that DISCOVERS a re-derivation instead of listing today's callers.
+
+    The first cut of EV-10 pinned the pair `("build_trace_view", "build_conversation")` by name.
+    `span_index._rows_for_node` — which doc 25's own *Locations* names as the fourth root-resolution —
+    kept deriving its own root underneath that green test, with a resolution note that never
+    mentioned it. A guard that enumerates the sites it knows about cannot report the site it does not,
+    and "a fifth copy reopens it" is the shape that has now bitten this rule twice.
+
+    The re-derivation has two AST fingerprints, and BOTH are followed through a hoisting variable —
+    the original `build_trace_view` copy was `f = _tree(...)` then `f[0]`, one line apart, so a guard
+    that only reads the inline spelling would have missed the very bug it is written for:
+
+    * a function that speaks the span-structure vocabulary (reads BOTH the `"span_id"` and
+      `"parent_id"` keys) AND asks whether a span's parent is PRESENT in some collection — the root
+      rule spelled out. The `"span_id"` half is what keeps this off the node graph, where `parent_id`
+      means a NODE's parent and `x not in state.aborted_nodes` is an unrelated question asked ~30
+      times across `engine`/`search`/`replay`;
+    * subscripting `_tree(...)`, the forest whose first element the rule used to be read off.
+      Ungated, because `_tree` is traceview-private and nothing outside it has another use for one.
+
+    Deliberately NOT caught, because it is a different rule: `build_conversation`'s structural `root`
+    tests `parent_id is None` — strictly narrower than "parent not in this trace" — and genuinely
+    wants that, because it names the stage and stands in as a band container.
+
+    Known blind spot, stated rather than papered over: a re-derivation that never mentions
+    `parent_id` (say `sorted(spans, key=start)[0]` on an already-filtered root list) is invisible to
+    any source scan. What holds that line is behavioural — the equivalence tests above, which compare
+    the index's answer against the view's on the shape where the two orders differ.
+    """
+    import ast
+
+    from _source_scan import PKG, iter_trees
+
+    # By PATH, not basename: a second file called `traceview.py` somewhere else in the package would
+    # otherwise be allow-listed into the exact hiding place this guard exists to close.
+    OWNER = "events/traceview.py"
+
+    def literal_keys(node):
+        """Every string key this function reads with `.get("k")` or `["k"]`."""
+        out = set()
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr == "get" and sub.args
+                    and isinstance(sub.args[0], ast.Constant)):
+                out.add(sub.args[0].value)
+            if isinstance(sub, ast.Subscript) and isinstance(sub.slice, ast.Constant):
+                out.add(sub.slice.value)
+        return out
+
+    def reads_a_spans_parent(node):
+        """`x.get("parent_id")` / `x["parent_id"]` — the VALUE, not a `"parent_id" in d` key check."""
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get" and node.args):
+            return isinstance(node.args[0], ast.Constant) and node.args[0].value == "parent_id"
+        if isinstance(node, ast.Subscript):
+            return isinstance(node.slice, ast.Constant) and node.slice.value == "parent_id"
+        return False
+
+    def builds_the_forest(node):
+        """A call to `_tree(...)`, however it is spelled."""
+        return (isinstance(node, ast.Call)
+                and getattr(node.func, "id", getattr(node.func, "attr", "")) == "_tree")
+
+    def bound_to(func, predicate):
+        """Names this function assigns from an expression matching *predicate* — so a re-derivation
+        hoisted into a local reads the same as one written inline."""
+        names = set()
+        for sub in ast.walk(func):
+            if isinstance(sub, ast.Assign) and predicate(sub.value):
+                names |= {t.id for t in sub.targets if isinstance(t, ast.Name)}
+            elif (isinstance(sub, (ast.AnnAssign, ast.NamedExpr)) and sub.value is not None
+                    and predicate(sub.value) and isinstance(sub.target, ast.Name)):
+                names.add(sub.target.id)
+        return names
+
+    offenders = []
+    for path, tree in iter_trees():
+        rel = path.relative_to(PKG).as_posix()
+        if rel == OWNER:
+            continue
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            speaks_spans = {"span_id", "parent_id"} <= literal_keys(func)
+            parents = bound_to(func, reads_a_spans_parent)
+            forests = bound_to(func, builds_the_forest)
+            for sub in ast.walk(func):
+                if (speaks_spans and isinstance(sub, ast.Compare)
+                        and any(isinstance(op, (ast.In, ast.NotIn)) for op in sub.ops)
+                        and (reads_a_spans_parent(sub.left)
+                             or (isinstance(sub.left, ast.Name) and sub.left.id in parents))):
+                    offenders.append(f"{rel}:{func.name}:{sub.lineno} {ast.unparse(sub)}")
+                if (isinstance(sub, ast.Subscript)
+                        and (builds_the_forest(sub.value)
+                             or (isinstance(sub.value, ast.Name) and sub.value.id in forests))):
+                    offenders.append(f"{rel}:{func.name}:{sub.lineno} {ast.unparse(sub)}")
+
+    assert offenders == [], (
+        "a private trace-root resolution came back; call `traceview.trace_root_span` instead "
+        f"(doc 25 EV-10): {offenders}")

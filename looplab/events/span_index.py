@@ -39,7 +39,7 @@ from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion
 from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
 from looplab.events.eventstore import (
     JsonlRecordInvalid, _interprocess_lock, decode_jsonl_line, scan_jsonl_region)
-from looplab.events.traceview import _normalize_span, _strip_span_io
+from looplab.events.traceview import _normalize_span, _strip_span_io, trace_root_span
 
 # Bump when the persisted record shape changes so an old `spans.index.jsonl` is ignored (rebuilt),
 # never mis-read. The index is a cache — a version skew simply triggers one rebuild.
@@ -379,6 +379,19 @@ class SpanIndex:
         their own attributes contain an unrelated retry ``attempt`` or no generation field at all.
         Legacy unstamped traces predate resets and therefore belong only to generation zero.
         Caller holds ``_rlock``.
+
+        The root comes from ``traceview.trace_root_span`` — the SHARED rule both views attribute
+        from — never a local re-derivation. This site used to take the first root in FILE order while
+        the views take the earliest by ``start``, and the two are not the same order: spans.jsonl is
+        written on span CLOSE, so the span that OPENED a trace is usually written LAST. So the fence
+        could be read off a DIFFERENT span than the one `build_trace_view` and `build_conversation`
+        attribute from, and a node's trace card would then be fenced to a lifecycle nobody else
+        believed it was in (doc 25 EV-10, the fourth copy the first cut left behind).
+
+        Stays an in-memory accelerator: ``self.light`` rows are already normalized, so this passes
+        the dicts the index ALREADY holds and adds no disk read, no dependency on ``spans.jsonl``
+        being complete, and no new failure mode. A truncated/quarantined source simply indexes fewer
+        rows here, exactly as before.
         """
         tids = self.node_tids.get(str(node_id), ())
         if generation is None:
@@ -388,13 +401,12 @@ class SpanIndex:
             trace_rows = list(self.by_tid.get(tid, ()))
             if not trace_rows:
                 continue
-            span_ids = {self.light[row].get("span_id") for row in trace_rows}
-            root_row = next(
-                (row for row in trace_rows
-                 if self.light[row].get("parent_id") not in span_ids),
-                trace_rows[0],
-            )
-            attributes = self.light[root_row].get("attributes")
+            root = trace_root_span([self.light[row] for row in trace_rows], _normalized=True)
+            # A rootless trace is a parent_id CYCLE (corrupt/crafted source only). The shared rule
+            # declines to name a root there rather than nominating an arbitrary span, and this
+            # follows it into the unstamped default below — the same answer the views reach, instead
+            # of reading one span's `generation` as if it were the whole trace's.
+            attributes = root.get("attributes") if root is not None else None
             raw_generation = (
                 attributes.get("generation") if isinstance(attributes, dict) else None
             )
