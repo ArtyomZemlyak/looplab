@@ -4447,6 +4447,18 @@ and the corpus still validates. The harness was teeth-checked in both directions
 copy of the tree produced 0 diffs, and six injected mutations — comment-only, blank-line, a real code
 change, a renamed writer step, an extra budget field, a bent setup hash — were each detected.
 
+**One residue of the STALE half, found while re-verifying it and left deliberately.** The manifest has
+three non-module members. `serve/settings_ui_schema.json` turns out to be hashed SEMANTICALLY by
+accident and correctly — a JSON document is a valid Python expression, so `ast.parse` succeeds and a
+reindent does not revoke (measured). `pyproject.toml` does not parse, so it falls back to raw bytes as
+`_semantic_source` intends, and a comment or whitespace edit THERE still revokes every receipt.
+Repairing it means parsing TOML and bumping the manifest schema to v3 — and a schema bump is itself a
+global revocation, spent on a file whose realistic edits are dependency changes that should revoke
+anyway. Recorded rather than fixed. `docs/guide/cli-reference.md` was carrying the pre-XP-07 claim
+("Regenerate after any byte change ... including Python comments") a day after it stopped being true;
+that is corrected here, since a stale instruction to burn six GPU runs is the same operational cost as
+the defect it describes.
+
 **Not done.** The finding's framing that ~3,450 lines "exist solely to admit one Settings knob" is
 left standing: since 2026-08-04 a receipt no longer gates ordinary runs at all (the node-budget refund
 replaced it), so the stack is a benchmark plus a calibrated-replay lane, and shrinking it is a
