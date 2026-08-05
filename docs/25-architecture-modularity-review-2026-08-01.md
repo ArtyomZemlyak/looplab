@@ -2582,6 +2582,82 @@ distinct error types. Teeth-verified against 13 separate breakages.
 
 *Recommendation:* Extract the card/idea digest+receipt subsystem (682-980) and the Card provenance models (1200-1451) into a `core/cards.py` (or `core/card_identity.py`), and the footprint helpers (442-576) alongside, re-exporting through models.py exactly as concepts.py already does. Preserve comments verbatim per the project convention.
 
+*Resolution (2026-08-05) — `core/cards.py`, 903 lines; `models.py` 2,320 → 1,529. Every digest is
+byte-identical: 5,699 corpus rows compared across the two trees, 0 differing.*
+
+Four of the five subsystems moved, comments verbatim, with the seam `core/concepts.py` established:
+the footprint reader/override/marker parser, the closed steering-context vocabulary, the versioned
+idea and card-action digests with their three ownership-receipt constructors, and the Card provenance
+family with `Card` itself. `RunState` stayed — its flat shape is documented as intentional and the
+finding is right that it is not the defect. The line numbers throughout the finding are stale by
+~40-140 lines (models.py was 2,320, not 2,181), so every cited range was re-derived before anything
+moved.
+
+**The recommendation as literally written does not compile, and that is the finding's real defect.**
+It moves `idea_proposal_digest` but not `durable_idea_payload`, and `Card` but not `hypothesis_id` —
+both module-scope reads from inside the moved code. Since the re-export seam forces `models` to
+import `cards`, leaving those two behind makes `cards` import `models` back. Measured by building
+exactly that arrangement: `ImportError: cannot import name 'durable_idea_payload' from partially
+initialized module 'looplab.core.models' (most likely due to a circular import)`. So both names moved
+too. `durable_idea_payload` is not a card helper and its name says so, but it is
+`idea_proposal_digest`'s PREIMAGE BOUNDARY — the digest's own comment ("Start at the durable boundary
+as well ... model defaults must not collapse their identity") makes it load-bearing for identity, and
+an edit to it silently re-values every idea digest, so a digest and the function that produces what it
+hashes belong in one file. The hypothesis trio moved on the finding's own evidence: `1 card =
+1 hypothesis`, `hypothesis_concept_cache_keys` takes a card, and `Card`'s fail-closed selection
+validator calls `hypothesis_id`. The steering-context validator (the finding's subsystem 3) moved as
+well, which the recommendation lists as evidence but omits from the fix; leaving it would have
+stranded the last consumer of `valid_digest_ref` in `models`.
+
+Two things the move surfaced and fixed in passing: the ten-line "Developer-crash sentinel" comment
+block had drifted onto the top of `DIRECTIONS`' comment, ten lines above the constant it describes
+(`DEVELOPER_ERROR_PREFIX`) — relocated verbatim, no text changed; and `core/parse.py`'s scalar-reader
+contract map still pointed at `models._resource_int`, which is now `cards._resource_int`.
+
+**Byte-identity, proven rather than assumed.** A 5,699-row corpus — every minter over ~50 card
+actions × 8 card ids × 7 statements, 15 Idea shapes, 17 footprints × 7 GPU envelopes, 27 steering
+snapshots, the three receipt constructors, the four provenance models' JSON schemas and their refusal
+cases — computed on a pristine `git archive HEAD` export and again on the new tree: 951 concrete
+digest strings, 943 receipt dicts, **0 rows differing**. The comparison was itself checked for teeth:
+dropping the `-0.0` normalization inside `_card_action_digest._number` on a throwaway copy moved 18
+rows. (The first run of this corpus was VOID and worth recording — a script run from a scratch
+directory resolves `looplab` through the editable install, i.e. the parent checkout, not the
+worktree, so both halves measured the same unchanged tree and "0 differing" meant nothing. Both
+halves now pin `PYTHONPATH` explicitly and the interpreter's `looplab.__file__` is printed.)
+
+`tests/test_card_identity_home.py` is the guard. It pins the four digest values AND the three field
+sets they were derived over — the `tests/test_calibration_profile_home.py` pattern, because pinning a
+digest alone cannot say WHICH of the two causes moved it, and the field tuples are not decorative:
+`events/replay.py::_card_action_receipt_payload` projects a durable snapshot through exactly them
+before handing it back to the minter, so dropping a member re-derives a different digest for the same
+card instead of failing. Around that: the seam is checked with `is`, not `==` (a re-export that
+rebuilds an object turns every existing `monkeypatch.setattr("looplab.core.models.<name>", …)` into a
+silent no-op), and the name list is derived from `cards.py`'s own AST through the shared walk, so a
+new public name that skips the seam fails rather than being quietly unreachable from the 360 sites
+that spell it on `models`. The cycle is DRIVEN, not asserted about the source: a fresh interpreter
+imports `core.cards` and reports whether `core.models` landed in `sys.modules`. And one end-to-end
+drive covers what `is`-identity cannot — a receipt minted through the NEW spelling still verifies
+through the fold, which re-derives through the OLD one.
+
+Teeth-verified against 10 breakages on a throwaway copy of the tree, each anchored to a string
+asserted to appear exactly once. Dropping `eval_timeout` from the v2 preimage → the v2 and
+expanded-v1 value pins and the receipt test; aliasing `card_action_digest` through a lambda → the
+`is`-identity test; deleting one seam assignment → collection error (plus pyflakes on the now-unused
+import); promoting the `TYPE_CHECKING` import of `Idea` to module scope → collection error; a
+NON-fatal cycle (`import looplab.events.replay` at the foot of `cards.py`, which resolves fine but
+drags `models` in) → the subprocess probe AND the layering test, which is the shape the probe exists
+for; a commented-out re-derivation pasted into `models.py` → two of the negative substring pins,
+which is the point of keeping those as substrings; dropping a member from
+`CARD_ACTION_DIGEST_V2_FIELDS` → the field-set pin only, correctly reporting the "schema changed too"
+branch; a receipt claiming `v: 1` over a v2 digest → the receipt test and the fold drive; removing
+`"cards": "core"` from `_LAYOUT` → the flat-alias test and `test_package_layout`.
+
+Two existing assertions had to move with the code rather than be left green:
+`test_digest_and_number_contracts.py`'s `test_no_minter_re_derives_the_canonical_dump` and
+`test_the_cap_is_declared_once` scan `inspect.getsource(models)` for a re-derived canonical dump —
+after the move `models` contains no minter at all, so both would have kept passing while nothing
+checked the module that now owns one. `cards` is added to each.
+
 #### CO-03 · MEDIUM · dead-code · effort: medium
 
 **Production-dead urllib-era streaming stack (~185 lines) kept alive only by tests**

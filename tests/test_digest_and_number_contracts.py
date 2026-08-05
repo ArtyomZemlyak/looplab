@@ -20,7 +20,7 @@ import math
 
 import pytest
 
-from looplab.core import advisory_payloads, fitness, models, parse, profile
+from looplab.core import advisory_payloads, cards, fitness, models, parse, profile
 from looplab.core.jsonutil import (DIGEST_TEXT_CAP, canonical_json, canonical_json_digest,
                                    valid_digest_ref)
 from looplab.core.receipts import bounded_receipt_count
@@ -79,8 +79,13 @@ def test_the_cap_refuses_rather_than_truncates():
         "the cap is opt-in; an uncapped caller must not start refusing")
 
 
+# `cards` carries the two minters that used to live in `models` (doc 25 CO-02 moved the idea/card
+# identity subsystem into `core/cards.py`). It is listed HERE and not merely left to the `models`
+# entry, because after that move `models` no longer contains a minter at all — the assertion would
+# still pass on it while nothing checked the module that now owns the dump.
 @pytest.mark.parametrize("module,owner", [
-    (models, "models"), (advisory_payloads, "advisory_payloads"), (fitness, "fitness"),
+    (models, "models"), (cards, "cards"), (advisory_payloads, "advisory_payloads"),
+    (fitness, "fitness"),
 ])
 def test_no_minter_re_derives_the_canonical_dump(module, owner):
     source = inspect.getsource(module)
@@ -89,7 +94,7 @@ def test_no_minter_re_derives_the_canonical_dump(module, owner):
 
 
 def test_the_cap_is_declared_once():
-    for module in (models, advisory_payloads, fitness):
+    for module in (models, cards, advisory_payloads, fitness):
         assert "131_072" not in inspect.getsource(module), (
             f"{module.__name__} re-declares the preimage budget")
 

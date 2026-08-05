@@ -896,6 +896,7 @@ Where each concept lives in the code:
 | Concept | Module |
 |---|---|
 | Domain models + event envelope | `core/models.py` |
+| Card identity: versioned action/idea digests, ownership receipts, `Card` + its provenance | `core/cards.py` (re-exported through `core/models.py`) |
 | Layered settings + masked snapshot | `core/config.py` |
 | Append-only log / pure fold / SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
 | Sandbox seam + subprocess/Docker bodies | `runtime/sandbox.py` |
