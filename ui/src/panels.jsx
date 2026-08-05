@@ -6,6 +6,10 @@ import { deadlineGet, get, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTR
   getRunArtifactContent, getRunArtifactInventory, submitCommand,
 } from './util.js'
 import { usePoll } from './hooks.js'
+import {
+  coverageSummary, filterRows, groupByConceptTree, rowConcepts, rowSource, shelfConcepts,
+  SOURCE_RUN, UNTAGGED,
+} from './conceptShelf.js'
 import { Bars, ParallelCoords, Scatter } from './charts.jsx'
 import { hyperImportance } from './report.js'
 import Markdown, { stripMd } from './markdown.jsx'
@@ -278,12 +282,46 @@ async function authoringTextRevision(text) {
     .map(value => value.toString(16).padStart(2, '0')).join('')
 }
 
+// The concept SHELF envelope (`engine/concept_shelf.py::build_shelf`). Validated but OPTIONAL: an older
+// server has no `concept_index`, and refusing the whole Memory payload over its absence would trade a
+// missing feature for a dead panel. Absent -> null, and the panel falls back to its flat list.
+function conceptIndexPayload(value) {
+  if (value == null) return null
+  if (!isRecord(value) || !isRecord(value.tree) || !isRecord(value.tree.nodes)
+      || !isRecord(value.coverage)) invalidPanelPayload()
+  const coverage = {}
+  for (const key of ['cases', 'lessons', 'notes']) {
+    const receipt = value.coverage[key]
+    if (receipt == null) continue
+    if (!isRecord(receipt) || !Number.isSafeInteger(receipt.total) || receipt.total < 0
+        || !Number.isSafeInteger(receipt.tagged) || receipt.tagged < 0 || receipt.tagged > receipt.total
+        || !Number.isSafeInteger(receipt.untagged)
+        || receipt.untagged !== receipt.total - receipt.tagged) invalidPanelPayload()
+    coverage[key] = receipt
+  }
+  return { tree: value.tree, coverage,
+           runsIndexed: Number.isSafeInteger(value.runs_indexed) ? value.runs_indexed : 0,
+           runsTagged: Number.isSafeInteger(value.runs_tagged) ? value.runs_tagged : 0 }
+}
+
+// A row's concept stamp travels on EVERY tier, so validate it in one place. `concepts` present with a
+// non-array, or a source outside the closed vocabulary, is a contract break — not a field to ignore —
+// because the panel renders a different affordance per source and a silently-dropped source would
+// display a run-level guess as a record-level fact.
+function validRowConcepts(row) {
+  if (row.concepts != null && (!Array.isArray(row.concepts)
+      || row.concepts.some(id => typeof id !== 'string'))) return false
+  return row.concept_source == null
+    || row.concept_source === 'record' || row.concept_source === 'run'
+}
+
 function memoryPayload(value) {
   if (!isRecord(value) || !nullableText(value.dir)
       || !['cases', 'lessons', 'notes'].every(key => Array.isArray(value[key]))) invalidPanelPayload()
   const cases = value.cases.map(row => {
     if (!isRecord(row) || !row.task_id || typeof row.task_id !== 'string' || typeof row.goal !== 'string'
         || !nullableNumber(row.metric) || !Object.hasOwn(row, 'params')
+        || !validRowConcepts(row)
         || (row.params_truncated != null && typeof row.params_truncated !== 'boolean')) invalidPanelPayload()
     return { ...row, params_truncated: row.params_truncated === true }
   })
@@ -292,18 +330,21 @@ function memoryPayload(value) {
     if (!isRecord(row) || !row.statement || typeof row.statement !== 'string'
         || lessonText.some(key => row[key] != null && typeof row[key] !== 'string')
         || ['delta', 'confidence'].some(key => row[key] != null && !nullableNumber(row[key]))
+        || !validRowConcepts(row)
         || (row.evidence_count != null && (!Number.isSafeInteger(row.evidence_count) || row.evidence_count < 0))) invalidPanelPayload()
   }
   const notes = value.notes.map(row => {
     const note = isRecord(row) && (row.note || row.statement)
-    if (typeof note !== 'string' || !note || (row.task_id != null && typeof row.task_id !== 'string')) invalidPanelPayload()
+    if (typeof note !== 'string' || !note || !validRowConcepts(row)
+        || (row.task_id != null && typeof row.task_id !== 'string')) invalidPanelPayload()
     return { ...row, note }
   })
   if (value.dir == null) {
     if (cases.length || value.lessons.length || notes.length || value.projection != null || value.page != null) {
       invalidPanelPayload()
     }
-    return { dir: null, cases, lessons: value.lessons, notes, projection: null, page: null }
+    return { dir: null, cases, lessons: value.lessons, notes, projection: null, page: null,
+             conceptIndex: null }
   }
   if (value.projection !== 'bounded_recent_tail' || !isRecord(value.page)
       || !isRecord(value.page.tiers)) invalidPanelPayload()
@@ -339,6 +380,7 @@ function memoryPayload(value) {
     notes,
     projection: value.projection,
     page: { tiers, truncated, unavailable, partial },
+    conceptIndex: conceptIndexPayload(value.concept_index),
   }
 }
 
@@ -2548,6 +2590,87 @@ function KbNote({ note }) {
   </div>
 }
 
+// The concept chips on one memory card. `source` is rendered, not just carried: a `run`-attributed row
+// says "the run that produced this touched these concepts", which is a materially weaker claim than a
+// row tagged from its own evidence, and an operator deciding what to trust needs to see which they have.
+function ConceptChips({ row, selected, onSelect }) {
+  const concepts = rowConcepts(row)
+  if (!concepts.length) return null
+  const source = rowSource(row)
+  const inherited = source === SOURCE_RUN
+  return (
+    <>{concepts.map(id => (
+      <button key={id} type="button"
+        className={'chip xs concept-chip' + (id === selected ? ' on' : '') + (inherited ? ' inherited' : '')}
+        aria-pressed={id === selected}
+        title={inherited
+          ? `${id} — inherited from this row's run, not from its own evidence. Click to filter.`
+          : `${id} — recorded with this entry. Click to filter.`}
+        onClick={() => onSelect(id === selected ? '' : id)}>{id}{inherited ? ' ·' : ''}</button>
+    ))}</>
+  )
+}
+
+// The shared concept axis for every tier: the picker, the display-mode toggle, and the coverage receipt
+// that has to sit beside them. Rendered even when coverage is zero — that is precisely when an operator
+// most needs to be told the filter cannot help yet, rather than being handed an empty result.
+function ConceptShelfBar({ tierLabel, receipt, concepts, selected, onSelect, mode, onMode, runsIndexed,
+                           runsTagged }) {
+  const summary = coverageSummary(receipt)
+  return (
+    <div className="concept-shelf-bar" style={{ marginBottom: 8 }}>
+      <div className="conv-toggle" style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        <label className="muted" style={{ fontSize: 11 }} htmlFor="mem-concept-pick">Concept</label>
+        <select id="mem-concept-pick" className="sel sm" value={selected}
+          onChange={event => onSelect(event.target.value)}>
+          <option value="">All concepts</option>
+          {concepts.map(({ id, depth, subtree }) => (
+            <option key={id} value={id}>{' '.repeat(depth * 2)}{id.split('/').pop()} ({subtree})</option>
+          ))}
+          <option value={UNTAGGED}>Untagged ({summary ? summary.untagged : 0})</option>
+        </select>
+        <span className="spacer" style={{ width: 8 }} />
+        {[['flat', 'List'], ['tree', 'Concept tree']].map(([key, label]) => (
+          <button key={key} type="button" aria-pressed={mode === key}
+            className={'seg' + (mode === key ? ' on' : '')} onClick={() => onMode(key)}>{label}</button>
+        ))}
+      </div>
+      {summary && <div className="muted" style={{ fontSize: 11, marginTop: 6, lineHeight: 1.5 }}>
+        {/* The non-negotiable disclosure. Sorting or filtering by an axis that only covers part of the
+            data is legitimate; doing it without saying how much it covers is not. */}
+        <b>{summary.tagged} of {summary.total}</b> {tierLabel.toLowerCase()} carry concepts
+        {summary.untagged > 0 && <> · <b>{summary.untagged} untagged</b>{mode === 'tree'
+          ? ' (shown under Untagged)' : ' (hidden by any concept filter)'}</>}
+        {summary.coarse && <> · all attribution is run-level, so it is only as precise as a whole run</>}
+        {runsIndexed > 0 && summary.untagged > 0
+          && <> · {runsTagged} of {runsIndexed} runs are concept-tagged</>}
+      </div>}
+    </div>
+  )
+}
+
+// One heading in the concept-tree display mode. Indented by depth so the id's path reads as the tree it
+// is, and the Untagged group is visually marked rather than dressed up as a concept — it is the honest
+// residue of the axis, and an operator scanning for what to tag next should be able to find it fast.
+function ConceptGroup({ group, children }) {
+  const empty = group.rows.length === 0
+  return (
+    <section className={'concept-group' + (group.untagged ? ' untagged' : '')}
+      style={{ marginLeft: group.untagged ? 0 : group.depth * 14, marginBottom: 10 }}>
+      <h4 style={{ margin: '8px 0 4px', fontSize: 12, display: 'flex', gap: 6, alignItems: 'baseline' }}>
+        {group.untagged
+          ? <span className="muted"><b>Untagged</b> — carries no concept</span>
+          : <><span className="muted">{group.depth > 0 ? group.id.split('/').slice(0, -1).join('/') + '/' : ''}</span>
+              <b>{group.id.split('/').pop()}</b></>}
+        <span className="grp-n">{group.rows.length}</span>
+      </h4>
+      {empty
+        ? <div className="muted" style={{ fontSize: 11 }}>Nothing here — every entry in this tier is attributed.</div>
+        : children}
+    </section>
+  )
+}
+
 export function MemoryPanel({ onClose }) {
   // Everything the run has LEARNED, in one place: distilled lessons, solved-task cases, meta-notes, and
   // the agentic knowledge-base markdown notes (best configs / recipes the agents save + later retrieve).
@@ -2557,6 +2680,11 @@ export function MemoryPanel({ onClose }) {
   const kb = knowledge.data || { dir: null, files: [], truncatedFiles: 0 }   // /api/knowledge → {dir, files:[{name,text}]}
   const [tab, setTab] = useState('lessons')
   const [lessonRole, setLessonRole] = useState('all')      // §role-split: Researcher vs Developer lessons
+  // The concept AXIS: one selection and one display mode shared by all three memory tiers, because the
+  // operator's question ("what has this lab learned about X") crosses tiers — resetting the concept when
+  // they switch from Lessons to Notes would break exactly the navigation this axis exists for.
+  const [concept, setConcept] = useState('')
+  const [conceptMode, setConceptMode] = useState('flat')
   const kbFiles = kb.files || []
   const truncatedKnowledgePreviews = kbFiles.filter(file => file.truncated).length
   const knowledgeIncomplete = kb.truncatedFiles > 0 || truncatedKnowledgePreviews > 0
@@ -2586,6 +2714,29 @@ export function MemoryPanel({ onClose }) {
     if (memoryTierIncomplete(receipt)) return `No ${noun} are visible in the loaded recent subset.`
     return completeCopy
   }
+  // ---------------------------------------------------------------- concept axis
+  const conceptIndex = mem.conceptIndex
+  const conceptTiers = { cases: mem.cases || [], lessons: mem.lessons || [], notes: mem.notes || [] }
+  const shelfOptions = useMemo(() => shelfConcepts(conceptTiers),
+    [mem.cases, mem.lessons, mem.notes])
+  const conceptOn = tab !== 'knowledge' && !!conceptIndex
+  // Applied AFTER the role split so the two filters compose the way the operator reads them ("developer
+  // lessons about retrieval"), and reported separately so a zero result can say WHICH filter emptied it.
+  const applyConcept = rows => (conceptOn && concept ? filterRows(rows, concept) : { shown: rows, hidden: 0, hiddenUntagged: 0 })
+  const conceptBar = tierKey => conceptOn && <ConceptShelfBar
+    tierLabel={tierKey === 'lessons' ? 'Lessons' : tierKey === 'cases' ? 'Cases' : 'Meta-notes'}
+    receipt={conceptIndex.coverage?.[tierKey]} concepts={shelfOptions} selected={concept}
+    onSelect={setConcept} mode={conceptMode} onMode={setConceptMode}
+    runsIndexed={conceptIndex.runsIndexed} runsTagged={conceptIndex.runsTagged} />
+  // In tree mode a filter still applies (drill into a subtree, then read it grouped), and the Untagged
+  // group is always rendered so nothing the axis cannot classify goes missing from the view.
+  const conceptGroups = rows => groupByConceptTree(applyConcept(rows).shown)
+  const filterNotice = (result, noun) => result.hidden > 0 && <div className="muted"
+    style={{ fontSize: 11, marginBottom: 8 }} role="status">
+    Concept filter <b>{concept === UNTAGGED ? 'Untagged' : concept}</b> hid {result.hidden} {noun}
+    {result.hiddenUntagged > 0 && <> — {result.hiddenUntagged} of them because they carry no concept at all</>}.
+    {' '}<button type="button" className="btn xs" onClick={() => setConcept('')}>Clear concept</button>
+  </div>
   return (
     <Panel title="Memory & knowledge — what the runs have learned" sub={memory.data ? (mem.dir || 'no memory dir') : ''} onClose={onClose} wide>
       <div className="conv-toggle memory-tabs" style={{ marginBottom: 12 }}>
@@ -2628,42 +2779,83 @@ export function MemoryPanel({ onClose }) {
           <button key={r} aria-pressed={lessonRole === r} className={'seg' + (lessonRole === r ? ' on' : '')}
             onClick={() => setLessonRole(r)}>{label}</button>)}
       </div>}
+      {tab === 'lessons' && conceptBar('lessons')}
       {tab === 'lessons' && (() => {
         // Researcher/Developer filters ALSO include untagged (shared) lessons — mirrors the backend
         // routing where an untagged lesson reaches both roles.
-        const shown = (mem.lessons || []).filter(l => lessonRole === 'all' || !l.role || l.role === lessonRole)
-        return shown.length
-          ? shown.map((l, i) => <div key={i} className="mem-card">
-              <div>{l.statement}</div>
-              <div className="mem-meta" style={{ marginTop: 4, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                <span className="chip xs">{l.role || 'shared'}</span>
-                {l.kind && <span className="chip xs">{l.kind}</span>}
-                {l.outcome && <span className="chip xs">{l.outcome}</span>}
-                {l.delta != null && <span className={'chip xs' + (l.delta > 0 ? ' ok' : '')}>Δ{fmt(l.delta)}</span>}
-                {l.confidence != null && <span className="muted" style={{ fontSize: 11 }}>conf {Math.round(l.confidence * 100)}%</span>}
-                {l.evidence_count ? <span className="muted" style={{ fontSize: 11 }}>· {l.evidence_count} evidence</span> : null}
-                {l.task_id && <span className="muted" style={{ fontSize: 11 }}>· {l.task_id}</span>}
-              </div>
-            </div>)
-          : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.lessons,
-            `${lessonRole === 'all' ? '' : lessonRole + ' '}lessons`,
-            lessonRole !== 'all' && mem.lessons.length > 0
-              ? `No ${lessonRole} lessons match the loaded lessons.`
-              : `No ${lessonRole === 'all' ? '' : lessonRole + ' '}lessons yet — they accrue as runs finish (reflection distils them into memory).`)}</div>
+        const byRole = (mem.lessons || []).filter(l => lessonRole === 'all' || !l.role || l.role === lessonRole)
+        const result = applyConcept(byRole)
+        const card = (l, key) => <div key={key} className="mem-card">
+          <div>{l.statement}</div>
+          <div className="mem-meta" style={{ marginTop: 4, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span className="chip xs">{l.role || 'shared'}</span>
+            {l.kind && <span className="chip xs">{l.kind}</span>}
+            {l.outcome && <span className="chip xs">{l.outcome}</span>}
+            {l.delta != null && <span className={'chip xs' + (l.delta > 0 ? ' ok' : '')}>Δ{fmt(l.delta)}</span>}
+            {l.confidence != null && <span className="muted" style={{ fontSize: 11 }}>conf {Math.round(l.confidence * 100)}%</span>}
+            {l.evidence_count ? <span className="muted" style={{ fontSize: 11 }}>· {l.evidence_count} evidence</span> : null}
+            {l.task_id && <span className="muted" style={{ fontSize: 11 }}>· {l.task_id}</span>}
+            <ConceptChips row={l} selected={concept} onSelect={setConcept} />
+          </div>
+        </div>
+        return <>
+          {conceptOn && filterNotice(result, result.hidden === 1 ? 'lesson' : 'lessons')}
+          {conceptOn && conceptMode === 'tree' && result.shown.length
+            ? conceptGroups(byRole).map(group => <ConceptGroup key={group.id} group={group}>
+                {group.rows.map((l, i) => card(l, i))}
+              </ConceptGroup>)
+            : result.shown.length
+              ? result.shown.map((l, i) => card(l, i))
+              : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.lessons,
+                `${lessonRole === 'all' ? '' : lessonRole + ' '}lessons`,
+                concept ? `No lessons are attributed to ${concept === UNTAGGED ? 'no concept' : concept}.`
+                  : lessonRole !== 'all' && mem.lessons.length > 0
+                    ? `No ${lessonRole} lessons match the loaded lessons.`
+                    : `No ${lessonRole === 'all' ? '' : lessonRole + ' '}lessons yet — they accrue as runs finish (reflection distils them into memory).`)}</div>}
+        </>
       })()}
-      {tab === 'cases' && ((mem.cases || []).length
-        ? <DataTable caption="Stored memory cases" card={false}><table className="tbl"><thead><tr><th>task</th><th>goal</th><th>metric</th><th>params</th></tr></thead><tbody>
-          {mem.cases.map((c, i) => <tr key={i}><td>{c.task_id}</td><td className="muted">{c.goal}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}
-            {c.params_truncated && <span title="Only a bounded parameter projection was returned"
-              aria-label="parameters truncated"> · partial</span>}</td></tr>)}</tbody></table></DataTable>
-        : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.cases,
-          'cases', 'No cases stored.')}</div>)}
-      {tab === 'notes' && ((mem.notes || []).length
-        ? mem.notes.map((n, i) => <div key={i} className="mem-card">
-            {n.task_id && <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>{n.task_id}</div>}
-            <Markdown text={n.note || n.statement || JSON.stringify(n)} /></div>)
-        : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.notes,
-          'meta-notes', 'No meta-notes yet.')}</div>)}
+      {tab === 'cases' && conceptBar('cases')}
+      {tab === 'cases' && (() => {
+        const result = applyConcept(mem.cases || [])
+        const rows = list => list.map((c, i) => <tr key={i}><td>{c.task_id}</td><td className="muted">{c.goal}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}
+          {c.params_truncated && <span title="Only a bounded parameter projection was returned"
+            aria-label="parameters truncated"> · partial</span>}</td>
+          <td><div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            <ConceptChips row={c} selected={concept} onSelect={setConcept} /></div></td></tr>)
+        const table = list => <DataTable caption="Stored memory cases" card={false}><table className="tbl">
+          <thead><tr><th>task</th><th>goal</th><th>metric</th><th>params</th><th>concepts</th></tr></thead>
+          <tbody>{rows(list)}</tbody></table></DataTable>
+        return <>
+          {conceptOn && filterNotice(result, result.hidden === 1 ? 'case' : 'cases')}
+          {conceptOn && conceptMode === 'tree' && result.shown.length
+            ? conceptGroups(mem.cases || []).map(group => <ConceptGroup key={group.id} group={group}>
+                {table(group.rows)}</ConceptGroup>)
+            : result.shown.length ? table(result.shown)
+              : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.cases,
+                'cases', concept ? `No cases are attributed to ${concept === UNTAGGED ? 'no concept' : concept}.`
+                  : 'No cases stored.')}</div>}
+        </>
+      })()}
+      {tab === 'notes' && conceptBar('notes')}
+      {tab === 'notes' && (() => {
+        const result = applyConcept(mem.notes || [])
+        const card = (n, key) => <div key={key} className="mem-card">
+          {n.task_id && <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>{n.task_id}</div>}
+          <Markdown text={n.note || n.statement || JSON.stringify(n)} />
+          <div className="mem-meta" style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <ConceptChips row={n} selected={concept} onSelect={setConcept} /></div>
+        </div>
+        return <>
+          {conceptOn && filterNotice(result, result.hidden === 1 ? 'meta-note' : 'meta-notes')}
+          {conceptOn && conceptMode === 'tree' && result.shown.length
+            ? conceptGroups(mem.notes || []).map(group => <ConceptGroup key={group.id} group={group}>
+                {group.rows.map((n, i) => card(n, i))}</ConceptGroup>)
+            : result.shown.length ? result.shown.map((n, i) => card(n, i))
+              : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.notes,
+                'meta-notes', concept ? `No meta-notes are attributed to ${concept === UNTAGGED ? 'no concept' : concept}.`
+                  : 'No meta-notes yet.')}</div>}
+        </>
+      })()}
       {tab === 'knowledge' && (kbFiles.length
         ? <><div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>{kb.dir} — agents save + retrieve these via kb_search</div>
           {kbFiles.map((n, i) => <KbNote key={i} note={n} />)}</>

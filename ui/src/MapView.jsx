@@ -20,7 +20,14 @@ const RUN_W = 190, RUN_H = 80, RUN_DX = 214, ROW_DY = 122, INDENT = 64
 
 function RunNode({ data }) {
   const run = data.run
-  const themes = Object.entries(run.themes || {})
+  // Concepts BEFORE themes, and never both. `themes` is the axis-truncated, legacy-backfilled grouping
+  // signal (`events/digest.py::theme_rollup`): for a concept-tagged run it shows `loss` where the run
+  // really touched `loss/contrastive/in-batch`, and for an untagged run it shows a legacy `idea.theme`
+  // slug that is not a concept at all. Showing the real ids where they exist is what makes the map and
+  // the concept tree the SAME vocabulary; falling back to themes keeps pre-concept runs readable
+  // instead of blanking them. `sortedRunConcepts` keeps the chip order stable across polls.
+  const concepts = sortedRunConcepts(run)
+  const themes = concepts.length ? [] : Object.entries(run.themes || {})
   const status = effectiveRunStatus(run)
   const stalled = status === 'stalled'
   const open = () => data.onOpen(run.run_id)
@@ -35,10 +42,28 @@ function RunNode({ data }) {
       <div className="row"><span className={'pill phase ' + status}>{status}</span>
         <b>{run.label || run.run_id}</b></div>
       <div className="muted">{run.label ? `${run.run_id} · ` : ''}{run.task_id} · best {fmt(run.best_confirmed ?? run.best_metric)} {run.direction || ''}</div>
+      {concepts.length > 0 && <div className="chips">{concepts.slice(0, 4).map(([id, info]) =>
+        // The LEAF segment is shown with the full path in the title: at map zoom a four-segment id is
+        // unreadable, and the leaf is the discriminating part. The full id stays one hover away so the
+        // chip is still a usable handle on the tree.
+        <span className="chip sm concept-chip" key={id} title={`${id} — best ${fmt(info.best_metric)}`}>
+          {id.split('/').pop()} <b>{info.count}</b></span>)}
+        {concepts.length > 4 && <span className="chip sm muted"
+          title={concepts.slice(4).map(([id]) => id).join('\n')}>+{concepts.length - 4}</span>}</div>}
       {themes.length > 0 && <div className="chips">{themes.slice(0, 4).map(([theme, info]) =>
         <span className="chip sm" key={theme} title={`best ${fmt(info.best_metric)}`}>{theme} <b>{info.count}</b></span>)}</div>}
     </a>
   )
+}
+
+// A run's concept rollup as stable, sorted `[id, {count, best_metric}]` pairs. The server already sorts
+// its keys, but a JSON object's key order is not a contract a renderer should lean on, and an unstable
+// chip order under polling moves click targets under the operator.
+export function sortedRunConcepts(run) {
+  const rollup = run && run.concepts
+  if (!rollup || typeof rollup !== 'object' || Array.isArray(rollup)) return []
+  return Object.keys(rollup).sort()
+    .map(id => [id, (rollup[id] && typeof rollup[id] === 'object') ? rollup[id] : {}])
 }
 
 function ProjRegion({ data }) {

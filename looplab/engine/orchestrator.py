@@ -4050,8 +4050,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _reflect_lessons(self, final: RunState, best, fp: list) -> list:
         return self.lessons.reflect_lessons(final, best, fp)
 
-    def _append_lessons(self, lessons: list, *, hygiene: bool = True) -> None:
-        return self.lessons.append_lessons(lessons, hygiene=hygiene)
+    def _append_lessons(self, lessons: list, *, hygiene: bool = True, state: RunState = None) -> None:
+        return self.lessons.append_lessons(lessons, hygiene=hygiene, state=state)
 
     @in_llm_lane("enrichment")
     def _comparative_lessons(self, state: RunState, fp: list, exclude=()) -> tuple[list, list]:

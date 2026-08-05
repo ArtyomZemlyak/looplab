@@ -151,7 +151,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                                 param_names=pnames,
                                 universal=bool(getattr(self._e, "_fingerprint_universal", False)))
 
-    def append_lessons(self, lessons: list, *, hygiene: bool = True) -> None:
+    def append_lessons(self, lessons: list, *, hygiene: bool = True, state: RunState = None) -> None:
         """Append lessons to the SHARED cross-run store. Used by run-end reflection AND the M6
         mid-run distillation, so a lesson distilled mid-flight is visible to a concurrent run's
         refresh immediately. Concurrency: the whole append (and the optional hygiene rewrite) runs
@@ -166,6 +166,24 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         from looplab.events.eventstore import _interprocess_lock
         base = Path(self._e.memory_dir)
         path = base / "lessons.jsonl"
+        # The concept SHELF's durable tag, stamped at the ONE funnel both producers reach so a lesson
+        # distilled mid-run is tagged identically to one distilled at run end. ADDITIVE and
+        # reader-defaulted (invariant 5): the claim-source validator gates on statement/outcome/stance
+        # and ignores unknown keys, so an old reader loads a tagged lesson unchanged.
+        # Per-lesson, from that lesson's OWN evidence nodes rather than the run's whole set — the
+        # difference between "this finding is about `loss/contrastive`" and "the run that produced it
+        # touched `loss/contrastive`". A lesson whose evidence is untagged records nothing and falls
+        # back to run-level inheritance at READ time, where it is labelled as the weaker claim.
+        if state is not None:
+            from looplab.engine.concept_shelf import state_concepts
+            for lz in lessons:
+                if not isinstance(lz, dict) or lz.get("concepts"):
+                    continue
+                evidence = lz.get("evidence")
+                concepts = state_concepts(
+                    state, evidence if isinstance(evidence, (list, tuple)) else None)
+                if concepts:
+                    lz["concepts"] = concepts
         payload = b"\n".join(orjson.dumps(lz) for lz in lessons)
         # BEST-EFFORT, the write twin of `maybe_refresh_lessons`'s read guard. The SHARED store lives
         # on a DIFFERENT filesystem from the run dir — a read-only / full / quota'd network mount
@@ -238,7 +256,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         # The append itself is best-effort — `append_lessons` guards the OSError an unwritable shared
         # store raises and discloses it as `lessons_store_unavailable` — so this call cannot fail the
         # run, matching the "the store misses one batch" stance two comments up.
-        self._e._append_lessons(lessons, hygiene=False)
+        self._e._append_lessons(lessons, hygiene=False, state=state)
         return fold(self._e.store.read_all())
 
     def lessons_store_stamp(self):
@@ -402,14 +420,28 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         if best is None:
             return
         lib = JsonlCaseLibrary(Path(self._e.memory_dir) / "cases.jsonl")
-        lib.add({
+        from looplab.engine.concept_shelf import state_concepts
+        case = {
             "task_id": final.task_id,
             "goal": final.goal,
             "direction": final.direction,
             "params": best.idea.params,
             "metric": best.robust_metric,
             "rationale": best.idea.rationale,
-        })
+            # Both fields are ADDITIVE and reader-defaulted (invariant 5): `valid_case_record` gates on
+            # `v`/`record_kind`/task_id/metric/params and ignores anything else, so an OLD reader loads a
+            # new case unchanged and a NEW reader treats an old case as untagged. No migration.
+            # `run_id` is what makes a case joinable AT ALL — a case is the one memory tier whose
+            # historical rows carry no run reference, so run-level inheritance could never reach them.
+            "run_id": final.run_id or "",
+            # The WINNER's concepts, not the run's: a case IS the winning configuration, so recording
+            # everything the run touched would over-claim exactly the way `state_concepts` refuses to.
+            "concepts": state_concepts(final, [best.id]),
+        }
+        # An empty value is dropped rather than persisted: absence is the wire shape the shelf reads as
+        # "not tagged", and `""`/`[]` would pin the row as durably-untagged and block the run fallback.
+        lib.add({key: value for key, value in case.items()
+                 if value or key not in ("run_id", "concepts")})
 
     def store_concept_capsule(self, final: RunState) -> None:
         """PART IV cross-run Step 2 (§21.20): persist this run's CONCEPT capsule to the shared
