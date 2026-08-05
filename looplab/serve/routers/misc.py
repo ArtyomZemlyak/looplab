@@ -34,6 +34,7 @@ from looplab.core.atomicio import (
 )
 from looplab.core.config import Settings
 from looplab.core.pathsafe import is_reparse
+from looplab.engine.concept_shelf import bounded_row_concepts, build_shelf, run_concept_index
 from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
 from looplab.serve.http import json_object, request_body_contract
 from looplab.serve.assistant import safe_provider_failure
@@ -402,12 +403,19 @@ def _project_memory_row(tier: str, row) -> Optional[dict]:
             out["rationale"] = rationale
         if params_truncated:
             out["params_truncated"] = True
+        # A case is the only tier whose historical rows carry no `run_id` at all, so run-level
+        # inheritance cannot reach them; carrying it forward is what lets a NEW case be attributed.
+        run_id = _memory_text(row.get("run_id"), 500, entropy=False)
+        if run_id:
+            out["run_id"] = run_id
+        _carry_row_concepts(row, out)
         return out
     if tier == "lessons":
         statement = _memory_text(row.get("statement"), 1000)
         if not statement:
             return None
         out = {"statement": statement}
+        _carry_row_concepts(row, out)
         for key, maximum in (("run_id", 500), ("task_id", 500), ("role", 40),
                              ("kind", 80), ("outcome", 48), ("claim_stance", 24)):
             value = _memory_text(row.get(key), maximum, entropy=key not in ("run_id", "task_id"))
@@ -429,7 +437,23 @@ def _project_memory_row(tier: str, row) -> Optional[dict]:
         value = _memory_text(row.get(key), maximum, entropy=key not in ("run_id", "task_id", "at"))
         if value:
             out[key] = value
+    _carry_row_concepts(row, out)
     return out
+
+
+def _carry_row_concepts(row: dict, out: dict) -> None:
+    """Carry a row's DURABLE `concepts` field into its projection, healed and bounded.
+
+    Deliberately not routed through `_memory_text`: a concept id is a closed-vocabulary identifier, not
+    prose, and `bounded_row_concepts` already refuses anything outside `normalize_concept_id`'s grammar
+    — so the redactor's entropy pass would only ever mangle a legitimate id (a long
+    `deployment/end-to-end` path reads as high-entropy) while adding no protection a stricter grammar
+    has not already given. The field is ABSENT when the row has none, so run-level inheritance in
+    `build_shelf` can still claim the row; writing `[]` here would pin it as durably-untagged.
+    """
+    concepts = bounded_row_concepts(row.get("concepts"))
+    if concepts:
+        out["concepts"] = concepts
 
 
 def _read_memory_tier(path: Path, tier: str) -> tuple[list[dict], dict]:
@@ -1726,6 +1750,18 @@ def build_router(srv) -> APIRouter:
         for tier, filename in (("cases", "cases.jsonl"), ("lessons", "lessons.jsonl"),
                                ("notes", "meta_notes.jsonl")):
             out[tier], receipts[tier] = _read_memory_tier(md / filename, tier)
+        # The concept SHELF: stamp every row with its concepts + attribution source, and publish the
+        # tree plus the coverage receipt beside them. This is a read projection — it never writes back,
+        # and it never invents a concept — so a tier whose rows predate the durable field simply reads
+        # as untagged, which is the fact the UI has to show rather than an empty filter result.
+        # Run-level inheritance needs the run list; when it is unavailable the shelf still ships with
+        # whatever DURABLE tags the rows carry, and `runs_indexed: 0` says why the rest went untagged.
+        try:
+            index = run_concept_index(srv.run_summaries())
+        except Exception:  # noqa: BLE001 — a half-written run must not empty the Memory panel
+            index = {}
+        out["concept_index"] = build_shelf(
+            {tier: out[tier] for tier in ("cases", "lessons", "notes")}, index)
         out["projection"] = "bounded_recent_tail"
         out["page"] = {"tiers": receipts,
                        "truncated": any(row["source_window_truncated"] for row in receipts.values()),

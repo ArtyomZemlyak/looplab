@@ -153,6 +153,77 @@ def theme_rollup(state: RunState) -> dict:
     return out
 
 
+# A run summary is fetched for EVERY run on every dashboard poll, so the concept rollup is bounded the
+# same way the ConceptFrame bounds a single run's membership. The cap is per-RUN and lexical, matching
+# `core/concepts.BoundedConceptAccumulator`, so the retained subset is deterministic rather than
+# hash-ordered — a truncated rollup that reshuffled between polls would make the map's chips flicker.
+MAX_ROLLUP_CONCEPTS = 64
+
+
+def concept_rollup(state: RunState) -> dict:
+    """Per-CONCEPT rollup: ``{concept_id: {count, best_metric}}`` over the FULL folded ids.
+
+    The concept-native twin of `theme_rollup`, and deliberately NOT the same projection:
+
+    * `theme_rollup` keys by the coarse AXIS (`loss/contrastive` -> `loss`) and falls back to the legacy
+      `idea.theme` slug for pre-concept runs. That fallback is what makes it a *grouping* signal and what
+      makes it useless as a *concept* signal: a run that never tagged a concept still reports themes, so
+      "has themes" cannot answer "is this run on the concept spine".
+    * This rollup keys by the WHOLE canonical id and has NO legacy fallback. An empty dict therefore
+      means exactly one thing — this run carries no folded concept membership — which is the fact every
+      cross-surface concept filter has to be able to state honestly rather than silently returning
+      nothing. The hierarchy is recovered by the reader (ids are `/`-paths; `search/concept_graph.py::
+      project_hierarchy` materializes the ancestor chain), so no parent rows are stored here.
+
+    Lifecycle deletion is applied exactly as `theme_rollup` applies it (tombstoned/aborted nodes remain
+    append-only history, not live breadth). Audit-only — never read by `replay.fold`.
+    """
+    better = (lambda a, b: a < b) if state.direction == "min" else (lambda a, b: a > b)
+    out: dict[str, dict] = {}
+    aborted = set(getattr(state, "aborted_nodes", None) or [])
+    for n in state.nodes.values():
+        if n.tombstoned or n.id in aborted:
+            continue
+        m = n.robust_metric
+        # Sorted at the wire boundary for the same reason `theme_rollup` sorts: a stable first-seen
+        # order across hash seeds, so the cap below retains the same subset on every poll.
+        for concept in sorted(folded_concepts(state, n)):
+            e = out.get(concept)
+            if e is None:
+                if len(out) >= MAX_ROLLUP_CONCEPTS:
+                    continue
+                e = out[concept] = {"count": 0, "best_metric": None}
+            e["count"] += 1
+            if m is not None and (e["best_metric"] is None or better(m, e["best_metric"])):
+                e["best_metric"] = m
+    return out
+
+
+def folded_concepts(state, node) -> set:
+    """The node's FULL folded, post-rename concept ids — `_folded_axes` without the axis truncation.
+
+    Shares `_folded_axes`' authority rule (an explicit folded entry wins, even when empty) but returns
+    the whole id, because the concept TREE is the navigational spine and an axis is only its root.
+    """
+    has_entry, _axes = _folded_axes(state, node)
+    if not has_entry:
+        return set()
+    nc = getattr(state, "node_concepts", None)
+    nc = nc if isinstance(nc, dict) else {}
+    rename = getattr(state, "concept_consolidation", None)
+    rename = rename if isinstance(rename, dict) else {}
+    from looplab.core.concepts import resolve_concept
+    out: set = set()
+    for concept in (nc.get(getattr(node, "id", None)) or []):
+        try:
+            canonical = resolve_concept(concept, rename)[0] or ""
+        except (AttributeError, TypeError, ValueError):
+            canonical = ""
+        if canonical:
+            out.add(canonical)
+    return out
+
+
 def node_metric(n) -> Optional[float]:
     """The metric used for ranking/display: the robust confirmed mean when present, else the raw."""
     return n.robust_metric

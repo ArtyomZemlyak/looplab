@@ -101,6 +101,14 @@ class LessonDistillMixin:
                     if _has_finish_seq:
                         rec["run_id"] = final.run_id
                         rec["finish_seq"] = finish_seq
+                    # Concept shelf, additive + reader-defaulted (invariant 5). Run-WIDE on purpose,
+                    # unlike a lesson's or a case's: a meta-note summarizes the whole run ("what won,
+                    # and why"), so the run's whole concept set is the honest scope of the claim.
+                    # Dropped when empty — absence is what the reader treats as untagged, and it keeps
+                    # the de-dup key (run_id, finish_seq) and the legacy row shape untouched.
+                    from looplab.engine.concept_shelf import state_concepts
+                    if (concepts := state_concepts(final)):
+                        rec["concepts"] = concepts
                     append_jsonl_bytes_locked(npath, orjson.dumps(rec))
 
         # M3 · lessons (incl. failures) with an M2 fingerprint. Memory of what DIDN'T work is as
@@ -137,7 +145,7 @@ class LessonDistillMixin:
         # themes (see `reflect_lessons`), so it consolidates the SAME signal into one lesson per theme.
         # §role-split: every surviving producer is role-tagged at its source — reflect_lessons →
         # researcher (R&D findings), comparative → developer for debug pairs / researcher otherwise.
-        self._e._append_lessons(lessons)
+        self._e._append_lessons(lessons, state=final)
 
         # M4 · auto-distilled skills (episodic → procedural memory): a supported hypothesis that
         # actually moved the metric becomes a candidate SKILL.md; a later run on a DIFFERENT task

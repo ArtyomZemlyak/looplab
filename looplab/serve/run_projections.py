@@ -19,7 +19,7 @@ import stat
 from looplab.core.run_deletion import (RunDeletionStorageError, load_run_deletion_fence,
                                        run_deletion_snapshot_token)
 from looplab.engine.finalize import incomplete_finalize_scope
-from looplab.events.digest import theme_rollup as _theme_rollup
+from looplab.events.digest import concept_rollup as _concept_rollup, theme_rollup as _theme_rollup
 from looplab.events.replay import fold
 from looplab.serve.run_commands import run_generation_token
 
@@ -86,6 +86,13 @@ def run_summaries(srv) -> list:
                 "seeded_from": sorted({n.origin["run_id"] for n in st.nodes.values()
                                        if isinstance(n.origin, dict) and n.origin.get("run_id")}),
                 "themes": _theme_rollup(st),
+                # The run's CONCEPT membership, keyed by whole id. `themes` cannot stand in for it:
+                # it is axis-truncated AND legacy-theme-backfilled, so it answers "how do I group this
+                # run" and never "which concepts is this run evidence for". This rollup is the join key
+                # the cross-run concept surfaces need — the memory shelf attributes an old lesson to a
+                # concept through its `run_id`, and it may only do so when the run really is tagged.
+                # Empty dict = untagged, and every reader must show that as untagged rather than absent.
+                "concepts": _concept_rollup(st),
                 "mtime": stt.st_mtime,    # last activity (events.jsonl mtime) — time sort + "updated"
                 # The run's true START, from the log itself. `st_ctime` is NOT creation time on
                 # POSIX — it is the inode-CHANGE time, which every append to events.jsonl
