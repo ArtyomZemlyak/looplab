@@ -7311,6 +7311,135 @@ AssistantBar.jsx 30.
 
 *Recommendation:* Extract useStartOverRecovery(runId, generation) as a hook (it already has a pure-model sibling in runStartOverRecovery.js), and a RunShell({children, banner}) wrapper for the six early-return screens. Merge-intent handling can also move next to mergeIntent.js as a hook.
 
+*Resolution (2026-08-05) — both named extractions done; the six screens were NOT identical and the
+differences turned out to be the interesting part; the third suggestion is rejected with a count.*
+
+Every number in the finding is stale, and in one place the recommendation would have been actively
+wrong. RunView.jsx was 3,060 lines, not ~2,000 (the component body is 250-3059, not 177-1999). The
+saga was 1362-1653, i.e. 292 lines rather than ~250, and its "4 coordinating effects at 852-903"
+were at 1602-1653 — line 852-903 is the large-run overview decision, an unrelated neighbour that
+turns out to matter (below). The six early-return screens were at 2208-2229 / 2230-2269 /
+2270-2297 / 2298-2329 / 2330-2433 / 2456-2478, not 1318-1506. `workspaceFocusOwnerRef` is real but
+lives at 922 with its switchyard at 1120-1150, not 461-511. **The "config resource fetch" is
+ALREADY DONE**: at HEAD `configResource` was already a `useScopedResource(...)` call at 1253 with
+four read sites (2485-2488, 2627), converted under UI-06, so there is nothing left to extract there.
+
+`ui/src/useStartOverRecovery.js` (333 lines) and `ui/src/RunScreen.jsx` (33 lines) are the two new
+modules; RunView.jsx is 2,784 lines. Of the 330 lines the diff removes from RunView, 316 reappear
+byte-identical (comments included, all four of them verbatim); the 14 that do not are exactly the
+util import line that shed `createIdempotencyKey`/`resetRun`, the two constants that gained an
+`export`, the two-line `startOverMutationBlocked` derivation that became a returned field, and the
+nine JSX lines of the six screen shells.
+
+**The saga is split across TWO hooks, and the boundary is effect ORDER rather than cohesion.** The
+obvious shape — one `useStartOverRecovery` called at the top, where `startOverMutationBlocked`
+already has to be available for the run-access publication (752), the panel allow-list (697) and
+`mutationReadOnlyMode` (690) — moves the handoff LAYOUT effect from declaration position 1602 to
+roughly position 7. Measured against the layout effects it would then precede: 752 (`setRunAccess`),
+774 (route-notice reset) and 827 (group collapse) all read render-scope values and are indifferent,
+but 848 reads `largeOverviewAppliedRef.current`, which the handoff sets to `false`. Both effects
+re-run in the same commit at handoff time (`live` changes when the replacement generation arrives),
+so ordering them the other way lets a replacement run re-decide its canvas one commit earlier. That
+is unreachable in practice — `initialDagOverviewDecision` returns `'wait'` at `nodeCount <= 0` and a
+just-reset generation is empty, and even at 1-79 nodes it returns `'preserve'`, so only a
+replacement that is already ≥80 nodes on its first read differs — but "unreachable in practice" is
+not the same as "identical", so `useStartOverRecovery` (durable state + the runId/reviewMode reset
+effect) is called where the state used to be and `useStartOverCoordination` (the operations + all
+four effects) is called where the operations used to be. Both hook call sites sit at the exact
+declaration index their contents occupied, so every effect's relative order is preserved.
+
+**The retained-work preflight deliberately did NOT move.** `submitStartOver`'s first 38 lines are a
+question about RunView's own `inspectorDraftStoreRef`, `panelNavigationGuardRef` and comment
+recovery storage — "may a Start over be started" — not about the durable operation. They stay in
+RunView and call the hook's `beginStartOver`; the hook owns everything from the pre-POST envelope
+onwards.
+
+**Per-screen verdict on the "same markup with small variations".** They were not the same markup,
+and the variations are reachability statements:
+
+| screen | wrapper | back control | toast | extra head |
+|---|---|---|---|---|
+| Start-over storage/corrupt (2208) | `"app"` | `{onBack && …}` | yes | — |
+| Start-over active (2230) | `"app"` | `{onBack && …}` | yes | — |
+| run-resource state (2270) | `'app' + review-mode` | `{onBack ? … : pill}` | no | — |
+| fence + Start-over (2298) | `"app"` | `{onBack && …}` | yes | — |
+| fence (2330) | `'app' + review-mode` | `{onBack ? … : pill}` | no | — |
+| history snapshot (2456) | `"app"` | `{onBack ? … : pill}` | no | spacer + live badge |
+
+`onBack` is null exactly when RunView is mounted for a review capability (App.jsx:149 vs 299), so
+the two variants differ precisely in review mode. The three Start-over screens are unreachable
+there (`reviewMode` pins the recovery state to `{ kind: 'none' }` in both the initializer and the
+reset effect), and the history screen is unreachable there too (`sanitizeRunRouteState` drops
+`sequence` whenever `reviewMode` is set, so `historyActive` is always false). The history screen is
+the odd one out — it renders the read-only pill AND a `.live` badge as direct children of
+`.run-head` while omitting the `review-mode` class that hides both at ≤600px (styles.css:3023) —
+and that asymmetry is PRESERVED rather than tidied, because normalizing it would change markup on a
+path nobody can reach while quietly retiring the invariant that makes it unreachable. `RunScreen`
+therefore takes `reviewMode` and `reviewPill` as separate, non-defaulted props; the default is the
+stricter owner-only head. `'app' + (reviewMode ? ' review-mode' : '')` with `reviewMode` false is
+the string `"app"`, and `{onBack ? btn : null}` renders exactly what `{onBack && btn}` rendered, so
+every screen is prop-faithful rather than merely reachability-faithful. The workspace's own topbar
+(now the only `topbar run-head` left in RunView) is NOT merged: it hangs off a `<main>` with a ref,
+`data-route-main` and an `aria-label`, not a `<div className="app">`.
+
+Render-equivalence was proved rather than argued: HEAD's six shells were transcribed into a scratch
+module and both versions rendered through a real `createRoot` in jsdom over the full prop
+cross-product (`onBack` × `toast` × `reviewMode`). 48/48 innerHTML comparisons were byte-identical,
+including the combinations RunView cannot produce.
+
+**Rejected: moving merge-intent next to mergeIntent.js as a hook.** Measured, it is not the same
+shape as the start-over saga. Its state is 8 declarations (1465-1472) but `mergeIntent` / `mergeFrom`
+/ `mergeTarget` / `mergeSubmitting` / the three focus refs are read at **61 sites spanning lines
+27-2618** — inside `onNodeAction`'s command dispatch, the DAG keyboard handler, the global Escape
+listener, `useDialogFocus`, the confirm-submit path that shares `CONTROL`/`showToast`/`checkedCommand`
+with every other node action, the merge dialog's own JSX, and the `mergeArm` prop handed to Dag. The
+start-over saga touched RunView through one derived flag and one workspace reset; merge intent IS the
+node-action surface. Extracting it would mean either exporting the three focus refs and the toast
+channel back out of the hook — a hook that returns the component's own DOM refs is not a boundary —
+or moving `onNodeAction` with it, which is a different finding.
+
+The guards are `ui/test/startOverSaga.test.js` (12 tests) and `ui/test/runScreenShell.test.js`
+(3 tests). The saga is DRIVEN, not asserted: a real React render, the real `sessionStorage`
+envelope, the real `api.js` request path with a stubbed `fetch`, and a timer table so the automatic
+re-check cadence can be fired on demand — the saga previously had no behavioural coverage at all,
+only two indirect source pins in `dagActions`/`runRouteSemantics` and the unmounted-lock tests in
+`runMode`. `Date.now` is pinned to a controlled clock because the re-check re-arms on the envelope's
+`updatedAt`, and three real persists inside one millisecond silently stop the cadence. The shell
+guard pins the rendered markup of every screen as LITERAL html strings, and counts (not `in`)
+the call sites: exactly one `topbar run-head`, six `<RunScreen`, three `reviewPill`, three
+`toast={toast}`, six `onLeave={leaveRetainedPanelRoute}` — an exact count is what a commented-out
+copy of a re-declared shell cannot satisfy.
+
+Verified by mutation on a throwaway copy of the tree, each break applied by a script that asserts
+its anchor appears exactly once:
+
+* Drop `initialRequest &&` from the authoritative-rejection guard, so any 4xx on any attempt reads
+  as proof the server never acted. Fails at *only the ORIGINAL response may prove a pre-mutation
+  rejection* — `'unknown' !== null`, i.e. the recovery envelope was released while the first request
+  may still have been archiving. The FULL suite catches nothing else.
+* Delete `if (startOverRequestRef.current !== request) return` from the success path. Fails at *a
+  response that arrives after the component moved on may not commit*: the abandoned run's envelope
+  advances to `accepted`.
+* Drop the operation-id argument from `saveRunStartOverIntent(next, undefined, intent.operationId)`.
+  Fails at *a competing tab owns the envelope*: the foreign operation is clobbered instead of
+  adopted.
+* Default `reviewPill` to `true` in RunScreen. Fails the literal-markup pin — the three Start-over
+  screens would show a review affordance they never had.
+* Re-declare one screen's shell inline (a second `topbar run-head` with a mangled brand and a bare
+  back button). Fails at *only the workspace itself may declare the run topbar* (`2 !== 1`). All 128
+  tests in the fifteen other files that read RunView.jsx source still pass, which is why this guard
+  exists.
+
+`npm test` 735 pass / 0 fail (exit 0; 720 before, +15 from the two new files). `npm run build`
+exits 0. Two heavy jsdom files (`runListDestructiveMutation`, `commentsContract`) time out under
+load in a parallel scratch copy and pass alone — unrelated to this change.
+
+**What remains.** RunView.jsx is still 2,784 lines. The retained-work machinery (the ~200 lines of
+`retainedComment*` / `retainedAuthoring*` / `retainedPanel*` derivations at 315-617) is the next
+mergeable entity and is a better candidate than merge intent, but it feeds the navigation-loss
+guard, the Start-over preflight and the fence screen's notices, so it wants its own finding. The
+`workspaceFocusOwnerRef` switchyard (922, 1120-1150) is untouched.
+
 #### UI-04 · MEDIUM · under-decomposition · effort: medium
 
 **panels.jsx: 19 panels in one 2,351-line module; ConfigPanel (~490 lines) and the Card kanban (~700 lines) are components-within-a-module needing their own files**
