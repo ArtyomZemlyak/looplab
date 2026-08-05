@@ -2460,7 +2460,7 @@ def test_malformed_run_concepts_replacement_poisons_the_base_receipt():
     they had already replaced, marked exact. The membership still cannot change (there is nothing
     valid to replace it with), but the receipt must degrade.
 
-    Unreachable via the sanctioned writers (serve/run_commands.py rejects a non-list with 400, the
+    Unreachable via the sanctioned writers (serve/control_validation.py rejects a non-list with 400, the
     engine always appends a list) — this is the forged/hand-edited-log path the integrity receipts
     exist for, so the events are built directly rather than round-tripped through a store.
     """

@@ -12,6 +12,12 @@ What these tests hold is the completeness itself: five per-event tables, each as
 import rather than quietly inheriting another event's rule. The two collapsed allow-lists are
 pinned BEHAVIOURALLY, because the interesting half of `inject_node`'s is that the two lists must
 NOT be the same list.
+
+The tables and `normalize_control` moved out of `run_commands.py` into `serve/control_validation.py`
+(doc 25 SC-01). These tests read that module DIRECTLY rather than through `run_commands`'
+re-exports: `_exec_source` needs the file whose top level carries the five assertions, and a
+`getsource`/`_CONTROL_*` scan aimed at the barrel would be scanning a file that no longer contains
+the thing under test — and would go green by finding nothing.
 """
 from __future__ import annotations
 
@@ -31,10 +37,11 @@ from looplab.events.eventstore import EventStore  # noqa: E402
 from looplab.events.replay import fold  # noqa: E402
 from looplab.events.types import (  # noqa: E402
     EV_BUDGET_EXTEND, EV_CARD_EDITED, EV_INJECT_NODE, EV_PAUSE)
-from looplab.serve import run_commands  # noqa: E402
+from looplab.serve import control_validation  # noqa: E402
+from looplab.serve.control_validation import (  # noqa: E402
+    CONTROL_DATA_FIELDS, CONTROL_SPECS, normalize_control)
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS  # noqa: E402
-from looplab.serve.run_commands import (  # noqa: E402
-    CONTROL_DATA_FIELDS, CONTROL_SPECS, RunCommandService, normalize_control)
+from looplab.serve.run_commands import RunCommandService  # noqa: E402
 
 FAKE = "fake_control"
 
@@ -82,16 +89,16 @@ class _Srv:
 
 
 def _exec_source(source: str):
-    """Execute a variant of run_commands.py as a fresh module, returning it or raising."""
-    name = "run_commands_registry_probe"
+    """Execute a variant of control_validation.py as a fresh module, returning it or raising."""
+    name = "control_validation_registry_probe"
     spec = importlib.util.spec_from_loader(name, loader=None)
     module = importlib.util.module_from_spec(spec)
-    module.__file__ = run_commands.__file__
+    module.__file__ = control_validation.__file__
     # `@dataclass` resolves this module's postponed annotations through `sys.modules[__module__]`,
     # so the probe has to be registered while it executes.
     sys.modules[name] = module
     try:
-        exec(compile(source, run_commands.__file__, "exec"), module.__dict__)
+        exec(compile(source, control_validation.__file__, "exec"), module.__dict__)
     finally:
         sys.modules.pop(name, None)
     return module
@@ -126,16 +133,16 @@ def test_every_control_event_declares_all_five_behaviours():
     for event_type, spec in CONTROL_SPECS.items():
         assert spec.event_type == event_type
         assert spec.data_fields is CONTROL_DATA_FIELDS[event_type]
-        assert spec.normalize is run_commands._CONTROL_NORMALIZERS[event_type]
-        assert spec.precondition is run_commands._CONTROL_PRECONDITIONS[event_type]
-        assert spec.decide is run_commands._CONTROL_DECISIONS[event_type]
+        assert spec.normalize is control_validation._CONTROL_NORMALIZERS[event_type]
+        assert spec.precondition is control_validation._CONTROL_PRECONDITIONS[event_type]
+        assert spec.decide is control_validation._CONTROL_DECISIONS[event_type]
 
 
 @pytest.mark.parametrize("declaration,_entry,words", TABLES)
 def test_dropping_one_row_from_any_table_refuses_the_import(declaration, _entry, words):
     """Each table's assertion has to bite on its OWN table. A single shared assertion, or one
     written against the wrong table, would let three of these mutations through."""
-    source = inspect.getsource(run_commands)
+    source = inspect.getsource(control_validation)
     broken = _drop_entry(source, declaration, "EV_DEEP_RESEARCH")
     assert broken != source
     with pytest.raises(AssertionError) as failure:
@@ -153,7 +160,7 @@ def test_a_new_control_event_cannot_ship_with_a_missing_handler(monkeypatch):
     import looplab.serve.protocol as protocol
 
     monkeypatch.setattr(protocol, "CONTROL_EVENTS", frozenset({*CONTROL_EVENTS, FAKE}))
-    source = inspect.getsource(run_commands)
+    source = inspect.getsource(control_validation)
     for declaration, entry, words in TABLES:
         with pytest.raises(AssertionError) as failure:
             _exec_source(source)
@@ -174,7 +181,7 @@ def test_a_precondition_for_a_non_collaboration_event_is_refused(monkeypatch):
     import looplab.serve.protocol as protocol
 
     monkeypatch.setattr(protocol, "CONTROL_EVENTS", frozenset({*CONTROL_EVENTS, FAKE}))
-    source = inspect.getsource(run_commands)
+    source = inspect.getsource(control_validation)
     for declaration, entry, _words in TABLES:
         if declaration.startswith("_CONTROL_PRECONDITIONS"):
             entry = f'    "{FAKE}": _precondition_card,'
@@ -188,7 +195,7 @@ def test_only_collaboration_events_carry_a_precondition_and_the_rest_fail_closed
     """The old chain's final `else` was the COMMENT recheck, so an event type it did not name was
     silently rechecked against a comment id it does not have — and, for a payload that happened to
     look like a comment revision, PASSED. A missing handler is now a refusal."""
-    declared = {event for event, handler in run_commands._CONTROL_PRECONDITIONS.items()
+    declared = {event for event, handler in control_validation._CONTROL_PRECONDITIONS.items()
                 if handler is not None}
     assert declared == set(COLLABORATION_EVENTS)
 
@@ -216,7 +223,7 @@ def test_inject_node_refuses_the_import_fields_it_did_not_consume(tmp_path):
     srv = _Srv(tmp_path)
     idea = {"operator": "manual", "params": {}, "rationale": "r"}
 
-    assert run_commands._INJECT_IMPORT_FIELDS <= CONTROL_DATA_FIELDS[EV_INJECT_NODE]
+    assert control_validation._INJECT_IMPORT_FIELDS <= CONTROL_DATA_FIELDS[EV_INJECT_NODE]
     for unconsumed in ({"source_run": "", "source_node": 0},
                        {"source_run": None, "source_node": 0},
                        {"source_run": "somewhere", "source_node": None},
@@ -234,7 +241,7 @@ def test_inject_node_refuses_the_import_fields_it_did_not_consume(tmp_path):
         "idea": {"operator": "draft", "params": {}, "rationale": "donor"}, "code": "print(1)"})
     imported = normalize_control(srv, rd, EV_INJECT_NODE,
                                  {"source_run": "donor", "source_node": 0})
-    assert run_commands._INJECT_IMPORT_FIELDS.isdisjoint(imported)
+    assert control_validation._INJECT_IMPORT_FIELDS.isdisjoint(imported)
     assert imported["origin"] == {"run_id": "donor", "node_id": 0, "metric": None,
                                   "source_attempt": 0}
 
@@ -266,7 +273,7 @@ def test_every_registered_budget_field_satisfies_the_budget_check(tmp_path):
 def test_neither_allowlist_is_spelled_a_second_time():
     """NEGATIVE pins: what must not come back is the TEXT of a second copy. A commented-out
     re-derivation is as much of a drift risk as a live one, so these stay substring checks."""
-    source = inspect.getsource(run_commands)
+    source = inspect.getsource(control_validation)
     assert "allowed_inject = {" not in source, "inject_node's allow-list is re-declared"
     assert '("add_nodes", "max_seconds"' not in source, "budget_extend's tuple copy came back"
     assert '"parent_generations", "code", "files", "deleted", "origin",\n        }' not in source, (
@@ -276,7 +283,7 @@ def test_neither_allowlist_is_spelled_a_second_time():
 # ---------------------------------------------------------------- the chains are actually gone
 
 @pytest.mark.parametrize("func", [
-    run_commands.normalize_control,
+    control_validation.normalize_control,
     RunCommandService._collaboration_precondition,
     RunCommandService._decision,
 ])

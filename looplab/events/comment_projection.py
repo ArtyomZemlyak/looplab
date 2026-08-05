@@ -148,7 +148,7 @@ def apply_comment_event(comments: dict[str, CommentState], event: Event,
         # Count only MODERN comments against the run cap: legacy EV_ANNOTATION notes must not consume
         # the modern-comment budget (they can't be compacted in an append-only log, so counting them
         # would permanently 409 all new attributed comments on a heavily-annotated run). Kept in lock
-        # step with the validation cap in run_commands.py so accept/fold never diverge.
+        # step with the validation cap in control_validation.py so accept/fold never diverge.
         modern_count = sum(1 for item in comments.values() if not item.legacy)
         if (not isinstance(comment_id, str) or COMMENT_ID_RE.fullmatch(comment_id) is None
                 or comment_id in comments or node_id is None or node_generation is None

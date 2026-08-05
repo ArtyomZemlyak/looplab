@@ -16,7 +16,7 @@ import pytest
 from looplab.core.models import Card, RunState
 from looplab.search.card_selection import merged_alias_ids
 from looplab.serve.protocol import CONTROL_EVENTS
-from looplab.serve.run_commands import CONTROL_SPECS
+from looplab.serve.control_validation import CONTROL_SPECS
 
 
 # ------------------------------------------------------------------ SC-16: the control registry
@@ -30,9 +30,9 @@ def test_every_spec_carries_the_event_type_it_is_keyed_under():
 
 
 def test_the_event_type_is_spelled_once_per_entry():
-    from looplab.serve import run_commands
+    from looplab.serve import control_validation
 
-    source = inspect.getsource(run_commands)
+    source = inspect.getsource(control_validation)
     # Scoped to the ENTRIES, not the comprehension below them that stamps the key onto each spec.
     entries = source[source.index("_CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {"):
                      source.index("CONTROL_SPECS: dict[str, ControlSpec] = {")]

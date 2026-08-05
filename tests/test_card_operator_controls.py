@@ -18,10 +18,10 @@ from looplab.events.types import (  # noqa: E402
 )
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS  # noqa: E402
 from looplab.serve.public_cards import public_cards  # noqa: E402
-from looplab.serve.run_commands import (  # noqa: E402
-    CONTROL_DATA_FIELDS, CONTROL_SPECS, EnginePolicy, RunCommandService,
-    normalize_control, run_generation_token,
+from looplab.serve.control_validation import (  # noqa: E402
+    CONTROL_DATA_FIELDS, CONTROL_SPECS, EnginePolicy, normalize_control,
 )
+from looplab.serve.run_commands import RunCommandService, run_generation_token  # noqa: E402
 
 
 CARD_CONTROLS = {
@@ -71,7 +71,7 @@ def test_all_four_card_controls_are_command_only_no_spawn_with_closed_payloads()
 def test_normalize_control_validates_card_and_server_stamps_authority(tmp_path, monkeypatch):
     rd, _store = _seed(tmp_path)
     monkeypatch.setattr(
-        "looplab.serve.run_commands._card_resource_envelope",
+        "looplab.serve.control_validation._card_resource_envelope",
         lambda: (2, (16_000, 12_000)),
     )
     srv = _Srv()
@@ -122,7 +122,7 @@ def test_resource_pin_rejects_out_of_envelope_without_folding(
         tmp_path, monkeypatch, payload):
     rd, store = _seed(tmp_path)
     monkeypatch.setattr(
-        "looplab.serve.run_commands._card_resource_envelope",
+        "looplab.serve.control_validation._card_resource_envelope",
         lambda: (2, (16_000, 12_000)),
     )
     before = store.read_all()
@@ -176,7 +176,7 @@ def test_append_time_recheck_rejects_resource_pin_after_envelope_shrinks(
     srv = _Srv(rd.parent)
     envelopes = iter([(2, (16_000, 12_000)), (1, (16_000,))])
     monkeypatch.setattr(
-        "looplab.serve.run_commands._card_resource_envelope",
+        "looplab.serve.control_validation._card_resource_envelope",
         lambda: next(envelopes),
     )
     normalized = normalize_control(srv, rd, EV_CARD_RESOURCE_PINNED, {

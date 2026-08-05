@@ -3506,7 +3506,7 @@ Scope: `looplab/serve/`: run_commands.py, command_observation.py, engine_proc.py
 - Why-comments are consistently load-bearing: almost every defensive branch names the exact race, CVE-class hazard, or pinning test it closes (e.g. the POSIX no-unlink rationale in sweep_stale_lifecycle_locks, the seq==0 sort-key note in routers/attention.py).
 - server.py after the BACKLOG §4 split is a genuinely thin assembly module: middleware, auth, router order, static mounts — with historical re-export/patch seams documented rather than duplicated.
 
-#### SC-01 · HIGH · under-decomposition · effort: large
+#### SC-01 · HIGH · under-decomposition · effort: large — **RESOLVED (2026-08-05)**
 
 **run_commands.py is a 4,103-line god-module spanning five separable subsystems**
 
@@ -3515,6 +3515,67 @@ Scope: `looplab/serve/`: run_commands.py, command_observation.py, engine_proc.py
 *Evidence:* One file contains: (1) OS process-identity probing incl. raw ctypes GetProcessTimes and /proc parsing (_process_alive/_process_identity, lines 244-392); (2) the ~775-line normalize_control payload validator (485-1259); (3) spawn-lease/quarantine/start-record sidecar machinery (~1345-1994); (4) the cross-process file-lock sequencer with msvcrt/fcntl branches (1996-2069); (5) RunCommandService's record store, reconciliation, and the ~460-line _execute worker state machine (3642-4103). These have different collaborators (hardware probing vs HTTP validation vs event-store CAS) and different test surfaces, but share one namespace and internal private helpers.
 
 *Recommendation:* Split along the existing seams: process_identity.py (PID/identity probes), control_validation.py (normalize_control + the CONTROL_* tables), spawn_leases.py (claim/quarantine/start-record sidecars), and keep RunCommandService as the orchestrator. All helpers are already module-level functions or self-contained methods, so this is mostly mechanical with re-exports for test patch seams.
+
+*Resolution (2026-08-05):* `serve/control_validation.py` exists and owns the whole HTTP intake boundary
+— `normalize_control`, the five per-event tables, `CONTROL_SPECS`, and the 35 named rules SC-02 created.
+`run_commands.py` went 4,661 → 3,110 lines; the validator is 1,609. All **55** top-level names that
+moved are byte-identical to their pre-split source (AST-segment comparison, not diff): nothing was
+lost, nothing is declared in both files, and the ONLY changed line inside `RunCommandService` is its
+`_card_resource_envelope()` call becoming module-qualified.
+
+**Three of the five claimed locations were stale or the wrong shape, and one recommendation is
+false of the current tree.** Re-derived by AST:
+
+* *(1) process probes, "lines 244-392".* The real cluster is 183-326 — `_process_alive` 183-217,
+  `_lock_identity` 220-224, `_process_identity_scheme` 231-242, `_process_identity_proves_reuse`
+  245-255, `_process_identity` 258-326 — **134** lines, not ~150, and it is where the finding's own
+  evidence is weakest: `_process_alive`/`_process_identity` are already CONSTRUCTOR-INJECTED into
+  `RunCommandService` (`process_alive=`/`process_identity=` defaults), so they do not "share one
+  namespace and internal private helpers" with anything. Not extracted — see below.
+* *(2) "the ~775-line normalize_control payload validator (485-1259)".* Superseded by SC-02:
+  `normalize_control` is 37 lines (1781-1817). The extractable SECTION is `_error` 419 through
+  `normalize_control` 1817, which is what moved.
+* *(3)/(4) spawn-lease sidecars "1701-1994" and the msvcrt/fcntl sequencer "1996-2069".* Both are
+  `RunCommandService` **methods** today, not module-level functions: `_start_record_path` 1904-1914
+  through `resolve_spawn_claim` 2475-2543, and `RunCommandService.sequence` 2546-2624.
+* *(5) "the ~460-line _execute worker state machine (3642-4103)".* `_execute` is **19** lines
+  (4643-4661). The state machine is `_admit` (4212-4446, 235 lines) plus `_monitor` (4448-4594, 147).
+* *"All helpers are already module-level functions or self-contained methods, so this is mostly
+  mechanical."* True of the validator — 55 module-level names with zero references back into the
+  command lifecycle. False of `spawn_leases.py`: those 20-plus methods share `self._root`,
+  `self.sequence`, `self.process_identity` and the run-lock registry, so extracting them yields a
+  mixin (which moves the god-CLASS without shrinking the god-module) or a signature rewrite of the
+  quiescence ladder. Deliberately not done.
+
+**`process_identity.py` deliberately not done.** It is a genuinely clean cut — 134 lines depending
+only on stdlib plus `core/pathsafe.py::filesystem_identity` — but it is 4% of the remaining file and
+buys no property: the two probes a caller substitutes are already injected, so the "shared namespace"
+complaint does not describe them. Left as a cheap follow-up rather than a third patch-seam surface.
+
+*Direction and seams.* The validator imports nothing from `run_commands` — including deferred,
+function-local imports, which is the realistic regression, since the registry guard re-executes the
+file as a fresh module and a back-edge would drag the record store into that probe. `run_commands`
+re-exports ONLY the six names its own code calls; anything else would be a decoy patch seam that
+`monkeypatch.setattr("looplab.serve.run_commands.<name>", …)` resolves while the validator goes on
+reading its own global. `_card_resource_envelope` is the one probe whose consumers straddle the cut
+(intake normalization in the validator, the append-time re-check in `RunCommandService`), so
+`run_commands` reaches it through the MODULE object and one patch is observed on both sides.
+
+*Verification.* `tests/test_serve_module_seams.py` gains four DRIVEN guards (the fourth is a real
+normalize → `_append_collaboration_intent` round trip with a counting probe, not a source pin), and
+`test_control_registry.py`/`test_registry_and_alias_seams.py`/`test_card_operator_controls.py` were
+re-pointed at the module that now contains the thing under test — a `getsource`/`_exec_source` scan
+aimed at the barrel would have scanned a file no longer containing the tables and gone green by
+finding nothing. Teeth-tested on a scratch copy, each break biting exactly one assertion: a by-value
+`from … import _card_resource_envelope` (the envelope round trip — and note the three PRE-EXISTING
+`test_card_operator_controls.py` patches of that name all stayed GREEN under it, which is why the new
+test had to exist); a deferred back-edge into `run_commands` (the direction guard); a decoy
+`CONTROL_DATA_FIELDS` re-export (the re-export guard); a second `CONTROL_DATA_FIELDS =` binding (the
+one-owner guard); a dropped `_LAYOUT` row (`test_package_layout.py::test_no_module_missing_from_layout`).
+And the completeness mechanism still refuses the same way from its new home: deleting a real
+`_CONTROL_NORMALIZERS` row makes `make_app()` raise the SAME `AssertionError` from the same
+first-import point before and after the split, and collection of `test_control_registry.py` errors out.
+Pyflakes: 502 findings before, 502 after, identical once line numbers are normalized.
 
 #### SC-02 · HIGH · flat-code · effort: large — **RESOLVED (2026-08-05)**
 
@@ -3594,10 +3655,11 @@ own engine decision — which reddens two PRE-EXISTING tests in `test_run_comman
 `test_finish_seq_only_pending_is_visible_and_rejects_new_commands`) rather than a new one, i.e. the
 `decide` table's entries are load-bearing behaviour the suite already held.
 
-**Not done:** SC-01's file split. `run_commands.py` is still one module and grew (4,274 → 4,661
+**Not done here:** SC-01's file split. `run_commands.py` was still one module and grew (4,274 → 4,661
 lines) — naming 35 rules costs more lines than one chain that names none — but the
-`control_validation.py` extraction SC-01 proposes is now a clean cut along a section boundary
+`control_validation.py` extraction SC-01 proposes became a clean cut along a section boundary
 (`_error` through `CONTROL_SPECS` + `normalize_control`) rather than surgery on a flat chain.
+*(Done on 2026-08-05, along exactly that boundary — see SC-01's resolution above.)*
 
 #### SC-03 · HIGH · duplication · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
