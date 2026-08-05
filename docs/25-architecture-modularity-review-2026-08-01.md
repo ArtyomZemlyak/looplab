@@ -3789,6 +3789,80 @@ dropped; the declared private-seam surface is one name smaller.
 
 *Recommendation:* Extract a shared durable-operation kit: generic receipt store (validate/load/save with immutable fields + phase-transition table), fence-binding validator, and one preflight_quiescence(srv, rd, *, operation) helper. Reset/deletion keep their own phase enums and effects.
 
+*Resolution (2026-08-05) — `serve/durable_op.py`, scoped down from the recommendation by measurement.*
+
+The finding was re-derived by DIFFING the two modules under a rename-normalising script rather than by
+reading them. What the diff says, per helper:
+
+| helper | reset lines | deletion lines | differing lines |
+|---|---|---|---|
+| `_regular_receipt` / `_regular_file` | 12 | 12 | **0** |
+| `load_*_receipt` | 23 | 27 | 6 |
+| `save_*_receipt` | 23 | 41 | 22 |
+| `*_receipts_for_run` | 12 | 11 | 13 |
+
+So the shared machinery is real — ~90 of ~500 combined CODE lines, and the first helper is
+*byte-identical* after renaming. Extracting it is not a line-count win (499 code lines became 502:
+~91 lines that existed twice became 94 that exist once, carrying the parameterisation and the
+reasoning); it is a single-copy win, which is the same trade `core/fence.py` made.
+Three of the finding's sub-claims are not accurate:
+
+* **`_is_reparse` is stale.** SC-03 (`cea97c35`, 2026-08-02) already moved it to `core/pathsafe.py`;
+  both modules imported it at the time this was implemented. The stated line ranges (`1-324`, `1-265`)
+  predate that removal; the files were 315 and 260 lines. `run_commands.py:2417-2529` for
+  `reject_if_active` is likewise stale — SC-07 moved it to 2990.
+* **"the same lock-namespace check" is wrong.** Reset proves the sequencer path sits in
+  `root/.command-locks` with a sha256 stem; deletion instead cross-checks `run_deletion_key(rd)`
+  against that stem and derives its root from `srv.root`. Two different questions, and the run-key
+  derivation is the identity binding each transaction rests on — so `receipts_for_run` takes an
+  already-derived root and pattern rather than `(srv, rd)`.
+* **The fence-binding validators are not a pair.** `_validate_fence_binding`/`_validate_fence_request`
+  live in `deletion_service.py`, not `deletion_transaction.py`; they compare different field sets
+  against different sources, and one raises `HTTPException(409)` while `validate_reset_binding` raises
+  a receipt error. Not unified — the recommendation's "fence-binding validator" is dropped.
+
+The all-of-6.4 "the deletion side had already drifted" story from CO-01 turned out to still be TRUE in
+this second location: `load_deletion_receipt` still carried the local six-field `file_identity` lambda
+that CO-01 removed from the deletion FENCE. Converged (proved numerically identical to
+`atomicio.file_identity` first).
+
+**What each owner keeps, as an explicit `ReceiptProtocol` field:** label, error class, size cap
+(64 MiB vs 64 KiB — a reset receipt carries the run's whole `effective_config`), validator (returning
+the normalised receipt, not a bool, so six distinct schema refusals keep their own messages), immutable
+identity fields, and `check_transition`. That last one is the flattening risk: reset's lattice is an
+unordered adjacency table (an uncertain launch legitimately falls back to `archived` and retries)
+while deletion's is a monotonic index with two absorbing branches outside it, one of which —
+`quarantine_ambiguous` — must NEVER become resumable. A generic phase machine would have made an
+ambiguous Windows quarantine move resumable, which is the difference between failing closed and
+deleting a run twice.
+
+**"Four spellings of the same quiescence checklist" measured as three plus one.** `destructive_guard`,
+`_admit_destructive_reset` and deletion's fresh-preflight block run `_active_command_ids` ->
+`_recent_spawn_claim` -> `_finalize_incomplete` in the same order; those now share
+`refuse_unless_quiescent`. `reject_if_active` is a DIFFERENT ladder and is deliberately left out: it
+reads `_active_record` (the authoritative record) rather than the fail-closed census, adds
+`_unresolved_terminal_record`, and checks finalize FIRST behind an `allow_incomplete_finalize` opt-out
+no destructive caller has — routing it through would have handed every destructive path that opt-out.
+The helper shares the probe SET and ORDER and nothing else: the three refusal vocabularies are live
+HTTP contracts (a plain sentence naming the operation, a `_detail` envelope with `retryable`, an
+`operation_id`-bearing conflict) and stay at the call sites as REQUIRED keyword builders, so a fourth
+rung cannot reach production half-wired.
+
+Also deliberately left alone: Replay's canonical-path recheck, which is not a fourth rung but how
+Replay re-checks the DELETION fence under the sequencer (`AppState.run_dir` refuses a fenced run with
+410) — which is why that route has no deletion probe of its own; the liveness ladders, which genuinely
+differ (reset additionally requires `not state.finished` and answers 409, deletion answers 503,
+`trace_clear` omits `_fresh_run_launch_pending`); and `trace_clear.py`'s third receipt store, whose
+refusals are `HTTPException`s rather than a receipt error type.
+
+Pinned by `tests/test_durable_op_kit.py` (42): the protocol parametrized over BOTH real receipts —
+built by real Replay/deletion transactions rather than hand-written — plus the asymmetries driven
+against each other (reset's back-edge accepted where deletion's is refused, the absorbing ambiguous
+phase, the two caps, the two error types, the two labels) and the ladder's set/order/short-circuit
+with all three live HTTP refusals. Teeth-tested against 26 breaks, all biting; one bites at the
+fixture rather than an assertion, because flattening reset onto a monotonic rule makes a REAL Replay
+answer 503 and never produce a receipt at all.
+
 #### SC-07 · MEDIUM · under-decomposition · effort: medium
 
 **_execute is a ~460-line worker state machine with an internally duplicated spawn-then-poll block**

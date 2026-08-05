@@ -64,6 +64,7 @@ from looplab.events.types import (
     EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED, EV_SET_STRATEGY,
     EV_SPEC_APPROVED)
 from looplab.serve.command_observation import CommandObservation, CommandObservationIndex
+from looplab.serve.durable_op import refuse_unless_quiescent
 from looplab.serve.engine_proc import (
     EngineSpawnOutcomeUnknown, _claim_and_spawn_resume, _engine_alive, _engine_liveness,
     _resolve_task_file, _spawn_engine)
@@ -3083,17 +3084,18 @@ class RunCommandService:
                     "message": f"Cannot {operation} while Replay is unresolved.",
                     "remediation": "Observe or retry that exact Replay operation first.",
                 })
-            active = self._active_command_ids(rd)
-            if active:
-                sample = ", ".join(active[:3])
-                raise HTTPException(
-                    409, f"cannot {operation}: run has active command(s) {sample}; wait for a terminal status")
-            if self._recent_spawn_claim(rd):
-                raise HTTPException(
-                    409, f"cannot {operation}: an engine start is still in progress; wait for its lock/status")
-            if self._finalize_incomplete(rd):
-                raise HTTPException(
-                    409, f"cannot {operation}: terminal projections are incomplete; resume finalization first")
+            # The probe set and its order are `durable_op.refuse_unless_quiescent`'s (doc 25 SC-06),
+            # shared with Replay and deletion so a rung cannot be dropped from one destructive path
+            # alone. The messages stay here: they are this guard's contract, and unlike the other two
+            # callers they name the caller's own `operation`.
+            refuse_unless_quiescent(
+                self, rd,
+                active_command=lambda active: HTTPException(
+                    409, f"cannot {operation}: run has active command(s) {', '.join(active[:3])}; wait for a terminal status"),
+                engine_start=lambda: HTTPException(
+                    409, f"cannot {operation}: an engine start is still in progress; wait for its lock/status"),
+                finalize_incomplete=lambda: HTTPException(
+                    409, f"cannot {operation}: terminal projections are incomplete; resume finalization first"))
             # Re-check the canonical path while holding the sequencer.  A run symlink swapped after
             # the route's initial run_dir() lookup must not redirect a destructive operation.
             canonical = self.srv.run_dir(rd.name)

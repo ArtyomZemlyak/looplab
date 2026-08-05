@@ -1,20 +1,23 @@
-"""Durable receipt primitives for whole-run reset/replay."""
+"""Durable receipt primitives for whole-run reset/replay.
+
+The receipt SCHEMA — its key set, its phase lattice, its identity binding — is this module's; the
+read-then-verify load and the validate/immutable/transition/publish/confirm save it shares with
+`deletion_transaction.py` live in `serve/durable_op.py` (doc 25 SC-06).
+"""
 from __future__ import annotations
 
-import json
 import math
 import os
 import re
-import stat
 import time
 from pathlib import Path
 from typing import Any, Optional
 
-from looplab.core.atomicio import file_identity, strict_atomic_write_text
-from looplab.core.pathsafe import is_reparse
 from looplab.core.run_reset import (
     RUN_RESET_OPERATION_RE, RunResetStorageError, clear_run_reset_marker,
     load_run_reset_marker)
+from looplab.serve.durable_op import (
+    ReceiptProtocol, load_receipt, receipts_for_run, save_receipt)
 
 
 RESET_RECEIPT_PREFIX = ".looplab-reset-receipt-"
@@ -105,18 +108,6 @@ def validate_reset_binding(
     return expected_path
 
 
-def _regular_receipt(path: Path) -> Optional[os.stat_result]:
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise ResetReceiptError(f"reset receipt cannot be inspected: {exc}") from exc
-    if is_reparse(info) or not stat.S_ISREG(info.st_mode):
-        raise ResetReceiptError("reset receipt is not a regular service-owned file")
-    return info
-
-
 def _valid_artifacts(value: Any, archive_stamp: Any) -> bool:
     if (type(archive_stamp) is not int or archive_stamp <= 0
             or not isinstance(value, list)
@@ -179,62 +170,46 @@ def _validate_receipt(value: Any, *, path: Path) -> dict[str, Any]:
     return value
 
 
+def _check_transition(current: dict[str, Any], value: dict[str, Any]) -> None:
+    """Reset's phase lattice is an UNORDERED adjacency table, not a monotonic index.
+
+    A launch that turns out uncertain legitimately falls back to `archived` and retries, so the
+    permitted moves are not "forward by one" — which is exactly what deletion's rule is. The two
+    lattices stay separate functions for that reason; see `durable_op.ReceiptProtocol`.
+    """
+    if value["phase"] not in _PHASE_TRANSITIONS[current["phase"]]:
+        raise ResetReceiptError(
+            f"invalid reset receipt transition {current['phase']} -> {value['phase']}")
+
+
+_PROTOCOL = ReceiptProtocol(
+    label="reset receipt",
+    error_cls=ResetReceiptError,
+    max_bytes=RESET_RECEIPT_MAX_BYTES,
+    validate=_validate_receipt,
+    immutable=_IMMUTABLE_RECEIPT_FIELDS,
+    check_transition=_check_transition,
+)
+
+
 def load_reset_receipt(path: Path) -> Optional[dict[str, Any]]:
-    before = _regular_receipt(path)
-    if before is None:
-        return None
-    if before.st_size > RESET_RECEIPT_MAX_BYTES:
-        raise ResetReceiptError("reset receipt exceeds its safety limit")
-    try:
-        with path.open("rb") as stream:
-            raw = stream.read(RESET_RECEIPT_MAX_BYTES + 1)
-        after = _regular_receipt(path)
-    except OSError as exc:
-        raise ResetReceiptError(f"reset receipt cannot be read: {exc}") from exc
-    if after is None or file_identity(before) != file_identity(after):
-        raise ResetReceiptError("reset receipt changed while it was being read")
-    if len(raw) > RESET_RECEIPT_MAX_BYTES:
-        raise ResetReceiptError("reset receipt exceeds its safety limit")
-    try:
-        value = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeError, RecursionError) as exc:
-        raise ResetReceiptError(f"reset receipt cannot be decoded: {exc}") from exc
-    return _validate_receipt(value, path=path)
+    return load_receipt(path, _PROTOCOL)
 
 
 def save_reset_receipt(path: Path, value: dict[str, Any]) -> dict[str, Any]:
-    value = _validate_receipt(value, path=path)
-    current = load_reset_receipt(path)
-    if current is not None:
-        if any(current.get(key) != value.get(key) for key in _IMMUTABLE_RECEIPT_FIELDS):
-            raise ResetReceiptError("reset receipt immutable identity changed")
-        if value["phase"] not in _PHASE_TRANSITIONS[current["phase"]]:
-            raise ResetReceiptError(
-                f"invalid reset receipt transition {current['phase']} -> {value['phase']}")
-    try:
-        encoded = json.dumps(
-            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-        if len(encoded.encode("utf-8")) > RESET_RECEIPT_MAX_BYTES:
-            raise ValueError("reset receipt exceeds its safety limit")
-        strict_atomic_write_text(path, encoded)
-    except (OSError, TypeError, ValueError) as exc:
-        raise ResetReceiptError(f"reset receipt could not be published durably: {exc}") from exc
-    confirmed = load_reset_receipt(path)
-    if confirmed != value:
-        raise ResetReceiptError("reset receipt publication could not be confirmed")
-    return confirmed
+    return save_receipt(path, value, _PROTOCOL, load=load_reset_receipt)
 
 
 def reset_receipts_for_run(srv, rd: Path) -> list[tuple[Path, dict[str, Any]]]:
+    # The run key is the command sequencer's file STEM, and the receipt root is its grandparent —
+    # `reset_receipt_path` is what proves that directory is the canonical lock namespace, and this
+    # scan reaches the same place from the same authority rather than from `srv.root`. Deletion
+    # derives its key the other way round (`run_deletion_key(rd)`, cross-checked against the stem),
+    # which is why `durable_op.receipts_for_run` takes an already-derived root and pattern.
     sequence_path = srv.commands._sequence_path(rd)
     root = sequence_path.parent.parent
     pattern = f"{RESET_RECEIPT_PREFIX}{sequence_path.stem}.*.json"
-    receipts: list[tuple[Path, dict[str, Any]]] = []
-    for path in root.glob(pattern):
-        receipt = load_reset_receipt(path)
-        if receipt is not None:
-            receipts.append((path, receipt))
-    return receipts
+    return receipts_for_run(root, pattern, load_reset_receipt)
 
 
 def receipt_result(receipt: dict[str, Any]) -> dict[str, Any]:
