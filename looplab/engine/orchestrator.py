@@ -67,6 +67,8 @@ from looplab.engine.asha_monitor import AshaMonitorMixin
 from looplab.engine.shared import SharedEngineMixin
 from looplab.engine.novelty import NoveltyGateMixin
 from looplab.engine.strategy import StrategyCadenceMixin
+from looplab.engine.concept_cadence import ConceptCadenceMixin
+from looplab.engine.verifier_tiebreak import VerifierTiebreakMixin
 from looplab.engine.research_cadence import ResearchCadenceMixin
 from looplab.engine.finalize import (
     ensure_finish_report,
@@ -373,6 +375,7 @@ _BUDGET_WAIT_MAX_S = 4.0
 
 
 class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
+             ConceptCadenceMixin, VerifierTiebreakMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
              AuditMixin, ResourceSchedulingMixin, SpeculationMixin, EvaluateMixin, NodeBuildMixin,
              ProposalCuesMixin,
