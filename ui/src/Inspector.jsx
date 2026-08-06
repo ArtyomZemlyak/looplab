@@ -21,6 +21,7 @@ import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts, parseConceptTagsInput } from './conceptChips.js'
 import { cardText } from './cardBoardModel.js'
 import { nodeCardLink, nodeConceptLanes } from './inspectorLinks.js'
+import { nodeLessons } from './derivedMemory.js'
 import { conceptMaterializationStatus } from './nodeProjection.js'
 import { buildingMarkers } from './buildingModel.js'
 import { deadlineRequest } from './requestDeadline.js'
@@ -853,6 +854,74 @@ function CardLink({ link, onOpenCard }) {
   </>
 }
 
+const LESSON_STORE_TIMEOUT_MS = 8000
+const LESSON_STANDING = {
+  present: ['still in memory', 'A live cross-run lesson still carries this exact statement under this run.'],
+  absorbed: ['no longer in memory as written',
+    'Consolidation merged this statement into another row, compaction dropped it, or a re-evaluation retired it. '
+    + 'The store keeps no record that distinguishes those, and no redirect to a descendant.'],
+  unknown: ['standing unknown',
+    'The cross-run store was not read, or only its recent tail was, so absence here is not evidence of absence.'],
+}
+
+// Item 4. What this experiment TAUGHT, and why it is two things rather than one — see the long note
+// at the head of `derivedMemory.js`. The spine is the run's own append-only event log, which cannot go
+// stale; the live cross-run store supplies only each row's STANDING, fetched at read time because it
+// is a mutable file outside the event log that merges and consolidates behind us.
+//
+// The store read is deliberately lazy AND conditional: nothing is fetched for a node the event log
+// credits with no lessons, which is most nodes. So the common Inspector open costs zero requests, and
+// a node that did teach something costs one bounded run-scoped read.
+function DerivedMemory({ n, state, runId }) {
+  const history = useMemo(() => nodeLessons(state, n.id, n.attempt, null), [state?.lessons_distilled, n.id, n.attempt])
+  const wanted = history.length > 0 && !!runId
+  const storeResource = useScopedResource(
+    signal => get(`/api/memory?run_id=${encodeURIComponent(runId)}`, { cache: 'no-store', signal }), {
+      scope: `node-memory:${runId}`,
+      timeout: LESSON_STORE_TIMEOUT_MS,
+      // Not "no lessons to check" as an error — it is simply no reason to spend a request.
+      gate: wanted ? null : 'idle',
+      validate: value => value && typeof value === 'object' && Array.isArray(value.lessons)
+        ? null : 'Cross-run memory returned an invalid response.',
+      classifyFailure: () => ({ error: 'Cross-run memory could not be read, so these lessons’ current standing is unknown.' }),
+    })
+  // The RAW body, not `panels.jsx::memoryPayload`'s normalized one: `derivedMemory.js` reads the
+  // receipt in either spelling, and importing the Memory panel's validator would pull `panels.jsx`
+  // into the Inspector's chunk for one field rename.
+  const store = ['ready', 'stale'].includes(storeResource.status) ? storeResource.data : null
+  const rows = useMemo(() => nodeLessons(state, n.id, n.attempt, store),
+    [state?.lessons_distilled, n.id, n.attempt, store])
+  if (!history.length) return null
+  return <>
+    <div className="section-h">What this experiment taught</div>
+    <div className="muted">From this run’s own event log, which is append-only — so this list is what
+      the experiment produced, not what memory happens to hold now. Each row’s standing below is read
+      live from cross-run memory, because that store merges and consolidates.</div>
+    <ul className="bul">{rows.map(row => {
+      const [label, why] = LESSON_STANDING[row.storeStatus] || LESSON_STANDING.unknown
+      return <li key={row.lessonId || row.statement}>
+        <span className="v">{row.statement}</span>
+        <div className="node-concepts-list">
+          {row.outcome && <span className="chip xs">{row.outcome}</span>}
+          {row.claimStance && <span className="chip xs">{row.claimStance}</span>}
+          {row.atNode != null && <span className="chip xs">distilled at #{row.atNode}</span>}
+          <span className={'chip xs' + (row.storeStatus === 'present' ? ' ok' : row.storeStatus === 'absorbed' ? ' warn' : '')}
+            title={why}>{label}</span>
+        </div>
+        {row.alsoFrom.length > 0 && <div className="muted">Drawn from this experiment together
+          with {row.alsoFrom.map(id => `#${id}`).join(', ')}.</div>}
+      </li>
+    })}</ul>
+    {storeResource.status === 'error' && <div className="muted">{storeResource.error}</div>}
+    {/* The run-end whole-run reflection is a DIAGNOSTIC event: not folded, not on the wire, and its
+        projection carries neither a lesson id nor evidence. For most runs those are the MAJORITY of
+        lessons, and they can only ever be attributed to the run. Saying so is the honest close to
+        this section — the alternative is a list that silently claims to be complete. */}
+    <div className="muted">Run-end reflection lessons are recorded without per-experiment evidence and
+      cannot appear here; open Lab → Memory to read them at run level.</div>
+  </>
+}
+
 function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, onOpenCard }) {
   const p = n.idea?.params || {}
   const uses = mergeSummary(n, state.nodes || {}, state)   // E3: for merges, which technique each parent fused
@@ -896,6 +965,7 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
     <div className="section-h">Idea params</div>
     {Object.keys(p).length ? <div className="kv">{Object.entries(p).map(([k, v]) => <KV key={k} k={k} v={fmt(v)} />)}</div> : <div className="muted">none</div>}
     {n.idea?.rationale && !(chg && chg.includes(n.idea.rationale)) && <><div className="section-h">Rationale</div><Markdown className="rationale-md" text={n.idea.rationale} /></>}
+    <DerivedMemory n={n} state={state} runId={runId} />
     {n.deleted?.length > 0 && <><div className="section-h">Deleted files</div><div className="v">{n.deleted.join(', ')}</div></>}
   </>
 }
