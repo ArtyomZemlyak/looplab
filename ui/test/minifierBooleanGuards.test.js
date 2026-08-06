@@ -15,6 +15,20 @@
 //
 // Every assertion is paired with a control arm that forces the option back on. A green test whose
 // control does not go red is not evidence, and this one is cheap enough to carry its own proof.
+//
+// The synthetic probe below is not a guess at the shape. The four REAL topbar controls were built
+// through the REAL production pipeline (Rolldown + Terser, the real config) in SSR mode and rendered,
+// both ways, on 2026-08-06. Rewritten, they reproduce the operator's screen dump character for
+// character — including the fact that DensityToggle, the one control with no `&&` guard, has no zero:
+//
+//   flag on : DensityToggle ["Aa · Compact"]   ThemeSwitcher ["Theme","0"]
+//             EnergyToggle  ["Energy","0"]     GlobalMenu    ["LoopLab ▾","0"]
+//   flag off: DensityToggle ["Aa · Compact"]   ThemeSwitcher ["Theme"]
+//             EnergyToggle  ["Energy"]         GlobalMenu    ["LoopLab ▾"]
+//
+// That build takes ~45 s per arm, so it is not repeated here: the property it demonstrates is held
+// cheaply by the arms below, and held over the REAL emitted bytes — whichever minifier produced them —
+// by `scripts/check-bundle.mjs::findIntegerBooleanChunks`, which CI already runs after every build.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
