@@ -898,9 +898,30 @@ class RunState(BaseModel):
     # Layer 3 queue owner pinned by run_started. False on old logs preserves the policy/pilot path;
     # replay never infers this selection-affecting treatment from a mutable config snapshot.
     card_driven_selection: bool = Field(False, exclude=True)
-    # Layer 5 producer/evaluator overlap treatment pinned by run_started. Hidden from the public
-    # RunState dump so legacy/default-zero logs remain byte-identical at the API/golden boundary.
+    # Layer 5 producer/evaluator overlap. THREE FIELDS, because the run records TWO DIFFERENT FACTS
+    # about its depth and one of them is not a run-start pin (they were one field until 2026-08-06,
+    # and the conflation made a run that ratcheted itself down unresumable through two doors — see
+    # `events/replay.py::_on_speculation_depth_settled` and `core/config.py::RUN_START_PINNED_FIELDS`):
+    #
+    #   * `speculation_depth_pinned` — what `run_started` recorded, i.e. the LAUNCH treatment
+    #     invariant #6 makes immutable. This is the only one of the three that belongs to
+    #     `RUN_START_PINNED_FIELDS`, and the only one a re-entry may compare a SPELLED depth against.
+    #   * `speculation_depth_settled` — the floor every `speculation_depth_settled` row has ratcheted
+    #     the run down to, or None when the run never settled itself. A measurement THIS RUN made
+    #     about its own evaluations, not something the operator's launch command owns.
+    #   * `speculation_depth` — the EFFECTIVE treatment: the pin narrowed by that floor, which is what
+    #     re-entry adopts and what every reader that asks "is this run prefetching" wants. It stays
+    #     the plain, publicly-named field precisely because it is the one almost everything reads.
+    #
+    # Deriving the effective value from two order-INSENSITIVE facts is also what makes the fold
+    # order-tolerant against `run_started` itself (invariant #5): a minimum taken directly on this
+    # field could not be, because `run_started` ASSIGNS over a default of 0, so a settle row spliced
+    # ahead of it folded to the pin instead of the floor.
+    # All three hidden from the public RunState dump so legacy/default-zero logs remain byte-identical
+    # at the API/golden boundary.
     speculation_depth: int = Field(default=0, ge=0, le=64, exclude=True)
+    speculation_depth_pinned: int = Field(default=0, ge=0, le=64, exclude=True)
+    speculation_depth_settled: Optional[int] = Field(default=None, ge=0, le=64, exclude=True)
     # Exact local quality-gate receipt used to admit a positive depth.  Replay keeps the evidence
     # identity separate from the mutable config path; an old positive-depth row without this marker
     # remains readable but is not resumable through the guarded runtime path.

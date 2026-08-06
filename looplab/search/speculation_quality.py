@@ -1709,8 +1709,16 @@ def _analyze_speculation_run(run_dir: str | Path) -> tuple[dict[str, Any], dict[
     # actually ran.  A gate must not accept a treatment whose snapshot was edited after the fact.
     if getattr(state, "card_driven_selection", None) is not card_driven:
         raise ValueError("config and folded card_driven_selection differ")
-    if getattr(state, "speculation_depth", None) != speculation_depth:
-        raise ValueError("config and folded speculation_depth differ")
+    # The RUN-START PIN, explicitly: `state.speculation_depth` is the run's EFFECTIVE treatment, which
+    # a `speculation_depth_settled` row is allowed to move, and this line is asserting the run_started
+    # authority against the snapshot. Calibration always SPELLS depth 1, and a spelled depth never
+    # settles, so no honest calibration log carries such a row — which is why the floor is refused on
+    # its own line rather than folded into this comparison: evidence must be ONE exact treatment for
+    # its whole length, and a hand-forged row saying otherwise has to name itself in the refusal.
+    if getattr(state, "speculation_depth_pinned", None) != speculation_depth:
+        raise ValueError("config and run-start pinned speculation_depth differ")
+    if getattr(state, "speculation_depth_settled", None) is not None:
+        raise ValueError("calibration evidence records an adaptive speculation depth settle")
     implementation_digest = getattr(state, "speculation_implementation_digest", "")
     if not _valid_digest(implementation_digest):
         raise ValueError("run lacks a valid run-start speculation implementation digest")

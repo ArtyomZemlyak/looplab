@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import hashlib
+import logging
 import math
 import os
 import secrets
@@ -129,6 +130,8 @@ from looplab.core.tracing import JsonlSpanExporter, Tracer
 # collapse (the signature takes **knobs now, so the orchestrator itself no longer needs it);
 # kept importable from this module path for pre-collapse importers.
 from looplab.engine.options import _UNSET  # noqa: F401
+
+_LOG = logging.getLogger(__name__)
 
 # P0-5 dirty-input diff digest: the byte ceiling on how much of `git diff HEAD` is hashed before the
 # digest is marked truncated (`~`). A real code diff is far under this; beyond it we're diffing a
@@ -2435,7 +2438,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             entry, "speculation_calibration_profile_digest", "") or "")
         calibration_gpu = getattr(entry, "speculation_calibration_gpu_inventory", None)
         calibration_seed = getattr(entry, "speculation_calibration_seed", None)
-        recorded_depth = getattr(entry, "speculation_depth", 0)
+        # TWO DIFFERENT DEPTH FACTS, and reading only one of them is what made an adaptively settled
+        # run unresumable through the engine's OWN printed advice. `speculation_depth_pinned` is what
+        # `run_started` recorded — the LAUNCH treatment invariant #6 owns, and the only thing an
+        # operator's spelled depth may be compared against. `speculation_depth` is that pin narrowed
+        # by every `speculation_depth_settled` row (`replay.py::_on_speculation_depth_settled`) — a
+        # measurement THIS RUN made about itself, which the run is allowed to make and the operator is
+        # not. Until 2026-08-06 the single folded field carried both, so a resume that spelled exactly
+        # the depth `run_started` pinned was refused with "speculation_depth was pinned at 0" for a
+        # log whose run_started said 1.
+        recorded_depth = getattr(entry, "speculation_depth_pinned", 0)
+        adaptive_depth = getattr(entry, "speculation_depth", 0)
         recorded_impl = str(getattr(
             entry, "speculation_implementation_digest", "") or "")
         recorded_scope = str(getattr(entry, "speculation_policy_scope", "") or "")
@@ -2471,17 +2484,34 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 "the log pinned rather than editing them on the resume command."
             )
 
-        # AUTO depth is a STARTUP resolution off the live box (`_resolve_speculation_depth`), exactly
-        # like eval_parallel/llm_parallel. Invariant #6 therefore owns re-entry: adopt the depth the
-        # log pinned, so resuming on a differently-sized box continues the run's own search treatment
-        # rather than refusing it. An EXPLICITLY spelled depth is never adopted — a changed explicit
-        # treatment must still fail closed below.
+        # ONE re-entry rule for the depth, and it is stated here once. It used to be two that
+        # contradicted each other: this AUTO-only adoption, and `_reentry_repin`'s unconditional
+        # `self.speculation_depth = _entry.speculation_depth`.
+        #
+        #   * AUTO is a STARTUP resolution off the live box (`_resolve_speculation_depth`), exactly
+        #     like eval_parallel/llm_parallel — the operator asked the BOX to decide, so on re-entry
+        #     the run's own log outranks a different box. Adopt the run's EFFECTIVE depth, its own
+        #     ratchet included: a run narrowing itself is not an operator disagreement and must never
+        #     refuse. This is what keeps a resume on a differently-sized box continuing the run's own
+        #     search treatment.
+        #   * An EXPLICITLY spelled depth is never adopted, and it is compared against the LAUNCH PIN
+        #     below — a changed explicit treatment must still fail closed. Note what that means for a
+        #     run that ratcheted: spelling the pin is ACCEPTED and still runs at the settled depth,
+        #     because the ratchet is a durable one-way fact about this run that no resume flag can
+        #     un-record (`engine/speculation.py::_settle_speculation_depth` says so in the warning it
+        #     prints, which used to advise the opposite).
+        auto_depth = bool(getattr(self, "_speculation_depth_auto", False))
         if (
-            getattr(self, "_speculation_depth_auto", False)
-            and type(recorded_depth) is int
-            and 0 <= recorded_depth <= 64
+            auto_depth
+            and type(adaptive_depth) is int
+            and 0 <= adaptive_depth <= 64
         ):
-            self.speculation_depth = recorded_depth
+            self.speculation_depth = adaptive_depth
+        # Which recorded depth THIS process has to agree with, per the rule above. Computed once so
+        # the legacy adoption below and the refusal further down cannot drift apart.
+        authoritative_depth = adaptive_depth if auto_depth else recorded_depth
+        depth_agrees = (type(authoritative_depth) is int
+                        and authoritative_depth == self.speculation_depth)
 
         # LEGACY PRODUCT-LANE ADOPTION (invariant #6 again). A build before the receipt-lane fix
         # carried a supplied receipt's identity into `run_started` even on a workload the receipt
@@ -2500,8 +2530,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             and recorded_receipt
             and recorded_scope == SPECULATION_POLICY_SCOPE
             and getattr(entry, "card_driven_selection", False) is True
-            and type(recorded_depth) is int
-            and recorded_depth == self.speculation_depth
+            and depth_agrees
         ):
             self._speculation_implementation_digest = recorded_impl
             self._speculation_gate_receipt_digest = recorded_receipt
@@ -2540,10 +2569,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 "the log carries no evidence identity, so it cannot be resumed under a receipt")
         if getattr(entry, "card_driven_selection", False) is not True:
             causes.append("the log did not pin card_driven_selection=true")
-        if type(recorded_depth) is not int or recorded_depth != self.speculation_depth:
+        if not depth_agrees:
+            # NAME BOTH FACTS when they differ. The old text said "pinned at <settled value>", which
+            # was not a value `run_started` ever carried, so it sent the operator to re-run with a
+            # launch setting the log does not record — and the depth it printed was the one the
+            # ratchet had already overridden.
+            settled_note = (
+                f" (and settled by this run to {adaptive_depth!r})"
+                if adaptive_depth != recorded_depth else "")
             causes.append(
-                f"speculation_depth was pinned at {recorded_depth!r} and this process resolved "
-                f"{self.speculation_depth!r}")
+                f"speculation_depth was pinned at run start to {recorded_depth!r}{settled_note}, "
+                f"and this process resolved {self.speculation_depth!r}")
         if recorded_scope != SPECULATION_POLICY_SCOPE:
             causes.append(
                 f"the log pinned policy scope {recorded_scope!r}, not {SPECULATION_POLICY_SCOPE!r}")
@@ -2710,6 +2746,35 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # grant for card_scoring depends on this run-start-pinned value, not the ambient snapshot.
         if _entry.run_id:
             self.card_driven_selection = _entry.card_driven_selection
+            # THE LOG'S OWN TREATMENT WINS (invariant #6), and the value adopted is the EFFECTIVE
+            # depth — the launch pin narrowed by every settle row this run wrote. Same single rule
+            # `_require_pinned_speculation_receipt` states, and it ran at the top of this method,
+            # where it has ALREADY failed closed on a spelled depth that disagrees with the launch pin.
+            #
+            # SAY SO WHERE IT CANNOT. A log whose `run_started` recorded no speculative prefix at all
+            # never reaches that refusal (the guard returns on `recorded_marker`), so a resume
+            # spelling `-s speculation_depth=2` over a run that pinned none was accepted there and
+            # then silently clamped to 0 right here — the operator's explicit flag doing nothing, with
+            # nothing said, which is the shape of the two rules disagreeing. It still cannot take
+            # effect (turning the treatment on mid-run would write a speculative prefix into a log
+            # whose run_started carries no receipt authorizing one, and the run's own next re-entry
+            # would then have to refuse it), but it is no longer silent.
+            # Gated on `_speculation_gate_admitted` so this says only what it means. A depth spelled
+            # with Layer 3 OFF never entered the lane in the first place (`admit_speculation_lane`
+            # requires `card_driven_selection`), so it is not re-entry that is ignoring it — and
+            # `_run_start_pinned_values` omits the key in that case, which would otherwise make every
+            # FRESH `-s card_driven_selection=false -s speculation_depth=2` run warn about its own
+            # run_started.
+            if (not getattr(self, "_speculation_depth_auto", False)
+                    and getattr(self, "_speculation_gate_admitted", False)
+                    and self.speculation_depth != _entry.speculation_depth):
+                _LOG.warning(
+                    "ignoring speculation_depth=%d on re-entry: this run's log is the authority for "
+                    "its search treatment (engine invariant #6) and records %d — run_started pinned "
+                    "%d. A depth can only be chosen at LAUNCH; start a new run to use a different "
+                    "one.",
+                    self.speculation_depth, _entry.speculation_depth,
+                    getattr(_entry, "speculation_depth_pinned", 0))
             self.speculation_depth = _entry.speculation_depth
         # A7 Strategist: re-apply the last-decided strategy on (re)entry so a resumed run continues
         # with it WITHOUT re-consulting the Strategist (the decision lives in the event log).

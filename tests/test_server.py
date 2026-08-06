@@ -2623,6 +2623,68 @@ def test_run_config_uses_folded_launch_pins_and_repairs_legacy_snapshot_drift(tm
         assert healed[key] == shown[key]
 
 
+def test_run_config_survives_a_run_that_ratcheted_its_own_speculation_depth(tmp_path):
+    """DOOR 2: a routine UI edit must not destroy a run's launch config, and needs no operator intent.
+
+    The sibling above covers only a log with NO settle row, where `run_started`'s depth and the folded
+    `speculation_depth` are the same number. Once the AUTO depth is allowed to ratchet itself down,
+    they are two different facts, and reading the wrong one here was PERMANENT: measured through this
+    route, `run_started` pinned 4, `config.snapshot.json` held the `-1` AUTO sentinel, GET reported 0
+    — a value `run_started` never contained — a PUT of an unrelated `timeout` wrote that 0 into the
+    snapshot as a "legacy drift repair", a PUT trying to restore `-1` came back 422 "run-start pinned
+    settings cannot be changed after creation", and the run's next re-entry refused it outright with
+    "this process did not admit Card speculation at all… but the log records a speculative prefix".
+
+    Two rules close it: the pinned contract reads `run_started`'s own value, and the AUTO SENTINEL is
+    not drift (`core/config.py::run_start_pinned_disagreement`) — it is the launch-time request the
+    pin is the resolution OF, so repairing it would replace the operator's standing spelling with one
+    run's resolved integer, irreversibly.
+    """
+    from looplab.core.config import Settings
+
+    rd = tmp_path / "ratcheted"
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {
+        "run_id": "ratcheted", "task_id": "t", "goal": "g", "direction": "max",
+        "card_driven_selection": True, "speculation_depth": 4,
+        "speculation_gate_receipt_digest": "sha256:" + "a" * 64,
+        "speculation_policy_scope": "greedy",
+    })
+    store.append("speculation_depth_settled", {"depth": 0, "previous": 4, "reason": "fast evals"})
+    assert fold(store.read_all()).speculation_depth == 0            # the run's EFFECTIVE treatment
+    assert fold(store.read_all()).speculation_depth_pinned == 4     # what run start committed
+    (rd / "config.snapshot.json").write_text(json.dumps(
+        Settings(card_driven_selection=True, speculation_depth=-1, timeout=30.0).masked_snapshot()),
+        encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+
+    shown = client.get("/api/runs/ratcheted/config").json()
+    assert shown["speculation_depth"] == -1                         # the operator's own spelling
+    assert "speculation_depth" in shown["_looplab_config_meta"]["run_start_pinned_fields"]
+    assert shown["_looplab_config_meta"]["snapshot_mismatch_fields"] == []
+
+    saved = _run_config_put(client, "ratcheted", {"settings": {"timeout": 45.0}})
+    assert saved.status_code == 200
+    assert saved.json()["normalized_pinned"] == []
+    healed = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
+    assert healed["timeout"] == 45.0                                # the edit the operator asked for
+    assert healed["speculation_depth"] == -1                        # ...and nothing else moved
+
+    # The sentinel round-trips; a real change of the treatment is still refused.
+    assert _run_config_put(client, "ratcheted",
+                           {"settings": {"speculation_depth": -1}}).status_code == 200
+    refused = _run_config_put(client, "ratcheted", {"settings": {"speculation_depth": 2}})
+    assert refused.status_code == 422 and "speculation_depth" in refused.json()["detail"]
+    assert json.loads(
+        (rd / "config.snapshot.json").read_text(encoding="utf-8"))["speculation_depth"] == -1
+
+    # The run is still resumable: the snapshot the CLI restores from spells AUTO, exactly as launched.
+    from looplab.core.config import settings_from_snapshot
+    assert settings_from_snapshot(
+        json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
+    ).speculation_depth == -1
+
+
 def test_put_run_config_rejects_every_run_start_pinned_field(tmp_path):
     from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
 

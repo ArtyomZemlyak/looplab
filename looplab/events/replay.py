@@ -314,6 +314,27 @@ class _FoldCtx:
         self.run_base_seen = False
         self.event_index = -1
 
+
+def _settle_folded_speculation_depth(st: RunState) -> None:
+    """Recompute the EFFECTIVE Layer-5 depth from the run's two independent depth facts.
+
+    `speculation_depth_pinned` is `run_started`'s launch treatment and `speculation_depth_settled` is
+    the floor the run's own adaptive ratchet has narrowed itself to; the effective depth is the pin
+    capped by that floor. Both writers call this, which is what makes the pair ORDER-TOLERANT: each
+    fact is written by exactly one handler, neither reads the other's field before writing its own,
+    and the derivation is a pure minimum. Splicing `speculation_depth_settled` anywhere relative to
+    `run_started` therefore lands on the same effective depth — which a minimum taken directly on
+    `speculation_depth` did NOT: `run_started` ASSIGNS over a `RunState` default of 0, so a settle
+    row folded first was simply overwritten (measured: 4 at position 0, 0 at every other position).
+
+    A floor ABOVE the pin is inert, which is what keeps a stale/foreign/hand-edited row from ever
+    RAISING the treatment — the property the minimum was chosen for.
+    """
+    floor = st.speculation_depth_settled
+    st.speculation_depth = (st.speculation_depth_pinned if floor is None
+                            else min(st.speculation_depth_pinned, floor))
+
+
 def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # FIRST START WINS. `run_started` is the one-time identity anchor and carries the run's immutable
     # authority: `direction` (champion ordering for the whole run), `trust_gate`, `card_driven_selection`,
@@ -350,8 +371,13 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.card_driven_selection = d.get("card_driven_selection") is True
     # A strict bounded integer is required: bools/strings/floats are malformed and must not turn on
     # speculative execution. Absent on old logs -> 0 -> historical alternating build/eval behavior.
+    # This is the LAUNCH PIN and nothing else writes it; the EFFECTIVE depth is derived from it and
+    # the adaptive floor by `_settle_folded_speculation_depth`, so this handler and
+    # `_on_speculation_depth_settled` may land in either order (invariant #5).
     _spec_depth = d.get("speculation_depth", 0)
-    st.speculation_depth = (_spec_depth if type(_spec_depth) is int and 0 <= _spec_depth <= 64 else 0)
+    st.speculation_depth_pinned = (
+        _spec_depth if type(_spec_depth) is int and 0 <= _spec_depth <= 64 else 0)
+    _settle_folded_speculation_depth(st)
     # Four sha256-prefixed receipt digests admitted by ONE predicate (doc 25 EV-04); they were four
     # copies of the same six-line conjunction. The assignments stay written out rather than a
     # `setattr` loop over field-name strings: a typo in such a loop would silently set the wrong
@@ -3365,6 +3391,16 @@ def _on_speculation_depth_settled(st: RunState, e: Event, d: dict, ctx: "_FoldCt
     one row folded twice, would land on a different treatment, and a duplicated stale row could raise
     a depth back up after the run had already narrowed it.
 
+    THE MINIMUM IS TAKEN OVER SETTLE ROWS ONLY, into a field of their own, and the effective depth is
+    derived from that floor and the launch pin together (`_settle_folded_speculation_depth`). Folding
+    the two facts into ONE field made the "order-tolerant" claim above false against the one event
+    whose order actually mattered: `_on_run_started` ASSIGNS, so a settle row spliced BEFORE it was
+    overwritten and the fold landed on the pin (measured on this exact log: 4 at splice position 0, 0
+    at every other position). It was latent — `run_started` is first by construction — but this
+    codebase writes ordering PRECONDITIONS down rather than leaving them as properties of an event
+    (invariant #1 does it for `EV_NODE_EVAL_STARTED`), and here the precondition could simply be
+    removed instead. There is now no order requirement between these two handlers at all.
+
     Nothing here is re-measured. The row's `evidence` is recorded for the operator and for
     `looplab inspect`; the fold reads only `depth`, so a resume on a box with different hardware
     continues under the treatment THIS RUN chose rather than one re-derived from the new host — the
@@ -3372,12 +3408,14 @@ def _on_speculation_depth_settled(st: RunState, e: Event, d: dict, ctx: "_FoldCt
 
     Bounds are strict for the same reason `run_started`'s are: a bool/float/string in a malformed or
     hand-edited row must not be able to change the search treatment. A row the engine never wrote
-    (depth above the pinned one) is simply inert under the minimum.
+    (depth above the pinned one) is simply inert, because the derivation caps the floor at the pin.
     """
     depth = d.get("depth")
     if type(depth) is not int or not 0 <= depth <= 64:
         return
-    st.speculation_depth = min(st.speculation_depth, depth)
+    floor = st.speculation_depth_settled
+    st.speculation_depth_settled = depth if floor is None else min(floor, depth)
+    _settle_folded_speculation_depth(st)
 
 
 def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:

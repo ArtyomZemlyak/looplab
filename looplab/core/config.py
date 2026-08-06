@@ -159,6 +159,14 @@ def flatten_parallelism_layers(layers) -> dict:
 # (a different holdout split) or make the live producer disagree with replay's selection policy.
 # The HTTP config editor and the engine both consume this one contract; keep deliberately mutable
 # controls such as ``trust_gate`` out (that field has its own durable change event).
+#
+# MEMBERSHIP IS ABOUT THE ``run_started`` RECORD, NOT ABOUT THE FOLDED FIELD OF THE SAME NAME. The two
+# stopped being the same thing for ``speculation_depth`` when the AUTO depth became allowed to ratchet
+# itself down mid-run: `RunState.speculation_depth` is the EFFECTIVE treatment (pin ∧ every
+# `speculation_depth_settled` row) and only `RunState.speculation_depth_pinned` is what run start
+# committed. `run_start_pinned_settings` reads the pin for exactly that reason. A field whose value is
+# allowed to move after run start and has NO run-start pin of its own does not belong in this set at
+# all — that is why ``trust_gate`` and the two settled widths are out.
 RUN_START_PINNED_FIELDS = frozenset({
     "card_driven_selection",
     "speculation_depth",
@@ -170,12 +178,43 @@ RUN_START_PINNED_FIELDS = frozenset({
 })
 
 
+# The one pinned field with a LAUNCH-TIME SENTINEL, and therefore the only one whose
+# `config.snapshot.json` value is not in the same domain as what ``run_started`` recorded.
+# ``speculation_depth = -1`` is AUTO — "let the box decide" — and the pin is what ONE launch, on ONE
+# box, resolved that request to. The two do not disagree: re-entry resolves AUTO again and then adopts
+# the log (`Engine._require_pinned_speculation_receipt`), exactly as it does for the two AUTO widths.
+# Normalizing the sentinel away replaces the operator's standing request with one run's resolution and
+# cannot be undone — a PUT restoring ``-1`` comes back 422 as a pinned-field change, while an unrelated
+# PUT had already overwritten it. So the sentinel is not drift and is never repaired.
+_NO_AUTO_SENTINEL = object()
+RUN_START_PINNED_AUTO_SENTINELS: dict[str, object] = {"speculation_depth": -1}
+
+
+def run_start_pinned_disagreement(field: str, value, pinned) -> bool:
+    """Does ``value`` genuinely contradict what ``run_started`` pinned for ``field``?
+
+    THE SINGLE SPELLING of that question, shared by the HTTP config editor's three consumers — the
+    read-only overlay's mismatch list, the refuse-list for an attempted change, and the legacy-snapshot
+    repair. They were three separate ``!=`` comparisons, which is how the AUTO sentinel came to be
+    treated as drift by all three at once (see `RUN_START_PINNED_AUTO_SENTINELS`).
+    """
+    if value == pinned:
+        return False
+    return value != RUN_START_PINNED_AUTO_SENTINELS.get(field, _NO_AUTO_SENTINEL)
+
+
 def run_start_pinned_settings(state) -> dict:
     """Return the effective Settings names committed by a folded run-start record.
 
     Pre-pin legacy logs have no recorded holdout fraction, so their snapshot remains authoritative
     for both holdout knobs. Verifier fields, however, have always been re-pinned from the legacy-safe
     fold defaults whenever a valid ``run_started`` identity exists.
+
+    Every value here must be one ``run_started`` ACTUALLY CARRIED. That is not a tautology for
+    ``speculation_depth``: the folded field of that name is the run's EFFECTIVE treatment, which an
+    adaptive `speculation_depth_settled` row is allowed to ratchet down, and reading it here reported
+    a depth the run-start record never contained and then wrote it into the snapshot as though it were
+    the pin. `RunState.speculation_depth_pinned` is the launch value and is what this contract owns.
     """
     if not getattr(state, "run_id", ""):
         return {}
@@ -184,8 +223,9 @@ def run_start_pinned_settings(state) -> dict:
         # resume must keep the same owner even if the snapshot or ambient default changes later.
         "card_driven_selection": bool(getattr(state, "card_driven_selection", False)),
         # Layer 5 overlaps Card production with evaluation only when this pinned treatment is
-        # positive. Old logs omit it and therefore retain the exact serial build/eval spine.
-        "speculation_depth": int(getattr(state, "speculation_depth", 0)),
+        # positive. Old logs omit it and therefore retain the exact serial build/eval spine. The PIN,
+        # never `state.speculation_depth` — see the docstring.
+        "speculation_depth": int(getattr(state, "speculation_depth_pinned", 0)),
         "select_verifier": bool(getattr(state, "select_verifier_tiebreak", False)),
         "select_verifier_samples": int(getattr(state, "select_verifier_samples", 3)),
         "verifier_ci_tie": bool(getattr(state, "verifier_ci_tie", False)),
@@ -1116,13 +1156,19 @@ class Settings(BaseSettings):
     #        same shape of knob as `eval_parallel`/`llm_parallel`, but it needs its OWN sentinel
     #        because `0` here already means a hard off-switch and is a run_started-pinned search
     #        treatment — repurposing it would silently turn speculation on for every old snapshot.
-    #        The resolution happens once, in `Engine.__init__`, and it is the RESOLVED integer that is
-    #        pinned by run_started, so replay/resume never re-derive a treatment from a different box.
+    #        The startup resolution happens in `Engine.__init__`, and it is the RESOLVED integer that
+    #        run_started pins, so replay/resume never re-derive a treatment from a different box. AUTO
+    #        may then ratchet ITSELF down mid-run (`Engine._settle_speculation_depth`); each move is a
+    #        durable `speculation_depth_settled` event, and the fold keeps that floor SEPARATE from the
+    #        pin (`RunState.speculation_depth_pinned` vs `speculation_depth_settled`) so a resume can
+    #        tell "the operator changed the treatment" from "the run narrowed itself".
     #    0 = off.  1..64 = that exact backlog cap (an explicit value always overrides AUTO).
-    # THE DEFAULT STAYS 0 — but as of 2026-08-05 that is a SEPARATE STEP, no longer a blocked one.
-    # Flipping it to -1 (AUTO) is the operator's standing request and everything around it is ready:
-    # AUTO resolution, the run_started pin, the node-budget refund, and the three AUTO settle-to-off
-    # rules in `Engine._resolve_speculation_depth`. What used to block it was a defect in the Card
+    # THE DEFAULT IS -1 (AUTO) as of 2026-08-05 — the flip below has SHIPPED, and the paragraphs that
+    # follow are the history of why it could not before, kept because they are the evidence for the
+    # `_card_debuggable_leaf_ids` fix that unblocked it. (This block still read "THE DEFAULT STAYS 0"
+    # thirty lines above `default=-1` until 2026-08-06.) Everything around it was ready: AUTO
+    # resolution, the run_started pin, the node-budget refund, and the three AUTO settle-to-off rules
+    # in `Engine._resolve_speculation_depth`. What used to block it was a defect in the Card
     # DEBUG anchor that only a default could make everyone's problem:
     #
     #   `events/replay.py::_card_debuggable_leaf_ids` disqualified a failed node the moment it had ANY
@@ -1148,11 +1194,12 @@ class Settings(BaseSettings):
     #       `search/card_selection.py`, its historical home) precisely so replay can reach it: a
     #       second copy on the events side is how the two views came to disagree in the first place.
     # Same offline reproduction after the fix: 16 minted / 12 charged / 11 evaluated / normal finish.
-    # The flip itself is intentionally NOT part of that change — land it on its own.
+    # The flip itself was deliberately landed on its own, after that change.
     #    -1 = AUTO (the default).  0 = off.  1..64 = that exact backlog cap.
     # AUTO ships as the default from 2026-08-05, once that fix made a `debug` prefetch survivable.
-    # It resolves ONCE at startup to the settled `eval_parallel` and pins the RESOLVED integer, and
-    # it settles itself back to OFF wherever a prefetch cannot pay for itself: a build whose roles
+    # It resolves at startup to the settled `eval_parallel`, pins the RESOLVED integer, may ratchet
+    # itself down once mid-run against its own measurements, and settles straight back to OFF at
+    # startup wherever a prefetch cannot pay for itself: a build whose roles
     # call no LLM (there is no provider latency to overlap, and fan-out would cost the offline smoke
     # its byte-reproducible event order), a policy other than `greedy`, and a run with no id.
     # `EngineOptions` deliberately keeps `0` — see `engine/options.py`; a bare Engine must not gain a

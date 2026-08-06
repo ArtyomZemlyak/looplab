@@ -22,7 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.config import (
-    RUN_START_PINNED_FIELDS, Settings, run_start_pinned_settings, settings_from_snapshot)
+    RUN_START_PINNED_FIELDS, Settings, run_start_pinned_disagreement, run_start_pinned_settings,
+    settings_from_snapshot)
 from looplab.core.node_evidence import node_attempt
 from looplab.core.run_deletion import (RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed)
 from looplab.core.run_reset import (
@@ -2577,14 +2578,21 @@ def build_router(srv) -> APIRouter:
         engine ignored them on re-entry. Overlay the folded values so both API and form show the policy
         the run actually uses; metadata lets the form render them as read-only without duplicating the
         Python contract in JavaScript.
+
+        The overlay applies exactly where the snapshot CONTRADICTS the run-start record
+        (`run_start_pinned_disagreement`), not wherever the two bytes differ: an AUTO sentinel is a
+        launch-time request the pin is the resolution OF, so overwriting it here would show — and then
+        let the form save back — one run's resolved integer in place of the operator's own spelling.
         """
         pinned = run_start_pinned_settings(srv.state(rd))
         # Keep revision bound to the exact on-disk object, but expose the complete effective Settings
         # projection that resume consumes. Preserve unknown snapshot keys; GET stays read-only and
         # never backfills legacy bytes.
         effective = {**snapshot, **settings_from_snapshot(snapshot).masked_snapshot()}
-        mismatches = sorted(k for k, value in pinned.items() if effective.get(k) != value)
-        effective.update(pinned)
+        mismatches = sorted(
+            k for k, value in pinned.items()
+            if run_start_pinned_disagreement(k, effective.get(k), value))
+        effective.update({k: pinned[k] for k in mismatches})
         effective["_looplab_config_meta"] = {
             "config_revision": _run_config_revision(snapshot),
             "run_start_pinned_fields": sorted(pinned),
@@ -2648,7 +2656,7 @@ def build_router(srv) -> APIRouter:
         pinned = run_start_pinned_settings(folded)
         attempted_pinned_changes = sorted(
             key for key, value in incoming.items()
-            if key in pinned and value != pinned[key]
+            if key in pinned and run_start_pinned_disagreement(key, value, pinned[key])
         )
         if attempted_pinned_changes:
             raise HTTPException(
@@ -2660,9 +2668,22 @@ def build_router(srv) -> APIRouter:
 
         updated = dict(current)
         # Repair snapshots written by older servers. These values are not a new policy decision: the
-        # event fold has always been the authority used by replay/re-entry, and GET already overlays it.
-        normalized_pinned = sorted(k for k, value in pinned.items() if updated.get(k) != value)
-        updated.update(pinned)
+        # RUN-START RECORD has always been the authority used by replay/re-entry, and GET already
+        # overlays it.
+        #
+        # "the event fold" was the wording here until 2026-08-06, and it stopped being true the day
+        # the AUTO depth was allowed to ratchet itself down: `st.speculation_depth` became the run's
+        # EFFECTIVE treatment rather than run_started's value, and this repair — which needs no
+        # operator intent at all, an unrelated `timeout` edit reaches it — wrote that settled value
+        # into `config.snapshot.json` as though it were the pin. Measured through this route:
+        # run_started pinned 4, the snapshot held -1 (AUTO), GET reported 0, a PUT of `timeout` wrote
+        # 0, a PUT restoring -1 came back 422, and the next re-entry refused the run outright.
+        # `run_start_pinned_settings` reads the PIN now, and the repair fires only on a genuine
+        # disagreement, so the AUTO sentinel survives an unrelated save.
+        normalized_pinned = sorted(
+            k for k, value in pinned.items()
+            if run_start_pinned_disagreement(k, updated.get(k), value))
+        updated.update({k: pinned[k] for k in normalized_pinned})
         # A hand-authored/legacy sparse snapshot may omit the mutable trust gate. Preserve the folded
         # policy in that case rather than manufacturing an "audit" downgrade during an unrelated edit.
         updated.setdefault("trust_gate", folded.trust_gate)

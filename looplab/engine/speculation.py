@@ -238,7 +238,13 @@ class SpeculationMixin:
     #     oscillation is a durable change to the run's SEARCH TREATMENT, not a tuning knob;
     #   * the harm is asymmetric. Prefetching on a fast task costs tokens for nothing (measured
     #     above); not prefetching on a slow one costs some wall clock and nothing else;
-    #   * it bounds the log. At most `depth` transitions per run, each strictly smaller.
+    #   * it bounds the log. The payload's resolved depth is `0` — the rule's whole finding is "there
+    #     is nothing here to overlap", which has no smaller answer — so a run emits AT MOST ONE of
+    #     these rows: the second call sees `current <= 0` and returns before measuring anything. (This
+    #     comment claimed "at most `depth` transitions per run, each strictly smaller" until
+    #     2026-08-06, describing a graduated ratchet the writer below never implemented. The fold is
+    #     nevertheless written for many rows, and must stay that way: it is what makes a duplicated or
+    #     replayed row inert.)
     # AUTO-ONLY, like every other AUTO settling rule here: a SPELLED depth is honoured as spelled.
     _ADAPTIVE_DEPTH_MIN_SAMPLES = 2
     # How much of a build one evaluation must be able to hide before the prefetch earns its fixed
@@ -341,10 +347,22 @@ class SpeculationMixin:
         # comparing two runs' token bills deserves to know which one prefetched. WARNING for the same
         # reason the GPU-pool lease wait is at WARNING: it is not an error, but a silent one gets
         # debugged as something else.
+        #
+        # THE ADVICE HAS TO WORK ON THE RUN DIRECTORY IT IS PRINTED FOR. This line used to end
+        # "`-s speculation_depth=%d` keeps it on" with the PRE-settle depth, which was wrong twice
+        # over: the settle is durable and the fold applies it on top of the pin, so a resume spelling
+        # that depth still runs at 0 — and before 2026-08-06 the re-entry guard refused the resume
+        # outright, so the engine's own printed advice was the faster of the two doors out of a
+        # resumable run. Name the surface where the choice is actually available: LAUNCH, where a
+        # spelled depth opts out of AUTO settling entirely (`_settle_speculation_depth` returns on
+        # `_speculation_depth_auto`).
         _LOG.warning(
             "speculation depth %d -> 0: median evaluation %.3gs is only %.2g%% of a median build "
             "(%.3gs), so a prefetch has no provider latency to overlap. Recorded as "
-            "speculation_depth_settled in the event log; `-s speculation_depth=%d` keeps it on.",
+            "speculation_depth_settled in the event log — a ONE-WAY ratchet for THIS run, which "
+            "replay and resume both reproduce, so no resume flag lifts it. To keep the prefetch on, "
+            "LAUNCH a run with the depth spelled (`-s speculation_depth=%d`): a spelled depth is "
+            "never settled away.",
             current, eval_median, ratio * 100.0, build_median, current)
         return True
 

@@ -32,6 +32,7 @@ from looplab.engine.evaluate import SpeculativeEvaluationInvariantError
 from looplab.engine.options import EngineOptions
 from looplab.engine.orchestrator import Engine, SpeculationAuthorizationError
 from looplab.events.replay import fold
+from looplab.events.types import EV_SPECULATION_DEPTH_SETTLED
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search.policy import GreedyTree
 from looplab.search.speculation_calibration import (
@@ -180,9 +181,15 @@ def test_the_product_lane_pins_survive_re_entry_and_bind_the_exact_treatment(tmp
 
     # ...and a DIFFERENT treatment on the same durable prefix still fails closed, NAMING the pin that
     # moved. The old message listed every pin the check knows about and left the operator to guess.
+    # "at run start" is load-bearing in the wording (2026-08-06): the depth the message quotes has to
+    # be one `run_started` ACTUALLY carried, because the remedy it prints is "re-run with the launch
+    # settings the log pinned" — and it was quoting the ADAPTIVE value, which no launch command can
+    # spell. There is no settle row here, so the two coincide; the test below drives the case where
+    # they do not.
     changed = _engine(run_dir, task, card_driven_selection=True, speculation_depth=2)
     with pytest.raises(SpeculationAuthorizationError,
-                       match=r"speculation_depth was pinned at 3 and this process resolved 2"):
+                       match=r"speculation_depth was pinned at run start to 3, "
+                             r"and this process resolved 2"):
         changed._require_pinned_speculation_receipt(fold(changed.store.read_all()))
 
 
@@ -539,8 +546,23 @@ def test_auto_depth_adopts_the_pinned_depth_on_a_differently_sized_box(tmp_path)
     explicit = _engine(run_dir, task, card_driven_selection=True,
                        speculation_depth=2, eval_parallel=2)
     with pytest.raises(SpeculationAuthorizationError,
-                       match=r"speculation_depth was pinned at 4 and this process resolved 2"):
+                       match=r"speculation_depth was pinned at run start to 4, "
+                             r"and this process resolved 2"):
         explicit._require_pinned_speculation_receipt(fold(explicit.store.read_all()))
+
+    # THE SAME EXPLICIT REFUSAL ON A RUN THAT RATCHETED ITSELF, which is the case that made this
+    # check refuse a resume it should have admitted. The adaptive settle moves the run's EFFECTIVE
+    # depth and leaves the launch pin alone; a spelled depth is measured against the pin, so a
+    # genuine disagreement still fails closed and the message names BOTH facts.
+    first.store.append(EV_SPECULATION_DEPTH_SETTLED, {"depth": 0, "previous": 4})
+    settled = fold(first.store.read_all())
+    assert (settled.speculation_depth_pinned, settled.speculation_depth) == (4, 0)
+    still_wrong = _engine(run_dir, task, card_driven_selection=True,
+                          speculation_depth=2, eval_parallel=2)
+    with pytest.raises(SpeculationAuthorizationError,
+                       match=r"pinned at run start to 4 \(and settled by this run to 0\), "
+                             r"and this process resolved 2"):
+        still_wrong._require_pinned_speculation_receipt(settled)
 
 
 def test_settings_carries_the_auto_sentinel_and_rejects_anything_below_it():
