@@ -531,6 +531,38 @@ def test_a_merge_whose_source_left_the_portfolio_is_declined(tmp_path):
     assert load_concept_aliases(memory_dir) == {}
 
 
+# --------------------------------------------------------------------------- the finalize hook
+# A REAL toy run to its terminal, twice, so "the stage is wired into finalize and gated" is observed
+# rather than asserted about source text. The run appends nothing about the stage — that is the
+# point — so what is observed is the cross-run policy the run left behind.
+
+def _run_to_completion(run_dir, memory_dir, *, concept_tidy):
+    import anyio
+
+    from tests.factories import make_engine
+
+    engine = make_engine(run_dir, n_seeds=1, max_nodes=1, memory_dir=str(memory_dir),
+                         concept_tidy=concept_tidy)
+    anyio.run(engine.run)
+    return engine
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_the_finalize_hook_runs_exactly_when_the_setting_says_so(tmp_path, enabled):
+    memory_dir = tmp_path / "mem"
+    _write_capsules(memory_dir, [_capsule("seeded", ["a/one", "a/two"])])
+    _append_proposal(memory_dir, merges=[_merge("a/two", "a/one")])
+
+    engine = _run_to_completion(tmp_path / "run", memory_dir, concept_tidy=enabled)
+
+    assert load_concept_aliases(memory_dir) == ({"a/two": "a/one"} if enabled else {})
+    assert bool(read_ratification_receipts(memory_dir)) is enabled
+    # Whatever it did, it did it without touching the run's log: no event type is involved, so the
+    # fold, the replay and `QUIET_FINALIZATION_SUFFIX` cannot have moved.
+    types = {event.type for event in engine.store.read_all()}
+    assert not any("ratif" in name or "tidy" in name for name in types)
+
+
 def test_the_receipt_records_what_landed_and_what_is_left_for_the_operator(tmp_path):
     memory_dir = tmp_path / "mem"
     _write_capsules(memory_dir, [_capsule("run-a", ["a/one", "a/two", "noise/x"])])
