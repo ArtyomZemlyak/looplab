@@ -779,7 +779,15 @@ export function DataQualityPanel({ state, onClose }) {
     <Panel title="Data quality" sub={`${cols.length} columns`} onClose={onClose} wide>
       <DataTable caption="Dataset column quality profile" card={false}><table className="tbl"><thead><tr><th>column</th><th>dtype</th><th>missing%</th><th>unique</th><th>min</th><th>max</th><th>mean</th><th>flags</th></tr></thead><tbody>
         {cols.map(([c, s]) => <tr key={c}>
-          <td>{c}</td><td>{s.dtype}</td><td>{fmt((s.missing_frac || 0) * 100, 3)}</td><td>{fmtInt(s.n_unique)}</td>
+          {/* `(s.missing_frac || 0) * 100` invented a measurement. Not every profiler records
+              missingness — real logs carry rows that are only `{count, dtype, constant}`
+              (`runs/live-nosignal`, `runs/live-periodic`, …) — and this cell then said "0% missing"
+              while every OTHER cell in the same row correctly said `—`, because `fmtInt`/`fmt`
+              already report an absent value as unknown. A fraction that was never measured is not
+              a fraction of zero; only a number is a measurement. */}
+          <td>{c}</td><td>{s.dtype}</td>
+          <td>{fmt(typeof s.missing_frac === 'number' ? s.missing_frac * 100 : null, 3)}</td>
+          <td>{fmtInt(s.n_unique)}</td>
           <td>{fmt(s.min)}</td><td>{fmt(s.max)}</td><td>{fmt(s.mean)}</td>
           <td>{s.constant && <span className="flag">constant </span>}{s.high_missing && <span className="flag">high-missing</span>}</td></tr>)}
       </tbody></table></DataTable>

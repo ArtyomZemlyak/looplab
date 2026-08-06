@@ -74,7 +74,7 @@ const CASES = [
   ['CrossRunPanel', s => React.createElement(panels.CrossRunPanel, { state: s, onClose: noop })],
   ['QueuePanel', s => React.createElement(panels.QueuePanel, { state: s, runId: 'r', onSelect: noop, onClose: noop, onToast: noop })],
   ['ResearchPanel', s => React.createElement(panels.ResearchPanel, { state: s, runId: 'r', onToast: noop, onClose: noop })],
-  ['ReportView', s => React.createElement(report.default, { state: s, runId: 'r', onOpenPanel: noop, canOpenPanel: false, onToast: noop, onPickNode: noop, readOnly: true })],
+  ['ReportView', s => React.createElement(report.default, { state: s, runId: 'r', onOpenPanel: noop, canOpenPanel: () => false, onToast: noop, onPickNode: noop, readOnly: true })],
   ['HypothesisBoard', s => React.createElement(board.HypothesisBoard, { state: s, runId: 'r', runGeneration: null, onSelect: noop, onClose: noop, onToast: noop })],
   ['ConceptChipBar', s => React.createElement(chips.default, { state: s, onHighlight: noop })],
 ]
