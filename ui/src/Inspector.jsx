@@ -1759,10 +1759,11 @@ function Trust({ n, drifts = [] }) {
   return <div className="inspector-trust">
     <div className="section-h">Robustness</div>
     {n.confirmed_mean != null
-      {/* `|| 'Multiple'` swallowed a REAL zero: a node reporting `confirmed_seeds: 0` alongside a
-          `confirmed_mean` is a contradiction worth seeing, and rewriting it to the reassuring word
-          "Multiple" is the one rendering that hides it. Print the count whenever it is a number —
-          including 0 — and reserve the word for a genuinely absent count. */}
+      // `|| 'Multiple'` swallowed a REAL zero: a node reporting `confirmed_seeds: 0` alongside a
+      // `confirmed_mean` is a contradiction worth seeing, and rewriting it to the reassuring word
+      // "Multiple" is the one rendering that hides it. Print the count whenever it is a number —
+      // including 0 — and reserve the word for a genuinely absent count.
+      // (A `{/* … */}` here is a syntax error: inside a ternary we are in JS, not in JSX children.)
       ? <><State tone="ok" label="Multi-seed confirmed" detail={`${typeof n.confirmed_seeds === 'number' ? n.confirmed_seeds : 'Multiple'} successful seeds are recorded for this node.`} /><div className="kv">
         <KV k="single" v={fmt(n.metric)} />
         <KV k="robust mean" v={fmt(n.confirmed_mean)} />
