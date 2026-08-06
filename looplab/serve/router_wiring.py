@@ -132,7 +132,8 @@ def router_builders() -> tuple:
       6. control   — /control appends + resume/reset//api/start engine spawns
       7. genesis   — /api/research + /api/genesis (reads srv.list_tasks_fn at request time)
       8. assistant — sessions + the HITL permission registry
-      9. boss      — chat-log / chat / suggest / command / report_refresh
+      9. boss      — chat-log / chat / suggest / command / report_refresh (also late-binds the two
+                     srv.flush_*_run_costs hooks the destructive and command layers call)
      10. jobs      — GET /api/jobs/{id} over the shared JobRegistry
      11. reports   — cross-run scope reports
      12. misc      — settings/secret/tasks/health/gpu, then the generic `GET /api/{kind}`
