@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { OpIcon } from './icons.jsx'
 import {
-  buildConceptCooccurrence, buildConceptForest, forestCoverage, forestPathTo, partnersOf,
-  visibleForestRows,
+  buildConceptCooccurrence, buildConceptForest, conceptScopeClaim, forestCoverage, forestPathTo,
+  partnersOf, visibleForestRows,
 } from './conceptForest.js'
 import './portfolio-concepts.css'
 
@@ -208,8 +208,11 @@ export default function PortfolioConcepts({
     if (selected && !forest.nodes[selected]) setSelected('')
   }, [forest, selected])
 
-  const scopeName = restrictToSelection && selectedIds.size
-    ? `${selectedIds.size} selected run${selectedIds.size === 1 ? '' : 's'}` : scopeLabel
+  // The heading names the population the TREE is folded from, which is `active` — not the number of
+  // boxes ticked in List. The rule is in the model (`conceptScopeClaim`) because this state is behind
+  // a click and a rule only a click can reach is a rule no test drives.
+  const { name: scopeName, outOfScope: selectedOutOfScope } = conceptScopeClaim({
+    scopeLabel, restrictToSelection, selectedCount: selectedIds.size, activeCount: active.length })
 
   return <div className="pc-stage">
     <div className="pc-head">
@@ -256,6 +259,13 @@ export default function PortfolioConcepts({
       {coverage.complete && <> · every run in scope is tagged</>}
       {coverage.malformedRuns > 0 && <> · <b>{coverage.droppedIds} unreadable tag(s)</b> in {coverage.malformedRuns} run(s)</>}
     </div>}
+
+    {/* Checked in List, then filtered out of it. The tree already excludes them — the disagreement
+        was only ever in the words, and silently dropping them is how "the runs I picked" and "the
+        runs this tree describes" become two different sets nobody mentions. */}
+    {selectedOutOfScope > 0 && <p className="muted pc-scope-note" role="status">
+      {selectedOutOfScope} checked run(s) are outside the current list scope and are not in this
+      tree. Clear the list filters to include them.</p>}
 
     {forest.truncated && <div className="notice resource-warning" role="status">
       This scope carries more concepts than the tree renders. Narrow the scope to see the rest.
@@ -349,6 +359,19 @@ export default function PortfolioConcepts({
                   && <p className="muted">+{cooccurrence.pairs.length - MAX_PAIR_ROWS} more pair(s)
                     above the threshold, not listed.</p>}
               </>}
+          {/* The RANKING cap, which is a different absence from both of the two below and was the
+              only one with no words. `pairsOmitted` is pairs that reached the floor, were counted,
+              and then fell off the end of the ranked list — so unlike a pruned node's pairs their
+              count is EXACT, and unlike the row cap above it is measured against the whole ranked
+              set rather than the twelve rows shown. Reachable without a large corpus: the server
+              caps ONE run at MAX_ROLLUP_CONCEPTS = 64 ids, C(64,2) = 2,016, and the `any run` floor
+              beside this heading is right there — so a single wide-tagged run already spills, and
+              `partnersOf` then returns a SHORT list for the concepts that fell off while the detail
+              pane says "no concept appeared with this one". */}
+          {cooccurrence.pairsOmitted > 0 && <p className="muted">
+            {cooccurrence.pairsOmitted} further pair(s) reached this threshold and were counted, but
+            fall outside the ranked set this view keeps. They are missing from the list above and
+            from the partners of any concept they touch.</p>}
           {/* Two different absences, never merged. The cap above is exact — we counted them and showed
               fewer. A pruned node's pairs were never materialized, so their count is UNKNOWN, and
               printing it as zero would present a bound as a finding. */}

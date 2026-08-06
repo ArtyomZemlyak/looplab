@@ -328,6 +328,27 @@ export function forestPathTo(id) {
   return parts.map((_, index) => parts.slice(0, index + 1).join('/'))
 }
 
+// What the Concepts heading NAMES, and the gap it has to disclose.
+//
+// A decision, so it lives here and not in the component: the restricted state is behind a click, and
+// a rule only a click can reach is a rule no test can drive — which is exactly how the heading came
+// to announce a population its tree did not contain. `active` is the array the tree is folded from;
+// `selected` is what is ticked in List, and `RunList.jsx::compareRuns` maps those ids over the WHOLE
+// payload rather than over the visible rows, so a run stays ticked after a filter hides it. The two
+// counts are therefore routinely different, and the heading must report the one the tree describes.
+export function conceptScopeClaim({ scopeLabel = 'All runs', restrictToSelection = false,
+  selectedCount = 0, activeCount = 0 } = {}) {
+  const selected = Number.isSafeInteger(selectedCount) && selectedCount > 0 ? selectedCount : 0
+  const active = Number.isSafeInteger(activeCount) && activeCount > 0 ? activeCount : 0
+  if (!restrictToSelection || !selected) return { name: scopeLabel, outOfScope: 0 }
+  return {
+    name: `${active} selected run${active === 1 ? '' : 's'}`,
+    // Never negative: `active` is a filter OVER the selection, so it cannot exceed it — but a caller
+    // that passed the two from different renders would otherwise print a negative disclosure.
+    outOfScope: Math.max(0, selected - active),
+  }
+}
+
 // The coverage sentence that goes ABOVE the tree, in the spirit of `conceptShelf.js::coverageSummary`:
 // a tree drawn from 15 of 46 runs is a true picture of 15 runs and says nothing about the other 31, and
 // the surface must not let that read as "the lab studied 71 things". `complete` is the only state in
