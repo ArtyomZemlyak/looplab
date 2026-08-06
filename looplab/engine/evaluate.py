@@ -38,7 +38,8 @@ import anyio
 import orjson
 
 from looplab.core.llm import BudgetExceeded
-from looplab.core.models import (DEVELOPER_ERROR_PREFIX, NodeStatus, developer_artifact_footprint,
+from looplab.core.models import (DEVELOPER_ERROR_PREFIX, NodeStatus, coerce_node_id,
+                                 developer_artifact_footprint,
                                  is_developer_error, normalize_extra_metrics)
 from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.engine.asha_monitor import extract_resource_curve
@@ -115,6 +116,51 @@ def _effective_repair_cap(inline_repair_attempts: int) -> int:
     return int(inline_repair_attempts) or _UNLIMITED_REPAIR_CEILING
 
 
+def _durable_row_belongs(d, node_id: int, generation: int) -> bool:
+    """Does this RAW log row belong to `(node_id, generation)` — keyed exactly as the fold keys it?
+
+    The ONE spelling the three durable ledgers below share, and it is a CALL into the fold's own
+    rules rather than a re-statement of them. All three used to spell it inline as
+    `d.get("node_id") != node_id` / `"generation" in d and d.get("generation") != generation`, each
+    with a comment claiming it keyed "exactly as `replay._generation_matches` keys the same event".
+    It did not, in both directions — measured over 18 raw values, three disagree:
+
+      * `generation: true` (or `node_id: true`) against lifecycle/node **1**. `bool` is a subclass
+        of `int`, so `True != 1` is False and the raw compare ADMITS the row, while
+        `core/models.py::coerce_node_id` rejects a bool on purpose (its docstring: `int(True) == 1`
+        would spuriously match node 1) and the fold therefore drops it. The inline comment on
+        `_durable_repair_ledger` worried about exactly this case — "a corrupt row the fold refuses"
+        — and then admitted one.
+      * `generation: "1"` / `node_id: " 1 "`. The fold coerces a numeric string and KEEPS the row;
+        the raw compare rejects it, so a resume reads a node's repair chain as empty and hands it a
+        fresh budget — the very defect the durable ledger exists to fix.
+
+    A budget charged against rows the fold does not have (or refunded for rows it does) is not the
+    log's budget, which is this whole family's premise. `_event_generation` is imported rather than
+    re-derived for the same reason `agents/unified_agent.py` imports the verdict vocabulary instead
+    of re-spelling it: a rule with two copies has two behaviours as soon as one moves.
+
+    `legacy_attempt` stays OFF, matching `replay._on_node_repaired`'s own call: on `node_repaired`
+    `attempt` is the inline-repair ordinal, not a generation.
+    """
+    if not isinstance(d, Mapping):
+        return False
+    return coerce_node_id(d) == node_id and event_generation_binds(d, generation)
+
+
+def _durable_int(value, default=0):
+    """A durable counter field as an int, or `default` — TOTAL over an untrusted log.
+
+    `int(d.get("unparseable_repairs") or 0)` raised `ValueError` on a string and `TypeError` on a
+    list, from inside `_evaluate`'s attempt loop where nothing catches it: the eval dies with NO
+    terminal event, so the node is neither evaluated nor failed and every resume re-reads the same
+    row and dies again. That is the failure mode `runtime/command_eval.py::READER_PATH_KEYS` exists
+    to prevent, one reader over. A counter nobody can parse contributes its default, exactly as the
+    `isinstance(n, int)` guards beside it already do for `attempt`/`round`/`spent`.
+    """
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+
 def _durable_dep_rounds(events, node_id: int, generation: int) -> int:
     """How many env-prep install ROUNDS this node has already spent, from the log.
 
@@ -130,18 +176,18 @@ def _durable_dep_rounds(events, node_id: int, generation: int) -> int:
 
     Generation-keyed exactly as `replay._generation_matches` keys it — an absent stamp binds, a
     present-but-mismatched one is rejected — so a `node_reset` genuinely starts a fresh env budget.
+    That "exactly" is a CALL, not a claim: see `_durable_row_belongs`, and the three raw values the
+    hand-spelled version disagreed with the fold about.
     """
     rounds = 0
     for e in events or []:
         if e.type != EV_DEPS_INSTALLED:
             continue
         d = e.data or {}
-        if d.get("node_id") != node_id:
+        if not _durable_row_belongs(d, node_id, generation):
             continue
-        if "generation" in d and d.get("generation") != generation:
-            continue
-        n = d.get("round")
-        rounds = max(rounds, int(n)) if isinstance(n, int) else rounds + 1
+        n = _durable_int(d.get("round"), default=None)
+        rounds = max(rounds, n) if n is not None else rounds + 1
     return rounds
 
 
@@ -169,12 +215,10 @@ def _durable_full_retrains(events, node_id: int, generation: int) -> int:
         if e.type != EV_FULL_RETRAIN_CHARGED:
             continue
         d = e.data or {}
-        if d.get("node_id") != node_id:
+        if not _durable_row_belongs(d, node_id, generation):
             continue
-        if "generation" in d and d.get("generation") != generation:
-            continue
-        n = d.get("spent")
-        spent = max(spent, int(n)) if isinstance(n, int) else spent + 1
+        n = _durable_int(d.get("spent"), default=None)
+        spent = max(spent, n) if n is not None else spent + 1
     return spent
 
 
@@ -211,21 +255,21 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
         if e.type != EV_NODE_REPAIRED:
             continue
         d = e.data or {}
-        if d.get("node_id") != node_id:
-            continue
         # Keyed exactly as `replay._generation_matches` keys the same event: an ABSENT stamp is the
         # legacy `_MISSING` case and binds to whichever lifecycle is asking, while a stamp that is
         # present and does not match is rejected — including an explicit null, which replay treats as
         # an invalid stamp rather than as "unstamped". Deliberately NOT `d.get("generation") is None`:
-        # that spelling would silently admit a corrupt row the fold refuses. `legacy_attempt` is not
-        # used here for the reason `_event_generation` documents — on `node_repaired`, `attempt` is
-        # the inline-repair ordinal, not a generation.
-        if "generation" in d and d.get("generation") != generation:
+        # that spelling would silently admit a corrupt row the fold refuses. Nor is it the hand-rolled
+        # `!=` this used to be, which admitted a different corrupt row (`generation: true`) and
+        # dropped a live one (`generation: "1"`) — `_durable_row_belongs` CALLS the fold's rules.
+        # `legacy_attempt` is not used here for the reason `_event_generation` documents — on
+        # `node_repaired`, `attempt` is the inline-repair ordinal, not a generation.
+        if not _durable_row_belongs(d, node_id, generation):
             continue
-        n = d.get("attempt")
-        attempts = max(attempts, int(n)) if isinstance(n, int) else attempts + 1
-        unparseable = max(unparseable, int(d.get("unparseable_repairs") or 0))
-        row = {"attempt": n if isinstance(n, int) else attempts,
+        n = _durable_int(d.get("attempt"), default=None)
+        attempts = max(attempts, n) if n is not None else attempts + 1
+        unparseable = max(unparseable, _durable_int(d.get("unparseable_repairs")))
+        row = {"attempt": n if n is not None else attempts,
                "error": str(d.get("error_in", ""))[-_JUDGE_ERROR_CHARS:],
                "fix": str(d.get("rationale", ""))[:200],
                "stages_passed": d.get("stages_passed")}
@@ -234,6 +278,11 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
         rows.append(row)
     return attempts, rows, unparseable
 from looplab.events.replay import fold
+# The fold's OWN generation rule, CALLED rather than re-derived — `_durable_row_belongs` above is
+# the single place the durable ledgers key a raw row, and it must agree with `replay` by
+# construction. Public on purpose (see its docstring): the alternative was importing the private
+# reader plus its `_MISSING` sentinel across the package boundary.
+from looplab.events.replay import event_generation_binds
 from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.events.types import (EV_CARD_DROPPED, EV_DEPS_INSTALLED, EV_FULL_RETRAIN_CHARGED, EV_NODE_ABORT,
                                   EV_NODE_EVAL_STARTED,

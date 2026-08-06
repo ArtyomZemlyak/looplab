@@ -202,8 +202,9 @@ def test_a_verdict_nobody_can_parse_is_not_permission_to_continue():
 
 def test_only_an_engine_side_marker_admits_the_provider_outage_verdict():
     """`unanswerable` reaches the engine from a return value through ONE door: the
-    `TRIAGE_TRANSPORT_FAILURE_KEY` marker that `UnifiedAgent`'s `_fallback` stamps when `resilient`
-    contained a transport failure. The word alone proves nothing — the wire can carry it."""
+    `TRIAGE_TRANSPORT_FAILURE_KEY` marker that `UnifiedAgent`'s `_transport_failed` stamps when
+    `resilient` contained a transport failure. The word alone proves nothing — the wire can carry
+    it."""
     marked = {"action": "unanswerable", TRIAGE_TRANSPORT_FAILURE_KEY: True, "rationale": "gone"}
     assert is_transport_failure_verdict(marked)
     # The word without the marker: a live model echoing the engine's own vocabulary.
@@ -506,6 +507,49 @@ def test_one_unreadable_verdict_does_not_take_healthy_siblings_down(tmp_path):
     assert repaired[0] == 0 and all(repaired[nid] == 2 for nid in (1, 2, 3)), repaired
 
 
+def test_a_live_endpoint_that_never_emits_stops_the_node_but_not_the_run(tmp_path):
+    """THE HOLE THE OTHER TESTS LEFT: every judge in this file is a hand-written dict-returning
+    double, so none of them ever exercised the REAL `UnifiedAgent` over the REAL `drive_tool_loop`.
+    Driven that way, an endpoint that COMPLETES EVERY REQUEST — it just answers in prose and ignores
+    `tool_choice`, i.e. an ordinary local vLLM/SGLang/llama.cpp deployment — used to reach
+    `triage_crash`'s TRANSPORT fallback, because `_pilot_emit` handed the same marked callable to
+    `resilient` (which fires on a raise) and to `drive_tool_loop` (which fires when the model never
+    emitted). Measured on this exact harness before the fix: four successful HTTP requests, zero
+    repairs, `node_failed reason='developer_crash'` and a RUN-level pause carrying `node_id=None`
+    telling the operator to check credits, key and base URL.
+
+    That is `test_a_live_model_answering_garbage_stops_the_node_but_not_the_run` all over again —
+    the marker being unforgeable from a model's ANSWER is not enough when refusing to answer at all
+    reaches the marked branch."""
+
+    class _AliveButProse:
+        """Every request completes and returns bytes; no `complete_tool`, so the forced-emit
+        salvage cannot rescue it either."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, messages, tools, tool_choice="auto"):
+            self.calls += 1
+            return {"content": "Let me think about this crash some more.", "tool_calls": []}
+
+    from looplab.agents.unified_agent import UnifiedAgent
+
+    client = _AliveButProse()
+    r, d = ToyTask.load(TASK).build_roles()
+    judge = UnifiedAgent(researcher=r, developer=d, strategist=None, pilot_client=client)
+    dev = _ScriptedDev([], first=_lazy_import_src("AlphaProcessor"), cycle=True)
+    evs, _ = _drive(tmp_path, dev, judge, inline_repair_attempts=12)
+
+    assert client.calls > 0, "the harness must actually reach the endpoint"
+    assert _repairs(evs) == []                       # still nothing repaired blind …
+    terminal = _terminals(evs)
+    assert len(terminal) == 1 and terminal[0].data["reason"] == "crash"   # NOT developer_crash
+    assert [e for e in evs if e.type == "pause"] == []                    # and NO run-level pause
+    assert fold(evs).paused is False
+    assert "could not read" in terminal[0].data["triage_rationale"]
+
+
 def test_an_older_triage_crash_signature_is_not_read_as_a_dead_provider(tmp_path):
     """`triage_crash` is a DUCK-TYPED seam — any object wired as `researcher` may implement it — and
     this change added three keyword arguments to it. Passing them unconditionally makes an
@@ -585,17 +629,32 @@ def test_the_agent_fallbacks_fail_closed_and_do_it_DIFFERENTLY():
     assert confused["action"] == UNREADABLE_TRIAGE_ACTION
     assert not is_transport_failure_verdict(confused)
 
-    # NOBODY ANSWERED — `resilient` contains the transport error and hands over to `_fallback`.
+    # NOBODY ANSWERED — the loop RAISES, `_pilot_emit`'s own `resilient` contains it and hands over
+    # to the TRANSPORT fallback. Raising is the whole simulation: an exception escaping
+    # `drive_tool_loop` is the only thing that distinguishes "the endpoint is gone" from "the model
+    # would not emit", so a stub that returns the loop's `fallback` (as this one used to) is
+    # simulating the OTHER condition. `resilient` is imported to state that rule, not to re-run it.
+    assert resilient(lambda: "ok", lambda: "fb") == "ok"
+
     def _dead(client, tools, messages, emit_spec, *, finalize=None, fallback=None, **kw):
-        def _boom():
-            raise ConnectionError("connection reset by peer")
-        return resilient(_boom, lambda: fallback(messages))
+        raise ConnectionError("connection reset by peer")
 
     outage = _with_loop(_dead)
     assert outage["action"] == UNANSWERABLE_TRIAGE_ACTION
     assert is_transport_failure_verdict(outage), (
         "the transport fallback must stamp the engine-side marker, or the engine reads a real "
         "outage as an ordinary unreadable answer and never pauses the run")
+
+    # NOBODY EMITTED, BUT THE ENDPOINT ANSWERED — the loop RETURNS its own `fallback`. Same
+    # fail-closed direction, different fact, and it must NOT carry the marker.
+    def _never_emits(client, tools, messages, emit_spec, *, finalize=None, fallback=None, **kw):
+        return fallback(messages)
+
+    silent = _with_loop(_never_emits)
+    assert silent["action"] == UNREADABLE_TRIAGE_ACTION
+    assert not is_transport_failure_verdict(silent), (
+        "a loop that ended without an emit is not evidence the transport failed — the requests all "
+        "completed; reading it as an outage pauses the whole run over a talkative model")
 
 
 # ------------------------------------------------------- the ledger is the LOG's, not the process's
@@ -1074,6 +1133,86 @@ def test_the_other_two_per_node_budgets_are_the_log_s_too():
     assert _durable_full_retrains([
         Event(v=1, seq=0, ts=0.0, type="node_repaired",
               data={"node_id": 0, "generation": 0, "attempt": 1})], 0, 0) == 0
+
+
+def test_the_three_durable_ledgers_key_a_row_exactly_as_the_fold_does():
+    """"Generation-keyed exactly as `replay._generation_matches` keys it" — DIFFERENTIALLY, because
+    all three ledgers said that in a comment while hand-spelling the rule as a raw `!=`, and the two
+    disagreed in both directions.
+
+    Why it is not a nit. These three counters are budgets — repair attempts, env-prep rounds, GPU
+    re-trains — and their whole premise (the 2026-08-06 durability fix) is that the LOG's rows are
+    the authority. A row the fold keeps but the ledger drops refunds a budget on every resume, which
+    is the defect the fix exists to remove; a row the fold drops but the ledger charges bills a node
+    for work replay says never happened. So the two readers have to agree ROW BY ROW, and the only
+    way to keep that true is for the ledger to CALL the fold's reader instead of re-deriving it.
+
+    Enumerated rather than exampled: the disagreements were at the edges (`bool` is a subclass of
+    `int`, so `True != 1` is False; a numeric string is coerced by the fold and not by `!=`), which
+    is exactly what a hand-picked example misses."""
+    from looplab.core.models import Idea, Node, coerce_node_id
+    from looplab.engine.evaluate import _durable_dep_rounds, _durable_full_retrains
+    from looplab.events.eventstore import Event
+    from looplab.events.replay import _generation_matches
+
+    node = Node(id=1, parent_ids=[], operator="draft", idea=Idea(operator="draft", params={}))
+    node.attempt = 1
+
+    def _fold_admits(data):
+        return coerce_node_id(data) == 1 and _generation_matches(node, data)
+
+    def _ledger_admits(data):
+        row = Event(v=1, seq=0, ts=0.0, type="node_repaired", data=dict(data, attempt=1))
+        return bool(_durable_repair_ledger([row], 1, 1)[1])
+
+    raw = [1, 0, 2, -1, None, True, False, "1", " 1 ", "1.0", 1.0, 1.5, float("nan"),
+           float("inf"), [1], {"a": 1}, "abc", 10 ** 30]
+    for value in raw:
+        for data in ({"node_id": 1, "generation": value}, {"node_id": value, "generation": 1}):
+            assert _fold_admits(data) == _ledger_admits(data), (
+                f"the ledger and the fold disagree about {data!r}: fold={_fold_admits(data)} "
+                f"ledger={_ledger_admits(data)}")
+    # The legacy unstamped row binds to whichever lifecycle is asking, in BOTH readers.
+    assert _fold_admits({"node_id": 1}) and _ledger_admits({"node_id": 1})
+
+    # …and the same rule reaches the other two ledgers, which is the point of it being one function.
+    def _dep(**data):
+        return Event(v=1, seq=0, ts=0.0, type="deps_installed", data=data)
+
+    def _rt(**data):
+        return Event(v=1, seq=0, ts=0.0, type="full_retrain_charged", data=data)
+
+    assert _durable_dep_rounds([_dep(node_id=True, generation=True, round=9)], 1, 1) == 0
+    assert _durable_dep_rounds([_dep(node_id="1", generation="1", round=9)], 1, 1) == 9
+    assert _durable_full_retrains([_rt(node_id=True, generation=True, spent=9)], 1, 1) == 0
+    assert _durable_full_retrains([_rt(node_id="1", generation="1", spent=9)], 1, 1) == 9
+
+
+def test_the_durable_ledgers_stay_total_over_a_corrupt_counter():
+    """A counter field nobody can parse must contribute its default, never a raise.
+
+    `_durable_repair_ledger` did `int(d.get("unparseable_repairs") or 0)` — `ValueError` on a
+    string, `TypeError` on a list — from inside `_evaluate`'s attempt loop, where nothing catches
+    it. The eval dies with NO terminal event, so the node is neither evaluated nor failed and every
+    resume re-reads the same row and dies again: the run cannot be finished or resumed past it. That
+    is the failure `runtime/command_eval.py::READER_PATH_KEYS` exists to prevent, one reader over,
+    and the `isinstance(n, int)` guards already sitting beside it on `attempt`/`round`/`spent` are
+    the shape the fix takes."""
+    from looplab.engine.evaluate import _durable_dep_rounds, _durable_full_retrains
+    from looplab.events.eventstore import Event
+
+    for bad in ("many", [1], {"a": 1}, 2.7, None, True, float("nan")):
+        row = Event(v=1, seq=0, ts=0.0, type="node_repaired",
+                    data={"node_id": 0, "generation": 0, "attempt": 1,
+                          "unparseable_repairs": bad})
+        attempts, rows, unparseable = _durable_repair_ledger([row], 0, 0)
+        assert (attempts, len(rows)) == (1, 1) and unparseable == 0, bad
+        assert _durable_dep_rounds(
+            [Event(v=1, seq=0, ts=0.0, type="deps_installed",
+                   data={"node_id": 0, "generation": 0, "round": bad})], 0, 0) == 1, bad
+        assert _durable_full_retrains(
+            [Event(v=1, seq=0, ts=0.0, type="full_retrain_charged",
+                   data={"node_id": 0, "generation": 0, "spent": bad})], 0, 0) == 1, bad
 
 
 def test_the_retrain_charge_cannot_ride_on_node_repaired():

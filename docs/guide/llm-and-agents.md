@@ -393,8 +393,8 @@ answer decides how much it stops, because only one of the two ways is evidence a
 
 | What happened | Verdict | What stops |
 |---|---|---|
-| **Nobody answered** — the call raised, the endpoint was unreachable, a 401/402, the loop never emitted | `unanswerable` | The node (`developer_crash`) **and the run**: one run-level pause naming the provider, `resume` once it is back |
-| **The model answered something unreadable** — an action outside `repair`/`abandon`/`reject_idea`, an empty or missing one, or the literal word `unanswerable` arriving from the wire | `unreadable` | **Only the node**, terminalized like an `abandon` with the eval's own failure reason, so a node reset re-opens it. No pause — the endpoint just answered |
+| **Nobody answered** — the request never completed: the call raised, the endpoint was unreachable, a 401/402, a transport error surviving the client's own retry ladder | `unanswerable` | The node (`developer_crash`) **and the run**: one run-level pause naming the provider, `resume` once it is back |
+| **The model answered something unreadable** — an action outside `repair`/`abandon`/`reject_idea`, an empty or missing one, the literal word `unanswerable` arriving from the wire, **or no emit at all** (prose replies your endpoint would not force into a tool call, the stuck detector, the turn/wall-clock budget) | `unreadable` | **Only the node**, terminalized like an `abandon` with the eval's own failure reason, so a node reset re-opens it. No pause — the endpoint just answered |
 
 Either way the engine **re-asks once** before acting: one non-answer is not a diagnosis, and a single
 flapped socket used to end a node with zero repair calls where the second ask would have healed it.
@@ -407,6 +407,13 @@ could not clear it) telling the operator to check credits, key and base URL — 
 rationale as the evidence — and under `eval_parallel > 1` it took every healthy in-flight sibling
 down with it. Excluding `unanswerable` from the schema enum could not prevent that on its own,
 because the *fail-closed default* for an unreadable verdict was `unanswerable`.
+
+The **no-emit** row moved from the first line to the second on 2026-08-06, for the same reason: it
+was reachable from a demonstrably healthy endpoint. A local vLLM/SGLang/llama.cpp deployment that
+ignores `tool_choice` and a model that prefers to reason in prose together end the tool loop with no
+emit — every HTTP request having completed — and that used to raise the run-level pause and tell you
+to check your credits. The rule now is mechanical rather than descriptive: the tool loop **raising**
+is a transport failure; the tool loop **returning without an emit** is an answer nobody could read.
 
 Without any of this, a provider error string was committed as the node's code and re-evaluated:
 one real run turned an out-of-credits `402` into **2345 `node_repaired` events on a single node over

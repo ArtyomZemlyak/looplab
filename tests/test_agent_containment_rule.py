@@ -178,8 +178,14 @@ def test_triage_without_a_run_state_reaches_the_helper_with_binding_off(monkeypa
 
     seen = {}
 
-    def spy(_self, messages, emit_spec, finalize, fallback, *, state=None, bind_state=True):
+    def spy(_self, messages, emit_spec, finalize, fallback, *, state=None, bind_state=True,
+            transport_fallback=None):
         seen.update(state=state, bind_state=bind_state)
+        # The two degradations must arrive as two DIFFERENT callables: the loop's no-emit fallback
+        # says `unreadable` (the endpoint answered), the transport one says `unanswerable` and
+        # carries the marker. One callable for both is how a prose-answering live endpoint paused a
+        # whole run — see `test_repair_stop_decision.py::test_a_live_endpoint_that_never_emits_...`.
+        seen.update(no_emit=fallback(messages), transport=transport_fallback(messages))
         return {"action": "repair", "rationale": ""}
 
     monkeypatch.setattr(UnifiedAgent, "_pilot_emit", spy)
@@ -189,8 +195,15 @@ def test_triage_without_a_run_state_reaches_the_helper_with_binding_off(monkeypa
     agent.prompts = {}
     node = type("N", (), {"id": 1, "code": ""})()
     agent.triage_crash(node, "boom", 1)
-    assert seen == {"state": None, "bind_state": False}, (
+    assert (seen["state"], seen["bind_state"]) == (None, False), (
         "triage with no run state must not ask the helper to bind tools to it")
+    from looplab.engine.triage import (TRIAGE_TRANSPORT_FAILURE_KEY, UNANSWERABLE_TRIAGE_ACTION,
+                                       UNREADABLE_TRIAGE_ACTION, is_transport_failure_verdict)
+    assert seen["no_emit"]["action"] == UNREADABLE_TRIAGE_ACTION
+    assert TRIAGE_TRANSPORT_FAILURE_KEY not in seen["no_emit"]
+    assert not is_transport_failure_verdict(seen["no_emit"])
+    assert seen["transport"]["action"] == UNANSWERABLE_TRIAGE_ACTION
+    assert is_transport_failure_verdict(seen["transport"])
 
 
 def test_both_public_entry_points_go_through_the_helper():

@@ -252,16 +252,25 @@ _MECHANICAL_MARKERS = (
 #   "abandon"      — stop repairing this node. The model's own "I do not know how to fix this any
 #                    more", and also what a circling repair history should produce.
 #   "reject_idea"  — stop, and mark the whole lineage as wrong, not just this node.
-#   "unanswerable" — THE TRANSPORT FAILED. The judge was wired and no answer came back at all: the
-#                    call raised, the endpoint was unreachable, the request was refused, the loop
-#                    never emitted. Not a judgement about the node — it is the dead-provider
+#   "unanswerable" — THE TRANSPORT FAILED. The judge was wired and the REQUEST NEVER COMPLETED: the
+#                    call raised, the endpoint was unreachable, the request was refused. Not a
+#                    judgement about the node — it is the dead-provider
 #                    condition the developer-crash circuit breaker exists for, so the engine routes
 #                    it there (terminal + RUN-level pause naming the provider).
 #   "unreadable"   — THE MODEL ANSWERED SOMETHING THE ENGINE DOES NOT RECOGNISE. An out-of-enum
 #                    action, an empty one, a non-dict, a missing key — including the literal string
-#                    "unanswerable" arriving from the wire. The provider is demonstrably alive (it
+#                    "unanswerable" arriving from the wire, and including NO EMIT AT ALL (the tool
+#                    loop ran to its prose/turn/wall-clock bound and returned without one). The
+#                    provider is demonstrably alive (it
 #                    produced bytes), so this is a per-NODE stop with no pause: the node terminalizes
 #                    like an `abandon` and the run keeps going.
+#
+# THE LINE BETWEEN THEM IS MECHANICAL, NOT DESCRIPTIVE, and that is the whole of the enforcement:
+# `drive_tool_loop` RAISING is `unanswerable`, `drive_tool_loop` RETURNING its no-emit fallback is
+# `unreadable`. "The loop never emitted" sat on the `unanswerable` side until 2026-08-06 and was
+# reachable from a healthy endpoint — a local server that ignores `tool_choice` plus a model that
+# answers in prose ends the loop with no emit after four SUCCESSFUL requests, and that paused the
+# whole run. See `agents/unified_agent.py::triage_crash`'s two fallbacks.
 #
 # WHY THOSE ARE TWO VERDICTS AND NOT ONE. They used to be one, with `unanswerable` as the fail-closed
 # default for every unparseable answer, and the collapse was a measured defect in both directions:

@@ -1384,8 +1384,16 @@ class CrossRunTools:
                      f"{str(scope_receipt.get('scope_complete') is True).lower()} "
                      f"task_scope_unknown_capsules={scope_receipt.get('scope_unknown_capsules', 0)} "
                      f"global_source_complete={str(global_complete).lower()} "
+                     # `pair_source_*`, not `edge_source_*`. The latter was `portfolio_concept_graph`'s
+                     # spelling, and when that second implementation was removed (2026-08-06) these two
+                     # reads were the stragglers — every other reader in this file was re-pointed. Both
+                     # `.get`s default silently, so the receipt reported `cooccurrence_source_complete=
+                     # false` and `cooccurrence_nodes_pruned=0` on EVERY card forever, including on a
+                     # fully complete population, while the prose warning fifteen lines above (which
+                     # reads the surviving key) correctly stayed silent — one tool output contradicting
+                     # itself about its own coverage.
                      f"cooccurrence_source_complete="
-                     f"{str(graph.get('edge_source_complete') is True).lower()} "
-                     f"cooccurrence_nodes_pruned={graph.get('edge_source_nodes_pruned', 0)} "
+                     f"{str(graph.get('pair_source_complete') is True).lower()} "
+                     f"cooccurrence_nodes_pruned={graph.get('pair_source_nodes_pruned', 0)} "
                      f"taxonomy_revision={taxonomy['concept_governance_revision']}]")
         return "\n".join(lines)
