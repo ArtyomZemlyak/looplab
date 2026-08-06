@@ -67,7 +67,18 @@ function normalizeView(value) {
     supertask: scalarText(value.supertask, '__all__', MAX_PORTFOLIO_SCOPE_ID_LENGTH),
     sort: SORTS.has(value.sort) ? value.sort : 'time',
     direction: value.direction === 'asc' ? 'asc' : 'desc',
-    view: value.view === 'map' || (value.view === 'compare' && compare.length > 1)
+    // `map` (labelled Lineage) and `concepts` restore unconditionally: both are representations of
+    // whatever the saved scope resolves to, so neither can be saved into a state it cannot show.
+    // `compare` is the exception — it names specific runs, and one that no longer resolves to two
+    // of them must fall back rather than restore an empty comparison.
+    //
+    // `concepts` HAS to be here rather than falling through to `list`: authoring is strict
+    // (`preparePortfolioViewSave` refuses when the normalized view and the live state disagree), so
+    // an unlisted value does not degrade quietly — it makes Save view REFUSE with `code: 'state'`
+    // for anyone who happens to be looking at that view. An omission here reads to the operator as
+    // a broken Save button, which is why the check is a list and not a truthiness test.
+    view: value.view === 'map' || value.view === 'concepts'
+      || (value.view === 'compare' && compare.length > 1)
       ? value.view : 'list',
     compare,
     columns: normalizeCompareColumns(value.columns),

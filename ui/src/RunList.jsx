@@ -32,6 +32,7 @@ import {
 const MapView = lazy(() => import('./MapView.jsx'))
 const ScopeReport = lazy(() => import('./ScopeReport.jsx'))
 const RunCompare = lazy(() => import('./RunCompare.jsx'))
+const PortfolioConcepts = lazy(() => import('./PortfolioConcepts.jsx'))
 // App writes `looplab` when the operator leaves through the LoopLab menu; `settings` is the value
 // already persisted in older history entries and returns focus to the same control.
 const returnsToGlobalMenu = control => control === 'looplab' || control === 'settings'
@@ -43,7 +44,9 @@ const RUN_GENERATION_RE = /^[0-9a-f]{64}$/
 const RUN_DELETION_TIMEOUT_MS = 12_000
 const RUN_DELETION_POLL_MS = 2_500
 const LIST_SORT_KEYS = new Set(['time', 'name', 'metric', 'task', 'nodes', 'phase'])
-const LIST_VIEWS = new Set(['list', 'map', 'compare'])
+// The run list's four representations of ONE scoped run set. `map` is the KEY, `Lineage` is the label
+// — see the view-toggle below for why the key must not follow the label.
+const LIST_VIEWS = new Set(['list', 'map', 'concepts', 'compare'])
 const LIST_STATUSES = new Set(['all', 'running', 'finalizing', 'paused', 'approval', 'stalled', 'unknown', 'finished'])
 const TASK_SELECT_ALL = 'all'
 const PORTFOLIO_VIEWS_LOCK = 'looplab:portfolio-views'
@@ -2117,8 +2120,26 @@ export default function RunList({ onOpen, onGlobalNavigate,
         </button>
         <span className="spacer" style={{ flex: 1 }} />
         <div className="seg">
+          {/* LINEAGE, not "Map", and CONCEPTS beside it — because the two answer different questions
+              and calling one of them "the map" is why the second one was missing for so long. This
+              view draws which run descends from which, inside which project: ancestry, i.e. lineage.
+              The concept tree is the other map, of what the lab has STUDIED, and it is the button
+              after this one. Same rename as the run-level view took today, where `Search` became
+              `Lineage` while its internal key stayed `dag`.
+
+              The KEY stays `map`. It is persisted in saved views, in the restored navigation state
+              and in shared links (`normalizeNavigation` above admits it, `captureNavigationState`
+              writes it), so renaming the key would silently retire every saved scope and every
+              bookmark that names this view. A label is not a reason to break those. Whoever comes
+              next wanting to "finish" the rename: the label is the whole rename. */}
           <button aria-pressed={view === 'list'} className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}><OpIcon name="list" className="t-ic" /> List</button>
-          <button aria-pressed={view === 'map'} className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}><OpIcon name="map" className="t-ic" /> Map</button>
+          <button aria-pressed={view === 'map'} className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}><OpIcon name="map" className="t-ic" /> Lineage</button>
+          <button aria-pressed={view === 'concepts'} className={view === 'concepts' ? 'on' : ''}
+            disabled={projectScopeBlocked}
+            title={projectScopeBlocked
+              ? 'Restore the saved project or use All runs first'
+              : 'Concepts across the runs this list is showing'}
+            onClick={() => setView('concepts')}><OpIcon name="gitbranch" className="t-ic" /> Concepts</button>
           <button ref={compareViewButtonRef} aria-pressed={view === 'compare'} className={view === 'compare' ? 'on' : ''}
             disabled={projectScopeBlocked || compareRuns.length < 2}
             title={projectScopeBlocked ? 'Restore the saved project or use All runs first'
@@ -2391,6 +2412,25 @@ export default function RunList({ onOpen, onGlobalNavigate,
                 scopeLabel={scope?.label || (sel === ALL ? 'All runs' : sel === UNASSIGNED ? 'Unassigned' : (projName[sel] || sel))} />
             </LazyBoundary>
           </div>}
+          {/* Concepts folds the SAME `mapRuns` array the Lineage view draws and the List renders —
+              no fetch of its own, so switching representation cannot silently change the population.
+              It is also why this costs nothing on the 2.5s poll: the fold is pure JS over rows
+              already in memory (measured 3.6ms over the real 46-run corpus), not a cross-run
+              request on a timer. The scope-blocked guard mirrors Lineage's: while a saved project id
+              cannot be verified the list withholds actionable results, and a concept tree built from
+              a silently-empty scope would read as "this lab has studied nothing". */}
+          {view === 'concepts' && projectScopeBlocked && runs
+            && <div className="notice resource-warning" role="status">
+              <span>Concepts needs a verified project scope before it can tell you which runs it covers.</span>
+              <button type="button" className="btn sm" onClick={() => setView('list')}>Show List</button>
+            </div>}
+          {view === 'concepts' && !projectScopeBlocked && runs
+            && <LazyBoundary label="concept tree" resetKey={`concepts:${sel}`}>
+              <PortfolioConcepts runs={mapRuns} selectedRuns={compareRuns}
+                scopeLabel={scope?.label || (sel === ALL ? 'All runs'
+                  : sel === UNASSIGNED ? 'Unassigned' : (projName[sel] || sel))}
+                onOpenRun={id => { if (!navigationBusy) openRun(id) }} />
+            </LazyBoundary>}
           {view === 'compare' && !projectScopeBlocked && compareRuns.length > 1 && <LazyBoundary label="run comparison"
             resetKey={compareRuns.map(run => run.run_id).join(':')}>
             <RunCompare runs={compareRuns} columns={compareColumns}

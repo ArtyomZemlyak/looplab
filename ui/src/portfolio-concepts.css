@@ -1,0 +1,71 @@
+/* The global Concepts view (run list, beside List / Lineage / Compare). Kept in its own file rather
+   than in styles.css so it can be read as one thing — the same reason research-atlas.css exists. */
+
+.pc-stage { display: flex; flex-direction: column; gap: 12px; min-height: 0; padding: 4px 2px 24px; }
+
+.pc-head h2 { margin: 2px 0 4px; font-size: 19px; }
+.pc-lede { margin: 0 0 10px; max-width: 84ch; font-size: 12px; line-height: 1.5; }
+.pc-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pc-scope button { font-size: 11px; }
+.pc-search input { min-width: 180px; padding: 4px 8px; font-size: 12px;
+  border: 1px solid var(--line-2); border-radius: 7px; background: var(--bg-1); color: var(--fg); }
+
+.pc-coverage { padding: 8px 12px; border: 1px solid var(--line-2); border-left-width: 3px;
+  border-radius: 8px; background: var(--bg-1); font-size: 12px; line-height: 1.5; }
+.pc-coverage.pc-complete { border-left-color: var(--ok, #3ba55d); }
+
+.pc-variants { padding: 8px 12px; border: 1px solid var(--line-2); border-radius: 8px;
+  background: var(--bg-1); font-size: 12px; }
+.pc-variants summary { cursor: pointer; }
+.pc-variants ul { margin: 8px 0 6px; padding-left: 18px; display: grid; gap: 4px; }
+.pc-variants code { margin-right: 8px; padding: 1px 5px; border-radius: 5px; background: var(--bg-2, var(--bg)); }
+.pc-variants p { margin: 0; max-width: 80ch; line-height: 1.5; }
+
+.pc-body { display: grid; grid-template-columns: minmax(0, 1.9fr) minmax(240px, .9fr); gap: 14px;
+  align-items: start; min-height: 0; }
+@media (max-width: 900px) { .pc-body { grid-template-columns: minmax(0, 1fr); } }
+
+.pc-tree-shell { display: grid; gap: 10px; min-width: 0; }
+.pc-tree { margin: 0; padding: 6px 0; list-style: none; border: 1px solid var(--line-2);
+  border-radius: 10px; background: var(--bg-1); }
+.pc-row { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.pc-twist { flex: 0 0 auto; width: 18px; padding: 0; border: 0; background: none; cursor: pointer;
+  color: var(--fg-mut); font-size: 11px; line-height: 22px; }
+.pc-twist-leaf { cursor: default; opacity: .45; text-align: center; }
+.pc-name { display: flex; flex: 1 1 auto; align-items: baseline; gap: 8px; min-width: 0;
+  padding: 3px 8px; border: 0; border-radius: 6px; background: none; color: var(--fg);
+  font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.pc-name:hover { background: var(--bg-2, rgba(127, 127, 127, .12)); }
+.pc-name.on { background: var(--sel, rgba(90, 140, 255, .18)); }
+.pc-name.pc-grouping .pc-label { color: var(--fg-dim); }
+.pc-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-tag-note { flex: 0 0 auto; color: var(--fg-mut); font-size: 9px; text-transform: uppercase;
+  letter-spacing: .05em; }
+.pc-counts { display: flex; flex: 0 0 auto; gap: 10px; margin-left: auto; color: var(--fg-mut);
+  font-size: 11px; font-variant-numeric: tabular-nums; }
+.pc-metric { color: var(--fg-dim); }
+
+.pc-untagged { display: grid; gap: 3px; padding: 9px 12px; border: 1px dashed var(--line-2);
+  border-radius: 9px; font-size: 12px; line-height: 1.5; }
+
+.pc-detail { position: sticky; top: 6px; display: grid; gap: 10px; padding: 12px 14px;
+  border: 1px solid var(--line-2); border-radius: 10px; background: var(--bg-1);
+  box-shadow: var(--shadow-card); font-size: 12px; }
+.pc-detail-idle { color: var(--fg-mut); }
+.pc-detail-idle p { margin: 0; }
+.pc-detail-h { display: flex; align-items: center; gap: 8px; }
+.pc-detail-id { overflow-wrap: anywhere; font-size: 12px; }
+.pc-detail-h .btn { margin-left: auto; }
+.pc-facts { display: grid; gap: 10px; margin: 0; }
+.pc-facts > div { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; }
+.pc-facts dt { color: var(--fg-mut); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.pc-facts dd { margin: 0; font-size: 14px; font-variant-numeric: tabular-nums; }
+.pc-facts p { grid-column: 1 / -1; margin: 3px 0 0; font-size: 11px; line-height: 1.45; }
+.pc-detail h4 { margin: 2px 0 0; font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--fg-mut); }
+.pc-detail-runs { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; max-height: 320px;
+  overflow: auto; }
+.pc-detail-runs li { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.pc-detail-runs .muted { margin-left: auto; font-size: 10px; }
+.pc-run-link { padding: 0; border: 0; background: none; color: var(--link, var(--fg));
+  font: inherit; font-size: 12px; text-align: left; cursor: pointer; text-decoration: underline; }
