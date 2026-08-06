@@ -38,8 +38,22 @@ export function costPricing(c) {
     return { text: '—', priced: false, partial: false,
              title: 'No LLM cost roll-up exists for this run yet.' }
   }
+  // A body whose roll-up was never written says so. `routers/runs.py::run_cost` and
+  // `routers/reviews.py::_review_cost` zero-fill their defaults and stamp `recorded: false` for
+  // exactly this case, naming this function as the consumer — and until this branch existed the
+  // flag was dead payload, so an unmeasured run still reached `calls <= 0` below and rendered as a
+  // measured "$0 — nothing was spent". Absent means the writer does not state it; only an explicit
+  // `false` is a claim.
+  if (c.recorded === false) {
+    return { text: '—', priced: false, partial: false,
+             title: 'No LLM cost roll-up exists for this run yet.' }
+  }
   const cost = typeof c.cost === 'number' && Number.isFinite(c.cost) ? c.cost : null
-  const calls = typeof c.calls === 'number' && Number.isFinite(c.calls) ? c.calls : 0
+  // `null`, not `0` — the same rule as `priced_calls` below, for the same reason. `narration.js`
+  // renders RAW `llm_cost` events and its `validate` requires only `total_tokens` and `cost`, so a
+  // payload carrying `cost: 8.26` and no `calls` key is reachable; defaulting it to 0 put that
+  // payload in the "$0, nothing was spent" branch BEFORE its cost was ever read.
+  const calls = typeof c.calls === 'number' && Number.isFinite(c.calls) ? c.calls : null
   // ABSENT is not ZERO, and this is the same distinction the whole function exists for, one level
   // up. The FOLDED total always carries `priced_calls` (the fold backfills it), but a RAW
   // `llm_cost` event written before it travelled with the payload does not — and the timeline reads
@@ -51,10 +65,18 @@ export function costPricing(c) {
   if (cost === null) {
     return { text: '—', priced: false, partial: false, title: 'No cost was recorded.' }
   }
-  // No provider call at all (offline/toy run): nothing was spent and nothing is unknown.
-  if (calls <= 0) {
+  // No provider call at all (offline/toy run): nothing was spent and nothing is unknown. Only when
+  // the payload STATES the count — see `calls` above.
+  if (calls !== null && calls <= 0) {
     return { text: '$0', priced: true, partial: false,
              title: 'No model calls were made, so nothing was spent.' }
+  }
+  // A cost with no call count. Show the money it does state and say what it does not: claiming
+  // either "nothing was spent" or "all of it is priced" would be inventing the missing half.
+  if (calls === null) {
+    return { text: `$${fmt(cost)}`, priced: cost > 0, partial: false,
+             title: 'This roll-up does not record how many calls it covers, so the figure may be a'
+               + ' floor. Open the run to see the split.' }
   }
   // The payload does not carry the counter: show the cost it DOES carry, and say the split is
   // unknown rather than asserting either "unpriced" or "all priced".

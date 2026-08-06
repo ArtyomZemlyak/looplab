@@ -434,6 +434,41 @@ necessarily exposed as an on-demand tool.
 | Part IV/V portfolio claims + concepts | `cross_run_prior_attempts`, `cross_run_claims`, `cross_run_atlas`, `cross_run_search`, `cross_run_concept_map`, `similar_runs`, `find_concept_slugs`, `concept_card` |
 | Cards (open beliefs) | injected each proposal (open ones, with instruction to reuse exact wording for evidence linking) |
 
+## The concept shelf — memory indexed by the concept tree
+
+The Memory panel can be filtered and grouped by the same concept tree the run workspace shows, so
+"what has this lab learned about `loss/contrastive`" is a question you can ask of lessons, cases and
+meta-notes. `GET /api/memory` ships that join beside the rows, under `concept_index`
+(`looplab/engine/concept_shelf.py::build_shelf` — a pure read projection; it never writes back).
+
+Two things it publishes that matter when you read the result:
+
+**Where a row's concepts came from.** Each attributed row carries `concept_source`:
+
+| Source | Meaning |
+|---|---|
+| `record` | the row itself was tagged, at distillation time, from the experiments it describes |
+| `run` | inherited through the row's `run_id` from its whole run's folded concept membership |
+
+These are different claims. `record` says *this lesson is about that concept*; `run` only says *the
+run that produced this lesson touched it*. The UI labels them separately for that reason.
+
+**How much of the tier is covered at all.** `concept_index.coverage` states `total`, `tagged`,
+`untagged` and the per-source split for each tier, and the panel renders it next to any concept
+filter. On a real portfolio most rows predate the durable `concepts` field and most runs were never
+tagged, so filtering would otherwise return an empty list that reads as "no such knowledge" when the
+truth is "this knowledge was never tagged". An unstated count renders as `—`, never as `0`.
+
+The shelf **does not invent concepts** — no keyword matching, no embeddings, no `task_id` guess. An
+untagged row stays untagged and is counted as such. Deriving a concept from a lesson's text is a
+tagger's job (`search/concept_tagging.py::tag_text_llm`), it costs a provider call, and its output
+belongs in the durable field via the write path.
+
+Run-level inheritance folds only the runs the loaded rows actually cite, so opening the panel does
+not fold the whole workspace. When the run list cannot be read at all the shelf still ships with
+whatever durable tags the rows carry, and `concept_index.runs_indexed: 0` says why the rest is
+untagged.
+
 ## Configuration
 
 - `LOOPLAB_MEMORY_DIR` — cross-run memory home (default `~/.looplab/memory`; `""` disables).

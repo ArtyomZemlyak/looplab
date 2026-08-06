@@ -148,10 +148,12 @@ class AppState:
         # `routers/genesis.py` and `routers/misc.py` independent leaves — neither imports the other.
         self.list_tasks_fn: Optional[Callable[[], dict]] = None
 
-    def run_summaries(self) -> list:
-        """The mtime-cached per-run fold summaries, WITHOUT the live-fact overlay (doc 25 SR-12)."""
+    def run_summaries(self, only=None) -> list:
+        """The mtime-cached per-run fold summaries, WITHOUT the live-fact overlay (doc 25 SR-12).
+
+        `only` is an optional run-id set that bounds the fold; see `run_projections.run_summaries`."""
         from looplab.serve.run_projections import run_summaries
-        return run_summaries(self)
+        return run_summaries(self, only=only)
 
     def run_membership(self) -> list:
         """Only the columns `reports._scope_run_ids` joins on. Side-effect free by construction."""

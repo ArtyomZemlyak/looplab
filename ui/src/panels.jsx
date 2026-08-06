@@ -1892,7 +1892,10 @@ function ConceptShelfBar({ tierLabel, receipt, concepts, selected, onSelect, mod
           {concepts.map(({ id, depth, subtree }) => (
             <option key={id} value={id}>{' '.repeat(depth * 2)}{id.split('/').pop()} ({subtree})</option>
           ))}
-          <option value={UNTAGGED}>Untagged ({summary ? summary.untagged : 0})</option>
+          {/* `—`, never a bare 0: an absent or partial coverage receipt does not know how many rows
+              are untagged, and "Untagged (0)" is a claim that everything is classified. */}
+          <option value={UNTAGGED}>
+            Untagged ({summary && summary.untagged !== null ? summary.untagged : '—'})</option>
         </select>
         <span className="spacer" style={{ width: 8 }} />
         {[['flat', 'List'], ['tree', 'Concept tree']].map(([key, label]) => (
@@ -1903,7 +1906,7 @@ function ConceptShelfBar({ tierLabel, receipt, concepts, selected, onSelect, mod
       {summary && <div className="muted" style={{ fontSize: 11, marginTop: 6, lineHeight: 1.5 }}>
         {/* The non-negotiable disclosure. Sorting or filtering by an axis that only covers part of the
             data is legitimate; doing it without saying how much it covers is not. */}
-        <b>{summary.tagged} of {summary.total}</b> {tierLabel.toLowerCase()} carry concepts
+        <b>{summary.tagged === null ? '—' : summary.tagged} of {summary.total}</b> {tierLabel.toLowerCase()} carry concepts
         {summary.untagged > 0 && <> · <b>{summary.untagged} untagged</b>{mode === 'tree'
           ? ' (shown under Untagged)' : ' (hidden by any concept filter)'}</>}
         {summary.coarse && <> · all attribution is run-level, so it is only as precise as a whole run</>}
@@ -2071,7 +2074,7 @@ export function MemoryPanel({ onClose }) {
               </ConceptGroup>)
             : result.shown.length
               ? result.shown.map((l, i) => card(l, i))
-              : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.lessons,
+              : memory.status === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.lessons,
                 `${lessonRole === 'all' ? '' : lessonRole + ' '}lessons`,
                 concept ? `No lessons are attributed to ${concept === UNTAGGED ? 'no concept' : concept}.`
                   : lessonRole !== 'all' && mem.lessons.length > 0
@@ -2096,7 +2099,7 @@ export function MemoryPanel({ onClose }) {
             ? conceptGroups(mem.cases || []).map(group => <ConceptGroup key={group.id} group={group}>
                 {table(group.rows)}</ConceptGroup>)
             : result.shown.length ? table(result.shown)
-              : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.cases,
+              : memory.status === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.cases,
                 'cases', concept ? `No cases are attributed to ${concept === UNTAGGED ? 'no concept' : concept}.`
                   : 'No cases stored.')}</div>}
         </>
@@ -2116,7 +2119,7 @@ export function MemoryPanel({ onClose }) {
             ? conceptGroups(mem.notes || []).map(group => <ConceptGroup key={group.id} group={group}>
                 {group.rows.map((n, i) => card(n, i))}</ConceptGroup>)
             : result.shown.length ? result.shown.map((n, i) => card(n, i))
-              : memory.state === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.notes,
+              : memory.status === 'ready' && <div className="muted">{memoryEmptyCopy(mem.page?.tiers?.notes,
                 'meta-notes', concept ? `No meta-notes are attributed to ${concept === UNTAGGED ? 'no concept' : concept}.`
                   : 'No meta-notes yet.')}</div>}
         </>

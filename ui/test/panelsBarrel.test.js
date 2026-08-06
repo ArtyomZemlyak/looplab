@@ -7,10 +7,11 @@
 //      export is not a build error. `module[name]` is `undefined`, React.lazy resolves
 //      `{ default: undefined }`, and the failure surfaces as a render-time crash the first time an
 //      operator opens that panel.
-//   2. Some other module imports ./ConfigPanel.jsx or ./CardBoard.jsx directly. That gives Rolldown a
-//      second reachability root for panel code, which is exactly what RunView's single `loadPanels`
-//      promise exists to prevent: measured after the split, `src/panels.jsx` is still the only
-//      manifest entry for these modules and the panel-hub increment is one 11-chunk closure.
+//   2. Some module OUTSIDE the declared importer set reaches ./ConfigPanel.jsx or ./CardBoard.jsx
+//      directly. That gives Rolldown an unbudgeted reachability root for panel code, which is what
+//      RunView's single `loadPanels` promise exists to prevent: measured after the split,
+//      `src/panels.jsx` is still the only manifest entry for ConfigPanel and the panel-hub increment
+//      is one 11-chunk closure. CardBoard is the one deliberate exception — see EXTRACTED below.
 //
 // So the expected export list is DERIVED from the real call sites rather than hand-written here, and
 // the check is behavioural: load the barrel and look at what it actually gives back.
@@ -25,8 +26,17 @@ const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const SRC = new URL('../src/', import.meta.url)
 const TEST = new URL('./', import.meta.url)
 
-// The panel modules the hub re-exports. Adding another split module means adding it here.
-const EXTRACTED = ['ConfigPanel.jsx', 'CardBoard.jsx']
+// The panel modules the hub re-exports, each mapped to the COMPLETE set of modules allowed to
+// import it. Adding another split module means adding a row here.
+//
+// `CardBoard.jsx` has two importers on purpose since the board became the fourth workspace view:
+// `panels.jsx` keeps the legacy `HypothesisBoard` re-export, and `RunView.jsx` lazy-loads
+// `CardWorkspace` as a view like Dag/Report/Concepts. That is a second importer, not a second copy
+// — re-measured on the shipped build: `grep -rl 'card-kanban-card card-lane-card' dist/assets/*.js`
+// matches exactly ONE of the 35 chunks, because Rollup hoists a module both entry points reach.
+// The chunk-SIZE half of this concern is owned by `scripts/check-bundle.mjs` and its closure
+// budgets, which measure the real build; this test owns only the importer set.
+const EXTRACTED = { 'ConfigPanel.jsx': ['panels.jsx'], 'CardBoard.jsx': ['RunView.jsx', 'panels.jsx'] }
 
 const readDirSource = async base => {
   const names = (await readdir(base)).filter(name => /\.(js|jsx)$/.test(name))
@@ -101,15 +111,15 @@ test('every name a consumer takes from the panel hub is really exported by it', 
 
 test('only the hub imports its extracted panel modules, so they stay in one lazy chunk', async () => {
   const src = await readDirSource(SRC)
-  for (const extracted of EXTRACTED) {
+  for (const [extracted, allowed] of Object.entries(EXTRACTED)) {
     const specifier = `./${extracted}`
     const importers = [...src]
       .filter(([, text]) => text.includes(`'${specifier}'`))
       .map(([file]) => file)
       .sort()
-    assert.deepEqual(importers, ['panels.jsx'],
-      `${extracted} must be reachable only through panels.jsx; a second importer splits the panel `
-      + 'hub into more than one lazy chunk')
+    assert.deepEqual(importers, [...allowed].sort(),
+      `${extracted} must be reachable only through ${allowed.join(' / ')}; an unlisted importer `
+      + 'splits the panel hub into more than one lazy chunk')
   }
 })
 
@@ -118,7 +128,7 @@ test('the extracted panel modules never import back from the barrel', async () =
   // A shared helper goes DOWN into panelPrimitives.js, never back up into panels.jsx. Importing the
   // barrel from a module the barrel imports is a cycle, and under native ESM ordering a cycle is a
   // load-time TDZ crash rather than a build error.
-  for (const leaf of [...EXTRACTED, 'panelPrimitives.js']) {
+  for (const leaf of [...Object.keys(EXTRACTED), 'panelPrimitives.js']) {
     const text = src.get(leaf)
     assert.ok(text, `${leaf} is missing`)
     assert.doesNotMatch(text, /from\s*'\.\/panels\.jsx'/, `${leaf} imports the barrel it is part of`)
@@ -136,7 +146,7 @@ test('the shared panel primitives are defined once, not re-derived per module', 
       `panelPrimitives.js must own ${name}`)
     // Negative pins stay substrings on purpose: what must not come back is a second DEFINITION, and
     // splitting a module is exactly the moment someone reaches for a local copy instead of an import.
-    for (const consumer of ['panels.jsx', ...EXTRACTED]) {
+    for (const consumer of ['panels.jsx', ...Object.keys(EXTRACTED)]) {
       assert.doesNotMatch(src.get(consumer), new RegExp(`^const ${name}\\b`, 'm'),
         `${consumer} re-derives ${name} instead of importing the shared one`)
     }
