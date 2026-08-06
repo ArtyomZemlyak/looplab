@@ -800,6 +800,29 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                         )
                         _steward_receipt(step, outcome=receipt_outcome)
 
+        # PART IV §22.4 RATIFICATION — the consumer the concept steward never had. It runs OUTSIDE
+        # the `_cross_run_curation` block on purpose: the proposals it applies are DURABLE, so a
+        # portfolio whose steward is now switched off (or whose LLM was unreachable this time) still
+        # has yesterday's recorded judgements to ratify, and the two flags stay independently
+        # meaningful — "keep proposing" and "keep applying" are different operator decisions.
+        #
+        # Deliberately NOT a `_mark_finalize_step` receipt and NOT a background task. It appends no
+        # run events at all (see `concept_tidy`'s module docstring: a cross-run policy decision is
+        # not a run fact, and `fold` could not honestly re-derive one), so it cannot perturb replay,
+        # cannot perturb `QUIET_FINALIZATION_SUFFIX`, and needs no `BACKGROUND_APPENDABLE` entry.
+        # Its audit lives in cross-run memory, where it survives this run's deletion. Main task,
+        # after the steward, so a proposal bought seconds ago is ratifiable in the same finalize.
+        if getattr(engine, "_concept_tidy", False) and getattr(engine, "memory_dir", ""):
+            try:
+                import datetime as _dt
+
+                from looplab.engine.concept_tidy import ratify_concept_merges
+                ratify_concept_merges(
+                    engine.memory_dir,
+                    at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"))
+            except Exception:  # noqa: BLE001 — taxonomy hygiene must never block terminal completion
+                pass
+
         events = engine.store.read_all()
         cost_step_done = _finalize_step_done(
             events, scope, finish_seq, FINALIZE_STEP_LLM_COST, EV_LLM_COST)

@@ -985,6 +985,16 @@ class Settings(BaseSettings):
     # Deprecated compatibility flag. Steward output is untrusted and finalize is proposal-only regardless
     # of this value; retained so old snapshots still validate and logs can disclose that auto was requested.
     cross_run_curation_auto: bool = False
+    # PART IV cross-run §22.4 (RATIFICATION). The steward above only PROPOSES, and until this flag nothing
+    # applied its proposals: `apply_concept_curation` was deleted on 2026-08-03 (72ae8487/EM-14) for
+    # bypassing the CAS discipline, leaving a paid proposer with no consumer. When ON, finalize runs
+    # `engine/concept_tidy.py::ratify_concept_merges` right after the steward and applies every still-valid
+    # agent-proposed MERGE through the same `record_concept_alias` the operator CLI/HTTP surfaces use —
+    # append-only, read-time, reversible by one `concept-alias-clear`, and never splits or purges. Costs no
+    # inference (the judgement is already bought and logged) and appends no run events. OFF by default: it
+    # is the only path that lets an agent decision change the cross-run taxonomy without a human in the
+    # moment, so it is opt-in even though every decision it makes is individually reversible.
+    concept_tidy: bool = False
     # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model). Validated in
     # `_check_enum_fields` alongside the other enum-ish strings — every consumer tests `== "llm"`
     # exactly (cli/__init__.py, adapters/tasks.py), so an untyped `--set`/file/env typo (or a mis-cased
@@ -1691,6 +1701,10 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "cross_run_advisory": False,
     "cross_run_structured_claims": False,
     "cross_run_curation": False,
+    # A run whose snapshot predates the ratification stage never consented to an agent changing the
+    # cross-run taxonomy; resuming it must not start doing so. (Same as the live default today, but
+    # this map is the place that keeps it true if the default ever flips.)
+    "concept_tidy": False,
     "cross_run_read_tools": False,
     "concept_run_base": False,
     "fingerprint_universal": False,

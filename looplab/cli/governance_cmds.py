@@ -399,6 +399,52 @@ def concept_split_cmd(
     typer.echo(f"split: '{rec['from']}' -> {{{', '.join(sorted(set(tgts)))}}} ({len(rec['rules'])} rule(s))")
 
 
+@app.command(name="concept-ratify")
+def concept_ratify_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds concept_curation_log.jsonl)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what WOULD be applied; write nothing."),
+    # Clamped to the module's own cap below rather than defaulted from it: a Typer default is
+    # evaluated at import time, and importing the engine stage there would drag the governance
+    # ledgers into every `looplab --help`.
+    limit: int = typer.Option(32, help="Max merges to apply in this pass (capped by the stage)."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the full result as JSON."),
+):
+    """PART IV cross-run §22.4 — RATIFY the agentic steward's already-recorded MERGE proposals.
+
+    The steward (`concept-steward`) only proposes, and its proposals are durably logged. This is the
+    consumer: it applies every still-valid proposed merge through the SAME append-only, read-time,
+    reversible `record_concept_alias` this CLI's `concept-merge` uses — with the proposal's semantic
+    payload as the at-most-once `action_id` and a per-decision governance CAS. It costs no inference
+    (the judgement was bought at finalize) and never applies a SPLIT or a PURGE, which stay operator
+    work. Undo one decision with `concept-alias-clear`; a cleared decision is never re-applied.
+
+    This is also what `Settings.concept_tidy` runs unattended at finalize — one code path, so a dry
+    run here previews exactly what the background stage would do."""
+    from looplab.engine.concept_tidy import MAX_RATIFICATIONS_PER_PASS as _cap, ratify_concept_merges
+    import datetime as _dt
+
+    with _governed_write():
+        out = ratify_concept_merges(
+            str(memory_dir), at=_dt.datetime.now().isoformat(timespec="seconds"),
+            limit=min(int(limit), _cap), dry_run=dry_run)
+    if as_json:
+        typer.echo(orjson.dumps(out, option=orjson.OPT_INDENT_2).decode())
+        return
+    verb = "would apply" if dry_run else "applied"
+    typer.echo(f"concept ratification: {verb} {len(out['applied'])} merge(s), "
+               f"{len(out['skipped'])} not applied")
+    for entry in out["applied"]:
+        typer.echo(f"  {verb}  '{entry['from']}' -> '{entry['to']}'"
+                   + (f"   ({entry['why']})" if entry.get("why") else ""))
+    for entry in out["skipped"]:
+        typer.echo(f"  skip   '{entry['from']}' -> '{entry['to']}'   [{entry['outcome']}]")
+    pending = out["pending"]
+    if pending["splits"] or pending["purges"]:
+        typer.echo(f"pending operator work: {pending['splits']} proposed split(s), "
+                   f"{pending['purges']} proposed purge(s) — this stage never applies either; use "
+                   "concept-split / concept-purge after reviewing them.")
+
+
 @app.command(name="concept-steward")
 def concept_steward_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds concept_capsules.jsonl)."),
