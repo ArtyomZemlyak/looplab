@@ -287,7 +287,8 @@ about *that run's event log*, and every panel behind it reads `/api/runs/<id>/�
 | **Lab** | Files · Registry · Comments & sharing · Events |
 | **Run settings** | budgets and knobs for **this run only** |
 
-**The LoopLab menu** (`LoopLab ▾`, beside the ◉ mark) is the same on every owner screen — including
+**The LoopLab menu** is the ◉ LoopLab mark itself, top-left, carrying a `▾`: click the mark and the
+menu opens. It is the same on every owner screen — including
 inside a run, so you never leave a run to ask an installation-wide question. Everything in it is true
 for the whole installation no matter which run is open, and every surface behind it reads a bare
 `/api/…` with no run id:
@@ -314,7 +315,11 @@ the run-route query grammar changed, and everything remains a URL **fragment**, 
 a path-mounting proxy (see [Behind a path-mounting proxy](#behind-a-path-mounting-proxy-jupyterhub-reverse-proxy-subpath)).
 
 A **read-only review link** never renders the LoopLab menu: that route is public, and installation
-surfaces are owner-only.
+surfaces are owner-only. The mark is still there — it is simply an inert mark on that route, with no
+arrow and nothing to open, rather than a disabled control that would advertise what it withholds.
+
+The mark opens the menu and does **not** also navigate. `Runs` (`#/`) is the first item in the menu,
+which is where the old "click the logo to go home" behaviour lives now; one click, one meaning.
 
 ## Which graph am I looking at?
 
