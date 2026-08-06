@@ -15,6 +15,7 @@ import { filterConceptTree, experimentRefMatches } from './conceptSearch.js'
 import { Marked } from './Highlight.jsx'
 import { nodeTheme } from './conceptId.js'
 import { nodeIsActive } from './nodeProjection.js'
+import { conceptRefInspectable } from './conceptInspect.js'
 
 const TIMEOUT_MS = 12_000
 const LENS_PROMPT_MAX_CHARS = 800
@@ -367,7 +368,13 @@ function StateCard({ tone, title, body, action, pending = false, stale = false,
   </section>
 }
 
-export default function ConceptView({ runId, generation, sequence: displayedSequence, state, onPickNode }) {
+// `onPickNode` keeps its name but no longer means "navigate away": the host now selects the
+// experiment in place and renders the Inspector beside this tree (see `RunView.jsx`'s `concepts`
+// branch). `selectedNodeId` is what that host has selected, so an evidence row can show which
+// experiment the pane is answering about — without it the pane and the tree read as two unrelated
+// surfaces that happen to be side by side.
+export default function ConceptView({ runId, generation, sequence: displayedSequence, state, onPickNode,
+  selectedNodeId = null }) {
   const runKey = String(runId)
   const lensScope = JSON.stringify([runKey, generation ?? null])
   const paidLensScope = JSON.stringify([runKey, generation ?? null, displayedSequence ?? null])
@@ -1421,10 +1428,11 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
           {/* Render the frame's generation-bound refs, never a live-state join that can
               attach historical concepts to a replaced node with the same numeric id. */}
           {evidenceOpen && shownExperiments.map(ref => {
-            const displayed = state.nodes?.[ref.node_id]
-            const lifecycleMatches = !!displayed
-              && Number.isSafeInteger(displayed.attempt)
-              && displayed.attempt === ref.node_generation
+            // Rule 1 of `conceptInspect.js`, and the reason it lives there: the pane beside this tree
+            // has to refuse the same superseded-attempt rows this button does, and two copies of an
+            // attempt fence is exactly how the two surfaces drift apart.
+            const lifecycleMatches = conceptRefInspectable(ref, state)
+            const inspecting = lifecycleMatches && selectedNodeId === ref.node_id
             const constraint = ref.feasible === false ? 'infeasible'
               : ref.feasible === true ? 'feasible' : 'constraint status not reported'
             const rollup = ref.metric === null ? 'not included in the concept rollup: robust metric unavailable'
@@ -1433,11 +1441,12 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
             const rollupLabel = ref.metric === null ? 'unavailable'
               : ref.feasible === false ? 'excluded' : 'eligible'
             const refSummary = `Experiment #${ref.node_id}, attempt ${ref.node_generation}, ${ref.status}, ${constraint}, membership ${ref.membership_provenance}, ${rollup}`
-            return <tr key={`${id}:${ref.node_id}:${ref.node_generation}`} className="cv-erow"><td className="cv-name" style={{ paddingLeft: 12 + (depth + 1) * 18 }}>
+            return <tr key={`${id}:${ref.node_id}:${ref.node_generation}`} className={'cv-erow' + (inspecting ? ' hit' : '')}><td className="cv-name" style={{ paddingLeft: 12 + (depth + 1) * 18 }}>
               <button type="button" className="cv-exp-button" disabled={!lifecycleMatches}
+                aria-current={inspecting ? 'true' : undefined}
                 onClick={() => onPickNode?.(ref.node_id)} title={refSummary}
                 aria-label={`${refSummary}. ${lifecycleMatches
-                  ? 'Open in Inspector'
+                  ? inspecting ? 'Shown in the Inspector beside this tree' : 'Inspect it beside this tree'
                   : 'This attempt is not in the displayed run snapshot'}`}>
                 <span className="cv-exp"><Marked text={`Experiment #${ref.node_id} · attempt ${ref.node_generation}`} query={searching ? query : ''} /></span>
                 <span className="badge"><Marked text={ref.status} query={searching ? query : ''} /></span>

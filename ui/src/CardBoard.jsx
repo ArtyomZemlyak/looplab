@@ -20,7 +20,8 @@ import {
   cardAttemptSummary, cardAttempts, cardInt as _cardInt, cardLanes as _cardLanes,
   cardNodes as _cardNodes, cardNumber as _cardNumber, cardOrder as _cardOrder,
   cardRows as _cardRows, cardStatus as _cardStatus, cardStatusLabel as _cardStatusLabel,
-  cardText as _cardText, resolveSelectedCard,
+  cardText as _cardText, cardLessons as _cardLessons, cardOrigin as _cardOrigin,
+  resolveSelectedCard,
 } from './cardBoardModel.js'
 import { isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
 
@@ -126,8 +127,13 @@ function _CardProjectionNotice({ projection, cards }) {
 // a presentation; duplicating them is how a control silently stops reflecting its own fold.
 function _CardKanbanCard({
   card, receipt, onSelect, onClose, onControl, controlState, controlsLocked,
-  presentation = 'full', selected = false, onOpen = null, attempts = null,
+  presentation = 'full', selected = false, onOpen = null, attempts = null, state = null,
 }) {
+  // Item 6's two derivations. `state` is optional on purpose: a lane card is a summary, and the
+  // legacy pre-Card fallback board has no run state to pass — both then simply render nothing extra
+  // rather than the component having to branch on which host built it.
+  const origin = _cardOrigin(card)
+  const lessons = _cardLessons(state, card)
   const statement = _cardText(card.statement) || `Card ${card.id}`
   const source = _cardText(card.source)
   const operator = _cardText(card.operator)
@@ -379,6 +385,43 @@ function _CardKanbanCard({
       {_cardText(card.merged_into) ? `Merged into ${card.merged_into}` : card.dropped_reason}
       {_cardText(card.dropped_by) ? ` · by ${card.dropped_by}` : ''}
     </div>}
+    {/* Item 6. Everything here was already on the wire and rendered NOWHERE, which is why
+        "why is this card here, and what came of it?" had no answer in the UI even though the
+        answer shipped. `cardOrigin`/`cardLessons` own the derivations. */}
+    {origin.paraphrased && <div className="card-kanban-fact">
+      <span className="card-kanban-k">Seed</span>
+      <span title="The immutable statement captured at card_added — the key the whole Card ledger joins on. The text above is an operator display edit over it.">{origin.seed}</span>
+    </div>}
+    {origin.cues.length > 0 && <div className="card-kanban-fact">
+      <span className="card-kanban-k">Proposed under</span>
+      <span>{origin.cues.map(cue => <span key={cue.kind} className="chip xs"
+        title={`steering cue ${cue.kind}${cue.detail.length ? ` · ${cue.detail.join(' · ')}` : ''}`}>
+        {cue.label}{cue.detail.length ? ` · ${cue.detail.join(' · ')}` : ''}</span>)}</span>
+    </div>}
+    {origin.rationale && <div className="card-kanban-fact">
+      <span className="card-kanban-k">Rationale</span><span>{origin.rationale}</span>
+    </div>}
+    {(origin.aliases.length > 0 || origin.createdAtNode != null) && <div className="card-kanban-fact">
+      <span className="card-kanban-k">Formed</span>
+      <span>{origin.createdAtNode != null ? `at node ${origin.createdAtNode}` : ''}
+        {/* A card that absorbed three sibling proposals looked identical to one minted alone. */}
+        {origin.aliases.length > 0
+          ? `${origin.createdAtNode != null ? ' · ' : ''}absorbed ${origin.aliases.join(', ')}` : ''}</span>
+    </div>}
+    {(lessons.lessons.length > 0 || lessons.unresolved.length > 0) && <div className="card-kanban-fact">
+      {/* `.card-kanban-fact` is a 2-column grid whose third and later children span column 2, so
+          each lesson is a DIRECT child rather than being nested in one wrapping span. */}
+      <span className="card-kanban-k">Taught</span>
+      {lessons.lessons.map(lesson => <span key={lesson.lessonId}>
+        {lesson.statement}{lesson.outcome ? ` (${lesson.outcome})` : ''}
+        {lesson.evidence.length ? ` — from ${lesson.evidence.map(nid => `#${nid}`).join(', ')}` : ''}
+      </span>)}
+      {/* Referenced but not distilled in THIS run's log — an earlier run's lesson carried in as a
+          prior. Reported, because a card claiming fewer lessons than it cites is quietly wrong. */}
+      {lessons.unresolved.length > 0 && <span className="muted">
+        {lessons.unresolved.length} referenced {lessons.unresolved.length === 1 ? 'lesson was' : 'lessons were'} distilled
+        outside this run and cannot be resolved to their text here.</span>}
+    </div>}
     <div className="card-kanban-evidence">
       {evidence.map(nid => <button key={nid} type="button" className="btn xs ghost"
         aria-label={`Open evidence node #${nid}`} title={`evidence node #${nid}`}
@@ -518,7 +561,7 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode }) {
 // pane says which one you are looking at instead of blurring them into one column.
 function _CardDetailPane({
   card, receipt, attempts, selectedNodeId, onOpenNode, onSelect, onControl, controlState,
-  controlsLocked, renderInspector,
+  controlsLocked, renderInspector, state,
 }) {
   if (!card) {
     return <div className="card-detail card-detail-empty">
@@ -540,7 +583,7 @@ function _CardDetailPane({
   }
   return <div className="card-detail">
     <_CardAttempts attempts={attempts} selectedNodeId={selectedNodeId} onOpenNode={onOpenNode} />
-    <_CardKanbanCard card={card} receipt={receipt} presentation="full"
+    <_CardKanbanCard card={card} receipt={receipt} presentation="full" state={state}
       controlState={controlState} controlsLocked={controlsLocked} onControl={onControl}
       onSelect={onSelect} onClose={null} />
   </div>
@@ -763,7 +806,7 @@ function _CardKanban({
           receipt={isRecord(receipts[card.id]) ? receipts[card.id] : null}
           controlState={optim[card.id]} controlsLocked={globalPending && !optim[card.id]?.pending}
           onSelect={onSelect} onClose={onClose} onControl={control}
-          presentation={view ? 'lane' : 'full'}
+          presentation={view ? 'lane' : 'full'} state={view ? null : state}
           selected={view && selectedCardId === card.id} onOpen={onSelectCard}
           attempts={attemptsByCard?.get(card.id) || null} />)}
         {rows.length === 0 && <div className="muted card-empty">—</div>}
@@ -801,7 +844,7 @@ function _CardKanban({
           receipt={selectedCard && isRecord(receipts[selectedCard.id]) ? receipts[selectedCard.id] : null}
           attempts={selectedCard ? attemptsByCard.get(selectedCard.id) || [] : []}
           selectedNodeId={selectedNodeId} onOpenNode={onSelectNode} onSelect={onSelect}
-          onControl={control} renderInspector={renderInspector}
+          onControl={control} renderInspector={renderInspector} state={state}
           controlState={selectedCard ? optim[selectedCard.id] : null}
           controlsLocked={globalPending && !(selectedCard && optim[selectedCard.id]?.pending)} />
       </aside>

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
 
 import anyio
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from looplab.core.atomicio import (
@@ -387,6 +387,41 @@ def _bounded_json_value(value):
     return projected, truncated[0]
 
 
+_MEMORY_EVIDENCE_MAX = 32
+# `engine/lessons_reconcile.py:155-178` writes `evidence_sig` as `v2:a=<attempt>:t=<0|1>:x=<0|1>:...`.
+# Only the ATTEMPT is republished: the tombstone/abort flags and the outcome are a staleness fence the
+# engine re-derives for itself, and mirroring them onto the wire would invite a client to re-implement
+# `_lesson_evidence_stale` from a projection that is one field short of it.
+_EVIDENCE_SIG_ATTEMPT = re.compile(r"\Av[0-9]+:a=(\d{1,9}):")
+
+
+def _lesson_evidence_refs(row: dict) -> tuple[list[int], dict[str, int]]:
+    """The node ids a lesson row credits, and each one's node ATTEMPT where the row records it.
+
+    Returned separately rather than as one list of pairs because they have different completeness:
+    every distilling writer sets `evidence`, but a row written before `evidence_sig` — or one that
+    survived a consolidation that took its base from another run — can carry ids with no attempt at
+    all. A consumer must be able to tell "node 7, attempt 0" from "node 7, attempt unrecorded", and a
+    pair list with a null half invites reading the second as the first.
+    """
+    evidence: list[int] = []
+    for value in row.get("evidence") or []:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            continue
+        if value not in evidence:
+            evidence.append(value)
+        if len(evidence) >= _MEMORY_EVIDENCE_MAX:
+            break
+    generations: dict[str, int] = {}
+    signatures = row.get("evidence_sig")
+    if isinstance(signatures, dict):
+        for node_id in evidence:
+            match = _EVIDENCE_SIG_ATTEMPT.match(str(signatures.get(str(node_id), "")))
+            if match is not None:
+                generations[str(node_id)] = int(match.group(1))
+    return evidence, generations
+
+
 def _project_memory_row(tier: str, row) -> Optional[dict]:
     if not isinstance(row, dict):
         return None
@@ -428,6 +463,20 @@ def _project_memory_row(tier: str, row) -> Optional[dict]:
         evidence_count = row.get("evidence_count")
         if isinstance(evidence_count, int) and not isinstance(evidence_count, bool):
             out["evidence_count"] = max(0, evidence_count)
+        # The node-level provenance a lesson row genuinely carries, restored to the wire. It was
+        # dropped here while `evidence_count` (a scalar the CONSOLIDATION pass writes) survived, which
+        # left the UI able to say "3 experiments supported this" and unable to say WHICH — so no
+        # surface could answer "what did this experiment teach us". `evidence` is the writers' own
+        # field (`engine/lessons_distill.py:334`, `engine/lessons_reconcile.py:45-57`: "`evidence`
+        # [child, parent] IS the credited pair"), and `evidence_sig` binds each id to the exact node
+        # ATTEMPT it was distilled against — which is what stops a re-run node from inheriting a
+        # lesson drawn from its previous life. Both are bounded identifiers, not prose, so neither
+        # goes through the entropy redactor.
+        evidence, generations = _lesson_evidence_refs(row)
+        if evidence:
+            out["evidence"] = evidence
+            if generations:
+                out["evidence_generations"] = generations
         return out
     note = _memory_text(row.get("note") or row.get("statement"), 4000)
     if not note:
@@ -456,8 +505,19 @@ def _carry_row_concepts(row: dict, out: dict) -> None:
         out["concepts"] = concepts
 
 
-def _read_memory_tier(path: Path, tier: str) -> tuple[list[dict], dict]:
-    receipt = {"limit": _MEMORY_TIER_LIMIT, "returned": 0, "skipped": 0,
+def _read_memory_tier(path: Path, tier: str, run_id: str = "") -> tuple[list[dict], dict]:
+    """Project one memory tier's bounded recent tail, optionally narrowed to ONE run.
+
+    `run_id` filters on the row's own durable `run_id` and is applied INSIDE the source-window scan,
+    before the `_MEMORY_TIER_LIMIT` cap. That ordering is the whole point: filtering the already-capped
+    200-row result would silently answer "this run contributed nothing" whenever 200 newer rows from
+    other runs sat in front of it. Rows excluded by the filter are counted as `filtered`, NOT as
+    `skipped` — `skipped` means a row was unreadable, and a caller reasoning about store health must
+    not have deliberate narrowing folded into that number. The window receipt is unchanged and still
+    load-bearing: `source_window_truncated` means older rows for this run were never read, so an empty
+    filtered result is "not in the recent tail", never "does not exist".
+    """
+    receipt = {"limit": _MEMORY_TIER_LIMIT, "returned": 0, "skipped": 0, "filtered": 0,
                "source_window_truncated": False, "unavailable": False}
     try:
         with path.open("rb") as handle:
@@ -503,6 +563,9 @@ def _read_memory_tier(path: Path, tier: str) -> tuple[list[dict], dict]:
         safe = _project_memory_row(tier, row)
         if safe is None:
             receipt["skipped"] += 1
+            continue
+        if run_id and safe.get("run_id") != run_id:
+            receipt["filtered"] += 1
             continue
         projected.append(safe)
     if len(projected) > _MEMORY_TIER_LIMIT:
@@ -1733,11 +1796,19 @@ def build_router(srv) -> APIRouter:
             return {"available": False}
 
     @router.get("/api/memory")
-    def memory():
+    def memory(run_id: str = Query("", max_length=500)):
         # Cross-run memory dir holds several tiers in separate .jsonl files — SPLIT them by filename so
         # the UI can show cases / lessons / notes each with their own shape. MUST be declared BEFORE the
         # `/api/{kind}` catch-all below, else it's swallowed as an unknown kind (→ 404, the reason the
         # Memory panel was silently empty). `cases` stays populated for back-compat.
+        #
+        # `run_id` is OPTIONAL and additive: absent, this is byte-for-byte the whole-store projection
+        # the Memory panel has always read. Supplied, it narrows all three tiers to rows that name that
+        # run, which is what makes "what did this run/experiment teach us" affordable from a per-node
+        # Inspector — the unfiltered read is a 2 MiB tail scan of every tier plus a concept-shelf build
+        # over every run summary, and paying that on each node selection would not be acceptable. It is
+        # a FILTER over the same bounded window, never a wider read: an older run can still be outside
+        # the window entirely, which is what the per-tier `source_window_truncated` receipt says.
         s = srv.global_settings()
         out = {"dir": None, "cases": [], "lessons": [], "notes": []}
         if not s.memory_dir:
@@ -1749,7 +1820,7 @@ def build_router(srv) -> APIRouter:
         # recent source window and result cap; governance/capsule ledgers are not accidental "cases".
         for tier, filename in (("cases", "cases.jsonl"), ("lessons", "lessons.jsonl"),
                                ("notes", "meta_notes.jsonl")):
-            out[tier], receipts[tier] = _read_memory_tier(md / filename, tier)
+            out[tier], receipts[tier] = _read_memory_tier(md / filename, tier, run_id=run_id)
         # The concept SHELF: stamp every row with its concepts + attribution source, and publish the
         # tree plus the coverage receipt beside them. This is a read projection — it never writes back,
         # and it never invents a concept — so a tier whose rows predate the durable field simply reads

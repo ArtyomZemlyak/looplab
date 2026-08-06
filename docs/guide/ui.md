@@ -224,6 +224,22 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   to a valid terminal result. The Card board is the single research board (1 card = 1 hypothesis); the
   operator **+ Add** / **abandon** affordances write `hypothesis_added` / `hypothesis_updated` control
   events that seed and update cards.
+- **Inspector context** — the Inspector is one component mounted from three hosts (the Lineage
+  workspace, the Cards board's detail pane and the Concepts tree's), and it takes its host awareness
+  as callbacks rather than a view name. **Show in Lineage** appears only when that jump goes
+  somewhere, i.e. never inside the Lineage view itself. Its Overview names the **work item
+  (hypothesis)** the experiment tested — a Card *is* the hypothesis, so the section leads with the
+  count of *other* attempts at the same question rather than presenting one node as one hypothesis,
+  and it distinguishes a node with no card stamp (legitimate — `Idea.card_id` is optional) from one
+  naming a Card the displayed frame does not publish. When an operator paraphrase overlays the
+  display statement, the immutable `seed_statement` is shown beside it. Concepts the *Card* carries
+  but this attempt does not are a separate lane, never folded into the node's own memberships.
+  **What this experiment taught** lists the lessons the run's own append-only event log credits to
+  this exact `(node, attempt)`; each row's standing in cross-run memory is read live, because that
+  store merges and consolidates. A statement no longer present reads *no longer in memory as
+  written* — consolidation keeps no redirect to a descendant — and a truncated read window degrades
+  to *standing unknown* rather than claiming absence. Run-end reflection lessons carry no
+  per-experiment evidence and are named as out of scope instead of being silently omitted.
 - **Per-node trace** — when `trace_llm_io` is on, inspect the bounded, canonicalized and heuristically
   redacted diagnostic representation recorded for each call. It is not byte-exact provider I/O. Complete
   object rows with an invalid span shape are quarantined one by one; invalid required IDs are skipped and

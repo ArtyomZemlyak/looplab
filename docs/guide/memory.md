@@ -80,6 +80,42 @@ run in structured form, and that is a real property. But trace the readers and t
 * `GET /api/memory` renders them on the Memory panel.
 * `JsonlCaseLibrary._reload` reads them back so `add` can keep the better metric.
 
+### `GET /api/memory` and what it can honestly say about one experiment
+
+`GET /api/memory` reads a **bounded recent tail** of each of the three tiers (last 2 MiB / 1000 lines
+of the file, 200 rows returned), and each tier ships a receipt — `limit`, `returned`, `skipped`
+(unreadable rows), `filtered` (excluded by the run filter below), `source_window_truncated`,
+`unavailable`. `?run_id=` narrows all three tiers to rows naming that run; it is applied **inside the
+source-window scan**, before the per-tier cap, so a busy store cannot report that a run contributed
+nothing merely because newer rows sit in front of it. It is a filter over the same window, never a
+wider read — an old run can still fall outside it entirely, which is what `source_window_truncated`
+says. Omitting the parameter is byte-for-byte the whole-store projection the Memory panel reads.
+
+A **lesson** row is published with the node provenance it actually carries: `evidence` (the credited
+node ids) and `evidence_generations` (each id's node *attempt*, parsed from the durable
+`evidence_sig`), beside the consolidation-written scalar `evidence_count`. `evidence_generations` is
+kept separate from `evidence` and is **absent** rather than null-filled when a row records no
+attempt, because "attempt unrecorded" and "attempt 0" are different facts.
+
+What this can and cannot support is worth stating plainly, because the Inspector's *What this
+experiment taught* section is built on it:
+
+* the **run's event log** is the exact, immutable half — `lessons_distilled` (folded, and on
+  `GET /api/runs/{id}/state`) carries `evidence_refs: [{node_id, generation}]` and a content-addressed
+  `lesson_id`;
+* the **cross-run store** is the mutable half, and consolidation is destructive: `consolidate_lessons`
+  merges a group as `merged = dict(newest)`, so every non-base row's `run_id`, `evidence`,
+  `evidence_sig`, `concepts` and `fingerprint` are dropped and only `evidence_count` accumulates; the
+  agentic pass replaces the statement with LLM-written text; superseded rows are physically removed.
+  There is **no `merged_from`, no tombstone and no redirect**, so a merged-away lesson cannot be
+  resolved to its descendant — only reported as no longer present as written;
+* **cases** carry no node id at all, and **meta-notes** carry no node id (and no `run_id` at all when
+  written off the finalize path);
+* run-end **reflect** lessons ride on the diagnostic `reflection_note` event, which carries neither
+  `lesson_id` nor evidence, so they are attributable at run level only;
+* **knowledge notes** (`LOOPLAB_KNOWLEDGE_DIR`) carry no provenance whatsoever and can never be
+  attributed to a run or a node.
+
 That is the complete list. No prompt injection, no warm start, no gate, no score, no selection.
 `JsonlCaseLibrary.search()` and `.all()` have **no production call sites at all**. The
 vector/Memora-capable `CaseLibrary` in the same module is explicitly unwired (`tests/test_case_store_wiring.py`

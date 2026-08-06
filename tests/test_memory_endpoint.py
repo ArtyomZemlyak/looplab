@@ -114,3 +114,109 @@ def test_memory_endpoint_bounds_source_bytes_and_oversized_rows(tmp_path, monkey
 
     assert payload["lessons"][-1]["statement"] == "recent usable"
     assert receipt["source_window_truncated"] is True and receipt["skipped"] >= 1
+
+
+def test_lesson_evidence_and_generations_reach_the_wire(tmp_path):
+    """A lesson's node provenance is on disk; it must not be dropped at the HTTP boundary.
+
+    The scalar `evidence_count` alone lets a UI say "3 experiments supported this" and never say
+    WHICH, so no per-experiment surface can answer "what did this experiment teach us".
+    `evidence_sig` is the only thing binding a credited id to the node ATTEMPT it was distilled
+    against — without it a re-run node silently inherits its previous life's conclusions.
+    """
+    memory_dir = tmp_path / "mem"
+    memory_dir.mkdir()
+    (memory_dir / "lessons.jsonl").write_text(
+        json.dumps({
+            "statement": "contrastive loss helped", "outcome": "supported",
+            "run_id": "run-a", "task_id": "t", "evidence": [4, 2], "evidence_count": 3,
+            "evidence_sig": {"4": "v2:a=1:t=0:x=0:evaluated:0.9", "2": "v2:a=0:t=0:x=0:evaluated:0.4"},
+        }) + "\n"
+        # A row whose ids carry no signature at all — real for pre-`evidence_sig` history, and for a
+        # row whose consolidation base came from another run.
+        + json.dumps({
+            "statement": "no signatures here", "run_id": "run-a", "evidence": [9],
+        }) + "\n",
+        encoding="utf-8")
+    client = TestClient(make_app(tmp_path / "runs"))
+    assert client.put("/api/settings", json={"settings": {"memory_dir": str(memory_dir)}}).status_code == 200
+
+    lessons = client.get("/api/memory").json()["lessons"]
+    assert lessons[0]["evidence"] == [4, 2]
+    assert lessons[0]["evidence_generations"] == {"4": 1, "2": 0}
+    assert lessons[0]["evidence_count"] == 3, "the consolidation scalar is unchanged beside it"
+    # Absent, not `{}` and not a null-valued map: "attempt unrecorded" must be distinguishable from
+    # "attempt 0", which is precisely what a pair list with a null half would blur.
+    assert lessons[1]["evidence"] == [9]
+    assert "evidence_generations" not in lessons[1]
+
+
+def test_lesson_evidence_refs_reject_malformed_ids_and_are_bounded(tmp_path, monkeypatch):
+    memory_dir = tmp_path / "mem"
+    memory_dir.mkdir()
+    monkeypatch.setattr(misc_router, "_MEMORY_EVIDENCE_MAX", 3)
+    (memory_dir / "lessons.jsonl").write_text(
+        json.dumps({
+            "statement": "hostile evidence", "run_id": "r",
+            # bools are ints in Python; negatives, strings, nulls and duplicates all have to go.
+            "evidence": [True, -1, "7", None, 5, 5, 6, 8, 11, 12],
+            "evidence_sig": {"5": "not-a-signature", "6": "v2:a=2:t=0:x=0:evaluated:1"},
+        }) + "\n", encoding="utf-8")
+    client = TestClient(make_app(tmp_path / "runs"))
+    assert client.put("/api/settings", json={"settings": {"memory_dir": str(memory_dir)}}).status_code == 200
+
+    row = client.get("/api/memory").json()["lessons"][0]
+    assert row["evidence"] == [5, 6, 8], "malformed ids dropped, duplicates collapsed, cap honoured"
+    assert row["evidence_generations"] == {"6": 2}, "an unparseable signature yields no attempt"
+
+
+def test_memory_run_filter_is_applied_inside_the_source_window(tmp_path, monkeypatch):
+    """`?run_id=` must narrow BEFORE the per-tier cap, or a busy store hides the run entirely.
+
+    Filtering the already-capped result would report "this run contributed nothing" whenever enough
+    newer rows from other runs sat in front of it — the exact failure a per-experiment view would
+    then render as "absorbed".
+    """
+    memory_dir = tmp_path / "mem"
+    memory_dir.mkdir()
+    monkeypatch.setattr(misc_router, "_MEMORY_TIER_LIMIT", 3)
+    rows = [{"statement": "mine", "run_id": "wanted", "task_id": "t"}]
+    rows += [{"statement": f"theirs-{index}", "run_id": "other", "task_id": "t"} for index in range(10)]
+    (memory_dir / "lessons.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    (memory_dir / "meta_notes.jsonl").write_text(
+        json.dumps({"task_id": "t", "note": "mine", "run_id": "wanted"}) + "\n"
+        + json.dumps({"task_id": "t", "note": "theirs", "run_id": "other"}) + "\n", encoding="utf-8")
+    client = TestClient(make_app(tmp_path / "runs"))
+    assert client.put("/api/settings", json={"settings": {"memory_dir": str(memory_dir)}}).status_code == 200
+
+    unfiltered = client.get("/api/memory").json()
+    assert [row["statement"] for row in unfiltered["lessons"]] == ["theirs-7", "theirs-8", "theirs-9"], \
+        "the oldest row is genuinely outside the cap when unfiltered"
+
+    scoped = client.get("/api/memory", params={"run_id": "wanted"}).json()
+    assert [row["statement"] for row in scoped["lessons"]] == ["mine"], \
+        "the filter must run before the cap, not after it"
+    assert [row["note"] for row in scoped["notes"]] == ["mine"]
+    receipt = scoped["page"]["tiers"]["lessons"]
+    # A deliberately excluded row is not an unreadable one. Folding the two would make store-health
+    # reasoning (and the UI's "absence proves nothing" gate) read a healthy filter as damage.
+    assert receipt["filtered"] == 10 and receipt["skipped"] == 0
+    assert receipt["returned"] == 1
+
+
+def test_memory_without_run_filter_is_unchanged(tmp_path):
+    """The parameter is additive: absent, this is byte-for-byte the whole-store projection."""
+    memory_dir = tmp_path / "mem"
+    memory_dir.mkdir()
+    (memory_dir / "lessons.jsonl").write_text(
+        json.dumps({"statement": "a", "run_id": "one"}) + "\n"
+        + json.dumps({"statement": "b", "run_id": "two"}) + "\n"
+        + json.dumps({"statement": "c"}) + "\n", encoding="utf-8")
+    client = TestClient(make_app(tmp_path / "runs"))
+    assert client.put("/api/settings", json={"settings": {"memory_dir": str(memory_dir)}}).status_code == 200
+
+    assert client.get("/api/memory").json() == client.get("/api/memory", params={"run_id": ""}).json()
+    assert [row["statement"] for row in client.get("/api/memory").json()["lessons"]] == ["a", "b", "c"]
+    # A run id nobody wrote yields an honest empty result, not every row.
+    assert client.get("/api/memory", params={"run_id": "nope"}).json()["lessons"] == []

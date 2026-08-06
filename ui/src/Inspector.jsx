@@ -19,6 +19,9 @@ import {
 } from './traceProjection.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts, parseConceptTagsInput } from './conceptChips.js'
+import { cardText } from './cardBoardModel.js'
+import { nodeCardLink, nodeConceptLanes } from './inspectorLinks.js'
+import { liveLessonsForNode, nodeLessons } from './derivedMemory.js'
 import { conceptMaterializationStatus } from './nodeProjection.js'
 import { buildingMarkers } from './buildingModel.js'
 import { deadlineRequest } from './requestDeadline.js'
@@ -119,7 +122,14 @@ function ResetBtn({ runId, id, generation, onToast }) {
   </span>
 }
 
+// `onOpenLineage` is the Inspector's ONE piece of host awareness, and it is deliberately a callback
+// rather than a view name: the Inspector must not learn to branch on which workspace is showing it.
+// A host that is already the Lineage graph passes null and the button does not render — an affordance
+// that lands you where you are is worse than none. Everyone else (the Card board's detail pane, the
+// concept tree's) passes the jump, because from those surfaces "where does this sit in the run?" is
+// a real question, and it is exactly the jump the concept tree used to make without being asked.
 export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, readOnly = false,
+  onOpenLineage = null, onOpenCard = null,
   historySeq = null, expectedGeneration = null, readOnlyReason = 'history', evidenceAvailable = true,
   commentsRevision = null, focusCommentId = null, traceClearRecoveryStore: sharedClearStore = null,
   traceClearRecoverySnapshot: sharedClearSnapshot = null,
@@ -358,8 +368,16 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                 : `Snapshot seq ${historySeq} · read-only. Live traces, metrics sidecars and actions are hidden.`}</div>
           : <div className="insp-hint muted">Run actions (confirm · ablate · fork · promote) stay in chat. Use Comments for review, or attach <button className="ctx-chip ctx-chip-action" title="attach this node to assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context.<ResetBtn runId={runId} id={n.id} generation={n.attempt} onToast={onToast} /></div>}
 
+        {onOpenLineage && <div className="insp-hint">
+          <button type="button" className="ctx-chip ctx-chip-action"
+            title="open the Lineage graph with this experiment selected, among its parents and children"
+            onClick={() => onOpenLineage(n.id)}>↗ Show #{n.id} in Lineage</button>
+          <span className="muted"> — the experiment graph, with this node selected.</span>
+        </div>}
+
         {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId}
-          onToast={onToast} draftStore={draftStore} expectedGeneration={expectedGeneration} />}
+          onToast={onToast} draftStore={draftStore} expectedGeneration={expectedGeneration}
+          onOpenCard={onOpenCard} />}
         {activeTab === 'Comments' && <CommentsThread runId={runId} nodeId={n.id}
           nodeGeneration={n.attempt} expectedGeneration={expectedGeneration} refreshKey={commentsRevision}
           readOnly={readOnly} reviewMode={readOnlyReason === 'review'} focusCommentId={focusCommentId}
@@ -784,10 +802,163 @@ function ConceptTags({ n, state, runId, onToast, draftStore, expectedGeneration 
   </>
 }
 
-function Overview({ n, state, runId, onToast, draftStore, expectedGeneration }) {
+// The Card this experiment tested — item 3's "links to hypotheses", and the correction to the
+// standing misreading that one node IS one hypothesis. Since Cards absorbed Hypothesis, the Card IS
+// the hypothesis (`core/cards.py`: "1 card = 1 hypothesis"), so the honest shape of this section is
+// "the question, its verdict, and how many OTHER attempts there were" — never "the hypothesis of this
+// node". `inspectorLinks.js::nodeCardLink` owns which of its four answers applies.
+function CardLink({ link, onOpenCard }) {
+  if (link.kind === 'none') {
+    return <><div className="section-h">Work item (hypothesis)</div>
+      <div className="muted">This experiment carries no work-item stamp. A node may belong to no
+        Card (<code>Idea.card_id</code> is optional), so this is a fact about the node, not a
+        missing link.</div></>
+  }
+  if (link.kind === 'unknown') {
+    return <><div className="section-h">Work item (hypothesis)</div>
+      <div className="muted">Stamped <b>{link.cardId}</b>, which the displayed board does not
+        publish — a historical snapshot, or beyond the published card cap. The stamp is durable; the
+        record is simply not in this frame.</div></>
+  }
+  const { card, cardId, summary } = link
+  // `seed_statement` is the IMMUTABLE statement captured at `card_added` and the join key the whole
+  // Card ledger keys on; `statement` is an operator-editable DISPLAY overlay. When they differ, the
+  // operator paraphrased the question — and only showing the paraphrase hides that.
+  const seed = cardText(card.seed_statement)
+  const shown = cardText(card.statement)
+  const paraphrased = !!seed && !!shown && seed !== shown
+  return <>
+    <div className="section-h">Work item (hypothesis)
+      {onOpenCard && <button type="button" className="ctx-chip ctx-chip-action"
+        title="open this work item on the Cards board, with its full record and every attempt"
+        onClick={() => onOpenCard(cardId)}>↗ Open {cardId}</button>}
+    </div>
+    <div className="v">{shown || seed || cardId}</div>
+    {paraphrased && <div className="muted">Seed statement (immutable, the join key): {seed}</div>}
+    <div className="node-concepts-list">
+      <span className="chip xs">{cardId}</span>
+      {cardText(card.verdict) && cardText(card.verdict) !== 'open'
+        && <span className="chip xs">verdict · {card.verdict}</span>}
+      {cardText(card.status) && <span className="chip xs">{card.status}</span>}
+      {card.best_delta != null && <span className="chip xs">best Δ {fmt(card.best_delta)}</span>}
+    </div>
+    {/* The count IS the correction. One card, N attempts — including attempts that are merely
+        reserved for it and are not evidence yet, which is why the union and not `card.evidence`. */}
+    <div className="muted">{summary.total === 1
+      ? 'This is the only attempt at this work item.'
+      : `${summary.total} attempts at this work item — this one and ${summary.total - 1} other${summary.total === 2 ? '' : 's'}.`}
+      {summary.evidence > 0 && ` ${summary.evidence} in its evidence list`}
+      {summary.ownedOnly > 0 && `, ${summary.ownedOnly} reserved but not evidence yet`}
+      {summary.missing > 0 && `, ${summary.missing} not in this snapshot`}.
+    </div>
+  </>
+}
+
+const LESSON_STORE_TIMEOUT_MS = 8000
+const LESSON_STANDING = {
+  present: ['still in memory', 'A live cross-run lesson still carries this exact statement under this run.'],
+  absorbed: ['no longer in memory as written',
+    'Consolidation merged this statement into another row, compaction dropped it, or a re-evaluation retired it. '
+    + 'The store keeps no record that distinguishes those, and no redirect to a descendant.'],
+  unknown: ['standing unknown',
+    'The cross-run store was not read, or only its recent tail was, so absence here is not evidence of absence.'],
+}
+
+// Item 4. What this experiment TAUGHT, and why it is two things rather than one — see the long note
+// at the head of `derivedMemory.js`. The spine is the run's own append-only event log, which cannot go
+// stale; the live cross-run store supplies only each row's STANDING, fetched at read time because it
+// is a mutable file outside the event log that merges and consolidates behind us.
+//
+// The store read is deliberately lazy AND conditional: nothing is fetched for a node the event log
+// credits with no lessons, which is most nodes. So the common Inspector open costs zero requests, and
+// a node that did teach something costs one bounded run-scoped read.
+function DerivedMemory({ n, state, runId }) {
+  const history = useMemo(() => nodeLessons(state, n.id, n.attempt, null), [state?.lessons_distilled, n.id, n.attempt])
+  // The store read is worth making for a node with no event-log lesson too, because consolidation
+  // runs the other way: measured across `runs/`, the surviving MERGED row usually still credits the
+  // node whose own lesson was absorbed. Gated on the run having distilled anything at all, so a run
+  // with no lessons still costs nothing.
+  const wanted = (history.length > 0 || (state?.lessons_distilled || []).length > 0) && !!runId
+  const storeResource = useScopedResource(
+    signal => get(`/api/memory?run_id=${encodeURIComponent(runId)}`, { cache: 'no-store', signal }), {
+      scope: `node-memory:${runId}`,
+      timeout: LESSON_STORE_TIMEOUT_MS,
+      // Not "no lessons to check" as an error — it is simply no reason to spend a request.
+      gate: wanted ? null : 'idle',
+      validate: value => value && typeof value === 'object' && Array.isArray(value.lessons)
+        ? null : 'Cross-run memory returned an invalid response.',
+      classifyFailure: () => ({ error: 'Cross-run memory could not be read, so these lessons’ current standing is unknown.' }),
+    })
+  // The RAW body, not `panels.jsx::memoryPayload`'s normalized one: `derivedMemory.js` reads the
+  // receipt in either spelling, and importing the Memory panel's validator would pull `panels.jsx`
+  // into the Inspector's chunk for one field rename.
+  const store = ['ready', 'stale'].includes(storeResource.status) ? storeResource.data : null
+  const rows = useMemo(() => nodeLessons(state, n.id, n.attempt, store),
+    [state?.lessons_distilled, n.id, n.attempt, store])
+  const live = useMemo(() => liveLessonsForNode(store, n.id, n.attempt), [store, n.id, n.attempt])
+  if (!history.length && !live.length) return null
+  return <>
+    {live.length > 0 && <>
+      <div className="section-h">What memory still says about this experiment</div>
+      <div className="muted">Live cross-run lessons whose recorded evidence names this experiment.
+        These are the current text, re-read each time — consolidation may have rewritten them.</div>
+      <ul className="bul">{live.map(row => <li key={`live:${row.statement}`}>
+        <span className="v">{row.statement}</span>
+        <div className="node-concepts-list">
+          {row.outcome && <span className="chip xs">{row.outcome}</span>}
+          {row.attemptMatch === 'unrecorded' && <span className="chip xs warn"
+            title="This row records no node attempt for this experiment, so it may have been drawn from an earlier attempt of the same id.">attempt not recorded</span>}
+          {/* The visible fingerprint of a merge: more agreeing observations than traceable ids. */}
+          {row.evidenceCount != null && row.evidenceCount > row.alsoFrom.length + 1
+            && <span className="chip xs" title="Consolidation keeps only a count when it merges rows from other runs; their own evidence is not retained.">
+              {row.evidenceCount} agreeing observations, {row.alsoFrom.length + 1} still traceable</span>}
+          {row.concepts.map(id => <span key={id} className="nc-tag">{id}</span>)}
+        </div>
+        {row.alsoFrom.length > 0 && <div className="muted">Also credits {row.alsoFrom.map(id => `#${id}`).join(', ')}.</div>}
+      </li>)}</ul>
+    </>}
+    {history.length > 0 && <>
+    <div className="section-h">What this experiment taught</div>
+    <div className="muted">From this run’s own event log, which is append-only — so this list is what
+      the experiment produced, not what memory happens to hold now. Each row’s standing below is read
+      live from cross-run memory, because that store merges and consolidates.</div>
+    <ul className="bul">{rows.map(row => {
+      const [label, why] = LESSON_STANDING[row.storeStatus] || LESSON_STANDING.unknown
+      return <li key={row.lessonId || row.statement}>
+        <span className="v">{row.statement}</span>
+        <div className="node-concepts-list">
+          {row.outcome && <span className="chip xs">{row.outcome}</span>}
+          {row.claimStance && <span className="chip xs">{row.claimStance}</span>}
+          {row.atNode != null && <span className="chip xs">distilled at #{row.atNode}</span>}
+          <span className={'chip xs' + (row.storeStatus === 'present' ? ' ok' : row.storeStatus === 'absorbed' ? ' warn' : '')}
+            title={why}>{label}</span>
+        </div>
+        {row.alsoFrom.length > 0 && <div className="muted">Drawn from this experiment together
+          with {row.alsoFrom.map(id => `#${id}`).join(', ')}.</div>}
+      </li>
+    })}</ul>
+    </>}
+    {storeResource.status === 'error' && <div className="muted">{storeResource.error}</div>}
+    {/* The run-end whole-run reflection is a DIAGNOSTIC event: not folded, not on the wire, and its
+        projection carries neither a lesson id nor evidence. For most runs those are the MAJORITY of
+        lessons, and they can only ever be attributed to the run. Saying so is the honest close to
+        this section — the alternative is a list that silently claims to be complete. */}
+    <div className="muted">Run-end reflection lessons are recorded without per-experiment evidence and
+      cannot appear here; open Lab → Memory to read them at run level.</div>
+  </>
+}
+
+function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, onOpenCard }) {
   const p = n.idea?.params || {}
   const uses = mergeSummary(n, state.nodes || {}, state)   // E3: for merges, which technique each parent fused
   const chg = nodeChip(n, state.nodes || {}, state)        // same chip as the card (sweep-aware; '' for merges)
+  const cardLink = nodeCardLink(state, n)
+  // Item 5: the node's OWN concepts already had a section (`ConceptTags`, editable). What was absent
+  // is the Card's `concept_tags`, a separately-derived set that can name concepts this attempt never
+  // carried — so it renders as its own lane, never folded into the node's list.
+  const lanes = nodeConceptLanes(
+    nodeCanonicalConcepts(state?.node_concepts || {}, n.id, state?.concept_consolidation || {}),
+    cardLink.card)
   return <>
     <div className="kv">
       <KV k="node" v={`#${n.id}`} />
@@ -799,8 +970,19 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration }) 
       <KV k="feasible" v={String(n.feasible)} />
       <KV k="eval seconds" v={fmt(n.eval_seconds)} />
     </div>
+    <CardLink link={cardLink} onOpenCard={onOpenCard} />
     <ConceptTags key={`${runId}:${expectedGeneration || '?'}:${n.id}:${n.attempt}`} n={n} state={state} runId={runId}
       onToast={onToast} draftStore={draftStore} expectedGeneration={expectedGeneration} />
+    {lanes.cardOnly.length > 0 && <>
+      <div className="section-h">Also on its work item</div>
+      {/* Kept OUT of the node's own list on purpose: a card tag is derived from the card's FIRST
+          linked node and carried across merges, so presenting it beside this node's memberships
+          would silently upgrade a card-level claim into a claim about this attempt's evidence. */}
+      <div className="node-concepts-list">{lanes.cardOnly.map(c =>
+        <span key={c} className="nc-tag" title={`${c} — carried by the work item, not by this experiment`}>{c}</span>)}</div>
+      <div className="muted">Concepts its work item carries that this attempt does not
+        {lanes.cardTagOrigin ? ` (card tags derived from: ${lanes.cardTagOrigin})` : ''}.</div>
+    </>}
     <StagePipeline stages={n.stages} failed={n.failed_stage} runId={runId} id={n.id} generation={n.attempt} onToast={onToast} />
     {chg && <><div className="section-h">What this node did</div><div className="v">{chg}</div></>}
     {uses.length > 0 && <><div className="section-h">Merge — techniques fused</div>
@@ -809,6 +991,7 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration }) 
     <div className="section-h">Idea params</div>
     {Object.keys(p).length ? <div className="kv">{Object.entries(p).map(([k, v]) => <KV key={k} k={k} v={fmt(v)} />)}</div> : <div className="muted">none</div>}
     {n.idea?.rationale && !(chg && chg.includes(n.idea.rationale)) && <><div className="section-h">Rationale</div><Markdown className="rationale-md" text={n.idea.rationale} /></>}
+    <DerivedMemory n={n} state={state} runId={runId} />
     {n.deleted?.length > 0 && <><div className="section-h">Deleted files</div><div className="v">{n.deleted.join(', ')}</div></>}
   </>
 }

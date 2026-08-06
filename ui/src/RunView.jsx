@@ -30,6 +30,7 @@ import {
 } from './mergeIntent.js'
 import { GLOBAL_DESTINATIONS, INSTALLATION_ROUTE_VIEWS } from './globalNav.js'
 import { nodeIsActive } from './nodeProjection.js'
+import { conceptPaneTarget } from './conceptInspect.js'
 import { createInspectorDraftStore } from './inspectorDraftStore.js'
 import { installNavigationLossGuard } from './navigationLossGuard.js'
 import {
@@ -2266,9 +2267,30 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // so hosting it under a Card costs nothing and forking it would immediately drift. Keeping it a
   // single expression is what makes "the card pane hosts the node Inspector" true rather than
   // approximately true — a second copy of these fifteen props is a second set of defaults.
+  // The jump the concept tree used to make FOR you, now spelled once and offered as a button. Three
+  // surfaces wanted the same four-field update (report rows, the Card board's evidence buttons, and
+  // the Inspector's own Lineage button) and each had spelled it out; a fourth copy is how one of them
+  // eventually forgets to clear `cardId` or to reveal the pane. `cardId: null` is safe for every
+  // caller because `sanitizeRunRouteState` already drops a card target outside the `cards` view.
+  const jumpToLineage = (id) => {
+    route.update(current => ({ ...current, view: 'dag', nodeId: id,
+      nodeGeneration: null, cardId: null, commentId: null }))
+    commitGroupNavigation(null, { mode: 'replace' })
+    if (compactWorkspace) setCompactInspectorOpen(true)
+    else setSideC(false)
+  }
+  // ONE spelling of the node Inspector, mounted from the graph workspace, the Card board's detail
+  // pane and the concept tree's. `onOpenLineage` is the seam that lets it be hosted anywhere: the
+  // Inspector must not know WHICH view is showing it, only whether "take me to the graph" is a move
+  // that goes somewhere. Passing null inside the Lineage view is what keeps it from offering a
+  // button that lands you where you already are.
   const renderNodeInspector = nodeId => <LazyBoundary label="experiment inspector"
     resetKey={`node:${nodeId}`}>
     <Inspector runId={runId} nodeId={nodeId} state={state} live={live}
+      onOpenLineage={view === 'dag' ? null : jumpToLineage}
+      // The Card board is owner-only (`REVIEW_SAFE_VIEWS`), so a review bearer is offered no link
+      // into it — the route would be refused and the button would be a dead end.
+      onOpenCard={reviewMode ? null : selectCard}
       tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}
       draftStore={inspectorDraftStoreRef.current}
       traceClearRecoveryStore={traceClearRecoveryStore}
@@ -2279,6 +2301,15 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       focusCommentId={commentAttemptMatches ? routeState.commentId : null}
       readOnlyReason={mutationReadOnlyReason} evidenceAvailable={!reviewMode || reviewEvidence} />
   </LazyBoundary>
+  // The concept tree's own selection. It stays in the `concepts` view on purpose — that is the whole
+  // point of the change — and only opens the compact drawer, which is the same reveal the graph does.
+  const inspectFromConcepts = (id) => {
+    setSelectedId(id)
+    if (id != null && compactWorkspace) setCompactInspectorOpen(true)
+  }
+  // `conceptInspect.js` owns the decision; this is only which of its three answers is live.
+  const conceptPaneTargetState = conceptPaneTarget(state, selectedId)
+  const conceptPaneCollapsed = compactWorkspace && !compactInspectorOpen
   // Card selection is route state, so a Card is linkable and Back works over it. Picking a DIFFERENT
   // card clears the inspected node: that node was an attempt at the previous card's question, and
   // leaving it selected would show the new card beside an experiment that never tested it.
@@ -2680,13 +2711,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                   setPanel(p)
                 }}
                 canOpenPanel={panelAllowed}
-                onPickNode={(id) => {
-                  route.update(current => ({ ...current, view: 'dag', nodeId: id,
-                    nodeGeneration: null, commentId: null }))
-                  commitGroupNavigation(null, { mode: 'replace' })
-                  if (compactWorkspace) setCompactInspectorOpen(true)
-                  else setSideC(false)
-                }} />
+                onPickNode={jumpToLineage} />
             </LazyBoundary>
           </div></div>
         : view === 'cards'
@@ -2696,16 +2721,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               selectedCardId={selectedCardId} onSelectCard={selectCard}
               selectedNodeId={selectedId} onSelectNode={selectCardNode}
               renderInspector={renderNodeInspector}
-              onSelect={(id) => {
-                // The lane cards' evidence buttons still mean "take me to this experiment on the
-                // graph", the same jump they made from the modal. Only the detail pane's attempt
-                // rows keep you on the board.
-                route.update(current => ({ ...current, view: 'dag', nodeId: id,
-                  nodeGeneration: null, cardId: null, commentId: null }))
-                commitGroupNavigation(null, { mode: 'replace' })
-                if (compactWorkspace) setCompactInspectorOpen(true)
-                else setSideC(false)
-              }}
+              // The lane cards' evidence buttons still mean "take me to this experiment on the
+              // graph", the same jump they made from the modal. Only the detail pane's attempt
+              // rows keep you on the board.
+              onSelect={jumpToLineage}
               // The board borrows the workspace's OWN pane chrome rather than growing a second one:
               // same persisted `ll.sideW`, same drag/keyboard splitter, same <900px drawer. A second
               // width would drift from the graph's and would not survive the same resize clamp.
@@ -2721,17 +2740,64 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               }} />
           </LazyBoundary>
         : view === 'concepts'
-        ? <div className="main"><LazyBoundary label="concept tree"
-            resetKey={`${runId}:${generation || 'pending'}:${historyActive ? viewSeq : 'live'}`}>
-            <ConceptView runId={runId} generation={generation}
-              sequence={historyActive ? viewSeq : null} state={state} onPickNode={(id) => {
-              route.update(current => ({ ...current, view: 'dag', nodeId: id,
-                nodeGeneration: null, commentId: null }))
-              commitGroupNavigation(null, { mode: 'replace' })
-              if (compactWorkspace) setCompactInspectorOpen(true)
-              else setSideC(false)
-            }} />
-          </LazyBoundary></div>
+        // Clicking an Experiment row used to fly you to the graph with that node selected — you were
+        // reading a concept's evidence and the answer removed the question. It now selects in place
+        // and this pane answers it, borrowing the SAME `.side` chrome as the graph inspector and the
+        // Card board's pane (and the same persisted `ll.sideW`), because a third pane width would
+        // drift from both. `renderNodeInspector` is the one Inspector, not a third copy.
+        ? <div className={'main run-workspace' + (compactWorkspace ? ' compact' : '')}>
+            <LazyBoundary label="concept tree"
+              resetKey={`${runId}:${generation || 'pending'}:${historyActive ? viewSeq : 'live'}`}>
+              <ConceptView runId={runId} generation={generation}
+                sequence={historyActive ? viewSeq : null} state={state}
+                selectedNodeId={selectedId} onPickNode={inspectFromConcepts} />
+            </LazyBoundary>
+            {conceptPaneCollapsed
+              // Narrow screens keep the tree unobstructed until asked, exactly as the graph does;
+              // on desktop the pane is always there, because its empty state is how an operator
+              // learns the tree became inspectable at all.
+              ? selectedId != null && <button ref={compactInspectorTriggerRef}
+                  className="workspace-pane-toggle" onClick={() => setCompactInspectorOpen(true)}
+                  aria-label="Open inspector panel">Inspector · #{selectedId}</button>
+              : <>
+                {compactWorkspace
+                  ? <button type="button" className="workspace-scrim" tabIndex={-1}
+                      onClick={closeCompactInspector} aria-label="Close inspector panel" />
+                  : <div className="splitter v" onPointerDown={startDrag('side')}
+                      onKeyDown={resizeWithKeys('side')} role="separator" tabIndex={0}
+                      aria-orientation="vertical" aria-label="Resize inspector"
+                      aria-valuemin={280} aria-valuemax={Math.max(280, window.innerWidth - 486)}
+                      aria-valuenow={Math.round(sideW)}
+                      title="Drag or use arrow keys to resize" />}
+                <aside className={'side card-detail-side' + (compactWorkspace ? ' compact-drawer' : '')}
+                  style={{ width: sideW }} ref={compactInspectorRef}
+                  tabIndex={compactWorkspace ? -1 : undefined}
+                  role={compactWorkspace ? 'dialog' : 'complementary'}
+                  aria-label="Experiment inspector"
+                  data-route-focus-guard={compactWorkspace ? 'true' : undefined}>
+                  <div className="pane-grip">
+                    <span className="muted">{conceptPaneTargetState.kind === 'node'
+                      ? `inspector · #${conceptPaneTargetState.nodeId}` : 'inspector'}</span>
+                    <span className="spacer" style={{ flex: 1 }} />
+                    {selectedId != null && <button ref={compactInspectorCloseRef} className="btn sm ghost"
+                      data-dialog-initial-focus={compactWorkspace ? true : undefined}
+                      title="clear the inspected experiment"
+                      aria-label={`Close the inspector for experiment ${selectedId}`}
+                      onClick={() => {
+                        setSelectedId(null)
+                        if (compactWorkspace) closeCompactInspector()
+                      }}>⟩</button>}
+                  </div>
+                  {conceptPaneTargetState.kind === 'empty'
+                    ? <div className="insp-empty">Pick an experiment under a concept to inspect it
+                      here — its idea, code, metrics, trust and agent trace, without leaving the tree.</div>
+                    : conceptPaneTargetState.kind === 'absent'
+                      ? <div className="insp-empty" role="status">Experiment #{conceptPaneTargetState.nodeId} is
+                        not in the displayed run snapshot, so there is nothing to inspect for it here.</div>
+                      : renderNodeInspector(conceptPaneTargetState.nodeId)}
+                </aside>
+              </>}
+          </div>
         : <>
       <LazyBoundary label="concept filter" resetKey={`${runId}:${generation || 'pending'}`}>
         <ConceptChipBar key={`concept-filter:${runId}:${generation || 'pending'}`}
