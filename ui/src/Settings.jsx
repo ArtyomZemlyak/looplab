@@ -1267,7 +1267,6 @@ export default function Settings({ onBack }) {
 
   return <div className="app">
     <div className="topbar">
-      <span className="brand"><span className="dot">◉</span> LoopLab</span>
       <GlobalMenu current="settings" />
       <button className="btn sm ghost" onClick={requestBack}>← runs</button>
       <span className="ttl" style={{ fontWeight: 700, fontSize: 15 }}>Settings</span>

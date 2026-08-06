@@ -1,4 +1,5 @@
 import React from 'react'
+import { BrandMark } from './GlobalMenu.jsx'
 
 // Doc 25 UI-03. The six non-workspace screens of the run route — two Start-over recovery states,
 // the run-resource state, the two stale-generation-fence states and the loading snapshot — each
@@ -22,7 +23,13 @@ export default function RunScreen({
 }) {
   return <div className={'app' + (reviewMode ? ' review-mode' : '')}>
     <div className="topbar run-head">
-      <span className="brand"><span className="dot">◉</span> LoopLab</span>
+      {/* The INERT mark, not the menu trigger, and that is a reachability statement like the two
+          props above: three of these six screens pass no `reviewMode` at all (the note above says
+          why), so this shell cannot tell an owner from a reviewer. A trigger here would be a menu
+          offered to a public review capability on exactly the screens that render when a run cannot.
+          The mark comes from GlobalMenu.jsx so the workspace header and these six screens keep
+          rendering the same LoopLab mark rather than two copies that drift. */}
+      <BrandMark />
       {onBack ? <button className="btn sm ghost" onClick={onLeave}>← runs</button>
         : reviewPill ? <span className="pill">read-only review</span> : null}
       {head}

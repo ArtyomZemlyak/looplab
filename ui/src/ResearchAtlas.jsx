@@ -359,7 +359,6 @@ export default function ResearchAtlas({ onBack }) {
   const topbarOwnsRefresh = busy && request.key === '' && retryFocusRef.current?.origin === 'topbar'
   return <div className="app atlas-route">
     <div className="topbar">
-      <span className="brand"><span className="dot">◉</span> LoopLab</span>
       <GlobalMenu current="research-atlas" />
       <button type="button" className="btn sm ghost" aria-label="Back to runs" onClick={onBack}>← runs</button>
       <span className="ttl">Research Atlas preview</span>
