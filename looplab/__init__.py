@@ -47,12 +47,18 @@ _LAYOUT = {
     "archive": "search",
     "artifacts": "serve",
     "paid_work": "serve",
+    "paid_ledger": "serve",  # ...its claim→terminal receipt half, shared by the paid routes (doc 25 SR-01)
     "settings_ui_schema": "serve",
     "asset_brief": "tools",   # PART IV D1 bounded local asset/prior-art brief
     "audit": "engine",   # engine audit/trust-emitter mixin
-    "concept_capsules": "engine",
-    "concept_shelf": "engine",   # the concept surfaces every memory view sorts by (UI cross-linking)  # durable per-run concept record + portfolio views (doc 25 EM-10)
-    "concept_graph": "search",   # PART IV D5 pure concept-graph projection used offline and live
+    "concept_cadence": "engine",  # PART IV/V concept re-tag + snapshot mixin (doc 25 EC-09)
+    "concept_capsules": "engine",  # durable per-run concept record + portfolio views (doc 25 EM-10)
+    "concept_shelf": "engine",   # the per-run concept surface the memory views sort by
+    "concept_graph": "search",   # PART IV D5 concept vocabulary + axis-DAG + curated skeletons
+    "concept_analytics": "search",  # ...its pure coverage/metrics/alarm read-models (doc 25 SE-09)
+    "concept_lens": "search",    # ...the hierarchy/lens view projections the UI reads (same split)
+    "concept_map": "search",     # ...consolidation + the build_concept_map entry (same split)
+    "concept_tagging": "search",  # ...the heuristic + LLM taggers (same split)
     "concept_projection": "search",  # receipt/lifecycle-aware CURRENT membership boundary
     "coverage": "search",
     "graded_novelty": "search",   # PART IV D3 graded novelty + failed-direction re-exam (advisory)
@@ -63,6 +69,7 @@ _LAYOUT = {
     "cross_run_context": "engine",  # shared skeleton of the live cross-run builders (doc 25 EC-01)
     "crash_repair": "engine",
     "calibration": "agents",   # the CUDA probe the speculation calibration runs (doc 25 AG-02)
+    "loop_options": "agents",  # the typed drive_tool_loop options bundle (doc 25 AG-01)
     "cadence": "engine",     # the shared since-last node-count gate (doc 25 EC-07)
     "claims": "engine",
     "claims_health": "engine",  # ...its source-row/read-health leaf (doc 25 EM-01 split)          # PART IV cross-run Step 4: evidence-grounded claim assessments (read-model)
@@ -77,13 +84,18 @@ _LAYOUT = {
     "task_facets": "engine",     # PART IV cross-run §21.20.2: agentic task faceting overlay (off the index)
     "governance_health": "engine",  # PART IV cross-run: paid-curation ledger health / fail-closed gates
     "steward_invocation": "engine",  # PART IV cross-run: agentic steward invocation/session bookkeeping
+    "curation_protocol": "engine",  # the FINALIZE at-most-once paid-curation transaction (doc 25 EM-03)
     "concept_tools": "tools",    # PART V Phase 2a: assistant-editable cross-run concept taxonomy (merge/purge/split, gated)
     "cross_run_tools": "tools",  # PART V §22: read-only cross-run knowledge tool for the agent tool-loop
     "assistant": "serve",
     "assistant_commands": "serve",
     "atomicio": "core",
     "best_of_n": "search",
+    "card_ledger": "events",  # the derived Card ledger: receipt bounds + derive_cards (doc 25 EV-01)
+    "card_reservation": "engine",  # the Card RESERVATION/receipt ledger + id allocators (doc 25 ES-01)
+    "speculation_gate": "engine",  # the calibrated speculation ENVELOPE + its runtime record (doc 25 ES-01)
     "card_selection": "search",  # Card-backed candidate election and ownership receipts
+    "cards": "core",          # card identity: digests, ownership receipts, provenance (doc 25 CO-02)
     "bg_tasks": "runtime",
     "classification": "adapters",
     "cli_agent": "agents",
@@ -98,6 +110,9 @@ _LAYOUT = {
     "confirm": "trust",
     "confirm_phase": "engine",   # engine confirm mixin ("confirm" is taken by trust/confirm.py)
     "context_budget": "core",
+    # the HTTP control-payload validator `run_commands.py` shed (doc 25 SC-01) — registered so the
+    # package-layout audit sees it and the flat `looplab.control_validation` alias resolves
+    "control_validation": "serve",
     "costs": "engine",
     "critic": "trust",
     "cross_run": "trust",   # cross-run identity/scope-boundary checks among the trust monitors
@@ -109,6 +124,7 @@ _LAYOUT = {
     "deletion_service": "serve",
     "deletion_transaction": "serve",
     "digest": "events",
+    "durable_op": "serve",     # the shared reset/deletion receipt + quiescence kit (doc 25 SC-06)
     "edit_match": "tools",
     "env_inspect": "tools",
     "errors": "core",
@@ -124,6 +140,7 @@ _LAYOUT = {
     "evaluate": "engine",
     "engine_proc": "serve",
     "finalize_scope": "events",   # the finalize-scope read side (doc 25 XP-07)
+    "finalize_protocol": "events",  # finalize step/suffix vocabulary, writer+readers (doc 25 SE-01)
     "finalize": "engine",
     "foresight": "search",
     "gate": "trust",
@@ -220,6 +237,7 @@ _LAYOUT = {
     "run_commands": "serve",
     "run_files": "serve",
     "run_projections": "serve",   # the run-list projections AppState now owns (doc 25 SR-12)
+    "router_wiring": "serve",   # router mount order + the late-bound `srv.*_fn` registry (doc 25 XP-05)
     "run_deletion": "core",
     "run_reset": "core",
     "run_tools": "tools",
@@ -227,12 +245,14 @@ _LAYOUT = {
     "sandbox": "runtime",
     "scorer_fidelity": "search",
     "schemas": "serve",
+    "scope_actions": "serve",   # the paid ACTION protocol above that store (doc 25 SR-02)
     "scope_report": "serve",
     "scope_report_store": "serve",   # the durable store `routers/reports.py` shed (doc 25 SR-12)
     "scope_sources": "serve",
     "serve_prompts": "serve",   # UI-server prompt strings ("prompts" is taken by core/prompts.py)
     "server": "serve",
     "settings_store": "serve",
+    "setup_identity": "core",   # run-start config_hash / setup manifest digests (doc 25 SE-01)
     "shell_tools": "tools",
     "span_index": "events",   # derived light span index behind the UI trace views (perf)
     "shared": "engine",     # cross-cluster Engine members (doc 25 ES-14)
@@ -267,6 +287,7 @@ _LAYOUT = {
     "validate": "core",
     "vectorstore": "tools",
     "verifier": "trust",   # PART IV keystone-B §12 advisory verifier (offline/library)
+    "verifier_tiebreak": "engine",  # R1-c calibrated-verifier metric tie-break mixin (doc 25 EC-09)
     # The D8 memo-claim verifier. It was `trust/verify.py` — two letters from `trust/verifier.py`,
     # which is a DIFFERENT verifier (doc 25 CT-09). Both legacy spellings live in `_RENAMED` below,
     # because this map's contract is canonical-stem -> package and `verify` is no longer a stem.

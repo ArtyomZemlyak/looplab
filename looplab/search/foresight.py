@@ -212,7 +212,7 @@ def _idea_prose(idea) -> str:
 
     Named `_idea_prose`, not `_idea_text` (doc 25 SE-15): `search/` had two unrelated module-level
     `_idea_text`s rendering an Idea for different consumers, so a reader who found one had no way to
-    know the other existed. See `concept_graph._node_text` for the map of the four renderers.
+    know the other existed. See `concept_tagging.node_text` for the map of the four renderers.
     """
     parts: list[str] = []
     hyp = getattr(idea, "hypothesis", None)

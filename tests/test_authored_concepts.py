@@ -3,14 +3,27 @@
 A later `node_concepts` classifier event refines them last-write-wins; admission consumers can therefore
 distinguish a proposal claim from independent classifier evidence without migrating old event logs.
 """
-from types import SimpleNamespace
-
 import pytest
 
 from looplab.core.models import Idea, IdeaEmission, Node, durable_idea_payload
-from looplab.engine.strategy import StrategyCadenceMixin
+from looplab.engine.concept_cadence import ConceptCadenceMixin
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
+
+
+class _CadenceHost(ConceptCadenceMixin):
+    """The engine surface `_concept_coverage_snapshot` actually needs: a reflect client and a store.
+
+    A REAL mixin instance rather than a `SimpleNamespace`, because the producer drives its tagging /
+    edge / hypothesis steps through `self` (doc 25 EC-09) — a duck host would only exercise whichever
+    steps happened to be inlined on the day it was written.
+    """
+
+    def __init__(self, store):
+        self.store = store
+
+    def _reflect_client(self):
+        return object()
 
 
 def _store(tmp_path) -> EventStore:
@@ -240,7 +253,9 @@ def test_cadence_retags_authored_claim_and_stamps_classifier_generation(tmp_path
     state = fold(s.read_all())
     captured = {}
 
+    from looplab.search import concept_analytics as ca
     from looplab.search import concept_graph as cg
+    from looplab.search import concept_map as cm
     graph = cg.dense_retrieval_skeleton()
     tags = {0: frozenset({"loss/decoupled-contrastive"}),
             1: frozenset({"classifier/known"})}
@@ -251,21 +266,21 @@ def test_cadence_retags_authored_claim_and_stamps_classifier_generation(tmp_path
             "graph": graph,
             "tags": tags,
             "raw_tags": tags,
-            "coverage": cg.concept_coverage(state, graph, tags),
+            "coverage": ca.concept_coverage(state, graph, tags),
             "important_uncovered": [],
             "consolidated": {},
             "mode": "llm",
         }
 
-    monkeypatch.setattr(cg, "build_concept_map", fake_build)
+    monkeypatch.setattr(cm, "build_concept_map", fake_build)
 
     class CaptureStore:
         def __init__(self): self.events = []
         def append(self, event_type, data): self.events.append((event_type, data))
 
     store = CaptureStore()
-    host = SimpleNamespace(_reflect_client=lambda: object(), store=store)
-    assert StrategyCadenceMixin._concept_coverage_snapshot(host, state) is not None
+    host = _CadenceHost(store)
+    assert host._concept_coverage_snapshot(state) is not None
 
     assert captured["known_tags"] == {1: ["classifier/known"]}
     emitted = [data for event_type, data in store.events if event_type == "node_concepts"]
@@ -287,7 +302,9 @@ def test_cadence_repairs_partial_classifier_instead_of_caching_subset(tmp_path, 
     assert state.node_concept_materialization_receipts[0]["status"] == "partial"
     captured = {}
 
+    from looplab.search import concept_analytics as ca
     from looplab.search import concept_graph as cg
+    from looplab.search import concept_map as cm
     graph = cg.dense_retrieval_skeleton()
     tags = {0: frozenset({"classifier/repaired"}),
             1: frozenset({"classifier/known"})}
@@ -298,21 +315,21 @@ def test_cadence_repairs_partial_classifier_instead_of_caching_subset(tmp_path, 
             "graph": graph,
             "tags": tags,
             "raw_tags": tags,
-            "coverage": cg.concept_coverage(state, graph, tags),
+            "coverage": ca.concept_coverage(state, graph, tags),
             "important_uncovered": [],
             "consolidated": {},
             "mode": "llm",
         }
 
-    monkeypatch.setattr(cg, "build_concept_map", fake_build)
+    monkeypatch.setattr(cm, "build_concept_map", fake_build)
 
     class CaptureStore:
         def __init__(self): self.events = []
         def append(self, event_type, data): self.events.append((event_type, data))
 
     store = CaptureStore()
-    host = SimpleNamespace(_reflect_client=lambda: object(), store=store)
-    assert StrategyCadenceMixin._concept_coverage_snapshot(host, state) is not None
+    host = _CadenceHost(store)
+    assert host._concept_coverage_snapshot(state) is not None
 
     assert captured["known_tags"] == {1: ["classifier/known"]}
     emitted = [data for event_type, data in store.events if event_type == "node_concepts"]
@@ -327,7 +344,9 @@ def test_cadence_persists_per_node_fallback_provenance(tmp_path, monkeypatch):
     s.append("node_created", _created(2, None))
     state = fold(s.read_all())
 
+    from looplab.search import concept_analytics as ca
     from looplab.search import concept_graph as cg
+    from looplab.search import concept_map as cm
     graph = cg.dense_retrieval_skeleton()
     for i in range(70):
         graph.ensure(f"axis/c{i:03d}")
@@ -344,21 +363,21 @@ def test_cadence_persists_per_node_fallback_provenance(tmp_path, monkeypatch):
             "raw_tags": tags,
             # Exercise both JSON/string keys and a defensive over-wide classifier row.
             "raw_tag_modes": {"0": "offline-heuristic", "1": "llm", "2": "llm"},
-            "coverage": cg.concept_coverage(state, graph, tags),
+            "coverage": ca.concept_coverage(state, graph, tags),
             "important_uncovered": [],
             "consolidated": {},
             "mode": "llm",
         }
 
-    monkeypatch.setattr(cg, "build_concept_map", fake_build)
+    monkeypatch.setattr(cm, "build_concept_map", fake_build)
 
     class CaptureStore:
         def __init__(self): self.events = []
         def append(self, event_type, data): self.events.append((event_type, data))
 
     store = CaptureStore()
-    host = SimpleNamespace(_reflect_client=lambda: object(), store=store)
-    assert StrategyCadenceMixin._concept_coverage_snapshot(host, state) is not None
+    host = _CadenceHost(store)
+    assert host._concept_coverage_snapshot(state) is not None
 
     emitted = {data["node_id"]: data for event_type, data in store.events
                if event_type == "node_concepts"}
@@ -385,7 +404,9 @@ def test_cadence_never_retags_an_operator_edited_node(tmp_path, monkeypatch):
     assert state.node_concept_provenance == {1: "classifier", 0: "operator-edited"}
     captured = {}
 
+    from looplab.search import concept_analytics as ca
     from looplab.search import concept_graph as cg
+    from looplab.search import concept_map as cm
     graph = cg.dense_retrieval_skeleton()
     tags = {0: frozenset({"operator/hand-tag"}), 1: frozenset({"classifier/known"})}
 
@@ -395,21 +416,21 @@ def test_cadence_never_retags_an_operator_edited_node(tmp_path, monkeypatch):
             "graph": graph,
             "tags": tags,
             "raw_tags": tags,
-            "coverage": cg.concept_coverage(state, graph, tags),
+            "coverage": ca.concept_coverage(state, graph, tags),
             "important_uncovered": [],
             "consolidated": {},
             "mode": "llm",
         }
 
-    monkeypatch.setattr(cg, "build_concept_map", fake_build)
+    monkeypatch.setattr(cm, "build_concept_map", fake_build)
 
     class CaptureStore:
         def __init__(self): self.events = []
         def append(self, event_type, data): self.events.append((event_type, data))
 
     store = CaptureStore()
-    host = SimpleNamespace(_reflect_client=lambda: object(), store=store)
-    assert StrategyCadenceMixin._concept_coverage_snapshot(host, state) is not None
+    host = _CadenceHost(store)
+    assert host._concept_coverage_snapshot(state) is not None
 
     # The operator node (0) AND the classifier node (1) are both KNOWN — the operator node survives the
     # staleness filter despite its at_vocab=0, so neither enters the LLM todo set.

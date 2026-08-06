@@ -21,8 +21,9 @@ from looplab.events.replay import fold  # noqa: E402
 from looplab.serve import run_commands as run_commands_module  # noqa: E402
 from looplab.serve.engine_proc import EngineSpawnOutcomeUnknown  # noqa: E402
 from looplab.serve.protocol import CONTROL_EVENTS, PHASE_FINALIZING  # noqa: E402
+from looplab.serve.control_validation import CONTROL_DATA_FIELDS  # noqa: E402
 from looplab.serve.run_commands import (  # noqa: E402
-    CONTROL_DATA_FIELDS, CONTROL_SPECS, TERMINAL_STATUSES, EnginePolicy, RunCommandService,
+    CONTROL_SPECS, TERMINAL_STATUSES, EnginePolicy, RunCommandService,
     _process_identity, normalize_control, run_generation_token, task_file_for)
 from looplab.serve.server import make_app  # noqa: E402
 

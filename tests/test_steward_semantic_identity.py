@@ -544,13 +544,15 @@ def test_prune_curation_scratch_bounds_orphan_locks(tmp_path, monkeypatch):
     import os
     import time
 
-    from looplab.engine import lessons as _lessons
+    # The scratch bounds moved with the protocol they belong to (doc 25 EM-03): the finalize
+    # claim/recovery transaction is `engine/curation_protocol.py`, not `engine/lessons.py`.
+    from looplab.engine import curation_protocol as _protocol
 
     memory = LessonMemory(_engine(tmp_path))
     scratch = tmp_path / ".curation_invocations"
     scratch.mkdir(parents=True)
-    monkeypatch.setattr(_lessons, "_CURATION_SCRATCH_MAX_ENTRIES", 8)
-    old = time.time() - (_lessons._CURATION_SCRATCH_MIN_AGE_S + 3600)
+    monkeypatch.setattr(_protocol, "_CURATION_SCRATCH_MAX_ENTRIES", 8)
+    old = time.time() - (_protocol._CURATION_SCRATCH_MIN_AGE_S + 3600)
 
     # 20 OLD orphan locks (no `.json` claim) — all prunable back down to the cap.
     for i in range(20):
@@ -573,4 +575,4 @@ def test_prune_curation_scratch_bounds_orphan_locks(tmp_path, monkeypatch):
     assert fresh.name in remaining          # too young to prune
     assert paired_claim.name in remaining   # durable recovery claim untouched
     assert paired_lock.name in remaining    # paired with a live claim
-    assert len(remaining) <= _lessons._CURATION_SCRATCH_MAX_ENTRIES + 2  # + the two intentional keeps
+    assert len(remaining) <= _protocol._CURATION_SCRATCH_MAX_ENTRIES + 2  # + the two intentional keeps

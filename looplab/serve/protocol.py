@@ -59,7 +59,7 @@ EXPECTED_RUN_GENERATION_FIELD = "expected_generation"
 
 # Control events the UI is allowed to append (intent). The engine writes the domain effect.
 # FROZEN on purpose: this is the security boundary routers/control.py checks membership against and
-# run_commands asserts a ControlSpec for. As a plain set, any imported module — or a test doing
+# control_validation asserts a ControlSpec for. As a plain set, any imported module — or a test doing
 # `CONTROL_EVENTS.add(...)` — could widen it process-wide and authorize a new appendable type with
 # no failing assertion and no spec review. Adding a type must be an edit to THIS literal.
 CONTROL_EVENTS = frozenset({

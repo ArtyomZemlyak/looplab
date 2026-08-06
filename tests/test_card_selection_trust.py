@@ -215,3 +215,42 @@ def test_a_strategist_treatment_still_normalizes_to_the_closed_default():
     assert (treatment.stance, treatment.novelty_weight, treatment.coverage_weight) == (
         "explore", 0.7, 0.2)
     assert treatment.confidence_weight == 0.0
+
+
+def test_the_weight_has_exactly_one_way_in():
+    """What makes the reachability claim in `_foresight_signal` and the configuration guide TRUE.
+
+    The Strategist is blocked by `validate_card_scoring`'s exact-set match — but that only closes the
+    door if the validator is the ONLY thing that ever assigns `Engine._card_scoring`. A second
+    assignment path (a config loader, a resume restore, a control handler) would reopen it silently,
+    and the docs would go from accurate to actively misleading with nothing failing.
+
+    The walk comes from `_source_scan` rather than a local `rglob`, per the meta-guard in
+    `test_source_scan_helper.py`. Its reason is not tidiness: a hand-rolled walk reading plain
+    `utf-8` dies on `runtime/command_eval.py`'s BOM, which is exactly what the first draft of this
+    test did.
+    """
+    import ast
+
+    from tests import _source_scan
+
+    writes = []
+    for path, tree in _source_scan.iter_trees():
+        for node in ast.walk(tree):
+            targets = (node.targets if isinstance(node, ast.Assign)
+                       else [node.target] if isinstance(node, (ast.AnnAssign, ast.AugAssign)) else [])
+            for target in targets:
+                if (isinstance(target, ast.Attribute) and target.attr == "_card_scoring"
+                        and isinstance(target.value, ast.Name) and target.value.id == "self"):
+                    writes.append((path, node.lineno))
+
+    assert len(writes) == 1, (
+        "_card_scoring is assigned from more than one place: "
+        f"{[(p.name, line) for p, line in writes]}")
+    path, lineno = writes[0]
+    assert path.name == "strategy.py", path.name
+    # The single assignment must read the VALIDATED map, not the raw proposal.
+    source = path.read_text(encoding="utf-8-sig", errors="replace").split("\n")
+    assert "validate_card_scoring(" in "\n".join(source[max(0, lineno - 6):lineno]), (
+        "the single assignment no longer comes from validate_card_scoring, so a proposal naming "
+        "confidence_weight could reach the scorer")

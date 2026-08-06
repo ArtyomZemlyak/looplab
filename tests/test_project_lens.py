@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from looplab.search.concept_graph import (project_lens, default_lenses, concept_touch_counts)
+from looplab.search.concept_lens import concept_touch_counts, default_lenses, project_lens
 
 
 def _edges(triples):
@@ -94,7 +94,7 @@ def test_serialized_projection_is_byte_stable_across_python_hash_seeds():
     # so each projection is built under a genuinely different string-hash layout, then compare wire bytes.
     script = r"""
 import json
-from looplab.search.concept_graph import project_lens
+from looplab.search.concept_lens import project_lens
 
 concepts = ["zeta", "alpha", "hub", "mid", "omega", "beta"]
 triples = [

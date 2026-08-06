@@ -6,7 +6,7 @@ to know the other existed, and no way to know which one a third caller meant. Se
 empirical predictors each wrote out the same Euclidean loop around the shared `knn_idw`.
 
 The renderers' divergence is load-bearing and stays. What changes is that the names say which is
-which, and that a map at `_node_text` lists all four.
+which, and that a map at `node_text` lists all four.
 """
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ import pytest
 from _source_scan import PKG
 from looplab.core.models import Idea, Node
 from looplab.core.numeric import euclidean, knn_idw
-from looplab.search import concept_graph, foresight, graded_novelty, novelty_recall, panel, proxy
-from looplab.search import surrogate
+from looplab.search import concept_tagging, foresight, graded_novelty, novelty_recall, panel
+from looplab.search import proxy, surrogate
 
 
 # ------------------------------------------------------------------ one distance
@@ -114,24 +114,24 @@ def test_each_name_says_what_it_renders():
 
 def test_the_value_carrying_renderer_still_carries_values():
     """`novelty_recall` exists to tell a VARIANT from a duplicate, which needs the values that
-    `_node_text` deliberately drops."""
+    `node_text` deliberately drops."""
     node = Node(id=1, operator="mutate",
                 idea=Idea(operator="mutate", params={"temperature": 0.02}))
     assert "0.02" in novelty_recall._idea_full_text(node)
-    assert "0.02" not in concept_graph._node_text(node)
+    assert "0.02" not in concept_tagging.node_text(node)
 
 
 def test_the_map_lists_every_renderer():
-    doc = concept_graph._node_text.__doc__ or ""
+    doc = concept_tagging.node_text.__doc__ or ""
     for named in ("_idea_tag_text", "_idea_full_text", "_idea_prose"):
         assert named in doc, f"the map does not mention {named}"
     assert "load-bearing" in doc, "and it must say why they are not merged"
 
 
 def test_the_classifier_surface_still_excludes_the_proposers_own_claim():
-    """The reason `_node_text` is not simply "everything on the idea": feeding `Idea.concepts` to the
+    """The reason `node_text` is not simply "everything on the idea": feeding `Idea.concepts` to the
     classifier would let a proposal manufacture the evidence graded-novelty admission relies on."""
     node = Node(id=1, operator="mutate",
                 idea=Idea(operator="mutate", concepts=["totally-novel-thing"]))
-    assert "totally-novel-thing" not in concept_graph._node_text(node)
+    assert "totally-novel-thing" not in concept_tagging.node_text(node)
     assert "totally-novel-thing" not in graded_novelty._idea_tag_text(node.idea)

@@ -712,7 +712,7 @@ persisted `co_occurs` cache rows are ignored. A hierarchy is then **computed** b
   carries** (never divided). Current rollups and the median baseline exclude tombstoned/aborted lifecycle
   rows; best/mean eligibility also requires an evaluated, finite metric that is not explicitly infeasible.
   `delta_*` is direction-normalized vs that median, so positive means better for both minimize and maximize
-  runs. See `looplab/search/concept_graph.py`.
+  runs. See `looplab/search/concept_analytics.py`.
 - `node_concept_delta(state, node_id)` — one node's concepts as a **delta vs its parent(s)**:
   `{parent_ids, added, removed, inherited}` (a merge inherits from the UNION of parents; a root's concepts
   are all `added` for legacy full authoring, while a delta-authored root inherits the run base). This is a
@@ -897,8 +897,10 @@ Where each concept lives in the code:
 | Concept | Module |
 |---|---|
 | Domain models + event envelope | `core/models.py` |
+| Card identity: versioned action/idea digests, ownership receipts, `Card` + its provenance | `core/cards.py` (re-exported through `core/models.py`) |
 | Layered settings + masked snapshot | `core/config.py` |
 | Append-only log / pure fold / SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
+| Derived Card ledger (fold-time receipt bounds + the `derive_cards` post-pass) | `events/card_ledger.py` |
 | Sandbox seam + subprocess/Docker bodies | `runtime/sandbox.py` |
 | Researcher/Developer roles (toy + LLM) | `agents/roles.py`, `agents/unified_agent.py` |
 | Structured output + LLM client + cost accountant | `core/parse.py`, `core/llm.py` |
@@ -906,12 +908,16 @@ Where each concept lives in the code:
 | Operators (merge/ensemble, sweep) | `search/operators.py`, `sweep.py` |
 | Control loop + crash-resume | `engine/orchestrator.py` |
 | Authoritative server command lifecycle + leases | `serve/run_commands.py` |
+| HTTP control-payload validation (`normalize_control` + the five per-event tables) | `serve/control_validation.py` |
+| Durable whole-run Replay/deletion receipts + the destructive-quiescence ladder | `serve/durable_op.py`, `serve/reset_transaction.py`, `serve/deletion_transaction.py` |
+| Serve-side paid work: metering lease + claim→terminal receipt ledger | `serve/paid_work.py`, `serve/paid_ledger.py` |
 | Variance gate + multi-seed confirmation | `trust/gate.py`, `trust/confirm.py` |
 | CV harness, K-fold, purged walk-forward | `trust/cv.py` |
 | Leakage detectors + data profiler | `trust/leakage.py`, `core/profile.py` |
 | Vector store + agentic retrieval | `tools/vectorstore.py`, `tools/retrieval.py`, `tools/knowledge_tools.py`, `agents/agent.py` |
 | Cross-run case library | `engine/memory.py` |
-| Part IV/V concept materialization + graph projections | `core/concepts.py`, `search/concept_projection.py`, `search/concept_graph.py` |
+| Part IV/V concept materialization + graph projections | `core/concepts.py`, `search/concept_projection.py`, the five-module concept cluster `search/concept_graph.py` (structure) → `search/concept_tagging.py` / `search/concept_lens.py` → `search/concept_analytics.py` → `search/concept_map.py` |
+| Live concept cadence (re-tag, consolidation, edges, coverage snapshot) | `engine/concept_cadence.py` |
 | Cross-run index, claims + agent reads | `engine/cross_run_index.py`, `engine/claims.py`, `tools/cross_run_tools.py` |
 | Portfolio governance + paid steward lifecycle | `engine/concept_registry.py`, `engine/governance_health.py`, `engine/steward_invocation.py`, `engine/concept_steward.py`, `engine/claim_steward.py`, `engine/task_facets.py` |
 | Research Atlas / typed owner governance HTTP | `serve/routers/cross_run.py` |

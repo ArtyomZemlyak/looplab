@@ -201,7 +201,7 @@ def _tag_lesson(statement: str, graph) -> list[str]:
     if graph is None:
         return []
     try:
-        from looplab.search.concept_graph import tag_text
+        from looplab.search.concept_tagging import tag_text
         return sorted(tag_text(statement, graph, allow_plural=True))
     except Exception:  # noqa: BLE001 — tagging is best-effort context, never blocks the guard
         return []

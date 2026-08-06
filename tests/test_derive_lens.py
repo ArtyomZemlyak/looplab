@@ -3,7 +3,7 @@ spec (relation subset + labels); it writes no events -> replay-clean. Best-effor
 so the caller falls back to a default lens. The result feeds project_lens/project_hierarchy."""
 import pytest
 
-from looplab.search.concept_graph import derive_lens, project_lens
+from looplab.search.concept_lens import derive_lens, project_lens
 
 
 class _LensClient:

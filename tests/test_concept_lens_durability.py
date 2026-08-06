@@ -511,6 +511,52 @@ def test_legacy_string_root_terminal_replays_after_consolidation_with_original_s
     assert "agents/controller" in payload["tree"]["nodes"]
 
 
+def test_a_visible_terminal_whose_receipt_cannot_be_confirmed_replays_as_uncertain(
+        tmp_path, monkeypatch):
+    """A durable lens terminal is only replayable once its storage confirms the sync.
+
+    A strict append can write a complete line and then fail to confirm its fsync: the line is
+    visible for same-key reconciliation but is not authoritative. This drives that path end to end
+    through the endpoint, which is what the fsync-confirm seam is FOR — and it is the seam doc 25
+    SR-01 moved into `serve/paid_ledger.py`, so the injection has to name that module. If a router
+    ever re-bound `strict_fsync` and confirmed with its own copy, the injection below would still
+    succeed and simply reach nothing; `tests/test_paid_ledger.py` states that rule over the binding.
+    """
+    run_dir = _seed_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    generation = client.get("/api/runs/demo/concepts").json()["generation"]
+    identity, terminal = _write_derived_terminal(
+        run_dir, "unconfirmed-terminal", generation, root="agents/orchestrator")
+    monkeypatch.setattr(
+        "looplab.serve.server.make_llm_client",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("an unconfirmed terminal must never authorize a second paid call")),
+    )
+    monkeypatch.setattr(
+        "looplab.serve.paid_ledger.strict_fsync",
+        lambda _fd: (_ for _ in ()).throw(OSError("terminal fsync unavailable")))
+
+    unconfirmed = _post(TestClient(make_app(tmp_path)), "unconfirmed-terminal")
+    payload = unconfirmed.json()
+    assert unconfirmed.status_code == 200
+    assert payload.get("code") == "concept_lens_uncertain", (
+        "a terminal whose fsync could not be confirmed was disclosed as authoritative")
+    assert payload["ambiguous"] is True
+    assert payload["request_id"] == identity
+    assert "unconfirmed" in payload["error"]
+
+    # ...and once storage can sync again, the SAME key replays the already-paid terminal.
+    monkeypatch.undo()
+    monkeypatch.setattr(
+        "looplab.serve.server.make_llm_client",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a confirmed terminal replay must not rebuild a provider client")),
+    )
+    replay = _post(TestClient(make_app(tmp_path)), "unconfirmed-terminal")
+    assert replay.status_code == 200 and replay.json()["ok"] is True
+    assert replay.json()["seq"] == terminal.seq
+
+
 @pytest.mark.parametrize("malformed_root", [
     ["agents/orchestrator"],
     {"concept": "agents/orchestrator"},

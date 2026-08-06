@@ -246,7 +246,10 @@ class LLMRepoDeveloper:
         # PART V §22: read-only cross-run knowledge, ROLE-SCOPED to the developer (repair/impl lessons).
         self._cross_run_read_tools = bool(cross_run_read_tools)
         self._cross_run_memory_dir = memory_dir
-        self.loop_opts = dict(loop_opts or {})
+        # Coerced at the BOUNDARY (doc 25 AG-01) so an unknown option name raises here, in the
+        # ctor, rather than surviving as dead weight in a dict until the drive call swallows it.
+        from looplab.agents.loop_options import LoopOptions
+        self.loop_opts = LoopOptions.coerce(loop_opts)
         # C4 plan decomposition + hard per-session backstop (see Settings.developer_*).
         self._plan_decompose = plan_decompose
         self._plan_min_steps = max(2, int(plan_min_steps))
@@ -429,16 +432,20 @@ class LLMRepoDeveloper:
                         "its metric. Briefly summarize what you wrote.",
                         {"summary": {"type": "string"}}, [])
 
-    def _session_opts(self, *, max_turns=None, time_budget=None) -> dict:
+    def _session_opts(self, *, max_turns=None, time_budget=None):
         """loop_opts + the HARD per-session ceiling. A developer session ALWAYS gets a finite bound so
         a model that keeps writing/exploring without ever emitting `done` fails cleanly with the code
-        it has written, instead of the 10k-call / multi-hour runaway a big task produced."""
-        opts = dict(getattr(self, "loop_opts", {}) or {})
-        opts["max_turns"] = int(max_turns if max_turns is not None
-                                else getattr(self, "_session_max_turns", 500))
-        opts["time_budget_s"] = float(time_budget if time_budget is not None
-                                      else getattr(self, "_session_time_budget_s", 1200.0))
-        return opts
+        it has written, instead of the 10k-call / multi-hour runaway a big task produced.
+
+        `.replace()`, not `.with_defaults()`: the ceiling is the point — it must WIN over whatever
+        the configured bundle carries, which is exactly what the old `opts[...] = ...` assignment did.
+        """
+        from looplab.agents.loop_options import LoopOptions
+        return LoopOptions.coerce(getattr(self, "loop_opts", None)).replace(
+            max_turns=int(max_turns if max_turns is not None
+                          else getattr(self, "_session_max_turns", 500)),
+            time_budget_s=float(time_budget if time_budget is not None
+                                else getattr(self, "_session_time_budget_s", 1200.0)))
 
     def _plan_emit_spec(self) -> dict:
         from looplab.tools._base import fn_spec

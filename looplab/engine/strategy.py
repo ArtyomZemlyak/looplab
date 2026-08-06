@@ -6,6 +6,15 @@ StrategyCadenceMixin)` inherits these methods unchanged, so there is ZERO call-s
 `_ablate_every`, `_coverage_context`, `strategist_every`, `n_seeds` … knobs), exactly as they did
 inside the class.
 
+Two clusters that used to sit here left in doc 25 EC-09, because neither is strategist cadence:
+the PART IV/V concept subsystem (classifier re-tag / consolidation / edges / hypothesis tags /
+concept-coverage snapshot / run-base seed) is `engine/concept_cadence.py`, and it paces on its OWN
+`concept_retag_every` gate rather than `strategist_every`; the R1-c calibrated-verifier metric
+tie-break is `engine/verifier_tiebreak.py`, and it is SELECTION machinery — it can move the run's
+reported champion. What remains here is the consult/apply/coverage core: build the brief, validate
+and merge the operator pin against the Strategist's decision, apply the knobs through the governance
+matrix, and record the breadth snapshot the brief reads.
+
 `_op_span` deliberately stays on the Engine: it is a generic new-trace span helper the research /
 hypothesis-merge / lessons clusters use too, not strategist-specific. The moved methods call it as
 `self._op_span(...)` — resolved on the Engine instance, unchanged.
@@ -24,37 +33,19 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext,
                                        classify_run_phase,
                                        validate_card_scoring, validate_strategy)
 from looplab.core.config import parallelism_aliases
-from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
-from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest,
-                                  verifier_evidence_snapshot)
 from looplab.core.llm_broker import LLM_LANES, in_llm_lane
-from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, NODE_CONCEPT_PROVENANCE_CLASSIFIER,
-                                  NODE_CONCEPT_PROVENANCE_OPERATOR, RunState,
-                                  node_concept_event_provenance)
+from looplab.core.models import RunState
 from looplab.engine.cadence import cadence_due, cadence_marks
 from looplab.engine.widths import EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width
 from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
 from looplab.events.replay import fold
-from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
-                                  EV_CONCEPT_EDGE, EV_COVERAGE_SNAPSHOT, EV_HYPOTHESIS_CONCEPTS,
-                                  EV_NODE_CONCEPTS, EV_RUN_CONCEPTS, EV_STRATEGY_DECISION,
-                                  EV_VERIFIER_GROUP_SCORED)
-from looplab.search.coverage import (analytics_projection_token, coverage_signal,
-                                     latest_live_snapshot,
-                                     snapshot_matches_analytics_projection)
+from looplab.events.types import EV_COVERAGE_SNAPSHOT, EV_STRATEGY_DECISION
+from looplab.search.coverage import (already_covered_at, analytics_projection_token, coverage_signal,
+                                     latest_live_snapshot)
 from looplab.search.policy import available_policies, make_policy, operator_yields
 from looplab.trust.cross_run import (cross_run_text, same_live_direction,
                                      sanitize_cross_run_projection, valid_live_direction)
-
-# HT (§21.18): max hypotheses to agentically tag per strategist cadence, so a large board (the rubertlite
-# run hit ~150) tags incrementally over a few cadences instead of exploding one cadence's LLM budget.
-_HYP_TAG_CAP = 60
-# B1 (§21.18): a node whose tags were made against < _RETAG_GROWTH of the latest vocabulary is "stale" and
-# gets re-tagged against the grown vocab; at most _RETAG_CAP such nodes per cadence (bounds the LLM cost,
-# the rest refresh over subsequent cadences).
-_RETAG_GROWTH = 0.7
-_RETAG_CAP = 20
 
 
 class StrategyCadenceMixin:
@@ -350,24 +341,6 @@ class StrategyCadenceMixin:
         # (`_maybe_snapshot_coverage`) — `_cadence_due` guards `every <= 0` for that case.
         return cadence_due(n, cadence_marks(marks), self.strategist_every)
 
-    def _should_consult_concepts(self, state: RunState, *, marks=None) -> bool:
-        """PART V (F1): the concept CLASSIFIER re-tag / consolidation cadence — DECOUPLED from
-        `strategist_every`. The LLM concept map is heavier and slower-moving than a strategy consult, so it
-        refreshes on its OWN `concept_retag_every` interval (default 30) rather than every consult.
-        Researcher-authored `idea.concepts` still fold into node_concepts at node_created (immediate UI
-        freshness); this only paces the classifier-EVIDENCE + consolidation refresh and the concept-coverage
-        pivot snapshot. Same shape/guards as `_should_consult` (creation decision point, seed boundary, then
-        every interval — since-last, for the same batch-stride reason `_should_consult` states)."""
-        if state.pending_nodes():
-            return False
-        n = len(state.nodes)
-        if n == 0:
-            return False
-        if n == self.n_seeds:
-            return True
-        every = getattr(self, "concept_retag_every", 0) or self.strategist_every
-        return cadence_due(n, cadence_marks(marks), every)
-
     def _record_strategy(self, strat: dict, state: RunState,
                          ctx: Optional[StrategyContext] = None) -> None:
         # every newly recorded decision has one canonical spelling per concurrency
@@ -603,12 +576,6 @@ class StrategyCadenceMixin:
                 pass
 
     @staticmethod
-    def _already_covered_at(state: RunState, n: int) -> bool:
-        return any((c or {}).get("at_node") == n
-                   and snapshot_matches_analytics_projection(state, c)
-                   for c in state.coverage_snapshots)
-
-    @staticmethod
     def _autonomous_strategy_already_recorded_at(state: RunState, n: int) -> bool:
         """Whether the latest strategy action at this node count was autonomous.
 
@@ -644,488 +611,13 @@ class StrategyCadenceMixin:
         n = len(state.nodes)
         if (not self._coverage_context
                 or not self._should_consult(state, marks=state.coverage_snapshots)
-                or self._already_covered_at(state, n)):
+                or already_covered_at(state, n, state.coverage_snapshots)):
             return state
         self.store.append(EV_COVERAGE_SNAPSHOT, {
             "at_node": n,
             "projection_token": analytics_projection_token(state),
             **coverage_signal(state, resolution=self.archive_resolution)})
         return fold(self.store.read_all())
-
-    @in_llm_lane("enrichment")
-    def _maybe_snapshot_concept_coverage(self, state: RunState) -> RunState:
-        """PART IV Phase 2a: record a compact concept-graph coverage + uncovered-region snapshot at the
-        `concept_retag_every` cadence (via `_should_consult_concepts`, NOT `strategist_every`) when
-        `concept_pivot` is on. The producer is LLM-backed when a client is wired,
-        with a deterministic heuristic fallback; recording the result makes replay deterministic. The
-        folded record does not select a node directly, but its explore-stance directive can change future
-        Researcher candidates. Same at_node idempotence gate as `_maybe_snapshot_coverage`; no-op
-        off-cadence / mid-eval / when the flag is off / when neither a client nor fallback skeleton works."""
-        # This gates on the seed boundary + ``concept_retag_every`` (via ``_should_consult_concepts``),
-        # NOT ``strategist_every``. Every operator-facing description — this docstring, configuration.md,
-        # the core config help, and the Settings-UI schema — is aligned to that cadence so operators tune
-        # the control that actually governs snapshot freshness / paid-LLM cost.
-        if (not getattr(self, "_concept_pivot", False)
-                or not self._should_consult_concepts(
-                    state, marks=state.concept_coverage_snapshots)):
-            return state
-        n = len(state.nodes)
-        if any((c or {}).get("at_node") == n
-               and snapshot_matches_analytics_projection(state, c)
-               for c in state.concept_coverage_snapshots):
-            return state
-        # KNOWN GAP (not a claim-fenced path, unlike the finalize stewards): this cadence dispatches
-        # `_concept_coverage_snapshot`'s paid tagging/consolidation calls DIRECTLY, with no durable
-        # invocation claim taken before the provider call. A crash between provider success and the
-        # EV_NODE_CONCEPTS / EV_CONCEPT_COVERAGE_SNAPSHOT appends therefore re-purchases the
-        # un-recorded tagging on resume. It is BOUNDED, not prevented: `_RETAG_CAP`/`_HYP_TAG_CAP`
-        # limit each pass and per-node incremental reuse skips already-tagged nodes, so the repeat is
-        # a small re-spend rather than the whole snapshot. Closing it means the claim-before-dispatch
-        # protocol `lessons.py::_paid_curation_attempt` implements — claim the bounded input digest,
-        # persist terminal/ambiguous receipts — since an eventual snapshot is not a payment fence.
-        snap = self._concept_coverage_snapshot(state)
-        if snap is None:
-            return state
-        # The agentic producer may have persisted fresh tags/consolidation while building ``snap``. Bind the
-        # snapshot to that post-write projection, not the stale state object passed into the cadence.
-        current = fold(self.store.read_all())
-        if any((c or {}).get("at_node") == n
-               and snapshot_matches_analytics_projection(current, c)
-               for c in current.concept_coverage_snapshots):
-            return current
-        self.store.append(EV_CONCEPT_COVERAGE_SNAPSHOT, {
-            "at_node": n, "projection_token": analytics_projection_token(current), **snap})
-        return fold(self.store.read_all())
-
-    def _maybe_seed_run_base_concepts(self, state: RunState) -> RunState:
-        """PART V (B): seed `run_base_concepts` ONCE from the first evaluated node's AUTHORED concepts when
-        `concept_run_base` is on. Idempotent + replay-safe: the gate is "base is empty", so once the
-        EV_RUN_CONCEPTS is in the log every resume folds a populated base and this never re-emits. Only the
-        main task appends it (invariant 1). No-op while off or until a node has authored concepts."""
-        if not getattr(self, "_concept_run_base", False):
-            return state
-        from looplab.core.concepts import (
-            CONCEPT_DELTA_MISSING_RUN_BASE_REASON,
-            normalized_concept_materialization_receipt,
-        )
-        raw_base_receipt = state.run_base_concept_receipt
-        base_receipt = normalized_concept_materialization_receipt(raw_base_receipt)
-        derived_missing_base = bool(
-            base_receipt is not None
-            and CONCEPT_DELTA_MISSING_RUN_BASE_REASON in base_receipt["reasons"]
-        )
-        if state.run_base_concepts or (raw_base_receipt is not None and not derived_missing_base):
-            # A partial/unavailable empty base is still an authored base event. Never overwrite it with
-            # a later apparently exact seed; operator repair remains an explicit last-write-wins action.
-            # the fold-derived missing-base receipt is the one exception: it proves that no
-            # EV_RUN_CONCEPTS exists, so a later exact evaluated full node may still perform the intended seed.
-            return state
-        prov = getattr(state, "node_concept_provenance", None) or {}
-        receipts = getattr(state, "node_concept_materialization_receipts", None) or {}
-        # First evaluated node whose concepts the RESEARCHER authored (not a classifier tag) — the run's
-        # common tech stack. Deterministic (id-sorted). Downstream nodes then author only deltas vs this.
-        for node in sorted(state.evaluated_nodes(), key=lambda x: x.id):
-            concepts = state.node_concepts.get(node.id)
-            if (node.id in state.aborted_nodes or not concepts
-                    or prov.get(node.id) != NODE_CONCEPT_PROVENANCE_AUTHORED
-                    or node.id in receipts):
-                # a bounded/invalid/otherwise partial membership cannot become an exact
-                # run base merely because the next event contains only its retained valid subset.
-                continue
-            # Normalize EXACTLY as _on_run_concepts folds it (drop empty/dup), and only seed a NON-EMPTY
-            # base. Otherwise `["" ]`-style concepts would fold to an empty run_base_concepts, the "base is
-            # empty" gate would never clear, and this cadence would re-emit EV_RUN_CONCEPTS every pass.
-            seen: set[str] = set()
-            base: list[str] = []
-            for c in concepts:
-                s = str(c)
-                if s and s not in seen:
-                    seen.add(s)
-                    base.append(s)
-            if base:
-                self.store.append(EV_RUN_CONCEPTS, {"concepts": base})
-                return fold(self.store.read_all())
-        return state
-
-    def _concept_coverage_snapshot(self, state: RunState) -> Optional[dict]:
-        """The compact concept-coverage record (uncovered regions + top-concentration + lock-in).
-
-        AGENTIC + UNIVERSAL when a reflect client is wired (§21.13): the LLM agent BUILDS the concept graph
-        from the actual experiments' RECORDED text (`build_concept_map` with `tools=None`, mode="llm" — it
-        tags from each node's captured idea/params/result/log excerpts, works on ANY task, no curated
-        skeleton needed; wiring run tools would make it fully agentic with live code/log reads but heavier),
-        and the uncovered-region directive comes from the per-task DERIVED importance
-        (`derive_reference_concepts`), not a hardcoded `key=True` list. This is produced ONCE per strategist
-        cadence and RECORDED as an event; `fold` only reads it (the at_node gate makes resume idempotent), so
-        replay stays deterministic even though the producer is impure — the established memo/lessons pattern.
-        Deterministic FALLBACK (no client): the alias heuristic over the task-type skeleton (curated pack
-        required) — None when neither a client nor a skeleton is available (nothing to steer on)."""
-        import contextlib
-
-        from looplab.search.concept_graph import (build_concept_map, concept_coverage, skeleton_for,
-                                                  stale_tagged_nodes, uncovered_regions)
-        from looplab.search.lock_in import lock_in_signal
-        # Defensive: a bare/None `self` (e.g. a unit test calling this as a pure helper) has no reflect
-        # client -> deterministic fallback, unchanged behaviour. Real engines get the agentic path.
-        _rc = getattr(self, "_reflect_client", None)
-        client = _rc() if callable(_rc) else None
-        seed = skeleton_for(state.task_id or "")
-        seed = seed if seed.concepts() else None
-        # guard the whole producer so a failed snapshot cannot perturb the run. A successfully
-        # recorded snapshot is deliberately behavioral: its uncovered-region cue can steer later proposals.
-        try:
-            graph = tags = cov = None
-            important: list = []
-            mode = "heuristic"
-            if client is not None:
-                parser = getattr(getattr(self, "deep_researcher", None), "parser", "tool_call")
-                # INCREMENTAL (§21.16, Phase 2c): reuse per-node tags already recorded as `node_concepts`
-                # events and only LLM-tag NEW nodes, so per-run tagging is ~O(nodes) not ~O(nodes × cadences).
-                # Bare-library EngineOptions keeps `_concept_pivot` off, while product `Settings` is ON;
-                # cadence, bounded per-pass work, and incremental reuse therefore bound product cost.
-                # The snapshot producer uses `tools=None` and tags from the node's
-                # RECORDED text (idea/params/result/log excerpts in state), i.e. mode="llm", NOT a live
-                # per-node tool-loop (passing run tools would make it fully agentic but far heavier).
-                # Span-scope the concept-map LLM generations (tagging + consolidation + importance) so they
-                # file under a `concept_coverage` op, not the ambient/next-node trace. nullcontext if spanless.
-                provenance = getattr(state, "node_concept_provenance", None) or {}
-                # Researcher-authored Idea.concepts are visible read-model claims, not an
-                # independent tagging result. Reusing them as known_tags would prevent the classifier from
-                # ever examining that node and would later let the claim masquerade as classifier evidence.
-                # Operator-edited tags ARE authoritative for THIS node (a human/assistant asserted them via
-                # the concept_tag_edited control event), so treat them as known too — otherwise the cadence
-                # re-tags an operator node every pass forever (the fold guard rejects the re-tag, so it never
-                # converges: wasted LLM calls + no-op log growth). This keeps operator tags out of the
-                # classifier-only cross-run/novelty EVIDENCE channel (still gated on CLASSIFIER provenance).
-                receipts = getattr(state, "node_concept_materialization_receipts", None) or {}
-                all_known = {
-                    int(k): v
-                    for k, v in (getattr(state, "node_concepts", None) or {}).items()
-                    if (provenance.get(int(k)) == NODE_CONCEPT_PROVENANCE_OPERATOR
-                        or (provenance.get(int(k)) == NODE_CONCEPT_PROVENANCE_CLASSIFIER
-                            and int(k) not in receipts))
-                }
-                at_vocab = {int(k): int(v)
-                            for k, v in (getattr(state, "node_concepts_at_vocab", None) or {}).items()}
-                # B1 (§21.18): re-tag the most-stale nodes — those tagged against a much smaller vocabulary
-                # than the latest (a concept minted later may now apply to them). Bounded per cadence, and
-                # a strict no-op until the vocabulary has actually grown. Excluding a stale node from `known`
-                # makes build_concept_map re-tag it against the grown vocab. Staleness is a CLASSIFIER-only
-                # notion — only classifier receipts carry an `at_vocab`. An operator-edited node has its
-                # at_vocab receipt popped (fold), so passing it here would read as at_vocab=0 (maximally
-                # stale) and re-tag it every cadence — a re-tag the fold then rejects (never converges).
-                # Restrict the stale candidates to classifier nodes so operator tags are left untouched.
-                classifier_known = [nid for nid in all_known
-                                    if provenance.get(nid) == NODE_CONCEPT_PROVENANCE_CLASSIFIER]
-                stale = set(stale_tagged_nodes(classifier_known, at_vocab,
-                                               growth=_RETAG_GROWTH, cap=_RETAG_CAP))
-                known = {nid: v for nid, v in all_known.items() if nid not in stale}
-                known_renames = {str(k): str(v)
-                                 for k, v in (getattr(state, "concept_consolidation", None) or {}).items()}
-                _span = getattr(self, "_op_span", None)
-                with (_span("concept_coverage") if callable(_span) else contextlib.nullcontext()):
-                    cmap = build_concept_map(state, task_goal=state.goal or "", client=client, tools=None,
-                                             seed_graph=seed, parser=parser, known_tags=known,
-                                             known_renames=known_renames)
-                # B3 (§21.18): record only the NEW consolidation decisions so later cadences keep them FIXED
-                # (stable vocabulary, no flapping). Accumulated in the fold; emit-only-if-new -> no churn.
-                new_renames = {k: v for k, v in (cmap.get("consolidated") or {}).items()
-                               if known_renames.get(k) != v}
-                if new_renames:
-                    self.store.append(EV_CONCEPT_CONSOLIDATION,
-                                      {"rename": new_renames, "mode": cmap.get("mode", "llm")})
-                # Reuse the coverage build_concept_map already computed (no second O(nodes) rollup).
-                graph, tags = cmap["graph"], cmap["tags"]
-                cov, important = cmap["coverage"], cmap["important_uncovered"]
-                mode = cmap.get("mode", "llm")
-                v_now = len(graph.concepts())    # the vocabulary size THESE tags were produced against
-                raw_tag_modes = cmap.get("raw_tag_modes") or {}
-                # Record a node's RAW tags + at_vocab when it is NEW/re-tagged (not in `known`) OR its tags
-                # changed. Re-recording a staleness-refreshed node even when its tags are unchanged updates
-                # its at_vocab, so it isn't flagged stale (and re-tagged) every cadence — no churn.
-                for nid, ft in (cmap.get("raw_tags") or {}).items():
-                    nid = int(nid)
-                    node = state.nodes.get(nid)
-                    if node is None:
-                        continue
-                    # one classifier batch may contain per-node heuristic fallbacks. Stamp
-                    # the actual producer so those rows cannot enter admission/capsules as independent
-                    # classifier evidence merely because their successful siblings used the LLM.
-                    producer_mode = raw_tag_modes.get(
-                        nid, raw_tag_modes.get(str(nid), mode))
-                    # Canonicalize and bound tags before the durable node_concepts trust boundary.
-                    raw_ids = list(ft)
-                    normalized = [normalize_concept_id(c) for c in raw_ids]
-                    classifier_row = (node_concept_event_provenance({"mode": producer_mode})
-                                      == NODE_CONCEPT_PROVENANCE_CLASSIFIER)
-                    if classifier_row and (
-                            any(cid is None for cid in normalized)
-                            or len(raw_ids) > MAX_MATERIALIZED_CONCEPTS):
-                        # a classifier row outside its reviewed schema is only a bounded
-                        # display fallback. Never persist a filtered subset as independent evidence.
-                        producer_mode = "offline-heuristic"
-                    new_ids = sorted({cid for cid in normalized if cid})[:MAX_MATERIALIZED_CONCEPTS]
-                    final_classifier_row = (node_concept_event_provenance({"mode": producer_mode})
-                                            == NODE_CONCEPT_PROVENANCE_CLASSIFIER)
-                    if not new_ids and not final_classifier_row:
-                        continue
-                    if nid not in known or known.get(nid) != new_ids:
-                        self.store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": new_ids,
-                                                             "mode": producer_mode, "at_vocab": v_now,
-                                                             "generation": node.attempt})
-                # do not persist co-tag edges. They can decrease or disappear after
-                # re-tagging, while the commutative max ledger can only ratchet upward and therefore
-                # leaves ghost co-occurrences. ConceptFrame derives that relation from its exact bounded
-                # membership snapshot for online, offline and legacy runs. Explicit is_a assertions remain
-                # durable: path/curated parent structure is still the typed graph's audit substrate.
-                try:
-                    prior_edges = getattr(state, "concept_edges", None) or {}
-                    fresh_edges: list[dict] = []
-                    seen: set[str] = set()
-                    for concept in graph.concepts():
-                        if concept.id.endswith("/*"):
-                            continue
-                        prefix_parent = (
-                            concept.id.rsplit("/", 1)[0] if "/" in concept.id else None)
-                        parents = set(graph.parents_of(concept.id))
-                        if prefix_parent:
-                            parents.add(prefix_parent)
-                        for parent in sorted(parents):
-                            if not parent or parent == concept.id:
-                                continue
-                            key = "\t".join((concept.id, "is_a", parent))
-                            if key in seen or key in prior_edges:
-                                continue
-                            seen.add(key)
-                            fresh_edges.append({
-                                "src": concept.id, "rel": "is_a", "dst": parent,
-                                "provenance": "asserted", "confidence": 1.0,
-                            })
-                    if fresh_edges:
-                        self.store.append(EV_CONCEPT_EDGE, {"edges": fresh_edges, "mode": mode})
-                except Exception:  # noqa: BLE001 - audit enrichment must not break the cadence
-                    pass
-                # HT (§21.18): agentically tag any UNtagged hypotheses against the SAME graph and record
-                # them, so taxonomy dedup reuses the agentic tags instead of the tag_text alias heuristic.
-                # Incremental (skip already-tagged) + capped per cadence, so a big board tags over a few
-                # cadences instead of exploding one. Isolated try: a tagging hiccup must not lose the snapshot.
-                try:
-                    from looplab.search.concept_graph import tag_text_llm
-                    known_h = getattr(state, "hypothesis_concepts", None) or {}
-                    h_at_vocab = getattr(state, "hypothesis_concepts_at_vocab", None) or {}
-                    v_now = len(graph.concepts())
-                    # B1-ext (§21.18): re-tag the most-STALE hypotheses (tagged against a much smaller vocab)
-                    # in addition to UNtagged ones — same at_vocab staleness rule as nodes, bounded per cadence.
-                    stale_h = set(stale_tagged_nodes(list(known_h), h_at_vocab,
-                                                     growth=_RETAG_GROWTH, cap=_RETAG_CAP))
-                    tagged_this_cadence = 0
-                    # 1 card = 1 hypothesis: tag the single Card board. Tag the DISPLAY `statement` (== the
-                    # old Hypothesis.statement, including a merged card's consolidated wording). The cache
-                    # is joined by the card id AND its seed-statement hash (below): a research card without
-                    # an explicit card_id already has that hash as its id, but a migrated native card-N does
-                    # not, so an id-only join would orphan its legacy tags.
-                    from looplab.core.models import hypothesis_concept_cache_keys
-                    for h in state.research_cards():
-                        if not getattr(h, "statement", ""):
-                            continue
-                        # Match the recorded tags by the card id OR its seed-statement hash (peer review),
-                        # and judge staleness on the MATCHED key — an id-only skip re-tagged a migrated
-                        # card-N belief every resume and mis-read its freshness.
-                        matched = next((k for k in hypothesis_concept_cache_keys(h) if k in known_h), None)
-                        if matched is not None and matched not in stale_h:   # already tagged & fresh -> skip
-                            continue
-                        if tagged_this_cadence >= _HYP_TAG_CAP:
-                            break
-                        htags = sorted(tag_text_llm(h.statement, graph, client, parser=parser,
-                                                    allow_plural=True))
-                        self.store.append(EV_HYPOTHESIS_CONCEPTS, {"hyp_id": str(h.id), "concepts": htags,
-                                                                   "mode": mode, "at_vocab": v_now})
-                        tagged_this_cadence += 1
-                except Exception:  # noqa: BLE001 — hypothesis tagging is best-effort audit enrichment
-                    pass
-            if graph is None:                   # deterministic fallback needs a curated skeleton
-                if seed is None:
-                    return None
-                graph, tags, mode = seed, None, "heuristic"
-                cov = concept_coverage(state, graph, tags)
-            if not graph.concepts():
-                return None
-            lock = lock_in_signal(state, graph, tags=tags)
-            top = cov.get("top_concept") or {}
-            # UNIVERSAL uncovered-region: prefer the LLM-DERIVED importance (any task); else the skeleton's
-            # hardcoded key-concept alarm (deterministic fallback).
-            keys = [str((m or {}).get("concept_id")) for m in (important or [])
-                    if (m or {}).get("concept_id")][:8]
-            if keys:
-                directive = ("0 coverage in {" + ", ".join(keys[:6]) + "} across all "
-                             f"{cov['experiments']} experiments — direct the next proposals there "
-                             "(not just 'broaden').")
-                fired, uncovered_key, uncovered_axes = True, keys, cov["uncovered_axes"]
-            else:
-                alarm = uncovered_regions(state, graph, tags)
-                fired, uncovered_key = alarm["fired"], alarm["uncovered_key"]
-                uncovered_axes, directive = alarm["uncovered_axes"], alarm["directive"]
-        except Exception:  # noqa: BLE001 — never let an audit snapshot crash the cadence / the run
-            return None
-        return {
-            "fired": fired,
-            "uncovered_key": uncovered_key,
-            "uncovered_axes": uncovered_axes,
-            "directive": directive,
-            "experiments": cov["experiments"],
-            "top_concept": top.get("id"),
-            "top_concept_frac": top.get("frac", 0.0),
-            "locked_axis": lock["locked_axis"],
-            "streak": lock["streak"],                  # longest same-lever run (diagnostic)
-            # current_streak = the same-lever run ENDING at the latest experiment; recent_axis = the axis
-            # the last few experiments concentrate on. The capability-expansion directive gates on
-            # current_streak (not the longest-ever streak) and names recent_axis, so a successful pivot to
-            # a different axis drops both and CLEARS the "expand the action space" cue — it fires only while
-            # the search is STILL locked in right now, not forever after a past lock-in.
-            "current_streak": lock["current_streak"],
-            "recent_axis": lock["recent_axis"],
-            "tag_mode": mode,
-        }
-
-    # --- R1-c: calibrated-verifier metric-tie-break -------------------------------------------------
-    @in_llm_lane("enrichment")
-    def _maybe_verify_ties(self, state: RunState) -> RunState:
-        """R1-c: the calibrated §12-verifier metric-tie-break (opt-in). Find the complete selector-reachable
-        exact/CI tie that is not yet resolvable and re-score every member against one evidence revision
-        (`selection_criteria`) so the fold can break it by soundness. Lazy, bounded per cadence, and
-        best-effort (no client / any failure -> skip). Emits one atomic
-        `verifier_group_scored` record; the fold reads it ONLY as a tie-break — it can never override
-        a strictly-better metric (§21.7). No-op when `select_verifier` is off. Runs in the sync cadence
-        (like the Strategist consult), so a blocking LLM call here matches the established pattern."""
-        if not state.select_verifier_tiebreak:
-            return state
-        # The producer and replay validator must agree on the selection contract before any paid
-        # verification work starts.  A future/unknown recorded contract is intentionally fail-closed:
-        # this process cannot safely emit a v1 treatment for selection rules it does not understand.
-        if state.select_verifier_contract != VERIFIER_SELECTION_CONTRACT:
-            return state
-        groups = self._metric_tie_groups(state)
-        if not groups:
-            return state
-        try:
-            client = self._reflect_client()
-        except Exception:  # noqa: BLE001
-            client = None
-        if client is None:
-            return state
-        # Process-local FAILURE guard: record a (node, generation, evidence revision) whose verify returned
-        # None so a degraded client can't re-verify the same tie every cadence (a success sets
-        # verifier_score, which _metric_tie_groups already excludes). In-memory only (verify is live, never
-        # replayed); a fresh
-        # process on resume may retry, which is fine (bounded).
-        attempted = getattr(self, "_verify_attempted", None)
-        if attempted is None:
-            attempted = self._verify_attempted = set()
-        budget = 8                       # per-cadence NODE cap so a big tie cluster can't burst cost
-        done = False
-        for group in groups:
-            # ATOMIC per group: score EVERY unscored member of a tie or NONE of it. A half-scored group
-            # would leave an unscored sibling at the neutral 0.5 midpoint, which could outrank a
-            # verified-but-low member — deciding the tie by verify TIMING/BUDGET rather than soundness. So
-            # a group with a prior FAILED member (can never be fully scored) is skipped entirely (its tie
-            # falls back to the id tie-break), and a group larger than the cadence budget is left for a
-            # later cadence (a group larger than the cap is never verified — honest + bounded).
-            attempted_keys = {
-                n.id: (n.id, n.attempt, verifier_evidence_digest(state.direction, n)) for n in group}
-            if any(attempted_keys[n.id] in attempted for n in group):
-                continue
-            # Re-score the complete current tie. Carrying an older member score into a newly expanded group
-            # would mix treatments and let one node influence two incompatible evidence snapshots.
-            todo = list(group)
-            if len(todo) > budget:
-                continue
-            verdicts, failed = [], False
-            for n in todo:
-                v = self._verifier_soundness(state, n, client)
-                budget -= 1
-                if v is None:
-                    attempted.add(attempted_keys[n.id])  # failure abstains this evidence revision hereafter
-                    failed = True
-                    break
-                verdicts.append((n, v))
-            if not failed:
-                # Publish the complete selector-reachable tie group in one durable event;
-                # per-node appends expose crash prefixes that can change the winner during replay.
-                self.store.append(EV_VERIFIER_GROUP_SCORED, {
-                    "v": 1, "contract": VERIFIER_SELECTION_CONTRACT,
-                    "requested_samples": state.select_verifier_samples,
-                    "members": [{
-                        "node_id": n.id, "generation": n.attempt,
-                        "score": round(v["score"], 4), "n_samples": v["n_samples"],
-                        "agreement": v["agreement"], "method": v["method"],
-                        "evidence_digest": verifier_evidence_digest(state.direction, n),
-                    } for n, v in verdicts],
-                })
-                done = True
-            if budget <= 0:
-                break
-        return fold(self.store.read_all()) if done else state
-
-    def _metric_tie_groups(self, state: RunState) -> list:
-        """The sole complete tie-set that can affect `_select_best`'s final champion.
-
-        The replay helper owns pool/holdout/CI precedence as one pure contract shared by the event producer
-        and validator. Recorded run state is authoritative here: live engine fields may not silently change
-        selection semantics after resume or a config edit.
-        """
-        # Use folded run flags and the validator's helper; live engine config must not produce
-        # a treatment that replay rejects or select a tie shadowed by the final holdout selector.
-        from looplab.events.replay import verifier_tie_groups
-        return verifier_tie_groups(state)
-
-    def _verifier_soundness(self, state: RunState, node, client) -> Optional[dict]:
-        """The calibrated §12-verifier soundness verdict for a node's REALIZED result, or None on any
-        failure / too-noisy a verdict. Returns `{score, n_samples, agreement}` — `score` is the
-        `result_sound` criterion mean in [0,1] (grounded on the node's idea + metric + confirm/holdout
-        signals); the provenance rides on the audit event. Best-effort — never raises.
-
-        ABSTAINS (None) when cross-sample AGREEMENT is not a strict majority (only measurable with >1 sample):
-        a high-variance verdict — the single-shot noise §21.12 measured — must not decide a tie. Evidence
-        is scalar-summary only (the hard leakage/gaming/overfit signals stay the job of the trust layer's
-        reward-hack / leakage detectors); this advisory tie-break asks only "does the reported result look
-        sound", and abstains rather than over-claiming when the judgment is unstable."""
-        try:
-            from looplab.trust.verifier import selection_criteria, verify
-            from looplab.agents.roles import resolve_role_parser
-
-            parser = resolve_role_parser(getattr(self, "researcher", None),
-                                         getattr(self, "developer", None))
-            snapshot = verifier_evidence_snapshot(state.direction, node)
-            subject = (f"Experiment #{node.id} reported metric={snapshot['metric']} on the task (optimize "
-                       f"direction: {state.direction}); its result is genuinely sound and will hold up.")
-            evidence = (f"What it did: {snapshot['rationale']}\n"
-                        f"Metric: {snapshot['metric']}"
-                        + (f"; confirmed mean over {snapshot['confirmed_seeds']} seeds: "
-                           f"{snapshot['confirmed_mean']}" if snapshot['confirmed_mean'] is not None else "")
-                        + (f"; holdout metric: {snapshot['holdout_metric']}"
-                           if snapshot['holdout_metric'] is not None else "")
-                        + (f"; generalization gap: {snapshot['generalization_gap']}"
-                           if snapshot['generalization_gap'] is not None else ""))
-            samples = state.select_verifier_samples
-            rep = verify(subject, evidence, selection_criteria(), client=client,
-                         samples=samples, parser=parser)
-            if rep is None or rep.method == "unavailable":
-                return None
-            crit = (rep.per_criterion or {}).get("result_sound") or {}
-            m = crit.get("mean")
-            score = float(m) if m is not None else (float(rep.score) if rep.score is not None else None)
-            if score is None or score != score or not 0.0 <= score <= 1.0:
-                return None
-            # Repeated verification needs a strict majority of the REQUESTED samples to
-            # survive parsing as well as a strict modal majority. One lucky parsed answer out of three is
-            # not a repeated verdict and must not become selection-affecting evidence.
-            if (rep.n_samples > samples or rep.n_samples * 2 <= samples
-                    or (samples > 1 and rep.agreement <= 0.5)):
-                return None
-            return {"score": score, "n_samples": rep.n_samples, "agreement": rep.agreement,
-                    "method": str(rep.method or "")[:80]}
-        except Exception:  # noqa: BLE001 — advisory tie-break: any failure just skips (id tie-break stands)
-            return None
 
     @in_llm_lane("enrichment")
     def _maybe_consult_strategist(self, state: RunState) -> RunState:

@@ -497,6 +497,46 @@ Scope: `looplab/engine/`: orchestrator.py, node_build.py, eval_dispatch.py, eval
 
 *Recommendation:* Extract (1) the calibration profile + envelope validation into looplab/search/speculation_calibration.py (where SPECULATION_CALIBRATION_SEEDS etc. already live) or a new engine/speculation_gate.py, and (2) the Card ledger into an engine/card_ledger.py mixin, following the established pattern. For the Card cluster's internal fold() calls, either import fold from the canonical home (as evaluate.py does, with the same docstring note that the orchestrator seam gates creation only) or route through a small engine hook, and verify the two fold-monkeypatching tests still intercept the paths they target.
 
+*Resolution (2026-08-05):* Both halves done, and the finding's own instruction about the `fold` seam
+does not survive measurement.
+
+**(b) the Card ledger** is `engine/card_reservation.py::CardReservationMixin` — the stem
+`card_ledger` was already taken by `events/card_ledger.py` (EV-01). The cluster measured larger than
+the finding says: 27 methods, not 19, contiguous from `_record_dropped_batch_cards` through
+`_mirror_hypothesis_card_merges`. orchestrator.py 6,644 → 5,500 lines. `_BuildReservation` /
+`_CardReservationPlan` moved with it and are imported back, so `looplab.orchestrator._BuildReservation`
+still resolves.
+
+**The `fold` instruction was wrong twice.** The finding names "the two fold-monkeypatching tests";
+there are FOUR files patching the seam through the orchestrator module — `test_continuous_dispatch`,
+`test_gpu_resources`, `test_creation_runaway_guard`, `test_hypothesis_merge`. Counted by wrapping the
+shim, only ONE reaches this cluster and only once (`test_creation_runaway_guard`, via a real
+`Engine`); the two dispatch files drive `_dispatch_evals` on a stub host that owns none of these
+methods, and `test_hypothesis_merge` never gets here. **And all 59 of those tests stay GREEN with the
+ledger folding through its own import** — so re-verifying the named files, as the finding asks, would
+have proved nothing. The real cost of the offered `from looplab.events.replay import fold` is not a
+red test: it is that `monkeypatch.setattr(orch, "fold", …)` silently stops covering ~1,100 lines of
+engine, and `test_creation_runaway_guard`'s own stated reasoning about the Card lane under an empty
+fold quietly stops being true of what it runs. Every fold here therefore goes through `_fold`, which
+resolves `orchestrator.fold` as a module ATTRIBUTE at call time.
+`tests/test_card_reservation_fold_seam.py` is the coverage that was missing and it DRIVES the
+property — a real toy run with a watched seam, asserting the interceptions include frames from
+`looplab.engine.card_reservation`.
+
+**(a) is half stale.** The calibration PROFILE construction the finding puts at 141-310 had already
+moved to `search/speculation_calibration.py`, with `tests/test_calibration_profile_home.py` guarding
+that home. What was still inline is now `engine/speculation_gate.py`: the two `__init__` closures
+(`_narrow_runtime_envelope_errors`, 96 lines; `_guard_calibrated_role_factory`) plus the two
+module-level helpers they call. The point is not `__init__`'s length — as closures over twenty
+construction locals the envelope could not be STATED, so no test could reach a single rule of the
+check that decides whether a caller may claim the speculation-depth waiver. `CalibrationRuntime`
+names those twenty inputs once and `tests/test_speculation_gate_envelope.py` is the 48-case truth
+table that becomes writable. Bodies are the closures' own text; the only edits are the signature
+lines, a rebinding preamble, and an AST-located `self` → `engine` rename.
+
+`_require_pinned_speculation_receipt` stays in orchestrator.py: it is read by the run spine at three
+re-entry boundaries and by `cli/run_cmds.py`, so it is engine surface, not envelope.
+
 #### ES-02 · HIGH · duplication · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
 **Three node-creation paths triplicate a ~70-line commit epilogue that has already forced the same fix to be applied three times**
@@ -534,6 +574,65 @@ pinned. Verified to have teeth by making the inject path keep two emits and drop
 *Evidence:* The file's own docstring calls _evaluate "the engine's single largest method". Its body interleaves: pre-start lifecycle fencing, stale-reservation gating, proxy scoring, workdir manifest stamping (three nested closures 204-231), a 420-line while-loop (280-697) containing the intervention watcher closure (_intervention_seen/_watch, 306-382), two watchdog task spawns, GPU-pin failure terminalization with shielded cancel-scope commentary, stall salvage, dep auto-install rounds, anti-stuck signatures, mid-loop eval-budget refolds, the inline-repair pipeline with stage-reuse computation (579-696), and finally a 100-line terminal-emission block (718-823) that also runs three trust scans (reward-hack, leakage, critic). Each concern reads/writes loop-local state (attempt, dep_rounds, total_eval, stuck_sig, next_start, full_retrains, triage_outcome), which is why it has resisted decomposition.
 
 *Recommendation:* Split along the existing seams without changing event order: (1) an _EvalAttempt dataclass owning the loop-local counters; (2) extract the watcher closures to methods (they only need node_id/generation/start_seq/cancel); (3) extract the trust-scan block (748-810) into a `_trust_scan_signals(node, res, workdir)` helper — it is already side-effect-free until the single append; (4) extract the inline-repair step (558-696). The one-terminal invariant stays in the residual ~150-line driver.
+
+*Resolution (2026-08-05) — (2) and (3) landed as written; (1) is rejected on measurement; (4) is
+adjudicated down from one extraction to the five decisions inside it. Every line number and two of
+the named concerns are stale.*
+
+Re-measured against the tree rather than the finding: `_evaluate` was `evaluate.py:283-1228`, **946
+lines, not ~700**, and its attempt loop 602 lines, not 420 — the numbers describe an earlier tree.
+Two named concerns no longer exist: **anti-stuck signatures and `stuck_sig` are gone** (`stuck_sig`
+appears nowhere under `looplab/` or `tests/` — only in this document), removed with the
+error-signature counter whose incident the loop's own comment still records. It was also no longer "the engine's single
+largest method" by the end of this change: 727 lines against `orchestrator.__init__`'s 908, so the
+docstring claim the finding quotes as evidence was corrected too.
+
+What landed: `_eval_intervention_seen`/`_watch_for_intervention` (the 81-line watcher closure pair),
+`_trust_scan_surface`/`_trust_scan_signals`, and — for (4) — `_eval_failure_text`,
+`_repaired_footprint`, `_repair_provider_failure`, `_repair_change_set`,
+`_repair_forces_full_retrain`. 946 -> 727 lines, attempt loop 602 -> 420. No event, append, fold,
+write-lock point or branch order moved.
+
+**(1) `_EvalAttempt` is rejected.** The seven counters it names are not seven: `stuck_sig` does not
+exist, and the loop-carried set is ten (`attempt`, `dep_rounds`, `next_start`, `full_retrains`,
+`triage_outcome`, `err`, `reason`, `unparseable_repairs`, `best_depth`, `node`) beside six read-only
+locals (`total_eval`, `state`, `workdir`, `generation`, `repair_log`, `_resource_reservation`).
+Boxing them changes ~60 read sites, removes no line, isolates no concern, and does not let the loop
+body move out — which needs `self`, `res`, `cancel` and the reservation besides. It is churn over
+the one method where a silent defect costs a node's terminal.
+
+**(4) as ONE extraction was rejected for the reason ES-05's own resolution records.** Measured on
+the AST rather than read off the screen, the region ES-03 points at is 383 lines that mutate those
+ten loop-carried names across SEVEN `break`s and TWO `continue`s targeting the outer `while`, plus
+two `return`s through `_record_superseded`. ES-05's first draft lost a single counter's round-trip
+and only pyflakes caught it; ten is not the same bet. The five decisions inside it
+extract with no control flow crossing the boundary at all, and each was worth naming for a reason
+size does not capture: **every one was reachable only by driving a real sandboxed evaluation that
+failed in exactly the right way** — a dead endpoint, three truncated repairs in a row, a later stage
+failing inside a multi-GPU reservation — so their branches had no individual coverage.
+`tests/test_evaluate_named_rules.py` is that coverage (25 tests), and the one counter that does
+round-trip (`unparseable_repairs`, which is per-NODE and bounds the 2343-repair incident) returns
+through the return value rather than being mutated in place.
+
+Two guard tests were stranded by the extraction and are re-pointed with the property re-verified,
+not made green: `test_config.py`'s watch-limiter pin followed the tick into
+`_watch_for_intervention` (now an AST pin, since the substring it used was indentation-sensitive),
+and `test_trust_gates_reach_the_ledger.py`'s concatenation pin followed `_trust_gate_signals` into
+`_trust_scan_signals` — plus a new pin on the link the split created, that `_evaluate` still BINDS
+what the scan returns over the same `scan_src` the `code_digest` commits to.
+
+Teeth: 20 breaks over four passes on a throwaway copy, anchors verified unique. Two are worth
+recording. A break that looked right was SILENT — replacing the no-metric hint's `key {_mk!r}`
+sentence left the key visible in the `print(json.dumps(...))` line below it; the real break is
+`_mk = "metric"`. And `test_a_renamed_later_stage_still_consumes_the_cap` has no branch of its own:
+the rule sees only the PRE-repair result, so a renamed stage is indistinguishable there, which IS
+the property — it is held by the signature and by an argument pin on the call site, both broken
+coherently and both bite.
+
+Not done: `_evaluate` remains a 727-line driver. The pre-start fencing (lifecycle, stale
+reservation, proxy, eval-start boundary) and the terminal-emission block are cohesive but read a
+dozen loop-locals each with no round-trip to hide a defect in — a lower-yield, larger-diff lift than
+this one, and best taken on its own.
 
 #### ES-04 · MEDIUM · excessive-logic · effort: medium
 
@@ -848,6 +947,43 @@ in the same change.
 
 *Recommendation:* Pick one forwarding style per sub-object and generate the delegators from a small name registry (a class-body loop or a tested __getattr__ with an explicit allow-list mirroring the existing registry-test pattern), including lane decoration as registry data. Keep the two deprecated-width properties as-is (they carry real semantics).
 
+*Resolution (2026-08-05):* The registry is DATA and the guard is real; GENERATION is rejected, with
+the measurement.
+
+`Engine.FORWARDED_SUBOBJECT_MEMBERS` declares all 32 one-line delegators as
+`<engine name> -> (sub-object, lane)`, and `tests/test_engine_forwarding_registry.py` (69) checks it
+both ways plus the lane and the forwarding target. That closes the one cost the finding actually
+names — a new sub-object method needing a hand-written forwarder with the correct `@in_llm_lane`,
+where forgetting the lane does not fail but silently runs the call outside the capped enrichment lane
+to compete with foreground work for provider concurrency. Verified by three breaks: dropping
+`_comparative_lessons`'s lane, adding an undeclared delegator, and pointing an entry at the wrong
+sub-object — each fails only its own assertion.
+
+REJECTED: generating the delegators. Measured before deciding, not asserted:
+
+* the naming rule IS uniform — 32 of 32 forward to `self.<sub>.<name minus the leading underscore>`
+  — so generation would work mechanically. That is what makes the table checkable, and it is also
+  the entire benefit generation would add over checking it.
+* 15 of the 32 are referenced by the suite, one of them (`_reflect_client`) 49 times, and they are a
+  documented monkeypatch seam. `monkeypatch.setattr(Engine, name, ...)` raises unless the attribute
+  already exists, so the `__getattr__` half of the recommendation is simply unavailable here; a
+  class-body loop keeps `hasattr` true but costs `inspect.signature`, a greppable `def`, and any
+  per-delegator comment — in a module CLAUDE.md already treats as comment-dense and that two other
+  open findings (ES-01, XP-06) want to keep readable.
+* the finding's own severity is LOW and it concedes the delegators are documented design. Trading
+  static analysis and greppability across 32 members of the Engine, in a file with ~170 direct
+  construction sites, to save writing three lines per new method is the wrong side of that trade.
+
+Also corrected: the finding says "eleven delegators carry it [`@in_llm_lane`]". Eleven methods in
+`Engine` carry the `enrichment` lane, but only EIGHT of them are sub-object delegators; the other
+three are ordinary engine methods. The registry pins eight.
+
+Kept visibly separate, and pinned as such: the five property pairs forward an ATTRIBUTE both ways
+through a setter rather than a call, and the three `staticmethod(LessonMemory.x)` aliases bind the
+CLASS's function — so unlike every table entry they do NOT route through `self.lessons`, and
+re-pointing that instance would not intercept them. Listing either shape in the table would claim a
+routing guarantee it does not have, so two tests assert they stay out.
+
 #### ES-14 · LOW · layering · effort: small
 
 **Mixin-boundary misplacements: governance and generic helpers live in unrelated clusters**
@@ -933,7 +1069,7 @@ Neither is visible in rendered output, which is exactly why centralizing them ne
 rather than inherited ones. `tests/test_cross_run_context.py` — 14 tests; all seven breaks (the five
 above plus receipt key-order and a digest leaking into the unavailable receipt) now fail loudly.
 
-#### EC-02 · HIGH · under-decomposition · effort: large
+#### EC-02 · HIGH · under-decomposition · effort: large — **RESOLVED (2026-08-05)**
 
 **_run_card_session is a ~500-line async god-function with acknowledged perf debt**
 
@@ -942,6 +1078,225 @@ above plus receipt key-order and a digest leaking into the unavailable receipt) 
 *Evidence:* _run_card_session spans speculation.py:1467-1968: a while-True loop with two nested closures (_start_head_producer, _eval_one), and the triple gate recomputation `outer_rebuild/terminal_gate/budget_exhausted = ...` copy-pasted four times per iteration (lines 1640-1644, 1703-1708, 1824-1829, 1926-1932). One idle turn performs ~8 full `fold(self.store.read_all())` rebuilds; the code itself carries embedded review comments admitting this ('CODEX AGENT: one idle polling turn performs this full replay plus several more below... Cache one snapshot per observed tail', line 1618-1621) and a head-of-line-blocking fence issue (line 1516-1520). The whole file is 1968 lines for one feature.
 
 *Recommendation:* Decompose the loop body into named phase methods (recover_sentinels, serve_raw_stage, drop_stale, serve_head, admit_evals, decide_exit) that each take and return one folded snapshot, so the state is folded once per turn and the exit-gate predicate exists in exactly one place. The two admitted-vs-terminal gate tuples should be one small dataclass computed once per fold. Then address the acknowledged fold-caching TODO.
+
+*Resolution (2026-08-05) — decomposed as recommended, with the snapshot PLUMBING rejected in favour
+of a tail-keyed fold, which is what turns "re-fold after an append" from a discipline into a
+mechanism.*
+
+**Recount first, because four of the finding's numbers do not survive one.** Every cited line is
+stale by ~210 lines (`_run_card_session` spanned 1679-2186 of a 2186-line file at `568ea78b`, not
+1467-1968 of 1968), which is cosmetic. Three are not:
+
+* *"two nested closures"* — there were **five**: `_budget_exhausted`, `_needs_outer_rebuild`,
+  `_admissible`, `_eval_one`, `_start_head_producer`. The three the finding missed are the ones that
+  mattered, because they are the gate vocabulary itself.
+* *"copy-pasted four times per iteration"* — the four full `outer_rebuild/terminal_gate/
+  budget_exhausted` tuples are real (1849, 1913, 2041, 2146), but they were the smaller half. The
+  five-term OPEN-GATE conjunction built from them (`not terminal and not budget and not outer and
+  not consumer_completed and not yield_outer`) was spelled **five** more times (1854, 1882, 1898,
+  1918, 2050), the session-exit ladder spelled a sixth variant of it as a four-branch `if/elif`
+  chain (2162-2174), and the admission loop re-derived **two** of the three conditions inline a
+  seventh and eighth time (1928, 1931). Twelve places had to agree on one rule.
+* *"~8 full fold rebuilds per idle turn"* — right order of magnitude, wrong for every actual turn
+  shape. Instrumented (`fold` counted per turn, turns delimited at `_close_developer_sentinel_once`):
+  a quiescing poll costs **6**, an open-gate poll with no request head **7**, an open-gate poll with
+  a durable head and a live producer **9**. All nine fold *byte-identical* input.
+
+Two defects the finding did not name turned up in the recount. The admission loop's
+`budget_exhausted = True` / `outer_rebuild = True` assignments before its `break`s were **dead
+stores** — every path out of that loop either `continue`s the turn or falls into the fresh triple
+seven lines below, so no reader ever observed them (pyflakes cannot see this: the names are
+reassigned later). And `_serve_card_builds` can return False **having appended** — a committed build
+whose `card_build_done` close then loses its CAS is the live case — after which the old code went on
+to guard `_start_head_producer` with the gate tuple computed *before* it. That is a stale read of
+exactly the kind the finding's own recommendation is aimed at, in the one phase it did not suspect.
+
+**What shipped.** `looplab/engine/speculation.py`:
+
+* `CardSessionGates` (frozen) is the three fold-derived stop conditions, built in exactly one place
+  (`_session_gates`), and `CardSession` (`slots=True`) is the turn loop's mutable state — every field
+  a former `nonlocal`. `CardSession.open_for_new_work(gates)` is **the** exit-gate predicate: all
+  twelve sites above now ask it, including the exit ladder, which collapses to "still open ⇒ a ready
+  pending Node also holds the session; closing ⇒ only in-flight work does" without changing a truth
+  value. `slots=True` is load-bearing, not tidiness: the one mutation this refactor could plausibly
+  get wrong is `session.yeild_outer = True`, which as a `nonlocal` rewrite would bind a new attribute
+  and leave the real gate open for the rest of the run.
+* **Two of the twelve sites deliberately do NOT use the full predicate**, and finding that out is the
+  part of this worth reading. Applying the recommendation literally — one predicate everywhere —
+  makes the admitted-batch fill loop and its pre-GPU re-check read `consumer_completed` too, and the
+  first draft did. That is wrong in the dangerous direction: the flag is set by the eval CHILD at any
+  checkpoint, so the first sibling to terminate would truncate the batch its own siblings are still
+  being admitted into — a width-4 consumer silently admitting three, i.e. the same "speculation
+  quietly went serial" shape this subsystem has already paid for. Those two sites consult
+  `gates.stopping`, the FOLD-derived half only; the batch BOUNDARY stays where it was, at the phase's
+  outer entry gate, which does read both flags. The asymmetry is pinned rather than commented.
+* Six phase methods — `_card_phase_serve_raw_stage`, `_card_phase_drop_stale`,
+  `_card_phase_serve_head`, `_card_phase_admit_evals`, `_card_phase_request_build`,
+  `_card_phase_decide_exit` — plus `_start_head_producer` and `_card_eval_one` hoisted out of the
+  closure. The turn body is now twelve lines of phase dispatch.
+* `_fold_current()` reads the log on every call and reuses the previous fold only while the observed
+  tail — `(len(events), events[-1].seq)` — has not moved. It also keys on the `fold` callable itself,
+  because `looplab.engine.speculation.fold` is a documented patch seam and a memo outliving a swap
+  would answer the new function's caller with the old one's state.
+
+**The snapshot-threading half of the recommendation was rejected.** "Phase methods that each take
+and return one folded snapshot" makes freshness a *discipline*: a phase that appends has to remember
+to hand the next one a new snapshot, and the two defects above are precisely that discipline failing
+inside a single function. With a tail-keyed `_fold_current` each phase simply asks for the current
+state and **cannot** be served a pre-append fold — the append moved the tail. That is the property
+CLAUDE.md's invariant 4 is protecting, made mechanical instead of reviewed. The invariant is not
+weakened: the log is still read every time, and a memo hit is the pure function `fold` not being
+recomputed on an input it has already seen — the same `(length, last seq)` identity
+`EventStore.append(expected_last_seq=…)` already trusts to decide whether a caller's view is
+current.
+
+Three fold sites deliberately stay un-memoized. The raw-proposal lane keeps its explicit
+`proposal_events = self.store.read_all()` / `proposal_state = fold(proposal_events)` pair: that is
+the proposal's OWN authority snapshot, handed whole to a worker that outlives the turn, and its
+pairing is a guarded property. `_producer_card_reservation` and `_prepare_raw_card_stage` run in
+worker THREADS, and the memo is main-task-only by construction. `_request_card_build` /
+`_claim_requested_card_build` / `_append_card_build_done` run once per election rather than once per
+poll, and each is immediately followed by a tail CAS that is the real freshness authority. A
+one-line `recover_sentinels` wrapper was also declined — `_close_developer_sentinel_once` already is
+that phase and already has that name; wrapping it adds a name, not a boundary.
+
+**Folds per idle turn: 6 / 7 / 9 (by turn shape) → 0.** A poll whose tail has not moved now folds
+zero times; the first turn that observes a new tail folds once. Measured on the same instrumented
+session that produced the "before" numbers.
+
+**The election and discard counts are preserved, and the proof needed three arms, not two.** Eight
+full deterministic runs each (`make_engine`, toy adapter, `max_nodes=12`, `speculation_depth=1`,
+real `role_factory` producer pair — the harness behind
+`test_the_refund_is_reachable_end_to_end_on_the_deterministic_backend`), reporting
+`speculation_budget_observation` plus the raw `card_build_requested`/`card_build_done` rows:
+
+| arm | requested | committed | closed `stale` | refunded | folds |
+|---|---|---|---|---|---|
+| A — pristine `568ea78b` | 16.50 | 13.12 | 3.38 | 1.12 | 929.12 |
+| B — decomposition, memo disabled | 16.75 | 12.75 | 4.00 | 0.75 | 928.38 |
+| C — decomposition + memo (shipped) | 15.12 | 14.88 | 0.25 | 2.88 | 225.38 |
+
+A vs B is the load-bearing comparison and it is what makes the C column readable: with the memo
+switched off, the decomposition lands inside the baseline's own run-to-run spread on every count,
+so **the restructuring is behaviour-neutral**. C's shift is therefore attributable to the memo alone,
+and its direction is the OPPOSITE of the regression CLAUDE.md records for this subsystem (a
+worker-written boundary row that took depth-1 speculation from 17 builds / 5 discards to 12 / 0 —
+*less* overlap): a main task that is ~4x cheaper per turn services its request head before the search
+epoch rotates under it, so prefetches that used to be given up `stale` now commit and are honestly
+superseded-and-refunded instead. In all 24 runs `evaluated == 12`, `charged_discards == 0`,
+`abandoned == 0`, `producer_failed == 0` — the budget-neutrality claim speculation rests on is
+untouched.
+
+**Comments.** The `CODEX AGENT:` head-of-line-blocking fence annotation moved verbatim into
+`_card_eval_one`; it describes an open question about refill fairness that this change does not
+answer. The `CODEX AGENT:` fold-caching annotation was the thing being FIXED, so per the "if you fix
+what an annotation describes, replace it with a note recording what was done" rule it is now
+`_fold_current`'s docstring, which states the measurement, the invariant-4 argument, and the three
+sites left out. One nearby comment was amended rather than moved: the poll comment claiming "the
+next turn always re-folds the log" is now "always re-READS the log … re-folding it whenever the tail
+moved", because the old wording had become false.
+
+**Guards.** Four new tests in `tests/test_card_speculation_engine.py` (56 → 60), plus three
+re-pointed:
+
+* `test_open_for_new_work_is_the_one_exit_gate_predicate` — the rule STATED. Truth table over each
+  fold-derived condition and each live flag, both halves of `budget_exhausted` (eval-seconds and wall
+  clock, neither reachable from any call site before), and `pytest.raises(AttributeError)` on the
+  misspelled-flag mutation that `slots=True` exists to catch.
+* `test_no_session_phase_re_derives_a_stop_condition_by_hand` — `CardSessionGates(` is constructed
+  exactly once in the module; the set of functions that READ `consumer_completed`/`yield_outer` is
+  exactly `{open_for_new_work, _card_phase_serve_raw_stage}`; `.stopping` is read exactly once in
+  `open_for_new_work` and exactly TWICE in `_card_phase_admit_evals`, with exactly one
+  `open_for_new_work` call in that phase — per-function COUNTS, because a set-only version let a
+  half-reverted asymmetry through (see Teeth); and no `_card_phase_*` method calls
+  `self._terminal_intent`, `session.budget_exhausted`, or `needs_outer_rebuild`. AST throughout, so
+  a commented-out copy is not a node.
+* `test_the_turn_snapshot_folds_once_per_observed_tail` — same tail returns the same object with no
+  rebuild; an append rebuilds AND the new state carries the append; a swapped `fold` seam is never
+  served the previous function's answer.
+* `test_a_turn_that_appends_refolds_before_every_later_phase_reads` — the turn-scope half of
+  invariant 4, DRIVEN: phase one appends an operator pause, and the same turn must not consult the
+  freshness drain, must not admit the pending Node, and must close after exactly one turn.
+* `test_admission_records_the_eval_start_boundary_before_it_starts_the_worker` was three ordered
+  `source.index()` lookups — the exact pin CLAUDE.md names as satisfiable by
+  `pass  # self._record_eval_start_boundary(chosen)`. It now DRIVES the property (the eval child
+  observes its own `eval_started` already durable) and keeps only an AST ordering pin.
+  `test_raw_action_selection_and_worker_share_one_proposal_snapshot` and
+  `test_run_card_session_pre_gpu_recheck_unions_producer_failed_but_raw_lane_does_not` were
+  re-pointed at the phase methods that now own those two consults, with their assertions unchanged.
+
+**Teeth.** Breaks applied to a throwaway copy of the tree, each by a script asserting its anchor
+exists exactly once, each run against `test_card_speculation_engine` + `test_card_budget_refund` +
+`test_card_selection_integration`. **Two of the six did not bite, and both are worth more than the
+four that did:**
+
+| break | result |
+|---|---|
+| `_fold_current` stops honouring the tail (serve the memo forever) | 5 failures inside the first 15% of one suite, `test_the_turn_snapshot_folds_once_per_observed_tail`, then a HANG — `test_a_turn_that_appends_refolds_before_every_later_phase_reads` never returns, which is the honest consequence: a session that can never observe a terminal |
+| `open_for_new_work` drops `consumer_completed` | 4: the truth table plus the three outer-cadence-boundary session tests |
+| one phase re-derives the stop conditions by hand | `test_no_session_phase_re_derives_a_stop_condition_by_hand` |
+| `self._record_eval_start_boundary(chosen)` → `pass  # …` (CLAUDE.md's documented evasion) | 2, incl. the end-to-end refund run. Verified rather than assumed: the RETIRED `source.index()` pin, replayed against the broken source, returns `boundary < admitted < started` — it passes. The AST pin does not see the call at all |
+| the drop-stale gate reads the pre-`_skip_if_aborted` snapshot | **nothing failed** — and provably cannot |
+| the admitted-batch fill gate reads the live flags again (PARTIAL reversion, pre-GPU re-check left alone) | **nothing failed** on the first guard; `test_no_session_phase_re_derives_a_stop_condition_by_hand` after it was strengthened |
+| both admission gates read the live flags again (FULL reversion) | `test_no_session_phase_re_derives_a_stop_condition_by_hand` |
+
+The two silent breaks are the useful ones. `_skip_if_aborted`'s only append is a
+zero-`eval_seconds` `node_failed` that REMOVES a pending node — it cannot touch
+`paused/finished/stop_requested`, cannot move `total_eval_seconds`, and can only move
+`outer_rebuild` True→False. A stale read there is *conservative in every direction*, so no test can
+distinguish it and one written to try would be testing its own setup. The code stopped depending on
+the distinction anyway: that gate now takes its own `_session_state()`, so there is no refresh line
+for a later editor to delete. The batch-fill asymmetry is likewise **not reachable today** — there
+is no checkpoint inside the fill loop, so `consumer_completed` cannot flip mid-batch — which is
+precisely why it is written down as a structural rule rather than left to be re-derived, the same
+shape as CLAUDE.md's `EV_NODE_EVAL_STARTED` ordering precondition. The guard is what had to change:
+its first version asserted the *set* of functions reading `.stopping`, and reverting only the fill
+gate kept that set identical and passed. It now asserts per-function COUNTS (`open_for_new_work` 1,
+`_card_phase_admit_evals` 2) plus exactly one `open_for_new_work` call in the phase, and both the
+partial and the full reversion fail.
+
+**A flaky test, diagnosed rather than retried.**
+`test_card_budget_refund.py::test_the_refund_is_reachable_end_to_end_on_the_deterministic_backend`
+was failing about 1 run in 3 and had been read as "load-sensitive by design". It is not. Its failure
+detail always showed supersedes HAPPENING (`stale: 5`) with `refunded: 0`, while its assertion
+message said "no supersede occurred" — false, and pointed the next reader at the wrong thing.
+
+Attributed at the branch (a run instrumented at `_serve_card_builds` to record which condition
+closed each request), **8 of 8 `stale` closes were `allow_commit=False`** — not epoch rotation, not
+terminal intent, not a refused claim. `allow_commit` is `session.open_for_new_work(gates)`, and the
+term that shuts it here is `consumer_completed`, set by `_card_eval_one`'s `finally` on the FIRST
+eval terminal of the admitted batch. So the `stale`-vs-`discarded` split is decided by which of two
+real wall-clock durations is shorter: a Developer `implement()` on a worker thread, or a sandbox
+subprocess evaluation. **There is no election or CAS seam that arbitrates it** — the CASes decide
+who WRITES, never which side of the dispatch boundary a supersede lands on — and the fence that
+closes the batch is the documented outer-cadence boundary, so it cannot be moved to make the race
+deterministic without changing a contract. Notably this is the SAME fence as the open
+head-of-line-blocking annotation below: one object, two symptoms.
+
+So the test now asserts every accounting identity that is stage-INDEPENDENT (a discarded prediction
+spends no budget; `discarded == refunded`; `requested == committed + stale + producer_failed`;
+`abandoned == 0`; the run still executes its full 12 experiments; every node id spent beyond those
+12 is a refunded prediction) — measured true in **60/60 runs across six max_nodes/depth
+configurations**, in which `refunded >= 1` would still have failed twice. The refund itself is held
+DETERMINISTICALLY by the sibling `test_discarded_speculative_build_refunds_its_slot_and_survives_replay`,
+which commits a real speculative node and then drives the supersede through
+`_drop_stale_speculation`; that test now also asserts the same `speculation_budget_observation`
+ledger the e2e sibling reports, so a refund that stops reaching the projection is caught on the
+deterministic path. The misleading message is replaced by one that reports the stage split.
+
+Worth recording for whoever reads the flake history: EC-02's fold caching moved this race a long
+way on its own (`stale` closes 3.38 → 0.25 per run, `refunded` 1.12 → 2.88, because the session
+services a finished producer result far sooner) — a much wider margin, and still not a guarantee,
+which is why the test no longer rests on it.
+
+**What remains.** The head-of-line-blocking fence the second `CODEX AGENT:` annotation describes is
+untouched and still annotated: one terminal child still closes the whole admitted batch, so an
+unequal-duration sibling set under-fills the consumer — and, per the diagnosis above, it is also
+what turns a still-building prefetch into a `stale` close. That is a policy question about refill
+fairness, not a structure question, and it wants its own before/after on a workload with unequal
+eval durations. `speculation.py` is still ~2.3k lines for one feature; the file-level split
+(producer lane / request lifecycle / session) is a separate decision the phase boundaries now make
+cheap but which nothing here needs.
 
 #### EC-03 · HIGH · duplication · effort: small — **RESOLVED (2026-08-02)**
 
@@ -1184,6 +1539,99 @@ have compared an empty list to an empty list and proved nothing.
 *Evidence:* The 'strategist cadence' mixin (1269 lines) actually contains: the consult/apply machinery, the cross-run note, coverage snapshots, the whole concept subsystem (classifier tagging, consolidation, edge assertion, hypothesis tagging, run-base seeding — with _concept_coverage_snapshot one 240-line method at 776-1014 nesting 4 try blocks), and the R1-c verifier tie-break (1017-1154), which is selection machinery, not strategist cadence. The at_node+projection-token idempotence predicate is also spelled three times (_already_covered_at at 634-638, and inline twice at 698-701 and 717-721) instead of once parametrized by snapshot list. Every other engine subsystem of this size got its own mixin file per the documented seventeen-file convention.
 
 *Recommendation:* Split a ConceptCadenceMixin (concept snapshot/tagging/consolidation/run-base) and move _maybe_verify_ties/_verifier_soundness to their own small mixin (or eval_stages), leaving strategy.py the consult/apply/coverage core. Parametrize the at_node-idempotence predicate over the snapshot list. Break _concept_coverage_snapshot into tag-refresh / consolidation / edges / hypothesis-tag / coverage-summary steps.
+
+*Resolution (2026-08-05) — the split, the one predicate, and a driver over named steps.*
+
+`engine/concept_cadence.py::ConceptCadenceMixin` (433 lines) and
+`engine/verifier_tiebreak.py::VerifierTiebreakMixin` (168) leave `engine/strategy.py`, which drops
+1260 -> 752 and is now what its module docstring always claimed: build the Strategist's brief,
+validate and merge the operator pin against the decision, apply the knobs through the governance
+matrix, record the breadth snapshot the brief reads. Both new modules are registered in
+`looplab/__init__.py::_LAYOUT` (without which their flat paths stop resolving and every monkeypatch
+through them becomes a silent no-op), both moved `@in_llm_lane("enrichment")` producers are re-spelled
+in `core/llm_broker.py::BACKGROUND_LANE_PRODUCERS` — whose two-way scan keys on
+`<filename>::<method>`, so the move alone would have orphaned them — and CLAUDE.md's inventory goes
+to NINETEEN files / eighteen mixins, with `shared.py` the twentieth.
+
+The finding's numbers are stale by 25-29 lines and the file is 1260, not 1269 (the method is
+750-989, not 776-1014; the tie-break 991-1128, not 1017-1154; the predicate copies at 605-609 /
+673-676 / 692-695, the last of them four lines rather than the five claimed), and it
+overcounts the nesting: `_concept_coverage_snapshot` has THREE `try` statements, not four, at a max
+depth of two — one outer producer guard plus two SIBLINGS inside it. That miscount matters, because
+the sibling structure is the whole design and it is what the decomposition had to preserve: the edge
+assertion and the hypothesis tagging each swallow their own failures ("audit enrichment must not
+break the cadence"), while a failure in the tagging pass itself has nothing left to summarize and
+falls through to the outer guard as "no snapshot". Every other claim held — this is the one finding
+in the batch whose substance survived checking intact.
+
+**Rejected: `eval_stages`** as the home for the tie-break, the recommendation's parenthetical. It is
+the wrong file by the registry's own lights. `eval_stages.py` holds the ONE eval-path producer
+`BACKGROUND_LANE_PRODUCERS` exists to keep OUT of a capped lane (`_stage_check_fn::_check`, whose
+lane is asserted NOT capped by `test_the_per_eval_stage_check_is_not_in_a_capped_lane`), and that
+guard reads the file with `_LANE_DECL.search(source)` — the FIRST `@in_llm_lane` declaration in it —
+then asserts the match is `_check`. Landing `_maybe_verify_ties` (`@in_llm_lane("enrichment")`, a
+CAPPED lane) above `_stage_check_fn` would make that search match the new arrival and the guard would
+start asserting about the wrong function. Putting the registry's positive and negative example in one
+362-line module is not a filing decision; it is a way to break the guard by editing something else.
+
+**Rejected: keeping the predicate as an Engine method.** `_already_covered_at` is gone; the rule is
+`search/coverage.py::already_covered_at(state, n, snapshots)`. A mixin staticmethod would have had to
+live on one of the two cadence clusters and be called cross-cluster from the other, which is what
+`shared.py` exists to prevent — and the predicate has no engine state at all. It composes
+`snapshot_matches_analytics_projection` and belongs beside it, next to `latest_live_snapshot`, its
+mirror on the consumption side; a change to what "still live" means is now visible to producer and
+consumer in one screen. The cost is one retired patch seam, measured before taking it: one call site
+in the suite (`tests/test_coverage.py`), zero in `looplab/`, zero in `docs/`, all re-pointed here. The
+conjunct ORDER is preserved deliberately and now documented — `at_node` first, because the projection
+match digests every node's idea/params/concepts and testing it first would make a long snapshot
+history O(rows x nodes).
+
+**Rejected: folding the producer's trailing `return {…}` into the outer guard.** It sits outside the
+`try` in the original and stays outside it. Moving it in would be tidier and would change which
+failures are swallowed — a `cov` without an `experiments` key currently escapes and crashes the
+cadence — and a refactor is not the place to decide that it shouldn't. One deliberate delta in the
+other direction IS recorded: `stale_tagged_nodes` moved from a method-top import (outside the guard)
+into the two steps that use it, so a MISSING SYMBOL in `search/concept_graph.py` now yields "no
+snapshot" rather than killing the run. Importing the MODULE still escapes, because the driver's
+`skeleton_for` import is still ahead of the `try`; what changed is only reachable from a broken tree,
+which CI import-checks catch before a run ever starts.
+
+The guard is `tests/test_snapshot_cadence_idempotence.py` (10). Its predicate half drives the truth
+table directly, including the two cases a bare `at_node == n` check loses: a row at the right node
+count whose projection went stale under an abort must leave the gate OPEN (an abort changes what the
+snapshot would say without allocating a node), and one producer's snapshots must never satisfy the
+other's gate — the reason the parameter is the LIST and not a hard-coded attribute. Its site half
+drives all three: the flat cadence records once per node count; the concept cadence does not re-enter
+the PAID producer for a node count it already covered (that call site dispatches LLM tagging with no
+claim fence in front of it, so a leaky gate re-spends rather than merely re-appends); and the
+post-producer re-check against a FRESH fold stops a second row for a node count that became covered
+during the call — a site the pre-check cannot cover, because it ran before the write existed. The
+structural pin is AST (`called_names`), and it counts: `_maybe_snapshot_concept_coverage` must reach
+`already_covered_at` TWICE. The step decomposition is guarded behaviourally, on the four DURABLE
+effects rather than the four calls — a driver that stopped calling a step still returns a well-formed
+snapshot dict, so only the log can tell.
+
+One EXISTING pin was stranded by the move and re-pointed here, which is the hazard CLAUDE.md names:
+`test_options_divergence.py::test_part_iv_comments_distinguish_fold_storage_from_live_steering` reads
+`engine/strategy.py` looking for two Part IV rationale comments ("product `Settings` is ON", "can
+steer later proposals") that travelled with the concept cadence. It now reads
+`engine/concept_cadence.py` for both, and its negative pin — the retracted "audit-only, so the flag
+being off by default is harmless" claim — is asserted against BOTH files, because a revert could put
+it in either. Re-verified by deleting the pinned comment on a scratch copy: the assertion fires. It
+was caught only by the full-suite run; the targeted runs never touched that file.
+
+Teeth-tested against 8 breaks on a scratch tree, all biting at the intended assertion. Dropping the
+projection half of the predicate fails the two stale-projection cases here plus the pre-existing
+abort tests in `test_coverage`/`test_concept_pivot`; deleting the post-fold gate site fails the
+post-producer test and the AST count; re-inlining the predicate at the flat site in a form that still
+WORKS (import restored, behaviour byte-identical to the pre-split code) fails exactly one assertion —
+the structural one — which is the point of having it; and commenting out any of the four recording
+steps (`_assert_concept_edges`, `_tag_hypothesis_concepts`, `_record_node_concept_tags`, the
+consolidation append) fails the effects test, with the node-row break additionally failing three
+pre-existing `test_authored_concepts` cases.
+
+No diagram change: the split moves no cadence, threshold, default or event type, and the process
+diagram's `concept` block already describes the subsystem by behaviour rather than by file.
 
 #### EC-10 · MEDIUM · duplication · effort: medium
 
@@ -1525,6 +1973,84 @@ campaign keeps finding:
 
 *Recommendation:* Move the finalize claim/recovery protocol out of lessons.py into a curation_protocol.py module beside steward_invocation.py, and converge new writes on one protocol (the semantic-key v2 shape) so the validator's other branches become legacy-read-only code that can be isolated and eventually retired. The schema plurality is historical, not a requirement of new writes.
 
+*Resolution (2026-08-05) — the MOVE, done; the writer convergence, declined with the measurement.*
+
+`looplab/engine/curation_protocol.py` now owns the finalize at-most-once paid-curation transaction:
+the semantic keys, the claim write/read, the decision lock, the `.curation_invocations/` scratch GC,
+the paid attempt and its recovery, `_append_curation_once`, the shared steward driver and its three
+configurations. `lessons.py` drops from 1,301 to 604 lines — 698 of them were this (645 of method
+bodies plus the claim/scratch constants), so the finding's "~700 of 1,334" was almost exactly right
+against a file EM-02 had since shrunk to 1,301. It stays a
+MIXIN on `LessonMemory` on purpose: every method in it is a live patch seam spelled
+`LessonMemory.<name>` (23 of them, pinned by name in the new guard), and the protocol legitimately
+reads the engine handle for `memory_dir`, the two `_cross_run_curation*` gates and `reflect_client`.
+
+**The cited line numbers had drifted** (the block is 539-959, not 520-937; the validator is 394-495,
+not 370-473; `read_curation_rows` starts at 498, not 476) — `steward_invocation.py:167` was exact.
+
+*Converging the writers on the v2 shape is the part that would have caused harm,* and the reason is
+not stylistic. The v2 validator pins an EXACT field set and rejects anything outside it, so a v2 row
+cannot carry `action_id`, `by`/`at`, `request_digest`, or a non-null `receipt` — every field the
+on-demand protocol needs. "Converge on v2" therefore means WIDENING v2 into a fifth schema, not
+retiring four. Worse, it would collide the two identities: `_already_curated` treats any non-
+`unavailable` v2 row with a matching `curation_key` as terminal, so an operator's on-demand review of
+a portfolio would silently suppress the next unattended finalize curation of the same snapshot — and
+an operator asking for a second look at a snapshot finalize already reviewed would be told it was
+already resolved. Five parametrized cases now pin that red line.
+
+The crash windows differ for a reason, and the difference is the point:
+
+| | finalize (`curation_protocol.py`) | on-demand (`steward_invocation.py`) |
+|---|---|---|
+| identity | the content digest of the exact model-visible snapshot; facets, the task id | the caller's `action_id`, bound to a `request_digest` |
+| who chooses it | the code, from the input | the operator, per request |
+| claim location | a side file, `.curation_invocations/<sha>.json` (never in the ledger) | a `begun` ROW in the ledger |
+| lock | one per semantic key (+ a legacy guard only when a v1 claim exists) | one per LEDGER |
+| lost terminal | the next attempt CLOSES the key with `prior_attempt_incomplete_not_replayed`, derived from the CLAIM's own identity | the next attempt REPLAYS the begun row; the claim stays open until a human picks a new id |
+| deliberate re-run | impossible while the input is unchanged — that is the point | possible with a new id — that is the point |
+
+Unattended work that must never buy the same snapshot twice and operator work that must remain
+re-requestable are opposite requirements. One writer has to drop one of them.
+
+*What the four row schemas actually are, and which are reachable from disk.* `_validate_curation_row`
+is a reader of durable history, so each branch was traced to the writer that shipped it rather than
+assumed legacy:
+
+* **v2 semantic finalize** — written today by `_append_curation_once`.
+* **v1 begun/terminal** — written today by `steward_invocation.py`.
+* **legacy run-keyed finalize** — the shipped writer from `f1e15c79` (`_append_curation_once` writing
+  `{"v": 1, "run_id", "task_id", **rec}`) until `8471f407` re-keyed finalize by semantic work. No
+  current writer emits it and it is not dead: `_legacy_curation_terminal` reads exactly this shape as
+  a suppression gate, and `test_finalize_steward_durability.py::test_known_v1_terminal_history_still_deduplicates_paid_finalize`
+  drives it end to end.
+* **undiscriminated action-id audit** — `git log -S'"action_id": action_id'` over `looplab/` finds no
+  writer for it in this repository: both action-id writers (`f1e15c79`, `6ad5959e`) emit `"action":
+  "steward-invocation"` beside it. It is a compatibility branch, and it is kept because
+  `read_curation_rows` NORMALIZES such a row into a terminal. Deleting the branch makes a ledger
+  containing one unreadable; keeping the branch but deleting the normalization makes the same
+  `action_id` read as a cache MISS and buys the call again. Nothing in the suite covered that second
+  half before this change.
+
+A FIFTH shape exists in history and is deliberately NOT admitted: the original finalize row from
+`9761a429` carried `run_id`/`auto`/`proposals` and no `outcome`, so the legacy branch's closed-outcome
+requirement fails it closed (measured: `GovernanceLedgerUnavailable(reason="invalid_record")`). That
+is the correct treatment — an unknown decision must stop the ledger, not be projected as a known one —
+but it is now written down instead of being an accident.
+
+*One thing did converge.* The kind -> ledger-file vocabulary existed three times: inverted in
+`governance_health._CURATION_LEDGER_SCOPES`, as a literal dict inside `steward_invocation._log_path`,
+and as three filename literals at the finalize steward call sites. It is now
+`governance_health.curation_ledger_file`, and `_run_finalize_steward` derives the log from `kind`
+rather than taking both. A ledger added to one copy and not another does not fail — it splits one paid
+history in two, and an at-most-once gate reading the wrong file re-pays.
+
+`tests/test_curation_protocol.py` — 41 tests. Seven deliberate breaks were applied to a throwaway
+copy of the tree and every one failed loudly: dropping the finalize recovery call (6 failures, 3 of
+them pre-existing tests), ignoring the on-demand `begun` claim (2), deleting the undiscriminated-schema
+branch (2), deleting its normalization (1 — **only** the new guard), reintroducing a second ledger-name
+table (1 — only the new AST guard), leaving a protocol copy behind in `lessons.py` (1), and deleting
+the legacy run-keyed branch (1).
+
 #### EM-04 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-02)**
 
 **Durable identity derivation (_curation_source_key / _facets_curation_key) duplicated between writer and validator**
@@ -1709,6 +2235,94 @@ import contract (`tests/test_claims.py` asserts the re-export set). The import i
 *Evidence:* _ClaimSourceRows (claims.py 134-139, with _claim_source_rows/_filter_claim_source_rows), _ClaimAssessmentRows (820-836, with _filter_claim_assessments), and _CapsuleRows (memory.py 650-670, with _capsule_rows/_filter_capsule_rows) are three independent implementations of 'a list that carries a health receipt through projections', each with its own inherit/merge rules. On top of that, callers stash extra attributes dynamically: record_claim_decision's validate path and locked_claim_evidence_snapshot set assessments.lessons_snapshot / research_claims_snapshot / decisions_snapshot on the returned list (claims.py 1207-1209, 1619-1621). Any plain list operation (slicing, comprehension, sorted()) silently drops the receipt and snapshots — which is why each type needs its own guarded filter helper, and why getattr(source, 'read_health', None) probes appear throughout.
 
 *Recommendation:* Introduce one small generic Snapshot dataclass (rows + typed receipt + optional attachments) or a single shared ReceiptList base with an explicit .filter()/.map() API, and migrate the three types onto it; make the evidence-snapshot attachments explicit fields instead of monkey-set attributes.
+
+*Resolution (2026-08-05).* `core/receipts.ReceiptRows` is now the one place that decides how a health
+receipt survives a projection of the rows it describes, and the three types are its only subclasses.
+What it shares is exactly the CARRYING and nothing else: a `CARRIED_FIELDS` registry, `filter`,
+`map`, and a slice-preserving `__getitem__`. Each type keeps its own sanitizing `__init__`, its own
+inherit rule and its own absent-receipt default, verbatim.
+
+That restraint is the finding's one wrong instruction, and it is the part that would have done
+damage. "Migrate the three types onto one Snapshot dataclass (rows + typed receipt)" reads as though
+the three receipts are the same thing under three names. They are not, and the disagreement is
+load-bearing. Measured on the shipped code before touching it: `_ClaimSourceRows()` with no receipt
+defaults to a complete-and-empty `read_health` (`read_complete: true`) because a plain caller-supplied
+list is an explicit caller snapshot, which `_research_source_summary`'s docstring already says;
+`_CapsuleRows()` defaults to `source_store_complete: true` but `_capsule_rows` additionally derives
+`source_rows_total` from `len(origin)`, which the claim side never does; and `_ClaimAssessmentRows()`
+defaults its two summaries to `None`, which is not a default receipt at all but a THIRD state —
+`claims_retrieval._claim_claim_source_summary` reads `None` as "no aggregate was carried, fall back to
+the per-row `claim_source`/`research_source` copies", and only if those disagree does it return
+`_unknown_claim_source_summary()`, i.e. fail-CLOSED. One shared default would have collapsed "the
+store is complete", "we could not read the store" and "look at the rows" into whichever one was
+picked. The inherit rules diverge just as concretely: `_claim_source_rows` re-validates and
+conservatively ADDS newly visible schema failures to a carried receipt (measured: filtering
+`[valid, invalid]` under a carried `{quarantined 2, total 4}` yields `{quarantined 3, total 5}`),
+while `_dedup_valid_capsules` takes a per-field `max` against the duplicates it discovers itself.
+Neither is a copy, and neither belongs in a base class.
+
+Three other parts of the finding were stale or wrong against the live tree. The locations are all
+pre-split: `_ClaimSourceRows`/`_ClaimAssessmentRows` moved to `claims_health.py` (EM-01) and
+`_CapsuleRows` to `concept_capsules.py` (EM-10), so none of the five cited line numbers points at the
+code. `locked_claim_evidence_snapshot` does not exist anywhere in the repo — there is exactly ONE
+stashing site, `record_claim_decision._persist`, read by `record_observed_claim_decision`'s
+`_validate_target`. And `sorted()` is named in the hazard but has no caller: these snapshots are
+always sorted as the plain list they are built FROM, before wrapping, so a `.sorted()` sibling would
+be an unused projection API. `filter`/`map`/slicing each have a real call site; that is why they
+exist and `sorted` does not.
+
+The attachment half is done as the finding asked, with one change of shape. The three snapshots are
+now ONE declared field, `evidence_sources`, holding a `ClaimEvidenceSources` (`lessons`,
+`research_claims`, `decisions`) attached through `with_evidence_sources`. One field rather than three
+because the loudness has to be preserved: today an unattached snapshot raises `AttributeError` on the
+missing attribute, and three fields defaulting to `None` would instead have handed
+`claims_for_memory(lessons=None, decisions=None)` a licence to RE-READ the very files the
+policy-then-evidence lock chain exists to freeze — a silent defeat of the fence, dressed as a
+successful validation. Dereferencing `None.lessons` raises exactly as before. The sources are
+deliberately not sanitized on the way in, unlike every receipt beside them, because the operator's
+digest was computed over precisely those objects.
+
+`__slots__` is what actually retires the monkey-setting rather than merely discouraging it: an
+attribute a snapshot type does not declare can no longer be set on an instance at all. It is bound to
+`CARRIED_FIELDS` in each subclass, so the two cannot drift apart in the direction that fails
+silently — dropping a name from both raises at construction, and the guard covers the other
+direction.
+
+Equivalence was proved rather than assumed: a 22-probe harness over all three types (empty defaults,
+carried receipts, filter results and rows, plain-list ingest, invalid-row escalation, non-list input,
+unknown-key passthrough) produced byte-identical JSON before and after. It also surfaced one
+pre-existing oddity that this change deliberately did NOT fix, because touching a receipt rule is not
+a refactor: `_safe_research_source_summary` normalizes a LEGACY producer-only receipt by filling
+`read_health_v: 0`, and then rejects its own output on a second pass. Any re-sanitizing projection
+therefore drops a legacy aggregate to `None`. It is unreachable in production — `_research_source_summary`
+always stamps the current version — and it predates this work; it is recorded here and in the test
+fixture's comment so the next reader does not rediscover it as a regression.
+
+The guard is `tests/test_receipt_rows.py` (17 tests). It drives the property rather than pinning
+text: every snapshot is built with an UNHEALTHY receipt, so "the receipt survived" is distinguishable
+from "a fresh default was synthesized" — on a healthy source those two are identical, which is why a
+naive version of this test would pass against every break below. It checks `filter`/`map`/slice/empty
+-filter carry, reading the instance by its `__slots__` rather than by `CARRIED_FIELDS` so a field that
+was slotted and assigned but never registered is still caught; that `__slots__` refuses a stashed
+attribute; a two-way AST pin (`CARRIED_FIELDS` == the `self.x =` assignments in `__init__` ==
+`__slots__` ⊆ the keyword-only parameters) using `ast`, not substrings; the subclass registry itself;
+and an end-to-end read of a real `research_claims.jsonl` with one unparseable line, through the load
+projection, the scope filter and the assessment, asserting the answer still says the source was not
+completely read.
+
+Teeth-tested against seven breaks, each applied to the live file by a script that asserts its anchor
+is unique, then restored. B1 `_filter_claim_source_rows` narrows with a comprehension →
+`test_scoping_claim_source_rows_keeps_the_quarantine` and the end-to-end test fail on
+`read_complete is False`. B2 delete the slice branch of `__getitem__` → all three parametrizations of
+`test_filter_map_and_slice_carry_every_receipt` fail on the slice's type. B3 slot and assign
+`evidence_sources` but leave it out of `CARRIED_FIELDS` → the AST pin, the projection test and the
+decision-validator test fail (dropping it from BOTH raises at construction instead, which is the
+loud direction). B4 remove `_CapsuleRows.__slots__` → the AST pin, the projection test and the
+stash-refusal test fail. B5 `load_research_claims` rebuilds by comprehension instead of `map` → the
+end-to-end test fails with `malformed_rows == 0`. B6 drop `with_evidence_sources` → the
+decision-validator test plus six pre-existing `test_claim_decide_scope_parity` tests fail. B7
+`_filter_capsule_rows` narrows with a comprehension → `test_scoping_capsule_rows_keeps_the_quarantine`
+fails with the quarantine counters zeroed.
 
 #### EM-10 · MEDIUM · under-decomposition · effort: medium
 
@@ -1943,6 +2557,87 @@ Scope: `looplab/events/`: eventstore.py, replay.py, types.py, projections, span_
 *Evidence:* _derive_cards (replay.py:4746-5563) is one 818-line function with 9+ numbered phases (identity registration, hash/native bridging, merge-alias resolution with nested _canon closure, verdicts, drop overlays, build-reservation status, enrichment apply, ranking, operator overlays, selection-readiness blockers), containing 6 nested closures (_card_id, _register_card_identity, _record_registration, _record_action_owner, _node_parent_generations, _canon) and its own mini-state (12+ local dicts/sets). Together with its supporting helpers (_bounded_card_* at 2410-2730, card handlers at 2731-2939, _card_added_snapshot/_card_added_ownership/_card_action_freshness/_card_sidecar_subject at 4214-4745) the Card ledger occupies roughly 2,200 of replay.py's 5,563 lines (~40% of the file). It is invoked exactly once, as a pure post-pass from _finalize_fold (3848), and reads only folded state, so it has no reason to live in the fold module.
 
 *Recommendation:* Extract the Card ledger into a sibling module (e.g. events/cards.py: fold-time bounded-receipt helpers + a derive_cards(st) post-pass) and decompose _derive_cards into its numbered phases as top-level pure functions taking/returning explicit small dataclasses (identity map, alias map, action-owner table). Keep _finalize_fold calling one entry point; behavior is unchanged because the pass is already pure over RunState.
+
+*Resolution (2026-08-05) — done, both halves, and the module name is the one thing the
+recommendation got wrong.*
+
+`looplab/events/card_ledger.py` (2,256 lines) now owns the whole Card ledger; `replay.py` drops
+5,846 -> 3,819 lines. `_derive_cards` (847 lines by the time it was moved, not 818) is fifteen
+top-level phase functions plus a 17-line `derive_cards` that calls them in order, and the six nested
+closures are gone: `_card_id` and `_node_parent_generations` are module functions, `_canon` is
+`_CardAliases.canon`, `_record_registration`/`_record_action_owner` are `_CardLedger` methods, and
+`_register_card_identity` stays local to the one phase that owns it. The three dataclasses are the
+ones the finding named — `_CardIdentity` (frozen: the id decisions, made over the whole log before
+any Card exists), `_CardLedger` (the four provenance tables the merge fold has to rewrite together)
+and `_CardAliases` (bridge edges + merge edges + the display statements). `_finalize_fold` still
+calls one entry point.
+
+**Not `events/cards.py`.** `cards` is already a `_LAYOUT` stem (`core/cards.py`, doc 25 CO-02), and
+that map is keyed by module STEM, not by path — a second `cards.py` would have collided with the
+flat compat alias and `tests/test_package_layout.py` fails on it two ways. The stem is `card_ledger`.
+
+**Three names had to move DOWN to `core/models.py` first, and that is the part the recommendation
+does not mention.** The Card cluster's only dependencies outside itself were `_coerce_node_id`,
+`_MISSING` and `_INHERITABLE_CONCEPT_PROVENANCE`, all defined in `replay.py` — so the sibling module
+as specified imports `replay` while `replay` imports it. `coerce_node_id` and
+`INHERITABLE_CONCEPT_PROVENANCE` are now `core/models.py` (beside `Node` and beside the
+`NODE_CONCEPT_PROVENANCE_*` tiers respectively, re-imported into `replay` under their old private
+names so all ~30 call sites and `tests/test_shared_identity_rules.py` are untouched); `_MISSING` is a
+private absence marker that never crosses a module boundary, so the ledger has its own, documented as
+such. That keeps `card_ledger` a LEAF importing only `looplab.core`, which two of the new guard tests
+assert structurally over every import node — a function-local edge back into `replay` is a hidden
+cycle, not a style nit.
+
+**What is deliberately NOT re-exported.** Only the names `replay`'s own handlers CALL are imported
+back (the `_bounded_card_*` receipt bounds, `_card_replay_*`, `derive_cards`). The ledger internals
+several tests reached for through `looplab.events.replay` — `_card_added_snapshot`,
+`_bounded_card_action`, `_card_debug_leaf_children`, `_card_debuggable_leaf_ids`, `_native_first`,
+`_evidence_verdict`, `_record_setter_ids`, `_CARD_NODE_CONCEPT_PROVENANCE` — are re-pointed at
+`looplab.events.card_ledger` in the same change. A re-export would have been the *worse* option here
+and for a specific reason: unlike the flat-import module aliases (which resolve to the SAME module
+object, so patching either path patches both), a re-exported FUNCTION is a second binding — it looks
+like a patch seam while a monkeypatch through it would silently miss the fold. `is_unevaluated_
+speculative_discard` and `node_counts_toward_card_budget` moved with it for the same reason: the
+fold-side caller (`_card_debug_leaf_children`) is here now, so `tests/test_card_budget_refund.py`'s
+one-object-under-every-name assertion names `card_ledger`, and `replay.py` becomes pyflakes-clean
+(it had exactly one deliberate unused import before; the ledger now carries it, with its comment).
+
+**Verification.** A differential harness folded a corpus of **345 event logs / 1,259 derived Cards**
+on the pre-change and post-change trees and compared the derived ledger byte for byte, including
+`st.cards` INSERTION ORDER. 324 of the logs are real: every `fold()` input from the card-related test
+files, captured by wrapping `replay.fold` in a pytest plugin; 21 are synthetic, covering what the
+harvest was thin on (identity conflicts, X->A/X->B merge conflicts, merge cycles, auto-drops,
+hypothesis deletes, hostile rows, receipted natives, debug anchors). Identical after the move and
+again after the decomposition — the whole dump hashes to the same sha256 in all three runs. Order
+tolerance (invariant 5) was measured the same way: **11,040 permutations** (32 per log, seeded per
+log) folded on BOTH trees, with two checks — the same permuted log must fold to the same Cards on
+both trees, and the *set* of permutations that reproduce the unpermuted answer must be the same set
+(6,010 of 11,040 on both, unchanged). The harness was teeth-checked by injecting real one-line
+changes into a scratch copy: dropping the `verdict != "abandoned"` clause from `actionable` (3 Cards
+diverge) and reverting the merge-alias `min()` to last-write-wins (1 Card diverges, on exactly the
+synthetic conflict log). A third injected change — `rationale[:400]` to `[:399]` — was NOT detected,
+and that is a real finding about the corpus rather than the harness: `_bounded_card_added_receipt`
+DROPS a rationale longer than 400 chars at admission rather than truncating it, so the derive-time
+slice is unreachable through any admitted row.
+
+**One divergence documented, not fixed.** The hoisted `_card_id` is deliberately not
+`_card_replay_id`: it bounds the STRIPPED id at 256 while admission rejects a raw string longer than
+256 *before* stripping, so a padded 300-character spelling with a 250-character core is a usable
+control id on the derive side and not an admissible `card_added` id. That is live, not theoretical —
+the derive side reads ids from places admission never bounded (`Idea.card_id`, operator pin/edit map
+keys, a `card_ranked` order entry). Unifying them would silently retire controls on historical logs,
+so both names stay and the difference is now stated at the definition. Same family as EV-02's
+measured drift, opposite verdict.
+
+`tests/test_card_ledger_module.py` is new (8 tests): the two import-direction guards, the phase-order
+pin (AST, so a commented-out call cannot satisfy it), an orphan/double-call check, and three
+behavioural drivers — a 200-permutation order-tolerance fold, an operator pin that must beat a rank
+(the docs/23 decision 27 ordering), and an identity conflict created by the LAST event in the log
+(the phase-0 ordering). Teeth-tested against 5 breaks on a scratch copy, all biting: swapping the
+overlay and ranking calls (2 tests), reverting the merge-alias `min()` (1), a function-local
+`import replay` (2), an identity map that skips the node scan (1), and `pass  #
+_apply_card_actionable(ledger)` — the comment-carrying mutation CLAUDE.md warns about — which fails
+both the order pin and the orphan check.
 
 #### EV-02 · MEDIUM · duplication · effort: medium
 
@@ -2480,6 +3175,82 @@ distinct error types. Teeth-verified against 13 separate breakages.
 
 *Recommendation:* Extract the card/idea digest+receipt subsystem (682-980) and the Card provenance models (1200-1451) into a `core/cards.py` (or `core/card_identity.py`), and the footprint helpers (442-576) alongside, re-exporting through models.py exactly as concepts.py already does. Preserve comments verbatim per the project convention.
 
+*Resolution (2026-08-05) — `core/cards.py`, 903 lines; `models.py` 2,320 → 1,529. Every digest is
+byte-identical: 5,699 corpus rows compared across the two trees, 0 differing.*
+
+Four of the five subsystems moved, comments verbatim, with the seam `core/concepts.py` established:
+the footprint reader/override/marker parser, the closed steering-context vocabulary, the versioned
+idea and card-action digests with their three ownership-receipt constructors, and the Card provenance
+family with `Card` itself. `RunState` stayed — its flat shape is documented as intentional and the
+finding is right that it is not the defect. The line numbers throughout the finding are stale by
+~40-140 lines (models.py was 2,320, not 2,181), so every cited range was re-derived before anything
+moved.
+
+**The recommendation as literally written does not compile, and that is the finding's real defect.**
+It moves `idea_proposal_digest` but not `durable_idea_payload`, and `Card` but not `hypothesis_id` —
+both module-scope reads from inside the moved code. Since the re-export seam forces `models` to
+import `cards`, leaving those two behind makes `cards` import `models` back. Measured by building
+exactly that arrangement: `ImportError: cannot import name 'durable_idea_payload' from partially
+initialized module 'looplab.core.models' (most likely due to a circular import)`. So both names moved
+too. `durable_idea_payload` is not a card helper and its name says so, but it is
+`idea_proposal_digest`'s PREIMAGE BOUNDARY — the digest's own comment ("Start at the durable boundary
+as well ... model defaults must not collapse their identity") makes it load-bearing for identity, and
+an edit to it silently re-values every idea digest, so a digest and the function that produces what it
+hashes belong in one file. The hypothesis trio moved on the finding's own evidence: `1 card =
+1 hypothesis`, `hypothesis_concept_cache_keys` takes a card, and `Card`'s fail-closed selection
+validator calls `hypothesis_id`. The steering-context validator (the finding's subsystem 3) moved as
+well, which the recommendation lists as evidence but omits from the fix; leaving it would have
+stranded the last consumer of `valid_digest_ref` in `models`.
+
+Two things the move surfaced and fixed in passing: the ten-line "Developer-crash sentinel" comment
+block had drifted onto the top of `DIRECTIONS`' comment, ten lines above the constant it describes
+(`DEVELOPER_ERROR_PREFIX`) — relocated verbatim, no text changed; and `core/parse.py`'s scalar-reader
+contract map still pointed at `models._resource_int`, which is now `cards._resource_int`.
+
+**Byte-identity, proven rather than assumed.** A 5,699-row corpus — every minter over ~50 card
+actions × 8 card ids × 7 statements, 15 Idea shapes, 17 footprints × 7 GPU envelopes, 27 steering
+snapshots, the three receipt constructors, the four provenance models' JSON schemas and their refusal
+cases — computed on a pristine `git archive HEAD` export and again on the new tree: 951 concrete
+digest strings, 943 receipt dicts, **0 rows differing**. The comparison was itself checked for teeth:
+dropping the `-0.0` normalization inside `_card_action_digest._number` on a throwaway copy moved 18
+rows. (The first run of this corpus was VOID and worth recording — a script run from a scratch
+directory resolves `looplab` through the editable install, i.e. the parent checkout, not the
+worktree, so both halves measured the same unchanged tree and "0 differing" meant nothing. Both
+halves now pin `PYTHONPATH` explicitly and the interpreter's `looplab.__file__` is printed.)
+
+`tests/test_card_identity_home.py` is the guard. It pins the four digest values AND the three field
+sets they were derived over — the `tests/test_calibration_profile_home.py` pattern, because pinning a
+digest alone cannot say WHICH of the two causes moved it, and the field tuples are not decorative:
+`events/replay.py::_card_action_receipt_payload` projects a durable snapshot through exactly them
+before handing it back to the minter, so dropping a member re-derives a different digest for the same
+card instead of failing. Around that: the seam is checked with `is`, not `==` (a re-export that
+rebuilds an object turns every existing `monkeypatch.setattr("looplab.core.models.<name>", …)` into a
+silent no-op), and the name list is derived from `cards.py`'s own AST through the shared walk, so a
+new public name that skips the seam fails rather than being quietly unreachable from the 360 sites
+that spell it on `models`. The cycle is DRIVEN, not asserted about the source: a fresh interpreter
+imports `core.cards` and reports whether `core.models` landed in `sys.modules`. And one end-to-end
+drive covers what `is`-identity cannot — a receipt minted through the NEW spelling still verifies
+through the fold, which re-derives through the OLD one.
+
+Teeth-verified against 10 breakages on a throwaway copy of the tree, each anchored to a string
+asserted to appear exactly once. Dropping `eval_timeout` from the v2 preimage → the v2 and
+expanded-v1 value pins and the receipt test; aliasing `card_action_digest` through a lambda → the
+`is`-identity test; deleting one seam assignment → collection error (plus pyflakes on the now-unused
+import); promoting the `TYPE_CHECKING` import of `Idea` to module scope → collection error; a
+NON-fatal cycle (`import looplab.events.replay` at the foot of `cards.py`, which resolves fine but
+drags `models` in) → the subprocess probe AND the layering test, which is the shape the probe exists
+for; a commented-out re-derivation pasted into `models.py` → two of the negative substring pins,
+which is the point of keeping those as substrings; dropping a member from
+`CARD_ACTION_DIGEST_V2_FIELDS` → the field-set pin only, correctly reporting the "schema changed too"
+branch; a receipt claiming `v: 1` over a v2 digest → the receipt test and the fold drive; removing
+`"cards": "core"` from `_LAYOUT` → the flat-alias test and `test_package_layout`.
+
+Two existing assertions had to move with the code rather than be left green:
+`test_digest_and_number_contracts.py`'s `test_no_minter_re_derives_the_canonical_dump` and
+`test_the_cap_is_declared_once` scan `inspect.getsource(models)` for a re-derived canonical dump —
+after the move `models` contains no minter at all, so both would have kept passing while nothing
+checked the module that now owns one. `cards` is added to each.
+
 #### CO-03 · MEDIUM · dead-code · effort: medium
 
 **Production-dead urllib-era streaming stack (~185 lines) kept alive only by tests**
@@ -2913,7 +3684,7 @@ Scope: `looplab/serve/`: run_commands.py, command_observation.py, engine_proc.py
 - Why-comments are consistently load-bearing: almost every defensive branch names the exact race, CVE-class hazard, or pinning test it closes (e.g. the POSIX no-unlink rationale in sweep_stale_lifecycle_locks, the seq==0 sort-key note in routers/attention.py).
 - server.py after the BACKLOG §4 split is a genuinely thin assembly module: middleware, auth, router order, static mounts — with historical re-export/patch seams documented rather than duplicated.
 
-#### SC-01 · HIGH · under-decomposition · effort: large
+#### SC-01 · HIGH · under-decomposition · effort: large — **RESOLVED (2026-08-05)**
 
 **run_commands.py is a 4,103-line god-module spanning five separable subsystems**
 
@@ -2923,7 +3694,68 @@ Scope: `looplab/serve/`: run_commands.py, command_observation.py, engine_proc.py
 
 *Recommendation:* Split along the existing seams: process_identity.py (PID/identity probes), control_validation.py (normalize_control + the CONTROL_* tables), spawn_leases.py (claim/quarantine/start-record sidecars), and keep RunCommandService as the orchestrator. All helpers are already module-level functions or self-contained methods, so this is mostly mechanical with re-exports for test patch seams.
 
-#### SC-02 · HIGH · flat-code · effort: large
+*Resolution (2026-08-05):* `serve/control_validation.py` exists and owns the whole HTTP intake boundary
+— `normalize_control`, the five per-event tables, `CONTROL_SPECS`, and the 35 named rules SC-02 created.
+`run_commands.py` went 4,661 → 3,110 lines; the validator is 1,609. All **55** top-level names that
+moved are byte-identical to their pre-split source (AST-segment comparison, not diff): nothing was
+lost, nothing is declared in both files, and the ONLY changed line inside `RunCommandService` is its
+`_card_resource_envelope()` call becoming module-qualified.
+
+**Three of the five claimed locations were stale or the wrong shape, and one recommendation is
+false of the current tree.** Re-derived by AST:
+
+* *(1) process probes, "lines 244-392".* The real cluster is 183-326 — `_process_alive` 183-217,
+  `_lock_identity` 220-224, `_process_identity_scheme` 231-242, `_process_identity_proves_reuse`
+  245-255, `_process_identity` 258-326 — **134** lines, not ~150, and it is where the finding's own
+  evidence is weakest: `_process_alive`/`_process_identity` are already CONSTRUCTOR-INJECTED into
+  `RunCommandService` (`process_alive=`/`process_identity=` defaults), so they do not "share one
+  namespace and internal private helpers" with anything. Not extracted — see below.
+* *(2) "the ~775-line normalize_control payload validator (485-1259)".* Superseded by SC-02:
+  `normalize_control` is 37 lines (1781-1817). The extractable SECTION is `_error` 419 through
+  `normalize_control` 1817, which is what moved.
+* *(3)/(4) spawn-lease sidecars "1701-1994" and the msvcrt/fcntl sequencer "1996-2069".* Both are
+  `RunCommandService` **methods** today, not module-level functions: `_start_record_path` 1904-1914
+  through `resolve_spawn_claim` 2475-2543, and `RunCommandService.sequence` 2546-2624.
+* *(5) "the ~460-line _execute worker state machine (3642-4103)".* `_execute` is **19** lines
+  (4643-4661). The state machine is `_admit` (4212-4446, 235 lines) plus `_monitor` (4448-4594, 147).
+* *"All helpers are already module-level functions or self-contained methods, so this is mostly
+  mechanical."* True of the validator — 55 module-level names with zero references back into the
+  command lifecycle. False of `spawn_leases.py`: those 20-plus methods share `self._root`,
+  `self.sequence`, `self.process_identity` and the run-lock registry, so extracting them yields a
+  mixin (which moves the god-CLASS without shrinking the god-module) or a signature rewrite of the
+  quiescence ladder. Deliberately not done.
+
+**`process_identity.py` deliberately not done.** It is a genuinely clean cut — 134 lines depending
+only on stdlib plus `core/pathsafe.py::filesystem_identity` — but it is 4% of the remaining file and
+buys no property: the two probes a caller substitutes are already injected, so the "shared namespace"
+complaint does not describe them. Left as a cheap follow-up rather than a third patch-seam surface.
+
+*Direction and seams.* The validator imports nothing from `run_commands` — including deferred,
+function-local imports, which is the realistic regression, since the registry guard re-executes the
+file as a fresh module and a back-edge would drag the record store into that probe. `run_commands`
+re-exports ONLY the six names its own code calls; anything else would be a decoy patch seam that
+`monkeypatch.setattr("looplab.serve.run_commands.<name>", …)` resolves while the validator goes on
+reading its own global. `_card_resource_envelope` is the one probe whose consumers straddle the cut
+(intake normalization in the validator, the append-time re-check in `RunCommandService`), so
+`run_commands` reaches it through the MODULE object and one patch is observed on both sides.
+
+*Verification.* `tests/test_serve_module_seams.py` gains four DRIVEN guards (the fourth is a real
+normalize → `_append_collaboration_intent` round trip with a counting probe, not a source pin), and
+`test_control_registry.py`/`test_registry_and_alias_seams.py`/`test_card_operator_controls.py` were
+re-pointed at the module that now contains the thing under test — a `getsource`/`_exec_source` scan
+aimed at the barrel would have scanned a file no longer containing the tables and gone green by
+finding nothing. Teeth-tested on a scratch copy, each break biting exactly one assertion: a by-value
+`from … import _card_resource_envelope` (the envelope round trip — and note the three PRE-EXISTING
+`test_card_operator_controls.py` patches of that name all stayed GREEN under it, which is why the new
+test had to exist); a deferred back-edge into `run_commands` (the direction guard); a decoy
+`CONTROL_DATA_FIELDS` re-export (the re-export guard); a second `CONTROL_DATA_FIELDS =` binding (the
+one-owner guard); a dropped `_LAYOUT` row (`test_package_layout.py::test_no_module_missing_from_layout`).
+And the completeness mechanism still refuses the same way from its new home: deleting a real
+`_CONTROL_NORMALIZERS` row makes `make_app()` raise the SAME `AssertionError` from the same
+first-import point before and after the split, and collection of `test_control_registry.py` errors out.
+Pyflakes: 502 findings before, 502 after, identical once line numbers are normalized.
+
+#### SC-02 · HIGH · flat-code · effort: large — **RESOLVED (2026-08-05)**
 
 **normalize_control is a ~775-line flat if/elif chain that re-spells the per-event registries three more times**
 
@@ -2932,6 +3764,80 @@ Scope: `looplab/serve/`: run_commands.py, command_observation.py, engine_proc.py
 *Evidence:* The file already has two per-event registries (CONTROL_SPECS, CONTROL_DATA_FIELDS with equality assertions), yet event-specific behavior is then implemented as three separate giant if/elif chains: normalize_control (485-1259, one branch per event type, some >100 lines), _collaboration_precondition (2706-2843, a second per-type chain re-checking cards/comments/nodes), and _decision (2901-2975, a third per-type chain). Field allowlists are spelled twice inside the same file: EV_BUDGET_EXTEND's field tuple at 142-144 is repeated verbatim at 928-929, and EV_INJECT_NODE's allowed set at 150-152 is re-declared as allowed_inject at 1058-1061 (already drifted: the second omits source_run/source_node because they were popped earlier — invisible coupling).
 
 *Recommendation:* Extend ControlSpec into a real per-event strategy record: {event_type, engine_policy, postcondition, data_fields, normalize(fn), precondition(fn), decide(fn)}. The existing set-equality assertions then guarantee every event has all handlers, and the duplicate field tuples collapse into the single data_fields definition.
+
+*Resolution (2026-08-05):* done as recommended, with ONE deliberate departure recorded below.
+`ControlSpec` now carries `data_fields`, `normalize`, `precondition` and `decide`, and is joined from
+five tables — `CONTROL_DATA_FIELDS`, `_CONTROL_NORMALIZERS`, `_CONTROL_PRECONDITIONS`,
+`_CONTROL_DECISIONS`, `_CONTROL_POLICIES` — each asserted equal to `CONTROL_EVENTS` at import. All
+three chains became dispatchers: `normalize_control` is 37 lines (the shared preamble — known type,
+JSON object, allow-listed fields — plus the shared tail — finite, encodable, ≤1 MiB), and
+`_collaboration_precondition` / `_decision` are 22 and 33. What used to be inside them is 35 named
+per-event functions (24 normalizers, 5 preconditions, 6 decisions), the `_ControlIntake` object that
+carries the coercion helpers `normalize_control`'s closures used to be, and three shared rules the
+chains had inlined — `_normalize_lifecycle_target` (the exact-`(node, generation)` fence the seven
+`_LIFECYCLE_CONTROL_TARGETS` events share), `_import_cross_run_source`, `_relative_file_name`.
+
+**The line numbers were stale and the "~775-line" count was low:** `normalize_control` is 782 lines
+(487-1268, not 485-1259), `_collaboration_precondition` 2736-2872 (not 2706-2843), `_decision`
+2930-3004 (not 2901-2975), the registries 133-181 (not 134-173). Every structural claim was
+otherwise accurate, including both duplicate allow-lists.
+
+**The `allowed_inject` drift is REAL — and the recommended fix for it is a security regression.**
+The two lists do differ, exactly as reported. But the difference is fail-CLOSED, and it is not
+vestigial: the import block pops `source_run`/`source_node` only when `source_run` is truthy AND
+`source_node` is present, so `{"source_run": "", "source_node": 0, "idea": {...}}` reaches the
+residual check with both fields intact and is refused. Collapsing the two lists "into the single
+data_fields definition" accepts it and writes `"source_run": "", "source_node": 0` straight into the
+durable event. Measured on the payload corpus: **61 cases flip from HTTP 400 to accepted**. So the
+residual list stays a residual list, spelled as `CONTROL_DATA_FIELDS[EV_INJECT_NODE] -
+_INJECT_IMPORT_FIELDS` — the duplicate literal is gone, the subtraction is named and commented, and
+`_INJECT_IMPORT_FIELDS <= CONTROL_DATA_FIELDS[EV_INJECT_NODE]` is asserted at import. `budget_extend`
+had no such subtlety and did collapse to `CONTROL_DATA_FIELDS[EV_BUDGET_EXTEND]` verbatim.
+
+**One behaviour deliberately CHANGED, in the fail-closed direction.** The old
+`_collaboration_precondition` chain ended in an unguarded `else` that ran the COMMENT recheck, so any
+event type it did not name — a new collaboration event, a corrupted record — was rechecked against a
+`comment_id` it does not have, and for a payload that happened to look like a comment revision it
+PASSED. A missing handler is now a `collaboration_precondition_missing` refusal, and the registry
+cross-check (`{event: handler for non-None} == COLLABORATION_EVENTS`) keeps that branch unreachable.
+This is the only difference in 3,510 compared `_collaboration_precondition`/`_decision` outcomes:
+2,016 of them, ALL on the 21 non-collaboration event types the caller never passes
+(`_append_collaboration_intent` is gated on `event_type in COLLABORATION_EVENTS`), 0 of them
+refusal → pass. `_decision` is byte-identical across all 630 of its cases.
+
+*Verification.* A differential corpus of **2,599 control payloads** (every event × every
+allow-listed field × 26 adversarial values, every event × 11 foreign field names, empty/absent/
+non-dict bodies, ~180 hand-written branch and boundary cases, two >1 MiB bodies) was run against the
+pre-change module and the new one and compared outcome-by-outcome — return value, HTTP status and
+full error detail: **0 differences** (379 accepted, 1,988× 400, 92× 404, 139× 409, 1× 413). The
+harness was teeth-checked by injecting four real mutations into a copy of the OLD module: the naive
+inject collapse (61 differences), `<= 0` → `< 0` on `add_nodes` (3), dropping `parallel_build` from
+the budget tuple (2), and skipping the lifecycle generation fence for `promote` (4).
+
+*Guard test:* `tests/test_control_registry.py` (16). It drives the completeness rather than pinning
+it: `CONTROL_EVENTS` is widened by a fake type and the five tables are satisfied ONE at a time, with
+every stage required to still refuse the import and to name the next table that has not chosen;
+dropping any single row from any table is separately proven to be caught by that table's OWN
+assertion, not by a neighbour's. The two collapsed allow-lists are pinned behaviourally (every
+registered budget field alone satisfies the budget check and keeps its own upper bound; every
+unconsumed `source_run`/`source_node` combination is a 400 and neither field survives a real
+import), and the three chains are proven gone by AST — no `Compare` node against `event_type` other
+than the class-level `in COLLABORATION_EVENTS` — because comments are not AST nodes.
+
+Teeth-tested against six breaks on a scratch copy, all biting: the naive inject collapse (1 test),
+re-copying the budget tuple one field short (2), the precondition dispatcher falling through to the
+comment recheck (1), a control event losing its normalizer row (import refused, 3 collection
+errors), a collaboration event losing its precondition (import refused, 3), and `pause` losing its
+own engine decision — which reddens two PRE-EXISTING tests in `test_run_command_service.py`
+(`test_stop_and_resume_reject_during_pending_finalize`,
+`test_finish_seq_only_pending_is_visible_and_rejects_new_commands`) rather than a new one, i.e. the
+`decide` table's entries are load-bearing behaviour the suite already held.
+
+**Not done here:** SC-01's file split. `run_commands.py` was still one module and grew (4,274 → 4,661
+lines) — naming 35 rules costs more lines than one chain that names none — but the
+`control_validation.py` extraction SC-01 proposes became a clean cut along a section boundary
+(`_error` through `CONTROL_SPECS` + `normalize_control`) rather than surgery on a flat chain.
+*(Done on 2026-08-05, along exactly that boundary — see SC-01's resolution above.)*
 
 #### SC-03 · HIGH · duplication · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
@@ -3063,6 +3969,80 @@ dropped; the declared private-seam surface is one name smaller.
 *Evidence:* reset_transaction.py and deletion_transaction.py each define: receipt-path derivation off srv.commands._sequence_path with the same lock-namespace check, _is_reparse + _regular_file/_regular_receipt, _validate_receipt with _RECEIPT_KEYS/immutable-field/phase tables (_IMMUTABLE_RECEIPT_FIELDS vs _IMMUTABLE_FIELDS), load-with-before/after-identity change detection, save with immutable-field enforcement, and marker/fence-to-receipt binding validators (validate_reset_binding vs _validate_fence_binding/_validate_fence_request). Their drivers (reset_route._reset_blocking, deletion_service.begin_or_resume_run_deletion) both roll a phase state machine forward under the same lock stack (commands.sequence → run_lifecycle_lock_http → engine_write_lock_http → config+events+span-index locks) and both re-spell the preflight ladder (active commands / spawn claim / finalize incomplete / liveness) that run_commands.reject_if_active and destructive_guard also implement — four spellings of the same quiescence checklist.
 
 *Recommendation:* Extract a shared durable-operation kit: generic receipt store (validate/load/save with immutable fields + phase-transition table), fence-binding validator, and one preflight_quiescence(srv, rd, *, operation) helper. Reset/deletion keep their own phase enums and effects.
+
+*Resolution (2026-08-05) — `serve/durable_op.py`, scoped down from the recommendation by measurement.*
+
+The finding was re-derived by DIFFING the two modules under a rename-normalising script rather than by
+reading them. What the diff says, per helper:
+
+| helper | reset lines | deletion lines | differing lines |
+|---|---|---|---|
+| `_regular_receipt` / `_regular_file` | 12 | 12 | **0** |
+| `load_*_receipt` | 23 | 27 | 6 |
+| `save_*_receipt` | 23 | 41 | 22 |
+| `*_receipts_for_run` | 12 | 11 | 13 |
+
+So the shared machinery is real — ~90 of ~500 combined CODE lines, and the first helper is
+*byte-identical* after renaming. Extracting it is not a line-count win (499 code lines became 502:
+~91 lines that existed twice became 94 that exist once, carrying the parameterisation and the
+reasoning); it is a single-copy win, which is the same trade `core/fence.py` made.
+Three of the finding's sub-claims are not accurate:
+
+* **`_is_reparse` is stale.** SC-03 (`cea97c35`, 2026-08-02) already moved it to `core/pathsafe.py`;
+  both modules imported it at the time this was implemented. The stated line ranges (`1-324`, `1-265`)
+  predate that removal; the files were 315 and 260 lines. `run_commands.py:2417-2529` for
+  `reject_if_active` is likewise stale — SC-07 moved it to 2990.
+* **"the same lock-namespace check" is wrong.** Reset proves the sequencer path sits in
+  `root/.command-locks` with a sha256 stem; deletion instead cross-checks `run_deletion_key(rd)`
+  against that stem and derives its root from `srv.root`. Two different questions, and the run-key
+  derivation is the identity binding each transaction rests on — so `receipts_for_run` takes an
+  already-derived root and pattern rather than `(srv, rd)`.
+* **The fence-binding validators are not a pair.** `_validate_fence_binding`/`_validate_fence_request`
+  live in `deletion_service.py`, not `deletion_transaction.py`; they compare different field sets
+  against different sources, and one raises `HTTPException(409)` while `validate_reset_binding` raises
+  a receipt error. Not unified — the recommendation's "fence-binding validator" is dropped.
+
+The all-of-6.4 "the deletion side had already drifted" story from CO-01 turned out to still be TRUE in
+this second location: `load_deletion_receipt` still carried the local six-field `file_identity` lambda
+that CO-01 removed from the deletion FENCE. Converged (proved numerically identical to
+`atomicio.file_identity` first).
+
+**What each owner keeps, as an explicit `ReceiptProtocol` field:** label, error class, size cap
+(64 MiB vs 64 KiB — a reset receipt carries the run's whole `effective_config`), validator (returning
+the normalised receipt, not a bool, so six distinct schema refusals keep their own messages), immutable
+identity fields, and `check_transition`. That last one is the flattening risk: reset's lattice is an
+unordered adjacency table (an uncertain launch legitimately falls back to `archived` and retries)
+while deletion's is a monotonic index with two absorbing branches outside it, one of which —
+`quarantine_ambiguous` — must NEVER become resumable. A generic phase machine would have made an
+ambiguous Windows quarantine move resumable, which is the difference between failing closed and
+deleting a run twice.
+
+**"Four spellings of the same quiescence checklist" measured as three plus one.** `destructive_guard`,
+`_admit_destructive_reset` and deletion's fresh-preflight block run `_active_command_ids` ->
+`_recent_spawn_claim` -> `_finalize_incomplete` in the same order; those now share
+`refuse_unless_quiescent`. `reject_if_active` is a DIFFERENT ladder and is deliberately left out: it
+reads `_active_record` (the authoritative record) rather than the fail-closed census, adds
+`_unresolved_terminal_record`, and checks finalize FIRST behind an `allow_incomplete_finalize` opt-out
+no destructive caller has — routing it through would have handed every destructive path that opt-out.
+The helper shares the probe SET and ORDER and nothing else: the three refusal vocabularies are live
+HTTP contracts (a plain sentence naming the operation, a `_detail` envelope with `retryable`, an
+`operation_id`-bearing conflict) and stay at the call sites as REQUIRED keyword builders, so a fourth
+rung cannot reach production half-wired.
+
+Also deliberately left alone: Replay's canonical-path recheck, which is not a fourth rung but how
+Replay re-checks the DELETION fence under the sequencer (`AppState.run_dir` refuses a fenced run with
+410) — which is why that route has no deletion probe of its own; the liveness ladders, which genuinely
+differ (reset additionally requires `not state.finished` and answers 409, deletion answers 503,
+`trace_clear` omits `_fresh_run_launch_pending`); and `trace_clear.py`'s third receipt store, whose
+refusals are `HTTPException`s rather than a receipt error type.
+
+Pinned by `tests/test_durable_op_kit.py` (42): the protocol parametrized over BOTH real receipts —
+built by real Replay/deletion transactions rather than hand-written — plus the asymmetries driven
+against each other (reset's back-edge accepted where deletion's is refused, the absorbing ambiguous
+phase, the two caps, the two error types, the two labels) and the ladder's set/order/short-circuit
+with all three live HTTP refusals. Teeth-tested against 26 breaks, all biting; one bites at the
+fixture rather than an assertion, because flattening reset onto a monotonic rule makes a REAL Replay
+answer 503 and never produce a receipt at all.
 
 #### SC-07 · MEDIUM · under-decomposition · effort: medium
 
@@ -3415,6 +4395,73 @@ for a single named record).
 
 *Recommendation:* Split into phase functions mirroring the receipt phases (discover_or_rejoin, restore_fence, admit_and_prepare, archive, launch, await_generation) each stating its lock preconditions in the signature/docstring; the driver keeps the lock nesting explicit and short.
 
+*Resolution (2026-08-05):* Nine phase functions, each stating its lock precondition; the driver is
+82 lines and holds nothing but the ladder. **Rejected `admit_and_prepare`**, with the measurement.
+
+The finding undercounts in every direction, so the numbers are restated first. Measured on the tree
+before the change: `_reset_blocking` was lines 453-898 — **446** lines, not "~410". It contained
+**ten** `with` statements entering **thirteen** context managers, not "six lock scopes"; six is the
+depth of the deepest CHAIN (sequence → lifecycle → engine_write → config+events+span), which is
+what the prose was describing, and the other six `with` blocks — the pre-sequence re-probe, the
+marker-only fence restore, `launch_env`, and three sequencer re-entries around Popen — are exactly
+the ones a reader has to hold in their head as well. Its statements reached **40 columns, ten
+levels**, not six; six is where the fenced body STARTS. All three cited ranges were stale
+(476-884 / 614-831 / 833-884 against a live 453-898 / 667-809 / 811-898).
+
+DONE. `_discover_or_rejoin`, `_flush_retained_paid_activity`, `_resolve_reset_ownership`,
+`_restore_existing_fence`, `_admit_destructive_reset`, `_classify_launch_evidence`,
+`_publish_and_archive`, `_launch_replacement_engine`, `_await_replacement_generation`. Every body is
+byte-verbatim from the original (extracted by script, then dedented uniformly) so no comment moved a
+character; the driver is 446 -> 82 lines, ten `with` statements -> four, thirteen context managers
+-> six, forty columns -> thirty. Nothing about the transaction changed: every phase call sits at the
+exact statement position its code occupied, and the function has **no `await` at all** (it runs
+under `anyio.to_thread.run_sync`), so no lift could change which lock is held across which await.
+The route's verbs, refusal codes, messages and receipt shapes are untouched, which is why no
+existing test needed re-pointing.
+
+REJECTED, first: `admit_and_prepare` as one phase. Measured, they sit on different rungs — admission
+runs at `("sequence",)`, and `_prepare_receipt` is only reached at
+`("sequence", "lifecycle", "engine_write", "config", "events", "spans")`. Merging them means either
+running the six-lock preparation under one lock or taking all six before the admission checks that
+exist to decide whether the run may be touched at all. They stay two phases three rungs apart.
+
+REJECTED, second: `archive` and (implicitly) prepare as things to EXTRACT. Both were already
+free-standing module functions before this change — `_archive_forward` (51 lines) and
+`_prepare_receipt` (94 lines) — as were `_frozen_launch`, `_validate_reset_quiescence` and
+`_validate_archived_manifest`. The recommendation reads as though none of the six existed; what was
+actually inline was the ORCHESTRATION between them, which is what got named.
+
+Two shapes deliberately kept, because the alternative reads better and is wrong. The two early
+`return`s buried inside the lock nesting became a `finished` slot in each phase's return tuple
+rather than a control-flow exception; the driver returns it after the `with` and the `try/except`
+unwind instead of from inside them, which is the same unwind order a `return` inside a `with`
+already produced, with nothing running in between. And `_restore_existing_fence` still takes two of
+the six locks ITSELF: that config+events pairing without `engine.lock` exists only on the
+marker-only recovery path, is not a rung of the driver's ladder, and is stated in its docstring
+rather than in the precondition registry — which is about what must ALREADY be held.
+
+Guard: `tests/test_reset_phase_locks.py` (6). Nothing pinned this before — every existing reset test
+drives the route from the outside and passes whether the phases are separate, interleaved, or
+holding the wrong locks. Two driven tests replace all six lock context managers with a recorder and
+run real Replays end to end (one that completes, one that rejoins an uncertain launch), asserting
+the acquire/release order and the exact stack held at each phase entry; two structural tests read
+the driver's AST for the `with` nesting each phase call literally sits inside, plus a two-way
+registry check that a new phase must state a precondition. No substring pins — chains are built from
+real `ast.With` ancestors of real `ast.Call` nodes, so a commented-out call satisfies nothing.
+
+Verified by breaking each property on a scratch copy of the tree. (A) inverting the innermost
+acquisition order (span guard first, run config last) and (B) dropping the span-index write guard
+from the `with` each failed 3 of the 6 new tests; (C) moving `_admit_destructive_reset` one rung
+deeper, inside the lifecycle lock, failed 4. Under all three breaks the existing suite stayed
+green — 9 reset tests in `test_server.py` for (A), 17 reset/replay tests across `test_server.py` and
+`test_run_command_service.py` for (B) and (C) — which is the measurement that says what the new
+tests are for.
+
+Not done: `durable_reset_run`'s own ~100-line preamble (generation/operation-id derivation and the
+run-path identity ladder) is untouched — it is HTTP argument validation, not the transaction, and it
+holds no locks. `reset_route` still imports `errno` without using it; that predates this change
+(pyflakes reports it identically before and after) and removing it is a different diff.
+
 #### SC-15 · LOW · under-decomposition · effort: medium
 
 **tui.py Tui class mixes rendering, wizards, chat persistence, and a client-side command-recovery state machine; _reconcile_pending interleaves two protocols**
@@ -3516,7 +4563,7 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 
 *Recommendation:* Extract two shared services in looplab/serve/: an event-ledger paid-action protocol (claim event, terminal event, fsync-confirm, generation fence — parameterized by event types) covering report_refresh and concept-lens, and keep the file-ledger machinery of scope actions as its own module. Each new hand-rolled variant is a fresh set of crash-window bugs to re-find; the near-identical helper pairs prove the abstraction already exists implicitly.
 
-#### SR-02 · HIGH · under-decomposition · effort: large
+#### SR-02 · HIGH · under-decomposition · effort: large — **LARGELY RESOLVED (2026-08-05)**
 
 **reports.py is a god-module: a distributed-storage subsystem inside a router file**
 
@@ -3525,6 +4572,106 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 *Evidence:* 3103 lines total. Lines ~154-1553 (~1400 lines) are module-level storage machinery with zero HTTP content: path confinement (`_validated_reports_dir`, `_confined_report_path`, `_confined_scope_root_path`), cross-platform byte-range file locks (`_open_scope_action_lease`, `_try_lock_scope_action_descriptor` with msvcrt/fcntl branches), lease markers, fences, receipt validation, and the prompt projection `_prior_learnings_index`. The endpoints themselves are enormous: `abandon_scope_report_action` is ~195 lines of nested marker/fence/lease case analysis; `generate_scope_report_ep` is ~530 lines containing five nested closures (`_stamp_scope_action_usage`, `_compute`, `_inputs_unchanged`, `_persist_terminal`, `_compute_durable`). serve/ already extracts comparable subsystems (deletion_service.py, reset_transaction.py, scope_report.py, scope_sources.py), so this file is the exception, not the pattern.
 
 *Recommendation:* Move the lease/fence/receipt machinery to looplab/serve/scope_actions.py (or fold into scope_report.py), and `_prior_learnings_index` next to its consumers (it is a Genesis prompt projection, not a report route). The router should shrink to endpoint wiring plus the staleness GET.
+
+*Resolution (2026-08-05).* **Half of this finding was already done when I picked it up, by SR-12 on
+2026-08-04, and the measurement matters because it changes what the remaining work IS.** Every name
+this finding lists as "module-level storage machinery" — `_validated_reports_dir`,
+`_confined_report_path`, `_confined_scope_root_path`, `_open_scope_action_lease`,
+`_try_lock_scope_action_descriptor` with its msvcrt/fcntl branches, the markers, the fences, receipt
+validation, and `_prior_learnings_index` — already lived in `serve/scope_report_store.py`. That move
+took `routers/reports.py` from 3 117 to 1 612 lines (`git show 8228283e`), i.e. the ~1 400 lines the
+evidence paragraph counts were gone. The finding's first recommendation was therefore stale on
+arrival; its second (`_prior_learnings_index` "next to its consumers") was answered differently and
+better — the projection reads eleven private helpers and three constants of the store, so it went
+WITH the store rather than to `routers/genesis.py`, which now imports it from there.
+
+What was NOT done, and is what this change does, is the finding's second sentence: *"The endpoints
+themselves are enormous."* Both endpoint measurements were still exactly right at 1 612 lines —
+`abandon_scope_report_action` was 193 lines of nested marker/fence/lease case analysis and
+`generate_scope_report_ep` 550 with its five nested closures — and, less visibly, the whole file was
+still ONE function: all 25 of its top-level helpers (40 defs counting the inner
+closures) were nested inside `build_router`, so every branch of the
+crash-recovery state machine was reachable only by building the ASGI app and driving HTTP. That is
+the same complaint SR-03 made about `control.py`, and it gets the same answer.
+
+`looplab/serve/scope_actions.py` (587 lines) now owns the paid ACTION protocol: `action_response`,
+`indeterminate_receipt`, `_reconcile_running_action`, `read_reconciled_action`,
+`active_scope_action`, plus `get_scope_action` and `durable_abandon_scope_action` — the two
+`/api/scope-report-actions/…` bodies. `routers/reports.py` keeps the route decorators, the abandon
+docstring (it is the OpenAPI description) and the comment explaining why action observation has its
+own URL namespace; each route is now a single delegating call. The file goes 1 612 → 1 131 lines,
+3 117 → 1 131 across both changes.
+
+The moved bodies are VERBATIM. A normalized differential over all 497 significant lines — reversing
+the three documented mechanical edits — reports the signatures and docstrings as the only
+difference. Those edits are: `srv` threaded explicitly where it was captured, `srv.reports_dir` in
+place of the captured `_reports_dir` (`AppState.__init__` assigns it once and nothing in the tree
+ever reassigns it, so the capture and the live read are the same object), and the five helpers
+renamed to public spellings because the router calls four of them.
+
+**Rejected: translating the refusals at the boundary.** `durable_abandon_scope_action` raises
+`HTTPException(409, …)` from inside the storage case analysis, which looks like HTTP leaking down a
+layer. Introducing a typed refusal instead would have changed which failures are terminal and which
+are retryable — the ordering of `except HTTPException: raise` ahead of the two store-conflict
+handlers is load-bearing, and a new exception type re-entering that ladder is a behaviour change
+dressed as a refactor. `deletion_service.py` and `trace_clear.py` already raise `HTTPException` from
+`serve/`, so the precedent runs the other way. The new module raises it; a guard asserts it holds no
+`APIRouter` and no route decorator, which is the line that actually matters.
+
+**Rejected: folding into `scope_report_store.py`.** It is the finding's own second option and it
+would have added ZERO new patch surface, which is a real argument. It loses on layering: the store's
+docstring commits to "none of it is HTTP", and reconciliation is policy OVER the store (it decides
+when to write a tombstone and when a visible terminal must still read as running), not more store.
+
+**Not attempted:** `generate_scope_report_ep`. See "still open" below.
+
+*The seam this move creates, and the guard.* Importing a store name binds it BY VALUE exactly as the
+router's star import does, so `scope_actions.py` is a THIRD copy of every seam it names — and it is
+now the ONLY reader of `_read_scope_action_lease_marker` outside the store, the router's copy having
+become live-but-dead. A two-module sweep would have left `test_report.py`'s marker-loss recovery test
+green while injecting nothing, which is precisely the failure SR-12 paid for once.
+`test_report.py::_patch_store` therefore sweeps a named constant `_STORE_PATCH_MODULE_PATHS`
+(store, scope_actions, routers/reports, routers/genesis — genesis binds `_prior_learnings_index` and
+was missing from the old two-module sweep), and
+`test_scope_actions_service.py::test_the_store_patch_sweep_names_every_module_that_binds_a_store_name`
+fails if any module imports from the store without being listed. The rule is stated over the IMPORT
+statement rather than over a list of names patched today, because the next test to inject a failure
+picks a name nobody enumerated.
+
+*The guard.* `tests/test_scope_actions_service.py` — 12 tests, 8 of which DRIVE the state machine
+against a stub `srv` carrying two attributes (`reports_dir`, `jobs`) with no ASGI app, no engine and
+no run, seeding real on-disk ledgers through the store's own writers. They reach the states HTTP
+cannot construct on demand: a claim whose worker died between the receipt and the terminal, a
+terminal that is visible while its OS lock is still held, an abandon racing a live provider call, and
+an abandon of a UUID the server never issued. The four remaining tests are structural — re-export
+identity asserted with `is` (not name lookup), the two routes as one delegating call each (over the
+AST, so a comment carrying the call cannot satisfy it), and no route decorator in the service module.
+
+*It bites.* Nine deliberate breaks, each applied to a backup copy by a harness that asserts its
+anchor occurs exactly once, each caught by exactly the test guarding the property it broke:
+(1) orphan a claim whose OS lease is still held → the live-lease and abandon-race tests;
+(2) disclose a terminal during the lease hand-off window → the hand-off test;
+(3) let abandon overwrite a running receipt → the abandon-race test;
+(4) mint a durable tombstone for a server-unknown UUID → the no-durable-files test;
+(5) drop `scope_actions` from the patch sweep → the sweep guard;
+(6) inline one line of storage case analysis back into the route and (7) replace a delegate with
+`pass  # <the same call>` → the AST route-shape test, which is what makes (7) interesting: the
+comment-only mutation is the one a substring pin would have missed;
+(8) skip `srv.jobs.discard_orphaned_running` → the dead-worker test, which is how the `jobs`
+threading is proven to have landed rather than asserted;
+(9) rebind the router's imported name to an alias → the identity test.
+
+**Still open:** `generate_scope_report_ep` — 550 lines with five nested closures
+(`_stamp_scope_action_usage`, `_compute`, `_inputs_unchanged`, `_persist_terminal`,
+`_compute_durable`) — stays in the router, as does the ~210-line source-probe staleness cache
+(`_source_probe_key` … `_omission_is_current`), which SR-02 explicitly wants the router to keep but
+whose caching machinery is not HTTP either and captures three mutable `build_router` locals, so
+extracting it needs a class rather than a move. `generate` is the harder half: it interleaves the
+action protocol with agent invocation, the `anyio` job hand-off, `_scope_run_ids`/`_scope_sig`/
+`_scope_context_digest`, and lease RETENTION (the quarantine path), and a verbatim move cannot
+establish that its crash windows are unchanged the way a 497-line differential can here. It wants
+the SR-03 treatment — a byte-level differential harness against a pre-extraction worktree — and is
+a separate change.
 
 #### SR-03 · HIGH · under-decomposition · effort: medium — **RESOLVED (2026-08-02)**
 
@@ -3993,6 +5140,113 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 
 *Recommendation:* Adopt the fix the file's own comment proposes: a versioned semantic/runtime manifest (or explicit rollout protocol version) instead of raw-byte whole-package hashing. Extract the finalization/setup 'expected event shape' constants into the engine writer modules (finalize.py, orchestrator setup) and import them, so writer and validator share one spelling instead of two hand-synced copies. Cache/receipt the revalidation instead of full recomputation per check.
 
+*Resolution (2026-08-05) — the finding's headline evidence is STALE; its three mirror claims are REAL,
+and the recommendation's destination is wrong.*
+
+**STALE: "hashes RAW BYTES of every shipped .py, so comments and formatting revoke every receipt."**
+This was the finding's most-quoted evidence and it no longer exists — doc 25 XP-07 landed
+`_semantic_source`, which hashes `ast.dump(ast.parse(raw))`. Comments never reach the AST, and
+`ast.dump` without attributes carries no line or column numbers, so blank lines, rewrapping and
+line-ending conversion vanish. `_manifest_entry` sizes the PARSED body too, which closes the hole
+where sizing `raw` beside a hash of the tree would have smuggled byte sensitivity back in through the
+other field. Re-verified rather than taken on trust: a throwaway tree with a comment inserted into
+`engine/finalize.py`, and a second with a blank line inserted mid-function, each produced **0 changed
+leaves out of 1155** measured; changing `_COST_REFRESH_MAX_ATTEMPTS = 3` to `4` in the same file
+produced exactly **2** — the implementation digest and that file's one manifest row. The inline
+comment the finding quotes is gone with the defect. What remains true, and is not a defect, is that a
+REAL semantic change to any shipped module still revokes every receipt: that is the digest's contract,
+and this change revokes them too (eight modules moved).
+
+**REAL: `_validate_calibration_terminal` hardcodes the finalization suffix and the payload dicts.**
+Confirmed at the shifted line numbers — `expected_types` (a literal 12-tuple), `expected_tail_data`
+(seven literal payload dicts), the literal `budget` field set, and `{"scope": scope, "step":
+"budget"}`. **REAL: `_validate_calibration_setup` re-derives `Engine._setup_phase`'s
+config_hash/setup_manifest.** The finding did not say how sharp this one is: the two derivations
+differ by ONE orjson option — `run_started.config_hash` dumps the task payload UNSORTED, the
+manifest's inner config hash dumps the same payload SORTED — and a copy made from memory that gets
+that backwards produces a self-consistent digest no honest run yields. **REAL:
+`validated_speculation_gate_receipt` recomputes the entire gate**, and worse than stated: it derived
+the whole-source implementation digest and the environment fingerprint, then called
+`speculation_quality_gate`, which derived both AGAIN. One validation parsed every shipped `.py` twice.
+
+**Where the shared constants had to go, and why not where the recommendation says.** "Extract them
+into the engine writer modules and import them" is not available: `search` may not import `engine`,
+and `tests/test_calibration_profile_home.py::test_the_search_to_engine_edge_is_gone` asserts that
+edge at ZERO — doc 25 XP-07 moved the finalize-scope read side DOWN into `events/` for exactly this
+reason. So the constants moved DOWN, not up: `events/finalize_protocol.py` (the step-name vocabulary,
+`FINALIZE_BUDGET_FIELDS` + the `budget_receipt` constructor that mints the payload, and
+`QUIET_FINALIZATION_SUFFIX`) and `core/setup_identity.py` (the two run-start digests). `engine/finalize.py`
+and `engine/orchestrator.py` write through them; `events/finalize_scope.py` and
+`search/speculation_quality.py` read through them.
+
+**A shared constant is not the fix on its own.** Relocating a hand-copied table only renames the
+problem unless something proves the table is still TRUE of the writer. So `tests/test_finalize_protocol.py`
+drives a REAL toy run to completion and compares the suffix the engine actually appended against
+`QUIET_FINALIZATION_SUFFIX`, and asserts the real run's `config_hash`/`setup_finished.manifest`
+against the shared derivation. That is the test the old arrangement could not have: the gate's own
+suite builds its evidence with a hand-written fixture — a THIRD copy — which is deliberately kept
+independent (deriving it from the shared table would make `test_speculation_quality_gate` pass
+tautologically) and therefore cannot notice the writer changing. Teeth-tested by commenting out the
+`case` step marker in the writer: the driven test reddens and **nothing else in the gate's own 124
+tests does**, which is precisely the silent-lockstep failure the finding describes.
+
+**Recomputation: removed rather than cached.** The two hoists above make one validation derive the
+implementation digest and environment fingerprint ONCE instead of twice, and the `speculation-gate`
+CLI now publishes the body it already computed (`publish_speculation_gate_receipt`) instead of
+re-entering `write_speculation_gate_receipt`, which re-ran the whole gate — six run directories
+re-parsed, the scorer matrix re-executed — purely to reproduce bytes the frame was holding. A CACHE
+was considered and rejected on the merits: `validated_speculation_gate_receipt` is called ONCE per
+`Engine` construction and once per CLI invocation, so after the double-work is gone there is nothing
+to amortize, and a sound key would have to cover every byte the gate reads — six run directories'
+`events.jsonl`/`config.snapshot.json`/`task.snapshot.json` — via stat tuples for evidence this gate
+exists to distrust. Trading a fail-closed recomputation for a stat-tuple cache with no repeated call
+to pay for it is a worse gate, not a faster one. Both halves are DRIVEN rather than pinned:
+`test_one_validation_derives_each_expensive_identity_once` counts the two seams through a real
+validation, and the CLI test counts gate invocations and fails outright if the publish path reaches
+for `write_speculation_gate_receipt` again. Counting is the only way to see either — the outcome was
+identical with the double work, which is exactly why it survived.
+
+**Digest safety.** Every digest was measured against a fixed six-run corpus before and after:
+**1155 leaves compared, 15 differ**, and all 15 are implementation-manifest rows for the eight files
+this change touches — `__init__`, `cli/inspect_cmds`, `core/setup_identity` (new), `engine/finalize`,
+`engine/orchestrator`, `events/finalize_protocol` (new), `events/finalize_scope`,
+`search/speculation_quality` — plus the aggregate digest. The calibration-profile digest, task-profile digest,
+both product-authority digests, the runtime-scope digest, the environment digest, the scorer-fidelity
+report, both setup identities, all six per-run analyses (which embed every source digest and the
+semantic execution trajectory), the whole gate body and the receipt's `self_digest` are BYTE-IDENTICAL,
+and the corpus still validates. The harness was teeth-checked in both directions first: an unmodified
+copy of the tree produced 0 diffs, and six injected mutations — comment-only, blank-line, a real code
+change, a renamed writer step, an extra budget field, a bent setup hash — were each detected.
+The REAL implementation digest does move, necessarily: eight shipped modules changed semantically, so
+this commit revokes every already-issued receipt. That is the digest's contract rather than a defect —
+the alternative is a receipt that survives the implementation it attests to — and it is why the
+byte-identity that matters here is of every OTHER digest and of the gate's verdict on fixed evidence.
+
+**Unrelated flake found while verifying, not caused here.**
+`tests/test_card_budget_refund.py::test_the_refund_is_reachable_end_to_end_on_the_deterministic_backend`
+is load-dependent: it needs an eval to finish and move `best` out from under an in-flight prefetch, and
+under a busy machine the supersede does not happen (`refunded: 0`). Measured 6x on this branch and 6x on
+its unmodified merge-base: it fails on BOTH (1/6 and 3/6 passing respectively, under identical load), so
+it is pre-existing rather than a regression. Left alone deliberately — making it deterministic means
+changing the scheduling it is written to observe, which is a different change from this one.
+
+**One residue of the STALE half, found while re-verifying it and left deliberately.** The manifest has
+two non-`.py` members. `serve/settings_ui_schema.json` turns out to be hashed SEMANTICALLY by
+accident and correctly — a JSON document is a valid Python expression, so `ast.parse` succeeds and a
+reindent does not revoke (measured). `pyproject.toml` does not parse, so it falls back to raw bytes as
+`_semantic_source` intends, and a comment or whitespace edit THERE still revokes every receipt.
+Repairing it means parsing TOML and bumping the manifest schema to v3 — and a schema bump is itself a
+global revocation, spent on a file whose realistic edits are dependency changes that should revoke
+anyway. Recorded rather than fixed. `docs/guide/cli-reference.md` was carrying the pre-XP-07 claim
+("Regenerate after any byte change ... including Python comments") a day after it stopped being true;
+that is corrected here, since a stale instruction to burn six GPU runs is the same operational cost as
+the defect it describes.
+
+**Not done.** The finding's framing that ~3,450 lines "exist solely to admit one Settings knob" is
+left standing: since 2026-08-04 a receipt no longer gates ordinary runs at all (the node-budget refund
+replaced it), so the stack is a benchmark plus a calibrated-replay lane, and shrinking it is a
+scope-of-the-benchmark question rather than a modularity one.
+
 #### SE-02 · MEDIUM · mergeable-entities · effort: medium
 
 **Three researcher-wrapper classes solve the same delegation problem three different ways, each with its own history of forwarding bugs**
@@ -4252,6 +5506,81 @@ Covered by `tests/test_json_and_metric_contracts.py` (30).avoid the name collisi
 
 *Recommendation:* Split into concept_graph.py (structure + skeleton), concept_tagging.py (heuristic + LLM taggers), concept_analytics.py (coverage/metrics/alarms), and move the lens/hierarchy projections next to the other UI projections (events/ per the package map, or serve/). Promote _experiment_nodes/_node_text to public names since three sibling modules import them.
 
+*Resolution (2026-08-05):* CONFIRMED and split — as FIVE modules, not the four the recommendation
+names, because four of them close an import cycle. Three of the finding's own claims needed
+correcting first.
+
+**The counts.** The file is 1,691 lines, not 1,680, and four of the five cited spans have drifted
+16-36 lines (`tag_nodes_llm` is :546-725, not :530-709; the projections :1127-1344, not :1123-1341;
+consolidation + `build_concept_map` :1437-1645, not :1437-1634). The five responsibilities and the
+`Concept` DESIGN NOTE at :75-80 are exactly as described.
+
+**Three modules reach into the privates, or four?** Four. `engine/novelty.py:858` imports
+`_experiment_nodes` too, and it does so across a PACKAGE boundary —
+`tests/test_cross_package_private_seams.py` already carried it as a declared debt. `_node_text` has
+exactly one importer (`novelty_recall`). Both are promoted: `concept_tagging.experiment_nodes` and
+`concept_tagging.node_text`, and the registry entry is DELETED rather than re-pointed, which is the
+outcome that registry's own docstring asks for ("the moment to ask whether it should be public
+instead").
+
+**The recommendation's four modules do not import.** It names `concept_graph` (structure) /
+`concept_tagging` / `concept_analytics` plus a destination for the projections, and gives the fifth
+responsibility — consolidation + `build_concept_map` — no home. Left behind in `concept_graph.py`
+that makes the base module import its own dependents. Measured on a scratch copy holding exactly the
+recommended shape: `python -c "import looplab.search.concept_tagging"` → `ImportError: cannot import
+name 'ConceptGraph' from partially initialized module 'looplab.search.concept_graph' (most likely
+due to a circular import)`. So there is a fifth file, `concept_map.py`, at the TOP of the cluster,
+and the layering is `concept_graph` (0) ← `concept_tagging` / `concept_lens` (1) ←
+`concept_analytics` (2) ← `concept_map` (3). 1,691 lines became 413 / 428 / 367 / 314 / 295.
+
+**Where the projections went, and why not where the review said.** Both proposed destinations were
+measured and both fail. `serve/` is unreachable: `tools/run_tools.py` consumes `project_hierarchy`
+and `node_concept_delta`, `tools` sits BELOW `serve`, and
+`test_cross_package_private_seams.py::test_the_upward_import_is_confined_to_that_one_default` allows
+exactly ONE `tools -> serve` import (inside `RunControlTools.lifecycle`). `events/` cannot take the
+group whole: the package imports nothing above `core` (measured — zero non-`core` `looplab.` imports
+in it), while `node_concept_delta` needs `search/concept_projection.py`'s receipt-aware CURRENT
+projection, and `derive_lens` makes an LLM call into a package that holds the PURE projections
+precisely so the fold's neighbourhood never grows a provider edge. Landing three of the five in
+`events/` and leaving two behind splits one view API across two packages to satisfy the letter of a
+recommendation whose reason — cohesion — it breaks. They live in `search/concept_lens.py`, which
+every consumer already imports.
+
+**No re-export facade, on purpose.** The obvious way to make a split invisible is to re-export the
+moved names from `concept_graph`. That is the trap here rather than the fix: a re-export RESOLVES,
+so `monkeypatch.setattr(concept_graph, "build_concept_map", …)` keeps working while the engine's
+`concept_map.build_concept_map` runs untouched — the silent no-op CLAUDE.md's back-compat note
+describes, wearing a green test. Without one, the five stale patches in the suite raised
+`AttributeError: module 'looplab.search.concept_graph' has no attribute 'build_concept_map'` on the
+first run and named themselves.
+
+**The seam the split could have cost.** `from looplab.search.concept_tagging import
+tag_nodes_heuristic` binds BY VALUE, so once the analytics live in another file a
+`monkeypatch.setattr(concept_tagging, …)` stops reaching them — the same second-patch-surface hazard
+CLAUDE.md records for `serve/scope_actions.py`. That seam is live
+(`tests/test_retro_tag_persist.py` patches the tagger to force a CAS race). So a cluster module
+reaches a sibling's FUNCTIONS through the module object; only the two types and the
+`_normalize_concept_id` identity wrapper are imported by name, because nothing patches those.
+
+**Not fixed, and why.** The `Concept` DESIGN NOTE moved verbatim rather than being acted on:
+unifying the dual id-prefix/`axes` encoding changes what `axes_of`/`parents_of` return for every
+curated cross-link (`loss/margin-mse` sits under BOTH `loss` and `distillation`), and those feed
+coverage, graded-novelty admission and Card scoring. That is a behaviour change to live selection,
+not a decomposition, and it needs its own measurement. Noted in passing: `_canonical_with_rename`
+has no caller anywhere in `looplab/` or `tests/` — it moved with the projections rather than being
+deleted only because `events/digest.py`'s comment names it as the thing NOT to reach for, and a
+dangling reference is worse than a dead function. A stale `normalized_concept_renames` import (dead
+since SE-10) went with the split.
+
+`tests/test_concept_module_split.py` (7). Three of the seven DRIVE the seam — patch the sibling, call
+across the file boundary, assert the patched output is what came back — because a counter alone
+cannot tell "the module was imported" from "the patched function ran". Verified by three breaks on a
+scratch copy: restoring the by-value `from looplab.search.concept_tagging import tag_nodes_heuristic`
+in `concept_analytics` (which is what a future refactor does without thinking), adding a
+function-local `concept_map` import back into `concept_graph`, and growing a two-name re-export
+facade. The first break is the one worth recording: 220 existing concept/endpoint/tool tests stayed
+GREEN through it, and only the driven guard failed.
+
 #### SE-10 · MEDIUM · inconsistency · effort: medium
 
 **Concept/synonym merging implemented three different ways; per-run LLM consolidation bypasses the shared agent_merge core**
@@ -4493,6 +5822,103 @@ Scope: `looplab/agents/`: roles.py, tool_loop.py, agent.py, cli_agent.py, unifie
 *Evidence:* drive_tool_loop (tool_loop.py:204-575) takes 26 parameters (4 positional + 22 keyword-only) and its single for-loop body inlines nine concerns: history compaction, plan re-injection, prose-stall forced emit, per-call JSON-args hardening, emit-validation bounce, cancellation stubs, tracing, the identical-result repeat ledger, stuck detection, and the emit_after/emit_force convergence machinery. Options travel as an untyped dict from loop_opts_from_settings and are **-spread at each call site. Both ToolUsingResearcher.__init__ (agent.py:156-162) and ToolUsingStrategist.__init__ (strategist.py:753-758) carry near-identical comments describing the SAME past bug: context_budget_chars arriving via both the ctor kwarg and loop_opts caused a double-keyword TypeError that the broad except silently swallowed, leaving 'the agentic Researcher DEAD in the default config' — fixed per-callsite with duplicated dict.setdefault merges instead of at the source. DeepResearcher meanwhile re-plumbs 9 of the same settings as individual ctor kwargs (deep_research.py:110-131, make_deep_researcher:287-297) precisely because the dict bundle can't express 'everything except self_plan and summary_client'.
 
 *Recommendation:* Introduce a typed LoopOptions dataclass (built once by loop_opts_from_settings, with a .replace()-style override for DeepResearcher's two divergences) so a duplicate keyword is impossible by construction and every option has one declaration point; then extract the per-tool-call execution block (args hardening, execute, cap, repeat-note, hooks — roughly lines 414-510) and the three forced-emit salvage paths into named helpers, keeping drive_tool_loop as the turn-level skeleton.
+
+*Resolution (2026-08-05) — the bug half in full; the decomposition half in part.*
+
+`agents/loop_options.py::LoopOptions` is a frozen dataclass that IS a Mapping, so every existing
+`**loop_opts` spread keeps working byte-identically while each option has one declaration point.
+`loop_opts_from_settings` returns one. Merging is named rather than inferred: `.replace()` (this
+value WINS — a hard per-session ceiling, the assistant's own 5-minute floor, the memo stage's
+`self_plan=False`), `.with_defaults()` (fill only what is unset — exactly the precedence the two
+`dict.setdefault` merges already had), `.without()` (restore the loop's own default, which is how
+the DeepResearcher's `summary_client` divergence is now stated).
+
+**What actually closes the bug is a two-part rule, not the dataclass.** A typed bundle alone still
+permits `drive_tool_loop(max_turns=…, **opts)`. So `LOOP_OPTION_FIELDS` and
+`EXPLICIT_ONLY_LOOP_ARGS` now PARTITION the loop's 22 keyword-only parameters: an option may travel
+only in a bundle, and the per-call callbacks plus the two prompt contracts (`nudge_prompt` /
+`stuck_prompt`) may travel only as explicit keywords. That makes both halves checkable — an explicit
+option keyword beside a `**` spread is an AST-visible violation, and a bundle carrying `finalize` is
+refused by `coerce` at the boundary. The prompt half is deliberate: prompt strings are contracts, and
+a config bundle that could carry `nudge_prompt` would let a settings file reword an agent's nudge.
+
+**What the finding got wrong, recounted.** The parameter count is right — 4 positional + 22
+keyword-only = 26 — and the two ctor comments are still there, near-identical, describing the same
+swallowed TypeError. The dict was still untyped (`-> dict`). Every line number is stale (the function
+starts at 211, not 204; the two ctors at `agent.py:165-171` and `strategist.py:774-780`), with
+`deep_research.py:110-131` the one exact hit. Three claims are wrong in substance, and all three
+understate the problem:
+
+- "DeepResearcher re-plumbs **9** of the same settings" — **7** overlap with the bundle
+  (`context_budget_chars`, the three stuck knobs, `auto_summary`, `emit_after`, `emit_force`).
+  `max_turns`/`time_budget_s` are the other two, and the bundle never carried them, which is the
+  point below.
+- "the **three** forced-emit salvage paths" — there are **four**: the prose reply, the `emit_force`
+  ceiling, the stuck-detector stop, and budget exhaustion.
+- "fixed per-call-site with duplicated `dict.setdefault` merges" names **two** sites; the merge
+  pattern was at **five** — the two ctors plus `repo_developer._session_opts`,
+  `lessons_distill._reflect_loop_opts` and `serve/assistant.py`'s `opts["self_plan"] = False`, the
+  last three mutating the shared bundle in place rather than merging into it.
+
+And the finding treats the collision as fixed history. It is not: the `option= beside **spread` shape
+was live at **five** call sites (`agent.py`, `strategist.py`, `unified_agent.py`,
+`tool_loop.py::emit_loop`, `serve/assistant.py`), each passing `max_turns=` and `time_budget_s=` next
+to a spread. It had not fired only because `loop_opts_from_settings` happened not to produce those
+two keys — while eight other sites (`serve/report.py`, `trust/judge.py`, `engine/genesis.py`,
+`engine/lessons_distill.py`, `search/best_of_n.py`, `search/concept_graph.py`,
+`search/hybrid_merge.py`, `tools/asset_brief.py`) already build bundles that DO carry `max_turns`.
+The bug was one bundle-and-callsite pairing away from recurring, in the same silent shape. All five
+now fold their limits into the bundle instead.
+
+*The guard is `tests/test_loop_options.py`, and its first section drives the bug rather than pinning
+it.* Each agentic entry point is run against the REAL `drive_tool_loop` with a bundle carrying ALL
+twelve options, and asserted to return its emitted value — the fake client has no `complete_tool`
+and no `complete_text`, so every degraded path fails on it and "not the emitted value" proves the
+loop was never reached. That is the historical failure at full strength: with the old code all five
+sites raise, and the Researcher's is swallowed into a draft Idea indistinguishable from a weak
+model's bad JSON. Behind it sit the AST call-site rule and a two-way registry partition test, so a
+new `drive_tool_loop` parameter has to declare which side it is on.
+
+*Verified to bite by mutating a throwaway copy, five ways.* (1) Restoring `max_turns=self.max_turns,
+time_budget_s=self.time_budget_s` beside the spread in `ToolUsingResearcher.propose` → 3 red (the
+driven test, the AST rule, and the pre-existing `test_agentic_researcher_no_context_budget_kwarg_collision`).
+(2) Swapping the ctor's `with_defaults` for `replace` → 1 red, `max_turns` silently re-capped 11 → 0.
+(3) Making `_check_names` a no-op → 2 red (an unknown key is still caught by the dataclass, but the
+message that distinguishes a typo from a per-call argument is gone). (4) Narrowing the AST matcher to
+drop `run_phase` → the violation test still passes GREEN while searching nothing; only the
+scan-coverage assertion catches it, which is why that assertion exists. (5) The comment evasion —
+deleting the `drive_tool_loop` call in `_pilot_emit` and leaving its exact text as a comment → red,
+because comments are not AST nodes.
+
+*Two test contracts moved with the code.* `tests/test_emit_loop.py`'s fixture returned
+`{"stuck_retries": 3}` — a misspelling of `stuck_repeat` that rode an untyped dict to a `**kwargs`
+fake and was asserted on by name; it now names the real option, which is the same property tested
+against something that exists. `tests/test_deep_research_loop.py` passes `loop_opts=LoopOptions(max_turns=1)`
+where it passed `max_turns=1`, because `DeepResearcher.__init__` now takes the bundle and a named
+`_DEFAULT_LOOP_OPTS` instead of nine individual kwargs.
+
+*The decomposition half is partial, and honestly so.* Four helpers came out — `_compact_in_place`,
+`_tool_call_args`, `_run_tool_call` (execute + trace + cap + repeat ledger + provenance hook, the
+block the recommendation names) and the `_salvage_emit` all four forced-emit exits share.
+`drive_tool_loop` goes 379 → 333 lines, of which 54 are its docstring. That is a smaller win than the
+finding implies, for a reason worth recording: the why-comments MOVE with the code (CLAUDE.md), so
+extracting a 35-line block that is 20 lines of comment relocates ~35 lines rather than deleting them.
+The value is the naming, not the line count.
+
+Deliberately NOT extracted: the emit-validation bounce and the turn skeleton itself. Both are control
+flow — the bounce `continue`s so sibling calls still get their tool results, and an accepted emit
+`return`s from inside a nested loop — so a helper would have to hand that decision back through a
+protocol, trading one readable branch for an invented one. `_salvage_emit` also deliberately returns
+`(accepted, result)` rather than a `None` sentinel: `ToolUsingStrategist`'s finalize degrades to the
+rule baseline, which is `Optional[Strategy]`, so "nothing to accept" and "the result is None" must
+stay distinguishable — collapsing them would silently turn a legitimate None strategy into a
+fallback.
+
+`drive_tool_loop`'s 26-parameter signature is UNCHANGED on purpose. It is a documented monkeypatch
+seam with 15+ call sites and several hundred tests speaking it; replacing the keywords with an
+`options=` object would retire every one of those spellings at once, and the collision they enable is
+already closed by the partition rule above. `LoopOptions` is what a caller CONFIGURES with; the
+signature stays what the loop is CALLED with.
 
 #### AG-02 · MEDIUM · flat-code · effort: medium
 
@@ -6208,6 +7634,118 @@ entry, and a fresh upward import from `core/parse.py`.
 
 *Recommendation:* Extract endpoint bodies to module-level functions taking srv (or a typed protocol) explicitly and register them in a thin build_router; replace the late-bound srv.*_fn attributes with an explicit shared-services object constructed before any router, so the inter-router contract is typed and import-checkable.
 
+*Resolution (2026-08-05) — the DI half is done and guarded; the extraction half is measured and
+deferred with numbers. The finding's evidence is largely stale, and the part that survived is not
+the part it leads with.*
+
+**Adjudication first, because most of the evidence no longer describes the tree.**
+
+| Claim | Verdict | Measured |
+|---|---|---|
+| 13 `build_router(srv)` factories | CONFIRMED | exactly 13 — 12 in `routers/` + `serve/jobs.py` |
+| "three exceeding 1300 lines" | STALE | two: runs 2130, assistant 1357 |
+| runs.py `build_router` = 2146 | CONFIRMED | 2130 (drift 16) |
+| reports.py = 1549 | STALE | 1072 — SR-12 shed ~1 400 lines into `scope_report_store.py` |
+| control.py = 1327 | STALE | 838 — SC-01 shed `control_validation.py` |
+| assistant.py = 757 | FALSE | 1357. It GREW ~80% and is now the second-largest factory |
+| `_summary_cache` is a nested closure | STALE | `AppState.summary_cache`, a real attribute (SR-12) |
+| `concept_core_cache` is a nested closure | CONFIRMED | `routers/runs.py:754`, local to `build_router` |
+| runs.py sets `srv.list_runs_membership_fn` | FALSE | deleted by SR-12; `AppState.run_membership()` |
+| `reports.py` reads a `srv.*_fn` at request time | FALSE | reads `srv.run_membership()`; SR-12 |
+| runs.py sets `srv.list_runs_fn` | CONFIRMED | `routers/runs.py:862` |
+| misc.py sets `srv.list_tasks_fn`, genesis reads it | CONFIRMED | `misc.py:1297` → `genesis.py:195` |
+| "no static guarantee the producer router was mounted" | CONFIRMED | and this is the finding |
+| the late-bound edges are all `*_fn` | INCOMPLETE | `boss.py` assigns two `flush_*_run_costs` too |
+
+An AST scan for `srv.<x>_fn` assignments and loads across `looplab/serve/` returns two producers and
+ONE consumer — not the three-edge mesh the finding describes. Half of that mesh was closed by SR-12
+the day before.
+
+**But the finding's defect class is real and BIGGER than the finding, and the `_fn` spelling is what
+hides it.** Dropping the suffix filter and scanning for any `srv.<attr>` assigned inside a router
+finds two more edges, and they are the ones that matter. `routers/boss.py::build_router` assigns
+`srv.flush_pending_run_costs` and `srv.flush_durable_run_costs`; the consumers are
+`serve/deletion_service.py`, `serve/reset_route.py` and `serve/run_commands.py::destructive_guard`
+— none of them a router, so a router-to-router framing cannot see them at all. They read through
+`getattr(srv, "<name>", None)`, which the finding's mental model does not cover either.
+
+The asymmetry between the two is the finding's "no static guarantee" half with a cost attached.
+`flush_durable_run_costs`'s two consumers fail closed on absence — a reset or delete returns 503.
+All three consumers of `flush_pending_run_costs` SKIP: an unmounted boss router does not fail the
+destructive operation, it lets an irreversible mutation proceed with a paid call still waiting for
+durable run-cost accounting, and reports nothing anywhere. For that row the defensive fallback IS
+the failure.
+
+**Done: the contract is enumerable and checked at mount time.** `serve/router_wiring.py` holds the
+mount ORDER (moved verbatim out of `make_app`, minus two parentheticals SR-12 had falsified) and
+`LATE_BOUND_ROUTER_CALLABLES` — four rows; `mount_routers` includes every router and then refuses an
+app that does not satisfy it. Two shapes, both previously silent until a request arrived: a live
+CONSUMER without its PRODUCER, and a producer mounted that no longer assigns (the assignment moved
+behind a condition, or lost its name in a rename). Note the mount order does not establish the
+contract by itself and never did — genesis mounts 7th and its producer misc 12th, which works only
+because the read is at request time. That is precisely why it has to be checked rather than argued
+from the list.
+
+`LateBoundCallable` splits `router_consumers` from `service_consumers` because their LIVENESS
+differs: a router consumer exists only when mounted, a service consumer is imported code and is
+always live. Folding them into one tuple would let a row whose only readers are services pass a
+mount that omits its producer — which is exactly the two boss rows, i.e. the check would have been
+approximately right in precisely the place it needed to be exactly right.
+
+`RuntimeError`, deliberately not an `OperatorRefusal`: a mount list that does not satisfy its own
+registry is a defect in this package, not a mistake in something the operator typed. The consumers'
+own `getattr(..., None)` guards stay untouched — each is defensive code at a site that cannot import
+the router. What changes is that in a correctly mounted app the fallback is now unreachable, so it
+stops being the thing that quietly decides an operator's cost accounting.
+
+**Rejected: the shared-services object.** Every row is a route BODY or a closure over `srv` built
+inside `build_router` — `list_tasks` reads the on-disk catalogue relative to the repo, `list_runs`
+overlays engine-liveness facts with a best-effort resume re-spawn, and the two flushes are
+`paid_work` functions partially applied to `srv`. Promoting any of them into `AppState` puts HTTP and
+paid-work concerns in the state bag, which is what SR-12 declined one day earlier for the same
+reason. Overturning that without new evidence would be churn.
+
+`list_runs_fn`'s row carries an EMPTY consumer tuple, which is the finding's most interesting
+casualty: SR-12 gave the scope reports their own `run_membership()` because a report GET must not
+probe every run's lock, so the attribute the finding cites as a cross-router dependency now has no
+production reader at all. It is not deleted — it is the handle
+`test_report.py::test_a_scope_report_read_never_probes_liveness_or_spawns_an_engine` uses to assert
+the runs list still DOES probe, the contrast that makes SR-12's split mean anything (verified by
+breaking the probe: that test fails at "only the report projection skips the probe"). So the empty
+tuple is a measured fact, and the scan fails if a production reader ever appears without a row.
+
+**Repaired en route:** four comments SR-12 left stale, one of them actively misleading — the
+rationale "the membership-only projection … NO engine-liveness lock probe and NO durable-resume
+reconciler" had re-attached itself to `list_tasks_fn`, the task CATALOGUE, describing a different
+thing entirely. It moves to `run_projections.run_membership`, which is what it was written about.
+
+**Deferred, with numbers: extracting the endpoint bodies.** The 13 factories hold ~8 300 lines and
+313 nested defs. The property the extraction would buy is "an endpoint can be imported and
+unit-tested in isolation", and nothing in the suite is currently blocked on it — every route is
+already driven end-to-end through `TestClient`, which exercises the dependency wiring an extracted
+call would skip. Against that: each moved body is a monkeypatch seam, and the failure mode is not a
+red test. It is the one measured on this tree today — a by-value break under which three
+pre-existing patch tests stayed GREEN while reaching nothing. A 8 300-line mechanical move with that
+failure mode and no property to show for it is a worse trade than leaving the closures alone. The
+one sub-claim still true (`concept_core_cache` local to `runs.py::build_router`) is a per-request
+cache with no cross-router reader, so it is not the defect class this finding is about.
+
+The honest measurement is also that the finding's premise has inverted since it was written:
+`assistant.py::build_router` grew from 757 to 1357 lines while `reports.py` and `control.py` shrank
+by a third each. Whoever picks the extraction up should re-derive the targets rather than trust the
+table above — including this row.
+
+Pinned by `tests/test_router_wiring.py` (14): the deficient mount really does 500 at request time
+when the check is bypassed (so the refusal has a cost attached), `mount_routers` refusing both
+shapes, the empty-consumer and service-consumer branches, the two cost flushes actually differing on
+absence, and the two-way AST scan tying every `srv.<x>` assignment in a router and every read of one
+of those names anywhere in `serve/` back to a registry row — attribute loads and
+`getattr(srv, "<name>", …)` alike, since the string-literal spelling is the one all three service
+consumers use. Teeth-tested against 8 breaks, all biting — including three written to be
+comment-satisfiable (`pass  # srv.list_tasks_fn = list_tasks`, the same for the boss flush, and a
+commented-out `mount_routers(app, srv)` beside a hand include loop), which the AST checks ignore as
+they should.
+
 #### XP-06 · MEDIUM · under-decomposition · effort: large
 
 **The largest module in each package still contains one 500-800-line function**
@@ -6418,6 +7956,139 @@ Scope: `ui/src/` + `ui/test/`.
 
 *Recommendation:* Extract one useDurableRunCommand(source, runId, {labels, onToast}) hook (or a pure state-machine module driven by both components) over the already-shared api.js envelope layer; the DIRECT/TRANSPORT_INTENTS action tables and label maps become the only per-surface inputs.
 
+*Resolution (2026-08-05) — the shared RULES were extracted and the one genuinely duplicated effect was
+merged; the `useDurableRunCommand` hook was REJECTED on a measurement, and each rejection is recorded
+with the behaviour that would have been lost.*
+
+**The "near-identical, ~350 lines, pairwise-parallel" premise does not survive being measured.** Take
+Dock's machine (`persistTransport` through the poll effect, 252 non-blank lines) and the Assistant's
+(`persistDirect` through its poll effect, 477 non-blank lines), α-rename every one of the finding's
+nine pairs plus `transportPending`/`directPending`, `transportFailure`/`directFailure`, the four
+storage calls and the source string, and diff: **71 lines match, 28% of the smaller side.** Strip the
+structural residue (`}`, `try {`, `return`) and what is left is four substantive runs — the
+`command_storage_unavailable` record, the `error?.commandRecord || error?.commandId` submit-catch
+preamble, the `['transport','access','protocol']` test, and the poll loop. The two "byte-similar
+restore-on-mount effects" are the sharper miss: **7 of 66 lines match and all 7 are closing braces.**
+They implement the same decision *table* and share no code.
+
+The divergences are not incidental, and a hook parameterized by `(source, runId, {labels, onToast})`
+would have had to pick a winner for each:
+
+* `failTransport` vs `failDirectObservation` — the Assistant deletes `record.error.message` and
+  `.remediation` off the failure record before storing it, so `commandErrorMessage` falls back to
+  api.js's client-owned copy. Dock keeps the server text. **Assistant's redaction is the better rule
+  and Dock's is arguably a leak, but changing it changes what Dock renders, which this change is not.**
+  Kept separate, both spellings intact.
+* `unavailableTransport` vs `unavailableDirect` — same split: Dock stores `lastError: error?.message
+  || String(error)`, the Assistant stores the fixed `'Command status could not be verified.'`. Neither
+  matters visually: `lastError` is written at twelve sites across the two files (5 in Dock, 7 in the
+  bar) and **read at none** — no `.lastError` read exists in `ui/src`, it is in neither component's
+  markup, and `saveCommandTransport` builds its payload field-by-field so it never reaches storage
+  either (`commandLifecycle.test.js` pins exactly that). Left as found; deleting dead state is a
+  different diff — and, on inspection at merge, a diff that would COST something. The pin in question
+  is `test_strict storage persists no server free text, raw lastError, payload, or JSON-like secret`,
+  which asserts `raw.includes('lastError') === false`: it is a secret-leak guard, and `lastError` is
+  where a raw provider/transport message lands before the storage layer drops it. Deleting the field
+  would make that assertion pass because the NAME no longer exists anywhere, i.e. turn a security pin
+  vacuous. The dead state is what keeps it honest. Removing it is therefore only correct together
+  with re-stating the storage rule generally — no unknown free-text field reaches storage — rather
+  than naming this one, and that is the diff, not a deletion.
+* `acceptTransportRecord` vs `acceptDirectRecord` — when the post-accept persist fails, Dock escalates
+  to `protocolInvalid` (`canResubmit: false`, only Dismiss clears it) while the Assistant degrades to
+  `observationKind: 'transport'` (still checkable). Both are defensible; merging silently picks one.
+* the restore effects — the Assistant **auto-resubmits** an id-less recovery on mount
+  (`executeDirect(restored, { recovery: true })`); Dock marks it unavailable and waits for the operator
+  to press Check. The two also order their branches differently: for a SUCCEEDED envelope under a
+  mismatched lock, Dock clears silently and the Assistant raises protocol-invalid recovery.
+* every Assistant setState is fenced on `mountedRef.current` and on `currentRunIdRef.current` matching
+  the entry's own `runId` (the bar outlives navigation; Dock is mounted per run), and its entries carry
+  `name`/`spec`/`arg`/`nodeGeneration` where Dock's carry a single `action` against a fixed
+  three-entry `TRANSPORT_INTENTS`.
+
+A hook spanning that would need roughly ten injected callbacks — and the callbacks are exactly where
+the divergence lives, so the "shared" body would be a call-forwarding shell over ten per-surface
+functions. What shipped instead:
+
+`ui/src/runCommandMachine.js` (103 lines, pure) holds the rules that are provably the same on both
+sides, each verified line-by-line before moving: `observeCommandError` (Dock's private
+`observationKind` and `assistantCommand.js::assistantDirectObservationKind` were **byte-identical**;
+one is now gone and the other renamed), `commandIntentPreserved` over the intent-preserving
+observation set (8 call sites, spelled three different ways — `.includes`, a `||` chain, and a
+narrowed `access||protocol` after an early `transport` return, all equivalent),
+`protocolCommandRecord` (2), `commandStorageUnavailableRecord` (2), `commandLockIdentity` (4),
+`foreignCommandLock` and `commandLockMismatch` (the cross-surface fence, 2 each),
+`interruptedCommandRecovery` and `settledCommandFailure` (the failed-vs-unknown rule, 5 open-coded
+copies between them), `restoredCommandRecord` (2), and the poll cadence. `restoredCommandRecord` is Dock's two-step spelling,
+which is a strict superset of the Assistant's: the extra id-backfill branch cannot fire, because
+`loadCommandTransport` already refuses any envelope where `!!commandId !== !!record.id` — noted in the
+comment so nobody re-derives the narrower one.
+
+`hooks.js::useCommandStatusPoll` is the one React duplication that was real, and it is now one effect
+instead of two. The surfaces hand in `observe` / `onRecord` (returns keep-polling) / `onUnobservable` /
+`onFailed`; the hook owns the accepted-or-executing gate, the `active` latch, the three-strike
+transient budget and the cadence. Two details had to be preserved deliberately rather than tidied:
+(1) the five-entry dependency list collapses to `!!paused`, which is safe only because the effect body
+is inert whenever `paused` is true and all its constituents are false whenever it is live — written
+down as a comment, since it is not obvious; (2) the callbacks are snapshotted **once at effect start**
+(`const bound = handlers.current`), reproducing the frozen closures of the hand-written effects.
+Reading the ref per tick would be latest-render semantics — a different machine, in which a re-render
+mid-flight silently re-targets an in-flight observation. There is a test for that specific difference.
+
+**Nothing either component renders changed**, and that is verified rather than asserted: every line in
+Dock.jsx and AssistantBar.jsx matching a JSX marker (`<Tag`, `</`, `/>`, `className=`, `role=`,
+`aria-`) is byte-identical to HEAD — 269 and 386 lines respectively — and no `+`/`-` line in the diff
+of either file contains one.
+
+The guard is `ui/test/runCommandMachine.test.js` (19 tests). It drives the protocol rather than
+reading source for the parts that matter: the three durable states are staged through the REAL
+`saveRunTransport`/`saveAssistantRunTransport`, reloaded through the real loaders (a reload IS
+"everything in memory is gone, re-read sessionStorage"), and classified — an accepted command whose
+status read failed, a terminal FAILED record written while `statusUnavailable` was set, and a reload
+mid-check/mid-retry all stay observable, while a clean terminal failure settles. The cross-surface
+fence is driven the same way: a staged Dock envelope is invisible to `loadAssistantRunTransport`, and
+the shared lock is caught by `foreignCommandLock` — the test also pins that `commandLockMismatch`
+returns **false** there, because the mismatch rule is own-source only and a surface that checked only
+for a mismatch would sail straight past. The poll runs in a real React render against a recording
+`setTimeout`: 1s first read, 1.5s repeat, exactly three reads at 1s/+1.5s/+3s before the unknown
+verdict, no retry budget spent on access/protocol, `missing`/`request` settling as failures, silence
+while paused, an unmount that leaves no armed timer and lets no late response commit, and the
+handler-snapshot semantics above. The cadence numbers are ALSO pinned as literals in their own test,
+because every other assertion is written in terms of the exported constants and would widen with them.
+
+Verified by mutation on a throwaway copy of the tree (each break applied by a script that asserts its
+anchor appears exactly once; scratch baseline 720/720):
+
+* Drop `!saved?.statusUnavailable` from `settledCommandFailure`, so an unverified terminal record
+  settles → 2 failures, both `an unknown command outcome survives a reload instead of settling as
+  failed` (dock and assistant). Nothing else in 720 tests notices.
+* Point `commandTransportKey` at Dock's namespace for both sources → 5 failures: this file's
+  `the two surfaces cannot read each other's staged command`, plus four in `commandLifecycle.test.js`.
+* Move the handler snapshot inside `poll` (latest-render semantics) → 3 failures, including
+  `a running poll keeps the callbacks from the render that started it`.
+* `COMMAND_POLL_MAX_TRANSIENT = 4` → 2 failures. **This one initially passed** — the transient test
+  looped over the constant, so widening the budget widened the test. The literal-cadence test and the
+  hard-coded three-read assertion were added in response; they are the reason it bites now.
+* Delete the command-id clause from `commandLockMismatch` → 1 failure, the identity-fence test.
+* Re-grow a `timer = setTimeout(poll, 1000)` in Dock → 1 failure, the negative pins.
+
+One existing pin had to move with the code: `uiSemantics.test.js`'s "every command poll clears its
+timer" matched `return () => { active = false; clearTimeout(timer) }` in AssistantBar.jsx, where the
+teardown no longer lives. It now reads `hooks.js` for the teardown and AssistantBar for the fact that
+it drives the shared hook and has not re-grown a poll of its own — the same treatment the toast timer
+got under UI-13, and the property itself is now driven behaviourally by the unmount test.
+
+Left separate on purpose, beyond the divergences above: `assistantCommand.js`'s `INTENTS` table and
+the `submitAssistantDirect` in-flight dedup map (assistant-only), Dock's `TRANSPORT_INTENTS` and
+`verifiedTransportAction` / the Assistant's `verifiedDirectEntry` (they resolve different entry
+shapes against different action vocabularies), and both label maps. `CommentsThread.jsx` keeps its own
+`COMMAND_ID_RE` — it is a different feature's recovery journal, not this protocol.
+
+Costs: 720 tests pass (was 701), `npm run build` exits 0, and `npm run check:bundle` reports the same
+13 pre-existing violations as HEAD — same categories, including the manifest static-import cycle that
+was already there under a different chunk pair — with byte deltas only: total JS gzip 473,199 →
+473,457 B (+258 B), owner run DAG route 357,643 → 357,890 B (+247 B). Dock.jsx lost 40 net lines,
+AssistantBar.jsx 30.
+
 #### UI-02 · HIGH · over-engineering · effort: large
 
 **api.js re-accreted into a 2,216-line god-module of 8 distinct concerns**
@@ -6427,6 +8098,149 @@ Scope: `ui/src/` + `ui/test/`.
 *Evidence:* One module contains: the fetch client + auth/review/prefix plumbing (_authHeaders, _throw, apiUrl, reviewReadPath), ~550 lines of sessionStorage command-envelope/lock/launch-transport persistence (lines 53-606), a WHATWG SSE parser (1384-1483), the command submit/await/retry protocol (663-960), the report-refresh intent store (962-1114), the scope-report paid-action reconciliation saga (~300 lines, 1788-2098), the CONTROL action map, cross-run Atlas payload sanitizers (projectCrossRunValue, 1685-1760), and every endpoint function. The header comment says it was split out of util.js 'bodies verbatim', but it has since grown well beyond an API client.
 
 *Recommendation:* Split along the already-visible seams: commandStorage.js (envelopes/locks/launch transports), eventStream.js (parser + fetchEventStream), commandProtocol.js (submit/await/retry/jobAwait), scopeReportActions.js (the paid-action saga). util.js barrel keeps importers unchanged, matching the P5.2 precedent.
+
+*Resolution (2026-08-05) — the four recommended modules landed, plus two the recommendation could not
+have known were prerequisites; every line and comment moved verbatim and the barrel's export surface
+is byte-for-byte the same set.*
+
+**Every number is stale, and the concern sizes are wrong in both directions.** api.js was 2,860 lines,
+not 2,216 (+29% since the review). Re-measured on the live tree, the eight concerns are: the fetch
+client 212 lines (10-51, 1474-1547, 1650-1688, 1804-1824, 1996-2033 — the finding gives no range for
+this one); the sessionStorage persistence 483 lines, not "~550 lines (53-606)" — the contiguous 53-654
+block is 602 lines but 119 of them are shared vocabulary that is not storage; the SSE parser 1549-1648,
+exactly the 100 lines claimed but 165 lines lower in the file; the command protocol 737-1034 (298
+lines, 74 lines below the cited 663-960) **plus a 63-line generic job await at 2457-2519 the finding
+does not mention**; the report-refresh intent store 1036-1081 — **46 lines, not the 153 implied by
+962-1114**, a 3.3x overstatement (what now occupies that range is the paid concept-lens family, a
+ninth concern the finding does not list); the scope saga 2320-2647, 264 lines of code interleaved with
+that job await; CONTROL 1190-1328 (139); the Atlas sanitizers 2180-2265 (86, not 76).
+
+**The recommendation's four modules are not a closed set, and the missing two are the load-bearing
+ones.** All four need `_authHeaders` / `_throw` / `apiUrl` / `reviewReadPath` /
+`assertNotReviewMutation` / `get`, which lived in api.js — so as recommended, each of the four would
+have had to import the barrel back, which under this build's native ESM execution order is a load-time
+TDZ crash rather than a build error (the same trap recorded under UI-04). The fetch client therefore
+had to be hoisted DOWN first: `ui/src/apiClient.js` (234 lines) is the browser's security boundary in
+one file — which principal's credential travels, which namespace a read addresses, and where a review
+mutation is refused. The second addition is measured, not aesthetic: commandStorage and commandProtocol
+share exactly twelve names (`COMMAND_FAILED`, `COMMAND_ID_RE`, `COMMAND_PENDING`, `COMMAND_STATUSES`,
+`STORED_ERROR_CODES`, `STORED_ERROR_KEYS`, `UUID_V4_RE`, `commandEventForAction`,
+`createIdempotencyKey`, `hasOnlyKeys`, `safeIdentityText`, `validRunGeneration`) and neither sits below
+the other, so `ui/src/commandModel.js` (240 lines, **zero imports**) is the leaf they hoist into.
+`scopeGenerationErrorIdentity` lives there for the same reason and only that reason — it is pure, and
+both `jobAwait` and the scope saga annotate an error with it; keeping it beside the saga would have
+pointed commandProtocol UP at scopeReportActions, closing the cycle from the other side.
+
+The six modules are `apiClient.js` (234), `commandModel.js` (240), `commandStorage.js` (552),
+`commandProtocol.js` (375), `eventStream.js` (108), `scopeReportActions.js` (256); api.js is 1,240
+lines and re-exports all of them. The report-refresh intent store went into commandStorage.js rather
+than a seventh module: it is 46 lines of the same tab-scoped paid-identity persistence, built on the
+same `transportStorage` accessor. Nothing was reworded and no body changed; the launch timeout
+constants moved down beside the launch section they are the only readers of, since the constant block
+they used to sit in left with the vocabulary that needed sharing.
+
+**Rejected: `export *` in the barrel.** Siblings need names that were module-private (`_authHeaders`,
+`_throw`, `send`, `assertNotReviewMutation`, `commandJson`, `commandRead`, `storedRecord` …), so those
+declarations are now exported from their own module; `export *` would have carried all ~50 of them into
+api.js AND into util.js, and would have added the failure mode this split most needs to avoid — two
+modules exporting one name makes it AMBIGUOUS, which ESM resolves by silently omitting it. Explicit
+re-export lists keep the surface identical instead: **132 exported names before, 132 after, none added,
+none missing**, verified by diffing the export sets of the pre-split file and the barrel.
+
+**Rejected: making util.js the barrel**, as the recommendation words it. util.js already does
+`export * from './api.js'` and is untouched by this change, but sixteen other src modules and fourteen
+test files import `./api.js` DIRECTLY; routing the new modules through util.js instead would have broken
+every one of them. api.js is the barrel; util.js keeps working through it, which is what "importers are
+unchanged" actually requires here.
+
+**Not extracted: the CONTROL map (139 lines) and the cross-run Atlas sanitizers (86).** The finding
+names both as concerns but its recommendation asks for neither, and neither is a seam of the same kind.
+CONTROL is the action vocabulary a reader opens an API module to find, and it is the only remaining
+resident that reaches `runCommand`, `jobAwait` and the endpoint plumbing at once. The Atlas sanitizers
+look like they belong in `researchAtlasModel.js`, but that module opens with
+`import { boundedAtlasText, projectResearchAtlasSource } from './api.js'` and immediately re-exports
+them — so hosting them there while api.js keeps re-exporting them (ResearchAtlas.jsx takes
+`projectResearchAtlasSource` from api.js directly) is a barrel<->member cycle, the one shape this whole
+change exists to avoid. Untangling that means re-pointing ResearchAtlas.jsx too, which is a different
+change from this one.
+
+Bundling is unchanged, which was the risk. Measured across the split with `npm run build` +
+`npm run check:bundle`: 38 assets before and after, 35 manifest keys before and after with **no new
+manifest entry for any of the six modules**, and identical chunk counts in every closure
+(initial shell 6, owner List route 12, owner run DAG route 23, review DAG 19, Concepts 18, panel-hub
+increment 12). Total JS gzip 473,457 B -> 473,446 B (-11 B); initial shell 101,444 -> 101,526 (+82 B);
+owner run DAG route 357,890 -> 357,900 (+10 B); panel-hub increment 44,919 -> 44,920 (+1 B).
+`check:bundle` reports the same 13 pre-existing violations, including the same manifest static-import
+cycle it already had — the tree was over budget before this change and is over budget by 11 fewer bytes
+after it.
+
+**Adjudicated against UI-04's premise:** the "keep it to one reachability root or the chunk splits"
+rule that held for panels.jsx does NOT hold here, and asserting it would have been a claim I had not
+measured. api.js is reachable from index.html, so every module it imports is already in the eager
+graph. Built with a deliberate second importer (`import { commandRead } from './commandProtocol.js'`
+added to hooks.js), the bundle is byte-identical: 38 assets, 35 manifest keys, JS gzip 473,446 B,
+initial shell 101,526 B, owner run DAG 357,900 B, the same 13 violations. The single-importer test
+below is therefore a structural rule, not a byte rule — and the fact that the tree cannot feel the
+difference is precisely why it needs a test instead of a comment.
+
+Five source-reading assertions across four test files pointed api.js at code that had moved; all five
+went red on the first run and are re-pointed, not deleted. `requestDeadlineShapes.test.js` (its
+`commandFetch` slice), `runApiPathBoundary.test.js` (both the constructor slice and the ONE exemption
+in its scan-every-module grep), `runRouteSemantics.test.js` (the review-bearer parse) and
+`uiGlobalReview.test.js` (the `/api/assistant/shared` slice). One of them mattered more than the rest,
+because shrinking it is invisible rather than red: the COVERAGE list in
+`uiGlobalReview.test.js` — the raw-run-id-in-a-URL rule — gained all six modules, so the rule keeps
+covering the code that left; `run(?:Node)?ApiPath(` is additionally required of apiClient.js and
+commandProtocol.js, and commandModel/commandStorage/eventStream/scopeReportActions are deliberately
+excluded from that half (the first two hold no URLs at all, the third takes its path from the caller,
+the fourth addresses `/api/scope-report…`).
+
+The guard is `ui/test/apiBarrel.test.js` (6 tests). It does not hand-list the barrel's exports — it
+DERIVES them from real call sites (named imports of `./api.js` and `./util.js` across src and test:
+142 names from 55 files today), refuses to run on a derivation below 100 names or 20 files, pins six
+literal canaries (one per extracted module, each a name this split moved), then LOADS both barrels and
+checks each name resolves through them. The other five tests are the ones nothing else covers: that a
+review tab's capability — and never the stale owner token beside it — reaches fetch through all three
+transports that left api.js (`get`, `fetchEventStream`, and `getScopeReport`'s bounded command read),
+that the review read-only refusal still fires before `submitRunCommand` touches the wire, that no member
+imports the barrel, that no module outside {api.js, the six} imports a member, and that `_authHeaders`
+/ `_throw` / `apiPrefix` / `reviewReadPath` / `UUID_V4_RE` / `COMMAND_ID_RE` / `validRunGeneration` /
+`hasOnlyKeys` / `safeIdentityText` / `COMMAND_REQUEST_TIMEOUT_MS` are DEFINED once and re-derived
+nowhere.
+
+Verified by mutation on a throwaway copy of the tree (each break applied by a script that asserts its
+anchor appears exactly once; the copy's own baseline is 726 pass / 0 fail):
+
+* Drop `fetchEventStream` from the `./eventStream.js` re-export line. The guard fails at *every name a
+  consumer takes from the barrel really resolves through it* and at the credential test — and so do
+  four whole test FILES, which is worth writing down rather than claiming sole credit for: with
+  EXPLICIT re-export lists a dropped name is a link error (`ERR_NAMED_EXPORT_NOT_FOUND`) for every
+  static importer, a strictly stronger signal than the panels barrel gets, where RunView resolves by
+  string. `export *` would have had neither property.
+* Drop `genScopeReport`, whose only consumer is a `.jsx` the node suite never imports. The guard fails
+  first and names it; the collateral is `reportRefreshApi`/`researchAtlas` failing to link and four
+  ScopeReport UI behaviours going red for a reason that reads as unrelated.
+* Add `import { commandRead } from './commandProtocol.js'` to hooks.js. Of 726 tests exactly ONE
+  fails — *only the barrel and its own members import the extracted modules* — and, per the
+  measurement above, the build does not move by a single byte. This is the drift nothing else can see.
+* Re-derive `_authHeaders` inside eventStream.js, keeping the review branch and dropping the owner one
+  (the shape a hurried copy actually takes). Two failures: *the shared primitives are defined once*,
+  and `eventStream.test.js`'s owner-SSE test, which loses its `X-LoopLab-Token`.
+* Re-derive it the other way — eventStream.js reads `ll.owner-token` out of sessionStorage
+  unconditionally, so a review tab's SSE reconnect starts sending the owner credential. Three
+  failures: the behavioural credential test at
+  `/user/a/proxy/8765/api/review/events carried the owner credential out of a review tab`, the
+  shared-primitives pin, and `eventStream.test.js`'s review-SSE test.
+
+`npm test` 726 pass / 0 fail (720 before, plus this guard's 6). `npm run build` exits 0.
+
+What remains: all four recommended modules are done, so what is still open is what this resolution
+declined — the CONTROL map (139 lines) and the Atlas sanitizers (86, blocked behind the
+researchAtlasModel.js cycle above), plus the ~1,200-line endpoint residue the finding calls "every
+endpoint function", which is what an API module is for. The paid concept-lens family (106 lines,
+api.js:62-167 today) is a ninth concern neither the finding nor this change names; it is the closest
+thing left to a coherent extraction, and it would want a sibling of scopeReportActions.js rather than a
+seventh top-level module.
 
 #### UI-03 · HIGH · mergeable-entities · effort: large
 
@@ -6438,6 +8252,135 @@ Scope: `ui/src/` + `ui/test/`.
 
 *Recommendation:* Extract useStartOverRecovery(runId, generation) as a hook (it already has a pure-model sibling in runStartOverRecovery.js), and a RunShell({children, banner}) wrapper for the six early-return screens. Merge-intent handling can also move next to mergeIntent.js as a hook.
 
+*Resolution (2026-08-05) — both named extractions done; the six screens were NOT identical and the
+differences turned out to be the interesting part; the third suggestion is rejected with a count.*
+
+Every number in the finding is stale, and in one place the recommendation would have been actively
+wrong. RunView.jsx was 3,060 lines, not ~2,000 (the component body is 250-3059, not 177-1999). The
+saga was 1362-1653, i.e. 292 lines rather than ~250, and its "4 coordinating effects at 852-903"
+were at 1602-1653 — line 852-903 is the large-run overview decision, an unrelated neighbour that
+turns out to matter (below). The six early-return screens were at 2208-2229 / 2230-2269 /
+2270-2297 / 2298-2329 / 2330-2433 / 2456-2478, not 1318-1506. `workspaceFocusOwnerRef` is real but
+lives at 922 with its switchyard at 1120-1150, not 461-511. **The "config resource fetch" is
+ALREADY DONE**: at HEAD `configResource` was already a `useScopedResource(...)` call at 1253 with
+four read sites (2485-2488, 2627), converted under UI-06, so there is nothing left to extract there.
+
+`ui/src/useStartOverRecovery.js` (333 lines) and `ui/src/RunScreen.jsx` (33 lines) are the two new
+modules; RunView.jsx is 2,784 lines. Of the 330 lines the diff removes from RunView, 316 reappear
+byte-identical (comments included, all four of them verbatim); the 14 that do not are exactly the
+util import line that shed `createIdempotencyKey`/`resetRun`, the two constants that gained an
+`export`, the two-line `startOverMutationBlocked` derivation that became a returned field, and the
+nine JSX lines of the six screen shells.
+
+**The saga is split across TWO hooks, and the boundary is effect ORDER rather than cohesion.** The
+obvious shape — one `useStartOverRecovery` called at the top, where `startOverMutationBlocked`
+already has to be available for the run-access publication (752), the panel allow-list (697) and
+`mutationReadOnlyMode` (690) — moves the handoff LAYOUT effect from declaration position 1602 to
+roughly position 7. Measured against the layout effects it would then precede: 752 (`setRunAccess`),
+774 (route-notice reset) and 827 (group collapse) all read render-scope values and are indifferent,
+but 848 reads `largeOverviewAppliedRef.current`, which the handoff sets to `false`. Both effects
+re-run in the same commit at handoff time (`live` changes when the replacement generation arrives),
+so ordering them the other way lets a replacement run re-decide its canvas one commit earlier. That
+is unreachable in practice — `initialDagOverviewDecision` returns `'wait'` at `nodeCount <= 0` and a
+just-reset generation is empty, and even at 1-79 nodes it returns `'preserve'`, so only a
+replacement that is already ≥80 nodes on its first read differs — but "unreachable in practice" is
+not the same as "identical", so `useStartOverRecovery` (durable state + the runId/reviewMode reset
+effect) is called where the state used to be and `useStartOverCoordination` (the operations + all
+four effects) is called where the operations used to be. Both hook call sites sit at the exact
+declaration index their contents occupied, so every effect's relative order is preserved.
+
+**The retained-work preflight deliberately did NOT move.** `submitStartOver`'s first 38 lines are a
+question about RunView's own `inspectorDraftStoreRef`, `panelNavigationGuardRef` and comment
+recovery storage — "may a Start over be started" — not about the durable operation. They stay in
+RunView and call the hook's `beginStartOver`; the hook owns everything from the pre-POST envelope
+onwards.
+
+**Per-screen verdict on the "same markup with small variations".** They were not the same markup,
+and the variations are reachability statements:
+
+| screen | wrapper | back control | toast | extra head |
+|---|---|---|---|---|
+| Start-over storage/corrupt (2208) | `"app"` | `{onBack && …}` | yes | — |
+| Start-over active (2230) | `"app"` | `{onBack && …}` | yes | — |
+| run-resource state (2270) | `'app' + review-mode` | `{onBack ? … : pill}` | no | — |
+| fence + Start-over (2298) | `"app"` | `{onBack && …}` | yes | — |
+| fence (2330) | `'app' + review-mode` | `{onBack ? … : pill}` | no | — |
+| history snapshot (2456) | `"app"` | `{onBack ? … : pill}` | no | spacer + live badge |
+
+`onBack` is null exactly when RunView is mounted for a review capability (App.jsx:149 vs 299), so
+the two variants differ precisely in review mode. The three Start-over screens are unreachable
+there (`reviewMode` pins the recovery state to `{ kind: 'none' }` in both the initializer and the
+reset effect), and the history screen is unreachable there too (`sanitizeRunRouteState` drops
+`sequence` whenever `reviewMode` is set, so `historyActive` is always false). The history screen is
+the odd one out — it renders the read-only pill AND a `.live` badge as direct children of
+`.run-head` while omitting the `review-mode` class that hides both at ≤600px (styles.css:3023) —
+and that asymmetry is PRESERVED rather than tidied, because normalizing it would change markup on a
+path nobody can reach while quietly retiring the invariant that makes it unreachable. `RunScreen`
+therefore takes `reviewMode` and `reviewPill` as separate, non-defaulted props; the default is the
+stricter owner-only head. `'app' + (reviewMode ? ' review-mode' : '')` with `reviewMode` false is
+the string `"app"`, and `{onBack ? btn : null}` renders exactly what `{onBack && btn}` rendered, so
+every screen is prop-faithful rather than merely reachability-faithful. The workspace's own topbar
+(now the only `topbar run-head` left in RunView) is NOT merged: it hangs off a `<main>` with a ref,
+`data-route-main` and an `aria-label`, not a `<div className="app">`.
+
+Render-equivalence was proved rather than argued: HEAD's six shells were transcribed into a scratch
+module and both versions rendered through a real `createRoot` in jsdom over the full prop
+cross-product (`onBack` × `toast` × `reviewMode`). 48/48 innerHTML comparisons were byte-identical,
+including the combinations RunView cannot produce.
+
+**Rejected: moving merge-intent next to mergeIntent.js as a hook.** Measured, it is not the same
+shape as the start-over saga. Its state is 8 declarations (1465-1472) but `mergeIntent` / `mergeFrom`
+/ `mergeTarget` / `mergeSubmitting` / the three focus refs are read at **61 sites spanning lines
+27-2618** — inside `onNodeAction`'s command dispatch, the DAG keyboard handler, the global Escape
+listener, `useDialogFocus`, the confirm-submit path that shares `CONTROL`/`showToast`/`checkedCommand`
+with every other node action, the merge dialog's own JSX, and the `mergeArm` prop handed to Dag. The
+start-over saga touched RunView through one derived flag and one workspace reset; merge intent IS the
+node-action surface. Extracting it would mean either exporting the three focus refs and the toast
+channel back out of the hook — a hook that returns the component's own DOM refs is not a boundary —
+or moving `onNodeAction` with it, which is a different finding.
+
+The guards are `ui/test/startOverSaga.test.js` (12 tests) and `ui/test/runScreenShell.test.js`
+(3 tests). The saga is DRIVEN, not asserted: a real React render, the real `sessionStorage`
+envelope, the real `api.js` request path with a stubbed `fetch`, and a timer table so the automatic
+re-check cadence can be fired on demand — the saga previously had no behavioural coverage at all,
+only two indirect source pins in `dagActions`/`runRouteSemantics` and the unmounted-lock tests in
+`runMode`. `Date.now` is pinned to a controlled clock because the re-check re-arms on the envelope's
+`updatedAt`, and three real persists inside one millisecond silently stop the cadence. The shell
+guard pins the rendered markup of every screen as LITERAL html strings, and counts (not `in`)
+the call sites: exactly one `topbar run-head`, six `<RunScreen`, three `reviewPill`, three
+`toast={toast}`, six `onLeave={leaveRetainedPanelRoute}` — an exact count is what a commented-out
+copy of a re-declared shell cannot satisfy.
+
+Verified by mutation on a throwaway copy of the tree, each break applied by a script that asserts
+its anchor appears exactly once:
+
+* Drop `initialRequest &&` from the authoritative-rejection guard, so any 4xx on any attempt reads
+  as proof the server never acted. Fails at *only the ORIGINAL response may prove a pre-mutation
+  rejection* — `'unknown' !== null`, i.e. the recovery envelope was released while the first request
+  may still have been archiving. The FULL suite catches nothing else.
+* Delete `if (startOverRequestRef.current !== request) return` from the success path. Fails at *a
+  response that arrives after the component moved on may not commit*: the abandoned run's envelope
+  advances to `accepted`.
+* Drop the operation-id argument from `saveRunStartOverIntent(next, undefined, intent.operationId)`.
+  Fails at *a competing tab owns the envelope*: the foreign operation is clobbered instead of
+  adopted.
+* Default `reviewPill` to `true` in RunScreen. Fails the literal-markup pin — the three Start-over
+  screens would show a review affordance they never had.
+* Re-declare one screen's shell inline (a second `topbar run-head` with a mangled brand and a bare
+  back button). Fails at *only the workspace itself may declare the run topbar* (`2 !== 1`). All 128
+  tests in the fifteen other files that read RunView.jsx source still pass, which is why this guard
+  exists.
+
+`npm test` 735 pass / 0 fail (exit 0; 720 before, +15 from the two new files). `npm run build`
+exits 0. Two heavy jsdom files (`runListDestructiveMutation`, `commentsContract`) time out under
+load in a parallel scratch copy and pass alone — unrelated to this change.
+
+**What remains.** RunView.jsx is still 2,784 lines. The retained-work machinery (the ~200 lines of
+`retainedComment*` / `retainedAuthoring*` / `retainedPanel*` derivations at 315-617) is the next
+mergeable entity and is a better candidate than merge intent, but it feeds the navigation-loss
+guard, the Start-over preflight and the fence screen's notices, so it wants its own finding. The
+`workspaceFocusOwnerRef` switchyard (922, 1120-1150) is untouched.
+
 #### UI-04 · MEDIUM · under-decomposition · effort: medium
 
 **panels.jsx: 19 panels in one 2,351-line module; ConfigPanel (~490 lines) and the Card kanban (~700 lines) are components-within-a-module needing their own files**
@@ -6447,6 +8390,91 @@ Scope: `ui/src/` + `ui/test/`.
 *Evidence:* panels.jsx exports OverviewPanel, ResearchPanel, TrustPanel, SensitivityPanel, FailuresPanel, QueuePanel, ParetoPanel, DataQualityPanel, ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, GpuPanel, HyperImportancePanel, CrossRunPanel, HypothesisBoard (+_CardKanban/_CardKanbanCard/_HypothesisFallback), ComparePanel, EventExplorer, ArtifactsPanel. ConfigPanel alone spans 562-1048 with its own mutation-fencing/reconcile machinery; the Card board (1319-1953) contains an optimistic-control mini-framework (cardControlReflected/_cardWithOptimisticControls/sentEditRef pruning). RunView deliberately funnels all of these through one lazy chunk (loadPanels), so file layout is free to change without affecting bundling.
 
 *Recommendation:* Split ConfigPanel and the Card board (with _HypothesisFallback) into their own modules re-exported through panels.jsx; the single-chunk lazy strategy in RunView is preserved by keeping panels.jsx as the barrel.
+
+*Resolution (2026-08-05) — done as recommended; every line and comment moved verbatim, and the "free
+to change without affecting bundling" premise turned out to be conditional, so the condition is now a
+test.*
+
+Every number in the finding is stale in the same direction. panels.jsx was 4,857 lines, not 2,351;
+ConfigPanel was 669 lines (830-1498), not ~490; the Card board was 1,406 lines (2758-4163), not ~700.
+`ui/src/ConfigPanel.jsx` (725 lines) and `ui/src/CardBoard.jsx` (1,419 lines — `HypothesisBoard`,
+`_CardKanban`, `_CardKanbanCard`, `_HypothesisFallback` and the hypothesis delete-recovery journal)
+are the two new modules; panels.jsx is 2,741 lines and re-exports both where the code used to sit.
+
+Exactly three names are read by the hub AND by both extracted modules — `isRecord`,
+`PANEL_REQUEST_TIMEOUT_MS`, `RUN_GENERATION_RE`. They went DOWN into a new leaf,
+`ui/src/panelPrimitives.js` (13 lines, carrying the whole payload-guard group so `invalidPanelPayload`
+/ `nullableText` / `nullableNumber` are not separated from `isRecord`), rather than being imported
+back out of the barrel: under the build's `chunkModulesOrder: 'exec-order'` a barrel↔member cycle is a
+load-time TDZ crash, not a build error. Nothing else moved and no name was reworded; the only lines
+that differ from the original are the import statements, which shed the eighteen bindings the split
+orphaned (`SettingsForm`, four `settingsSchema` names, five `settingsModel` names, the
+`cardControlModel` pair and six from `util.js`).
+`usePoll`, `post` and `React` are still imported unused — they were already dead before this change,
+so removing them here would have been a diff about something else.
+
+**Rejected: extracting AuthoringPanel**, which is now the largest resident at 1,125 lines (a 949-line
+component plus 176 lines of its own sessionStorage operation-intent machinery) — bigger than
+ConfigPanel, and the finding does not mention it. It is not the same KIND of resident. Measured on the
+tree: ConfigPanel and the Card board each reach exactly three panels.jsx-local names (the three
+hoisted above) and nothing in panels.jsx reads back into either. AuthoringPanel reaches SEVEN, and two
+of them — `usePanelResource` and `PanelResourceNotice` — are the shared resource hook and its notice
+component used by five other panels; two more (`authoringPayload`, `AUTHORING_MAX_BYTES`) are read
+BACK by MemoryPanel. Extracting it therefore means hoisting `usePanelResource` too, which is UI-06's
+subject and its explicit recommendation ("promote one shared hook family into hooks.js"). Doing it
+here would settle UI-06 by accident, in the wrong file, without Inspector's supersede/mapLastGood
+superset in view.
+
+The finding's claim that "file layout is free to change without affecting bundling" is true of the
+layout that shipped, and only because of a property nothing was enforcing. Measured across the split:
+`dist/.vite/manifest.json` still contains exactly one key for this code (`src/panels.jsx`), total
+chunks 33 → 33, the `panel-hub increment` closure 11 chunks → 11 chunks and 45,303 B → 45,209 B gzip,
+and `npm run check:bundle` reports the same 14 pre-existing violations (byte deltas only; the tree was
+already over budget before this change). That holds because `panels.jsx` is the ONLY importer of the
+new modules. Give Rolldown a second reachability root and it stops holding — see the guard below.
+
+Twelve source reads across five test files pointed `panels.jsx` at code that has moved, and a sixth
+file kept a coverage list that would have silently stopped covering it. Six slices in
+`cardKanban.test.js` now read `CardBoard.jsx` (its
+`HypothesisBoard`-to-`// Module scope` slice lost its end anchor with the move and is now bounded by
+an asserted start anchor plus EOF, since `HypothesisBoard` is last in the file); two in
+`settingsPersistence.test.js` and the Config-restart slice in `uiSemantics.test.js` read
+`ConfigPanel.jsx`; `submitCommand.test.js` searches both modules for its six converted call sites
+instead of dropping the three that moved. Two COVERAGE lists mattered more than the slices, because
+shrinking them is invisible: `dataTableMigration.test.js` and the raw-run-id-in-a-URL scan in
+`uiGlobalReview.test.js` both enumerate modules by name, so both gained `ConfigPanel.jsx` and
+`CardBoard.jsx` (CardBoard is excluded from the positive `runApiPath(` half — every board mutation
+goes through a `CONTROL.*` helper, so it never names a run path). The four test files that
+`ssrLoadModule('/src/panels.jsx')` were deliberately NOT re-pointed: they are what proves the barrel.
+
+The guard is `ui/test/panelsBarrel.test.js` (4 tests). It does not hand-list the hub's exports — it
+DERIVES them from the real call sites (`lazyNamed(loadPanels, '<Name>')` literals in RunView.jsx, any
+named import of `./panels.jsx`, and the `ssrLoadModule('/src/panels.jsx')` destructurings and
+`panels.<Name>` reads in the suite: 20 names from 4 files today), refuses to run on a derivation
+smaller than 20 names or drawn from fewer than 2 files, then LOADS the barrel through vite and checks
+each name really resolves. That matters because RunView reaches every panel by STRING: a dropped
+re-export is not a build error, `module[name]` is `undefined`, and React.lazy hands back
+`{ default: undefined }` — a crash the first time an operator opens that panel.
+
+Verified by mutation on a throwaway copy of the tree (each break applied by a script that asserts its
+anchor appears exactly once):
+
+* Drop only `ConfigPanel` from the re-export line, leaving `__testPublicConfigForm` so
+  settingsPersistence's loader check still passes. Of 688 tests, exactly one new failure — this guard,
+  at `panels.jsx no longer exports ConfigPanel — a consumer resolves undefined`. Nothing else notices.
+* Add `import { HypothesisBoard } from './CardBoard.jsx'` to Dock.jsx. The guard fails at
+  `CardBoard.jsx must be reachable only through panels.jsx`, naming Dock.jsx. Built, the mutant emits
+  34 chunks instead of 33 and the `panel-hub increment` DROPS to 33,497 B gzip — 11.7 KiB of Card
+  board code left the panel chunk for one a review route loads eagerly — while `check:bundle` still
+  reports the same 14 violations and no `forbidden_reachability`. Its selectors resolve panel code by
+  `src: 'src/panels.jsx'`, so the leak reads as a smaller panel budget. That silent-improvement shape
+  is the reason this test exists rather than a note in the config.
+* Re-derive `const isRecord = …` locally in CardBoard.jsx instead of importing it. The guard fails at
+  `CardBoard.jsx re-derives isRecord instead of importing the shared one`.
+
+`npm test` 686 pass / 2 fail — `dockNarration` (asha_verdict narration) and `settingsSchemaResource`
+(162 vs 158 fields), both failing identically before this change and unrelated to it. `npm run build`
+exits 0.
 
 #### UI-05 · MEDIUM · under-decomposition · effort: large
 
@@ -6458,6 +8486,59 @@ Scope: `ui/src/` + `ui/test/`.
 
 *Recommendation:* Lift share/unshare into named handlers or a useAssistantShare hook; extract session management (openSession/newChat/delSession/tombstones) into a useAssistantSessions hook; the three view layouts can then be sibling components receiving one shared controller.
 
+*Resolution (2026-08-05):* Done in three parts, as a PURE-model split rather than a move of stateful
+React — `assistantShareModel.js`, `assistantSessionModel.js`, `assistantChromeModel.js`, each with a
+truth-table test.
+
+**The finding's inventory is stale in three places and understates the size in a fourth.** The file is
+**4,408 lines**, not 2,031 — it more than doubled after the review, so every line range in *Locations*
+is void. `openSession` is **~260 lines** (1108-1366), not "~120". The "duplicated direct-command
+machine" was already extracted (`runCommandMachine.js` / `commandModel.js`). And the two share
+handlers were not both inline: **`revokeCurrentShares` was already a named handler**; only the
+snapshot mint was still an `onClick={async () => { … }}` prop, at 68 lines rather than the two
+"~55/30-line" handlers described.
+
+**Share/unshare.** Two rules, stated once. A snapshot may only be minted over a COMPLETE turn (it is a
+durable public artifact; freezing a half-streamed turn publishes text the model has not finished
+saying) while a revoke is safe any time. And a 4xx is authoritative about THIS request while nothing
+else is — a timeout, a 5xx or a lost response leaves a link that may or may not exist, so `uncertain`
+is a FACT the caller acts on (mark the chat unknown, re-read the list), not a second string. Two real
+defects surfaced from stating them: `SHARE_ACTION_BLOCKS['toString']` inherited a truthy function from
+`Object.prototype` so the fail-closed branch never ran, and the fallback Copy-link button dereferenced
+a cleared record outside its try.
+
+**Session management — no `useAssistantSessions` hook, deliberately.** `openSession`'s ORDER against
+the surrounding effects is itself the contract; moving it wholesale relocates risk without making one
+rule statable. What WAS re-derived is the late-read fence, written out longhand at all three awaits
+and differing in exactly one conjunct (`sidRef.current !== id`, present only after the transcript is
+committed). `sessionReadSuperseded` returns the REASON, so the ordering is statable, and two rules
+that were invisible longhand are now driven: a tombstoned chat loses even when the epoch never moved,
+and slot ownership is object IDENTITY rather than the id the slot holds. `sessionDeleteBlock` and
+`sessionDeleteFailure` joined it — the delete dialog's detail and its toast were two nested ternaries
+a dozen lines apart, walking the same four codes and expected to agree.
+
+**The three layouts are NOT sibling components, and the recommendation is wrong about this.** Measured
+before acting: the three blocks read **136 distinct names off the component closure** (80 / 42 / 83,
+only 18 common to all three). A props bundle that size has no registry guard, and a missing prop
+arrives as `undefined` — which for `disabled={shareBusy || …}` silently ENABLES a mutation gate. One
+"shared controller" with 136 members is the same hazard in one place and decomposes nothing. What the
+views genuinely shared was duplicated DECISIONS — the new-chat gate twice byte for byte, the
+fold-to-bar control three times — and those are `assistantChromeModel.js` now, where a control's
+disabled state, its tooltip and its action come from one branch. The layouts became named render
+functions (the file's own pattern for `renderThread` / `composer` / `attachBtn`), JSX moved
+byte-identically, `return` is 12 lines.
+
+**AssistantBar's coverage cannot see a JSX structure break, and that is the finding under this
+finding.** Its tests are almost entirely source pins over the file's TEXT; nothing in the suite loads
+the module. The first attempt at the layout split dropped a closing brace in the side fragment —
+`vite build` refused the tree outright and **all 767 tests passed**. `assistantBarResourceTruth` now
+SSR-loads the module so it at least has to compile. Nothing MOUNTS it; that gap is open and is
+recorded in CLAUDE.md's `ui/` row.
+
+Left undone: `runLLM` (still ~350 lines with two concurrent fallback poll loops — the finding names it
+and it is genuinely the next target), `forkCurrentSession` / `reconcileFork` / `settleForkReconciliation`
+(a second recovery saga, untouched), and a real mount harness for the component. ui suite 741 -> 768.
+
 #### UI-06 · MEDIUM · inconsistency · effort: large
 
 **At least seven independent implementations of the load/last-good/stale/retry resource pattern**
@@ -6467,6 +8548,112 @@ Scope: `ui/src/` + `ui/test/`.
 *Evidence:* The same concept — fetch with deadline, keep last-good data, mark stale on failure, expose retry — is re-derived as RunList.useResource, panels.usePanelResource (with in-flight lock + poll), panels.useNodeResource, TrustPanel's inline configResource effect, RunView's configResource effect (retrying flag variant), Inspector's ~170-line detailResource machine (scope-fenced flights with supersede/mapLastGood/onSettled), and App's ReviewRoute effect; ConceptView, CollabPanel, ResearchAtlas, OwnerAuth and RunCompare each add further variants (grep for status:'loading' hits 13 files). Each differs subtly in abort handling, stale semantics, and pending labels, so fixes (e.g. the out-of-order-response fences several of them add) don't propagate.
 
 *Recommendation:* Promote one shared hook family into hooks.js — usePanelResource already has the right shape (lock, last-good, retry, optional poll); Inspector's supersede/mapLastGood needs are the superset to design for. Migrate incrementally, starting with the three trivial variants (TrustPanel, RunView config, ReviewRoute).
+
+*Resolution (2026-08-05):* Split into a PURE half and a React half, and **five of the seven converted**.
+`ui/src/resourceModel.js` holds the transitions — `resourceBegin` / `resourceSettle` / `resourceCancel`
+/ `resourceView` / `resourceGated`, no React and no I/O, so the rules can be stated and driven
+directly. `hooks.js::useScopedResource` is the only thing that decides WHEN a transition happens: one
+scope-owned in-flight request, abort on scope change and unmount, an optional poll, and `supersede`
+for a retry that must own freshness over a background refresh. Converted:
+`panels.usePanelResource` (now a six-line adapter carrying only the panel dialect — normalize inside
+the deadline, the tuple shape — with its six call sites untouched), `TrustPanel`, `RunView`'s config
+effect, `App.ReviewRoute`, and `Inspector.detailResource`.
+
+**Inspector's machine won, and usePanelResource's did not.** The recommendation has this backwards.
+Inspector's start rule is a strict SUPERSET of the panel rule on every state a panel can reach,
+checked case by case: same-key refresh over ready data returns the previous object in both (no busy
+flicker on a poll tick); same-key retry, same-key refresh over `error`, and same-key refresh over
+`stale` produce identical `{status, data, pending}`; a scope change differs only in that Inspector
+sets `pending: 'load'` where the panel left it `null`, which is invisible because
+`PanelResourceNotice` returns before it reads `pending` at `loading`. The one case where they truly
+disagree — a same-key `'load'` over ready data, where Inspector announces itself and the panel does
+not — is unreachable for panels, whose effect only re-runs when the key changes; it is reachable and
+load-bearing for Inspector, whose effect also depends on the node's own status. The panel rule also
+has no `error` field at all, so it cannot express TrustPanel or ReviewRoute. `panelResourceTruth.test.js`
+passes unchanged over the shared machine, which is the measurement.
+
+**"The three trivial variants" were not trivial — two of the three each needed a named concept
+first.** TrustPanel had NO deadline (`get(runApiPath(runId, '/config'))`, no signal, no timeout), so
+it needed `timeout`; RunView's separate `retrying` flag is a second spelling of `pending === 'retry'`
+and its `key: null` state is a pre-request GATE, so it needed `gate`; ReviewRoute's `gone` is a
+TERMINAL verdict that must not offer a retry, so it needed `classifyFailure`. Those three options,
+plus `validate` (HTTP 200 is not resource truth) and `onSuccess`, are the whole configuration
+surface, and `gate` pays for itself twice: the status that means "do not read" is also the status a
+render sees for a scope the state does not carry yet, so the gate and the synchronous fence can never
+disagree.
+
+**The finding's inventory is wrong in both directions.** Every line range in *Locations* is stale
+except Inspector's: `RunList.useResource` is 294-316 (not 41-64), `usePanelResource` 326-370 (not
+103-147), `useNodeResource` 2064-2137 (not 2101-2115), TrustPanel's effect 515-524 (not 295-304),
+RunView's 1250-1288 (not 569-608), `ReviewRoute` 117-140 (not 39-61). `grep "status: 'loading'"` hits
+**14** files, not 13 — and three of those (`runMode.js`, `timelineModel.js`, `useTimeline.js`) are
+pure projections that merely carry a `status` field and are not resource machines at all, so the real
+"further variants" count is 11 files. It also UNDERCOUNTS: since the split, `ConfigPanel.jsx:192` runs
+its own `/config` read, an eighth variant the finding never saw. That one is deliberately NOT
+converted and should stay that way — it is an EDITABLE resource whose failure must clear `cfg`
+outright, because keeping last-good config alive would let an edit be submitted against a config the
+server no longer has. Last-good is a hazard there, not a feature.
+
+**Left unconverted, with the measurement.** `RunList.useResource` is not single-flight and must not
+become so: its `load()` is a version-fenced, newest-wins, AWAITED call that returns `{ok, value}`, and
+thirteen lines in `RunList.jsx` invoke it that way — the run-deletion settlement at `RunList.jsx:1906`
+locks its recovery on `!listRead?.ok`. Adding the shared lock to it (measured on a scratch tree) turns
+`runListResourceTruth.test.js:140`'s `assert.equal(pending.length, 2)` into `1 !== 2`: two overlapping
+loads collapse into one request, and every post-mutation `await loadRuns()` that races the 2.5s poll
+returns `false`, which that deletion path reads as "the current run list could not be refreshed".
+`panels.useNodeResource` stays because its failure vocabulary carries a THIRD fact the shared
+`{status, error, data}` verdict deliberately does not model: `retryable`, computed from the error's
+code and HTTP status, gates whether `CmpCol` renders a Retry control at all (`panels.jsx`'s
+`resource.retryable && <button …>` and `if (!resource.retryable) return`). Widening the shared state
+for one caller, or dropping the gate, would each be worse than leaving it. `OwnerAuth`,
+`SharedAssistant`, `ConceptView`, `CollabPanel`, `ResearchAtlas`, `RunCompare`, `Settings` and
+`Report` are untouched; they were never part of the seven and each carries its own lifecycle
+(capability unlock, share revocation, comparison capture) on top of the read.
+
+**Four deliberate behaviour changes, all recorded rather than asserted away.** (1) TrustPanel's
+`/config` read is now bounded at `PANEL_REQUEST_TIMEOUT_MS` like every sibling panel; before, a hung
+request left "Loading detector configuration" on screen forever with no way to retry. (2) TrustPanel,
+RunView and ReviewRoute now get the synchronous scope fence: a `runId` / config-key / token change
+hides the previous scope's payload in the SAME render instead of one render later. Not reachable in
+TrustPanel today (its `runId` is fixed for the life of a mounted panel) — it is precisely the fence
+the finding says does not propagate. (3) ReviewRoute's missing token is a gate, so it reaches `gone`
+on the first render instead of painting "Opening review…" for one frame first. (4) `onSuccess` is
+handed the SETTLING read's scope rather than reading the render's, and the bound callbacks are frozen
+for the lifetime of one request rather than at effect time — so a read, the validation of its response
+and the wording of its failure always come from the same render, and a fence keyed by scope
+(Inspector's trace-clear set) can never release the wrong node's.
+
+The guard is `ui/test/resourceMachine.test.js` (7 tests). It drives the machine rather than reading
+it: a truth table over the pure transitions; the hook in a real React tree with a controllable read,
+taken through load → success, silent refresh, refused second flight, failure → stale with last-good
+kept, retry → recovered, a rejected HTTP 200, supersede, scope change, gate, and a terminal verdict;
+a second hook test for abort-on-unmount and poll ticks that do not stack; and then the converted
+components themselves — TrustPanel's error → retry-in-flight → recovered sequence, Inspector keeping
+its last-good detail across a failed reload and dropping it on a node switch, and the review route's
+gate / terminal / retry arms. The scope fence is asserted from the Probe's RENDER BODY, because the
+property is about the ONE commit between a scope change and the passive effect that services it,
+which `act` would otherwise hide.
+
+Verified by MUTATING a scratch copy (four breaks, each applied by a script that asserts its anchor
+occurs exactly once, then restored; `diff -r` confirms the tree came back). Making a failure blank the
+resource instead of keeping last-good failed 4 tests — the truth table, the hook test, the new
+Inspector test, and the pre-existing `panelResourceTruth`. Dropping the `resourceView` fence failed
+the truth table and the hook's render-body assertion (before the render-body assertion was added it
+failed only the truth table, which is why it is there). Blanking a retry back to `loading` failed the
+truth table, `panelResourceTruth` and `inspectorDetailResource`. The fourth break is the honest
+finding: removing `settle`'s `flight.current !== request` ownership check failed ONLY the source pin
+in `commentsContract.test.js`. That check is defense-in-depth, not a live property — `deadlineRequest`
+rejects with `AbortError` the moment its controller aborts, so a superseded read always lands on the
+abort arm (which has its own fence), and a settled promise's `.then` is a microtask that cannot be
+overtaken by a re-render. It was equally unreachable in the code this replaced; it stays, and the pin
+stays with it.
+
+Three source-pin tests spoke the old implementation and were re-pointed in the same change rather
+than deleted: `commentsContract.test.js` (the scope fence now pinned on `resourceModel.js`, the
+two-outcome ownership check on `hooks.js`), `uiSemantics.test.js` (the identity check on Inspector's
+`validate`, the unmount abort on `hooks.js`), and `runRouteSemantics.test.js` (`detailQuery.push`).
+Each property was re-verified where it now lives, and the two that matter most are additionally
+driven behaviourally by the new guard.
 
 #### UI-07 · MEDIUM · duplication · effort: small
 
@@ -6597,6 +8784,45 @@ its own validator rejects) and `settingsSchemaResource.test.js:16` (162 !== 158)
 *Evidence:* useRunState's single effect implements the owner SSE stream (backoff ramp, cursor validation), the terminal lifecycle probe (its own delay ramp + visibility handling), and the review poll loop, coordinated through ~20 mutable closure variables (stopped, timer, pollTimer, lastSeq, terminalMode, ownerEnded, reviewTerminal, reviewPollRunning, ...). Inspector's Trace function (1409-1918) combines view toggling, the clear-trace confirm/busy/verify/blocked recovery phases, polling, and rendering in one closure.
 
 *Recommendation:* Extract the connection logic into a plain (non-React) state-machine object with injected timers/fetchers — the same pattern the codebase already uses for pure models — leaving useRunState as a thin subscription wrapper; split Trace's clear-recovery phases into a useTraceClear hook.
+
+*Resolution (2026-08-05):* Done for both subjects, with one deliberate deviation and one location
+dropped. Re-measured first: the line numbers are stale (`ui/src/` moved a lot between 08-01 and
+08-05), the SIZES are not. `useRunState` is `hooks.js:281-633` and its single effect `301-625` — 325
+lines, three machines, 19 effect-scope mutable closure variables plus 2 more per `connect()`.
+`Trace` is `Inspector.jsx:1336-1845` — 510 lines exactly.
+
+`ui/src/runStateModel.js` and `ui/src/traceClearModel.js` are the PURE halves — the same split
+`resourceModel.js` / `useScopedResource` already uses — and `ui/src/useTraceClear.js` is the React
+half the finding asked for. What moved is decisions: what makes a payload a valid run snapshot, when
+one has moved backwards, which HTTP status ends a run for an owner versus for a reviewer, how far
+each backoff ramp climbs, and the trace clear's failure classification.
+
+The deviation is the "state-machine object with injected timers/fetchers, leaving useRunState a thin
+subscription wrapper". The reconnect/abort choreography, the visibility wiring and the setState
+fan-out stayed in the effect, because a machine object owning them would have to re-derive React's
+own effect lifetime — and that re-derivation is exactly where the ordering bugs this code has already
+been hardened against (the cursor reset on a rejected frame, abort-before-reconnect, the
+terminal-probe fence) would come back. The boundary used instead is "a decision, not a step".
+
+The third location, `AssistantBar.jsx:501-618`, is dropped: today it is a bank of `useRef`
+declarations, the finding's own evidence paragraph never mentions AssistantBar, and no part of the
+recommendation attaches to it. Decomposing a 4,408-line component is a different finding.
+
+Gating, which the finding's evidence is really about — none of these rules had a test, because
+reaching them meant standing up a React root, a jsdom document, a fake `fetch` and a fake clock
+first. `ui/test/runStateModel.test.js` gives every rule a truth table and then drives three
+properties through a real `useRunState`: an unchanged frame publishes nothing, a frame whose ONLY
+change is `event_count` publishes a new snapshot (that is what the timeline's exact lag and unread
+counts read), a rewound frame is refused inside a generation while a start-over's `seq: -1` is
+accepted into a new one. `ui/test/traceClearRecovery.test.js` does the same for the clear, and then
+drives the whole path through the real mounted Inspector — which is also the only thing that proves
+`Trace` is still wired to `useTraceClear` rather than carrying a second copy: arm, confirm, answer
+503, and the control must fence itself, say the outcome is unknown, and re-send the SAME operation id
+on recovery instead of submitting a second destructive clear.
+
+Two source pins in `timelineSemantics.test.js` / `uiSemantics.test.js` matched the deleted spelling
+and were re-pointed onto the join that is still the hook's own (dedupe before commit), with the
+identity's truth table now driven rather than matched.
 
 #### UI-10 · LOW · dead-code · effort: small
 

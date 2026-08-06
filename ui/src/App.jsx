@@ -2,7 +2,8 @@ import React, { lazy, useCallback, useEffect, useRef, useState } from 'react'
 import OwnerAuth from './OwnerAuth.jsx'
 import LazyBoundary from './LazyBoundary.jsx'
 import OwnerWorkspace from './OwnerWorkspace.jsx'
-import { deadlineGet, reviewTokenFromLocation } from './api.js'
+import { get, reviewTokenFromLocation } from './api.js'
+import { useScopedResource } from './hooks.js'
 import { initTheme } from './ThemeSwitcher.jsx'
 import { initFx } from './fx.js'
 import { initDensity } from './DensityToggle.jsx'
@@ -131,30 +132,21 @@ function cacheCurrentListHistory(navigation, originRunId = null, originControl =
   writeListHistory(navigation, originRunId, originControl)
 }
 
-function ReviewRoute({ token }) {
-  const [resource, setResource] = useState({ status: 'loading', error: '' })
-  const [retry, setRetry] = useState(0)
-  useEffect(() => {
-    let active = true
-    if (!token) {
-      setResource({ status: 'gone',
-        error: 'Review link incomplete or invalid. Ask the owner for a new link.' })
-      return () => { active = false }
-    }
-    setResource({ status: 'loading', error: '' })
-    const timed = deadlineGet('/api/review', 12_000)
-    timed.promise
-      .then(data => { if (active) setResource({ status: 'ready', data, error: '' }) })
-      .catch(error => {
-        if (!active) return
-        const gone = [401, 404, 410].includes(error?.status)
-        setResource({ status: gone ? 'gone' : 'error',
-          error: gone
-            ? 'Review link invalid, expired, or revoked. Ask the owner for a new link.'
-            : 'Review link unavailable. Retry.' })
-      })
-    return () => { active = false; timed.controller.abort() }
-  }, [token, retry])
+// Exported so the review route's own state sequence (gate → terminal → retry) can be driven without
+// mounting the whole owner shell; App still renders it directly.
+export function ReviewRoute({ token }) {
+  // The shared resource machine (doc 25 UI-06). A missing token is a GATE, not a failed read: there
+  // is nothing to request, so the route must not spend a round trip proving it. `gone` is terminal —
+  // a revoked capability can only repeat itself — so the classifier names it and no Retry is offered.
+  const resource = useScopedResource(signal => get('/api/review', { cache: 'no-store', signal }), {
+    scope: token || '', timeout: 12_000, gate: token ? null : 'gone',
+    classifyFailure: ({ error }) => [401, 404, 410].includes(error?.status)
+      ? { status: 'gone',
+          error: 'Review link invalid, expired, or revoked. Ask the owner for a new link.' }
+      : { status: 'error', error: 'Review link unavailable. Retry.' },
+  })
+  const reviewError = token ? resource.error
+    : 'Review link incomplete or invalid. Ask the owner for a new link.'
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
       if (!document.querySelector('[aria-modal="true"]')) document.querySelector('[data-route-main]')?.focus()
@@ -165,8 +157,8 @@ function ReviewRoute({ token }) {
     <div className="auth-card">
       <div className="auth-mark" aria-hidden="true">{resource.status === 'gone' ? '×' : '◉'}</div>
       <h1>{resource.status === 'loading' ? 'Opening review…' : resource.status === 'gone' ? 'Review link unavailable' : 'Could not open review'}</h1>
-      <p>{resource.status === 'loading' ? 'Validating this read-only capability.' : resource.error}</p>
-      {resource.status === 'error' && <button className="btn primary" onClick={() => setRetry(n => n + 1)}>Retry</button>}
+      <p>{resource.status === 'loading' ? 'Validating this read-only capability.' : reviewError}</p>
+      {resource.status === 'error' && <button className="btn primary" onClick={() => resource.retry()}>Retry</button>}
     </div>
   </main>
   const reviewKey = `${resource.data.id || token}:${resource.data.run_id}`

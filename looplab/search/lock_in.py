@@ -25,7 +25,8 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.core.models import RunState
-from looplab.search.concept_graph import ConceptGraph, _experiment_nodes, tag_nodes_heuristic
+from looplab.search.concept_graph import ConceptGraph
+from looplab.search.concept_tagging import experiment_nodes, tag_nodes_heuristic
 from looplab.search.coverage import latest_live_snapshot
 
 
@@ -82,7 +83,7 @@ def lock_in_signal(state: RunState, graph: ConceptGraph,
       current_streak   - the run's same-lever streak ENDING at the latest experiment (0 if the last is
                          untagged) — how locked-in the search is right now
     """
-    nodes = _experiment_nodes(state)
+    nodes = experiment_nodes(state)
     if tags is None:
         tags = tag_nodes_heuristic(state, graph)
     n = len(nodes)

@@ -58,7 +58,7 @@ def _folded_axes(state, node):
     rename = getattr(state, "concept_consolidation", None)
     rename = rename if isinstance(rename, dict) else {}   # read-time overlay: a merged concept may move axis
     axes: set = set()
-    # `core.concepts.resolve_concept` directly, NOT `search.concept_graph._canonical_with_rename`:
+    # `core.concepts.resolve_concept` directly, NOT `search.concept_lens._canonical_with_rename`:
     # `events` may only import `core` (CLAUDE.md layering), and that helper is a two-line wrapper over
     # exactly this call — reaching up into `search` bought nothing but the layering violation.
     from looplab.core.concepts import resolve_concept

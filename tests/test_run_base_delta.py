@@ -13,7 +13,7 @@ from looplab.core.models import Event, Idea, Node, RunState
 from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import FoldCursor, _materialize_concept_deltas, fold
-from looplab.search.concept_graph import node_concept_delta
+from looplab.search.concept_lens import node_concept_delta
 
 
 def _seed_host(store, *, concept_run_base=True):

@@ -395,3 +395,108 @@ def test_the_summary_cache_is_the_one_appstate_can_invalidate(tmp_path, monkeypa
     run_projections.run_summaries(srv)
     assert len(folds) == 2, (
         "the projection answered from a cache AppState's invalidation cannot reach")
+
+# --------------------------------------------------------------------------------------------
+# SC-01
+# --------------------------------------------------------------------------------------------
+
+def _module_tree(name: str) -> ast.AST:
+    return next(tree for path, tree in iter_trees() if path.name == name)
+
+
+def test_the_validator_never_imports_the_command_lifecycle_back():
+    """The direction IS the extraction. `control_validation` is a leaf under `run_commands`: its
+    registry guard re-executes the file as a fresh module, so an edge back to the command service
+    would drag the record store, the spawn leases and the observation index into that probe — and
+    close an import cycle that only surfaces as an ImportError at server start."""
+    offenders = []
+    for node in ast.walk(_module_tree("control_validation.py")):
+        targets = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
+                   else [node.module or ""] if isinstance(node, ast.ImportFrom) else [])
+        offenders += [f"{node.lineno}: {t}" for t in targets if "run_commands" in t]
+    assert offenders == [], offenders
+
+
+def test_the_command_module_re_exports_only_the_validator_names_it_calls():
+    """A re-export of a name `run_commands` does not itself use is not a convenience, it is a decoy
+    patch seam: `monkeypatch.setattr("looplab.serve.run_commands.<name>", ...)` keeps resolving while
+    the validator — which reads its OWN global — never sees it, so a test goes green having exercised
+    the real code path instead. Same rule `events/card_ledger.py` is held to."""
+    tree = _module_tree("run_commands.py")
+    imported = {alias.asname or alias.name
+                for node in tree.body
+                if isinstance(node, ast.ImportFrom)
+                and node.module == "looplab.serve.control_validation"
+                for alias in node.names}
+    assert imported, "precondition: the command module still binds validator names by value"
+    read = {node.id for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+    assert imported <= read, f"re-exported but never called here: {sorted(imported - read)}"
+
+
+def test_the_five_control_tables_are_declared_in_exactly_one_module():
+    """The tables ARE the completeness mechanism (doc 25 SC-02): each is asserted equal to
+    `CONTROL_EVENTS` at import. A second copy anywhere — including a `CONTROL_DATA_FIELDS = dict(...)`
+    compat mapping left behind in the old module — is a copy a caller can read while the assertions
+    guard the other one, which is exactly the drift they exist to stop."""
+    wanted = {"CONTROL_DATA_FIELDS", "_CONTROL_NORMALIZERS", "_CONTROL_PRECONDITIONS",
+              "_CONTROL_DECISIONS", "_CONTROL_POLICIES", "CONTROL_SPECS"}
+    owners: dict[str, list[str]] = {name: [] for name in wanted}
+    for path, tree in iter_trees():
+        for node in tree.body:
+            targets = (node.targets if isinstance(node, ast.Assign)
+                       else [node.target] if isinstance(node, ast.AnnAssign) else [])
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id in wanted:
+                    owners[target.id].append(path.relative_to(path.parents[2]).as_posix())
+    assert owners == {name: ["looplab/serve/control_validation.py"] for name in wanted}, owners
+
+
+def test_one_patch_of_the_gpu_envelope_is_observed_on_both_sides_of_the_split(tmp_path, monkeypatch):
+    """The seam the split had to keep alive. `_card_resource_envelope` has two consumers that now sit
+    in two modules — the resource-pin INTAKE normalizer in `control_validation` and the append-time
+    re-check in `RunCommandService` — and a test shrinking the envelope between them patches ONE
+    name. `run_commands` therefore reaches it through the MODULE object; a `from ... import` binds by
+    value, and the append-time half would go on probing the real GPUs while the test that believes it
+    is driving that branch still passes, for the wrong reason, on any host without two GPUs."""
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+    from looplab.events.types import EV_CARD_RESOURCE_PINNED
+    from looplab.serve.control_validation import normalize_control
+    from looplab.serve.run_commands import RunCommandService, run_generation_token
+
+    rd = tmp_path / "run"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "run", "task_id": "cards", "goal": "g",
+                                 "direction": "max"})
+    store.append("card_added", {"id": "card-1", "statement": "seed", "source": "researcher",
+                                "idea": {"operator": "draft", "params": {}, "space": {}}})
+
+    calls: list[int] = []
+
+    def envelope():
+        calls.append(len(calls))
+        return 2, (16_000, 12_000)
+
+    monkeypatch.setattr("looplab.serve.control_validation._card_resource_envelope", envelope)
+
+    class _Srv:
+        root = rd.parent
+
+        def state(self, path):
+            return fold(EventStore(path / "events.jsonl").read_all())
+
+    normalized = normalize_control(_Srv(), rd, EV_CARD_RESOURCE_PINNED,
+                                   {"id": "card-1", "gpus": 2, "gpu_mem_mib": 12_000})
+    assert calls == [0], "precondition: intake consulted the patched probe exactly once"
+
+    intent, _baseline, error = RunCommandService(_Srv())._append_collaboration_intent(
+        rd,
+        {"event_type": EV_CARD_RESOURCE_PINNED,
+         "run_generation": run_generation_token(store.read_all())},
+        normalized,
+    )
+    assert error is None and intent is not None, error
+    assert calls == [0, 1], (
+        "the append-time re-check probed the real hardware instead of the one patched name")

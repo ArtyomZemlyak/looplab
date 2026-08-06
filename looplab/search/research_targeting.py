@@ -25,7 +25,8 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.core.models import RunState
-from looplab.search.concept_graph import ConceptGraph, concept_coverage
+from looplab.search.concept_analytics import concept_coverage
+from looplab.search.concept_graph import ConceptGraph
 from looplab.search.graded_novelty import failed_directions
 
 
@@ -36,7 +37,7 @@ def research_targets(state: RunState, graph: ConceptGraph, *,
     """Ranked, axis-structured deep-research targets from the coverage map (§21.3). Pure/deterministic.
 
     `important_uncovered` is the UNIVERSAL, per-task importance derived by the LLM agent
-    (`concept_graph.derive_reference_concepts`) — `[{concept_id, why}]`. When given it seeds the HIGHEST-
+    (`concept_map.derive_reference_concepts`) — `[{concept_id, why}]`. When given it seeds the HIGHEST-
     priority targets, so the blind-region signal works on ANY task without a curated skeleton/`key=True`
     list (the §21.13 universality correction). The axis-based logic below remains a deterministic complement
     (and the sole source when no derivation is supplied, e.g. offline).

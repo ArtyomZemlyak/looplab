@@ -324,6 +324,15 @@ The three curation files are mixed-version invocation ledgers, not uniform lists
 | finalize diagnostic v2 | a source-keyed `*:diagnostic:v2:*` row records a failure before an exact model-input digest/key can be established; `input_digest` is empty, so this audit row is not a semantic portfolio receipt |
 | finalize semantic v2 | concept/claim `curation_key` is the exact input digest; facets use the exact-task key and retain the input digest as provenance |
 
+Two modules write those families, and they are deliberately separate transactions:
+`engine/curation_protocol.py` is the unattended finalize one (semantic key, claim held in a
+`.curation_invocations/` side file, one lock per key; a lost terminal is CLOSED by the next attempt
+with `prior_attempt_incomplete_not_replayed`), and `engine/steward_invocation.py` is the on-demand
+CLI/HTTP one (operator `action_id`, claim held as a `steward-invocation-begun` row in the ledger
+itself, one lock per ledger; a lost terminal stays OPEN and the operator must review it and choose a
+new id). They share exactly one thing by construction — the steward-kind to ledger-file table in
+`engine/governance_health.py::curation_ledger_file`.
+
 Finalize v2 rows carry `curation_key`, exact `source_key`, `run_id`, `task_id`, `finish_seq`,
 `input_digest`, `input_schema`, redacted `model`, effective `parser`, `outcome` and a bounded proposal payload.
 The source tuple is trigger provenance, not a fallback paid-work identity. Readers must branch on `v`,

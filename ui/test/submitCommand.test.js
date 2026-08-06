@@ -118,13 +118,19 @@ test('submitCommand never rethrows — the caller has already been told', async 
 // ------------------------------------------------------------------ the call sites use it
 
 test('the panels no longer re-derive the try/feedback/toast/catch block', () => {
-  const panels = src('panels.jsx')
-  for (const fn of ['Quarantined #', 'Cancelled #', 'Steered the next proposal',
-                    'Card added', 'Hypothesis added', 'Hypothesis abandoned']) {
-    const at = panels.indexOf(fn)
-    assert.ok(at > 0, `${fn} disappeared from panels.jsx`)
-    const window = panels.slice(Math.max(0, at - 400), at + 400)
-    assert.ok(window.includes('submitCommand('), `${fn} does not go through submitCommand`)
+  // The Card board left panels.jsx for CardBoard.jsx (doc 25 UI-04); the converted call sites are the
+  // same ones, so search both modules rather than dropping the three that moved.
+  for (const [file, labels] of [
+    ['panels.jsx', ['Quarantined #', 'Cancelled #', 'Steered the next proposal']],
+    ['CardBoard.jsx', ['Card added', 'Hypothesis added', 'Hypothesis abandoned']],
+  ]) {
+    const panels = src(file)
+    for (const fn of labels) {
+      const at = panels.indexOf(fn)
+      assert.ok(at > 0, `${fn} disappeared from ${file}`)
+      const window = panels.slice(Math.max(0, at - 400), at + 400)
+      assert.ok(window.includes('submitCommand('), `${fn} does not go through submitCommand`)
+    }
   }
 })
 
@@ -140,7 +146,8 @@ test('the Inspector reset paths go through the shared submitter', () => {
 test('the optimistic abandon rolls back on anything that is not success', () => {
   // `kind !== 'success'` and not `kind === 'error'`: a still-executing command has not abandoned
   // anything yet, so leaving the strike-through would show an outcome the run may still refuse.
-  const panels = src('panels.jsx')
+  const panels = src('CardBoard.jsx')
   const at = panels.indexOf('Hypothesis abandoned')
+  assert.ok(at > 0, 'the abandon call site disappeared from CardBoard.jsx')
   assert.ok(panels.slice(at, at + 500).includes("feedback.kind !== 'success'"))
 })

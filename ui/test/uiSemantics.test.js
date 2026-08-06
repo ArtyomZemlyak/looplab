@@ -343,13 +343,16 @@ test('Dock exposes accepted command records immediately instead of waiting in su
 
 test('displayed run generation participates in state dedupe and is published only after commit', async () => {
   const hooks = await source('hooks.js')
-  assert.match(hooks, /const identityChanged = next => next\[0\] !== lastSeq \|\| next\[1\] !== lastAlive\s*\|\| next\[2\] !== lastGeneration \|\| next\[3\] !== lastEventCount/)
-  assert.match(hooks, /if \(!identityChanged\(next\)\) return next[\s\S]*?\[lastSeq, lastAlive, lastGeneration, lastEventCount\] = next[\s\S]*?setGenerationState/)
+  // The four-component identity moved into ./src/runStateModel.js (doc 25 UI-09), where
+  // runStateModel.test.js drives its truth table instead of matching its text. The property that
+  // still belongs to the hook is the ORDER: dedupe first, then commit — and generation only via
+  // React state, so the publish below can be fenced on the commit.
+  assert.match(hooks, /if \(!identityChanged\(last, next\)\) return next\s*\n\s*last = next\s*\n\s*setGenerationState/)
   assert.match(hooks, /useLayoutEffect\(\(\) => \{ observeRunGeneration\(runId, generation\) \}/)
 })
 
 test('Config restart is one server-owned durable command and config load failure is retryable', async () => {
-  const panels = await source('panels.jsx')
+  const panels = await source('ConfigPanel.jsx')
   const restart = panels.slice(panels.indexOf('const onPauseResume = async'),
     panels.indexOf('const setEvalCeiling = async'))
   assert.ok(restart.length > 0 && restart.length < 2000, 'the restart slice must actually bound one handler')
@@ -394,7 +397,7 @@ test('collapsed recovery actions are not clipped and retain a 44px touch target'
 })
 
 test('Assistant unmount cleanup clears its toast timer and every command poll clears its timer', async () => {
-  const assistant = await source('AssistantBar.jsx')
+  const [assistant, hooks] = await Promise.all([source('AssistantBar.jsx'), source('hooks.js')])
   // The toast timer's teardown moved into the shared `useToast` hook (doc 25 UI-13), which owns both
   // halves of the guard; `toastTimerDiscipline.test.js` pins it there. What must stay true HERE is
   // that the bar takes its toast from that hook rather than re-arming a timer of its own, and that
@@ -402,7 +405,14 @@ test('Assistant unmount cleanup clears its toast timer and every command poll cl
   assert.match(assistant, /import \{ useToast \} from '\.\/useToast\.js'/)
   assert.doesNotMatch(assistant, /setTimeout\([^\n]*setToast\(null\)/,
     'the Assistant bar re-grew its own toast timer')
-  assert.match(assistant, /return \(\) => \{ active = false; clearTimeout\(timer\) \}/)
+  // The command poll's timer teardown moved the same way (doc 25 UI-01): it was byte-identical to
+  // Dock's, so it now lives once in `hooks.js::useCommandStatusPoll` and the bar drives it. The
+  // property is unchanged and `runCommandMachine.test.js` drives it — a real unmount must leave no
+  // armed timer — so what is pinned here is only that the bar has not re-grown a poll of its own.
+  assert.match(assistant, /useCommandStatusPoll\(\{/)
+  assert.doesNotMatch(assistant, /timer = setTimeout\(poll,/,
+    'the Assistant bar re-grew its own command-status poll loop')
+  assert.match(hooks, /return \(\) => \{ active = false; clearTimeout\(timer\) \}/)
 })
 
 test('direct command presentation is guarded by currentRunId while durable cleanup remains unconditional', async () => {
@@ -443,17 +453,22 @@ test('live node-detail and per-node building-trace polls gate their setState on 
   // R5-UI: a poll whose callback ignores the alive() predicate lets a slow in-flight response land
   // after the user selected a different node (Inspector) or after building ended (Dock), overwriting
   // fresher state with a stale snapshot. Both must take (alive) and guard the setState with alive().
-  const [inspector, dock] = await Promise.all([source('Inspector.jsx'), source('Dock.jsx')])
+  const [inspector, dock, hooks] = await Promise.all([
+    source('Inspector.jsx'), source('Dock.jsx'), source('hooks.js'),
+  ])
   // Inspector node-detail poll: callback receives (alive), rejects a STALER attempt (accepts fresher),
   // and only then writes. (R7: `>= nodeAttempt`, not exact — the detail endpoint often leads the poll.)
   assert.match(inspector, /const detailMatchesAttempt = value => !Number\.isSafeInteger\(nodeAttempt\)[\s\S]*?value\.attempt >= nodeAttempt/)
   // The poll became an explicit effect with an owned in-flight request, which is a STRONGER form of
   // the same rule: a superseded read is aborted rather than merely ignored, and the identity check
   // (node + generation + attempt) still gates every write. `alive` is the effect's own latch.
+  // That effect is now the SHARED one (doc 25 UI-06, hooks.js::useScopedResource): the abort and the
+  // `alive` latch moved there, while the identity check — the only half that is about node detail —
+  // stayed here as the resource's `validate`. `resourceMachine.test.js` drives both behaviourally.
   assert.match(inspector,
-    /timed\.promise\.then\(value => \{[\s\S]*?const valid = detailMatchesNode\(value\)[\s\S]*?if \(valid && detailMatchesGeneration\(value\) && detailMatchesAttempt\(value\)\)/)
-  assert.match(inspector,
-    /return \(\) => \{\n\s*alive = false[\s\S]*?detailFlightRef\.current\.controller\.abort\(\)/,
+    /validate: value => \{[\s\S]*?const valid = detailMatchesNode\(value\)[\s\S]*?if \(valid && detailMatchesGeneration\(value\) && detailMatchesAttempt\(value\)\)/)
+  assert.match(hooks,
+    /return \(\) => \{\n\s*alive = false[\s\S]*?flight\.current\.controller\.abort\(\)/,
     'unmount/selection change must abort the in-flight detail read, not just discard its result')
   // Dock building-trace poll: the O(node) callback receives alive, and every state write is gated.
   // The error flag is cleared only on SUCCESS (inside the alive() guard), never eagerly per tick, so a

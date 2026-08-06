@@ -148,12 +148,13 @@ test('historical Inspector and Report detail reads carry the exact run generatio
   ])
   assert.match(runView, /expectedGeneration=\{generation\}/g,
     'every historical detail read must carry the run generation the route resolved')
-  assert.match(inspector, /query\.push\(`expected_generation=\$\{encodeURIComponent\(expectedGeneration\)\}`\)/)
+  assert.match(inspector, /detailQuery\.push\(`expected_generation=\$\{encodeURIComponent\(expectedGeneration\)\}`\)/)
   assert.match(report, /params\.set\('expected_generation', solutionGeneration\)/)
 })
 
 test('minted review links carry only scope-safe canonical context after the bearer', async () => {
-  const [panels, api] = await Promise.all([source('CollabPanel.jsx'), source('api.js')])
+  // The review bearer is parsed by the fetch client, which moved into apiClient.js (doc 25 UI-02).
+  const [panels, api] = await Promise.all([source('CollabPanel.jsx'), source('apiClient.js')])
   assert.match(panels, /reviewRouteStateForScope\(\{ \.\.\.\(reviewRouteState \|\| \{\}\),/)
   assert.match(panels, /generation: expectedGeneration \}, \{ evidence: includeEvidence \}\)/,
     'a minted link must carry the generation the OWNER validated, not one echoed back by the mint')

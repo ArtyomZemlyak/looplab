@@ -72,7 +72,9 @@ test('commandFetch is deliberately NOT built on the primitive', async () => {
   // It bounds a durable COMMAND submission, where the body read is part of the operation and a
   // timeout has to surface as a typed error the command lifecycle understands. Collapsing the two
   // would turn a submission timeout into a generic TimeoutError the retry path cannot classify.
-  const api = await source('api.js')
+  // commandFetch moved with the rest of the durable command protocol into commandProtocol.js
+  // (doc 25 UI-02). The rule it carries is unchanged; only the file that must not name the primitive.
+  const api = await source('commandProtocol.js')
   const fetchBody = api.slice(api.indexOf('async function commandFetch'),
     api.indexOf('const commandJson'))
   assert.doesNotMatch(fetchBody, /deadlineRequest|boundedRequest/)

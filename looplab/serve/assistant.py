@@ -1688,7 +1688,7 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     (role/content); `instruction` is the new user message. Pure orchestration — the caller injects the
     LLM client, the run-liveness probe, Settings and the `approver` (so it is unit-testable with a
     scripted fake client + a stub approver)."""
-    from looplab.agents.agent import drive_tool_loop, loop_opts_from_settings
+    from looplab.agents.agent import LoopOptions, drive_tool_loop, loop_opts_from_settings
     mode = normalize_mode(mode)
     trust_mode = getattr(settings, "trust_mode", "trusted_local") if settings is not None else "trusted_local"
     tools = build_tools(run_root, alive_fn=alive_fn, mode=mode, approver=approver,
@@ -1761,18 +1761,21 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                 return m["content"].strip()
         return "(no reply)"
 
-    opts = loop_opts_from_settings(settings) if settings is not None else {}
-    opts["self_plan"] = False        # the assistant uses the visible write_todos tool instead
+    opts = LoopOptions.coerce(loop_opts_from_settings(settings) if settings is not None else None)
     max_turns = int(getattr(settings, "agent_max_turns", 0) or 0)
     # Interactive assistant: bound the turn's wall-clock so a stalled shared-LLM call can't leave the
     # chat "thinking" forever. Falls back to 5 min when the setting is unset (0 = unlimited).
     time_budget = float(getattr(settings, "agent_time_budget_s", 0.0) or 0.0) or 300.0
+    # `.replace()` (this WINS) for all three: the assistant uses the visible write_todos tool instead
+    # of the loop's self-plan, and its 5-minute floor is deliberately not the configured value.
+    # Folding them into the bundle is what stops `max_turns=…, **opts` — the shape that raises
+    # `TypeError: got multiple values` the day the bundle grows a limit (doc 25 AG-01).
+    opts = opts.replace(self_plan=False, max_turns=max_turns, time_budget_s=time_budget)
     def _collect(attr):
         return [a for p in getattr(tools, "providers", []) if hasattr(p, attr) for a in getattr(p, attr)]
 
     try:
         reply = drive_tool_loop(client, tools, convo, _emit_spec(),
-                                max_turns=max_turns, time_budget_s=time_budget,
                                 finalize=_fin, fallback=_fb, on_step=_on_step, on_text=on_text,
                                 cancel_check=cancel_check, **opts)
     except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the request

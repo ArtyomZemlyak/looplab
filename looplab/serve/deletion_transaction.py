@@ -1,18 +1,21 @@
-"""Strict durable receipts for whole-run deletion."""
+"""Strict durable receipts for whole-run deletion.
+
+The receipt SCHEMA — its key set, its monotonic phase index and the two terminal branches that step
+outside it — is this module's; the read-then-verify load and the
+validate/immutable/transition/publish/confirm save it shares with `reset_transaction.py` live in
+`serve/durable_op.py` (doc 25 SC-06).
+"""
 from __future__ import annotations
 
-import json
 import math
-import os
 import re
-import stat
 import time
 from pathlib import Path
 from typing import Any, Optional
 
-from looplab.core.atomicio import strict_atomic_write_text
-from looplab.core.pathsafe import is_reparse
 from looplab.core.run_deletion import RUN_DELETION_OPERATION_RE, run_deletion_key
+from looplab.serve.durable_op import (
+    ReceiptProtocol, load_receipt, receipts_for_run, save_receipt)
 
 
 DELETE_RECEIPT_PREFIX = ".looplab-delete-receipt-"
@@ -56,18 +59,6 @@ def deletion_quarantine_path(srv, rd: Path, operation_id: str) -> Path:
     return srv.root.resolve() / f"{DELETE_QUARANTINE_PREFIX}{run_key}.{operation_id}"
 
 
-def _regular_file(path: Path) -> Optional[os.stat_result]:
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise DeletionReceiptError(f"deletion receipt cannot be inspected: {exc}") from exc
-    if is_reparse(info) or not stat.S_ISREG(info.st_mode):
-        raise DeletionReceiptError("deletion receipt is not a regular service-owned file")
-    return info
-
-
 def _validate_receipt(value: Any, *, path: Path) -> dict[str, Any]:
     if (not isinstance(value, dict) or set(value) != _RECEIPT_KEYS
             or value.get("version") != DELETE_RECEIPT_VERSION
@@ -100,72 +91,55 @@ def _validate_receipt(value: Any, *, path: Path) -> dict[str, Any]:
     return value
 
 
+def _check_transition(current: dict[str, Any], value: dict[str, Any]) -> None:
+    """Deletion's phase lattice: a MONOTONIC index, plus two branches that leave it terminally.
+
+    Not a table like reset's, and the difference is load-bearing rather than stylistic. Deletion
+    moves forward by exactly one rung and never back — a rung it has already crossed has mutated the
+    filesystem. `quarantine_ambiguous` and `superseded` sit OUTSIDE the index and are absorbing:
+    an ambiguous quarantine move is the one state this protocol refuses to resume from at all,
+    because Windows reported a failure after the destination became visible and only a human can say
+    which side the run is on.
+    """
+    if value["phase"] == "quarantine_ambiguous":
+        if current["phase"] not in {"quarantining", "quarantine_ambiguous"}:
+            raise DeletionReceiptError(
+                f"invalid deletion receipt transition {current['phase']} -> "
+                "quarantine_ambiguous")
+    elif current["phase"] == "quarantine_ambiguous":
+        raise DeletionReceiptError(
+            "an ambiguous quarantine move requires manual storage recovery")
+    elif value["phase"] == "superseded":
+        if current["phase"] not in {"prepared", "superseded"}:
+            raise DeletionReceiptError(
+                f"invalid deletion receipt transition {current['phase']} -> superseded")
+    elif current["phase"] == "superseded":
+        if value["phase"] != "superseded":
+            raise DeletionReceiptError("a superseded deletion receipt is terminal")
+    else:
+        old_phase = _PHASE_INDEX[current["phase"]]
+        new_phase = _PHASE_INDEX[value["phase"]]
+        if new_phase < old_phase or new_phase > old_phase + 1:
+            raise DeletionReceiptError(
+                f"invalid deletion receipt transition {current['phase']} -> {value['phase']}")
+
+
+_PROTOCOL = ReceiptProtocol(
+    label="deletion receipt",
+    error_cls=DeletionReceiptError,
+    max_bytes=DELETE_RECEIPT_MAX_BYTES,
+    validate=_validate_receipt,
+    immutable=_IMMUTABLE_FIELDS,
+    check_transition=_check_transition,
+)
+
+
 def load_deletion_receipt(path: Path) -> Optional[dict[str, Any]]:
-    before = _regular_file(path)
-    if before is None:
-        return None
-    if before.st_size > DELETE_RECEIPT_MAX_BYTES:
-        raise DeletionReceiptError("deletion receipt exceeds its safety limit")
-    try:
-        with path.open("rb") as stream:
-            raw = stream.read(DELETE_RECEIPT_MAX_BYTES + 1)
-        after = _regular_file(path)
-    except OSError as exc:
-        raise DeletionReceiptError(f"deletion receipt cannot be read: {exc}") from exc
-    identity = lambda info: (
-        info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
-        int(getattr(info, "st_file_attributes", 0) or 0),
-    )
-    if after is None or identity(before) != identity(after):
-        raise DeletionReceiptError("deletion receipt changed while it was being read")
-    if len(raw) > DELETE_RECEIPT_MAX_BYTES:
-        raise DeletionReceiptError("deletion receipt exceeds its safety limit")
-    try:
-        value = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeError, RecursionError) as exc:
-        raise DeletionReceiptError(f"deletion receipt cannot be decoded: {exc}") from exc
-    return _validate_receipt(value, path=path)
+    return load_receipt(path, _PROTOCOL)
 
 
 def save_deletion_receipt(path: Path, value: dict[str, Any]) -> dict[str, Any]:
-    value = _validate_receipt(value, path=path)
-    current = load_deletion_receipt(path)
-    if current is not None:
-        if any(current.get(key) != value.get(key) for key in _IMMUTABLE_FIELDS):
-            raise DeletionReceiptError("deletion receipt immutable identity changed")
-        if value["phase"] == "quarantine_ambiguous":
-            if current["phase"] not in {"quarantining", "quarantine_ambiguous"}:
-                raise DeletionReceiptError(
-                    f"invalid deletion receipt transition {current['phase']} -> "
-                    "quarantine_ambiguous")
-        elif current["phase"] == "quarantine_ambiguous":
-            raise DeletionReceiptError(
-                "an ambiguous quarantine move requires manual storage recovery")
-        elif value["phase"] == "superseded":
-            if current["phase"] not in {"prepared", "superseded"}:
-                raise DeletionReceiptError(
-                    f"invalid deletion receipt transition {current['phase']} -> superseded")
-        elif current["phase"] == "superseded":
-            if value["phase"] != "superseded":
-                raise DeletionReceiptError("a superseded deletion receipt is terminal")
-        else:
-            old_phase = _PHASE_INDEX[current["phase"]]
-            new_phase = _PHASE_INDEX[value["phase"]]
-            if new_phase < old_phase or new_phase > old_phase + 1:
-                raise DeletionReceiptError(
-                    f"invalid deletion receipt transition {current['phase']} -> {value['phase']}")
-    try:
-        encoded = json.dumps(
-            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-        if len(encoded.encode("utf-8")) > DELETE_RECEIPT_MAX_BYTES:
-            raise ValueError("deletion receipt exceeds its safety limit")
-        strict_atomic_write_text(path, encoded)
-    except (OSError, TypeError, ValueError) as exc:
-        raise DeletionReceiptError(f"deletion receipt could not be published durably: {exc}") from exc
-    confirmed = load_deletion_receipt(path)
-    if confirmed != value:
-        raise DeletionReceiptError("deletion receipt publication could not be confirmed")
-    return confirmed
+    return save_receipt(path, value, _PROTOCOL, load=load_deletion_receipt)
 
 
 def prepare_deletion_receipt(
@@ -226,14 +200,13 @@ def mark_deletion_quarantine_ambiguous(
 
 
 def deletion_receipts_for_run(srv, rd: Path) -> list[tuple[Path, dict[str, Any]]]:
+    # Deletion's run key comes from `run_deletion_key(rd)` — the run's own filesystem identity —
+    # while reset derives its key from the command sequencer's file stem. Both bindings are exact and
+    # neither may answer for the other, which is why `durable_op.receipts_for_run` scans an
+    # already-derived root and pattern instead of taking `(srv, rd)`.
     key = run_deletion_key(rd)
-    paths = srv.root.resolve().glob(f"{DELETE_RECEIPT_PREFIX}{key}.*.json")
-    found: list[tuple[Path, dict[str, Any]]] = []
-    for path in paths:
-        receipt = load_deletion_receipt(path)
-        if receipt is not None:
-            found.append((path, receipt))
-    return found
+    return receipts_for_run(
+        srv.root.resolve(), f"{DELETE_RECEIPT_PREFIX}{key}.*.json", load_deletion_receipt)
 
 
 def deletion_result(receipt: dict[str, Any], **extra: Any) -> dict[str, Any]:

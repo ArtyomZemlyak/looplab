@@ -132,7 +132,7 @@ def test_control_events_subset_of_registry():
 
 def test_control_events_cannot_be_widened_at_runtime():
     """This allow-list IS the append boundary: routers/control.py refuses any type not in it, and
-    run_commands asserts a ControlSpec for every member. As a mutable set, one stray
+    control_validation asserts a ControlSpec for every member. As a mutable set, one stray
     `CONTROL_EVENTS.add(...)` — from an import cycle or a careless test — would authorize a new
     appendable type process-wide with nothing failing. Adding one must be an edit to the literal."""
     from looplab.serve.server import CONTROL_EVENTS

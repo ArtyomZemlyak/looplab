@@ -238,7 +238,13 @@ def test_discarded_speculative_build_refunds_its_slot_and_survives_replay(
     tmp_path, monkeypatch,
 ):
     """End to end: the engine discards a real speculative build, then a FRESH process re-folding the
-    same bytes reaches the identical budget, ceiling and remaining-slot numbers."""
+    same bytes reaches the identical budget, ceiling and remaining-slot numbers.
+
+    This is also where the POST-BUILD refund is held deterministically (doc 25 EC-02). Its sibling
+    `test_the_refund_is_reachable_end_to_end_on_the_deterministic_backend` runs the whole engine and
+    therefore cannot promise which side of the dispatch boundary a supersede lands on; here the node
+    is genuinely committed first and the supersede is then driven through `_drop_stale_speculation`,
+    so `refunded` reaching the ledger is a fact of the run rather than an outcome of a race."""
 
     run_dir = tmp_path / "refund-replay"
     engine, _producer = _engine(run_dir)
@@ -268,6 +274,16 @@ def test_discarded_speculative_build_refunds_its_slot_and_survives_replay(
     assert len(terminals) == 1
     assert terminals[0].data["never_evaluated"] is True
     assert not (run_dir / "nodes" / f"node_{dropped_node}").exists()
+
+    # The LEDGER projection, on the deterministic path. This is the exact dict the e2e sibling
+    # reports and the one `finalize_run` stamps into the run's `budget` receipt, so a refund that
+    # stops reaching it is caught here whether or not the e2e race lands post-build that day.
+    from looplab.search.speculation_quality import speculation_budget_observation
+    observed = speculation_budget_observation(live)
+    assert observed["discarded"] == 1, observed
+    assert observed["refunded"] == 1, observed
+    assert observed["charged_discards"] == 0, observed
+    assert observed["abandoned"] == 0, observed
 
     live_budget = card_budget_used(live)
     live_limit = engine._hard_node_reservation_limit(live)
@@ -388,16 +404,16 @@ def test_the_refund_predicate_is_one_object_under_every_name_it_is_reachable_by(
     hours. The unit that has to be one object is the PREDICATE, not the leaf of its proof.
     """
     from looplab.core import models
-    from looplab.events import replay
+    from looplab.events import card_ledger
     from looplab.search import card_selection, speculation_quality
 
     assert (card_selection.is_unevaluated_speculative_discard
             is models.is_unevaluated_speculative_discard
-            is replay.is_unevaluated_speculative_discard
+            is card_ledger.is_unevaluated_speculative_discard
             is speculation_quality.is_unevaluated_speculative_discard)
     assert (card_selection.node_counts_toward_card_budget
             is models.node_counts_toward_card_budget
-            is replay.node_counts_toward_card_budget
+            is card_ledger.node_counts_toward_card_budget
             is speculation_quality.node_counts_toward_card_budget)
     assert (card_selection._durable_speculative_lifecycle
             is models._durable_speculative_lifecycle)
@@ -411,7 +427,7 @@ def test_the_budget_view_and_the_fold_agree_on_what_a_discard_costs():
     replay's debug anchor still counted it as a child of the node it was going to repair — so the
     policy kept proposing `debug` on that node and the lane authored a permanently unselectable Card
     every loop turn. Both halves now read this one predicate."""
-    from looplab.events.replay import _card_debug_leaf_children, _card_debuggable_leaf_ids
+    from looplab.events.card_ledger import _card_debug_leaf_children, _card_debuggable_leaf_ids
 
     failed_parent = Node(
         id=0, operator="draft", idea=Idea(operator="draft", card_id="card-parent"),
@@ -454,6 +470,40 @@ def test_the_refund_is_reachable_end_to_end_on_the_deterministic_backend(tmp_pat
     Measured on the real CLI (`looplab run --backend toy --max-nodes 12 -s speculation_depth=1`):
     18 requests, 16 committed, 4 superseded before dispatch, **4 refunded, charged_discards 0** — and
     the run still executed exactly 12 experiments on its 12-node budget across 16 node ids.
+
+    WHAT THIS TEST CAN AND CANNOT PROMISE (2026-08-05, doc 25 EC-02). It used to assert
+    `refunded >= 1` with the message "no supersede occurred", and that message was FALSE in every
+    observed failure: supersedes did occur, they just landed on the wrong side of a race. A
+    supersede that lands BEFORE the producer's result is claimed closes the durable request `stale`
+    and no node is ever built, so there is nothing to refund; one that lands AFTER becomes
+    `discarded` and `refunded`. Attributed at the branch (a run instrumented at
+    `_serve_card_builds`), **8 of 8 `stale` closes were `allow_commit=False`** — the session's own
+    gate, which goes shut the instant `consumer_completed` is set by the first eval terminal in the
+    admitted batch. That fence is the documented "one terminal closes this admitted batch" boundary
+    (`_card_eval_one`), so the split is decided by which of two real wall-clock durations is
+    shorter: a Developer `implement()` on a worker thread, or a sandbox subprocess evaluation.
+    There is NO election or CAS point that arbitrates it — the CASes decide who writes, never which
+    side of the dispatch boundary a supersede lands on. So `refunded >= 1` was asserting one outcome
+    of a two-outcome race, and it failed roughly 1 run in 3 under load.
+
+    What is asserted instead is every accounting identity that holds at EITHER stage, which is what
+    neutrality actually means, and those are not weak: a discarded prediction spends no budget,
+    every post-build discard is refunded, every request reaches exactly one disposition, no
+    prefetch is left abandoned, the run still executes its full 12 experiments, and every node id
+    spent beyond those 12 is a refunded prediction. Verified true in 60/60 runs across six
+    max_nodes/speculation_depth configurations — in the same 60 runs `refunded >= 1` would still
+    have failed twice, which is the point.
+
+    The refund itself — a real speculative node, committed and then discarded, seen by the same
+    ledger projection — is held DETERMINISTICALLY by
+    `test_discarded_speculative_build_refunds_its_slot_and_survives_replay` below, which drives the
+    post-build supersede through `_drop_stale_speculation` on a real engine and event log rather
+    than waiting for the race to land there.
+
+    (The margin did improve a great deal as a side effect of doc 25 EC-02's fold caching: the
+    session services a finished producer result far sooner, so `stale` closes fell from a mean of
+    3.38 to 0.25 per run and `refunded` rose from 1.12 to 2.88. That is a wider margin, not a
+    guarantee, which is why it is not what this test rests on.)
     """
     from looplab.search.speculation_quality import speculation_budget_observation
     from tests.factories import make_engine
@@ -472,13 +522,33 @@ def test_the_refund_is_reachable_end_to_end_on_the_deterministic_backend(tmp_pat
 
     state = fold(engine.store.read_all())
     observed = speculation_budget_observation(state)
-    assert observed["refunded"] >= 1, (
-        "no supersede occurred, so the refund is still unexercised end to end: " f"{observed}")
+    detail = (
+        f"{observed}; a supersede that lands BEFORE the commit closes the request `stale` and "
+        f"leaves no node to refund, one that lands AFTER it is `discarded`+`refunded` — this run "
+        f"split {observed['stale']} / {observed['discarded']}"
+    )
+    # Every accounting identity below is stage-INDEPENDENT: it holds whichever side of the dispatch
+    # boundary each supersede landed on, which is the only thing a real run can promise (see the
+    # docstring). Measured true in 45/45 runs across six max_nodes/depth configurations.
     assert observed["charged_discards"] == 0, (
-        "a refunded discard must not also be charged — that is the neutrality claim: " f"{observed}")
+        "a discarded prediction must not spend budget — that is the neutrality claim: " + detail)
+    assert observed["discarded"] == observed["refunded"], (
+        "a post-build discard that was not refunded is the regression this exists for: " + detail)
+    assert observed["abandoned"] == 0, (
+        "a committed prefetch left pending at the end of the run is charged and never "
+        "terminalized: " + detail)
+    assert observed["requested"] == (
+        observed["committed"] + observed["stale"] + observed["producer_failed"]), (
+        "every durable request must reach exactly one disposition: " + detail)
     # The point of the refund: the run gets its full budget of REAL experiments back.
+    assert observed["evaluated"] == 12, (
+        "speculation cost the run real experiment budget: " + detail)
     assert len(state.evaluated_nodes()) + len(
         [n for n in state.nodes.values() if n.status is NodeStatus.failed
          and n.error_reason != "superseded"]) >= observed["evaluated"]
-    assert len(state.nodes) > observed["evaluated"], (
-        "node ids were spent on discarded predictions, which is what the refund gives back")
+    assert len(state.nodes) - observed["evaluated"] == observed["refunded"], (
+        "every node id spent beyond the run's experiments must be a refunded prediction: " + detail)
+    # Speculation genuinely ran ahead and genuinely gave some of it up. This is the weakest claim
+    # here on purpose — it is the one the STAGE the supersede lands at cannot invalidate.
+    assert observed["requested"] > observed["evaluated"], (
+        "no prefetch was ever given up, so nothing about the discard path was exercised: " + detail)

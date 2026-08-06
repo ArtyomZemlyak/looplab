@@ -7,9 +7,12 @@ Node, and every crash prefix is either resumed or explicitly given up without du
 from __future__ import annotations
 
 import ast
+import collections
+import dataclasses
 import inspect
 import threading
 import textwrap
+import time
 from pathlib import Path
 
 import anyio
@@ -17,6 +20,7 @@ import pytest
 
 import looplab.engine.speculation as speculation_module
 import looplab.search.speculation_quality as speculation_quality
+from tests._source_scan import called_names, function_tree, names_read
 from looplab.adapters.toytask import ToyTask
 from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.core.config import Settings
@@ -1727,13 +1731,58 @@ def test_session_quiescence_waits_for_surviving_build_marker(tmp_path, monkeypat
     assert not fold(engine.store.read_all()).buildings
 
 
-def test_admission_records_the_eval_start_boundary_before_it_starts_the_worker():
-    """The durable half of `eval_inflight` is written at the dispatch decision, by the MAIN task."""
-    source = inspect.getsource(Engine._run_card_session)
-    boundary = source.index("self._record_eval_start_boundary(chosen)")
-    admitted = source.index("eval_inflight.add((chosen.id, chosen.attempt))")
-    started = source.index("_eval_one, chosen.id, chosen.attempt, reservation")
+def test_admission_records_the_eval_start_boundary_before_it_starts_the_worker(
+    tmp_path, monkeypatch,
+):
+    """The durable half of `eval_inflight` is written at the dispatch decision, by the MAIN task.
+
+    DRIVEN, then pinned. Until doc 25 EC-02 this was three ordered `source.index()` lookups over
+    `_run_card_session`, and CLAUDE.md records exactly how little they bought: a
+    `pass  # self._record_eval_start_boundary(chosen)` satisfies all three, in order, while the
+    boundary event is never written — the defect that turned depth-1 speculation serial. So the
+    property is now EXERCISED (the eval child observes its own `eval_started` already durable), and
+    the ordering pin that survives is AST-based, where a comment is not a node.
+    """
+    engine, _producer = _engine(tmp_path / "boundary-order")
+    _start(engine)
+    _add_ready_draft(engine)
+    node_id = _commit_speculative_node(engine)
+    _without_research(monkeypatch, engine)
+    observed = []
+
+    async def _observing_eval(admitted_id, _limiter, _max_es):
+        node = fold(engine.store.read_all()).nodes[admitted_id]
+        observed.append((admitted_id, node.eval_started))
+        engine.store.append(EV_NODE_EVALUATED, {
+            "node_id": admitted_id,
+            "generation": node.attempt,
+            "metric": 0.0,
+            "eval_seconds": 0.0,
+        })
+
+    monkeypatch.setattr(engine, "_evaluate", _observing_eval)
+    anyio.run(
+        engine._run_card_session,
+        [],
+        fold(engine.store.read_all()),
+        None,
+    )
+    assert observed == [(node_id, True)], (
+        "the eval child ran before its `node_eval_started` row was durable")
+
+    calls = called_names(Engine._card_phase_admit_evals)
+    boundary = calls.index("self._record_eval_start_boundary")
+    admitted = calls.index("session.eval_inflight.add")
+    started = calls.index("session.task_group.start_soon")
     assert boundary < admitted < started
+    launches = [
+        node for node in ast.walk(function_tree(Engine._card_phase_admit_evals))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "start_soon"
+    ]
+    assert len(launches) == 1
+    assert ast.unparse(launches[0].args[0]) == "self._card_eval_one"
 
 
 def test_a_worker_written_eval_start_boundary_would_defeat_the_election(tmp_path, monkeypatch):
@@ -1814,7 +1863,10 @@ def test_stage_prepared_card_id_lock_contains_only_the_tail_cas_append():
 
 
 def test_raw_action_selection_and_worker_share_one_proposal_snapshot():
-    source = textwrap.dedent(inspect.getsource(Engine._run_card_session))
+    # The raw lane moved into `_card_phase_request_build` with doc 25 EC-02's decomposition; the
+    # property is unchanged, and this snapshot pair is deliberately NOT routed through the session's
+    # per-tail `_fold_current` memo — it is the proposal's own authority snapshot.
+    source = textwrap.dedent(inspect.getsource(Engine._card_phase_request_build))
     tree = ast.parse(source)
     selections = [
         node for node in ast.walk(tree)
@@ -2069,13 +2121,15 @@ def test_run_card_session_pre_gpu_recheck_unions_producer_failed_but_raw_lane_do
     (producer-failed excluded), while the raw-proposal lane deliberately keeps producer-failed cards
     IN — a producer-failed card legitimately owns that counterfactual and must fall through to the
     serial builder rather than restage as an unbuildable raw action."""
-    source = textwrap.dedent(inspect.getsource(Engine._run_card_session))
-    tree = ast.parse(source)
-
-    def _excluded_src(callee: str) -> str | None:
+    def _excluded_src(func, callee: str) -> str | None:
         """The `excluded_card_ids` SOURCE this callee is consulted with, read out of the session
         object it is bundled into (doc 25 SE-14). Reading it from anywhere else in the function
-        would let the two lanes silently converge on one set again, which is what this pins."""
+        would let the two lanes silently converge on one set again, which is what this pins.
+
+        The two consults live in two different phase methods since doc 25 EC-02 split the turn body;
+        each is still scanned inside the ONE phase that owns it, so a lane that quietly grew a second
+        consult somewhere else is still invisible to this scan and still a failure below."""
+        tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
         for node in ast.walk(tree):
             if not (
                 isinstance(node, ast.Call)
@@ -2097,10 +2151,211 @@ def test_run_card_session_pre_gpu_recheck_unions_producer_failed_but_raw_lane_do
                 return ""       # a session that names no exclusions is not a missing session
         return None
 
-    fresh_src = _excluded_src("speculative_card_is_fresh")
-    raw_src = _excluded_src("speculative_raw_actions")
+    fresh_src = _excluded_src(Engine._card_phase_admit_evals, "speculative_card_is_fresh")
+    raw_src = _excluded_src(Engine._card_phase_request_build, "speculative_raw_actions")
     assert fresh_src is not None and "_producer_failed_card_ids" in fresh_src
     assert raw_src is not None and "_producer_failed_card_ids" not in raw_src
+
+
+# --- doc 25 EC-02: one exit-gate predicate, one fold per observed tail ----------------------------
+#
+# The turn body used to spell its three fold-derived stop conditions out FOUR times per iteration,
+# each copy preceded by its own full `fold(store.read_all())`, and combine them with the two live
+# session flags in five more places. Neither half fails loudly when it drifts: a gate that
+# disagrees with the copy two lines below silently starts speculative work another phase has
+# already given up on, and a snapshot taken before an append silently answers a later phase with
+# the pre-append world. These four tests hold both halves.
+
+
+def test_open_for_new_work_is_the_one_exit_gate_predicate():
+    """The rule, stated. It was previously reachable only through a ~500-line closure."""
+    gates_open = speculation_module.CardSessionGates(
+        terminal_gate=False, budget_exhausted=False, outer_rebuild=False)
+    assert gates_open.stopping is False
+
+    def _session(**overrides):
+        session = speculation_module.CardSession(
+            max_eval_seconds=None, wall_deadline=None)
+        for name, value in overrides.items():
+            setattr(session, name, value)
+        return session
+
+    assert _session().open_for_new_work(gates_open) is True
+    # Each FOLD-derived condition closes the gate on its own...
+    for name in ("terminal_gate", "budget_exhausted", "outer_rebuild"):
+        closed = dataclasses.replace(gates_open, **{name: True})
+        assert closed.stopping is True
+        assert _session().open_for_new_work(closed) is False
+    # ...and so does each LIVE session flag, which is why they are read separately and not frozen
+    # into the snapshot: `consumer_completed` is set by the eval child at any checkpoint.
+    for flag in ("consumer_completed", "yield_outer"):
+        assert _session(**{flag: True}).open_for_new_work(gates_open) is False
+
+    # The eval-seconds and wall-clock halves of `budget_exhausted`, which no call site can reach.
+    state = RunState()
+    state.total_eval_seconds = 10.0
+    assert _session(max_eval_seconds=None).budget_exhausted(state) is False
+    assert _session(max_eval_seconds=10.5).budget_exhausted(state) is False
+    assert _session(max_eval_seconds=10.0).budget_exhausted(state) is True
+    assert _session(wall_deadline=time.time() + 600).budget_exhausted(state) is False
+    assert _session(wall_deadline=time.time() - 1).budget_exhausted(state) is True
+
+    # `slots=True` is load-bearing: every one of these fields used to be a `nonlocal`, and a
+    # misspelled assignment would bind a NEW name and leave the real gate open for the whole run.
+    with pytest.raises(AttributeError):
+        _session().yeild_outer = True
+
+
+def test_no_session_phase_re_derives_a_stop_condition_by_hand():
+    """One home for the gate tuple, and one home for combining it with the live session flags.
+
+    The second half also pins a deliberate ASYMMETRY. `_card_phase_admit_evals` consults
+    `gates.stopping` directly inside an admitted batch rather than `open_for_new_work`, because
+    re-reading `consumer_completed` there would let the first sibling to terminate truncate the
+    batch its own siblings are still being admitted into. That is the exact shape of the regression
+    this subsystem has already paid for once (depth-1 speculation silently going serial), so the
+    two spellings are not interchangeable and this test says which belongs where.
+    """
+    tree = ast.parse(
+        Path(speculation_module.__file__).read_text(encoding="utf-8-sig", errors="replace"))
+    built = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "CardSessionGates"
+    ]
+    assert len(built) == 1, "the gate tuple is built somewhere other than `_session_gates`"
+
+    def _owner(target: ast.AST) -> str:
+        """The nearest enclosing def of *target*."""
+        best = ""
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for inner in ast.walk(node):
+                    if inner is target:
+                        best = node.name
+        return best
+
+    # Reading a live session flag is how a second exit-gate predicate grows. Only the predicate
+    # itself and the raw-stage phase (whose own, different, gate-free test this is not) may.
+    flag_readers = {
+        _owner(node) for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr in {"consumer_completed", "yield_outer"}
+        and isinstance(node.ctx, ast.Load)
+    }
+    assert flag_readers == {"open_for_new_work", "_card_phase_serve_raw_stage"}, flag_readers
+
+    # COUNTS, not just the owner set: the admission phase reads `.stopping` at BOTH of its
+    # gates — the batch fill and the pre-GPU re-check — and reverting only one of them back to
+    # `open_for_new_work` leaves the owner set unchanged. (Verified: that partial reversion passed
+    # an earlier set-only version of this assertion.)
+    stopping_readers = collections.Counter(
+        _owner(node) for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "stopping"
+    )
+    assert stopping_readers == collections.Counter({
+        "open_for_new_work": 1, "_card_phase_admit_evals": 2,
+    }), stopping_readers
+    # ...and the phase asks the FULL predicate exactly once: its batch boundary, on entry.
+    assert called_names(Engine._card_phase_admit_evals).count("session.open_for_new_work") == 1
+
+    phases = [
+        getattr(Engine, name) for name in dir(Engine)
+        if name.startswith("_card_phase_")
+    ]
+    assert len(phases) >= 5
+    for phase in phases:
+        calls = set(called_names(phase))
+        names = names_read(phase)
+        assert "self._terminal_intent" not in calls, phase.__name__
+        assert "session.budget_exhausted" not in calls, phase.__name__
+        assert "needs_outer_rebuild" not in names | calls, phase.__name__
+
+
+def test_the_turn_snapshot_folds_once_per_observed_tail(tmp_path, monkeypatch):
+    """`_fold_current` memoizes the PURE function `fold` on an unchanged log prefix — nothing else.
+
+    Engine invariant 4 forbids caching derived state across loop iterations WITHOUT re-folding; the
+    log is still read on every call here, and any append by any writer moves the tail and forces a
+    real rebuild on the very next one.
+    """
+    engine, _producer = _engine(tmp_path / "fold-memo")
+    _start(engine)
+    folded: list[int] = []
+    real_fold = speculation_module.fold
+
+    def _counting(events):
+        folded.append(len(events))
+        return real_fold(events)
+
+    monkeypatch.setattr(speculation_module, "fold", _counting)
+
+    events, first = engine._fold_current()
+    assert len(folded) == 1 and len(events) == folded[0]
+    _again_events, again = engine._fold_current()
+    assert again is first and len(folded) == 1        # same tail: no rebuild
+
+    engine.store.append(EV_PAUSE, {"reason": "the tail moved"})
+    _after_events, after = engine._fold_current()
+    assert len(folded) == 2 and after is not first
+    assert after.paused is True                       # ...and the new fold carries the append
+
+    # The `fold` module global is a patch seam. A memo that outlived a swap would answer the new
+    # function's caller with the old one's state — a test that still runs and no longer measures.
+    sentinel = RunState()
+    monkeypatch.setattr(speculation_module, "fold", lambda _events: sentinel)
+    assert engine._fold_current()[1] is sentinel
+
+
+def test_a_turn_that_appends_refolds_before_every_later_phase_reads(tmp_path, monkeypatch):
+    """The turn-scope half of invariant 4, DRIVEN rather than pinned.
+
+    Phase one (`_close_developer_sentinel_once`) appends an operator-visible pause. Every phase
+    below it in the SAME turn must therefore observe a paused run: the freshness drain must not be
+    consulted, the pending Node must not be admitted, and the session must close after one turn. A
+    decomposition that handed the phases a snapshot taken before the append would drain and admit
+    against the pre-pause world and none of the three assertions below would hold.
+    """
+    engine, _producer = _engine(tmp_path / "refold-after-append")
+    _start(engine)
+    _add_ready_draft(engine)
+    node_id = _commit_speculative_node(engine)
+    _without_research(monkeypatch, engine)
+    turns = {"n": 0}
+    drains: list[bool] = []
+    admitted: list[int] = []
+
+    async def _pausing_recovery():
+        turns["n"] += 1
+        if turns["n"] == 1:
+            engine.store.append(EV_PAUSE, {"reason": "a phase that appends"})
+            return True
+        return False
+
+    real_drop = engine._drop_stale_speculation
+
+    async def _recording_drop(**kwargs):
+        drains.append(True)
+        return await real_drop(**kwargs)
+
+    async def _recording_eval(admitted_id, _limiter, _max_es):
+        admitted.append(admitted_id)
+
+    monkeypatch.setattr(engine, "_close_developer_sentinel_once", _pausing_recovery)
+    monkeypatch.setattr(engine, "_drop_stale_speculation", _recording_drop)
+    monkeypatch.setattr(engine, "_evaluate", _recording_eval)
+    anyio.run(
+        engine._run_card_session,
+        [],
+        fold(engine.store.read_all()),
+        None,
+    )
+
+    assert turns["n"] == 1, "the pause appended in phase one did not close the session's own turn"
+    assert drains == [], "the freshness drain ran against the pre-pause snapshot"
+    assert admitted == [], "a Node was admitted against the pre-pause snapshot"
+    assert fold(engine.store.read_all()).nodes[node_id].status is NodeStatus.pending
 
 
 def test_speculative_admission_releases_old_pin_and_rescans_current_pin(

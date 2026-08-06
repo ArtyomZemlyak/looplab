@@ -41,16 +41,20 @@ test('terminal run state uses a minute-scale visibility-paused probe before reop
   Object.defineProperty(dom.window.document, 'hidden', {
     configurable: true, get: () => hidden,
   })
-  const probes = [
-    lifecycle(),
-    lifecycle({ seq: 13, event_count: 14, engine_running: true }),
-  ]
+  // The probe answer is a variable the TEST arms, not a queue the CLOCK drains. The interval below
+  // is rewritten 60s -> 80ms, so on a loaded box an extra tick can land inside any wall-clock window
+  // this test waits out; with a queue that tick consumed the CHANGED lifecycle early and every count
+  // after it shifted by one (observed: "2 !== 1" at the first probe assertion under six concurrent
+  // agents). An unchanged answer is idempotent, so a stray tick now changes nothing it asserts.
+  let probeAnswer = lifecycle()
   const calls = []
+  const probeCount = () => calls.filter(url => url.endsWith('/lifecycle')).length
+  const streamCount = () => calls.filter(url => url.endsWith('/events')).length
   const fetchStub = (input, options = {}) => {
     const url = String(input)
     calls.push(url)
     if (url.endsWith('/state')) return Promise.resolve(jsonResponse(stateFrame))
-    if (url.endsWith('/lifecycle')) return Promise.resolve(jsonResponse(probes.shift()))
+    if (url.endsWith('/lifecycle')) return Promise.resolve(jsonResponse(probeAnswer))
     if (url.endsWith('/events')) {
       return new Promise((_resolve, reject) => {
         options.signal?.addEventListener('abort', () => {
@@ -96,32 +100,39 @@ test('terminal run state uses a minute-scale visibility-paused probe before reop
       await waitFor(() => latest?.status === 'ready', 'initial terminal state did not settle')
     })
     assert.equal(latest.connected, true)
-    assert.equal(calls.filter(url => url.endsWith('/events')).length, 0,
+    assert.equal(streamCount(), 0,
       'a known-terminal initial state must not open an immediately-terminal SSE request')
 
     await React.act(async () => {
-      await new Promise(resolve => setTimeout(resolve, 95))
+      await waitFor(() => probeCount() >= 1, 'a terminal run never probed its lifecycle at all')
     })
-    assert.equal(calls.filter(url => url.endsWith('/lifecycle')).length, 1)
-    assert.equal(calls.filter(url => url.endsWith('/events')).length, 0)
+    // Deliberately a BOUND, not a count. "Exactly one tick lands in 95ms" is an artifact of the
+    // rewritten interval and the box's load; what the minute-scale rule actually forbids is a tight
+    // loop, and at 80ms per tick that would be dozens here — this still fails on one.
+    assert.ok(probeCount() <= 3,
+      `a minute-scale probe must not spin: ${probeCount()} lifecycle reads in one interval`)
+    assert.equal(streamCount(), 0)
 
+    // Snapshot at the moment of hiding: the property is that the count STOPS GROWING, which is
+    // independent of how many ticks happened to fit before it.
+    const probesBeforeHiding = probeCount()
     hidden = true
     document.dispatchEvent(new Event('visibilitychange'))
     await React.act(async () => {
       await new Promise(resolve => setTimeout(resolve, 105))
     })
-    assert.equal(calls.filter(url => url.endsWith('/lifecycle')).length, 1,
+    assert.equal(probeCount(), probesBeforeHiding,
       'a hidden terminal tab must not keep probing')
 
+    probeAnswer = lifecycle({ seq: 13, event_count: 14, engine_running: true })
     hidden = false
     document.dispatchEvent(new Event('visibilitychange'))
     await React.act(async () => {
-      await waitFor(() => calls.some(url => url.endsWith('/events')),
-        'a changed lifecycle did not reopen the live stream')
+      await waitFor(() => streamCount() > 0, 'a changed lifecycle did not reopen the live stream')
     })
-    assert.equal(calls.filter(url => url.endsWith('/lifecycle')).length, 2,
-      'visibility resumes with one immediate compact probe')
-    assert.equal(calls.filter(url => url.endsWith('/events')).length, 1)
+    assert.ok(probeCount() > probesBeforeHiding,
+      'visibility resumes with an immediate compact probe rather than waiting out the interval')
+    assert.equal(streamCount(), 1)
   } finally {
     if (root) await React.act(async () => { root.unmount() })
     dom.window.close()

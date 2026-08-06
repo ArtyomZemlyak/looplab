@@ -31,6 +31,7 @@ from looplab.serve.deletion_transaction import (
     deletion_receipts_for_run, deletion_result, load_deletion_receipt,
     mark_deletion_quarantine_ambiguous, prepare_deletion_receipt, save_deletion_receipt,
     supersede_prepared_deletion_receipt)
+from looplab.serve.durable_op import refuse_unless_quiescent
 from looplab.serve.engine_proc import (
     _engine_alive, _engine_liveness, _fresh_resume_launch_pending,
     _fresh_run_launch_pending, engine_write_lock_http, run_lifecycle_lock_http)
@@ -442,20 +443,21 @@ def begin_or_resume_run_deletion(
                         "run_reset_in_progress",
                         "Resolve the existing Replay operation before deleting this run.",
                         operation_id=reset.get("operation_id")))
-                active = srv.commands._active_command_ids(rd)
-                if active:
-                    raise HTTPException(409, _detail(
+                # The probe set and its order are `durable_op.refuse_unless_quiescent`'s (doc 25
+                # SC-06); the `_detail` envelopes are deletion's own contract — each code, and
+                # `engine_launching`'s `retryable`, is what the UI branches on.
+                refuse_unless_quiescent(
+                    srv.commands, rd,
+                    active_command=lambda active: HTTPException(409, _detail(
                         "run_command_active", "The run has an active command.",
-                        operation_id=operation_id, active_command_ids=active[:3]))
-                if srv.commands._recent_spawn_claim(rd):
-                    raise HTTPException(409, _detail(
+                        operation_id=operation_id, active_command_ids=active[:3])),
+                    engine_start=lambda: HTTPException(409, _detail(
                         "engine_launching", "The run engine is still launching.",
-                        operation_id=operation_id, retryable=True))
-                if srv.commands._finalize_incomplete(rd):
-                    raise HTTPException(409, _detail(
+                        operation_id=operation_id, retryable=True)),
+                    finalize_incomplete=lambda: HTTPException(409, _detail(
                         "run_finalization_incomplete",
                         "Finish terminal projections before deleting this run.",
-                        operation_id=operation_id))
+                        operation_id=operation_id)))
 
             with run_lifecycle_lock_http(rd):
                 if receipt is None or receipt["phase"] == "prepared":

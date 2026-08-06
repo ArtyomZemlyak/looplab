@@ -107,13 +107,13 @@ Score, …); the **Card lifecycle board** (1 card = 1 hypothesis), **cross-run m
 | Append-only log · pure fold · SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
 | Researcher / Developer / unified agent | `agents/roles.py`, `agents/unified_agent.py` |
 | Canonical eval/LLM concurrency + named-lane broker | `engine/orchestrator.py`, `core/llm_broker.py`, `engine/strategy.py` |
-| Card model · replay/public projection · selection | `core/models.py`, `events/replay.py`, `serve/public_cards.py`, `search/card_selection.py` |
+| Card model · identity digests/receipts · replay/public projection · selection | `core/cards.py`, `events/card_ledger.py`, `serve/public_cards.py`, `search/card_selection.py` |
 | Resource admission · GPU lifecycle reservations | `engine/resources.py`, `core/hardware.py` |
 | Speculative Card producer/consumer · freshness/quality gates | `engine/speculation.py`, `search/speculation_quality.py`, `search/speculation_calibration.py` |
 | Foresight (belief-card prioritization, predict-before-execute) | `search/foresight.py` |
 | Hybrid retrieval + agent-decided merge (lessons & Card belief board) | `search/hybrid_merge.py` |
 | Search policies · operators | `search/policy.py`, `search/operators.py` |
-| Part IV/V concept materialization · graph · bounded frame | `core/concepts.py`, `search/concept_projection.py`, `search/concept_graph.py`, `serve/concept_frame.py` |
+| Part IV/V concept materialization · graph · bounded frame | `core/concepts.py`, `search/concept_projection.py`, the five-module concept cluster `search/concept_graph.py` (structure) → `search/concept_tagging.py` / `search/concept_lens.py` → `search/concept_analytics.py` → `search/concept_map.py`, `serve/concept_frame.py` |
 | Repo Developer: env-inspector + auto-validate | `tools/env_inspect.py`, `adapters/repo_write_tools.py` (re-exported via `repo_developer.py`) |
 | Sandbox seam (subprocess / Docker) · built-in eval watchdogs (loss/grad divergence · stall) | `runtime/sandbox.py` |
 | Training-log monitor (product `Settings`: watcher on **and** early-kill on — `train_monitor_kill=True`; bare `EngineOptions`: both off; the verdict is advisory until the kill switch is on, and then only a `broken` verdict at ≥ `train_monitor_kill_confidence`, about a log the eval plan can PROVE is the run's own training — the single-command `eval.log` or a one-stage pipeline, never a stage of a multi-stage pipeline — CONFIRMED by a second consecutive parseable tick, acts) | `engine/train_monitor.py` |
@@ -121,7 +121,7 @@ Score, …); the **Card lifecycle board** (1 card = 1 hypothesis), **cross-run m
 | Variance gate · multi-seed confirmation · CV · leakage · reward-hack | `trust/gate.py`, `trust/confirm.py`, `trust/cv.py`, `trust/leakage.py`, `trust/reward_hack.py` |
 | Cross-run memory · retrieval · harmonic index | `engine/memory.py`, `engine/lessons.py`, `tools/memora.py` |
 | Cross-run index · claims · taxonomy/claim governance | `engine/cross_run_index.py`, `engine/claims.py`, `engine/concept_registry.py`, `engine/governance_health.py` |
-| Paid proposal steward lifecycle | `engine/steward_invocation.py`, `engine/concept_steward.py`, `engine/claim_steward.py`, `engine/task_facets.py` |
+| Paid proposal steward lifecycle — two at-most-once transactions over the same three ledgers: `curation_protocol.py` is the unattended FINALIZE one (semantic content-digest key, side-file claim), `steward_invocation.py` the on-demand HTTP/CLI one (operator `action_id`, in-ledger `begun` claim) | `engine/curation_protocol.py`, `engine/steward_invocation.py`, `engine/concept_steward.py`, `engine/claim_steward.py`, `engine/task_facets.py` |
 | Research Atlas / owner governance API · UI | `serve/routers/cross_run.py`, `ui/src/ResearchAtlas.jsx`, `ui/src/researchAtlasModel.js` |
 | Trace span exporter | `core/tracing.py` |
 

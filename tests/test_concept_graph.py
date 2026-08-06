@@ -6,7 +6,11 @@ LINEAGE (all `dcl-*` variants -> one family, so concentration reads the branch n
 analytics are deterministic over (RunState, graph, tags); and the *uncovered winning-region* alarm fires
 on the exact regions the `rubertlite` run never entered, from the first node — the decisive PART IV
 signal. The pure analytics never write events or choose a champion themselves; engine-owned producers
-persist their bounded inputs/receipts and live admission/cue consumers apply them."""
+persist their bounded inputs/receipts and live admission/cue consumers apply them.
+
+Named for the SUBSYSTEM, not one file: doc 25 SE-09 split `search/concept_graph.py` into the five
+modules imported below, and these tests span all of them. `tests/test_concept_module_split.py` is
+the separate guard on the split's own shape."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,9 +20,10 @@ import pytest
 from looplab.core.models import RunState
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
-from looplab.search.concept_graph import (Concept, ConceptGraph, concept_coverage, concept_report,
-                                          dense_retrieval_skeleton, skeleton_for, tag_nodes_heuristic,
-                                          tag_nodes_llm, uncovered_regions)
+from looplab.search.concept_analytics import concept_coverage, concept_report, uncovered_regions
+from looplab.search.concept_graph import (Concept, ConceptGraph, dense_retrieval_skeleton,
+                                          skeleton_for)
+from looplab.search.concept_tagging import tag_nodes_heuristic, tag_nodes_llm
 
 
 def _store(tmp_path, nodes, direction="max") -> EventStore:
@@ -560,7 +565,8 @@ def test_concept_consolidation_event_accumulates_and_is_replay_safe(tmp_path):
 def test_consolidate_reuses_known_renames_authoritatively():
     """B3: a recorded rename is FIXED — never re-decided — even if the model would merge it elsewhere, so the
     vocabulary is stable across cadences."""
-    from looplab.search.concept_graph import ConceptGraph, consolidate_concepts
+    from looplab.search.concept_graph import ConceptGraph
+    from looplab.search.concept_map import consolidate_concepts
 
     class _MergeAll:  # a client that would (wrongly) merge everything into 'z/z'
         def complete_tool(self, m, j):
@@ -583,7 +589,8 @@ def test_consolidate_reuses_known_renames_authoritatively():
 def test_consolidate_freezes_known_canonicals_no_flap():
     """B3 defect-#1 regression: a known CANONICAL (a value in known_renames) must NOT be re-merged by the
     model, or `_final` would rewrite A->B into A->C — the cross-cadence flap B3 exists to stop."""
-    from looplab.search.concept_graph import ConceptGraph, consolidate_concepts
+    from looplab.search.concept_graph import ConceptGraph
+    from looplab.search.concept_map import consolidate_concepts
 
     class _RemapCanonical:  # the model tries to re-canonicalize the KNOWN canonical data-aug/mixup
         def complete_tool(self, m, j):
@@ -604,7 +611,8 @@ def test_consolidate_freezes_known_canonicals_no_flap():
 def test_consolidate_skips_llm_when_nothing_undecided():
     """B3: when every concept is already covered by known_renames (raw or canonical), the LLM step is
     skipped — the incremental efficiency win + total stability."""
-    from looplab.search.concept_graph import ConceptGraph, consolidate_concepts
+    from looplab.search.concept_graph import ConceptGraph
+    from looplab.search.concept_map import consolidate_concepts
 
     class _Boom:  # must NOT be called
         def complete_tool(self, m, j): raise AssertionError("LLM called though nothing was undecided")
@@ -636,7 +644,7 @@ def test_hypothesis_concepts_at_vocab_folds_and_staleness_works_on_str_ids(tmp_p
     """B1-ext (§21.18): hypothesis_concepts events carry at_vocab -> folds into
     hypothesis_concepts_at_vocab; the shared staleness helper works on STRING hypothesis ids too."""
     from looplab.events.eventstore import EventStore
-    from looplab.search.concept_graph import stale_tagged_nodes
+    from looplab.search.concept_tagging import stale_tagged_nodes
     s = EventStore(tmp_path / "e.jsonl")
     s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
     s.append("hypothesis_concepts", {"hyp_id": "h0", "concepts": ["loss/x"], "at_vocab": 3})
@@ -667,7 +675,8 @@ def test_hypothesis_concepts_last_write_clears_stale_vocabulary_receipt(tmp_path
 def test_tag_text_llm_shared_tagger(tmp_path):
     """The shared agentic single-text tagger: pins to KNOWN ids (grow=False), respects an empty verdict,
     recovers via tag_text on all-unknown / no client. `tag_idea_llm` now delegates to it."""
-    from looplab.search.concept_graph import skeleton_for, tag_text, tag_text_llm
+    from looplab.search.concept_graph import skeleton_for
+    from looplab.search.concept_tagging import tag_text, tag_text_llm
 
     class _C:
         def __init__(self, ids): self.ids = ids
@@ -688,7 +697,7 @@ def test_tag_text_llm_shared_tagger(tmp_path):
 def test_stale_tagged_nodes_selects_the_oldest_vocab_first():
     """B1 (§21.18): pick items tagged against < growth× the latest vocab, most-stale first, capped;
     a strict no-op until the vocabulary has grown."""
-    from looplab.search.concept_graph import stale_tagged_nodes
+    from looplab.search.concept_tagging import stale_tagged_nodes
     # latest vocab = 100; growth 0.7 -> threshold 70. Nodes at 10, 50 are stale; 80, 100 are fresh.
     at_vocab = {1: 10, 2: 50, 3: 80, 4: 100}
     assert stale_tagged_nodes([1, 2, 3, 4], at_vocab, growth=0.7, cap=20) == [1, 2]   # oldest-first
@@ -742,7 +751,7 @@ def test_build_concept_map_exposes_raw_tags_for_recording():
     import tempfile
     d = tempfile.mkdtemp()
     st = fold(_store(Path(d), [("dcl", "decoupled contrastive loss", 0.5)]).read_all())
-    from looplab.search.concept_graph import build_concept_map
+    from looplab.search.concept_map import build_concept_map
     m = build_concept_map(st, client=None, seed_graph=dense_retrieval_skeleton())
     assert "raw_tags" in m and isinstance(m["raw_tags"], dict)
     assert m["raw_tag_modes"] == {0: "offline-heuristic"}
@@ -820,14 +829,14 @@ assert ROOT.exists()
 
 def test_derive_reference_concepts_degrades_without_client():
     # No LLM reachable -> best-effort empty, never raises (keeps the diagnostic alive).
-    from looplab.search.concept_graph import derive_reference_concepts
+    from looplab.search.concept_map import derive_reference_concepts
     assert derive_reference_concepts("some task", {"concept_touch": {"loss/x": 1}}, client=None) == []
 
 
 def test_derive_reference_concepts_filters_explored(monkeypatch):
     # The derivation must DROP anything already explored and normalize ids — universal, no domain pack.
     import looplab.core.parse as parse_mod
-    from looplab.search import concept_graph as cg
+    from looplab.search import concept_map as cm
 
     class _It:
         def __init__(self, cid, why=""):
@@ -838,7 +847,7 @@ def test_derive_reference_concepts_filters_explored(monkeypatch):
                    _It("loss/decoupled-contrastive", "already tried")]  # explored -> dropped
 
     monkeypatch.setattr(parse_mod, "parse_structured", lambda *a, **k: _Out())
-    out = cg.derive_reference_concepts(
+    out = cm.derive_reference_concepts(
         "dense retrieval", {"concept_touch": {"loss/decoupled-contrastive": 5}},
         client=object())
     ids = [m["concept_id"] for m in out]
@@ -849,7 +858,8 @@ def test_derive_reference_concepts_filters_explored(monkeypatch):
 def test_build_concept_map_offline_fallback(tmp_path):
     # No client -> deterministic heuristic build over the seed pack; returns the full map shape, no crash.
     from looplab.events.replay import fold
-    from looplab.search.concept_graph import build_concept_map, dense_retrieval_skeleton
+    from looplab.search.concept_graph import dense_retrieval_skeleton
+    from looplab.search.concept_map import build_concept_map
     st = fold(_store(tmp_path, [("dcl-rdrop", "decoupled contrastive with r-drop", 0.80),
                                 ("dcl-rdrop-ema", "dcl r-drop ema averaging", 0.81),
                                 ("temperature", "tune the contrastive temperature", 0.82)]).read_all())
@@ -867,6 +877,7 @@ def test_build_concept_map_offline_fallback(tmp_path):
 
 def test_consolidate_applies_llm_rename(monkeypatch):
     import looplab.core.parse as parse_mod
+    from looplab.search import concept_map as cm
     from looplab.search import concept_graph as cg
     g = cg.ConceptGraph([cg.Concept("augmentation/mixup", "mixup", ("augmentation",)),
                          cg.Concept("data-augmentation/cutmix", "cutmix", ("data-augmentation",))])
@@ -878,7 +889,7 @@ def test_consolidate_applies_llm_rename(monkeypatch):
         merges = [_P("data-augmentation/cutmix", "augmentation/cutmix")]
     monkeypatch.setattr(parse_mod, "parse_structured", lambda *a, **k: _Out())
 
-    g2, t2, rename = cg.consolidate_concepts(g, tags, client=object())
+    g2, t2, rename = cm.consolidate_concepts(g, tags, client=object())
     assert rename == {"data-augmentation/cutmix": "augmentation/cutmix"}
     assert "augmentation/cutmix" in g2 and "data-augmentation/cutmix" not in g2
     assert g2.axes() == ["augmentation"]                     # the fragmented axis is gone
@@ -887,6 +898,7 @@ def test_consolidate_applies_llm_rename(monkeypatch):
 
 def test_consolidate_resolves_transitive_chain(monkeypatch):
     import looplab.core.parse as parse_mod
+    from looplab.search import concept_map as cm
     from looplab.search import concept_graph as cg
     g = cg.ConceptGraph([cg.Concept("a/x"), cg.Concept("b/x"), cg.Concept("c/x")])
     tags = {0: frozenset({"a/x"})}
@@ -895,22 +907,25 @@ def test_consolidate_resolves_transitive_chain(monkeypatch):
     class _Out:
         merges = [_P("a/x", "b/x"), _P("b/x", "c/x")]        # a->b->c
     monkeypatch.setattr(parse_mod, "parse_structured", lambda *a, **k: _Out())
-    _, t2, rename = cg.consolidate_concepts(g, tags, client=object())
+    _, t2, rename = cm.consolidate_concepts(g, tags, client=object())
     assert rename["a/x"] == "c/x"                            # collapsed transitively
     assert t2[0] == frozenset({"c/x"})
 
 
 def test_consolidate_no_client_never_crashes():
+    from looplab.search import concept_map as cm
     from looplab.search import concept_graph as cg
     g = cg.ConceptGraph([cg.Concept("a/x"), cg.Concept("a/y")])
-    g2, t2, rename = cg.consolidate_concepts(g, {0: frozenset({"a/x"})}, client=None)
+    g2, t2, rename = cm.consolidate_concepts(g, {0: frozenset({"a/x"})}, client=None)
     assert isinstance(rename, dict) and 0 in t2         # fallback ran, no crash
 
 
 def test_consolidation_preserves_aliases_for_heuristic_tagging():
     # Regression: rebuilding concepts during consolidation must NOT erase aliases, or the heuristic
     # tagger goes blind on the consolidated graph (and a merged concept must inherit the synonym's alias).
-    from looplab.search.concept_graph import (Concept, ConceptGraph, _apply_consolidation, tag_text)
+    from looplab.search.concept_graph import Concept, ConceptGraph
+    from looplab.search.concept_map import _apply_consolidation
+    from looplab.search.concept_tagging import tag_text
     g = ConceptGraph([Concept("loss/a", "A", ("loss",), ("alpha-loss",)),
                       Concept("loss/b", "B", ("loss",), ("beta-loss",))])
     g2, _ = _apply_consolidation(g, {}, {"loss/b": "loss/a"})   # merge b -> a
@@ -1004,9 +1019,9 @@ def test_rendering_the_default_returns_the_shipped_text_byte_for_byte():
     import re
 
     from looplab.core.prompts import render
-    from looplab.search import concept_graph
+    from looplab.search import concept_map
 
-    source = inspect.getsource(concept_graph.consolidate_concepts)
+    source = inspect.getsource(concept_map.consolidate_concepts)
     match = re.search(r"_CONSOLIDATE_SYSTEM = \(\n(.*?)\n            \)", source, re.S)
     assert match, "the consolidation prompt literal moved; re-point this guard"
     shipped = "".join(re.findall(r'"(.*?)"\n', match.group(1) + "\n"))

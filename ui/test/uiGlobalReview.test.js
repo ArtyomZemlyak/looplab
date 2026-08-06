@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { initialDagOverviewDecision, shouldAutoFitDag, shouldRefitDag } from '../src/dagViewport.js'
 import { safeExternalHref, safeMarkdownHref } from '../src/urlSafety.js'
+import { SHARE_ACTIONS, shareActionFailure } from '../src/assistantShareModel.js'
 import {
   CONTROL, runApiPath, runNodeApiPath, patchProject, deleteProject, renameSupertask, deleteSupertask,
 } from '../src/api.js'
@@ -94,9 +95,17 @@ test('collapsed group drill-down preserves the exact active concept projection',
 })
 
 test('stale async resources are cancelled and run ids are encoded at every transport boundary', async () => {
-  const [shared, deadline, hooks, api, dock, inspector, panels] = await Promise.all([
+  // ConfigPanel.jsx and CardBoard.jsx split out of panels.jsx (doc 25 UI-04), and the six modules
+  // after them split out of api.js (doc 25 UI-02). All of them are named here so the raw-run-id URL
+  // rule keeps covering them; without that they would drop out of this scan.
+  const [shared, deadline, hooks, api, dock, inspector, panels, configPanel, cardBoard,
+    apiClient, commandModel, commandStorage, commandProtocol, eventStream,
+    scopeReportActions] = await Promise.all([
     source('SharedAssistant.jsx'), source('requestDeadline.js'), source('hooks.js'),
     source('api.js'), source('Dock.jsx'), source('Inspector.jsx'), source('panels.jsx'),
+    source('ConfigPanel.jsx'), source('CardBoard.jsx'),
+    source('apiClient.js'), source('commandModel.js'), source('commandStorage.js'),
+    source('commandProtocol.js'), source('eventStream.js'), source('scopeReportActions.js'),
   ])
   assert.match(deadline, /const controller = new AbortController\(\)/)
   assert.match(deadline, /setTimeout\([\s\S]*controller\.abort/)
@@ -105,7 +114,7 @@ test('stale async resources are cancelled and run ids are encoded at every trans
   assert.match(shared, /requestRef\.current !== timed/)
   assert.match(shared, /requestRef\.current\?\.controller\.abort\(\)/)
   assert.doesNotMatch(shared, /sharedLoadError = error =>[\s\S]{0,400}error\?*\.message/)
-  const apiShared = api.slice(api.indexOf("const path = '/api/assistant/shared'"))
+  const apiShared = apiClient.slice(apiClient.indexOf("const path = '/api/assistant/shared'"))
   assert.match(apiShared, /'\/api\/assistant\/shared'/)
   assert.match(apiShared, /'X-LoopLab-Share': String\(shareToken \|\| ''\)/,
     'the share bearer travels in a header, never in the URL that reaches history or access logs')
@@ -116,11 +125,18 @@ test('stale async resources are cancelled and run ids are encoded at every trans
   assert.match(hooks, /lastEventId: lastStreamEventId/)
   assert.match(hooks, /streamRef\.current\?\.abort\(\)/)
   assert.doesNotMatch(hooks, /new EventSource\(/)
-  for (const [name, body] of Object.entries({ api, dock, inspector, panels })) {
+  for (const [name, body] of Object.entries({ api, dock, inspector, panels, configPanel, cardBoard,
+    apiClient, commandModel, commandStorage, commandProtocol, eventStream, scopeReportActions })) {
     assert.doesNotMatch(body, /`\/api\/runs\/\$\{(?!encodeURIComponent\()/,
       `${name} must not interpolate a raw run identity into a URL`)
   }
-  for (const body of [api, dock, inspector, panels]) assert.match(body, /run(?:Node)?ApiPath\(/)
+  // CardBoard.jsx is deliberately absent: every board mutation goes through a CONTROL.* helper, so it
+  // never names a run path itself. So are commandModel/commandStorage/eventStream/scopeReportActions
+  // — the first two hold no URLs at all, the third takes the path from its caller, and the fourth
+  // addresses `/api/scope-report…`. The modules that DO build one must use the encoding helper.
+  for (const body of [api, dock, inspector, panels, configPanel, apiClient, commandProtocol]) {
+    assert.match(body, /run(?:Node)?ApiPath\(/)
+  }
 })
 
 test('early run creation and uncertain share mutations cannot replay user intent', async () => {
@@ -131,7 +147,28 @@ test('early run creation and uncertain share mutations cannot replay user intent
   assert.match(workspace, /window\.dispatchEvent\(queuedNewRun\)/)
   assert.match(assistant, /const onNewRun = \(event\) => \{\s*event\.preventDefault\(\)/)
   assert.match(assistant, /onReady\?\.\(\)/)
-  assert.match(assistant, /shareUnknownSid[\s\S]*?Share uncertain · revoke before retrying/)
+  // Doc 25 UI-05. The uncertain-share rule moved out of a JSX `onClick` into `assistantShareModel.js`,
+  // so it is now DRIVEN rather than pinned as a string that happened to sit after `shareUnknownSids`.
+  // The property is unchanged and is stronger stated this way: only a 4xx is authoritative about a
+  // public link, so every other outcome must leave the chat marked unknown.
+  for (const action of SHARE_ACTIONS) {
+    for (const error of [null, undefined, {}, { status: 500 }, { status: 503 }, { status: 504 },
+      { name: 'TimeoutError' }, { name: 'AbortError' }, { status: 599 }]) {
+      assert.equal(shareActionFailure(action, error).uncertain, true,
+        `${action}: a non-authoritative failure must leave the public-link state unknown`)
+    }
+    for (const status of [400, 403, 404, 409, 413, 422, 499]) {
+      assert.equal(shareActionFailure(action, { status }).uncertain, false,
+        `${action}: a ${status} is the server's verdict on this request and must not be replayed`)
+    }
+  }
+  assert.equal(shareActionFailure('revoke', { status: 502 }).notice, 'Revoke uncertain · retry to confirm')
+  assert.equal(shareActionFailure('snapshot', { status: 502 }).notice,
+    'Share uncertain · revoke before retrying')
+  // ...and the component must ACT on `uncertain` rather than only announce it: an unknown link has to
+  // reach the session list before the next mutation can be started against a stale local truth.
+  assert.match(assistant, /const failure = shareActionFailure\(action, error\)\s*\n\s*if \(failure\.uncertain\) \{\s*\n\s*setShareUnknown\(shareSid, true\)\s*\n\s*refreshSessions\(\)/,
+    'an uncertain share mutation must mark the chat unknown and re-read the authoritative list')
   // The `unknownCreate` boolean became a DURABLE per-view recovery record — an uncertain mint now
   // survives a reload instead of only a re-render, which is the point: a link may already exist on
   // the server. The property is unchanged and is asserted on the record's fields.

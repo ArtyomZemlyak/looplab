@@ -20,6 +20,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from looplab.agents.loop_options import LoopOptions
 from looplab.core.advisory_payloads import MAX_RESEARCH_SOURCES, sanitize_research_memo_payload
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, ResearchMemo, RunState
@@ -107,28 +108,31 @@ class DeepResearcher:
     """Run-wide agentic research step. `tools` is any object with .specs()/.execute(); None = no
     external grounding (the memo is then formed from the results summary alone)."""
 
-    def __init__(self, client, tools=None, parser: str = "tool_call", max_turns: int = 0,
-                 context_budget_chars: int | None = None, time_budget_s: float = 0.0,
-                 stuck_detection: bool = True, stuck_repeat: int = 4, stuck_alternate: int = 4,
-                 auto_summary: bool = True, prompts=None,
-                 emit_after: int = 300, emit_force: int = 500):
+    # This stage's divergences from an unconfigured loop, as ONE named default (doc 25 AG-01). It
+    # used to re-plumb nine settings as individual ctor kwargs precisely because the untyped bundle
+    # could not express "everything the other roles get, except self_plan and summary_client";
+    # `LoopOptions.replace`/`.without` can, so `make_deep_researcher` states the two divergences
+    # instead of restating the whole set.
+    #   - self_plan OFF: the memo review never had an update_plan tool.
+    #   - auto_summary ON (C2): summarize the stale middle when the memo trace grows.
+    #   - emit_after/emit_force: G soft-convergence. A model that issues ever-DIFFERENT web/
+    #     literature searches never trips the StuckDetector (repeats only), so with the shipped
+    #     defaults max_turns=0 / time_budget=0 it would run unbounded ("one idea, then ~200 more
+    #     reads"). These nudge/force the memo emit.
+    # B1 stuck detection is left at the loop's own defaults (ON, 4/4): the no-progress guard so this
+    # "think hard" loop can't spin forever on repeated searches.
+    _DEFAULT_LOOP_OPTS = LoopOptions(self_plan=False, auto_summary=True,
+                                     emit_after=300, emit_force=500)
+
+    def __init__(self, client, tools=None, parser: str = "tool_call", loop_opts=None, prompts=None):
         self.client = client
         self.tools = tools
         self.parser = parser
         self.prompts = prompts              # hot-reloadable PromptStore (I18, ADR-8); None = inline default
-        self.max_turns = max_turns          # 0 = unlimited (config-driven via Settings.agent_max_turns)
-        self.context_budget_chars = context_budget_chars
-        self.time_budget_s = time_budget_s  # 0 = no wall-clock cap (Settings.agent_time_budget_s)
-        # B1: no-progress guard so this "think hard" loop can't spin forever on repeated searches.
-        self.stuck_detection = stuck_detection
-        self.stuck_repeat = stuck_repeat
-        self.stuck_alternate = stuck_alternate
-        self.auto_summary = auto_summary    # C2: summarize the stale middle when the memo trace grows
-        # G soft-convergence: a model that issues ever-DIFFERENT web/literature searches never trips
-        # the StuckDetector (repeats only), so with the shipped defaults max_turns=0 / time_budget=0 it
-        # would run unbounded ("one idea, then ~200 more reads"). These nudge/force the memo emit.
-        self.emit_after = emit_after
-        self.emit_force = emit_force
+        # The caller's bundle wins over this stage's defaults, which in turn win over the loop's own
+        # (max_turns 0 = unlimited, time_budget_s 0 = no wall-clock cap — both config-driven via
+        # Settings.agent_max_turns / agent_time_budget_s, never hardcoded here).
+        self.loop_opts = LoopOptions.coerce(loop_opts).with_defaults(**self._DEFAULT_LOOP_OPTS)
 
     def _emit_spec(self) -> dict:
         return {"type": "function", "function": {
@@ -174,22 +178,19 @@ class DeepResearcher:
             # the memo prompts, the consulted-sources ledger (`on_tool_result`), its historical
             # nudge wording (prompt strings are contracts), and the no-tools observation text
             # (truthiness on purpose, matching the pre-fold `if self.tools else` guards).
-            # `self_plan` stays OFF: the memo review never had an update_plan tool.
+            # Every OPTION rides the bundle (`self.loop_opts`, settled once in __init__ — including
+            # `self_plan=False` and the turn/time/context budgets); what stays an explicit keyword
+            # is per-call only, which is why the two nudge wordings live HERE, verbatim, where the
+            # stage that owns them can be read alongside them.
             return drive_tool_loop(
                 self.client, self.tools if self.tools else _NoTools(), messages, self._emit_spec(),
-                max_turns=self.max_turns,               # 0 = unlimited (config-driven)
-                context_budget_chars=self.context_budget_chars,
-                time_budget_s=self.time_budget_s,       # out of wall-clock budget -> memo from what we have
                 finalize=lambda args: self._finalize(args, memo, sources),
                 # Ran out of turns without an emit — force a structured memo from the accumulated context.
                 fallback=lambda msgs: self._forced(msgs, memo, sources),
-                stuck_detection=self.stuck_detection,   # B1: stop searching in circles -> force the memo
-                stuck_repeat=self.stuck_repeat, stuck_alternate=self.stuck_alternate,
-                emit_after=self.emit_after, emit_force=self.emit_force,   # G: bound ever-different searches
-                auto_summary=self.auto_summary, self_plan=False,
                 on_tool_result=_record,
                 nudge_prompt="Now call `emit` with your memo.",
-                stuck_prompt="Stop: you appear to be stuck ({reason}). Call `emit` with your memo now.")
+                stuck_prompt="Stop: you appear to be stuck ({reason}). Call `emit` with your memo now.",
+                **self.loop_opts)
         except BudgetExceeded:      # a hard budget stop must end the run, not be swallowed as a memo
             raise
         except Exception as e:  # noqa: BLE001 — research is best-effort; never crash the run
@@ -277,22 +278,22 @@ def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepRe
     if providers:
         from looplab.agents.agent import CompositeTools
         tools = providers[0] if len(providers) == 1 else CompositeTools(providers)
-    # Deliberately NOT `loop_opts_from_settings(settings)`: that bundle also carries `self_plan`
-    # (default ON — this stage never exposes an update_plan tool) and the D11 `summary_client`
-    # (compressor_model — this stage has always compacted with its own client), so spreading it
-    # would change the memo loop's behavior. Keep the explicit per-setting kwargs instead.
+    # `loop_opts_from_settings(settings)` MINUS this stage's two divergences, instead of the nine
+    # individually re-plumbed settings this used to spell out (doc 25 AG-01). The bundle also
+    # carries `self_plan` (default ON — this stage never exposes an update_plan tool) and the D11
+    # `summary_client` (compressor_model — this stage has always compacted with its own client), so
+    # spreading it UNCHANGED would change the memo loop's behavior. `.replace()`/`.without()` say
+    # exactly that, and every other setting now reaches the memo loop by construction rather than by
+    # someone remembering to add a tenth kwarg here.
+    from looplab.agents.agent import loop_opts_from_settings
+    loop_opts = (loop_opts_from_settings(settings)
+                 .replace(self_plan=False)
+                 .without("summary_client")
+                 .with_defaults(max_turns=getattr(settings, "agent_max_turns", 0),
+                                time_budget_s=getattr(settings, "agent_time_budget_s", 0.0)))
     # Hot-reloadable prompt store (I18, ADR-8): lets `deep_research_system.md` override the
     # built-in system prompt; no prompt_dir (or no file) keeps the inline default byte-identical.
     prompts = (PromptStore(settings.prompt_dir)
                if getattr(settings, "prompt_dir", None) else None)
     return DeepResearcher(client, tools, parser=getattr(settings, "llm_parser", "tool_call"),
-                          prompts=prompts,
-                          context_budget_chars=getattr(settings, "context_budget_chars", None),
-                          max_turns=getattr(settings, "agent_max_turns", 0),
-                          time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),
-                          stuck_detection=bool(getattr(settings, "agent_stuck_detection", True)),
-                          stuck_repeat=int(getattr(settings, "agent_stuck_repeat", 4)),
-                          stuck_alternate=int(getattr(settings, "agent_stuck_alternate", 4)),
-                          auto_summary=bool(getattr(settings, "agent_auto_summary", True)),
-                          emit_after=int(getattr(settings, "agent_emit_after", 300)),
-                          emit_force=int(getattr(settings, "agent_emit_force", 500)))
+                          prompts=prompts, loop_opts=loop_opts)

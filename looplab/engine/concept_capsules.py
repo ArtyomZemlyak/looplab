@@ -31,7 +31,7 @@ from typing import Optional
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.fitness import finite_or_absent_metric as _is_finite_metric
 from looplab.core.text import WORD_RE, fingerprint_similarity
-from looplab.core.receipts import bounded_receipt_count
+from looplab.core.receipts import ReceiptRows, bounded_receipt_count
 from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER
 from looplab.core.jsonlio import (read_jsonl_lenient, read_jsonl_lenient_with_health,
                                     replace_jsonl_rows_atomic_preserving_quarantine,
@@ -70,8 +70,11 @@ _EMPTY_CAPSULE_STORE_HEALTH = {
     "source_duplicate_run_rows": 0,
 }
 
-class _CapsuleRows(list):
+class _CapsuleRows(ReceiptRows):
     """List-compatible capsule snapshot carrying file/schema quarantine health through projections."""
+
+    CARRIED_FIELDS = ("source_health",)
+    __slots__ = CARRIED_FIELDS
 
     def __init__(self, rows=(), *, source_health: Optional[dict] = None):
         super().__init__(rows)
@@ -88,7 +91,10 @@ def _capsule_rows(rows=(), *, source=None) -> _CapsuleRows:
 def _filter_capsule_rows(rows, predicate) -> _CapsuleRows:
     """Filter a capsule snapshot without laundering quarantined source rows into exact absence."""
     source = rows if isinstance(rows, (list, tuple)) else []
-    return _capsule_rows((row for row in source if predicate(row)), source=source)
+    # `_capsule_rows` first, because inheriting the receipt from a plain list is capsule-specific
+    # (it derives `source_rows_total` from the origin); the narrowing itself is the shared
+    # receipt-preserving projection rather than a comprehension that would drop it (EM-09).
+    return _capsule_rows(source, source=source).filter(predicate)
 
 def _capsule_concept_evidence_completeness(
         capsule: dict,

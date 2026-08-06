@@ -19,19 +19,36 @@ TASK = ROOT / "examples" / "toy_task.json"
 
 
 
+#: Every serve module that binds a scope-report store seam by value, and therefore has to be swept
+#: when a test injects a store failure. `tests/test_scope_actions_service.py` fails if a serve module
+#: reads one of the swept seams without appearing here — the whole hazard of these extractions is
+#: that a patch left on one binding keeps passing while testing nothing.
+_STORE_PATCH_MODULE_PATHS = (
+    "looplab.serve.scope_report_store",
+    "looplab.serve.scope_actions",
+    "looplab.serve.routers.reports",
+    "looplab.serve.routers.genesis",
+)
+
+
 def _patch_store(monkeypatch, name, value):
-    """Patch a scope-report seam on BOTH modules that read it (doc 25 SR-12).
+    """Patch a scope-report seam on EVERY module that reads it (doc 25 SR-12, SR-02).
 
     The store moved to `serve/scope_report_store.py` and `routers/reports.py` re-exports it with a
     star import — which BINDS BY VALUE, so patching one module no longer reaches the other's global
     lookup. `strict_atomic_write_text` and `_read_scope_action_lease_marker` are genuinely read from
     both (the store writes receipts/fences; the router writes the report record), so a test that
     injects a write failure has to reach both or it silently exercises only half the path.
-    """
-    from looplab.serve import scope_report_store
-    from looplab.serve.routers import reports as _reports
 
-    for module in (scope_report_store, _reports):
+    SR-02 then moved the paid ACTION protocol to `serve/scope_actions.py`, which is now the ONLY
+    reader of `_read_scope_action_lease_marker` outside the store — the router's copy of that name
+    is live but dead. A sweep that still named two modules would have made the marker-loss recovery
+    test pass while injecting nothing.
+    """
+    import importlib
+
+    for path in _STORE_PATCH_MODULE_PATHS:
+        module = importlib.import_module(path)
         if hasattr(module, name):
             monkeypatch.setattr(module, name, value)
 
@@ -894,7 +911,11 @@ def test_report_refresh_success_requires_durable_terminal_before_success(
             raise OSError("terminal fsync unavailable")
 
     monkeypatch.setattr(eventstore_module, "strict_fsync", fail_terminal_sync)
-    monkeypatch.setattr("looplab.serve.routers.boss.strict_fsync", fail_terminal_sync)
+    # The fsync-confirm that upgrades a visible terminal to a durable receipt is `paid_ledger`'s
+    # since doc 25 SR-01 — the routers no longer import `strict_fsync` at all, so this seam MUST
+    # name the shared module. `tests/test_paid_ledger.py` proves both routers lost the name, which
+    # is what turns a stale spelling here into an AttributeError instead of a silent no-injection.
+    monkeypatch.setattr("looplab.serve.paid_ledger.strict_fsync", fail_terminal_sync)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings, **_kw: object())
     monkeypatch.setattr("looplab.serve.report.generate_report", lambda state, _client, **_kwargs: (
         calls.append(state.run_id) or {"headline": "paid terminal", "at_node": len(state.nodes)}))

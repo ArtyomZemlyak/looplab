@@ -479,8 +479,12 @@ name, total memory, display-driver version and CUDA-driver version). It admits o
 policy, deterministic quadratic Toy-task profile and exact tested runtime envelope; it is not authority
 for other policies, workloads, task profiles, depths, budgets or settings. Validation re-reads the raw
 evidence and binds the current implementation, environment and effective GPU identity, so retain every
-referenced run directory. Regenerate after any byte change covered by the implementation digest (including
-Python comments, the packaged settings schema and `pyproject.toml`) or any bound environment change.
+referenced run directory. Regenerate after any change covered by the implementation digest or any bound
+environment change. That digest covers the PARSED tree of every shipped Python module plus the packaged
+settings schema, so a review-only edit — a comment, a blank line, rewrapping, a line-ending conversion —
+no longer revokes a receipt (it did until 2026-08-04; doc 25 XP-07). A docstring edit still does, and is
+meant to: a tool's docstring is its agent-facing description. `pyproject.toml` is the one member still
+hashed as raw bytes, because it does not parse as Python and therefore has no tree to reduce to.
 
 ## `timings`
 

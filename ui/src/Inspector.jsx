@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react'
+import React, { useEffect, useMemo, useState, useRef } from 'react'
 import { costPricing, deadlineGet, get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL,
-  clearNodeTrace, commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
+  commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
   retryRunCommand, runNodeApiPath, submitCommand } from './util.js'
-import { usePoll } from './hooks.js'
+import { usePoll, useScopedResource } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { themeFilteredGroupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
@@ -13,15 +13,14 @@ import { diffLines } from './lineDiff.js'
 import { nodeFeasibilityStatus } from './trustSemantics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
-import { NODE_TRACE_SPAN_WINDOW, NODE_TRACE_SPAN_WINDOW_MAX, TRACE_PARTIAL_EMPTY_NOTICE,
-  TRACE_PARTIAL_NOTICE, traceDetailState, tracePartial, traceUnavailable, traceWindow,
-  traceWindowNotice, unavailableTraceDetail } from './traceProjection.js'
+import { traceDetailState, tracePartial, traceUnavailable, unavailableTraceDetail } from './traceProjection.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts, parseConceptTagsInput } from './conceptChips.js'
 import { conceptMaterializationStatus } from './nodeProjection.js'
 import { buildingMarkers } from './buildingModel.js'
 import { deadlineRequest } from './requestDeadline.js'
 import { createInspectorDraftStore, useInspectorDraftField } from './inspectorDraftStore.js'
+import { useTraceClear } from './useTraceClear.js'
 
 // Comments are an explicit Inspector interaction. Keep their independently secured
 // review transport out of the base DAG closure, then load the same component only when this tab opens.
@@ -31,15 +30,9 @@ const withoutNodeTrace = value => value && typeof value === 'object'
   ? { ...value, trace: { nodes: [] } }
   : value
 
-const newTraceClearOperationId = () => {
-  const token = globalThis.crypto?.randomUUID?.().replace(/-/g, '').toLowerCase()
-  if (!/^[0-9a-f]{32}$/.test(token || '')) {
-    const error = new Error('Secure operation identity is unavailable.')
-    error.code = 'trace_clear_operation_unavailable'
-    throw error
-  }
-  return `tc_${token}`
-}
+// `deadlineGet`'s own default, kept as a named bound now that the detail read spells its deadline
+// rather than inheriting one from the helper it no longer calls.
+const DETAIL_REQUEST_TIMEOUT_MS = 8000
 
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
 // several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated
@@ -134,11 +127,6 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   const nodeAttempt = state?.nodes?.[nodeId]?.attempt
   const detailScope = `${runId}@${expectedGeneration || '?'}:${nodeId ?? '-'}:${nodeAttempt ?? '?'}:${readOnly
     ? historySeq ?? readOnlyReason : 'live'}:${evidenceAvailable ? 1 : 0}`
-  const [detailResource, setDetailResource] = useState({
-    scope: null, status: 'idle', data: null, error: '', pending: null,
-  })
-  const detailCurrent = detailResource.scope === detailScope
-  const detail = detailCurrent ? detailResource.data : null
   // Accept a detail payload whose attempt is >= the summary's: the /nodes endpoint is often FRESHER
   // than the lagging run-state poll (e.g. right after an inline repair bumps `attempt`), and showing
   // the current truth is correct — only a genuinely STALER payload (an old attempt's late response)
@@ -151,15 +139,61 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     && String(value.id) === String(nodeId) && typeof value.status === 'string'
   const detailMatchesGeneration = value => !expectedGeneration
     || value?.run_generation === expectedGeneration
-  const detailStatus = detailCurrent ? detailResource.status
-    : readOnlyReason === 'review' && !evidenceAvailable ? 'restricted' : 'loading'
-  const detailError = detailCurrent ? detailResource.error : ''
-  const detailPending = detailCurrent ? detailResource.pending : null
+  const [traceClearedScopes, setTraceClearedScopes] = useState(() => new Set())
+  const detailQuery = []
+  if (readOnly && historySeq != null) detailQuery.push(`seq=${historySeq}`)
+  if (expectedGeneration) detailQuery.push(`expected_generation=${encodeURIComponent(expectedGeneration)}`)
+  const at = detailQuery.length ? `?${detailQuery.join('&')}` : ''
+  // This machine is the shared one (doc 25 UI-06) — `hooks.js::useScopedResource` over
+  // `resourceModel.js`. It was the superset the shared hook had to be designed for, and every part
+  // of it survives: the scope fence, `supersede`, `mapLastGood`, `onSettled`, and a status that
+  // keeps last-good detail visible-but-stale rather than blanking it. What stays HERE is the part
+  // that is genuinely about node detail: which payloads count as this node's, and how each failure
+  // reads to an operator.
+  const detailResource = useScopedResource(
+    signal => get(runNodeApiPath(runId, nodeId, at), { cache: 'no-store', signal }), {
+      scope: detailScope,
+      timeout: DETAIL_REQUEST_TIMEOUT_MS,
+      // Two gates, and the first wins: with no node selected there is nothing to read, and a
+      // summary-only review withholds the evidence rather than failing to fetch it.
+      gate: nodeId == null ? 'idle'
+        : readOnlyReason === 'review' && !evidenceAvailable ? 'restricted' : null,
+      validate: value => {
+        const valid = detailMatchesNode(value)
+        if (valid && detailMatchesGeneration(value) && detailMatchesAttempt(value)) return null
+        return valid
+          ? 'The experiment attempt changed while details were loading.'
+          : 'Full node details returned an invalid response.'
+      },
+      classifyFailure: ({ transport, message, intent, lastGood }) => ({
+        error: intent === 'reconcile'
+          ? transport
+            ? 'Trace was cleared, but the remaining experiment details could not be refreshed.'
+            : String(message).startsWith('The experiment attempt')
+              ? 'Trace was cleared, but the experiment attempt changed before details could be refreshed.'
+              : 'Trace was cleared, but the detail refresh returned an invalid response.'
+          : transport
+            ? lastGood == null
+              ? 'Full node details could not be loaded.'
+              : 'Experiment details could not be refreshed.'
+            : message,
+      }),
+      onSuccess: scope => setTraceClearedScopes(current => {
+        if (!current.has(scope)) return current
+        const next = new Set(current)
+        next.delete(scope)
+        return next
+      }),
+      // The node's own status is deliberately NOT part of detailScope — a status change must
+      // re-read the SAME scope (that is what fills the Trace tab in place) rather than reset it.
+      deps: [state?.nodes?.[nodeId]?.status],
+    })
+  const detail = detailResource.data
+  const detailStatus = detailResource.status
+  const detailError = detailResource.error
+  const detailPending = detailResource.pending
   const detailPendingLabel = detailPending === 'retry' ? 'Retrying…'
     : ['refresh', 'reconcile'].includes(detailPending) ? 'Refreshing…' : 'Loading…'
-  const [traceClearedScopes, setTraceClearedScopes] = useState(() => new Set())
-  const detailFlightRef = useRef(null)
-  const detailStartRef = useRef(null)
   const detailSurfaceRef = useRef(null)
   const detailFocusScopeRef = useRef(null)
   const fallbackClearStore = useRef(new Map())
@@ -172,10 +206,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
       scope, kind, revision: current.revision + 1,
     }))
   })
-  const requestDetail = (intent = 'refresh', options) => {
-    const current = detailStartRef.current
-    return current?.scope === detailScope ? current.start(intent, options) : false
-  }
+  const requestDetail = (intent = 'refresh', options) => detailResource.request(intent, options)
   const retryDetailWith = (options = {}) => {
     detailFocusScopeRef.current = detailScope
     // An explicit user retry owns freshness over an invisible background refresh. Superseding it
@@ -184,125 +215,6 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     return requestDetail('retry', { supersede: true, ...options })
   }
   const retryDetail = () => retryDetailWith()
-  useEffect(() => {
-    let alive = true
-    const owner = {}
-    if (nodeId == null) {
-      setDetailResource({ scope: detailScope, status: 'idle', data: null, error: '', pending: null })
-      detailStartRef.current = null
-      return () => { alive = false }
-    }
-    if (readOnlyReason === 'review' && !evidenceAvailable) {
-      setDetailResource({
-        scope: detailScope, status: 'restricted', data: null, error: '', pending: null,
-      })
-      detailStartRef.current = null
-      return () => { alive = false }
-    }
-    const query = []
-    if (readOnly && historySeq != null) query.push(`seq=${historySeq}`)
-    if (expectedGeneration) query.push(`expected_generation=${encodeURIComponent(expectedGeneration)}`)
-    const at = query.length ? `?${query.join('&')}` : ''
-    const start = (intent = 'refresh', {
-      supersede = false, mapLastGood = null, onSettled = null,
-    } = {}) => {
-      if (supersede && detailFlightRef.current) {
-        const obsolete = detailFlightRef.current
-        detailFlightRef.current = null
-        obsolete.controller.abort()
-      }
-      if (detailFlightRef.current) return false
-      const timed = deadlineGet(runNodeApiPath(runId, nodeId, at))
-      const request = { owner, controller: timed.controller, promise: timed.promise }
-      detailFlightRef.current = request
-      setDetailResource(previous => {
-        const sameScope = previous.scope === detailScope
-        const loaded = sameScope ? previous.data : null
-        const lastGood = typeof mapLastGood === 'function'
-          ? mapLastGood(loaded)
-          : loaded
-        if (lastGood != null && previous.status === 'ready' && intent === 'refresh') return previous
-        return {
-          scope: detailScope,
-          status: lastGood == null ? (sameScope && previous.status === 'error' ? 'error' : 'loading')
-            : previous.status === 'stale' ? 'stale' : 'ready',
-          data: lastGood,
-          error: sameScope ? previous.error : '',
-          pending: intent,
-        }
-      })
-      const cancel = () => {
-        if (detailFlightRef.current !== request) return
-        detailFlightRef.current = null
-        if (!alive) return
-        setDetailResource(previous => previous.scope === detailScope
-          ? { ...previous, pending: null }
-          : previous)
-      }
-      const finish = (ok, data = null, error = '') => {
-        if (detailFlightRef.current !== request) return
-        detailFlightRef.current = null
-        if (!alive) return
-        if (ok) {
-          setTraceClearedScopes(current => {
-            if (!current.has(detailScope)) return current
-            const next = new Set(current)
-            next.delete(detailScope)
-            return next
-          })
-        }
-        setDetailResource(previous => {
-          const lastGood = previous.scope === detailScope ? previous.data : null
-          const resourceError = intent === 'reconcile'
-            ? error === 'transport'
-              ? 'Trace was cleared, but the remaining experiment details could not be refreshed.'
-              : String(error).startsWith('The experiment attempt')
-                ? 'Trace was cleared, but the experiment attempt changed before details could be refreshed.'
-                : 'Trace was cleared, but the detail refresh returned an invalid response.'
-            : error === 'transport'
-              ? lastGood == null
-                ? 'Full node details could not be loaded.'
-                : 'Experiment details could not be refreshed.'
-              : error
-          return ok
-            ? { scope: detailScope, status: 'ready', data, error: '', pending: null }
-            : {
-              scope: detailScope,
-              status: lastGood == null ? 'error' : 'stale',
-              data: lastGood,
-              error: resourceError,
-              pending: null,
-            }
-        })
-        onSettled?.(ok)
-      }
-      timed.promise.then(value => {
-        const valid = detailMatchesNode(value)
-        if (valid && detailMatchesGeneration(value) && detailMatchesAttempt(value)) {
-          finish(true, value)
-          return
-        }
-        finish(false, null, valid
-          ? 'The experiment attempt changed while details were loading.'
-          : 'Full node details returned an invalid response.')
-      }, error => {
-        if (error?.name === 'AbortError') cancel()
-        else finish(false, null, 'transport')
-      })
-      return request
-    }
-    detailStartRef.current = { scope: detailScope, start }
-    start('load')
-    return () => {
-      alive = false
-      if (detailStartRef.current?.start === start) detailStartRef.current = null
-      if (detailFlightRef.current?.owner === owner) {
-        detailFlightRef.current.controller.abort()
-        detailFlightRef.current = null
-      }
-    }
-  }, [runId, nodeId, nodeAttempt, state?.nodes?.[nodeId]?.status, readOnly, historySeq,
-    expectedGeneration, readOnlyReason, evidenceAvailable, detailScope])
   useEffect(() => {
     if (detailFocusScopeRef.current == null) return
     if (detailFocusScopeRef.current !== detailScope) {
@@ -1184,36 +1096,27 @@ function StageBlock({ s, t0, total, runId }) {
   </div>
 }
 
-// The ONE rendering of `traceWindow` — every node-trace surface uses it, so none of them can drift
-// back into a dead "projection is partial" line. A control that removes ITSELF at the window ceiling
-// reads to the operator exactly like the missing button it replaced, so the ceiling state is a
-// stated remainder ("Showing 4096 of 14507 spans; 10411 more are not displayed."), never silence.
-function TraceWindowControl({ spanWindow, onLoadMore, empty = false }) {
-  if (spanWindow.kind === 'complete') return null
-  if (spanWindow.kind === 'pageable')
-    return <button type="button" className="trace-loadmore disclosure-button" onClick={onLoadMore}>
-      ↧ load more spans
-    </button>
-  return <div className="notice compact" role="status">
-    {empty ? TRACE_PARTIAL_EMPTY_NOTICE : traceWindowNotice(spanWindow)}</div>
-}
-
 // Reusable langfuse-style trace for ONE node's span forest — the lifecycle stages on a shared
 // timeline. Exported so the chat feed can show the same waterfall inline (Dock.jsx) as the Inspector.
 export function NodeTrace({ spans, runId, projection = {}, onRetry, onLoadMore }) {
   const roots = spans || []
   if (traceUnavailable(projection)) return <TraceUnavailable onRetry={onRetry} />
+  const partial = tracePartial(projection)
   // Prefer an ACTIONABLE control over a dead "projection is partial" notice. The receipt remains in
   // projection; repeating its optional count in this hot render path added branches without utility.
-  const spanWindow = traceWindow(projection, { canPage: !!onLoadMore })
+  const loadMore = (partial && onLoadMore)
+    ? <button type="button" className="trace-loadmore disclosure-button" onClick={onLoadMore}>
+        ↧ load more spans
+      </button>
+    : null
   if (!roots.length) {
-    if (spanWindow.kind === 'complete')
-      return <div className="muted trace-small">No execution spans captured yet.</div>
-    return <TraceWindowControl spanWindow={spanWindow} onLoadMore={onLoadMore} empty />
+    if (loadMore) return loadMore
+    if (partial) return <div className="notice compact" role="status">Trace projection is partial; no observations were included.</div>
+    return <div className="muted trace-small">No execution spans captured yet.</div>
   }
   const { t0, total } = traceBounds(roots)
   return <div className="trace">
-    <TraceWindowControl spanWindow={spanWindow} onLoadMore={onLoadMore} />
+    {loadMore || (partial && <div className="notice compact" role="status">Trace projection is partial.</div>)}
     {roots.map((s, i) => <StageBlock key={`${runId}:${s.span_id || i}`} s={s} t0={t0} total={total} runId={runId} />)}
   </div>
 }
@@ -1391,7 +1294,7 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
   const partial = tracePartial(conv.projection)
   if (unavailable) return <TraceUnavailable onRetry={onRetry} />
   if (!stages.length) return <div className={partial ? 'notice compact' : 'muted'} role={partial ? 'status' : undefined}>{partial
-    ? TRACE_PARTIAL_NOTICE : 'No conversation captured for this node yet.'}</div>
+    ? 'Trace projection is partial.' : 'No conversation captured for this node yet.'}</div>
   // The live log for a stage band: a multi-stage eval logs per stage (stages[label]); a single-command
   // eval logs to eval.log ("evaluate"/"command"); the dep-install step to setup.log. Anything else
   // (propose/implement/…) has no subprocess log.
@@ -1400,7 +1303,7 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
   // `allOpen` is owned by the sticky Trace header (so collapse-all lives in the pinned bar). It's folded
   // into each band's key so a collapse/expand-all click remounts them at the new default; a live poll
   // (allOpen unchanged) keeps the key stable, so per-band toggles survive the 4s refresh.
-  return <div className="conv">{partial && <div className="notice compact" role="status">{TRACE_PARTIAL_NOTICE}</div>}
+  return <div className="conv">{partial && <div className="notice compact" role="status">Trace projection is partial.</div>}
     {stages.map((st, i) => <ConvStage key={`${st.trace_id || ''}:${st.label || ''}:${st.start || i}:${allOpen}`}
                                       st={st} defaultOpen={allOpen} log={logFor(st.label)} live={working} />)}
     {logs.run_setup ? <RunSetupLog text={logs.run_setup} /> : null}
@@ -1428,104 +1331,28 @@ function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, work
   const [view, setView] = useState('conversation')   // linear reading by default; span tree on demand
   const [allOpen, setAllOpen] = useState(false)       // bands COLLAPSED by default (expand one to read it)
   const [nonce, setNonce] = useState(0)               // bumped after "clear trace" to reload the bands
-  const initialClearRecovery = useRef(recoverClearState).current
-  const [clearing, setClearing] = useState(
-    initialClearRecovery?.phase === 'busy' ? 'busy' : '') // '' | 'confirm' | 'busy'
-  const initialOnReload = useRef(onReload).current
-  const handledClearRecoveryRevisionRef = useRef(clearRecoverySignal?.revision || 0)
-  const initialClearMessage = useRef(!initialClearRecovery
-    ? null
-    : initialClearRecovery.phase === 'busy'
-      ? {
-          kind: 'status',
-          blocking: true,
-          pending: true,
-          verifyOperation: initialClearRecovery.mode === 'verify',
-          text: initialClearRecovery.mode === 'verify'
-            ? 'Checking whether the original trace clear completed…'
-            : 'Trace clear is still pending. This experiment will stay locked until the request settles.',
-        }
-      : ['blocked', 'reconcile', 'ambiguous'].includes(initialClearRecovery.phase)
-        ? initialClearRecovery.message
-        : initialClearRecovery.phase === 'confirm'
-          ? {
-              kind: 'success',
-              blocking: false,
-              text: 'Trace clear confirmation was cancelled because this view changed. Nothing was submitted.',
-            }
-          : {
-              kind: 'error',
-              blocking: true,
-              text: 'Trace clear state could not be recovered. Refresh this experiment before clearing.',
-            }).current
-  const [clearMessage, setClearMessage] = useState(initialClearMessage)
   const bodyRef = useRef(null)
-  const clearTriggerRef = useRef(null)
-  const clearConfirmRef = useRef(null)
-  const clearRefreshRef = useRef(null)
   const nodeGeneration = Number.isSafeInteger(n.attempt) && n.attempt >= 0 ? n.attempt : null
-  // "load more spans" for the node's FULL trace. The node-detail payload embeds this node's trace at
-  // the server's DEFAULT window (TRACE_NODE_SPAN_CAP=512) and carries no way to ask for more, so a
-  // heavily-repaired node rendered a dead "projection is partial" notice on the very surface the live
-  // trace's terminal note calls "the node's full trace" (rubert-dr-0804 node 1: 512 of 14,507 spans).
-  // Page the same O(node) route the timeline row uses, fenced to THIS attempt so a reset cannot
-  // splice a stale lifecycle in; the embedded snapshot stays authoritative until a page lands.
-  const [spanPage, setSpanPage] = useState({ limit: 0, nonce: 0 })
-  const [pagedTrace, setPagedTrace] = useState(null)
-  const [pageFailed, setPageFailed] = useState(false)
-  usePoll((alive) => {
-    if (!spanPage.limit || nodeGeneration == null) return undefined
-    return get(runNodeApiPath(runId, n.id,
-      `/trace?attempt=${nodeGeneration}&limit=${spanPage.limit}`))
-      .then(d => {
-        if (d?.node_id !== n.id || d?.attempt !== nodeGeneration) throw 0
-        if (!alive()) return
-        setPagedTrace({ limit: spanPage.limit, nodes: d.nodes || [], projection: d.projection || {} })
-        setPageFailed(false)
-      })
-      .catch(() => { if (alive()) setPageFailed(true) })
-  }, working ? 4000 : null,   // keep a widened window live while the agent works this node
-  [runId, n.id, nodeGeneration, spanPage.limit, spanPage.nonce, working])
-  const spans = pagedTrace?.nodes || n.trace?.nodes || []
-  // Trace CLEAR fences on the authoritative embedded snapshot, never on a widened page: a failed or
-  // in-flight page must not decide whether this node's trace is destroyable.
+  const spans = n.trace?.nodes || []
   const unavailable = traceUnavailable(n.trace?.projection)
-  const spanWindowLimit = pagedTrace?.limit || spanPage.limit || NODE_TRACE_SPAN_WINDOW
-  const canPageSpans = nodeGeneration != null && spanWindowLimit < NODE_TRACE_SPAN_WINDOW_MAX
-  const loadMoreSpans = canPageSpans
-    ? () => setSpanPage(page => ({
-        limit: Math.min(spanWindowLimit * 2, NODE_TRACE_SPAN_WINDOW_MAX), nonce: page.nonce }))
-    : undefined
-  const spanWindow = traceWindow(pagedTrace?.projection || n.trace?.projection,
-    { canPage: !!loadMoreSpans })
-  const partial = spanWindow.kind !== 'complete'
-  const pageFailure = pageFailed && <div className="notice resource-error compact" role="alert">
-    <span>More spans could not be loaded.</span>
-    <button type="button" className="btn sm"
-      onClick={() => setSpanPage(page => ({ ...page, nonce: page.nonce + 1 }))}>Retry</button>
-  </div>
-  const clearScopeReady = /^[0-9a-f]{64}$/.test(expectedGeneration || '')
-    && /^[0-9a-f]{64}$/.test(expectedTraceRevision || '')
-    && nodeGeneration != null && n.status !== 'building'
-    && detailStatus === 'ready' && !reloadPending && !unavailable
-  const runWritingTrace = live?.engine_running === true
-  const runTraceOwnershipKnown = live?.engine_running === false
-  const clearAvailable = clearScopeReady && runTraceOwnershipKnown
-  const clearUnavailableText = n.status === 'building'
-    ? 'Experiment creation is incomplete; trace clear is unavailable.'
-    : runWritingTrace
-    ? 'The run is active; trace clear is unavailable until it stops.'
-    : !runTraceOwnershipKnown
-      ? 'Run write ownership is being verified; trace clear is unavailable.'
-    : reloadPending
-    ? 'Experiment details are refreshing; clear is unavailable.'
-    : detailStatus === 'loading'
-    ? 'Experiment details are loading; clear is unavailable.'
-    : detailStatus !== 'ready'
-      ? 'Experiment details must refresh successfully before trace can be cleared.'
-      : unavailable
-        ? 'Trace diagnostics could not be loaded; clear is unavailable until a refresh succeeds.'
-      : 'Trace identity is loading; clear is unavailable.'
+  const partial = tracePartial(n.trace?.projection)
+  // "Clear trace" erases this node's spans (spans.jsonl is append-only, so a reset+rebuild would else
+  // STACK new bands on the old attempt's). Two-click confirm; disabled while THIS node is being worked.
+  // The phase machine, its durable recovery record and the request live in ./useTraceClear.js
+  // (doc 25 UI-09); what stays here is the control it renders.
+  const {
+    clearing, clearMessage, clearAvailable, clearUnavailableText,
+    clearPrimaryBusy, clearPrimaryVerifying, clearPrimaryConfirm, clearFenced,
+    clearTriggerRef, clearConfirmRef, clearRefreshRef,
+    beginClear, cancelClear, doClear, refreshClearScope,
+  } = useTraceClear({
+    nodeId: n.id, nodeStatus: n.status, nodeGeneration, runId,
+    expectedGeneration, expectedTraceRevision, live, detailStatus, reloadPending, unavailable,
+    onReload, clearScope, clearRecoveryStore, recoverClearState, clearRecoverySignal,
+    publishClearRecovery, bodyRef,
+    // reload the Conversation bands (now empty until a rebuild re-traces)
+    onCleared: () => setNonce(x => x + 1),
+  })
   const agent = n.agent_report
   // Live status: what the node is doing RIGHT NOW. Two live states: an LLM authoring the code
   // (building → writing / repairing / merging), or the sandbox running its eval pipeline (pending →
@@ -1545,308 +1372,6 @@ function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, work
     <span className="muted trace-live-note">live · auto-updates</span></div>
   const retryParentTrace = () => onReload?.('retry')
   const scrollTo = (where) => { const c = bodyRef.current?.closest('.insp-body'); if (c) c.scrollTop = where === 'top' ? 0 : c.scrollHeight }
-  const storeClearRecovery = useCallback(next => {
-    const store = clearRecoveryStore?.current
-    if (!store || !clearScope) return
-    if (!next) {
-      store.delete(clearScope)
-      return
-    }
-    store.delete(clearScope)
-    store.set(clearScope, next)
-    while (store.size > 64) store.delete(store.keys().next().value)
-  }, [clearRecoveryStore, clearScope])
-  const setClearPhase = phase => {
-    storeClearRecovery(phase ? { phase } : null)
-    setClearing(phase)
-  }
-  const shouldRestoreClearFocus = () => {
-    const active = document.activeElement
-    return active === document.body || !active?.isConnected
-      || active === clearConfirmRef.current
-      || (active === clearTriggerRef.current && clearTriggerRef.current?.disabled)
-  }
-  useEffect(() => {
-    if (!initialClearRecovery) return
-    if (initialClearRecovery.phase === 'reconcile') {
-      // Child effects run before the parent Inspector's request owner is installed on a full
-      // remount. Defer one frame so this always starts (and supersedes) a post-POST detail read.
-      const frame = requestAnimationFrame(() => {
-        initialOnReload?.('trace-cleared')
-        clearRefreshRef.current?.focus({ preventScroll: true })
-      })
-      return () => cancelAnimationFrame(frame)
-    }
-    if (initialClearRecovery.phase === 'busy') {
-      const frame = requestAnimationFrame(
-        () => clearConfirmRef.current?.focus({ preventScroll: true }))
-      return () => cancelAnimationFrame(frame)
-    }
-    if (initialClearRecovery.phase === 'confirm') {
-      storeClearRecovery(null)
-      const frame = requestAnimationFrame(
-        () => clearTriggerRef.current?.focus({ preventScroll: true }))
-      return () => cancelAnimationFrame(frame)
-    }
-    if (!initialClearMessage) return
-    if (initialClearRecovery.phase !== 'ambiguous') {
-      storeClearRecovery({ phase: 'blocked', message: initialClearMessage })
-    }
-    const frame = requestAnimationFrame(() => clearRefreshRef.current?.focus({ preventScroll: true }))
-    return () => cancelAnimationFrame(frame)
-  }, [initialClearRecovery, initialClearMessage, initialOnReload, storeClearRecovery])
-  useEffect(() => {
-    const revision = clearRecoverySignal?.revision || 0
-    if (clearRecoverySignal?.scope !== clearScope
-        || revision <= handledClearRecoveryRevisionRef.current) return
-    handledClearRecoveryRevisionRef.current = revision
-    const recovery = clearRecoveryStore?.current?.get(clearScope)
-    if (clearRecoverySignal.kind === 'clear-succeeded') {
-      const restoreFocus = shouldRestoreClearFocus()
-      const message = recovery?.message || {
-        kind: 'success',
-        blocking: true,
-        text: 'Trace was cleared. Refreshing experiment details before another clear is allowed.',
-      }
-      setClearing('')
-      setClearMessage(message)
-      onReload?.('trace-cleared')
-      if (restoreFocus) {
-        requestAnimationFrame(() => clearRefreshRef.current?.focus({ preventScroll: true }))
-      }
-      return
-    }
-    if (['clear-failed', 'refresh-failed'].includes(clearRecoverySignal.kind)) {
-      const restoreFocus = shouldRestoreClearFocus()
-      const message = recovery?.message || {
-        kind: 'error',
-        blocking: true,
-        text: clearRecoverySignal.kind === 'clear-failed'
-          ? 'Trace clear did not complete. Refresh this experiment before trying again.'
-          : 'Experiment details could not be refreshed. Trace clear remains unavailable until a refresh succeeds.',
-      }
-      setClearing('')
-      setClearMessage(message)
-      if (restoreFocus) {
-        requestAnimationFrame(() => clearRefreshRef.current?.focus({ preventScroll: true }))
-      }
-      return
-    }
-    if (clearRecoverySignal.kind !== 'refresh-succeeded' || !clearMessage?.blocking) return
-    const active = document.activeElement
-    const restoreFocus = active === clearRefreshRef.current
-      || active === document.body || !active?.isConnected
-    storeClearRecovery(null)
-    setClearMessage(null)
-    if (restoreFocus) {
-      requestAnimationFrame(() => {
-        const trigger = clearTriggerRef.current
-        const target = trigger && !trigger.disabled
-          ? trigger : bodyRef.current?.closest('.insp-body')
-        target?.focus({ preventScroll: true })
-      })
-    }
-  }, [clearRecoverySignal, clearRecoveryStore, clearScope, clearMessage?.blocking, onReload,
-    storeClearRecovery])
-  useEffect(() => {
-    if (!['confirm', 'busy'].includes(clearing)) return
-    const frame = requestAnimationFrame(() => {
-      if (clearing === 'confirm') {
-        clearConfirmRef.current?.focus({ preventScroll: true })
-        return
-      }
-      const active = document.activeElement
-      if (active === document.body || !active?.isConnected) {
-        clearConfirmRef.current?.focus({ preventScroll: true })
-      }
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [clearing])
-  useEffect(() => {
-    if (clearMessage?.kind !== 'success' || clearMessage.blocking) return
-    const timer = setTimeout(() => setClearMessage(null), 4000)
-    return () => clearTimeout(timer)
-  }, [clearMessage])
-  const finishClear = (message, recovery = null) => {
-    setClearing('')
-    storeClearRecovery(recovery || (message?.blocking ? { phase: 'blocked', message } : null))
-    setClearMessage(message)
-    if (message?.blocking) publishClearRecovery?.(clearScope, 'clear-failed')
-    requestAnimationFrame(() => {
-      const active = document.activeElement
-      if (active === document.body || !active?.isConnected) {
-        const target = message?.blocking
-          ? clearRefreshRef.current
-          : clearTriggerRef.current && !clearTriggerRef.current.disabled
-            ? clearTriggerRef.current : bodyRef.current?.closest('.insp-body')
-        target?.focus({ preventScroll: true })
-      }
-    })
-  }
-  const refreshClearScope = () => {
-    if (reloadPending || clearMessage?.refreshing) return
-    const recovery = clearRecoveryStore?.current?.get(clearScope)
-    if (clearMessage?.verifyOperation && recovery?.operation) {
-      void submitClear(recovery.operation, true)
-      return
-    }
-    setClearMessage(message => message ? { ...message, refreshing: true } : message)
-    if (!onReload?.('trace-clear-recovery')) {
-      const message = {
-        kind: 'error',
-        blocking: true,
-        text: 'Experiment refresh could not start. Trace clear remains unavailable; use the experiment retry notice before trying again.',
-      }
-      storeClearRecovery({ phase: 'blocked', message })
-      setClearMessage(message)
-    }
-  }
-  const submitClear = async (operation, verifying = false) => {
-    const pendingMessage = verifying ? {
-      kind: 'status',
-      blocking: true,
-      pending: true,
-      verifyOperation: true,
-      text: 'Checking whether the original trace clear completed…',
-    } : null
-    storeClearRecovery({
-      phase: 'busy',
-      operation,
-      mode: verifying ? 'verify' : 'clear',
-      ...(pendingMessage ? { message: pendingMessage } : {}),
-    })
-    setClearing('busy')
-    setClearMessage(pendingMessage)
-    try {
-      const timed = deadlineRequest(signal => clearNodeTrace(runId, n.id, {
-        expectedGeneration: operation.expectedGeneration,
-        expectedTraceRevision: operation.expectedTraceRevision,
-        nodeGeneration: operation.nodeGeneration,
-        operationId: operation.operationId,
-        signal,
-      }), 15000)
-      const result = await timed.promise
-      if (result?.status !== 'succeeded'
-          || result?.operation_id !== operation.operationId) {
-        const error = new Error('Trace clear returned an invalid operation receipt.')
-        error.code = 'trace_clear_protocol_error'
-        throw error
-      }
-      setNonce(x => x + 1)          // reload the Conversation bands (now empty until a rebuild re-traces)
-      // Persist the acknowledged mutation above the conditionally mounted Inspector. Only a detail
-      // read started after this POST settles may clear this fence and permit another mutation.
-      const message = {
-        kind: 'success',
-        blocking: true,
-        text: `Trace cleared for #${n.id} · attempt ${operation.nodeGeneration}. Refreshing experiment details…`,
-      }
-      storeClearRecovery({ phase: 'reconcile', message })
-      setClearing('')
-      setClearMessage(message)
-      publishClearRecovery?.(clearScope, 'clear-succeeded')
-    } catch (e) {
-      // Keep server free text out of the UI. Generation conflicts mean the exact confirmation scope
-      // disappeared and are deliberately distinct from the ordinary "run is active" 409.
-      const currentNodeGeneration = Number.isSafeInteger(e?.detail?.current_node_generation)
-        ? e.detail.current_node_generation : null
-      const definitelyNotMutated = [
-        'run_generation_changed', 'node_generation_changed', 'trace_revision_changed',
-        'run_generation_unavailable', 'node_generation_unavailable', 'trace_revision_unavailable',
-        'trace_clear_operation_unavailable', 'trace_clear_operation_conflict',
-        'engine_running', 'engine_lock_unavailable', 'run_lifecycle_lock_unavailable',
-        'STALE_LINK_READ_ONLY',
-      ].includes(e?.code) || (e?.status >= 400 && e.status < 500
-        && ![408, 425, 429].includes(e.status))
-      const verificationIdentityChanged = verifying && [
-        'run_generation_changed',
-        'node_generation_changed',
-        'trace_revision_changed',
-      ].includes(e?.code)
-      const verificationTerminal = verificationIdentityChanged || (verifying && [
-        'trace_clear_operation_superseded',
-        'trace_clear_operation_conflict',
-      ].includes(e?.code))
-      // Once the first request may have escaped, a Verify response is contextual: even a normally
-      // pre-mutation 4xx/503 cannot prove what the earlier handler did. Keep the exact operation
-      // until the server returns success or a durable terminal receipt.
-      const verificationUnresolved = verifying && !verificationTerminal
-      const outcomeUnknown = verificationUnresolved || (!definitelyNotMutated
-        && (e?.status == null || [408, 425, 429].includes(e.status) || e.status >= 500)
-      )
-      const pendingOperationId = e?.code === 'trace_clear_pending'
-        && /^tc_[0-9a-f]{32}$/.test(e?.detail?.operation_id || '')
-        ? e.detail.operation_id : null
-      const recoveryOperation = pendingOperationId
-        ? { ...operation, operationId: pendingOperationId }
-        : operation
-      const text = verificationUnresolved
-        ? e?.code === 'trace_clear_pending'
-          ? 'The original trace clear is still being resolved. Check this same operation again; do not submit a new clear.'
-          : 'The original trace clear could not be verified yet. Its outcome may already have changed the trace; check this same operation again.'
-        : verificationIdentityChanged
-          ? 'The trace lifecycle changed and no matching pending clear operation remains. No additional deletion was attempted. Refresh the current experiment before deciding what to do next.'
-        : e?.code === 'run_generation_changed' || e?.code === 'STALE_LINK_READ_ONLY'
-        ? 'The run changed before the trace was cleared. Nothing was cleared. Review the current run and confirm again.'
-          : e?.code === 'trace_clear_operation_superseded'
-            ? 'The trace changed after an interrupted clear, so the original outcome cannot be reconstructed. No additional deletion was attempted. Refresh the current experiment before deciding what to do next.'
-          : e?.code === 'trace_path_invalid'
-            ? 'Trace storage is not a valid run-owned file. Nothing was cleared. Restore the trace file, then refresh this experiment.'
-          : e?.code === 'trace_clear_operation_conflict'
-            ? 'This clear operation belongs to a different trace lifecycle. Nothing new was cleared. Refresh this experiment before trying again.'
-          : e?.code === 'node_generation_changed'
-          ? currentNodeGeneration == null
-            ? `Experiment #${n.id} changed attempts. Nothing was cleared. Review the current attempt and confirm again.`
-            : `Experiment #${n.id} moved to attempt ${currentNodeGeneration}. Nothing was cleared. Review the current attempt and confirm again.`
-          : e?.code === 'trace_revision_changed'
-            ? 'Trace diagnostics changed before the clear acquired ownership. Nothing was cleared. Refresh this experiment and confirm against the current trace.'
-          : ['run_generation_unavailable', 'node_generation_unavailable',
-              'trace_revision_unavailable',
-              'trace_clear_operation_unavailable'].includes(e?.code)
-              || e?.status === 428
-            ? 'The exact run, trace snapshot, or experiment attempt is unavailable. Nothing was cleared. Reload the run and confirm again.'
-            : e?.code === 'trace_clear_pending'
-              ? 'The original trace clear is still being resolved. Verify this same operation again; do not submit a new clear.'
-            : e?.status === 409
-              ? 'Trace wasn’t cleared because the run is active, busy, or its write ownership could not be verified. Wait for current work to settle, refresh, then try again.'
-              : outcomeUnknown
-                ? 'Trace clear outcome is unknown. Verify this same operation before trying again.'
-                : 'Trace clear was rejected. Nothing was confirmed as deleted. Refresh this experiment before trying again.'
-      const message = {
-        kind: 'error',
-        blocking: true,
-        verifyOperation: outcomeUnknown,
-        text,
-      }
-      finishClear(message, outcomeUnknown
-        ? { phase: 'ambiguous', message, operation: recoveryOperation }
-        : null)
-    }
-  }
-  const doClear = () => {
-    try {
-      return submitClear({
-        expectedGeneration,
-        expectedTraceRevision,
-        nodeGeneration,
-        operationId: newTraceClearOperationId(),
-      })
-    } catch (error) {
-      finishClear({
-        kind: 'error',
-        blocking: true,
-        text: 'A secure trace clear operation could not be created. Reload the run before trying again.',
-      })
-      return false
-    }
-  }
-  // "Clear trace" erases this node's spans (spans.jsonl is append-only, so a reset+rebuild would else
-  // STACK new bands on the old attempt's). Two-click confirm; disabled while THIS node is being worked.
-  const clearPrimaryBusy = clearing === 'busy'
-  const clearPrimaryVerifying = clearPrimaryBusy && clearMessage?.verifyOperation
-  const clearPrimaryConfirm = clearing === 'confirm'
-  const storedClearPhase = clearRecoveryStore?.current?.get(clearScope)?.phase
-  const clearFenced = !!clearMessage?.blocking
-    || ['busy', 'reconcile', 'blocked', 'ambiguous'].includes(storedClearPhase)
   const clearBtn = <span className="trace-clear">
     <button type="button" ref={clearing === '' ? clearTriggerRef : clearConfirmRef}
       className={'seg' + (clearing ? ' on' : '')}
@@ -1866,23 +1391,13 @@ function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, work
         : clearPrimaryVerifying
           ? `Checking the original trace clear outcome for experiment #${n.id}, attempt ${nodeGeneration}.`
         : undefined}
-      onClick={clearing === ''
-        ? () => { setClearMessage(null); setClearPhase('confirm') }
-        : clearPrimaryConfirm ? doClear : undefined}>
+      onClick={clearing === '' ? beginClear : clearPrimaryConfirm ? doClear : undefined}>
       {clearPrimaryVerifying
         ? 'Checking…'
         : clearPrimaryBusy ? 'Clearing…' : clearPrimaryConfirm ? '✕ confirm clear' : '✕ clear trace'}
     </button>
     {clearPrimaryConfirm && <>
-      <button className="seg" onClick={() => {
-        setClearPhase('')
-        requestAnimationFrame(() => {
-          const trigger = clearTriggerRef.current
-          const target = trigger && !trigger.disabled
-            ? trigger : bodyRef.current?.closest('.insp-body')
-          target?.focus({ preventScroll: true })
-        })
-      }}>cancel</button>
+      <button className="seg" onClick={cancelClear}>cancel</button>
       <span className="muted trace-clear-status">
         Clear #{n.id} · attempt {nodeGeneration}? Results and run history stay intact.
       </span></>}
@@ -1930,8 +1445,7 @@ function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, work
       return <div className="trace" ref={bodyRef}>{head}<TraceUnavailable
         onRetry={retryParentTrace} pending={reloadPending} /></div>
     if (partial)
-      return <div className="trace" ref={bodyRef}>{head}{pageFailure}
-        <TraceWindowControl spanWindow={spanWindow} onLoadMore={loadMoreSpans} empty /></div>
+      return <div className="trace" ref={bodyRef}>{head}<div className="notice compact" role="status">Trace projection is partial; no observations were included.</div></div>
     return <div className="trace" ref={bodyRef}>{head}<div className="muted">No execution spans yet. Offline nodes may have none; active nodes update here as they run.</div></div>
   }
   if (unavailable)
@@ -1939,8 +1453,7 @@ function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, work
       onRetry={retryParentTrace} pending={reloadPending} />
       {agent && <AgentReport r={agent} />}</div>
   if (!spans.length && partial)
-    return <div className="trace" ref={bodyRef}>{head}{pageFailure}
-      <TraceWindowControl spanWindow={spanWindow} onLoadMore={loadMoreSpans} empty />
+    return <div className="trace" ref={bodyRef}>{head}<div className="notice compact" role="status">Trace projection is partial; no observations were included.</div>
       {agent && <AgentReport r={agent} />}</div>
   const { t0, total } = traceBounds(spans)
   // create_node already nests propose→implement; if an agent wrote the node, the report belongs
@@ -1950,8 +1463,7 @@ function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, work
   const rtok = roll.tokens || {}
   return <div className="trace" ref={bodyRef}>
     {head}
-    {pageFailure}
-    <TraceWindowControl spanWindow={spanWindow} onLoadMore={loadMoreSpans} />
+    {partial && <div className="notice compact" role="status">Trace projection is partial.</div>}
     <div className="muted trace-rollup-intro">
       Node #{n.id} lifecycle · offset = start, bar = duration. Expand an observation for bounded,
       redacted I/O.
