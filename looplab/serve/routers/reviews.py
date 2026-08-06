@@ -186,9 +186,18 @@ def _review_metrics(raw) -> dict[str, list[dict]]:
 
 
 def _review_cost(raw) -> dict:
+    # ABSENT IS NOT ZERO. `RunState.llm_cost` is `None` until a roll-up is actually written (an
+    # offline/toy run, or one that has not finalized, never writes one — 13 of the 46 runs under
+    # `runs/` are in that state), and the zero-filled body alone is byte-identical to a finished run
+    # that genuinely made no provider call. `format.js::costPricing` reads exactly that shape as
+    # `calls <= 0` and prints "$0 — No model calls were made, so nothing was spent": a confident
+    # claim about money nobody measured, shown to the one party who cannot cross-check it against
+    # the live run. The owner twin `routers/runs.py::run_cost` already carries `recorded` for this
+    # reason; this is the same fact on the read-only route. The zeros stay, so any existing
+    # arithmetic client is byte-for-byte unaffected.
     defaults = {"cost": 0.0, "calls": 0, "total_tokens": 0}
     if not isinstance(raw, dict):
-        return defaults
+        return {**defaults, "recorded": False}
     out = {}
     for key in _REVIEW_COST_KEYS:
         if key not in raw or isinstance(raw[key], bool):
@@ -202,7 +211,12 @@ def _review_cost(raw) -> dict:
             # uses (replay._llm_counter, _review_metrics' step guard); a corrupt token field must
             # not become a ~1000-digit bigint in the public review projection.
             out[key] = min(int(number), 2**63 - 1) if key != "cost" else number
-    return {**defaults, **out}
+    # Keyed on `out`, not on `raw` being a dict: a payload that survives none of the checks above
+    # (empty, or every field corrupt/negative/non-finite) told us nothing, and reporting it as a
+    # recorded roll-up of zero is the same lie one branch up. `recorded` is stamped AFTER the merge
+    # and is deliberately NOT in `_REVIEW_COST_KEYS`, so it stays this projection's own verdict —
+    # a hand-edited `llm_cost` carrying that key can never assert that a roll-up exists.
+    return {**defaults, **out, "recorded": bool(out)}
 
 
 def _http_error(exc: ReviewError) -> HTTPException:

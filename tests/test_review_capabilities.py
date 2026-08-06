@@ -637,3 +637,39 @@ def test_reviewer_metrics_are_attempt_fenced_like_the_owner_route(tmp_path, monk
     # A receipt from a DIFFERENT attempt — the reset case — yields NO series, not old points.
     begin_metrics_attempt(node_dir, 1, started_at=5678.0)
     assert client.get(url, headers=headers).json()["metrics"] == {}
+
+
+def test_reviewer_cost_says_whether_a_roll_up_was_recorded_at_all(tmp_path, monkeypatch):
+    """A run with no cost roll-up must not read as a run that measured zero spend.
+
+    `RunState.llm_cost` stays `None` until something writes a roll-up — an offline/toy run, or one
+    that has not finalized, never does (13 of the 46 runs under `runs/` are in that state). The
+    review body for that case used to be the bare zero-filled default, which is byte-identical to a
+    finished run that genuinely made no provider call, and `format.js::costPricing` turns exactly
+    that shape into "$0 — No model calls were made, so nothing was spent". The reviewer is the one
+    party who cannot open the run and check, so a confident $0 there is the worst place for it.
+
+    The two halves are asserted against the SAME link on the SAME run so the only difference is the
+    presence of the roll-up: the three numbers a client reads are identical in both bodies, and
+    `recorded` is the only thing that separates "never measured" from "measured, and it was zero".
+    """
+    rd = _seed_run(tmp_path)
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    client = TestClient(make_app(tmp_path))
+    headers = {"X-LoopLab-Review": _create(client)["token"]}
+
+    absent = client.get("/api/review/cost", headers=headers)
+    assert absent.status_code == 200, absent.text
+    assert absent.json()["recorded"] is False
+
+    # A real roll-up whose measured total happens to be zero. The run generation is bound to the
+    # FIRST event, so appending here leaves the existing capability valid.
+    EventStore(rd / "events.jsonl").append("llm_cost", {
+        "cost": 0.0, "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+
+    measured = client.get("/api/review/cost", headers=headers)
+    assert measured.status_code == 200, measured.text
+    assert measured.json()["recorded"] is True
+    assert {key: absent.json()[key] for key in ("cost", "calls", "total_tokens")} \
+        == {key: measured.json()[key] for key in ("cost", "calls", "total_tokens")}, \
+        "the numbers must be indistinguishable — `recorded` is what carries the difference"

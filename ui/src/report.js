@@ -132,7 +132,16 @@ function _pearson(xs, ys) {
   let sxy = 0, sxx = 0, syy = 0
   for (let i = 0; i < n; i++) { const dx = xs[i] - mx, dy = ys[i] - my; sxy += dx * dy; sxx += dx * dx; syy += dy * dy }
   const d = Math.sqrt(sxx * syy)
-  return d === 0 ? 0 : sxy / d
+  // A correlation needs BOTH series to vary. When either is constant the denominator is 0 and r is
+  // UNDEFINED — it is not zero. Returning 0 here reported "importance 0 · r +0" for a knob every
+  // node set to the same value, which reads as "this knob was measured and does not matter" when
+  // the truth is "it was never varied, so nothing could be learned" — the opposite conclusion, on
+  // the panel whose whole job is telling an operator what to tune next. Measured across the runs
+  // under `runs/`: EVERY `importance 0` row in the corpus is this degenerate case (`l2` was
+  // [0.01, 0.01, 0.01], `lr` was [0.03, 0.03, 0.03], `learning_rate` was [0.5, 0.5, 0.5]) and not
+  // one of them is a real measured zero correlation. `null` = "cannot be computed from this
+  // evidence", which every caller already renders as `—`.
+  return d === 0 ? null : sxy / d
 }
 
 // Run-wide hyperparameter importance: |Pearson r| of each numeric param vs the metric across all
@@ -150,9 +159,12 @@ export function hyperImportance(state) {
     const pts = nodes.filter(n => typeof n.idea?.params?.[k] === 'number')
     if (pts.length < 3) return
     const r = _pearson(pts.map(n => n.idea.params[k]), pts.map(n => n.metric))
-    rows.push({ k, imp: Math.abs(r), r, n: pts.length })
+    rows.push({ k, imp: r == null ? null : Math.abs(r), r, n: pts.length })
   })
-  return rows.sort((a, b) => b.imp - a.imp)
+  // An unmeasurable param sorts LAST. It is not a small importance — it is no measurement at all,
+  // and `null - null` is 0, which would otherwise leave these rows interleaved with the real ones
+  // in whatever order the key set happened to produce.
+  return rows.sort((a, b) => (b.imp ?? -1) - (a.imp ?? -1))
 }
 
 // Normalize free text to a compact, single-line caption: collapse whitespace and cap the length.

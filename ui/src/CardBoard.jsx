@@ -320,7 +320,13 @@ function _CardKanbanCard({
         title={`${omissionCount} public field omission${omissionCount === 1 ? '' : 's'}`}>
         partial details{omissionCount ? ` · ${omissionCount}` : ''}</span>}
     </div>
-    {(operator || evalProfile || params.length || spaceCount) && <div className="card-kanban-fact">
+    {/* The two counts are compared, not truth-tested. `a || b || n` YIELDS `n` when a and b are
+        falsy, so with no operator, no profile, no params and no space this guard evaluated to the
+        NUMBER 0 — and React renders a bare `0` for `0 && <div/>` instead of rendering nothing.
+        Measured: a stray `0` between the Card's chips and its "Declared" row on every Card that
+        declares no action, across most runs in `runs/`. `_cardText` returning null for an absent
+        string is what keeps the first two operands safe; a count has no such spelling. */}
+    {(operator || evalProfile || params.length > 0 || spaceCount > 0) && <div className="card-kanban-fact">
       <span className="card-kanban-k">Action</span>
       <span>{operator || 'operator unspecified'}</span>
       {evalProfile && <span>profile {evalProfile}</span>}

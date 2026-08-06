@@ -281,3 +281,47 @@ test('Each Card control draft re-seeds only from its own folded source (no cross
   assert.match(card, /setMemoryDraft\([\s\S]*?\}, \[card\.id, formGpuMem\]\)/)
   assert.doesNotMatch(card, /\[card\.id, statement, card\.priority, formGpus, formGpuMem\]/)
 })
+
+// The Card board is the surface where "zeros are all over the UI" was actually reproducible. The
+// Action row's guard read `(operator || evalProfile || params.length || spaceCount)`: a `||` chain
+// YIELDS its trailing operand when everything before it is falsy, so a Card that declares no action
+// made that guard the NUMBER 0 — and React renders `0 && <div/>` as a text node `0`, not as
+// nothing. Measured by server-rendering the real `/api/runs/<id>/state` of every run under `runs/`:
+// a stray `0` sat between the Card's chips and its "Declared" row on most of them.
+//
+// The assertion is scoped to the Card's own <article> on purpose. The lane headers beside it
+// legitimately render `0` ("Gated 0"), so a board-wide "no `0` anywhere" check would be both wrong
+// and unable to fail for the right reason.
+const cardArticle = (markup, cardId) => {
+  const at = markup.indexOf(`data-card-id="${cardId}"`)
+  assert.ok(at > 0, `card ${cardId} must be on the board`)
+  return markup.slice(markup.lastIndexOf('<article', at),
+    markup.indexOf('</article>', at) + '</article>'.length)
+}
+const bareTextNodes = html => html.split(/<[^>]*>/g).map(part => part.trim()).filter(Boolean)
+
+test('a Card that declares no action renders no stray count where its Action row would be', () => {
+  const cards = {
+    // The ordinary shape of a freshly proposed Card: a statement, and nothing declared yet.
+    'card-bare': { id: 'card-bare', status: 'proposed', statement: 'No action declared' },
+    // Its opposite, so a "fix" that simply drops the two counts from the guard cannot pass: a Card
+    // whose ONLY declared action is a search space must still show the Action row.
+    'card-space': {
+      id: 'card-space', status: 'proposed', statement: 'Sweep only', space: { lr: [0.1, 0.2] },
+    },
+  }
+  const markup = renderToStaticMarkup(React.createElement(HypothesisBoard, {
+    state: { cards, hypotheses: {} }, runId: 'run', onClose() {}, onSelect() {},
+  }))
+
+  const bare = cardArticle(markup, 'card-bare')
+  assert.deepEqual(bareTextNodes(bare).filter(text => text === '0'), [],
+    'a Card with nothing declared must render no bare `0` — absent is not a count of zero')
+  assert.doesNotMatch(bare, />Action</, 'with nothing declared there is no Action row to label')
+  assert.match(bare, />Declared</, 'the rest of the Card must still render')
+
+  const space = cardArticle(markup, 'card-space')
+  assert.match(space, />Action<[\s\S]*1 search variable/,
+    'a declared search space is an action and must still open the Action row')
+  assert.deepEqual(bareTextNodes(space).filter(text => text === '0'), [])
+})
