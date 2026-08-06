@@ -231,8 +231,10 @@ MAX_MAP_PAIRS = 2_048
 MAX_MAP_RUN_CONCEPTS = 256      # cap ONE run's set before the O(k^2) pairing
 
 
-def concept_map(run_concepts, *, min_cooccurrence: int = 2) -> dict:
-    """The GLOBAL cross-run concept MAP over an ALREADY-SCOPED population — 'мега общая карта концептов'.
+def project_concept_map(run_concepts, *, min_cooccurrence: int = 2) -> dict:
+    """The GLOBAL cross-run concept MAP over an ALREADY-SCOPED population.
+
+    The 'мега общая карта концептов': one shared taxonomy view across every run the caller passed.
 
     `run_concepts` is an iterable of per-RUN concept-id iterables: one element per run, each the ids that
     run is evidence for. Pure/deterministic, no I/O, no governance lookup, ADVISORY — a read-model, never

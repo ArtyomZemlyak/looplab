@@ -1,4 +1,4 @@
-"""The GLOBAL concept MAP fold — `search/concept_lens.py::concept_map`.
+"""The GLOBAL concept MAP fold — `search/concept_lens.py::project_concept_map`.
 
 These properties used to be pinned against `engine/concept_capsules.py::portfolio_concept_graph`
 (`tests/test_cross_run_concepts.py`, removed in the same change). That function chose its own
@@ -11,13 +11,13 @@ map OF THE POPULATION IT PASSED. That is the property the first test drives, bec
 whose absence caused the split, and it is the reason the alias/split canonicalization is NOT in
 here: governance belongs to whoever owns the population's provenance.
 
-`ui/src/conceptForest.js` is the browser half and mirrors this vocabulary; `ui/test/conceptForest.test.js`
-and `ui/test/conceptCooccurrence.test.js` drive the same rules over the same shapes.
+`ui/src/conceptForest.js` is the browser half and mirrors this vocabulary;
+`ui/test/conceptForest.test.js` and `ui/test/conceptCooccurrence.test.js` drive the same rules.
 """
 from __future__ import annotations
 
-from looplab.search.concept_lens import (MAX_MAP_CONCEPTS, MAX_MAP_RUN_CONCEPTS, concept_map,
-                                         project_hierarchy)
+from looplab.search.concept_lens import (MAX_MAP_CONCEPTS, MAX_MAP_RUN_CONCEPTS,
+                                         project_concept_map, project_hierarchy)
 
 
 def test_the_map_is_exactly_the_population_it_was_handed():
@@ -26,11 +26,11 @@ def test_the_map_is_exactly_the_population_it_was_handed():
     # population is to pass more runs — which a scoped caller does not do.
     scoped = [{"loss/dcl", "arch/moe"}, {"loss/dcl"}]
     wider = scoped + [{"data/aug", "arch/moe"}]
-    assert concept_map(scoped)["n_runs"] == 2
-    assert {c["concept"] for c in concept_map(scoped)["concepts"] if c["n_runs"]} == {
+    assert project_concept_map(scoped)["n_runs"] == 2
+    assert {c["concept"] for c in project_concept_map(scoped)["concepts"] if c["n_runs"]} == {
         "loss/dcl", "arch/moe"}
-    assert "data/aug" not in {c["concept"] for c in concept_map(scoped)["concepts"]}
-    assert concept_map(wider)["n_runs"] == 3
+    assert "data/aug" not in {c["concept"] for c in project_concept_map(scoped)["concepts"]}
+    assert project_concept_map(wider)["n_runs"] == 3
 
 
 def test_nodes_carry_run_counts_over_the_path_spine():
@@ -40,7 +40,7 @@ def test_nodes_carry_run_counts_over_the_path_spine():
     runs = [{"loss/contrastive/dcl", "arch/moe"},
             {"loss/contrastive/dcl", "arch/moe"},
             {"loss/contrastive/dcl", "data/aug"}]
-    m = concept_map(runs, min_cooccurrence=2)
+    m = project_concept_map(runs, min_cooccurrence=2)
 
     counts = {c["concept"]: c["n_runs"] for c in m["concepts"]}
     assert counts["loss/contrastive/dcl"] == 3 and counts["arch/moe"] == 2
@@ -65,7 +65,7 @@ def test_cooccurrence_weights_distinct_runs_and_honors_the_floor():
     runs = [{"loss/contrastive/dcl", "arch/moe"},
             {"loss/contrastive/dcl", "arch/moe"},
             {"loss/contrastive/dcl", "data/aug"}]
-    m = concept_map(runs, min_cooccurrence=2)
+    m = project_concept_map(runs, min_cooccurrence=2)
     pairs = {(p["a"], p["b"]): p["n_runs"] for p in m["pairs"]}
 
     assert pairs == {("arch/moe", "loss/contrastive/dcl"): 2}      # sorted, unordered pair
@@ -74,14 +74,14 @@ def test_cooccurrence_weights_distinct_runs_and_honors_the_floor():
     # …but the candidate is COUNTED, so a caller can say "nothing reached the floor" instead of
     # rendering silence that reads as "nothing co-occurs".
     assert m["pair_candidates"] == 2 and m["min_cooccurrence"] == 2
-    assert {(p["a"], p["b"]) for p in concept_map(runs, min_cooccurrence=1)["pairs"]} == {
+    assert {(p["a"], p["b"]) for p in project_concept_map(runs, min_cooccurrence=1)["pairs"]} == {
         ("arch/moe", "loss/contrastive/dcl"), ("data/aug", "loss/contrastive/dcl")}
 
 
 def test_a_pair_repeated_inside_one_run_is_still_one_run():
     # The weight is DISTINCT RUNS. A run listing a concept twice (two raw spellings that canonicalize
     # to one id is the real way this happens) must not be able to lift a pair over the floor by itself.
-    m = concept_map([["a/x", "b/y", "a/x", "b/y"]], min_cooccurrence=2)
+    m = project_concept_map([["a/x", "b/y", "a/x", "b/y"]], min_cooccurrence=2)
     assert m["pairs"] == []
     assert m["pair_candidates"] == 1
     assert {c["concept"]: c["n_runs"] for c in m["concepts"]}["a/x"] == 1
@@ -91,10 +91,10 @@ def test_a_contract_violating_floor_falls_back_instead_of_opening_the_map():
     # `min_cooccurrence` reaches this from a tool argument and an HTTP-shaped caller. A non-integer
     # must not evaluate as "no floor", which would publish every single-run coincidence as an edge.
     runs = [{"a/x", "b/y"}]
-    assert concept_map(runs, min_cooccurrence="two")["pairs"] == []
-    assert concept_map(runs, min_cooccurrence=None)["pairs"] == []
-    assert concept_map(runs, min_cooccurrence=0)["min_cooccurrence"] == 1     # <=0 means "keep all"
-    assert len(concept_map(runs, min_cooccurrence=0)["pairs"]) == 1
+    assert project_concept_map(runs, min_cooccurrence="two")["pairs"] == []
+    assert project_concept_map(runs, min_cooccurrence=None)["pairs"] == []
+    assert project_concept_map(runs, min_cooccurrence=0)["min_cooccurrence"] == 1     # <=0 means "keep all"
+    assert len(project_concept_map(runs, min_cooccurrence=0)["pairs"]) == 1
 
 
 def test_ids_cross_the_shared_identity_contract_so_both_halves_join():
@@ -102,21 +102,21 @@ def test_ids_cross_the_shared_identity_contract_so_both_halves_join():
     # canonicalized through the governance registry (`normalize_key`) can hand over a spelling that
     # differs only in spacing/case, and both must land on ONE node or the two halves of one map
     # disagree about how many concepts a lab studied.
-    m = concept_map([{"Loss/Contrastive"}, {"loss contrastive"}, {"loss/contrastive"}])
+    m = project_concept_map([{"Loss/Contrastive"}, {"loss contrastive"}, {"loss/contrastive"}])
     counts = {c["concept"]: c["n_runs"] for c in m["concepts"]}
     assert counts == {"loss": 0, "loss/contrastive": 2, "loss-contrastive": 1}
     # An id no contract can read is DROPPED, never rendered: `n_runs` counts runs that named a
     # readable id, and the empty run below is still a run.
-    empty = concept_map([{"!!!"}, set()])
+    empty = project_concept_map([{"!!!"}, set()])
     assert empty["n_runs"] == 2 and empty["concepts"] == [] and empty["n_explored_concepts"] == 0
 
 
 def test_the_fold_is_deterministic_across_orderings_of_one_corpus():
     runs = [{"loss/a", "loss/b"}, {"loss/b", "arch/c"}, {"loss/a", "loss/b", "arch/c"}]
-    assert concept_map(runs) == concept_map(runs)
+    assert project_concept_map(runs) == project_concept_map(runs)
     # Same runs, different order: the map is a fold over a SET-valued population, and a per-process
     # set iteration order must not reach the payload (the ordering bug `project_hierarchy` records).
-    assert concept_map(runs) == concept_map(list(reversed(runs)))
+    assert project_concept_map(runs) == project_concept_map(list(reversed(runs)))
 
 
 def test_pair_materialization_is_bounded_before_counting_and_says_what_it_lost():
@@ -124,7 +124,7 @@ def test_pair_materialization_is_bounded_before_counting_and_says_what_it_lost()
     # count of every pair in the corpus: pairs touching a pruned node were not materialized at all.
     runs = [[f"axis{run:02}/c{index:03}" for index in range(MAX_MAP_RUN_CONCEPTS)]
             for run in range(20)]
-    m = concept_map(runs, min_cooccurrence=1)
+    m = project_concept_map(runs, min_cooccurrence=1)
 
     assert len(m["concepts"]) == MAX_MAP_CONCEPTS
     assert m["pair_candidates"] <= MAX_MAP_CONCEPTS * (MAX_MAP_CONCEPTS - 1) // 2
@@ -145,7 +145,7 @@ def test_pair_materialization_is_bounded_before_counting_and_says_what_it_lost()
 
 
 def test_a_complete_population_declares_itself_complete():
-    m = concept_map([{"a/x", "b/y"}, {"a/x", "b/y"}])
+    m = project_concept_map([{"a/x", "b/y"}, {"a/x", "b/y"}])
     assert m["pair_source_scope"] == "scoped_population"
     assert m["pair_source_complete"] is True
     assert m["pair_source_nodes_pruned"] == m["pairs_outside_projection"] == 0
@@ -156,7 +156,7 @@ def test_one_runs_own_set_is_capped_lexically_not_by_hash_order():
     # The per-run cap is what keeps the pairing quadratic in a bound rather than in the corpus. It has
     # to take the SAME subset on every process, or two workers fold one capsule into two maps.
     wide = [f"axis/c{index:04}" for index in range(MAX_MAP_RUN_CONCEPTS + 40)]
-    kept = {c["concept"] for c in concept_map([wide], min_cooccurrence=1)["concepts"]
+    kept = {c["concept"] for c in project_concept_map([wide], min_cooccurrence=1)["concepts"]
             if c["n_runs"]}
     assert kept == set(sorted(wide)[:MAX_MAP_RUN_CONCEPTS])
-    assert concept_map([wide]) == concept_map([list(reversed(wide))])
+    assert project_concept_map([wide]) == project_concept_map([list(reversed(wide))])

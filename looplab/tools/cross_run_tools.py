@@ -749,20 +749,21 @@ class CrossRunTools:
         # bound; portfolio-wide for an unbound (assistant/CLI) caller — the same _scoped_capsules the
         # atlas uses. Aliases/splits honor the operator/steward taxonomy governance.
         #
-        # This is the SAME fold the run list's `Concepts` view draws (`search/concept_lens.py::concept_map`,
-        # mirrored in `ui/src/conceptForest.js`). What differs is the POPULATION, and that is the whole
+        # This is the SAME fold the run list's `Concepts` view draws
+        # (`search/concept_lens.py::project_concept_map`, mirrored in `ui/src/conceptForest.js`). What
+        # differs is the POPULATION, and that is the whole
         # reason the fold no longer chooses one: an agent must be told what the durable capsule ledger
         # holds, because that is what novelty checks and priors will actually reuse, while the operator's
         # map answers "what have the runs I am looking at studied". Feeding one fold from two scopes is
         # honest; two folds that each pick their own scope is how they silently disagree.
-        from looplab.search.concept_lens import concept_map
+        from looplab.search.concept_lens import project_concept_map
         scoped_capsules = self._scoped_capsules()
         scope_receipt = self._capsule_scope_receipt
         governance = _governance
         _caps, canonical_sets = self._capsule_snapshot(
             governance["aliases"], governance["splits"],
             governance["concept_governance_revision"])
-        graph = concept_map([canonical_sets[id(cap)] for cap in scoped_capsules])
+        graph = project_concept_map([canonical_sets[id(cap)] for cap in scoped_capsules])
         # The capsule SOURCE receipt is population-specific and therefore no longer inside the fold: a
         # projection over concept sets cannot know whether the rows behind them were a complete read.
         # It is merged here, where the population was chosen — the same place the scope receipt is.
@@ -1191,7 +1192,7 @@ class CrossRunTools:
         from looplab.engine.memory import (_capsule_source_summary,
                                            _portfolio_concept_overview_data,
                                            _filter_capsule_rows, concept_profit_tendencies)
-        from looplab.search.concept_lens import concept_map
+        from looplab.search.concept_lens import project_concept_map
 
         taxonomy = _governance
         aliases, splits = taxonomy["aliases"], taxonomy["splits"]
@@ -1343,8 +1344,8 @@ class CrossRunTools:
         # there the runs the operator has filtered to. The default floor of 2 distinct runs is kept
         # deliberately: "usually paired with" must not be printed for a pair one run happened to emit,
         # and this card's whole job is to stop an agent re-running a coincidence as if it were a pattern.
-        graph = concept_map(concepts for cap, concepts in canonical_caps
-                            if canon in concepts and id(cap) in scoped_ids)
+        graph = project_concept_map(concepts for cap, concepts in canonical_caps
+                                    if canon in concepts and id(cap) in scoped_ids)
         partners: list[tuple] = []
         for e in graph["pairs"]:
             if e["a"] == canon:
