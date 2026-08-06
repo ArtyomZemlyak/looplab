@@ -1134,6 +1134,86 @@ def test_the_other_two_per_node_budgets_are_the_log_s_too():
               data={"node_id": 0, "generation": 0, "attempt": 1})], 0, 0) == 0
 
 
+def test_the_three_durable_ledgers_key_a_row_exactly_as_the_fold_does():
+    """"Generation-keyed exactly as `replay._generation_matches` keys it" — DIFFERENTIALLY, because
+    all three ledgers said that in a comment while hand-spelling the rule as a raw `!=`, and the two
+    disagreed in both directions.
+
+    Why it is not a nit. These three counters are budgets — repair attempts, env-prep rounds, GPU
+    re-trains — and their whole premise (the 2026-08-06 durability fix) is that the LOG's rows are
+    the authority. A row the fold keeps but the ledger drops refunds a budget on every resume, which
+    is the defect the fix exists to remove; a row the fold drops but the ledger charges bills a node
+    for work replay says never happened. So the two readers have to agree ROW BY ROW, and the only
+    way to keep that true is for the ledger to CALL the fold's reader instead of re-deriving it.
+
+    Enumerated rather than exampled: the disagreements were at the edges (`bool` is a subclass of
+    `int`, so `True != 1` is False; a numeric string is coerced by the fold and not by `!=`), which
+    is exactly what a hand-picked example misses."""
+    from looplab.core.models import Idea, Node, coerce_node_id
+    from looplab.engine.evaluate import _durable_dep_rounds, _durable_full_retrains
+    from looplab.events.eventstore import Event
+    from looplab.events.replay import _generation_matches
+
+    node = Node(id=1, parent_ids=[], operator="draft", idea=Idea(operator="draft", params={}))
+    node.attempt = 1
+
+    def _fold_admits(data):
+        return coerce_node_id(data) == 1 and _generation_matches(node, data)
+
+    def _ledger_admits(data):
+        row = Event(v=1, seq=0, ts=0.0, type="node_repaired", data=dict(data, attempt=1))
+        return bool(_durable_repair_ledger([row], 1, 1)[1])
+
+    raw = [1, 0, 2, -1, None, True, False, "1", " 1 ", "1.0", 1.0, 1.5, float("nan"),
+           float("inf"), [1], {"a": 1}, "abc", 10 ** 30]
+    for value in raw:
+        for data in ({"node_id": 1, "generation": value}, {"node_id": value, "generation": 1}):
+            assert _fold_admits(data) == _ledger_admits(data), (
+                f"the ledger and the fold disagree about {data!r}: fold={_fold_admits(data)} "
+                f"ledger={_ledger_admits(data)}")
+    # The legacy unstamped row binds to whichever lifecycle is asking, in BOTH readers.
+    assert _fold_admits({"node_id": 1}) and _ledger_admits({"node_id": 1})
+
+    # …and the same rule reaches the other two ledgers, which is the point of it being one function.
+    def _dep(**data):
+        return Event(v=1, seq=0, ts=0.0, type="deps_installed", data=data)
+
+    def _rt(**data):
+        return Event(v=1, seq=0, ts=0.0, type="full_retrain_charged", data=data)
+
+    assert _durable_dep_rounds([_dep(node_id=True, generation=True, round=9)], 1, 1) == 0
+    assert _durable_dep_rounds([_dep(node_id="1", generation="1", round=9)], 1, 1) == 9
+    assert _durable_full_retrains([_rt(node_id=True, generation=True, spent=9)], 1, 1) == 0
+    assert _durable_full_retrains([_rt(node_id="1", generation="1", spent=9)], 1, 1) == 9
+
+
+def test_the_durable_ledgers_stay_total_over_a_corrupt_counter():
+    """A counter field nobody can parse must contribute its default, never a raise.
+
+    `_durable_repair_ledger` did `int(d.get("unparseable_repairs") or 0)` — `ValueError` on a
+    string, `TypeError` on a list — from inside `_evaluate`'s attempt loop, where nothing catches
+    it. The eval dies with NO terminal event, so the node is neither evaluated nor failed and every
+    resume re-reads the same row and dies again: the run cannot be finished or resumed past it. That
+    is the failure `runtime/command_eval.py::READER_PATH_KEYS` exists to prevent, one reader over,
+    and the `isinstance(n, int)` guards already sitting beside it on `attempt`/`round`/`spent` are
+    the shape the fix takes."""
+    from looplab.engine.evaluate import _durable_dep_rounds, _durable_full_retrains
+    from looplab.events.eventstore import Event
+
+    for bad in ("many", [1], {"a": 1}, 2.7, None, True, float("nan")):
+        row = Event(v=1, seq=0, ts=0.0, type="node_repaired",
+                    data={"node_id": 0, "generation": 0, "attempt": 1,
+                          "unparseable_repairs": bad})
+        attempts, rows, unparseable = _durable_repair_ledger([row], 0, 0)
+        assert (attempts, len(rows)) == (1, 1) and unparseable == 0, bad
+        assert _durable_dep_rounds(
+            [Event(v=1, seq=0, ts=0.0, type="deps_installed",
+                   data={"node_id": 0, "generation": 0, "round": bad})], 0, 0) == 1, bad
+        assert _durable_full_retrains(
+            [Event(v=1, seq=0, ts=0.0, type="full_retrain_charged",
+                   data={"node_id": 0, "generation": 0, "spent": bad})], 0, 0) == 1, bad
+
+
 def test_the_retrain_charge_cannot_ride_on_node_repaired():
     """Why `full_retrain_charged` is its own event, stated as a property rather than a comment.
 
