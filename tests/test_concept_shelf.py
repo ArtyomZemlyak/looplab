@@ -307,8 +307,11 @@ def test_memory_endpoint_survives_an_unreadable_run_list(tmp_path, monkeypatch):
     client = TestClient(make_app(tmp_path / "runs"))
     assert client.put("/api/settings", json={"settings": {"memory_dir": str(memory)}}).status_code == 200
     import looplab.serve.appstate as appstate
+    # `only=` is part of the signature now (the shelf bounds the fold to the runs its rows cite), so
+    # the stub has to accept it — a `lambda self:` would raise TypeError instead of the OSError this
+    # test is about, and `except Exception` would swallow the difference and still look green.
     monkeypatch.setattr(appstate.AppState, "run_summaries",
-                        lambda self: (_ for _ in ()).throw(OSError("run root exploded")))
+                        lambda self, only=None: (_ for _ in ()).throw(OSError("run root exploded")))
     body = client.get("/api/memory").json()
     assert body["lessons"][0]["concepts"] == ["a/b"]
     assert body["concept_index"]["runs_indexed"] == 0, "and it must SAY the index is empty"
@@ -356,3 +359,45 @@ def test_a_finished_run_writes_its_concepts_into_cross_run_memory(tmp_path, monk
     cases = [json.loads(line) for line in (memory / "cases.jsonl").read_text().splitlines() if line]
     assert cases and cases[0]["concepts"] == ["optimization/analytic"]
     assert cases[0]["run_id"], "a case must carry its run or it can never be joined at all"
+
+
+def test_the_shelf_folds_only_the_runs_its_rows_cite(tmp_path, monkeypatch):
+    """The join needs `{run_id: concepts}` for the rows in hand, not the whole portfolio.
+
+    Unbounded, opening the Memory panel folded every run in the workspace on the request thread —
+    all of them on a cold cache, and every LIVE run on each open, because the summary cache is keyed
+    on `file_identity` and a live log's identity changes with every append. Driven rather than
+    pinned: count the folds a real request performs against a workspace of three runs, one cited.
+    """
+    monkeypatch.setenv("LOOPLAB_MEMORY_DIR", "")
+    runs = tmp_path / "runs"
+    for name in ("cited", "other-a", "other-b"):
+        _write(runs / name / "events.jsonl", [
+            {"seq": 0, "ts": 1.0, "type": "run_started",
+             "data": {"task_id": "t", "goal": "g", "direction": "min", "run_id": name}},
+            {"seq": 1, "ts": 2.0, "type": "node_created",
+             "data": {"node_id": 0, "parent_ids": [], "operator": "draft",
+                      "idea": {"operator": "draft", "params": {}, "summary": "s"}}},
+            {"seq": 2, "ts": 3.0, "type": "node_concepts",
+             "data": {"node_id": 0, "concepts": ["retrieval/dense"], "mode": "llm", "generation": 0}},
+            {"seq": 3, "ts": 4.0, "type": "node_evaluated", "data": {"node_id": 0, "metric": 1.0}},
+        ])
+    memory = tmp_path / "mem"
+    _write(memory / "lessons.jsonl", [{"statement": "legacy lesson", "run_id": "cited"}])
+    client = TestClient(make_app(runs))
+    assert client.put("/api/settings", json={"settings": {"memory_dir": str(memory)}}).status_code == 200
+
+    import looplab.serve.run_projections as projections
+    folded: list = []
+    real_fold = projections.fold
+
+    def counting_fold(events):
+        folded.append(len(events))
+        return real_fold(events)
+
+    monkeypatch.setattr(projections, "fold", counting_fold)
+    body = client.get("/api/memory").json()
+
+    assert len(folded) == 1, f"only the cited run may be folded, folded {len(folded)}"
+    assert body["lessons"][0]["concepts"] == ["retrieval/dense"], "and the join still happens"
+    assert body["concept_index"]["runs_indexed"] == 1

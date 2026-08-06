@@ -14,7 +14,8 @@ import { nodeFeasibilityStatus } from './trustSemantics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import {
-  NODE_TRACE_SPAN_WINDOW, TRACE_PARTIAL_EMPTY_NOTICE, conversationWindow, conversationWindowNotice,
+  NODE_TRACE_SPAN_WINDOW, TRACE_PARTIAL_EMPTY_NOTICE, conversationPagerLabel, conversationWindow,
+  conversationWindowNotice,
   traceDetailState, traceUnavailable, traceWindow, traceWindowNotice, unavailableTraceDetail,
 } from './traceProjection.js'
 import { nodeTheme } from './conceptId.js'
@@ -1310,8 +1311,7 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
   const convWindow = conversationWindow(conv.projection, { canPage: !!onLoadMore })
   const loadMore = convWindow.kind === 'pageable'
     ? <button type="button" className="trace-loadmore disclosure-button" onClick={onLoadMore}>
-        ↧ load more of this conversation ({convWindow.omittedStages} earlier
-        {convWindow.omittedStages === 1 ? ' stage' : ' stages'} not shown)
+        ↧ load more of this conversation ({conversationPagerLabel(convWindow)})
       </button>
     : null
   const windowNotice = convWindow.kind === 'complete' ? null
@@ -1400,9 +1400,14 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   // must fill in live during a build off the detail poll that already runs, and the extra request is
   // paid only by the operator who asked for it. (node_detail takes no limit ON PURPOSE — see the
   // comment at its trace assembly; it folds the whole log and serves no trace at all in History.)
+  // `view` is part of the gate, not just the window: the conversation branch returns below without
+  // ever reading `paged`, and both views raise the SAME shared window BY DESIGN — so an operator who
+  // clicked "load more" in the conversation had a second 4 s poll running against this node for as
+  // long as it worked, fetching a span tree whose response was thrown away (up to ~1.6 MB per tick
+  // at the x8 ceiling).
   const paged = usePagedNodeTrace({
     runId, nodeId: n.id, attempt: nodeGeneration, limit: spanLimit, nonce, working,
-    enabled: spanLimit > NODE_TRACE_SPAN_WINDOW,
+    enabled: view !== 'conversation' && spanLimit > NODE_TRACE_SPAN_WINDOW,
   })
   const trace = paged || n.trace
   const spans = trace?.nodes || []

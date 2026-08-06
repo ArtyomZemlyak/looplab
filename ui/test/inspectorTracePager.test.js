@@ -48,9 +48,15 @@ const installDom = () => {
   for (const name of ['window', 'document', 'navigator', 'HTMLElement', 'Element', 'Node', 'Event',
     'MouseEvent', 'CustomEvent', 'getComputedStyle', 'requestAnimationFrame',
     'cancelAnimationFrame']) {
-    globalThis[name] = dom.window[name]
+    // `defineProperty`, not assignment — the house pattern (conceptLensServerRecovery.test.js:186).
+    // Node ships `globalThis.navigator` as an accessor with no setter, so `globalThis.navigator = …`
+    // throws `Cannot set property navigator of #<Object> which has only a getter` and takes down the
+    // whole file before a single assertion runs.
+    Object.defineProperty(globalThis, name,
+      { configurable: true, writable: true, value: dom.window[name] })
   }
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true
+  Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT',
+    { configurable: true, writable: true, value: true })
   return dom
 }
 
@@ -126,9 +132,12 @@ test('the Trace tab conversation pager fetches a bigger window and renders what 
       assert.equal(container.querySelectorAll('.stage-dynamic').length, 128,
         'the wider response must actually reach the screen')
 
-      // Keep paging: the window climbs to the ceiling, and once nothing is hidden the control goes
-      // away instead of lingering as a button that cannot change anything.
-      for (const expected of [2048, 4096]) {
+      // Keep paging until nothing is hidden, at which point the control goes away instead of
+      // lingering as a button that cannot change anything. ONE more click, not two: this fixture's
+      // conversation is 200 stages, so the 2048 window returns all of them and the pager is gone
+      // before the x8 ceiling (4096) is ever reachable — asking for a fourth request here asserts
+      // the opposite of the termination rule the last three lines of this test check.
+      for (const expected of [2048]) {
         await act(async () => {
           container.querySelector('button.trace-loadmore')
             .dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))

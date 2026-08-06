@@ -415,7 +415,7 @@ class EvaluateMixin:
         `Node.eval_started` is one of the durable facts
         `core/models.py::is_unevaluated_speculative_discard` proves the Layer-5 budget refund from —
         which `node_counts_toward_card_budget` reads, which BOTH the L3 budget and the fold's debug
-        anchor (`events/replay.py::_card_debug_leaf_children`) read. So splicing it before rather than
+        anchor (`events/card_ledger.py::_card_debug_leaf_children`) read. So splicing it before rather than
         after its own `node_created` measurably flips a DIFFERENT Card's `selection_ready`: measured
         `{budget 2, leafs [2,3], later Card ready}` vs `{budget 3, leafs [3], not ready}`. Not reachable
         today (both writes are main-task and node-created-first), which is exactly why this is written

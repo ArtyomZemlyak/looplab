@@ -92,8 +92,12 @@ export const conversationWindow = (projection, { canPage = false } = {}) => {
   const totalTurns = count(projection?.total_turns)
   const omittedSpans = spansOmitted(projection)
   const base = {
-    omittedStages: omittedStages || 0,
-    omittedTurns: omittedTurns || 0,
+    // Carried as STATED — `null` when the payload does not say, never `0`. `|| 0` here made a
+    // legacy/partial projection carrying `omitted_turns: 320` and no `omitted_stages` key report
+    // "0 earlier stages" as a measured fact, which is the same absent-is-not-zero defect the
+    // `stated()` helper exists to prevent one line above.
+    omittedStages,
+    omittedTurns,
     visibleTurns,
     totalTurns,
     totalsArePartial: omittedSpans == null || omittedSpans > 0,
@@ -102,9 +106,28 @@ export const conversationWindow = (projection, { canPage = false } = {}) => {
   // than reading two absent fields as proof that nothing is hidden.
   const hidden = (omittedStages == null && omittedTurns == null)
     ? omittedSpans !== 0
-    : base.omittedStages > 0 || base.omittedTurns > 0
+    : (omittedStages || 0) > 0 || (omittedTurns || 0) > 0
   if (!hidden) return { kind: 'complete', ...base }
   return { kind: canPage ? 'pageable' : 'capped', ...base }
+}
+
+// What the PAGER names. The two counters move independently — `events/traceview.py::build_conversation`
+// derives `omitted_stages` from the stage cap and `omitted_turns` from the turn cap — so a heavily
+// repaired node whose whole thread lives in a handful of stages yields `{omittedStages: 0,
+// omittedTurns: 144}`: correctly pageable, and the old label interpolated the stage counter anyway
+// and rendered "(0 earlier stages not shown)". Name whichever counter is actually STATED and
+// non-zero, stages first (they are what the collapsed bands show); name nothing when neither is,
+// rather than inventing a count for a control the span receipt alone justified.
+export const conversationPagerLabel = view => {
+  const stages = view?.omittedStages
+  const turns = view?.omittedTurns
+  if (Number.isSafeInteger(stages) && stages > 0) {
+    return `${stages} earlier ${stages === 1 ? 'stage' : 'stages'} not shown`
+  }
+  if (Number.isSafeInteger(turns) && turns > 0) {
+    return `${turns} earlier ${turns === 1 ? 'step' : 'steps'} not shown`
+  }
+  return 'more of this conversation is not shown'
 }
 
 // Steps, because "steps" is what the collapsed bands already count for the operator. Never spans:

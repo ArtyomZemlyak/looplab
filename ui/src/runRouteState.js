@@ -133,7 +133,12 @@ export function sanitizeRunRouteState(input = {}, { reviewMode = false } = {}) {
   // `route.update({ panel: 'hypotheses' })` left in older code reach the same successor instead of
   // one of them silently landing on the graph. Applied before the view is read so an explicit
   // `?view=…` alongside the legacy panel still wins — the panel is the weaker, deprecated signal.
-  const migratedView = !reviewMode ? LEGACY_PANEL_VIEWS[input.panel] : undefined
+  // `Object.hasOwn`, never a bare index: `input.panel` is untrusted route text, and `constructor`
+  // /`toString`/`__proto__` all resolve to a truthy inherited member that would pass the
+  // `if (requestedView …)` test below and be assigned as `state.view` — the same guard the parse
+  // path already applies to this exact table.
+  const migratedView = !reviewMode && Object.hasOwn(LEGACY_PANEL_VIEWS, String(input.panel))
+    ? LEGACY_PANEL_VIEWS[String(input.panel)] : undefined
   const requestedView = VIEW_SET.has(input.view) && input.view !== 'dag' ? input.view : migratedView
   if (requestedView && (!reviewMode || REVIEW_VIEW_SET.has(requestedView))) state.view = requestedView
   if (state.view === 'cards' && canonicalCardId(input.cardId)) state.cardId = input.cardId
@@ -197,13 +202,19 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
     else issues.push('Invalid run generation was ignored.')
   }
   const view = single(params, 'view', issues)
+  // Whether the URL actually STATED a view, which `sanitizeRunRouteState` cannot recover: its input
+  // is `{...emptyRunRouteState(), ...raw}` on the in-memory path, so a defaulted `view: 'dag'` and an
+  // explicit `?view=dag` reach it identically. That is why the legacy-panel migration below is
+  // resolved HERE — the alternative (`input.view !== 'dag'` standing in for "a view was requested")
+  // silently turns `?view=dag&panel=hypotheses` into the Card board.
+  let explicitView = false
   if (view != null && view !== '') {
     if (!VIEW_SET.has(view)) issues.push('Unknown workspace view was ignored.')
     else if (reviewMode && !REVIEW_VIEW_SET.has(view)) {
       // Name the refused view rather than a generic message: a reviewer handed a `#…?view=cards`
       // link needs to know the board is owner-only, not that their link was malformed.
       issues.push(`The ${view === 'cards' ? 'Card board' : 'Concept'} view is unavailable in review links.`)
-    } else state.view = view
+    } else { state.view = view; explicitView = true }
   }
   const card = single(params, 'card', issues)
   if (card != null && card !== '') {
@@ -257,7 +268,10 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
     // became a view). It is carried through as the panel value so `sanitizeRunRouteState` — the ONE
     // owner of the translation — turns it into `view=cards`, and it must NOT report "Unknown panel"
     // on the way: a migrated link is honoured, not diagnosed. An explicit `?view=` still wins there.
-    else if (Object.hasOwn(LEGACY_PANEL_VIEWS, panel)) state.panel = panel
+    // Carried only when no explicit `?view=` was stated: the panel is the weaker, deprecated signal,
+    // and `?view=dag&panel=hypotheses` must land on the graph the link asked for. Dropping it here
+    // is not a diagnostic — the link is honoured, its migration is simply superseded.
+    else if (Object.hasOwn(LEGACY_PANEL_VIEWS, panel)) { if (!explicitView) state.panel = panel }
     else issues.push('Unknown panel was ignored.')
   }
   const legacyFocus = boundedText(single(params, 'focus', issues), 'legacy Direction focus', MAX_FOCUS_CHARS, issues)

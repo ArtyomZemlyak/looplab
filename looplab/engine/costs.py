@@ -37,8 +37,12 @@ _COUNTER_KEYS = ("calls", "priced_calls", "prompt_tokens", "completion_tokens", 
 # the counter — rejecting it would fail finalization closed on exactly the deltas whose whole
 # purpose is to survive a crash. Missing means "we do not know whether that call was priced", which
 # the reader-side default of 0 states correctly: it can only make a total look LESS complete.
-_LEGACY_DELTA_KEYS = frozenset(
-    {"cost", "calls", "prompt_tokens", "completion_tokens", "total_tokens"})
+# DERIVED from the live table, not re-spelled: the legacy shape is exactly today's minus the one
+# counter that was added. Hand-written, the two drift the moment a sixth counter joins
+# `_COUNTER_KEYS` — and `_decode_outbox` would then reject every NEW-shape record as an invalid
+# delta, i.e. crash-recovery of pending PAID usage failing closed on the very deltas that exist to
+# survive a crash.
+_LEGACY_DELTA_KEYS = frozenset({"cost", *_COUNTER_KEYS}) - {"priced_calls"}
 _OUTBOX_DIRNAME = ".llm-usage-outbox"
 _OUTBOX_VERSION = 1
 _ROOT_ATTRS = ("researcher", "developer", "strategist", "deep_researcher",
@@ -232,7 +236,7 @@ def _decode_outbox(path: Path) -> tuple[str, dict[str, int | float]]:
         raise ValueError("usage outbox filename does not match its identity")
     delta = raw.get("delta")
     if not isinstance(delta, dict) or set(delta) not in (
-            {"cost", *_COUNTER_KEYS}, set(_LEGACY_DELTA_KEYS)):
+            {"cost", *_COUNTER_KEYS}, _LEGACY_DELTA_KEYS):
         raise ValueError("invalid usage outbox delta")
     # Only the keys this record actually carries are held to the exact-value rule; the legacy shape
     # is short exactly `priced_calls`, which then takes `sanitize_usage_delta`'s reader-side 0.

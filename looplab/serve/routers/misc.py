@@ -1756,8 +1756,15 @@ def build_router(srv) -> APIRouter:
         # as untagged, which is the fact the UI has to show rather than an empty filter result.
         # Run-level inheritance needs the run list; when it is unavailable the shelf still ships with
         # whatever DURABLE tags the rows carry, and `runs_indexed: 0` says why the rest went untagged.
+        # Bounded to the runs the rows THEMSELVES cite. Unbounded, this folded every run in the
+        # workspace on the request thread — the whole portfolio on a cold cache, and every live run
+        # on every open of the panel (the summary cache is keyed on `file_identity`, which changes
+        # on each append). The shelf only ever looks a row's own `run_id` up, so a run no row
+        # mentions contributes nothing to `concept_index` whether it was folded or not.
+        cited = {row.get("run_id") for tier in ("cases", "lessons", "notes") for row in out[tier]
+                 if isinstance(row, dict) and isinstance(row.get("run_id"), str) and row.get("run_id")}
         try:
-            index = run_concept_index(srv.run_summaries())
+            index = run_concept_index(srv.run_summaries(only=cited))
         except Exception:  # noqa: BLE001 — a half-written run must not empty the Memory panel
             index = {}
         out["concept_index"] = build_shelf(

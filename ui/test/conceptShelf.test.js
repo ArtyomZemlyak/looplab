@@ -113,3 +113,15 @@ test('the Untagged sentinel can never collide with a real concept id', () => {
   // It is a selection value like any other, so it has to be outside the id grammar entirely.
   assert.deepEqual(rowConcepts({ concepts: [UNTAGGED] }), [])
 })
+
+test('an unstated coverage receipt is not a coverage of zero', () => {
+  // A tier read that partly failed (or an older server) ships a total with no `tagged`. The bar's
+  // stated purpose is that silence must never read as "this lab learned nothing", so the count is
+  // absent all the way to the reader rather than defaulting to 0 and asserting "0 of 214".
+  const partial = coverageSummary({ total: 214 })
+  assert.equal(partial.total, 214)
+  assert.equal(partial.tagged, null)
+  assert.equal(partial.untagged, null)
+  assert.equal(partial.coarse, false)
+  assert.equal(partial.complete, false)
+})

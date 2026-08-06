@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
+import { RUN_ROUTE_VIEWS } from '../src/runRouteState.js'
+
 const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
 
 test('Concept bulk actions retain scannable desktop labels', async () => {
@@ -33,7 +35,15 @@ test('trace loading, partial, and unavailable states expose recovery semantics',
   assert.match(inspector, /onClick=\{onRetry\} disabled=\{pending\}/,
     'a retry already in flight must not be re-clickable into a second read')
   assert.match(inspector, /className="muted trace-small" role="status">loading…<\/div>/)
-  assert.match(inspector, /className="notice compact" role="status">Trace projection is partial/)
+  // The partial-projection copy moved into `traceProjection.js` when the pager landed, so the
+  // Inspector renders the shared vocabulary instead of the literal. What this file owns is the LIVE
+  // REGION, so pin that at both sites plus the module that now owns the words. The words themselves
+  // are driven end to end by `inspectorTracePager.test.js`, which mounts Trace and reads the notice
+  // it actually renders.
+  assert.match(inspector, /className="notice compact" role="status">\{traceWindowNotice\(spanWindow\)\}/)
+  assert.match(inspector, /className="notice compact" role="status">\{TRACE_PARTIAL_EMPTY_NOTICE\}/)
+  assert.match(await source('traceProjection.js'),
+    /export const TRACE_PARTIAL_NOTICE = 'Trace projection is partial\.'/)
   assert.match(inspector, /className="trace-live-status" role="status"/)
   assert.match(dock, /!current\.loaded[\s\S]*?role="status">loading trace…/)
   assert.match(dock, /function OpTrace[\s\S]*?className="muted trace-loading" role="status"[\s\S]*?loading trace…/)
@@ -104,7 +114,16 @@ test('run view modes are truthful toggles and merge has one explicit confirmatio
   assert.match(runView, /onKeyDown=\{onWorkspaceToolbarKeyDown\} onFocus=\{onWorkspaceToolbarFocus\}/)
   assert.match(runView, /setWorkspaceTabStop\(view\)[\s\S]*?\}, \[view, historyActive, reviewMode\]\)/,
     'history/review transitions must move the sole tab stop off a newly disabled control')
-  assert.equal((runView.match(/data-workspace-control=/g) || []).length, 4)
+  // DERIVED, not the literal 4 it used to be: the toolbar carries one control per workspace view
+  // plus the `overview` panel toggle, and the roving tab stop is sized from `controls.length`. A
+  // hand-written count silently went stale the moment `cards` became the fourth view — and a view
+  // with no control (or a control with no view) is exactly the mismatch that leaves one member of
+  // the toolbar unreachable by keyboard.
+  assert.equal((runView.match(/data-workspace-control=/g) || []).length, RUN_ROUTE_VIEWS.length + 1)
+  for (const view of RUN_ROUTE_VIEWS) {
+    assert.match(runView, new RegExp(`data-workspace-control="${view}"`),
+      `the ${view} view has no toolbar control`)
+  }
   assert.match(runView, /nextRovingIndex\(event\.key, controls\.indexOf\(current\), controls\.length\)/)
   assert.match(runView, /aria-pressed=\{view === 'dag'\}/)
   assert.match(runView, /aria-pressed=\{view === 'report'\}/)

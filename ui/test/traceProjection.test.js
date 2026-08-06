@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import {
   NODE_TRACE_SPAN_WINDOW, NODE_TRACE_SPAN_WINDOW_MAX, TRACE_PARTIAL_NOTICE,
-  conversationWindow, conversationWindowNotice, nextNodeSpanWindow, spansOmitted,
+  conversationPagerLabel, conversationWindow, conversationWindowNotice, nextNodeSpanWindow,
+  spansOmitted,
   traceDetailState, tracePartial, traceUnavailable, traceWindow, traceWindowNotice,
   unavailableTraceDetail,
 } from '../src/traceProjection.js'
@@ -210,4 +211,36 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   assert.match(dock, /projection=\{nodeTrace\.projection\} runId=\{runId\} onRetry=\{retryNodeTrace\}/,
     'HTTP-200 unavailable node traces must share the same retry path as transport failures')
   assert.doesNotMatch(dock, /raw <think>|full I\/O of any observation|full, UNtruncated text|FULL content/)
+})
+
+test('the conversation pager names a counter that was actually stated', () => {
+  // The two omissions are computed independently by the server, so "pageable" does not imply the
+  // STAGE counter is the non-zero one. A heavily repaired node keeps its whole thread in a handful
+  // of stages: nothing is hidden by the stage cap, 144 turns are hidden by the turn cap, and the
+  // control is correctly offered — while the label used to interpolate the stage counter and print
+  // a bare "(0 earlier stages not shown)" on screen.
+  const turnsOnly = conversationWindow({
+    truncated: true, total_spans: 400, visible_spans: 400, omitted_spans: 0,
+    total_stages: 12, visible_stages: 12, omitted_stages: 0,
+    total_turns: 400, visible_turns: 256, omitted_turns: 144,
+  }, { canPage: true })
+  assert.equal(turnsOnly.kind, 'pageable')
+  assert.equal(conversationPagerLabel(turnsOnly), '144 earlier steps not shown')
+
+  // Stages first when both are stated, and the singular is a singular.
+  assert.equal(conversationPagerLabel(conversationWindow({
+    omitted_stages: 1, omitted_turns: 9, total_turns: 10, visible_turns: 1,
+  }, { canPage: true })), '1 earlier stage not shown')
+
+  // A counter the payload does not state stays absent all the way to the label: a legacy projection
+  // carrying only the turn count must not have a stage count invented for it, and a window the SPAN
+  // receipt alone justified names no conversation count at all.
+  const legacy = conversationWindow({ omitted_turns: 320, total_turns: 425, visible_turns: 105 },
+    { canPage: true })
+  assert.equal(legacy.omittedStages, null)
+  assert.equal(conversationPagerLabel(legacy), '320 earlier steps not shown')
+  const deferred = conversationWindow({ truncated: true, total_spans: 900, visible_spans: 512,
+    omitted_spans: 388 }, { canPage: true })
+  assert.equal(deferred.kind, 'pageable')
+  assert.equal(conversationPagerLabel(deferred), 'more of this conversation is not shown')
 })

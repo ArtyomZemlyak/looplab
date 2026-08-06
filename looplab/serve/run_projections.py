@@ -25,14 +25,25 @@ from looplab.events.replay import fold
 from looplab.serve.run_commands import run_generation_token
 
 
-def run_summaries(srv) -> list:
+def run_summaries(srv, only=None) -> list:
     """The mtime-cached per-run fold summaries, WITHOUT the live-fact overlay.
 
     Split out so scope reports can read run membership without the `_alive` lock probe and its
-    best-effort resume re-spawn — a report GET must not mutate the workspace."""
+    best-effort resume re-spawn — a report GET must not mutate the workspace.
+
+    `only` bounds the work to a set of run ids, skipping every other run BEFORE its fold. The cost
+    this exists for is real: a caller that needs a handful of runs' rollups (the Memory panel's
+    concept shelf joins on the `run_id` its rows cite) otherwise folds the WHOLE workspace on the
+    request thread — every run on a cold cache, and every LIVE run on each open, since the cache is
+    keyed on `file_identity` and a live log's identity changes on every append. `None` means every
+    run, which is what the run list and the report scope want; an EMPTY set means none, and is a
+    real answer rather than "unfiltered" — a caller whose rows cite no run wants no fold at all.
+    """
     out = []
     root = srv.root
     for rd in sorted(root.iterdir()) if root.exists() else []:
+        if only is not None and rd.name not in only:
+            continue
         if rd.name.lower().startswith((
                 ".looplab-delete-fence-", ".looplab-delete-receipt-",
                 ".looplab-delete-quarantine-")):

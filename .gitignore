@@ -17,6 +17,11 @@ env/
 
 # Node / frontend (ui/ source is committed; deps + build output are not — `dist/` above covers ui/dist)
 node_modules/
+# Throwaway SSR transpile/verification harnesses. An agent generates these from ui/src to render a
+# component outside the browser, then leaves them behind: 453 files / ~11 MB of machine-written .mjs
+# were once committed this way, burying a 1,599-line source change under 239k lines of noise and
+# leaving a plausible-looking second copy of the UI for the next agent to grep and edit by mistake.
+ui/.ssr-*
 
 # Testing
 .pytest_cache/

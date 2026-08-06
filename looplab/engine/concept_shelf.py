@@ -27,7 +27,7 @@ Two things it fixes, and one it refuses to paper over:
 
 3. **It does not invent concepts.** No keyword matching, no embedding nearest-neighbour, no
    task_id->concept guess. An untagged row stays untagged and is counted as such. Deriving a concept
-   from a lesson's TEXT is a tagger's job (`search/concept_graph.py::tag_text_llm`), it costs a provider
+   from a lesson's TEXT is a tagger's job (`search/concept_tagging.py::tag_text_llm`), it costs a provider
    call, and its output belongs in the durable field via the write path — not in a read projection that
    would silently re-derive a different answer on every request.
 
