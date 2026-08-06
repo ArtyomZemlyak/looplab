@@ -20,7 +20,9 @@ terminal shows, which only an end-to-end invocation can demonstrate.
 """
 from __future__ import annotations
 
+import errno
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -120,6 +122,60 @@ def test_a_refused_width_re_entry_reads_as_a_refusal_and_stays_byte_clean(tmp_pa
     _assert_reads_as_a_refusal(result, expected="run_started pinned 2")
     assert ((out / "events.jsonl").read_bytes(),
             (out / "config.snapshot.json").read_bytes()) == before
+
+
+# --- the run dir the operator named, not the flags they typed -----------------------------------
+#
+# `_engine_singleton` and its helpers raise EIGHT refusals about the storage under the run dir: the
+# lock cannot be taken, or a deletion/Replay fence over that dir is unresolved. Every one of them
+# already named the fact AND the remedy, and every one was a bare `RuntimeError` — so the boundary
+# above classified them as bugs and printed exactly none of that. The two tests below drive the two
+# families end to end.
+
+@pytest.mark.skipif(os.name == "nt", reason="the flock branch is the POSIX one")
+def test_an_unlockable_filesystem_refuses_with_its_remedy_instead_of_a_traceback(tmp_path,
+                                                                                 monkeypatch):
+    """A FUSE/S3-backed run dir (geesefs and friends): `flock` answers ENOTSUP, which is NOT a held
+    lock, so single-writer cannot be enforced and the run fails CLOSED. Measured before this was
+    typed: exit 1, a Rich traceback, and EMPTY stdout — the one sentence naming both ways forward
+    (move the dir, or opt into the risk) never reached the operator at all, on the one code path
+    whose whole purpose is to be actionable."""
+    import fcntl
+
+    def _unsupported(fd, operation):
+        raise OSError(errno.ENOTSUP, "operation not supported")
+
+    monkeypatch.setattr(fcntl, "flock", _unsupported)
+    result = runner.invoke(app, [
+        "run", _toy_task(tmp_path), "--backend", "toy", "--out", str(tmp_path / "run"),
+        "-s", "max_nodes=1"])
+
+    _assert_reads_as_a_refusal(
+        result, expected="Cannot enforce a single writer of the append-only event log")
+    assert "LOOPLAB_RUN_ROOT" in result.output                    # the remedy…
+    assert "LOOPLAB_ALLOW_UNLOCKED_WRITER=1" in result.output     # …and the knowing override
+    # It must still have refused to write: no engine ran, so the log was never created.
+    assert not (tmp_path / "run" / "events.jsonl").exists()
+
+
+def test_an_unresolved_deletion_over_the_run_dir_refuses_by_name(tmp_path, monkeypatch):
+    """The fence family — the other six sites, and the one that fires BEFORE `mkdir` so a quarantined
+    run name is never recreated as an empty shell. The refusal carries the operation id the operator
+    has to observe or retry, which is the entire point of showing it to them."""
+    import looplab.cli as cli
+    from looplab.core.run_deletion import RunDeletionFenceError
+
+    def _fenced(_run_dir):
+        raise RunDeletionFenceError("del-7f3c")
+
+    monkeypatch.setattr(cli, "assert_run_deletion_write_allowed", _fenced)
+    result = runner.invoke(app, [
+        "run", _toy_task(tmp_path), "--backend", "toy", "--out", str(tmp_path / "run"),
+        "-s", "max_nodes=1"])
+
+    _assert_reads_as_a_refusal(result, expected="deletion del-7f3c is unresolved")
+    assert "Retry or observe that exact deletion first" in result.output
+    assert not (tmp_path / "run").exists(), "the fenced name must not be recreated as an empty shell"
 
 
 # --- the control: an unexpected exception is NOT a refusal --------------------------------------
