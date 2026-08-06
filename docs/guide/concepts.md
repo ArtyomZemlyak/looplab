@@ -412,8 +412,11 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   per attempt (the call the loop already made) and is shown this node's whole repair history — what
   failed, what each fix claimed, which files it actually changed, how far the pipeline got — so it
   can answer "I no longer know how to fix this". `inline_repair_attempts` is a hard backstop behind
-  it, and anything meaning the judge *could not answer* (a dead endpoint, an unparseable verdict)
-  stops the node and pauses the run naming the provider rather than repairing blind. The budget has
+  it, and both the budget and that history are read back off the **event log**, so `looplab resume`
+  continues a node's repair chain instead of starting a fresh one on top of it. A judge that
+  *could not answer* never means "keep going": a dead endpoint stops the node **and** pauses the run
+  naming the provider, while a live model answering something unreadable stops only that node (see
+  [LLM & agents](llm-and-agents.md#llm-outage-resilience)). The budget has
   to be generous enough for the real case it protects: a repo with a year-stale `requirements.txt`
   legitimately spends several repairs re-paying migrations before it can reach its own research
   question.

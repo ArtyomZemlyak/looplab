@@ -325,16 +325,24 @@ class UnifiedAgent(WrapsDeveloper):
                      brief: str = "", history: str = "", stages_passed: Optional[int] = None,
                      attempts_left: Optional[int] = None) -> Optional[dict]:
         """Decide what to do with a just-crashed node: returns ``{"action", "rationale"}`` where
-        action ∈ {repair, abandon, reject_idea}, or ``None`` when no pilot model is wired (the engine
+        action ∈ {repair, abandon, reject_idea} — or one of the engine's two fail-closed verdicts
+        when this call could not produce one of those (see the bottom of this docstring) — or
+        ``None`` when no pilot model is wired (the engine
         then falls back to its deterministic rule). The agent may use its run-introspection tools
         (read_code / find_analogous) to judge whether the IDEA is wrong vs just the code. No side
         effects: the CALLER performs the repair and records the events.
 
         `history` is this node's in-node repair trajectory, already rendered by the engine
-        (`engine/crash_repair.py::_format_repair_log`); `attempts_left` is the operator's remaining
-        hard cap (None = unlimited). Both exist because this call IS the loop's stopping rule — see
-        `_TRIAGE_SYSTEM`. All three are keyword-only with empty/None defaults, so an older caller
-        (and every test double) still gets the historical single-traceback prompt."""
+        (`engine/crash_repair.py::_format_repair_log`) and, since the ledger became durable, it spans
+        RESUMES — a node with eight repairs behind it shows eight rows in a freshly started process.
+        `attempts_left` is the remaining hard cap. Both exist because this call IS the loop's
+        stopping rule — see `_TRIAGE_SYSTEM`. All three are keyword-only with empty/None defaults, so
+        an older caller (and every test double) still gets the historical single-traceback prompt.
+
+        NEITHER degradation path answers "repair", and they answer DIFFERENT things: `_finalize`'s
+        out-of-enum branch says `unreadable` (the model is alive, this node stops) and `_fallback`
+        says `unanswerable` with the engine-side transport marker (the endpoint is gone, the run
+        pauses). See `engine/triage.py`'s verdict contract for why collapsing them was a defect."""
         if self._pilot_client is None:
             return None                       # no triage model -> engine uses the rule-based fallback
         # DEFERRED (function-local) import of the verdict registry: `agents` sits BELOW the engine,
@@ -342,7 +350,9 @@ class UnifiedAgent(WrapsDeveloper):
         # to prevent — the engine's stop decision keys on these strings. `engine/triage.py` is pure
         # (stdlib-only at module scope), so this cannot cycle; keeping it call-local mirrors the
         # `agents` -> `search` rule and adds no import-time edge upward.
-        from looplab.engine.triage import AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION
+        from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
+                                           TRIAGE_TRANSPORT_FAILURE_KEY,
+                                           UNANSWERABLE_TRIAGE_ACTION)
         code_tail = (getattr(node, "code", "") or "")[-1500:]
         budget = ("" if attempts_left is None else
                   f"Attempts left before the hard cap stops this node anyway: {attempts_left}.\n")
@@ -365,9 +375,13 @@ class UnifiedAgent(WrapsDeveloper):
             "parameters": {"type": "object", "properties": {
                 # The verdict contract (engine/triage.py::AGENT_TRIAGE_ACTIONS) — the enum is
                 # read from the registry, never re-spelled here, because the engine's STOP decision
-                # keys on these exact strings. `unanswerable` is deliberately absent: it is minted
-                # by the engine for a judge that could not answer, and a live model must not be able
-                # to claim its own unreachability and trip the provider circuit breaker.
+                # keys on these exact strings. Both engine verdicts are deliberately absent:
+                # `unanswerable` says the transport failed and a live model must not be able to claim
+                # its own unreachability and trip the RUN-level circuit breaker; `unreadable` says
+                # the engine could not read the answer, which is not the answerer's to assert. The
+                # absence is documentation, not enforcement — `_finalize` below and
+                # `engine/triage.py::coerce_triage_action` are what actually refuse them, because a
+                # schema enum only constrains a well-behaved emit.
                 "action": {"type": "string", "enum": list(AGENT_TRIAGE_ACTIONS),
                            "description": "repair in place | abandon this node (you no longer know "
                                           "what to change) | reject the whole idea."},
@@ -384,8 +398,15 @@ class UnifiedAgent(WrapsDeveloper):
                 # FAIL CLOSED. This used to default to "repair" — "the cheap, safe action" — which is
                 # only cheap if a repair is cheap: each one is a full re-eval plus two LLM calls, and
                 # a provider stuck emitting garbage would drive them forever. An emit nobody can read
-                # is not a verdict, so it becomes the engine's `unanswerable` and the caller treats
-                # it as the provider outage it almost always is.
+                # is not a verdict, so it becomes `DEFAULT_TRIAGE_ACTION`.
+                #
+                # That default is `unreadable`, and it must not be `unanswerable`: THIS branch is the
+                # one place we KNOW the provider is alive — the request completed and the model
+                # emitted something, it just was not one of the three words. Answering the engine's
+                # provider-outage verdict here made one out-of-enum emit stop the node with
+                # `developer_crash` AND pause the whole run with a "check your credits" reason
+                # derived from the model's own rationale. The caller stops this node and lets the run
+                # continue; the literal string "unanswerable" arriving from the wire lands here too.
                 action = DEFAULT_TRIAGE_ACTION
             # `missing_dependency` is a NAME, not a command — the engine still requires its own
             # allowlist + traceback corroboration + an absence check before any install
@@ -398,10 +419,19 @@ class UnifiedAgent(WrapsDeveloper):
             # A TRANSPORT FAILURE IS NOT A VERDICT. `resilient` calls this when the pilot loop could
             # not complete — an unreachable endpoint, a 401/402, a model that never emitted. It
             # answered "attempt repair", which is precisely the reading that let a dead provider keep
-            # a repair loop at full speed with no model in it. The engine's own fail-closed action
-            # says "nobody answered" instead, and its caller stops the node and pauses the RUN naming
-            # the provider — recoverable with `resume` once the endpoint is back.
-            return {"action": DEFAULT_TRIAGE_ACTION,
+            # a repair loop at full speed with no model in it. It says `unanswerable` instead, and
+            # its caller stops the node and pauses the RUN naming the provider — recoverable with
+            # `resume` once the endpoint is back.
+            #
+            # THIS is the only path in the package that may say that word, and the ONLY reason the
+            # engine believes it is `TRIAGE_TRANSPORT_FAILURE_KEY` below: the marker is what
+            # `engine/triage.py::is_transport_failure_verdict` requires, and it is unforgeable from
+            # the wire because `_finalize` above rebuilds its dict from the three schema properties
+            # alone. Without the marker this dict would be read as an ordinary unreadable answer —
+            # which is the correct fail-closed direction, since the wrong reading of THIS branch only
+            # costs a node while the wrong reading of the other one costs the run.
+            return {"action": UNANSWERABLE_TRIAGE_ACTION,
+                    TRIAGE_TRANSPORT_FAILURE_KEY: True,
                     "rationale": "the crash-triage model did not return a verdict "
                                  "(transport failure or no emit)",
                     "missing_dependency": ""}

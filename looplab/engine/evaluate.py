@@ -12,7 +12,11 @@ decisions its attempt loop was making inline — the intervention watcher (`_eva
 /`_watch_for_intervention`), the trust surface and its findings (`_trust_scan_surface`
 /`_trust_scan_signals`), and the inline-repair pipeline's five verdicts (`_eval_failure_text`,
 `_repaired_footprint`, and the module-level `_repair_provider_failure`/`_repair_change_set`
-/`_repair_forces_full_retrain`). 946 -> 727 lines, the attempt loop 602 -> 420, with every append,
+/`_repair_forces_full_retrain`). The 2026-08-06 durability fix added two more of the same kind:
+`_durable_repair_ledger` (the repair budget + judge history read back off the EVENT LOG, so a resume
+continues a node's repair chain instead of restarting it) and `_effective_repair_cap` (what
+`inline_repair_attempts = 0` actually gets).
+946 -> 727 lines, the attempt loop 602 -> 420, with every append,
 fold, write-lock point and branch order left exactly where it was. What made those blocks worth
 naming is not their size: each was reachable ONLY by driving a real sandboxed evaluation that failed
 in exactly the right way, so `tests/test_evaluate_named_rules.py` is the first coverage several of
@@ -57,8 +61,9 @@ def _watch_limiter() -> "anyio.CapacityLimiter":
     if _WATCH_LIMITER is None:
         _WATCH_LIMITER = anyio.CapacityLimiter(_WATCH_THREADS)
     return _WATCH_LIMITER
-from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION, _failure_reason,
-                                   repair_artifact_defect)
+from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION,
+                                   UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION,
+                                   _failure_reason, repair_artifact_defect)
 
 # How many repair calls may answer with something that is not Python before the loop calls it a
 # provider failure rather than a truncation. NOT operator-settable and deliberately small: this is
@@ -71,12 +76,100 @@ _UNPARSEABLE_REPAIR_LIMIT = 3
 # Bounds on the repair history handed to the stop judge. Measured live (deepseek-v4-flash, the
 # recorded six-migration chain): the history costs ~66 extra prompt tokens per row and ZERO extra
 # calls, so a full chain under the default cap is ~800 tokens — cheap enough that the row cap is
-# NOT a cost lever. It exists for `inline_repair_attempts = 0` (UNLIMITED, what a pre-existing run
-# resumes with), where nothing else bounds the prompt at all. It keeps the NEWEST rows, which is the
-# lossy direction for "we already tried this" — acceptable only because it binds solely on chains
-# longer than any cap an operator would set.
+# NOT a cost lever. It exists for `inline_repair_attempts = 0` (no OPERATOR cap, what a pre-existing
+# run resumes with), whose only other bound is the far looser `_UNLIMITED_REPAIR_CEILING`. It keeps
+# the NEWEST rows, which is the lossy direction for "we already tried this" — acceptable only
+# because it binds solely on chains longer than any cap an operator would set.
 _JUDGE_HISTORY_ROWS = 12
 _JUDGE_ERROR_CHARS = 300
+
+# WHAT AN OPERATOR WITH `inline_repair_attempts: 0` GETS, stated plainly because it is the setting
+# most preserved runs actually carry (38 of 46 snapshots under `runs/`, INCLUDING `rubert-dr-0804` —
+# the 2345-repair incident this whole redesign was built for).
+#
+# `0` still means "no OPERATOR cap": the grandfathering decision in
+# `core/config.py::LEGACY_CONFIG_SNAPSHOT_DEFAULTS` stands, an operator who chose unlimited in-node
+# repair does not silently acquire a 12 mid-run, and the judge remains the primary stop. What it no
+# longer means is "unbounded", because that was measured to be exactly nothing: with an always-
+# `repair` judge and 0, the loop ran 795 repairs / 796 full evals in 45 seconds and emitted no
+# terminal — i.e. on its OWN snapshot, the incident this design exists to prevent was still not
+# prevented. So a run with no operator cap gets THIS ceiling instead, and the terminal says which
+# bound stopped it.
+#
+# 50 rather than 12: it must not silently re-cap a run the operator deliberately uncapped, so it sits
+# four times the shipped default and six times the longest legitimate chain on record (8 — the six
+# stale-dependency migrations plus two repairs on the real research question, see
+# `docs/guide/configuration.md`). A node that has made fifty in-place repairs and still has no metric
+# is not one repair away from working; whatever the judge believes, that node's remaining value is
+# below the cost of continuing to re-eval it, and a terminal returns the budget to the search.
+_UNLIMITED_REPAIR_CEILING = 50
+
+
+def _effective_repair_cap(inline_repair_attempts: int) -> int:
+    """The number of in-node repairs this node may actually make.
+
+    A named rule with a truth table because "0 = unlimited" is a THREE-way decision the loop reads in
+    three different places (the budget gate, the cap-out message, and the `attempts_left` the judge is
+    told), and the three used to disagree: the gate treated 0 as no bound at all while the message
+    quoted `self._inline_repair_attempts` and the judge was told `None`."""
+    return int(inline_repair_attempts) or _UNLIMITED_REPAIR_CEILING
+
+
+def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, list[dict], int]:
+    """This node's repair ledger as the EVENT LOG records it: (attempts, judge rows, unparseables).
+
+    THE COUNTERS ARE THE LOG'S, NOT THE PROCESS'S. `attempt`, `repair_log` and `unparseable_repairs`
+    used to be plain loop locals initialized to 0/[] at the top of `_evaluate`, and nothing folded
+    them (`events/replay.py::_on_node_repaired` mutates code and files only). So every re-entry —
+    `looplab resume`, a crashed process, and above all the operator-resumed pause this design's own
+    recovery from a dead judge PRESCRIBES — restarted the hard budget at zero and handed the judge an
+    empty history for a node that already had durable repairs. Measured over four real `Engine.run()`
+    resumes at `inline_repair_attempts=4`: 8 durable `node_repaired`, attempts [1,2,1,2,1,2,1,2], no
+    terminal, and the judge asked with `history_rows=0` while four durable repairs sat in the log. A
+    flapping provider therefore loops pause -> resume -> fresh budget forever, and each resume is a
+    fresh 4 repairs. That is invariant #3: the repair budget IS a side effect, so it has to be gated
+    on the durable events rather than on a process-local integer.
+
+    Reads `node_repaired` directly rather than through `fold`, because what the judge needs — the
+    per-attempt error, what each fix claimed, which files it actually touched — is a TRAJECTORY, and
+    `RunState` deliberately keeps only the latest code/files. Generation-scoped exactly like the
+    fold: a `node_reset` opens a new lifecycle whose budget genuinely starts fresh, and a row from an
+    abandoned generation must not charge it. An unstamped row (a log written before generations were
+    stamped) binds to the current lifecycle, mirroring `replay._generation_matches`.
+
+    Rows come back in `_format_repair_log`'s shape. `changed`/`stages_passed` are ADDITIVE fields on
+    `node_repaired` (invariant #5) and a row written before they existed simply omits `changed`,
+    which the renderer distinguishes from "changed nothing".
+    """
+    attempts = 0
+    rows: list[dict] = []
+    unparseable = 0
+    for e in events or []:
+        if e.type != EV_NODE_REPAIRED:
+            continue
+        d = e.data or {}
+        if d.get("node_id") != node_id:
+            continue
+        # Keyed exactly as `replay._generation_matches` keys the same event: an ABSENT stamp is the
+        # legacy `_MISSING` case and binds to whichever lifecycle is asking, while a stamp that is
+        # present and does not match is rejected — including an explicit null, which replay treats as
+        # an invalid stamp rather than as "unstamped". Deliberately NOT `d.get("generation") is None`:
+        # that spelling would silently admit a corrupt row the fold refuses. `legacy_attempt` is not
+        # used here for the reason `_event_generation` documents — on `node_repaired`, `attempt` is
+        # the inline-repair ordinal, not a generation.
+        if "generation" in d and d.get("generation") != generation:
+            continue
+        n = d.get("attempt")
+        attempts = max(attempts, int(n)) if isinstance(n, int) else attempts + 1
+        unparseable = max(unparseable, int(d.get("unparseable_repairs") or 0))
+        row = {"attempt": n if isinstance(n, int) else attempts,
+               "error": str(d.get("error_in", ""))[-_JUDGE_ERROR_CHARS:],
+               "fix": str(d.get("rationale", ""))[:200],
+               "stages_passed": d.get("stages_passed")}
+        if "changed" in d:
+            row["changed"] = list(d.get("changed") or [])
+        rows.append(row)
+    return attempts, rows, unparseable
 from looplab.events.replay import fold
 from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.events.types import (EV_CARD_DROPPED, EV_DEPS_INSTALLED, EV_NODE_ABORT,
@@ -825,12 +918,20 @@ class EvaluateMixin:
             #      is the only participant that can say "I no longer know how to fix this". This costs
             #      no additional LLM calls — the loop already made exactly one triage call per attempt
             #      to decide repair-vs-reject; it now decides repair-vs-STOP on better evidence.
-            #   2. `inline_repair_attempts`, a hard operator backstop. It exists because the judge can
-            #      be wrong in the expensive direction, and because a judge that cannot ANSWER must
-            #      not silently mean "keep going" (that verdict is `unanswerable` and lands on the
-            #      developer-crash circuit breaker below, not here).
+            #   2. `inline_repair_attempts`, a hard operator backstop (0 = no operator cap, which now
+            #      means `_UNLIMITED_REPAIR_CEILING` rather than nothing — see that constant). It
+            #      exists because the judge can be wrong in the expensive direction, and because a
+            #      judge that cannot ANSWER must not silently mean "keep going" (those verdicts are
+            #      `unanswerable`/`unreadable` and are handled below, not here).
+            #
+            # AND IT IS A LEDGER, NOT A PROCESS COUNTER. Both of those bounds — the budget and the
+            # history the judge reads — are seeded from the DURABLE `node_repaired` rows, so a resume
+            # continues this node's repair chain instead of starting a new one on top of it. See
+            # `_durable_repair_ledger` for the four-resume measurement that made it necessary.
             import threading
-            attempt = 0
+            _repair_cap = _effective_repair_cap(self._inline_repair_attempts)
+            attempt, _durable_rows, unparseable_repairs = _durable_repair_ledger(
+                events_at_start, node_id, generation)
             dep_rounds = 0                   # env-prep auto-install + re-run rounds (separate from repair attempts)
             total_eval = 0.0                 # summed subprocess wall-clock across all attempts (cost)
             async def _record_superseded() -> None:
@@ -845,9 +946,16 @@ class EvaluateMixin:
             reason = "crash"
             # THE EVIDENCE THE JUDGE DECIDES ON: this node's repair history, newest last. One row per
             # attempt — what failed, what the fix claimed it would do, and which files it actually
-            # touched. Built from loop locals rather than re-folded from the log: every field is
-            # already in hand here, and `state` is the fold taken at eval START, so it cannot see this
-            # node's own in-flight repairs at all.
+            # touched. Rows made in THIS process are appended from loop locals (every field is already
+            # in hand); rows from earlier processes are rebuilt from the durable `node_repaired`
+            # events above, because `state` is the fold taken at eval START and `RunState` keeps only
+            # the latest code, never the trajectory.
+            #
+            # The judge is handed the trajectory precisely so it can tell "moving" from "circling",
+            # and a resume used to hand it an empty history for a node with eight durable repairs —
+            # the same defect as the process-local budget, seen from the other side: the model was
+            # asked to judge a chain while being shown none of it, and answered `repair` because
+            # nothing it could see said otherwise.
             #
             # These three columns are chosen against the two ways the loop failed. A repair going in
             # CIRCLES is visible as a repeating error next to repeating changed-file sets — which is
@@ -855,11 +963,13 @@ class EvaluateMixin:
             # the actual text does not need a regex for. A repair making real PROGRESS is visible as a
             # moving failure next to fixes that touch different code. The model gets the trajectory,
             # not a scalar someone else already reduced it to.
-            repair_log: list[dict] = []
+            repair_log: list[dict] = list(_durable_rows)
             # A repair that returned something that is not Python at all. Counted directly rather than
             # inferred from the SyntaxError it produces: the error text can vary per attempt (a
-            # provider request id), the FACT cannot. See `_UNPARSEABLE_REPAIR_LIMIT`.
-            unparseable_repairs = 0
+            # provider request id), the FACT cannot. See `_UNPARSEABLE_REPAIR_LIMIT`. Durable for the
+            # same reason as the budget: it bounds a per-NODE condition (a provider answering with
+            # prose), so a process-local count let a resume grant three more truncations.
+            # `unparseable_repairs` is seeded from the ledger above.
             # Best pipeline depth any attempt has reached (stages passed/reused before the failure) —
             # surfaced to the judge as the other, non-textual evidence that a repair did real work.
             best_depth = -1
@@ -1064,8 +1174,12 @@ class EvaluateMixin:
                 _depth = len([s for s in (res.stages or [])
                               if isinstance(s, dict) and s.get("status") in ("ok", "reused")])
                 best_depth = max(best_depth, _depth)
-                # ONE BUDGET. `inline_repair_attempts` bounds the repairs this node may make, full
-                # stop; 0 still means UNLIMITED, which is what an existing run resumes with.
+                # ONE BUDGET, AND IT IS DURABLE. `inline_repair_attempts` bounds the repairs this node
+                # may make, full stop; `attempt` is the count of durable `node_repaired` rows for this
+                # lifecycle, so a resume continues the chain rather than restarting it. 0 still means
+                # "no OPERATOR cap" (what an existing run resumes with) and is settled to the engine's
+                # own `_UNLIMITED_REPAIR_CEILING` by `_effective_repair_cap` — read that constant for
+                # what an operator with 0 in their snapshot gets and why it is not simply 12.
                 #
                 # It used to be two: an `environment` ledger for repairs that only reconciled the code
                 # with the installed libraries and an `experiment` ledger for everything else, each
@@ -1077,8 +1191,7 @@ class EvaluateMixin:
                 # is answered by making the ONE budget big enough to cover the longest real chain on
                 # record and letting the judge stop early when there is nothing left to try, rather
                 # than by giving the loop a second allowance to spend.
-                budget_left = (not self._inline_repair_attempts
-                               or attempt < self._inline_repair_attempts)
+                budget_left = attempt < _repair_cap
                 # Inline-repair gate: feature on, repairable reason, budget left, a Developer that can
                 # repair, and something to repair (whole-file code, multi-file edits, or a repo).
                 if (not self._inline_repair
@@ -1087,19 +1200,27 @@ class EvaluateMixin:
                         or not callable(getattr(self.developer, "repair", None))
                         or not (node.code or node.files or self._repo_spec)):
                     if not budget_left and self._inline_repair:
-                        triage_outcome = ("abandon", f"inline repair has spent its hard limit of "
-                                                     f"{self._inline_repair_attempts} attempt(s) on "
-                                                     "this node (inline_repair_attempts)")
+                        # Which bound stopped it, said out loud. An operator whose snapshot says 0
+                        # never chose 50 and must not read a terminal that implies they did.
+                        triage_outcome = ("abandon", (
+                            f"inline repair has spent its hard limit of {_repair_cap} attempt(s) on "
+                            "this node (inline_repair_attempts)" if self._inline_repair_attempts else
+                            f"inline repair has spent the engine's absolute ceiling of {_repair_cap} "
+                            "attempt(s) on this node — this run's inline_repair_attempts is 0, which "
+                            "sets no operator cap, so the ceiling is what stopped it"))
                     break
                 # THE STOP DECISION. One call per attempt — the same call the loop already made — now
                 # carrying this node's repair history, so the model is answering "given everything
                 # that has been tried here, do you still know what to change?" instead of judging a
                 # single traceback in isolation. `abandon` is its stop.
+                #
+                # `attempts_left` is now always a real number, including for a run with no operator
+                # cap: there IS a bound in that case (the ceiling), and the whole point of telling the
+                # judge is that "a stop and a cap-out are not the same surprise". Telling it `None` on
+                # exactly the runs that carry the loosest bound was the least useful place to be coy.
                 triage = self._triage_crash(state, node, err, attempt + 1, reason=reason,
                                             repair_log=repair_log[-_JUDGE_HISTORY_ROWS:],
-                                            depth=_depth,
-                                            attempts_left=(self._inline_repair_attempts - attempt
-                                                           if self._inline_repair_attempts else None))
+                                            depth=_depth, attempts_left=_repair_cap - attempt)
                 action = triage.get("action", DEFAULT_TRIAGE_ACTION)
                 if action == "abandon":
                     triage_outcome = ("abandon", triage.get("rationale", ""))
@@ -1107,6 +1228,53 @@ class EvaluateMixin:
                 if action == "reject_idea":   # the idea itself is wrong -> mark the lineage; steer to a new idea
                     reason = "idea_rejected"
                     triage_outcome = ("reject_idea", triage.get("rationale", ""))
+                    break
+                # A JUDGE THAT PRODUCED NO USABLE VERDICT, in the two shapes that are not the same
+                # condition (`engine/triage.py`'s verdict contract owns the distinction). Both have
+                # already been re-asked by `_triage_crash`; reaching here means the non-answer
+                # persisted, so neither may read as "keep going".
+                #
+                # THIS BLOCK IS ABOVE THE TRIAGE-DRIVEN INSTALL ON PURPOSE. It used to sit below it,
+                # and the install `continue`s on success — so a judge that answered `unanswerable`
+                # every round bought itself a full eval per successful install: measured, 7 evals and
+                # six packages (faiss-cpu, tensorboardX, fastai, gensim, textblob, umap-learn) pushed
+                # into the SHARED eval interpreter before the breaker ever fired. That install exists
+                # because the agent's RATIONALE proves it read the traceback and named a library the
+                # traceback could not — a premise a non-answer denies outright. A verdict nobody could
+                # read is not evidence about anything, least of all about what to pip install.
+                if action in (UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION):
+                    _judge_err = str(triage.get("rationale", ""))[:400] or "no verdict returned"
+                    if action == UNANSWERABLE_TRIAGE_ACTION:
+                        # THE TRANSPORT FAILED. Not a verdict about this node: the triage model was
+                        # wired and the call did not complete — the same dead-provider condition the
+                        # circuit breaker exists for, and exactly how the 2345-repair incident began.
+                        # Routed to that breaker (terminal + RUN-level pause) rather than to a quiet
+                        # per-node abandon the operator would have to infer a provider outage from.
+                        triage_outcome = ("abandon", "the repair-stop judge could not be reached — "
+                                                     "treating it as a provider failure, not as "
+                                                     "permission to keep repairing")
+                        reason = "developer_crash"
+                        err = (f"crash-triage failed: {_judge_err}\n[the model that decides whether "
+                               f"to keep repairing this node could not be reached, so the node was "
+                               f"stopped rather than repaired blind. Its last eval error was: "
+                               f"{err[-200:]}]")
+                        await self._auto_pause_provider_failure(
+                            f"the crash-triage model could not be reached while deciding whether to "
+                            f"keep repairing node {node_id} — {_judge_err}")
+                    else:
+                        # THE MODEL ANSWERED SOMETHING UNREADABLE. The endpoint is demonstrably alive
+                        # — it produced bytes — so this is a per-NODE stop and NOTHING MORE. Pausing
+                        # the run here was a measured defect: one out-of-enum verdict on a SyntaxError
+                        # in the agent's own generated code raised a run-level pause carrying
+                        # `node_id=None` (not clearable by a node reset) that told the operator to
+                        # check credits, key and base URL — using the MODEL's own rationale as the
+                        # evidence — and under `eval_parallel > 1` took every healthy in-flight
+                        # sibling down with it. It terminalizes like an `abandon`, keeping the eval's
+                        # own `reason`, so a node reset re-opens it and the run continues.
+                        triage_outcome = ("abandon", f"the repair-stop judge answered something the "
+                                                     f"engine could not read as a verdict, so this "
+                                                     f"node stopped rather than repairing blind — "
+                                                     f"{_judge_err}")
                     break
                 # A library the traceback never NAMED. `_prepare_env` above installs only what the
                 # crash reports as missing; when a library degrades an absent dependency into a
@@ -1133,25 +1301,6 @@ class EvaluateMixin:
                                 "node_id": node_id, "generation": generation,
                                 "packages": installed, "round": dep_rounds, "source": "triage"})
                         continue   # re-run with the library present (no repair attempt spent)
-                # A judge that could not ANSWER. Not a verdict about this node: the triage model was
-                # wired and the call failed, was refused, or came back malformed — which is the same
-                # dead-provider condition the circuit breaker below exists for, and is exactly how the
-                # 2345-repair incident began. It must never read as "keep going", so it is spelled as
-                # its own action and routed to that breaker (terminal + run-level pause) rather than
-                # to a quiet per-node abandon the operator would have to infer a provider outage from.
-                if action == "unanswerable":
-                    _judge_err = str(triage.get("rationale", ""))[:400] or "no verdict returned"
-                    triage_outcome = ("abandon", "the repair-stop judge could not answer — treating "
-                                                 "it as a provider failure, not as permission to "
-                                                 "keep repairing")
-                    reason = "developer_crash"
-                    err = (f"crash-triage failed: {_judge_err}\n[the model that decides whether to "
-                           f"keep repairing this node could not answer, so the node was stopped "
-                           f"rather than repaired blind. Its last eval error was: {err[-200:]}]")
-                    await self._auto_pause_provider_failure(
-                        f"the crash-triage model could not answer while deciding whether to keep "
-                        f"repairing node {node_id} — {_judge_err}")
-                    break
                 # action == "repair": fix the code in place and re-eval (no new node, no budget spent).
                 # Snapshot the PRE-repair file set now (node is still the pre-repair fold) so we can
                 # compute the repair's REAL change set below — `developer.last_files` is the node's whole
@@ -1218,6 +1367,16 @@ class EvaluateMixin:
                 repaired_footprint = self._repaired_footprint(
                     node, new_code, repaired_files, _resource_reservation)
                 attempt += 1
+                # THE CHANGE SET, COMPUTED BEFORE THE APPEND. It used to be derived after it (a pure
+                # function of four locals all in hand here either way), and it is the column that
+                # separates a repair chain that is working from one rewriting the same lines — so it
+                # has to be IN the durable row, not only in the process-local one, or a resumed
+                # judge reads a history with the evidence column blank. Both halves are DELTAS
+                # against the pre-repair node, never the cumulative sets the developer hands back —
+                # see `_repair_change_set`. `new_deleted` is consumed by the reuse predicate below.
+                changed, new_deleted = _repair_change_set(
+                    prev_files, prev_deleted, repaired_files, repaired_deleted)
+                _changed_col = sorted(changed)[:12] or (["<whole-file solution>"] if new_code else [])
                 async with self._write_lock:
                     repair_payload = {
                         "node_id": node_id, "generation": generation,
@@ -1225,7 +1384,15 @@ class EvaluateMixin:
                         "files": repaired_files,
                         "deleted": repaired_deleted,
                         "error_in": err, "triage_action": "repair",
-                        "rationale": str(triage.get("rationale", ""))[:300]}
+                        "rationale": str(triage.get("rationale", ""))[:300],
+                        # The judge's evidence columns, made durable (invariant #5: additive, and the
+                        # fold ignores them — `_on_node_repaired` reads code/files/deleted/footprint
+                        # only). `_durable_repair_ledger` reads exactly these back after a resume;
+                        # `unparseable_repairs` rides along because it bounds the same per-NODE
+                        # condition and had the same process-local lifetime.
+                        "changed": _changed_col,
+                        "stages_passed": _depth,
+                        "unparseable_repairs": unparseable_repairs}
                     if repaired_footprint is not None:
                         repair_payload.update({
                             "idea_footprint": repaired_footprint,
@@ -1254,21 +1421,18 @@ class EvaluateMixin:
                 # a full re-run — bounded by inline_repair_retrain_cap so a repair that keeps rewriting
                 # training code can't burn many full trains (the attempt budget bounds the COUNT of
                 # repairs, not their cost). The workdir persists across attempts, so a reused
-                # checkpoint is valid.
-                # Both halves are DELTAS against the pre-repair node, never the cumulative sets the
-                # developer hands back — see `_repair_change_set`.
-                changed, new_deleted = _repair_change_set(
-                    prev_files, prev_deleted, repaired_files, repaired_deleted)
-                # THE ROW THE JUDGE WILL READ on the next attempt. Appended here, after `changed` is
-                # known, because "which files this fix actually touched" is the column that separates
-                # a repair chain that is working from one that is rewriting the same lines: the
+                # checkpoint is valid. (`changed`/`new_deleted` were computed above the append.)
+                # THE ROW THE JUDGE WILL READ on the next attempt — the in-process twin of what
+                # `_durable_repair_ledger` rebuilds from the event just written, kept because every
+                # field is already in hand and re-reading the log per attempt would be a full scan for
+                # nothing. "Which files this fix actually touched" is the column that separates a
+                # repair chain that is working from one that is rewriting the same lines: the
                 # developer's own rationale says what it INTENDED to change, this says what it did.
-                # `changed` is the real delta against the pre-repair node, not the cumulative file set.
                 repair_log.append({
                     "attempt": attempt,
                     "error": err[-_JUDGE_ERROR_CHARS:],
                     "fix": str(triage.get("rationale", ""))[:200],
-                    "changed": sorted(changed)[:12] or (["<whole-file solution>"] if new_code else []),
+                    "changed": _changed_col,
                     "stages_passed": _depth})
                 _stages = self._resolved_stages(node, workdir)
                 # `deleted` and the eval spec's `cwd` ride along so the predicate can fail closed on

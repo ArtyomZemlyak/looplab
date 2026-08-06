@@ -6,7 +6,9 @@ method bodies are verbatim moves and read engine attributes freely (`researcher`
 `sandbox`), exactly as they did inside the class.
 
 The cluster: `_triage_crash` (LLM crash-triage verdict — instance-monkeypatched by tests, which
-a mixin preserves), `_repair_error_context` (ancestral repair chain + hint directives for the
+a mixin preserves) over its single-ask half `_ask_triage` (one normalized ask; `_triage_crash` owns
+the bounded re-ask of a non-answer, so patching `_triage_crash` still replaces the WHOLE decision as
+every existing test expects), `_repair_error_context` (ancestral repair chain + hint directives for the
 repair prompt), `_prepare_env` (dependency self-prep on ModuleNotFoundError) and its sibling
 `_prepare_env_from_triage` (the same self-prep for a missing library the traceback never NAMES —
 see its docstring), sharing one install tail in `_install_missing`. The rule-based fallback
@@ -20,8 +22,9 @@ from typing import Optional
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import RunState, normalize_researcher_footprint
-from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION, _rule_triage,
-                                   coerce_triage_action)
+from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
+                                   UNANSWERABLE_TRIAGE_ACTION, _rule_triage, _TRIAGE_REASK_LIMIT,
+                                   coerce_triage_action, is_transport_failure_verdict)
 
 
 def _accepted_kwargs(fn, candidates: dict) -> dict:
@@ -55,7 +58,15 @@ def _format_repair_log(repair_log) -> str:
         return ""
     out = ["--- WHAT HAS ALREADY BEEN TRIED ON THIS NODE (oldest first) ---"]
     for r in rows:
-        changed = ", ".join(str(c) for c in (r.get("changed") or [])) or "nothing"
+        # A row rebuilt from a `node_repaired` written before the change-set column existed has no
+        # `changed` key at all, which is NOT the same fact as "this fix changed nothing" — and the
+        # difference is exactly the one the judge is being asked to read ("is this repair chain
+        # rewriting the same lines?"). Distinguish the missing key from the empty list rather than
+        # letting an old log look like a circling one. See
+        # `engine/evaluate.py::_durable_repair_ledger`.
+        changed = ("(not recorded — this attempt predates the change-set column)"
+                   if "changed" not in r
+                   else ", ".join(str(c) for c in (r.get("changed") or [])) or "nothing")
         out.append(
             f"attempt {r.get('attempt')}: failed with — {' '.join(str(r.get('error', '')).split())}\n"
             f"    the fix claimed: {str(r.get('fix', '')).strip() or '(no rationale)'}\n"
@@ -73,7 +84,7 @@ class CrashRepairMixin:
                       reason: str = "crash", *, repair_log=None,
                       depth: Optional[int] = None, attempts_left: Optional[int] = None) -> dict:
         """Decide what to do with a just-failed node BEFORE spending another eval:
-        {"action": "repair"|"abandon"|"reject_idea"|"unanswerable", "rationale": str}.
+        {"action": "repair"|"abandon"|"reject_idea"|"unanswerable"|"unreadable", "rationale": str}.
 
         THIS IS THE STOPPING RULE for the inline-repair loop, not merely a repair-vs-reject
         classifier. The unified agent decides (it can consult the run via its pilot tools —
@@ -86,83 +97,131 @@ class CrashRepairMixin:
 
         `reason` (crash|timeout|oom) is surfaced to both paths so a timeout is triaged as "too slow
         -> reduce compute" rather than mis-read as a wrong idea (a missing KNOWN lib never reaches
-        here — env-prep installs it and re-runs first). `attempts_left` is the operator's remaining
-        hard budget (None = unlimited), told to the model so a stop and a cap-out are not the same
-        surprise; it is advisory to the model and enforced by the caller regardless.
+        here — env-prep installs it and re-runs first). `attempts_left` is the remaining hard budget,
+        told to the model so a stop and a cap-out are not the same surprise; it is advisory to the
+        model and enforced by the caller regardless. It is a real number even for a run with no
+        OPERATOR cap (`inline_repair_attempts = 0`), because there is still a bound in that case —
+        `engine/evaluate.py::_UNLIMITED_REPAIR_CEILING` — and telling the judge `None` on exactly the
+        runs carrying the loosest bound was the least useful place to be coy. `None` remains
+        meaningful for a caller that genuinely has no cap to report.
 
-        FAIL CLOSED. When a triage model IS wired and cannot answer — transport failure, refusal,
-        an emit that does not parse — this returns `unanswerable`, NOT a permissive "repair" and NOT
-        the deterministic rule. A wired-but-dead judge is a provider outage, which is how the
-        2345-repair incident began, and the caller routes it to the run-level circuit breaker. The
-        rule path is reserved for the genuinely different case of no judge being wired at all."""
+        FAIL CLOSED, IN TWO DIFFERENT DIRECTIONS. A wired judge that produces no usable verdict never
+        degrades to a permissive "repair" and never falls through to the deterministic rule — but the
+        two ways it can fail are NOT the same condition and no longer share an answer:
+
+          * the TRANSPORT failed (the call raised, `resilient` caught an unreachable endpoint, the
+            loop never emitted) -> `unanswerable`, which the caller routes to the run-level circuit
+            breaker. This is how the 2345-repair incident began and it is a RUN-level fact: every
+            other node reaches the same endpoint.
+          * the model ANSWERED something outside the vocabulary -> `unreadable`, a per-NODE stop with
+            no pause. The provider is demonstrably alive, so halting the run (and, under
+            `eval_parallel > 1`, every healthy sibling with it) on one bad emit is a strictly wrong
+            diagnosis — it used to hand the operator the MODEL's own rationale under a "check your
+            credits, key and base URL" banner.
+
+        Both are re-asked `_TRIAGE_REASK_LIMIT` times before they are acted on: one non-answer is not
+        a diagnosis, and stopping a node on the first one costs a whole node for a single flapped
+        socket (measured: `developer.repair` calls = 0). The rule path stays reserved for the
+        genuinely different case of no judge being wired at all."""
         # Tag the failure kind so the LLM agent (and the rule's marker scan) see crash vs timeout.
         tagged = f"[failure kind: {reason}]\n{error}"
         fn = getattr(self.researcher, "triage_crash", None)
         if callable(fn):
-            try:
-                from looplab.agents.roles import _state_brief
-                from looplab.agents.hints import render_hint_directives
-                try:
-                    brief = _state_brief(state, None)
-                except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
-                    brief = ""
-                # Signal-delivery (§1): a standing directive (e.g. "prefer lighter models") is
-                # relevant to the repair-vs-reject decision, so surface it to the triage agent too.
-                brief += render_hint_directives(state.pending_hints)
-                # Own span so the crash-triage LLM turns band as `triage`, NOT `evaluate`: triage runs
-                # INSIDE the engine's `evaluate` span, so without this its (often many, agentic) turns
-                # inherit phase=evaluate and inflate the "evaluate" band with failure-debugging that has
-                # nothing to do with scoring — the exact "why is there a big eval when it never scored?"
-                # confusion. (The repair itself already has its own `inline_repair` span.)
-                # `triage_crash` is a DUCK-TYPED seam (any object wired as `researcher` may
-                # implement it), and this change added three keyword arguments to it. Passing them
-                # unconditionally makes an implementation written against the old signature raise
-                # TypeError — which the fail-closed handler below would then read as a dead provider
-                # and use to stop the node and pause the RUN. That is the worst possible way for a
-                # signature change to land, so the call is narrowed to what the callee actually
-                # accepts. A `**kwargs` implementation gets everything, as before.
-                extra = {"history": _format_repair_log(repair_log),
-                         "stages_passed": depth, "attempts_left": attempts_left}
-                with self.tracer.span("triage", attempt=attempt, reason=reason):
-                    out = fn(node, tagged, attempt, state=state, brief=brief,
-                             **_accepted_kwargs(fn, extra))
-                if isinstance(out, dict) and out.get("action") in AGENT_TRIAGE_ACTIONS:
-                    # `missing_dependency` (a library the agent says is absent) is part of the
-                    # verdict, so it is carried here rather than re-derived downstream. It fails
-                    # closed to "" = no install, and the engine never acts on it alone (see
-                    # runtime/deps.py::triage_install_candidates).
-                    return {"action": out["action"], "rationale": str(out.get("rationale", ""))[:300],
-                            "missing_dependency": str(out.get("missing_dependency", ""))[:100]}
-                # A wired judge that answered with something outside the vocabulary. Coerced through
-                # the registry, which fails closed to `unanswerable` rather than inventing "repair" —
-                # tonight's watchdog verification found the mirror-image bug (an unparseable verdict
-                # read as transparent) and it was a real break.
-                #
-                # `unanswerable` can also arrive ALREADY SPELLED, from the agent's own fail-closed
-                # paths (`UnifiedAgent.triage_crash` returns it for a transport failure or an emit it
-                # could not read). That one is not malformed, it is the same verdict reached one
-                # layer down — so its rationale passes through instead of being re-wrapped in
-                # "returned no usable verdict (…)", which is what the operator ends up reading in the
-                # pause reason.
-                _raw = (out or {}).get("action") if isinstance(out, dict) else None
-                _why = (str(out.get("rationale", ""))[:300] if _raw == DEFAULT_TRIAGE_ACTION
-                        else f"the triage model returned no usable verdict ({out!r})"[:300])
-                return {"action": coerce_triage_action(_raw),
-                        "rationale": _why or "no verdict returned", "missing_dependency": ""}
-            except BudgetExceeded:      # the hard budget stop must propagate, not degrade to a verdict
-                raise
-            except Exception as exc:  # noqa: BLE001 - a WIRED judge that cannot answer is a provider
-                # outage, not a licence to keep repairing. This used to fall through to `_rule_triage`,
-                # which answers "repair" for any mechanical crash while attempts remain — so a dead
-                # endpoint kept the loop running at full speed with no LLM in it at all.
-                return {"action": DEFAULT_TRIAGE_ACTION,
-                        "rationale": f"{type(exc).__name__}: {exc}"[:300],
-                        "missing_dependency": ""}
+            verdict = None
+            # THE RE-ASK. `_TRIAGE_REASK_LIMIT` extra rounds, and only ever for a non-answer: a real
+            # verdict (repair/abandon/reject_idea) returns from inside the loop on the first pass, so
+            # the healthy path still costs EXACTLY one call per attempt, which is what "the stop
+            # decision is free" depends on. The extra call is charged only when the alternative is
+            # ending the node on an answer nobody could read.
+            for _round in range(1 + _TRIAGE_REASK_LIMIT):
+                verdict = self._ask_triage(fn, state, node, tagged, attempt, reason,
+                                           repair_log, depth, attempts_left)
+                if verdict["action"] in AGENT_TRIAGE_ACTIONS:
+                    return verdict
+            return verdict
         # NO judge wired (`unified_agent` off) — a configuration, not a failure. The deterministic
         # rule keeps repairing mechanical crashes, bounded ONLY by the operator's hard cap, because
         # it has no way to form the stop judgement the model makes. 0 = unlimited -> a large cap.
         cap = self._inline_repair_attempts or 10**9
         return _rule_triage(reason, error, attempt, cap)
+
+    def _ask_triage(self, fn, state: RunState, node, tagged: str, attempt: int, reason: str,
+                    repair_log, depth, attempts_left) -> dict:
+        """ONE ask of the wired judge, normalized to a `TRIAGE_ACTIONS` verdict.
+
+        Split out of `_triage_crash` so the re-ask above is a loop over a single, total function
+        rather than a duplicated forty-line try block — and so the three ways an ask can end
+        (a real verdict, a transport failure, an answer nobody can read) have one place each instead
+        of being reachable only by driving a whole sandboxed eval against a broken endpoint."""
+        try:
+            from looplab.agents.roles import _state_brief
+            from looplab.agents.hints import render_hint_directives
+            try:
+                brief = _state_brief(state, None)
+            except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
+                brief = ""
+            # Signal-delivery (§1): a standing directive (e.g. "prefer lighter models") is
+            # relevant to the repair-vs-reject decision, so surface it to the triage agent too.
+            brief += render_hint_directives(state.pending_hints)
+            # Own span so the crash-triage LLM turns band as `triage`, NOT `evaluate`: triage runs
+            # INSIDE the engine's `evaluate` span, so without this its (often many, agentic) turns
+            # inherit phase=evaluate and inflate the "evaluate" band with failure-debugging that has
+            # nothing to do with scoring — the exact "why is there a big eval when it never scored?"
+            # confusion. (The repair itself already has its own `inline_repair` span.)
+            # `triage_crash` is a DUCK-TYPED seam (any object wired as `researcher` may
+            # implement it), and this change added three keyword arguments to it. Passing them
+            # unconditionally makes an implementation written against the old signature raise
+            # TypeError — which the fail-closed handler below would then read as a dead provider
+            # and use to stop the node and pause the RUN. That is the worst possible way for a
+            # signature change to land, so the call is narrowed to what the callee actually
+            # accepts. A `**kwargs` implementation gets everything, as before.
+            extra = {"history": _format_repair_log(repair_log),
+                     "stages_passed": depth, "attempts_left": attempts_left}
+            with self.tracer.span("triage", attempt=attempt, reason=reason):
+                out = fn(node, tagged, attempt, state=state, brief=brief,
+                         **_accepted_kwargs(fn, extra))
+            if isinstance(out, dict) and out.get("action") in AGENT_TRIAGE_ACTIONS:
+                # `missing_dependency` (a library the agent says is absent) is part of the
+                # verdict, so it is carried here rather than re-derived downstream. It fails
+                # closed to "" = no install, and the engine never acts on it alone (see
+                # runtime/deps.py::triage_install_candidates).
+                return {"action": out["action"], "rationale": str(out.get("rationale", ""))[:300],
+                        "missing_dependency": str(out.get("missing_dependency", ""))[:100]}
+            # A TRANSPORT FAILURE OBSERVED ONE LAYER DOWN. `UnifiedAgent.triage_crash`'s `_fallback`
+            # runs when `resilient` contained an unreachable endpoint / a 401 / a loop that never
+            # emitted, and it stamps `TRIAGE_TRANSPORT_FAILURE_KEY` on the verdict it returns. That
+            # marker — never the action string — is what admits `unanswerable` from a return value,
+            # so a live model echoing the word cannot claim its own unreachability and trip the
+            # run-level breaker. Its rationale passes through instead of being re-wrapped in
+            # "returned no usable verdict (…)", because it is a real report, not a malformed one.
+            if is_transport_failure_verdict(out):
+                return {"action": UNANSWERABLE_TRIAGE_ACTION,
+                        "rationale": (str(out.get("rationale", ""))[:300]
+                                      or "the triage model did not return a verdict"),
+                        "missing_dependency": ""}
+            # A WIRED, LIVE JUDGE THAT ANSWERED SOMETHING OUTSIDE THE VOCABULARY. Coerced through the
+            # registry, which fails closed to `unreadable` rather than inventing "repair" — tonight's
+            # watchdog verification found the mirror-image bug (an unparseable verdict read as
+            # transparent) and it was a real break. `unreadable` can also arrive ALREADY SPELLED,
+            # from `UnifiedAgent._finalize`'s own coercion of an out-of-enum emit; that one is not
+            # malformed, it is the same verdict reached one layer down, so its rationale (the model's
+            # own words about the node) passes through rather than being re-wrapped.
+            _raw = (out or {}).get("action") if isinstance(out, dict) else None
+            _why = (str(out.get("rationale", ""))[:300] if _raw == DEFAULT_TRIAGE_ACTION
+                    else f"the triage model returned no usable verdict ({out!r})"[:300])
+            return {"action": coerce_triage_action(_raw),
+                    "rationale": _why or "no verdict returned", "missing_dependency": ""}
+        except BudgetExceeded:      # the hard budget stop must propagate, not degrade to a verdict
+            raise
+        except Exception as exc:  # noqa: BLE001 - a WIRED judge whose CALL failed is a provider
+            # outage, not a licence to keep repairing. This used to fall through to `_rule_triage`,
+            # which answers "repair" for any mechanical crash while attempts remain — so a dead
+            # endpoint kept the loop running at full speed with no LLM in it at all. This is the
+            # engine's own observation of the transport, so it is `unanswerable` directly rather
+            # than through the coercion (which rejects that word on purpose).
+            return {"action": UNANSWERABLE_TRIAGE_ACTION,
+                    "rationale": f"{type(exc).__name__}: {exc}"[:300],
+                    "missing_dependency": ""}
 
     def _repair_error_context(self, reason: str, error: str,
                               state: Optional[RunState] = None, node=None) -> str:

@@ -268,6 +268,150 @@ def test_timeout_is_repaired_by_reducing_compute(tmp_path):
     assert st.nodes[0].status.name == "evaluated"    # recovered, not left dead
 
 
+# ------------------------------------------- a non-verdict may not drive an install (ordering)
+class _NeverRepairs:
+    """A developer whose `repair` must never be reached: the judge here never says "repair"."""
+
+    def __init__(self, src):
+        self.src = src
+        self.repair_calls = 0
+
+    def implement(self, idea):
+        return self.src
+
+    def repair(self, idea, code, error):
+        self.repair_calls += 1
+        raise AssertionError("the judge never said 'repair' — this must not be reached")
+
+
+def test_a_judge_that_produced_no_verdict_cannot_drive_an_install(tmp_path, monkeypatch):
+    """ORDER, and it is load-bearing. The triage-driven install used to run ABOVE the non-verdict
+    branch in `_evaluate`'s attempt loop, and it `continue`s on success — so each successful install
+    bought an already-diagnosed-dead judge another full eval and another triage call. Measured on the
+    shipped loop: a judge answering `unanswerable` every round with a package-naming rationale bought
+    7 evals and pushed SIX packages (faiss-cpu, tensorboardX, fastai, gensim, textblob, umap-learn)
+    into the shared eval interpreter before the circuit breaker fired.
+
+    That install exists because the agent's RATIONALE proves it read the traceback and named a
+    library the traceback could not (`runtime/deps.py::triage_install_candidates`, hardened
+    precisely against a shopping list). A verdict nobody could read denies that premise outright: it
+    is not evidence about anything, least of all about what to pip install.
+
+    Driven end to end rather than pinned on source order, because the property is "no pip ran", not
+    "these lines are in this sequence"."""
+    monkeypatch.setitem(deps._PIP_NAME, "faketestlib", "faketestlib")
+    installs: list[str] = []
+
+    def recording_install(package, *, python=None, timeout=None):
+        installs.append(package)
+        return InstallResult(package=package, ok=True, returncode=0, output="ok")
+
+    # An unresolved-name-shaped traceback whose missing symbol is provided by an allowlisted lib —
+    # the exact shape the triage-driven install is FOR, so nothing but the ordering can stop it.
+    src = ("import sys\n"
+           "sys.stderr.write('Traceback (most recent call last):\\n"
+           "  File \"/w/solution.py\", line 3, in <module>\\n"
+           "    x = faketestlib.thing()\\n"
+           "NameError: name \\'faketestlib\\' is not defined\\n')\n"
+           "sys.exit(1)\n")
+
+    class _NonVerdictJudge(_Stub):
+        def __init__(self, action):
+            self.action = action
+            self.calls = 0
+
+        def triage_crash(self, node, error, attempt, **kw):
+            self.calls += 1
+            return {"action": self.action,
+                    "rationale": "the faketestlib distribution is not installed, so the "
+                                 "faketestlib symbol is undefined",
+                    "missing_dependency": "faketestlib"}
+
+    for action in ("unanswerable", "keep_going"):    # the transport word, and any other non-verdict
+        dev = _NeverRepairs(src)
+        judge = _NonVerdictJudge(action)
+        run_dir = tmp_path / f"run_{action}"
+        eng = Engine(run_dir, task=ToyTask.load(TASK), researcher=judge, developer=dev,
+                     sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                     auto_install_deps=True, dep_installer=recording_install,
+                     inline_repair=True, inline_repair_attempts=12)
+        eng.store.append("run_started",
+                         {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+        eng.store.append("node_created", {
+            "node_id": 0, "parent_ids": [], "operator": "draft",
+            "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
+            "code": src})
+
+        async def _bounded() -> bool:
+            with anyio.move_on_after(120) as scope:
+                await eng._evaluate(0, anyio.CapacityLimiter(1), None)
+            return scope.cancelled_caught
+
+        assert not anyio.run(_bounded), f"the loop did not terminate for {action}"
+        evs = _events(run_dir)
+        assert installs == [], f"{action} drove a pip install: {installs}"
+        assert not [e for e in evs if e.type == "deps_installed"]
+        assert judge.calls == 2, action      # one ask + one re-ask, then stop — not one per install
+        assert len([e for e in evs if e.type in ("node_evaluated", "node_failed")]) == 1
+
+
+def test_a_real_verdict_still_drives_the_install(tmp_path, monkeypatch):
+    """The other direction of the same ordering: moving the breaker above the install must not cost
+    the install itself, which is what lets a degraded optional dependency be fixed without spending
+    a repair attempt (`runs/rubert-dr-0805` node 0)."""
+    monkeypatch.setitem(deps._PIP_NAME, "faketestlib", "faketestlib")
+    monkeypatch.setattr(deps, "is_present", lambda m, **kw: m != "faketestlib")
+    installs: list[str] = []
+    flag = tmp_path / "faketestlib.installed"
+
+    def recording_install(package, *, python=None, timeout=None):
+        installs.append(package)
+        flag.write_text("ok")
+        return InstallResult(package=package, ok=True, returncode=0, output="ok")
+
+    src = ("import os, sys\n"
+           f"if os.path.exists({str(flag)!r}):\n"
+           "    import json; print(json.dumps({'metric': 0.1})); sys.exit(0)\n"
+           "sys.stderr.write('Traceback (most recent call last):\\n"
+           "  File \"/w/solution.py\", line 3, in <module>\\n"
+           "    x = faketestlib.thing()\\n"
+           "NameError: name \\'faketestlib\\' is not defined\\n')\n"
+           "sys.exit(1)\n")
+
+    class _NamesIt(_Stub):
+        def triage_crash(self, node, error, attempt, **kw):
+            return {"action": "repair",
+                    "rationale": "the faketestlib distribution is not installed, so the "
+                                 "faketestlib symbol is undefined",
+                    "missing_dependency": "faketestlib"}
+
+    dev = _NeverRepairs(src)                 # an install must fix it WITHOUT a code repair
+    run_dir = tmp_path / "run"
+    eng = Engine(run_dir, task=ToyTask.load(TASK), researcher=_NamesIt(), developer=dev,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 auto_install_deps=True, dep_installer=recording_install,
+                 inline_repair=True, inline_repair_attempts=12)
+    eng.store.append("run_started",
+                     {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
+        "code": src})
+
+    async def _bounded() -> bool:
+        with anyio.move_on_after(120) as scope:
+            await eng._evaluate(0, anyio.CapacityLimiter(1), None)
+        return scope.cancelled_caught
+
+    assert not anyio.run(_bounded)
+    evs = _events(run_dir)
+    assert installs == ["faketestlib"]
+    dep_events = [e for e in evs if e.type == "deps_installed"]
+    assert len(dep_events) == 1 and dep_events[0].data["source"] == "triage"
+    assert dev.repair_calls == 0                     # an install is not a repair
+    assert fold(evs).nodes[0].status.name == "evaluated"
+
+
 def test_pip_child_does_not_inherit_the_operator_secrets(monkeypatch):
     """`pip install` of an sdist runs the package's setup.py/build backend — ARBITRARY CODE — so this
     child needs the same scrub every other spawn applies. It used to inherit the full os.environ, so a

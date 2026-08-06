@@ -1,9 +1,11 @@
 """Pure triage/fingerprint helpers for the engine loop (extracted from orchestrator.py):
 workspace drift fingerprinting (`_dir_fingerprint` / `_shallow_fingerprint`), failure
 classification (`_failure_reason`), the triage-verdict contract (`TRIAGE_ACTIONS` /
-`coerce_triage_action`), the "did the repair CALL produce a repair" predicate
+`coerce_triage_action` / `is_transport_failure_verdict`), the "did the repair CALL produce a repair"
+predicate
 (`repair_artifact_defect`), the deterministic crash-triage fallback (`_rule_triage` +
-`_MECHANICAL_MARKERS`), the env-prep round bound (`_MAX_DEP_ROUNDS`), and the D1 holdout partition
+`_MECHANICAL_MARKERS`), the env-prep round bound (`_MAX_DEP_ROUNDS`), the judge re-ask bound
+(`_TRIAGE_REASK_LIMIT`), and the D1 holdout partition
 (`_holdout_indices`). All are pure module-level functions/constants — no engine state, no
 event-log writes — so they stay trivially replay-safe. The orchestrator re-exports them under the
 same names for back-compat (tests import e.g. `looplab.engine.orchestrator._rule_triage`).
@@ -208,6 +210,25 @@ def _holdout_indices(n: int, fraction: float, epoch: int = 0) -> frozenset:
 # already prevents re-attempting the same module (one pip attempt per module per run, success or fail).
 _MAX_DEP_ROUNDS = 6
 
+# How many EXTRA times the engine re-asks a judge that did not produce a readable verdict, before it
+# acts on the non-answer. 1 = two asks in total.
+#
+# It exists because the two things this bounds are asymmetric. Acting on the FIRST non-answer costs a
+# whole node for free: measured on the shipped loop, a single `ConnectionError` on attempt 1 stopped
+# the node with `developer.repair` calls = 0 — a flapping provider (one 502, one dropped socket) and
+# a live model that emitted one out-of-enum verdict both ended the node before a single repair had
+# been tried. A re-ask is one triage call, which is the cheapest call in the loop and strictly
+# cheaper than the eval it is deciding whether to repeat. Not larger than 1 because the LLM client
+# underneath already runs its own transport retry ladder (`core/llm.py::_RETRY_POLICY`), so each ask
+# here is an entire retried request, not a bare socket attempt: a genuinely dead endpoint still
+# reaches the circuit breaker within one extra round-trip rather than being drip-fed retries.
+#
+# This is the "minimum attempts floor" in the only form that is safe. A floor spelled as "always
+# allow N repairs before the judge may stop the node" would repair BLIND — which is precisely the
+# behaviour the 2345-repair incident consisted of — so the floor is on the JUDGE's answer, not on the
+# repairs.
+_TRIAGE_REASK_LIMIT = 1
+
 # Mechanical-failure signatures: a crash whose stderr matches one of these is almost always a
 # code/runtime defect (bad import, removed/renamed API, typo) — repairable in place from the
 # traceback alone. Used by the deterministic crash-triage fallback when no LLM agent is wired.
@@ -231,13 +252,29 @@ _MECHANICAL_MARKERS = (
 #   "abandon"      — stop repairing this node. The model's own "I do not know how to fix this any
 #                    more", and also what a circling repair history should produce.
 #   "reject_idea"  — stop, and mark the whole lineage as wrong, not just this node.
-#   "unanswerable" — the ENGINE's verdict, never the model's: the judge was wired and could not
-#                    answer (transport failure, a refusal, a malformed emit). Distinct from
-#                    "abandon" because it is not a judgement about the node at all — it is the same
-#                    dead-provider condition the developer-crash circuit breaker exists for, and the
-#                    engine routes it there (terminal + run-level pause) rather than to a quiet
-#                    per-node abandon. Fail-closed BY CONSTRUCTION: every path that cannot produce a
-#                    real verdict produces this one, so "keep repairing" is never a default.
+#   "unanswerable" — THE TRANSPORT FAILED. The judge was wired and no answer came back at all: the
+#                    call raised, the endpoint was unreachable, the request was refused, the loop
+#                    never emitted. Not a judgement about the node — it is the dead-provider
+#                    condition the developer-crash circuit breaker exists for, so the engine routes
+#                    it there (terminal + RUN-level pause naming the provider).
+#   "unreadable"   — THE MODEL ANSWERED SOMETHING THE ENGINE DOES NOT RECOGNISE. An out-of-enum
+#                    action, an empty one, a non-dict, a missing key — including the literal string
+#                    "unanswerable" arriving from the wire. The provider is demonstrably alive (it
+#                    produced bytes), so this is a per-NODE stop with no pause: the node terminalizes
+#                    like an `abandon` and the run keeps going.
+#
+# WHY THOSE ARE TWO VERDICTS AND NOT ONE. They used to be one, with `unanswerable` as the fail-closed
+# default for every unparseable answer, and the collapse was a measured defect in both directions:
+#   * a healthy model emitting ONE out-of-enum verdict on a SyntaxError in its own generated code
+#     produced `node_failed reason='developer_crash'` plus a run-level pause carrying `node_id=None`
+#     — not clearable by a node reset, and under `eval_parallel > 1` it took every healthy in-flight
+#     sibling down with it, all on the strength of one bad emit;
+#   * the pause reason told the operator to check credits, key and base URL — advice derived from the
+#     MODEL'S OWN rationale, on an endpoint that was answering fine.
+# Only the first of the two is a provider outage, and only a provider outage should stop the run.
+# Excluding `unanswerable` from `AGENT_TRIAGE_ACTIONS` could never enforce that on its own, because
+# the fail-closed default WAS `unanswerable`: every rejected wire value became the very verdict the
+# exclusion existed to keep off the wire.
 #
 # Registry: the SINGLE spelling of the verdict vocabulary. It is a duck-typed seam across three
 # sites — the triage agent's emit schema (`agents/unified_agent.py::triage_crash`), the engine's
@@ -245,21 +282,53 @@ _MECHANICAL_MARKERS = (
 # fallback below — so a typo'd literal would silently turn a stop into "keep going". Adding a
 # verdict means updating this tuple and `tests/test_repair_stop_decision.py`, which scans the
 # schema against it.
-TRIAGE_ACTIONS = ("repair", "abandon", "reject_idea", "unanswerable")
-# The verdicts a MODEL may emit. `unanswerable` is engine-minted only: a model that emitted it would
-# be asserting its own unreachability, and admitting it from the wire would let a live-but-confused
-# model trip the provider circuit breaker.
+UNANSWERABLE_TRIAGE_ACTION = "unanswerable"
+UNREADABLE_TRIAGE_ACTION = "unreadable"
+TRIAGE_ACTIONS = ("repair", "abandon", "reject_idea", UNANSWERABLE_TRIAGE_ACTION,
+                  UNREADABLE_TRIAGE_ACTION)
+# The verdicts a MODEL may emit. Both engine verdicts are absent: a model that emitted `unanswerable`
+# would be asserting its own unreachability, and one that emitted `unreadable` would be asserting the
+# engine could not read it.
 AGENT_TRIAGE_ACTIONS = ("repair", "abandon", "reject_idea")
-# Fail-closed default. NOT "repair": defaulting a verdict nobody could parse to "keep spending" is
-# precisely how a dead provider produced 2345 in-node repairs on one node, and tonight's watchdog
-# verification found the same shape again (an unparseable verdict silently read as transparent).
-DEFAULT_TRIAGE_ACTION = "unanswerable"
+# Fail-closed default, and it is `unreadable`, NOT `unanswerable` and emphatically NOT "repair".
+# Defaulting a verdict nobody could parse to "keep spending" is precisely how a dead provider produced
+# 2345 in-node repairs on one node. Defaulting it to `unanswerable` is the mirror-image error: it
+# accuses a provider that just answered, and halts a whole run over one malformed emit. "Nobody could
+# read this" and "nobody was there" are different facts, and this default is the first of them.
+DEFAULT_TRIAGE_ACTION = UNREADABLE_TRIAGE_ACTION
+
+# The key an ENGINE-SIDE caller stamps on a verdict to report that it observed the transport fail —
+# `agents/unified_agent.py::triage_crash`'s `_fallback`, which is where `resilient` hands control when
+# the pilot loop could not complete. It is the ONLY way `unanswerable` reaches the engine from a
+# return value, and it is unforgeable from the wire BY CONSTRUCTION: the model answers through a
+# JSON-schema tool call whose properties are action/rationale/missing_dependency, and `_finalize`
+# rebuilds the returned dict from exactly those three, so no model output can ever set this key.
+TRIAGE_TRANSPORT_FAILURE_KEY = "transport_failure"
+
+
+def is_transport_failure_verdict(out) -> bool:
+    """Did the CALLEE report that the transport failed, as opposed to answering something odd?
+
+    The one place that question is spelled, because getting it wrong in either direction is
+    expensive: read a live model's confused emit as a transport failure and one bad answer pauses the
+    run; read a real outage as a confused emit and the loop keeps spending on an endpoint that is
+    gone. Requires BOTH the engine-side marker and the matching action, so a duck-typed researcher
+    has to opt in deliberately rather than by echoing a string."""
+    return (isinstance(out, dict)
+            and out.get(TRIAGE_TRANSPORT_FAILURE_KEY) is True
+            and str(out.get("action", "")).strip().lower() == UNANSWERABLE_TRIAGE_ACTION)
 
 
 def coerce_triage_action(value) -> str:
     """Normalize a triage-supplied action to a member of `AGENT_TRIAGE_ACTIONS`, failing closed to
-    `DEFAULT_TRIAGE_ACTION` ("unanswerable"). One spelling of "is this a real verdict?" for every
-    reader — and the one place that refuses to invent a permissive answer for a malformed one."""
+    `DEFAULT_TRIAGE_ACTION` ("unreadable"). One spelling of "is this a real verdict?" for every
+    reader — and the one place that refuses to invent a permissive answer for a malformed one.
+
+    Note what it does with the literal string "unanswerable": it REJECTS it, like any other
+    non-verdict. This function is the enforcement point of "`unanswerable` is engine-minted only" —
+    the vocabulary tuple only documents it. A transport failure never travels as a bare action
+    string; it carries `TRIAGE_TRANSPORT_FAILURE_KEY` and is recognised by
+    `is_transport_failure_verdict` before this is ever consulted."""
     v = str(value or "").strip().lower()
     return v if v in AGENT_TRIAGE_ACTIONS else DEFAULT_TRIAGE_ACTION
 

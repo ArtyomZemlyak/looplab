@@ -1,4 +1,7 @@
-"""The five decisions `_evaluate`'s attempt loop used to make inline (doc 25 ES-03).
+"""The decisions `_evaluate`'s attempt loop used to make inline (doc 25 ES-03) — five from the
+original split, plus the two the 2026-08-06 durability fix added (`_durable_repair_ledger`,
+`_effective_repair_cap`; their truth tables live in `test_repair_stop_decision.py`, beside the
+resume that drives them).
 
 Each of these was a block of straight-line code in the middle of a 600-line `while`, and that is the
 whole point of the file: to reach any branch of any of them you had to drive a real sandboxed
@@ -267,6 +270,11 @@ def test_the_attempt_loop_reaches_every_rule_it_no_longer_inlines():
     for rule in ("self._eval_failure_text", "self._repaired_footprint",
                  "_repair_provider_failure", "_repair_change_set",
                  "_repair_forces_full_retrain",
+                 # The 2026-08-06 durability pair. `_durable_repair_ledger` is the one whose absence
+                 # is INVISIBLE — drop the call and every counter silently reverts to a process-local
+                 # 0/[], which no outcome test of a single-process run can see (that is exactly how
+                 # the defect shipped). `_effective_repair_cap` is what makes `0` bounded.
+                 "_durable_repair_ledger", "_effective_repair_cap",
                  "self._trust_scan_surface", "self._trust_scan_signals"):
         assert calls.count(rule) == 1, (
             f"`_evaluate` must reach {rule} exactly once (found {calls.count(rule)})")

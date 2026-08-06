@@ -388,10 +388,27 @@ attempt isn't spent and nothing is written to the workdir), terminalizes that no
 `reason="developer_crash"` naming the provider failure, and appends the run-level pause.
 
 **The crash-triage judge runs on that same endpoint**, and it is what decides whether to keep
-repairing — so "the judge did not answer" must never mean "keep repairing". A transport failure, a
-refusal, or an emit that cannot be parsed is an `unanswerable` verdict, and it takes the identical
-exit: node terminalized `developer_crash`, one run-level pause naming the provider, `resume` once it
-is back. Without these, a provider error string was committed as the node's code and re-evaluated:
+repairing — so "the judge did not answer" must never mean "keep repairing". But *how* it failed to
+answer decides how much it stops, because only one of the two ways is evidence about your provider:
+
+| What happened | Verdict | What stops |
+|---|---|---|
+| **Nobody answered** — the call raised, the endpoint was unreachable, a 401/402, the loop never emitted | `unanswerable` | The node (`developer_crash`) **and the run**: one run-level pause naming the provider, `resume` once it is back |
+| **The model answered something unreadable** — an action outside `repair`/`abandon`/`reject_idea`, an empty or missing one, or the literal word `unanswerable` arriving from the wire | `unreadable` | **Only the node**, terminalized like an `abandon` with the eval's own failure reason, so a node reset re-opens it. No pause — the endpoint just answered |
+
+Either way the engine **re-asks once** before acting: one non-answer is not a diagnosis, and a single
+flapped socket used to end a node with zero repair calls where the second ask would have healed it.
+And a `repair`/`abandon`/`reject_idea` never triggers a re-ask, so a healthy run still costs exactly
+one triage call per attempt.
+
+Collapsing those two rows was a real defect and it cost more than it saved: one healthy model
+emitting a single out-of-enum verdict raised a run-level pause carrying no `node_id` (so a node reset
+could not clear it) telling the operator to check credits, key and base URL — using the *model's own*
+rationale as the evidence — and under `eval_parallel > 1` it took every healthy in-flight sibling
+down with it. Excluding `unanswerable` from the schema enum could not prevent that on its own,
+because the *fail-closed default* for an unreadable verdict was `unanswerable`.
+
+Without any of this, a provider error string was committed as the node's code and re-evaluated:
 one real run turned an out-of-credits `402` into **2345 `node_repaired` events on a single node over
 3.5 hours**. Use [`looplab timings RUN_DIR`](cli-reference.md#timings) to see where a run's
 wall-clock actually went (LLM vs eval vs repair vs tools, per node **and** run-level, reconciled

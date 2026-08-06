@@ -575,12 +575,20 @@ class Settings(BaseSettings):
     # this" — stops the node (`engine/evaluate.py`). That call is not an extra cost: the loop already
     # made exactly one triage call per attempt to decide repair-vs-reject.
     #
-    # 0 = UNLIMITED, which is what this shipped as and what an existing run resumes with
-    # (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`). It is no longer the default, because a cap is the only
-    # thing that bounds the case where the judge cannot help: it is wrong in the expensive
-    # direction, or the endpoint answering it is degraded rather than dead (a dead one is caught —
-    # an unanswerable judge stops the node and pauses the run naming the provider). Under 0 a single
-    # node reached 2345 `node_repaired` events over 3.5 h on a dead provider.
+    # 0 = NO OPERATOR CAP, which is what this shipped as and what an existing run resumes with
+    # (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`, 38 of the 46 preserved run directories). It is no longer
+    # the default, because a cap is the only thing that bounds the case where the judge cannot help:
+    # it is wrong in the expensive direction, or the endpoint answering it is degraded rather than
+    # dead (a dead one is caught — an UNREACHABLE judge stops the node and pauses the run naming the
+    # provider; a live one answering something unreadable stops only the node). Under 0 a single node
+    # reached 2345 `node_repaired` events over 3.5 h on a dead provider.
+    #
+    # 0 NO LONGER MEANS UNBOUNDED (2026-08-06). The grandfathering above stands — nobody silently
+    # acquires a 12 mid-run — but behind it the engine keeps an absolute ceiling of its own,
+    # `engine/evaluate.py::_UNLIMITED_REPAIR_CEILING` (50), and the terminal names which of the two
+    # stopped the node. Measured on the shipped loop: with an always-`repair` judge under 0 one node
+    # ran 795 repairs / 796 full evals in 45 s with no terminal — i.e. on the incident's OWN snapshot
+    # (`runs/rubert-dr-0804` carries 0), this redesign still did not prevent it.
     #
     # WHY 12. It has to clear the longest legitimate chain on record with margin: `runs/rubert-dr-0805`
     # node 0 needed 8 repairs — six PyTorch-Lightning/transformers/accelerate migrations of a repo

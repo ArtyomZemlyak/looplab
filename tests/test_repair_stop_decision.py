@@ -8,10 +8,13 @@ count, or let a model decide — the loop now uses the model, with a cap as a ba
     actually touched, how far the pipeline got. Its `abandon` verdict is the stop, and it means
     exactly "I no longer know how to fix this";
   * `inline_repair_attempts` is a HARD operator cap for when the judge is wrong in the expensive
-    direction;
-  * anything that means the judge could not ANSWER — a dead endpoint, a refusal, an emit nobody can
-    parse — is `unanswerable`, which stops the node AND pauses the run naming the provider. It is
-    never read as permission to keep repairing.
+    direction — and since 2026-08-06 it is charged against the DURABLE `node_repaired` rows, so a
+    resume continues a node's repair chain rather than restarting it (`test_the_budget_and_the_history_survive_a_resume`);
+  * a judge that produced no usable verdict is never read as permission to keep repairing — and the
+    two ways that happens are two different verdicts, because they are two different facts:
+    `unanswerable` (the TRANSPORT failed) stops the node AND pauses the run naming the provider,
+    while `unreadable` (the model answered something outside the vocabulary) stops only the node.
+    Both are re-asked once first: one non-answer is not a diagnosis.
 
 WHAT IT REPLACES, and why. Two heuristics, both removed:
 
@@ -41,8 +44,13 @@ import pytest
 from looplab.adapters.toytask import ToyTask
 from looplab.core.models import Idea, NodeStatus
 from looplab.engine.orchestrator import Engine, _rule_triage
-from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION, TRIAGE_ACTIONS,
-                                   coerce_triage_action, repair_artifact_defect)
+from looplab.engine.evaluate import (_UNLIMITED_REPAIR_CEILING, _durable_repair_ledger,
+                                     _effective_repair_cap)
+from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
+                                   TRIAGE_ACTIONS, TRIAGE_TRANSPORT_FAILURE_KEY,
+                                   UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION,
+                                   _TRIAGE_REASK_LIMIT, coerce_triage_action,
+                                   is_transport_failure_verdict, repair_artifact_defect)
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.runtime import deps
@@ -164,22 +172,71 @@ def test_triage_verdict_vocabulary_has_one_spelling():
     src = inspect.getsource(unified_agent.UnifiedAgent.triage_crash)
     assert '"enum": list(AGENT_TRIAGE_ACTIONS)' in src, (
         "the emit schema must read the enum from the registry, never re-spell it")
-    assert set(TRIAGE_ACTIONS) == {"repair", "abandon", "reject_idea", "unanswerable"}
-    # `unanswerable` is ENGINE-minted: a live model must not be able to claim its own
-    # unreachability and trip the run-level provider circuit breaker.
-    assert "unanswerable" not in AGENT_TRIAGE_ACTIONS
+    assert set(TRIAGE_ACTIONS) == {"repair", "abandon", "reject_idea", "unanswerable", "unreadable"}
+    # Both ENGINE verdicts are off the wire: a live model must not be able to claim its own
+    # unreachability (and trip the run-level provider circuit breaker), nor to assert that the engine
+    # could not read it.
+    assert UNANSWERABLE_TRIAGE_ACTION not in AGENT_TRIAGE_ACTIONS
+    assert UNREADABLE_TRIAGE_ACTION not in AGENT_TRIAGE_ACTIONS
     assert set(AGENT_TRIAGE_ACTIONS) < set(TRIAGE_ACTIONS)
 
 
 def test_a_verdict_nobody_can_parse_is_not_permission_to_continue():
-    """The fail-closed direction, at the coercion. This defaulted to `repair` — "the cheap, safe
-    action" — which is only cheap if a repair is cheap: each one is a full re-eval plus two LLM
-    calls."""
-    for bad in (None, "", "REPAIR!", "keep going", 7, {"a": 1}, "unanswerable"):
-        assert coerce_triage_action(bad) == DEFAULT_TRIAGE_ACTION == "unanswerable"
+    """The fail-closed direction, at the coercion — and WHICH fail-closed verdict it produces.
+
+    It defaulted to `repair` ("the cheap, safe action", only cheap if a repair is cheap: each one is
+    a full re-eval plus two LLM calls). It then defaulted to `unanswerable`, which was the
+    mirror-image error — that verdict accuses the PROVIDER and halts the run, and this branch is
+    reached precisely when a provider answered. It is `unreadable`.
+
+    The literal string "unanswerable" is rejected here like any other non-verdict, and THIS is the
+    enforcement of "engine-minted only": `AGENT_TRIAGE_ACTIONS` merely documents it, and while the
+    default WAS `unanswerable` the exclusion was self-defeating — every rejected wire value became
+    the very verdict the exclusion existed to keep off the wire."""
+    for bad in (None, "", "REPAIR!", "keep going", 7, {"a": 1}, "unanswerable", "unreadable"):
+        assert coerce_triage_action(bad) == DEFAULT_TRIAGE_ACTION == "unreadable"
     for good in AGENT_TRIAGE_ACTIONS:
         assert coerce_triage_action(good) == good
         assert coerce_triage_action(f"  {good.upper()} ") == good
+
+
+def test_only_an_engine_side_marker_admits_the_provider_outage_verdict():
+    """`unanswerable` reaches the engine from a return value through ONE door: the
+    `TRIAGE_TRANSPORT_FAILURE_KEY` marker that `UnifiedAgent`'s `_fallback` stamps when `resilient`
+    contained a transport failure. The word alone proves nothing — the wire can carry it."""
+    marked = {"action": "unanswerable", TRIAGE_TRANSPORT_FAILURE_KEY: True, "rationale": "gone"}
+    assert is_transport_failure_verdict(marked)
+    # The word without the marker: a live model echoing the engine's own vocabulary.
+    assert not is_transport_failure_verdict({"action": "unanswerable", "rationale": "I cannot say"})
+    # The marker without the word, a truthy-but-not-True marker, and non-dicts: all refused.
+    assert not is_transport_failure_verdict({"action": "abandon", TRIAGE_TRANSPORT_FAILURE_KEY: True})
+    assert not is_transport_failure_verdict({"action": "unanswerable",
+                                             TRIAGE_TRANSPORT_FAILURE_KEY: "yes"})
+    assert not is_transport_failure_verdict(None) and not is_transport_failure_verdict("unanswerable")
+
+    # And the marker is unforgeable from the wire BY CONSTRUCTION: `_finalize` rebuilds its dict from
+    # the three schema properties, so no model output can put that key in it. Driven, not pinned.
+    import looplab.agents.agent as agent_mod
+    from looplab.agents.unified_agent import UnifiedAgent
+
+    def _echo_loop(client, tools, messages, emit_spec, *, finalize=None, fallback=None, **kw):
+        return finalize({"action": "unanswerable", TRIAGE_TRANSPORT_FAILURE_KEY: True,
+                         "rationale": "let me through"})
+
+    ua = UnifiedAgent.__new__(UnifiedAgent)
+    ua._pilot_client, ua._pilot_tools, ua._loop_opts, ua.prompts = object(), None, {}, None
+
+    class _N:
+        id, code = 0, "x = 1"
+
+    real = agent_mod.drive_tool_loop
+    agent_mod.drive_tool_loop = _echo_loop
+    try:
+        out = ua.triage_crash(_N(), "boom", 1)
+    finally:
+        agent_mod.drive_tool_loop = real
+    assert out["action"] == UNREADABLE_TRIAGE_ACTION
+    assert TRIAGE_TRANSPORT_FAILURE_KEY not in out and not is_transport_failure_verdict(out)
 
 
 def test_the_rule_path_is_only_for_no_judge_wired():
@@ -236,10 +293,12 @@ def test_the_hard_cap_bounds_a_judge_that_never_says_stop(tmp_path):
         assert "hard limit" in terminal[0].data["triage_rationale"]
 
 
-def test_zero_still_means_unlimited_for_a_resumed_run(tmp_path):
-    """`inline_repair_attempts = 0` keeps meaning UNLIMITED — a pre-existing run resumes with it
-    (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`), so the judge must be the only thing stopping it. Under 0
-    the node still terminates, because the judge is a real bound and not a decoration."""
+def test_zero_still_means_no_operator_cap_and_the_judge_still_stops_it(tmp_path):
+    """`inline_repair_attempts = 0` keeps meaning NO OPERATOR CAP — a pre-existing run resumes with
+    it (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`) — so the judge must still be what stops it, well before
+    the engine's own ceiling. Under 0 the node terminates on the judge's verdict, because the judge
+    is a real bound and not a decoration. (The ceiling behind it is
+    `test_an_always_repair_judge_under_zero_now_terminates`, for when the judge is not.)"""
     dev = _ScriptedDev([], first=_lazy_import_src("AlphaProcessor"), cycle=True)
     evs, _ = _drive(tmp_path, dev, _StopWhenCircling(), inline_repair_attempts=0)
 
@@ -307,21 +366,30 @@ def test_a_node_going_in_circles_is_cut_off_but_a_moving_one_is_not(tmp_path):
 
 
 # ------------------------------------------------------------------- fail-closed: no judge, no go
-def test_a_judge_that_cannot_answer_stops_the_node_and_pauses_the_run(tmp_path):
+def test_a_judge_that_cannot_be_reached_stops_the_node_and_pauses_the_run(tmp_path):
     """THE case the redesign must not get wrong. A dead provider is how the 2345-repair incident
-    began, and the judge runs on that same provider — so "the judge did not answer" must never mean
-    "keep repairing". It lands on the developer-crash circuit breaker: no repair, ONE terminal
-    naming `developer_crash`, and ONE run-level pause the operator can `resume` from."""
+    began, and the judge runs on that same provider — so "the judge could not be reached" must never
+    mean "keep repairing". It lands on the developer-crash circuit breaker: no repair, ONE terminal
+    naming `developer_crash`, and ONE run-level pause the operator can `resume` from.
+
+    This is the half that must SURVIVE the 2026-08-06 split: only a transport failure halts the run,
+    and a transport failure still does."""
 
     class _DeadJudge(_Judge):
         def triage_crash(self, node, error, attempt, **kw):
+            self.calls.append({"attempt": attempt})
             raise RuntimeError("Error code: 402 - out of credits")
 
     dev = _ScriptedDev([], first=_lazy_import_src("AlphaProcessor"), cycle=True)
-    evs, _ = _drive(tmp_path, dev, _DeadJudge(), inline_repair_attempts=12)
+    judge = _DeadJudge()
+    evs, _ = _drive(tmp_path, dev, judge, inline_repair_attempts=12)
 
     assert _repairs(evs) == []                       # nothing was repaired blind
     assert dev.repair_calls == 0
+    # …but it was ASKED TWICE before the node was written off. One flapped socket must not cost a
+    # whole node: before the re-ask, a single `ConnectionError` on attempt 1 ended the node with
+    # `developer.repair` calls = 0, where the second ask would have healed it.
+    assert len(judge.calls) == 1 + _TRIAGE_REASK_LIMIT
     terminal = _terminals(evs)
     assert len(terminal) == 1 and terminal[0].data["reason"] == "developer_crash"
     assert "402" in terminal[0].data["error"]
@@ -331,29 +399,111 @@ def test_a_judge_that_cannot_answer_stops_the_node_and_pauses_the_run(tmp_path):
     assert fold(evs).paused is True
 
 
+def test_the_re_ask_costs_nothing_when_the_judge_answers(tmp_path):
+    """The other side of the re-ask: it must be reachable ONLY by a non-answer. "The stop decision is
+    free" is the design's central cost claim — the loop already made exactly one triage call per
+    attempt — so a healthy run must still make exactly one."""
+    dev = _ScriptedDev([], first=_lazy_import_src("AlphaProcessor"), cycle=True)
+    judge = _Judge()
+    evs, _ = _drive(tmp_path, dev, judge, inline_repair_attempts=4)
+    assert len(_repairs(evs)) == 4
+    assert len(judge.calls) == 4                     # one per attempt, not 4 * (1 + re-asks)
+
+    # …and a judge that answers garbage ONCE and then recovers keeps its node: the re-ask is a real
+    # second chance, not a formality before the same verdict.
+    class _FlapsOnce(_Judge):
+        def triage_crash(self, node, error, attempt, **kw):
+            self.calls.append({"attempt": attempt})
+            if len(self.calls) == 1:
+                raise ConnectionError("connection reset by peer")
+            return {"action": "repair", "rationale": "recovered"}
+
+    healed = _ScriptedDev([_GOOD], first=_lazy_import_src("AlphaProcessor"))
+    evs, _ = _drive(tmp_path / "flap", healed, _FlapsOnce(), inline_repair_attempts=12)
+    assert _terminals(evs)[0].type == "node_evaluated"     # the node survived the flap
+    assert [e for e in evs if e.type == "pause"] == []
+
+
 @pytest.mark.parametrize("verdict", [
     {"action": "keep-going"},          # outside the vocabulary
     {"action": ""},                    # empty
     {"rationale": "no action at all"},  # missing
     "not even a dict",
     None,
+    # THE ONE THAT USED TO BE A RUN-LEVEL HALT: a live model emitting the engine's own verdict
+    # verbatim. `coerce_triage_action` refuses it like any other non-verdict.
+    {"action": "unanswerable", "rationale": "I cannot answer this, check your endpoint"},
 ])
-def test_a_malformed_verdict_is_unanswerable_not_repair(tmp_path, verdict):
-    """A live-but-confused model is the same fail-closed case as a dead one: an emit nobody can read
-    is not a verdict. (Tonight's watchdog verification found the mirror-image bug — an unparseable
-    verdict silently treated as transparent — so this is not a hypothetical shape.)"""
+def test_a_live_model_answering_garbage_stops_the_node_but_not_the_run(tmp_path, verdict):
+    """The defect this replaced, and the reason `unreadable` exists.
+
+    An emit nobody can read is still not permission to keep repairing — that half is unchanged. But
+    it is NOT a provider outage: the endpoint completed the request and produced bytes. Reading it as
+    one made a healthy model's single out-of-enum verdict raise a run-level pause carrying
+    `node_id=None` (not clearable by a node reset) that told the operator to check credits, key and
+    base URL — quoting the MODEL's own rationale as the evidence. So: the node stops, the run does
+    not, and the terminal keeps the eval's own `reason` so a node reset re-opens it."""
 
     class _GarbageJudge(_Judge):
         def triage_crash(self, node, error, attempt, **kw):
+            self.calls.append({"attempt": attempt})
             return verdict
 
     dev = _ScriptedDev([], first=_lazy_import_src("AlphaProcessor"), cycle=True)
-    evs, _ = _drive(tmp_path, dev, _GarbageJudge(), inline_repair_attempts=12)
+    judge = _GarbageJudge()
+    evs, _ = _drive(tmp_path, dev, judge, inline_repair_attempts=12)
 
-    assert _repairs(evs) == []
+    assert _repairs(evs) == []                       # still nothing repaired blind …
+    assert len(judge.calls) == 1 + _TRIAGE_REASK_LIMIT       # … and still re-asked first
     terminal = _terminals(evs)
-    assert len(terminal) == 1 and terminal[0].data["reason"] == "developer_crash"
-    assert len([e for e in evs if e.type == "pause"]) == 1
+    assert len(terminal) == 1 and terminal[0].data["reason"] == "crash"   # NOT developer_crash
+    assert [e for e in evs if e.type == "pause"] == []                    # and NO run-level pause
+    assert fold(evs).paused is False
+    assert "could not read" in terminal[0].data["triage_rationale"]
+
+
+def test_one_unreadable_verdict_does_not_take_healthy_siblings_down(tmp_path):
+    """The cost of the old reading, made concrete. A run-level pause halts the RUN, so under
+    `eval_parallel > 1` one node's bad emit terminalized every healthy in-flight sibling with it.
+    Here node 0's judge answers garbage while nodes 1-3 are judged normally — and only node 0 stops
+    early."""
+
+    class _GarbageForNodeZero(_Judge):
+        def triage_crash(self, node, error, attempt, **kw):
+            self.calls.append({"node": getattr(node, "id", None)})
+            if getattr(node, "id", None) == 0:
+                return {"action": "keep_going", "rationale": "not a verdict"}
+            return {"action": "repair", "rationale": "fix it"}
+
+    run_dir = tmp_path / "run"
+    dev = _ScriptedDev([], first=_lazy_import_src("AlphaProcessor"), cycle=True)
+    eng = Engine(run_dir, task=ToyTask.load(TASK), researcher=_GarbageForNodeZero(), developer=dev,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=4, max_nodes=4),
+                 auto_install_deps=False, inline_repair=True, inline_repair_attempts=2)
+    eng.store.append("run_started",
+                     {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    for nid in range(4):
+        eng.store.append("node_created", {
+            "node_id": nid, "parent_ids": [], "operator": "draft",
+            "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
+            "code": dev.implement(None)})
+
+    async def _run_siblings() -> bool:
+        limiter = anyio.CapacityLimiter(4)
+        with anyio.move_on_after(120) as scope:
+            async with anyio.create_task_group() as tg:
+                for nid in range(4):
+                    tg.start_soon(eng._evaluate, nid, limiter, None)
+        return scope.cancelled_caught
+
+    assert not anyio.run(_run_siblings), "the sibling evals did not terminate"
+    evs = list(EventStore(run_dir / "events.jsonl").read_all())
+    assert [e for e in evs if e.type == "pause"] == []
+    assert not fold(evs).paused
+    # Node 0 spent nothing; every healthy sibling still spent its full budget on its own node.
+    repaired = {nid: len([e for e in evs if e.type == "node_repaired"
+                          and e.data.get("node_id") == nid]) for nid in range(4)}
+    assert repaired[0] == 0 and all(repaired[nid] == 2 for nid in (1, 2, 3)), repaired
 
 
 def test_an_older_triage_crash_signature_is_not_read_as_a_dead_provider(tmp_path):
@@ -391,20 +541,225 @@ def test_an_older_triage_crash_signature_is_not_read_as_a_dead_provider(tmp_path
     assert _accepted_kwargs(len, {"history": "h"}) == {}                  # unintrospectable -> none
 
 
-def test_the_agent_fallbacks_fail_closed_too():
-    """The same rule one layer down, where the transport failure is actually observed. Both of
-    `UnifiedAgent.triage_crash`'s degradation paths answered "attempt repair"; they now answer the
-    engine's fail-closed action, so a dead endpoint cannot drive the loop with no model in it."""
+def test_the_agent_fallbacks_fail_closed_and_do_it_DIFFERENTLY():
+    """The same rule one layer down, where the transport failure is actually observed — DRIVEN, not
+    pinned. Both of `UnifiedAgent.triage_crash`'s degradation paths answered "attempt repair"; they
+    then both answered `unanswerable`, which collapsed the one distinction the layer exists to make.
+    `_finalize` is reached BY an answer and `_fallback` INSTEAD of one, so only the second is
+    evidence about the provider.
+
+    (This used to be `body.count("DEFAULT_TRIAGE_ACTION") >= 2` over the source text, which the
+    comment on the very branch it guards would satisfy on its own — CLAUDE.md's "a guard test must
+    not be satisfiable by a COMMENT". Both properties are now behavioural.)"""
     import inspect
 
+    import looplab.agents.agent as agent_mod
     from looplab.agents import unified_agent
+    from looplab.agents.tool_loop import resilient
+    from looplab.agents.unified_agent import UnifiedAgent
 
-    src = inspect.getsource(unified_agent.UnifiedAgent.triage_crash)
-    body = src.split("def _finalize", 1)[1]
+    # NEGATIVE pin (CLAUDE.md keeps these as substrings on purpose): what must not come back is the
+    # TEXT of a degradation path answering "repair".
+    body = inspect.getsource(unified_agent.UnifiedAgent.triage_crash).split("def _finalize", 1)[1]
     assert 'action = "repair"' not in body and '"action": "repair"' not in body, (
         "a degradation path still answers 'repair' — that is the reading that let a dead provider "
         "keep the repair loop at full speed")
-    assert body.count("DEFAULT_TRIAGE_ACTION") >= 2      # the malformed emit AND the transport path
+
+    ua = UnifiedAgent.__new__(UnifiedAgent)
+    ua._pilot_client, ua._pilot_tools, ua._loop_opts, ua.prompts = object(), None, {}, None
+
+    class _N:
+        id, code = 0, "x = 1"
+
+    def _with_loop(loop):
+        real = agent_mod.drive_tool_loop
+        agent_mod.drive_tool_loop = loop
+        try:
+            return ua.triage_crash(_N(), "boom", 1)
+        finally:
+            agent_mod.drive_tool_loop = real
+
+    # THE MODEL ANSWERED, out of enum -> `unreadable`, carrying no provider accusation.
+    confused = _with_loop(lambda c, t, m, spec, *, finalize=None, fallback=None, **kw:
+                          finalize({"action": "keep_going", "rationale": "just fix the typo"}))
+    assert confused["action"] == UNREADABLE_TRIAGE_ACTION
+    assert not is_transport_failure_verdict(confused)
+
+    # NOBODY ANSWERED — `resilient` contains the transport error and hands over to `_fallback`.
+    def _dead(client, tools, messages, emit_spec, *, finalize=None, fallback=None, **kw):
+        def _boom():
+            raise ConnectionError("connection reset by peer")
+        return resilient(_boom, lambda: fallback(messages))
+
+    outage = _with_loop(_dead)
+    assert outage["action"] == UNANSWERABLE_TRIAGE_ACTION
+    assert is_transport_failure_verdict(outage), (
+        "the transport fallback must stamp the engine-side marker, or the engine reads a real "
+        "outage as an ordinary unreadable answer and never pauses the run")
+
+
+# ------------------------------------------------------- the ledger is the LOG's, not the process's
+def test_the_budget_and_the_history_survive_a_resume(tmp_path):
+    """INVARIANT #3, and the defect that broke it. `attempt`, the judge's `repair_log` and the
+    unparseable-answer counter were plain `_evaluate` locals initialized to 0/[] , and nothing folds
+    them (`replay.py::_on_node_repaired` mutates code and files only). So every re-entry — `looplab
+    resume`, a crashed process, and above all the operator-resumed PAUSE this design prescribes as
+    the recovery from a dead judge — restarted the hard budget at zero and showed the judge an empty
+    history for a node that already had durable repairs. A flapping provider therefore looped
+    pause -> resume -> fresh budget forever.
+
+    Driven the way it actually happens: a SECOND `Engine` over the same run directory, which is what
+    `looplab resume` builds."""
+    cap = 4
+    run_dir = tmp_path / "run"
+
+    def _engine(judge, dev):
+        return Engine(run_dir, task=ToyTask.load(TASK), researcher=judge, developer=dev,
+                      sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                      auto_install_deps=False, inline_repair=True, inline_repair_attempts=cap)
+
+    class _StopAfter(_ScriptedDev):
+        """Ends the process's eval mid-loop, exactly as a kill does: the node is left PENDING with
+        durable `node_repaired` rows and no terminal."""
+
+        def __init__(self, n):
+            super().__init__([], first=_lazy_import_src("AlphaProcessor"), cycle=True)
+            self.n = n
+
+        def repair(self, idea, code, error):
+            if self.repair_calls >= self.n:
+                raise _Kill()
+            return super().repair(idea, code, error)
+
+    class _Kill(BaseException):
+        """A BaseException so `_evaluate`'s `except Exception` containment cannot absorb it."""
+
+    dev = _StopAfter(2)
+    eng = _engine(_Judge(), dev)
+    eng.store.append("run_started",
+                     {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
+        "code": dev.implement(None)})
+
+    async def _first() -> None:
+        await eng._evaluate(0, anyio.CapacityLimiter(1), None)
+
+    with pytest.raises(_Kill):
+        anyio.run(_first)
+    mid = list(EventStore(run_dir / "events.jsonl").read_all())
+    assert len(_repairs(mid)) == 2 and _terminals(mid) == []      # pending, two durable repairs
+    assert fold(mid).nodes[0].status is NodeStatus.pending
+
+    # A fresh process: new Engine, new judge, new developer, same run directory.
+    judge2 = _Judge()
+    dev2 = _ScriptedDev([], first=_lazy_import_src("AlphaProcessor"), cycle=True)
+    eng2 = _engine(judge2, dev2)
+
+    async def _resume() -> bool:
+        with anyio.move_on_after(120) as scope:
+            await eng2._evaluate(0, anyio.CapacityLimiter(1), None)
+        return scope.cancelled_caught
+
+    assert not anyio.run(_resume), "the resumed repair loop did not terminate"
+    evs = list(EventStore(run_dir / "events.jsonl").read_all())
+
+    # THE BUDGET CONTINUED. 4 total across both processes, not 2 + 4; the attempt numbers are one
+    # monotone chain, which is what makes them a ledger rather than two overlapping ones.
+    assert len(_repairs(evs)) == cap
+    assert [e.data["attempt"] for e in _repairs(evs)] == [1, 2, 3, 4]
+    assert dev2.repair_calls == 2                    # the resume only spent what was left
+    terminal = _terminals(evs)
+    assert len(terminal) == 1 and terminal[0].type == "node_failed"
+    assert "hard limit" in terminal[0].data["triage_rationale"]
+
+    # THE HISTORY CONTINUED. The judge in the FRESH process was shown the earlier process's
+    # attempts — it is handed the trajectory precisely so it can tell "moving" from "circling", and
+    # it saw none of it before this fix.
+    assert judge2.calls, "the resumed loop never consulted the judge"
+    first_after_resume = judge2.calls[0]
+    assert "attempt 1:" in first_after_resume["history"], first_after_resume["history"]
+    assert "attempt 2:" in first_after_resume["history"]
+    assert first_after_resume["attempts_left"] == 2          # not `cap`
+    # …and the rows carry the evidence columns, from the DURABLE event rather than a lost local.
+    assert "it changed:" in first_after_resume["history"]
+    assert "not recorded" not in first_after_resume["history"]
+
+
+def test_the_durable_ledger_is_generation_scoped_and_reads_old_rows(tmp_path):
+    """The ledger's own truth table. A `node_reset` opens a new lifecycle whose budget genuinely
+    starts fresh, so an abandoned generation's rows must not charge it — while a row written before
+    the evidence columns existed must still COUNT, and must be distinguishable from one that changed
+    nothing (`_format_repair_log` renders the two differently, and "changed nothing twice" is
+    exactly what a circling chain looks like)."""
+    from looplab.engine.crash_repair import _format_repair_log
+    from looplab.events.eventstore import Event
+
+    def _ev(**data):
+        return Event(v=1, seq=0, ts=0.0, type="node_repaired", data=data)
+
+    rows = [
+        _ev(node_id=0, generation=0, attempt=1, error_in="boom one", rationale="fix A",
+            changed=["a.py"], stages_passed=1, unparseable_repairs=0),
+        _ev(node_id=0, generation=0, attempt=2, error_in="boom two", rationale="fix B",
+            changed=[], stages_passed=2, unparseable_repairs=2),
+        _ev(node_id=1, generation=0, attempt=9, error_in="another node", rationale="x"),
+        _ev(node_id=0, generation=1, attempt=1, error_in="a newer lifecycle", rationale="y"),
+        _ev(node_id=0, attempt=3, error_in="boom three", rationale="fix C"),   # unstamped (old log)
+    ]
+    n, hist, unparseable = _durable_repair_ledger(rows, 0, 0)
+    assert n == 3                                    # this node, this generation, incl. the unstamped
+    assert [r["attempt"] for r in hist] == [1, 2, 3]
+    assert unparseable == 2                          # the max, not the last
+    # A RESET LIFECYCLE STARTS FRESH: generation 0's rows do not charge generation 1's budget.
+    assert [r["error"] for r in _durable_repair_ledger(rows[:4], 0, 1)[1]] == ["a newer lifecycle"]
+    # …and an UNSTAMPED row binds to whichever lifecycle is asking, exactly as
+    # `replay._generation_matches` treats it: a log written before generations were stamped has no
+    # way to say which one it belongs to, and charging it to the current one is the safe direction
+    # (it can only shorten a budget, never extend it past the cap).
+    assert _durable_repair_ledger(rows, 0, 1)[0] == 3
+    assert _durable_repair_ledger(rows, 7, 0) == (0, [], 0)  # a node with no repairs
+    assert _durable_repair_ledger([], 0, 0) == (0, [], 0)
+    # A stamp that is PRESENT but invalid (an explicit null) is rejected, not read as unstamped —
+    # `replay._event_generation` treats it the same way, and the fold would drop such a row.
+    assert _durable_repair_ledger([_ev(node_id=0, generation=None, attempt=1)], 0, 0)[0] == 0
+
+    rendered = _format_repair_log(hist)
+    assert "it changed: a.py" in rendered
+    assert "it changed: nothing" in rendered                       # the empty list …
+    assert "it changed: (not recorded" in rendered                 # … is NOT the missing column
+
+
+def test_zero_means_no_operator_cap_and_gets_the_engine_ceiling():
+    """WHAT AN OPERATOR WITH `inline_repair_attempts: 0` GETS, stated as a truth table.
+
+    `0` is what 38 of the 46 preserved run snapshots carry, INCLUDING `runs/rubert-dr-0804` — the
+    2345-repair incident this whole redesign was built for. It kept meaning "unbounded", and
+    unbounded was measured to be exactly nothing: an always-`repair` judge under 0 ran 795 repairs /
+    796 full evals in 45 s with no terminal, i.e. on its OWN snapshot the incident was still not
+    prevented. `0` still means no OPERATOR cap (the grandfathering in
+    `core/config.py::LEGACY_CONFIG_SNAPSHOT_DEFAULTS` stands and nobody silently acquires a 12
+    mid-run) — but the engine keeps a ceiling of its own behind it."""
+    assert _effective_repair_cap(0) == _UNLIMITED_REPAIR_CEILING
+    assert _UNLIMITED_REPAIR_CEILING > 12, "the ceiling must not silently re-cap an uncapped run"
+    for n in (1, 5, 8, 12, 99):
+        assert _effective_repair_cap(n) == n         # an explicit cap is never widened or narrowed
+
+
+def test_an_always_repair_judge_under_zero_now_terminates(tmp_path):
+    """The 2345-repair shape, on a snapshot that says `0`: an alive judge that always says "repair"
+    and a node that never stops crashing. It must terminalize, and the terminal must not read as if
+    the operator had chosen 50."""
+    dev = _ScriptedDev([], first=_lazy_import_src("AlphaProcessor"), cycle=True)
+    evs, _ = _drive(tmp_path, dev, _Judge(), inline_repair_attempts=0, wall=300)
+
+    assert len(_repairs(evs)) == _UNLIMITED_REPAIR_CEILING
+    terminal = _terminals(evs)
+    assert len(terminal) == 1 and terminal[0].type == "node_failed"
+    why = terminal[0].data["triage_rationale"]
+    assert "absolute ceiling" in why and "inline_repair_attempts is 0" in why
+    assert "hard limit" not in why, "a run with no operator cap must not be told it hit one"
 
 
 def test_a_repair_that_is_not_a_program_is_a_provider_failure_not_a_fix():
