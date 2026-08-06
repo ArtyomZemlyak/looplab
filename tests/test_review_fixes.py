@@ -262,9 +262,10 @@ def test_review_cost_saturates_giant_token_counter():
     assert out["total_tokens"] == 2**63 - 1
     assert out["calls"] == 5
     assert out["cost"] == 2.5
-    # a normal payload is untouched
+    # a normal payload is untouched — apart from `recorded`, which every body now carries so a
+    # reviewer can tell a measured zero from a roll-up that was never written at all.
     normal = _review_cost({"total_tokens": 1234, "calls": 3, "cost": 0.7})
-    assert normal == {"total_tokens": 1234, "calls": 3, "cost": 0.7}
+    assert normal == {"total_tokens": 1234, "calls": 3, "cost": 0.7, "recorded": True}
 
 
 # ------------------------------------------------- R5-DE4: review scrub bounds its recursion (no 500)
