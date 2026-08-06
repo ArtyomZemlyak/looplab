@@ -32,8 +32,9 @@ GROUPS = {
     "concept_cmds": {"concept-coverage", "asset-brief", "lock-in", "board-dedup",
                      "research-targets", "novelty-recall", "lesson-guard"},
     "governance_cmds": {"cross-run-concepts", "cross-run-index", "concept-merge", "concept-split",
-                        "concept-steward", "claim-decide", "task-facets", "task-facets-set",
-                        "claim-steward", "cross-run-digest", "cross-run-search", "atlas", "claims"},
+                        "concept-steward", "concept-ratify", "claim-decide", "task-facets",
+                        "task-facets-set", "claim-steward", "cross-run-digest", "cross-run-search",
+                        "atlas", "claims"},
 }
 
 

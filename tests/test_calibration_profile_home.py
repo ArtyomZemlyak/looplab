@@ -41,11 +41,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 # Field-set history:
 #   2026-08-04  + asha_live_kill_confidence  (ASHA live-kill LLM judge)
 #   2026-08-05  - inline_repair_stuck_repeat (see the second history block below)
+#   2026-08-06  + concept_tidy               (cross-run concept ratification; see below)
 # A LITERAL, measured on the tree. Both halves must stay literals: an earlier attempt at this guard
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:1f49ef0c19ab53b160ef0dae2baee59c97e8dfc59d630f2c89e082acb031f650"
+_EXPECTED_DIGEST = "sha256:f5c768a14dd8e74776a7320214a2ecb55df95886ed9fd36e867863b74b4a8248"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -56,7 +57,13 @@ _EXPECTED_DIGEST = "sha256:1f49ef0c19ab53b160ef0dae2baee59c97e8dfc59d630f2c89e08
 #               calibration envelope really is different — the inline-repair loop that a speculative
 #               node's eval runs under is bounded differently now — so previously-issued receipts
 #               SHOULD stop verifying, and BOTH pins are re-set deliberately.
-_EXPECTED_FIELD_COUNT = 190
+#   2026-08-06  + concept_tidy                (the cross-run concept RATIFICATION stage). Also the
+#               "field set changed too" branch, though this knob is OFF in the calibration profile
+#               and cannot execute during a calibration run: it needs a `memory_dir`, which the
+#               profile pins to None. The envelope is still a different envelope — the profile is a
+#               COMPLETE settings map, so a new field changes it whatever its value — and the guard
+#               is deliberately not clever enough to exempt an inert knob. Both pins re-set.
+_EXPECTED_FIELD_COUNT = 191
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

@@ -140,6 +140,7 @@ ATTR_BY_FIELD = {
     "cross_run_structured_claims": "_cross_run_structured_claims",
     "cross_run_curation": "_cross_run_curation",
     "cross_run_curation_auto": "_cross_run_curation_auto",
+    "concept_tidy": "_concept_tidy",
     "cross_run_read_tools": "_cross_run_read_tools",
     "phase_handoff_summary": "_phase_handoff_summary",
     "inline_repair_retrain_cap": "_inline_repair_retrain_cap",
