@@ -112,8 +112,11 @@ class AppState:
         self.reviews = reviews or ReviewStore(root / ".reviews")
         self.commands = RunCommandService(self)
         self.resume_cancel = resume_cancel
-        # File identity + content metadata mirror state_payload's reset-safe cache signature.
-        self.summary_cache: dict[str, tuple] = {}  # run_id -> (ino, ctime_ns, size, mtime_ns, summary)
+        # Keyed on `atomicio.file_identity` — the SAME canonical signature `state_payload`'s
+        # reset-safe cache key is built from, not a narrower mirror of it. The comment here used to
+        # claim that equivalence while `run_projections` spelled the tuple by hand minus `st_dev` and
+        # the Windows reparse field, which is how the two drifted apart unnoticed (doc 25 SC-11).
+        self.summary_cache: dict[str, tuple] = {}  # run_id -> (file_identity(events.jsonl), summary)
         # Per-run folded-state cache keyed by (size, mtime, upto_seq): state_payload re-read + re-folded
         # the WHOLE events.jsonl on every SSE tick (every ~0.4s per client), O(n²) for a repo run whose
         # node_created events embed full file sets. The live-only `engine_running` is re-stamped on a hit.

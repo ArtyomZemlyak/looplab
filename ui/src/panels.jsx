@@ -1675,9 +1675,9 @@ export function AuthoringPanel({
       })
     }
   }
+  // Scope in the subtitle: this edits the prompts/skills/knowledge EVERY run shares (`/api/{kind}`),
+  // not anything belonging to whichever run a legacy `?panel=authoring` link was opened from.
   return (
-    {/* Scope in the subtitle: this edits the prompts/skills/knowledge EVERY run shares (`/api/{kind}`),
-        not anything belonging to whichever run a legacy `?panel=authoring` link was opened from. */}
     <Panel title="Authoring — configure the scientist" sub="every run · hot-reloaded next run" onClose={requestClose} wide>
       <div className="toolbar" style={{ marginBottom: 10 }}>
         {['prompts', 'skills', 'knowledge'].map(k => <button key={k} className={'btn sm' + (k === kind ? ' primary' : '')}

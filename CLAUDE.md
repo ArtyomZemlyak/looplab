@@ -165,6 +165,16 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   `core/prompts.py::PROMPT_KEYS`; delivered signals `engine/signal_delivery.py::SIGNALS`;
   crash-triage verdicts `engine/triage.py::TRIAGE_ACTIONS` / `AGENT_TRIAGE_ACTIONS` (the
   inline-repair STOP decision — a typo'd literal turns a stop into "keep repairing");
+  metric-reader path slots `runtime/command_eval.py::READER_PATH_KEYS` (which spec keys each reader
+  turns into a filesystem path — deliberately NOT the same table as `READERS_REQUIRING_PATH`, since
+  "needs a path" and "names a path" are different facts: `_read_adapter` DEFAULTS its path and still
+  builds one from `spec["path"]`, and `_read_host_score` names TWO files under other key names, one
+  of which reaches `Path(...)` without going through `_confined`. A reader added with an
+  unregistered path slot is one `Path(workdir) / 123` away from an uncaught TypeError that takes
+  down the RUN — no node terminal, re-dying on every resume. `tests/test_metric_reader_confinement.py`
+  drives the registry AND re-derives it from each reader's own `spec.get` reads, so a new reader
+  goes red rather than silently escaping the table; `spec_kind` is the same rule for the DISPATCH,
+  where an unhashable `kind` crashed the submit-time refusal itself);
   background-appendable events `events/types.py::BACKGROUND_APPENDABLE`, its thread-side sibling
   `SETUP_THREAD_APPENDABLE`, and its Card-conditional extension
   `NON_CARD_SELECTION_BACKGROUND_APPENDABLE` (legacy Hypothesis/Policy selection ONLY — the call site

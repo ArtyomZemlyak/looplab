@@ -31,7 +31,7 @@ from typer.core import TyperGroup
 
 from looplab import __version__
 from looplab.core.config import Settings
-from looplab.core.errors import OperatorRefusal
+from looplab.core.errors import EnvironmentRefusal, OperatorRefusal
 from looplab.core.run_deletion import (
     RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed)
 from looplab.core.run_reset import (
@@ -414,15 +414,23 @@ def _truthy_env(name: str) -> bool:
 
 
 def _assert_run_deletion_namespace_available(run_dir: Path) -> None:
-    """Refuse before mkdir so a fenced, quarantined run name is never recreated as an empty shell."""
+    """Refuse before mkdir so a fenced, quarantined run name is never recreated as an empty shell.
+
+    `EnvironmentRefusal`, like every other refusal `_engine_singleton` and its helpers raise: the
+    operator's command is not wrong, the storage under the run dir they named is not in a state that
+    can safely hold a second writer, and the message already names both the fact and the remedy. It
+    subclasses `RuntimeError` (the historical base at all eight sites), so nothing that catches or
+    asserts on `RuntimeError` changed meaning — the marker only lets `_RefusalBoundaryGroup` print
+    these as the one line they are instead of a Rich traceback at exit 1.
+    """
     try:
         assert_run_deletion_write_allowed(run_dir)
     except RunDeletionFenceError as exc:
-        raise RuntimeError(
+        raise EnvironmentRefusal(
             f"Cannot materialize {run_dir}: deletion {exc.operation_id} is unresolved. "
             "Retry or observe that exact deletion first.") from exc
     except RunDeletionStorageError as exc:
-        raise RuntimeError(
+        raise EnvironmentRefusal(
             f"Cannot materialize {run_dir}: deletion ownership cannot be verified.") from exc
 
 
@@ -435,7 +443,9 @@ def _engine_singleton(run_dir: Path):
     True when the lock was acquired (run), False when another engine already holds it (caller no-ops).
     The OS frees the lock when the process exits (even on crash), so there's no stale-lock problem.
     Where file locking is UNAVAILABLE (FUSE/S3 mounts) single-writer can't be enforced, so it fails
-    CLOSED with an actionable error unless LOOPLAB_ALLOW_UNLOCKED_WRITER=1 opts into the risk."""
+    CLOSED with an actionable error unless LOOPLAB_ALLOW_UNLOCKED_WRITER=1 opts into the risk.
+    Every refusal raised here is an `EnvironmentRefusal` so that actionable error is what the
+    operator actually SEES — see `_assert_run_deletion_namespace_available` for why that type."""
     # Keep the post-lock check below too: this first check protects the namespace before mkdir, while
     # the second closes publication races before the engine can write.
     _assert_run_deletion_namespace_available(run_dir)
@@ -462,7 +472,7 @@ def _engine_singleton(run_dir: Path):
                         pass   # explicit operator override -> single-writer assumption, run anyway
                     else:
                         acquired = False   # never acquired the lock -> skip the unlock in `finally`
-                        raise RuntimeError(
+                        raise EnvironmentRefusal(
                             f"Cannot enforce a single writer of the append-only event log: locking "
                             f"{run_dir}/engine.lock failed ({type(exc).__name__}: {exc}). Two runs "
                             f"here could corrupt events.jsonl. Move the run dir to a local disk (see "
@@ -487,7 +497,7 @@ def _engine_singleton(run_dir: Path):
                         pass   # explicit operator override -> single-writer assumption, run anyway
                     else:
                         acquired = False   # never acquired the lock -> skip the unlock in `finally`
-                        raise RuntimeError(
+                        raise EnvironmentRefusal(
                             f"Cannot enforce a single writer of the append-only event log: file "
                             f"locking is unavailable on the filesystem holding {run_dir}/engine.lock "
                             f"({type(exc).__name__}: {exc}). Two runs here could corrupt events.jsonl. "
@@ -513,18 +523,18 @@ def _engine_singleton(run_dir: Path):
                 assert_run_reset_write_allowed(run_dir)
                 assert_run_deletion_write_allowed(run_dir)
             except RunResetFenceError as exc:
-                raise RuntimeError(
+                raise EnvironmentRefusal(
                     f"Cannot start an engine for {run_dir}: Replay {exc.operation_id} is unresolved. "
                     "Retry or observe that exact Replay operation first.") from exc
             except RunResetStorageError as exc:
-                raise RuntimeError(
+                raise EnvironmentRefusal(
                     f"Cannot start an engine for {run_dir}: Replay ownership cannot be verified.") from exc
             except RunDeletionFenceError as exc:
-                raise RuntimeError(
+                raise EnvironmentRefusal(
                     f"Cannot start an engine for {run_dir}: deletion {exc.operation_id} is unresolved. "
                     "Retry or observe that exact deletion first.") from exc
             except RunDeletionStorageError as exc:
-                raise RuntimeError(
+                raise EnvironmentRefusal(
                     f"Cannot start an engine for {run_dir}: deletion ownership cannot be verified.") from exc
         yield acquired
     finally:

@@ -406,9 +406,20 @@ class EvaluateMixin:
         library callers included. In a card session that call is already satisfied by the folded flag
         and appends nothing.
 
-        Unlocked, like `_record_card_build_attempt`: it is ONE independent per-node row that the fold
-        keys by (node, generation) and applies set-only, so it pairs with nothing and its splice
-        position cannot change any other event's meaning.
+        Unlocked, like `_record_card_build_attempt`. That is safe because it is ONE independent
+        per-node row the fold keys by (node_id, generation) and applies SET-ONLY, AND because both
+        writers are on the main task *after* that node's own `node_created` — not because its position
+        is immaterial. This row is NOT splice-neutral, and saying it "pairs with nothing, so its splice
+        position cannot change any other event's meaning" (as this docstring did until 2026-08-06) is
+        false: `_on_node_eval_started` silently DROPS a row whose node does not exist yet, and
+        `Node.eval_started` is one of the durable facts
+        `core/models.py::is_unevaluated_speculative_discard` proves the Layer-5 budget refund from —
+        which `node_counts_toward_card_budget` reads, which BOTH the L3 budget and the fold's debug
+        anchor (`events/replay.py::_card_debug_leaf_children`) read. So splicing it before rather than
+        after its own `node_created` measurably flips a DIFFERENT Card's `selection_ready`: measured
+        `{budget 2, leafs [2,3], later Card ready}` vs `{budget 3, leafs [3], not ready}`. Not reachable
+        today (both writes are main-task and node-created-first), which is exactly why this is written
+        down as an ordering PRECONDITION rather than left as a property of the event.
 
         COST, for whoever re-runs `looplab speculation-gate`: one append is one flush+fsync, which on
         a network/FUSE run dir is not free — measured on this box at ~200 ms against ~1 ms on local

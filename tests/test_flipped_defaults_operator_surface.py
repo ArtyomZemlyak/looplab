@@ -106,6 +106,93 @@ def test_the_llm_judged_kill_switches_and_their_bars_are_all_on_the_form():
     assert "confidence" in rows["train_monitor_kill_confidence"]["help"]
 
 
+def test_the_speculation_row_describes_the_ratchet_that_replaced_the_startup_pin():
+    """`87adef6a` let AUTO re-resolve DOWNWARD mid-run and touched no operator surface, so the row went
+    on saying the integer is "resolved once at startup" and that `run_started` is what a resume reads.
+    Both are false now, and an operator comparing two runs' token bills acts on exactly that sentence.
+
+    The hole this closes is the one `_check_pinned_default` cannot see: the default (-1) never moved,
+    only the BEHAVIOUR under it. So the copy is bound to the code rather than pinned — the two numbers
+    it quotes ARE the ratchet's constants, and "the LAST one the log recorded" is driven through the
+    real fold. Retune either constant, or delete the ratchet, and this fails instead of drifting.
+    """
+    from looplab.engine.speculation import SpeculationMixin
+
+    help_text = _rows()["speculation_depth"]["help"]
+    # NEGATIVE pin first: what must never come back is the claim the ratchet falsified.
+    assert "resolved once at startup" not in help_text
+    assert "re-resolves DOWNWARD mid-run" in help_text
+    assert "speculation_depth_settled" in help_text
+    # the two numbers are the rule's own constants, so retuning either turns this copy into a lie
+    assert f"at least {SpeculationMixin._ADAPTIVE_DEPTH_MIN_SAMPLES} evaluated nodes" in help_text
+    assert f"{SpeculationMixin._ADAPTIVE_DEPTH_MIN_EVAL_FRACTION:.0%} of a build" in help_text
+
+
+def test_the_depth_in_force_is_the_last_one_the_log_recorded_not_run_starteds(tmp_path):
+    """The other half of that row's new sentence, driven rather than asserted about: a resume reads the
+    latest settle, not the startup pin. Its own test because it is a fold property, not copy."""
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+    from looplab.events.types import EV_RUN_STARTED, EV_SPECULATION_DEPTH_SETTLED
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append(EV_RUN_STARTED, {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min",
+                                  "speculation_depth": 4})
+    assert fold(store.read_all()).speculation_depth == 4
+    store.append(EV_SPECULATION_DEPTH_SETTLED, {"depth": 0, "previous": 4})
+    assert fold(store.read_all()).speculation_depth == 0
+
+
+def test_the_training_monitor_row_no_longer_claims_the_runtime_marks_out_a_training_stage():
+    """`9e26a17f` removed this row's premise. `run_argv(..., health_check=True)` is passed for EVERY
+    declared stage, the appended scorer included, so the runtime draws no train/not-train line and
+    there is no "declared training stage" whose log the monitor could be said to tail. Roles are
+    assigned STRUCTURALLY from the eval's own resolved pipeline instead — driven here, because the
+    sentence the row now makes is a claim about `eval_log_plan`'s output and nothing else.
+    """
+    from looplab.engine.train_monitor import (LOG_ROLE_SCORE, LOG_ROLE_SETUP, LOG_ROLE_TRAINING,
+                                              LOG_ROLE_WORK, eval_log_plan)
+
+    help_text = _rows()["train_monitor"]["help"]
+    assert "declared training stage" not in help_text            # the retired premise
+    assert "health_check is passed for EVERY declared stage" in help_text
+
+    roles = eval_log_plan([{"name": "data_prep"}, {"name": "train"}, {"name": "score"}]).roles
+    assert roles["setup.log"] == (None, LOG_ROLE_SETUP)          # dep install, never judged
+    assert roles["score.log"] == ("score", LOG_ROLE_SCORE)       # the LAST stage, by position
+    assert roles["data_prep.log"] == ("data_prep", LOG_ROLE_WORK)
+    # the substantive one: a stage NAMED `train` is still only work — nothing proves it is the training
+    assert roles["train.log"] == ("train", LOG_ROLE_WORK)
+    assert LOG_ROLE_TRAINING not in {role for _stage, role in roles.values()}
+
+
+def test_the_training_kill_row_describes_all_four_conjuncts_of_the_gate():
+    """The row described a TWO-conjunct gate (`enabled` + a confident `broken`) that `9e26a17f` had
+    already made four. For any multi-stage pipeline that reads as "on + broken@0.8 kills", which is
+    false in both directions the operator cares about — nothing there can kill, and one confident tick
+    is not enough anywhere. Same shape as the ASHA test above: the row's copy beside the truth table of
+    the pure function that IS the whole decision, so removing a conjunct fails the behavioural half.
+    """
+    from looplab.engine import train_monitor as tm
+
+    help_text = _rows()["train_monitor_kill"]["help"]
+    assert "FOUR independent conjuncts" in help_text
+
+    broken = tm.TrainingVerdict(status="broken", reason="diverged", confidence=0.9)
+    satisfied = dict(enabled=True, threshold=0.8, log_role=tm.LOG_ROLE_TRAINING, broken_streak=2)
+    assert tm.should_monitor_kill(broken, **satisfied) is True
+    # each conjunct, falsified ALONE, is enough to spare the node
+    assert tm.should_monitor_kill(broken, **{**satisfied, "enabled": False}) is False
+    assert tm.should_monitor_kill(
+        tm.TrainingVerdict(status="broken", reason="diverged", confidence=0.5), **satisfied) is False
+    assert tm.should_monitor_kill(broken, **{**satisfied, "log_role": tm.LOG_ROLE_WORK}) is False
+    assert tm.should_monitor_kill(broken, **{**satisfied, "broken_streak": 1}) is False
+    # and the row names all four, so an operator can tell WHICH one spared their node
+    for conjunct in ("Training kill confidence", "PROVE is this run's own training",
+                     "MULTI-stage pipeline", "second consecutive broken"):
+        assert conjunct in help_text
+
+
 def test_every_settings_field_is_a_row_or_a_written_down_omission():
     from looplab.serve import settings_ui_schema as schema
 

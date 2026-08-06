@@ -97,6 +97,66 @@ def test_the_attention_feed_signature_covers_the_windows_reparse_field():
     assert source.count("file_identity(") >= 3
 
 
+def _stat_on_another_device(base: os.stat_result) -> os.stat_result:
+    """`base`, moved to a different device and IDENTICAL in every other field.
+
+    Built as a real `os.stat_result` rather than a duck-typed stand-in: the production code reads
+    `st_mtime`/`st_ctime` as well as the `_ns` pair, and a shim that happened to omit one would make
+    the test pass for the wrong reason.
+    """
+    swapped = os.stat_result(
+        (base.st_mode, base.st_ino, base.st_dev + 1, base.st_nlink, base.st_uid, base.st_gid,
+         base.st_size, base.st_atime, base.st_mtime, base.st_ctime),
+        {"st_atime_ns": base.st_atime_ns, "st_mtime_ns": base.st_mtime_ns,
+         "st_ctime_ns": base.st_ctime_ns})
+    assert file_identity(swapped)[1:] == file_identity(base)[1:], "only st_dev may differ"
+    assert file_identity(swapped) != file_identity(base)
+    return swapped
+
+
+def test_the_run_summary_cache_notices_a_log_that_differs_only_in_st_dev(tmp_path, monkeypatch):
+    """`run_projections` keyed on `(st_ino, st_ctime_ns, st_size, st_mtime_ns)` — `file_identity`
+    minus BOTH `st_dev` and the Windows reparse field, with no stated reason.
+
+    The reachable wrong outcome is STALE SAME-ID data, not a collision between two runs: the cache is
+    keyed by `rd.name`, so run A can never be served run B's summary. What it CAN do is keep serving
+    generation A's summary for a run whose events.jsonl was replaced by a file on a different device
+    that matches on the four fields it did keep — and inode numbers are synthesized from the path on
+    geesefs/s3fs, so a restored or rsynced run dir on a FUSE/S3 mount collides by construction.
+
+    Driven, not pinned: the log below really is re-read and re-folded, and the dashboard row really
+    does carry the new goal. A source pin for `file_identity(` would hold with the write site still
+    flattening the tuple and the read site still slicing four fields off it.
+    """
+    from looplab.events.eventstore import EventStore
+    from looplab.serve import run_projections
+    from looplab.serve.server import make_app
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    log = rd / "events.jsonl"
+    EventStore(log).append("run_started", {"run_id": "demo", "task_id": "t", "goal": "g",
+                                           "direction": "min"})
+    srv = make_app(tmp_path).state.looplab
+
+    assert [s["goal"] for s in run_projections.run_summaries(srv)] == ["g"]
+    generation_a = log.stat()
+    assert srv.summary_cache, "precondition: the first projection cached a summary"
+
+    # Generation B: the SAME run id, genuinely different bytes, on a different device — with stat
+    # numbers that collide with generation A's on every field the hand-rolled signature kept.
+    text = log.read_text(encoding="utf-8")
+    assert '"goal":"g"' in text
+    log.write_text(text.replace('"goal":"g"', '"goal":"b"', 1), encoding="utf-8")
+    swapped = _stat_on_another_device(generation_a)
+    real_stat = Path.stat
+    monkeypatch.setattr(Path, "stat", lambda self, *a, **kw:
+                        swapped if self == log else real_stat(self, *a, **kw))
+
+    assert [s["goal"] for s in run_projections.run_summaries(srv)] == ["b"], (
+        "the run-summary cache served generation A for a log it can only tell apart by st_dev")
+
+
 # ------------------------------------------------------------------ no third tuple, silently
 
 def _hand_rolled_signature_lines() -> list[str]:
@@ -138,11 +198,15 @@ def _hand_rolled_signature_lines() -> list[str]:
 # The sites SC-11 named are converted. An AST sweep then found the pattern is far more widespread
 # than the finding's "six different ways" — measured below — so the rest is a LEDGER rather than a
 # silent backlog: the number cannot grow without this test going red, and shrinking it is the work.
-UNCONVERTED_SIGNATURE_SITES = 27
+UNCONVERTED_SIGNATURE_SITES = 22
 
 
 def test_the_backlog_of_hand_rolled_signatures_does_not_grow():
-    """SC-11 said six mechanisms; an AST sweep for tuples built out of `st_*` reads finds ~27.
+    """SC-11 said six mechanisms; an AST sweep for tuples built out of `st_*` reads finds far more.
+
+    The cap is the MEASURED count, not a round number with slack: a `<=` with headroom lets a new
+    hand-rolled signature appear as long as an unrelated one is converted in the same tree, which is
+    precisely the drift this ledger exists to stop. Re-measure and re-pin whenever a site converts.
 
     Converting them all needs per-site judgement — several are deliberately the weak
     replacement-only tier and correct as they stand — so this pins the COUNT instead of pretending

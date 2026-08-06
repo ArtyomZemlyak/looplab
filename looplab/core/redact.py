@@ -143,16 +143,55 @@ def _without_controls(text: str, *, keep_newlines: bool) -> str:
     )
 
 
-def _bounded_redacted_text(text: str, max_chars: int) -> str:
-    """Bound already-redacted text without making the original secret an oracle."""
+def _bounded_redacted_text(text: str, max_chars: int) -> tuple[str, bool]:
+    """Bound already-redacted text without making the original secret an oracle, AND say whether the
+    cap actually DROPPED anything.
+
+    The second element is the only honest source for a "this was shortened" receipt, because it is
+    decided HERE — against the cap that is about to be applied — rather than reconstructed further
+    down by a caller measuring the result.  Neither downstream comparison works, and both shipped:
+
+    * against the RAW input (`bounded_redacted_tree.safe_text` until 2026-08-06):
+      `_redact_persisted` NFKC-normalizes and redacts BEFORE bounding, so output length says nothing
+      about truncation in either direction.  `"ﬄ" * 300` EXPANDS to 900 characters, gets hashed away
+      at a 500-char cap, and still measures 500 > 300 -> the destroyed value was reported as
+      untruncated.  Lengths can also simply COINCIDE: `"password=x"` masks to 12 characters and
+      hashes back down to 10, exactly its input.
+    * against the REDACTED text: that only moves the lie.  A masked `sk-…` credential is shorter
+      than its input, so every row carrying a secret would report itself truncated — the exact
+      misleading receipt `bounded_redacted_tree` documents it must never emit.
+
+    Returned as a tuple rather than through a second `_bounded_…`-named helper on purpose: two names
+    one letter apart, one of which quietly discards the receipt, is how this comes back.
+    """
     cap = max(0, int(max_chars))
     if len(text) <= cap:
-        return text[:cap]
+        return text[:cap], False
     digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
     marker = f"\n[redacted preview: original_chars={len(text)} sha256={digest}]"
     if len(marker) >= cap:
-        return marker[-cap:] if cap else ""
-    return text[:cap - len(marker)] + marker
+        return (marker[-cap:] if cap else ""), True
+    return text[:cap - len(marker)] + marker, True
+
+
+def _redact_persisted(value, *, max_chars: int, entropy: bool = True,
+                      single_line: bool = False) -> tuple[str, bool]:
+    """:func:`redact_persisted_text`, plus the bounder's own "the cap shortened this" bit.
+
+    Split out so a caller that owes its operator a truncation receipt (`bounded_redacted_tree`) can
+    read the fact from the one place that knows it, instead of inferring it from lengths.  The
+    public spelling stays a plain `str`: ~30 call sites persist that return value directly.
+    """
+    text = _persisted_input(value)
+    text = unicodedata.normalize("NFKC", text).replace("\r\n", "\n").replace("\r", "\n")
+    # Persisted strings may be rendered by terminals and browsers. Keep an ordinary
+    # newline only for multi-line prose; replace every other Unicode control/format character before
+    # redaction, hashing, or truncation so ANSI/bidi/NUL payloads cannot survive in any representation.
+    text = _without_controls(text, keep_newlines=not single_line)
+    text = redact_secrets(text, entropy=entropy)
+    if single_line:
+        text = " ".join(text.split())
+    return _bounded_redacted_text(text, max_chars)
 
 
 def redact_persisted_text(value, *, max_chars: int, entropy: bool = True,
@@ -165,16 +204,8 @@ def redact_persisted_text(value, *, max_chars: int, entropy: bool = True,
     bidi controls must never be retained.  The digest is over the already-redacted canonical text,
     so a truncation marker cannot become an oracle for the original secret.
     """
-    text = _persisted_input(value)
-    text = unicodedata.normalize("NFKC", text).replace("\r\n", "\n").replace("\r", "\n")
-    # Persisted strings may be rendered by terminals and browsers. Keep an ordinary
-    # newline only for multi-line prose; replace every other Unicode control/format character before
-    # redaction, hashing, or truncation so ANSI/bidi/NUL payloads cannot survive in any representation.
-    text = _without_controls(text, keep_newlines=not single_line)
-    text = redact_secrets(text, entropy=entropy)
-    if single_line:
-        text = " ".join(text.split())
-    return _bounded_redacted_text(text, max_chars)
+    return _redact_persisted(value, max_chars=max_chars, entropy=entropy,
+                             single_line=single_line)[0]
 
 
 def redact_persisted_identity(value, *, max_chars: int) -> str:
@@ -192,15 +223,16 @@ def redact_persisted_identity(value, *, max_chars: int) -> str:
     else:
         text = redact_secrets(text, entropy=False)
     # Raw newlines were replaced above; only the truncation receipt can introduce one.  Replace that
-    # delimiter without collapsing otherwise-significant whitespace in the opaque identity.
-    return _bounded_redacted_text(text, max_chars).replace("\n", " ")
+    # delimiter without collapsing otherwise-significant whitespace in the opaque identity.  An
+    # identity is an equality key with nowhere to carry a receipt, so the bounder's "was it cut" bit
+    # is deliberately dropped here — the marker itself is already visible in the value.
+    return _bounded_redacted_text(text, max_chars)[0].replace("\n", " ")
 
 
 def bounded_redacted_tree(value, budget: list[int], items: list[int], *,
                           max_items: int = 64, max_depth: int = 5,
                           str_cap: int | None = None, key_cap: int = 160, depth: int = 0,
-                          truncated: list[bool] | None = None,
-                          mask_secret_keys: bool = True):
+                          truncated: list[bool] | None = None):
     """Bound and redact an untrusted structured value into a small JSON-compatible shape.
 
     ONE walker for both durable boundaries that need this (doc 25 CO-06): the span/trace records in
@@ -222,6 +254,14 @@ def bounded_redacted_tree(value, budget: list[int], items: list[int], *,
       whole payload, so the guard is now universal.
     * **A key that redacts to empty is DROPPED**, not emitted as `""`. Two such keys collide into one
       JSON member, silently discarding a value.
+    * **A credential-named key is MASKED as `"***"`, never dropped.** `genesis` used to emit nothing
+      at all for one (and call that truncation) while `misc` masked it, so the same payload got two
+      answers depending on which endpoint served it. Masking wins because "this field exists and is
+      a secret" is strictly more useful to an operator than a silently absent key — and a key that
+      simply vanishes is indistinguishable from one that was never there. The drop behaviour was
+      abandoned in ea9ea86f and survived until 2026-08-06 as an unreachable `mask_secret_keys=False`
+      escape hatch no call site ever passed; it is gone, and a caller that genuinely needs it must
+      re-argue the case above rather than flip a flag.
     * **Depth is cut at `>= max_depth`**, the earlier of the two cuts, and the marker is charged to
       the budget like any other emitted text.
     * **An `int` SUBCLASS stays an int** (`isinstance`, not `type(...) is`), so an `IntEnum` keeps its
@@ -234,11 +274,10 @@ def bounded_redacted_tree(value, budget: list[int], items: list[int], *,
     the operator a "this was cut" receipt (doc 25 SR-06) and had each grown their own walker to
     compute it. Masking a secret key is deliberately NOT truncation: nothing was dropped for SIZE,
     and telling an operator their config was truncated when a credential was merely hidden is a
-    misleading receipt.
-
-    `mask_secret_keys=False` emits nothing for a credential-named key rather than `"***"`. Only for a
-    caller whose consumer cannot show a masked placeholder; the default is to mask, because "this
-    field exists and is a secret" is strictly more useful to an operator than a silently absent key.
+    misleading receipt. Neither is NORMALIZATION — NFKC folding, control characters becoming spaces,
+    `single_line` collapsing runs of whitespace: the value is all still there. What counts is the
+    list above, and every member of it is decided by the code that does the omitting, never
+    reconstructed afterwards from a length (`_bounded_redacted_text` records what that cost).
     """
     def cut():
         if truncated is not None:
@@ -246,9 +285,12 @@ def bounded_redacted_tree(value, budget: list[int], items: list[int], *,
 
     def safe_text(item, *, cap=None, single_line=False):
         allowed = budget[0] if cap is None else min(budget[0], max(0, int(cap)))
-        text = redact_persisted_text(item, max_chars=allowed, entropy=True,
-                                     single_line=single_line)
-        if len(text) < len(_persisted_input(item)):
+        # The BOUNDER reports whether the cap dropped characters; this used to guess it by comparing
+        # the output against `len(_persisted_input(item))`, which was wrong in BOTH directions
+        # (`_bounded_redacted_text` records the two measurements). Take the signal alone.
+        text, shortened = _redact_persisted(item, max_chars=allowed, entropy=True,
+                                            single_line=single_line)
+        if shortened:
             cut()
         budget[0] = max(0, budget[0] - len(text))
         return text
@@ -283,8 +325,6 @@ def bounded_redacted_tree(value, budget: list[int], items: list[int], *,
                         cut()          # a key that redacts to empty, or collides, loses its value
                         continue
                     if is_secret_key_name(key):
-                        if not mask_secret_keys:
-                            continue
                         out[safe_key] = "***"
                         budget[0] = max(0, budget[0] - 3)
                     else:

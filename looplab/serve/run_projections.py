@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import stat
 
+from looplab.core.atomicio import file_identity
 from looplab.core.run_deletion import (RunDeletionStorageError, load_run_deletion_fence,
                                        run_deletion_snapshot_token)
 from looplab.engine.finalize import incomplete_finalize_scope
@@ -51,10 +52,23 @@ def run_summaries(srv) -> list:
             continue
         try:
             stt = log.stat()
-            sig = (stt.st_ino, stt.st_ctime_ns, stt.st_size, stt.st_mtime_ns)
+            # `file_identity`, not a hand-rolled tuple: this one used to be that definition minus
+            # BOTH `st_dev` and the Windows `st_file_attributes`, with no stated reason — the same
+            # omission already fixed in `appstate.state_payload` and in the attention feed (doc 25
+            # SC-11). The reachable wrong outcome here is STALE SAME-ID data, not cross-run bleed
+            # (the cache is keyed by `rd.name`, so two runs cannot collide): a run whose
+            # events.jsonl is replaced by a file on a DIFFERENT DEVICE that happens to match on
+            # (ino, ctime_ns, size, mtime_ns) reads as unchanged, and the dashboard keeps serving the
+            # previous generation's summary. Not exotic — geesefs/s3fs synthesize inode numbers from
+            # the path, so a restored or rsynced run dir on a FUSE/S3 mount collides by construction.
+            sig = file_identity(stt)
             cached = srv.summary_cache.get(rd.name)
-            if cached and cached[:4] == sig:    # unchanged log -> reuse (finished runs never re-fold)
-                out.append(cached[4])
+            # Stored as (signature, summary): the flattened `(*sig, summary)` made the tuple WIDTH
+            # load-bearing, so widening the signature by one field silently turned `cached[4]` into
+            # a stat number the dashboard would have served as a run summary.
+            # An unchanged log is reused as-is (a finished run never re-folds).
+            if cached is not None and cached[0] == sig:
+                out.append(cached[1])
                 continue
             events = srv.events(rd)
             st = fold(events)
@@ -104,7 +118,7 @@ def run_summaries(srv) -> list:
                 # where a wrong-but-close date beats none.
                 "created": (first_ts if first_ts > 0 else stt.st_ctime),  # "started" date
             }
-            srv.summary_cache[rd.name] = (*sig, summary)
+            srv.summary_cache[rd.name] = (sig, summary)
             out.append(summary)
         except Exception:  # noqa: BLE001 - a half-written run shouldn't break the list
             continue
