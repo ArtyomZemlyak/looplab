@@ -248,6 +248,46 @@ test('run-level memory reports the lessons NO event-log entry attributes to a no
   assert.equal(runMemory(STATE, null), null)
 })
 
+// ── item 6: why a Card exists, and what it taught ────────────────────────────────────────────────
+
+test('a card\'s steering cues, seed paraphrase, absorbed aliases and origin node are readable', async () => {
+  const { cardOrigin } = await vite.ssrLoadModule('/src/cardBoardModel.js')
+  const origin = cardOrigin({
+    id: 'card-x', statement: 'Try a contrastive head', seed_statement: 'contrastive loss helps',
+    rationale: 'node 0 hit the floor', created_at_node: 4, aliases: ['card-y', 'card-z'],
+    steering_context: [{ kind: 'strategy', novelty_stance: 'exploit' }, { kind: 'cross_run_tools' },
+      { kind: 'a_kind_added_next_year' }],
+  })
+  assert.equal(origin.paraphrased, true, 'an operator display edit over the seed must be visible')
+  assert.equal(origin.seed, 'contrastive loss helps')
+  assert.deepEqual(origin.aliases, ['card-y', 'card-z'])
+  assert.equal(origin.createdAtNode, 4)
+  assert.deepEqual(origin.cues.map(cue => cue.label),
+    ['the Strategist', 'cross-run tools', 'a_kind_added_next_year'])
+  // The cue's own extra keys travel rather than being flattened away.
+  assert.deepEqual(origin.cues[0].detail, ['novelty_stance exploit'])
+  // An unknown future cue renders its id: the vocabulary is versioned server-side and a silently
+  // hidden new cue is worse than an ugly one.
+  assert.deepEqual(origin.cues[2].detail, [])
+  // A card whose statement was never edited must not claim a paraphrase.
+  assert.equal(cardOrigin({ statement: 'same', seed_statement: 'same' }).paraphrased, false)
+  assert.deepEqual(cardOrigin(null).cues, [])
+})
+
+test('lesson_refs resolve through the run\'s own event log, and unresolvable ones are reported', async () => {
+  const { cardLessons } = await vite.ssrLoadModule('/src/cardBoardModel.js')
+  // `lesson:sha256:…` has NO resolver back to a lessons.jsonl row — the store never writes the id.
+  // The run's own log is the resolver, because the same id is minted there beside the statement.
+  const resolved = cardLessons(STATE, { lesson_refs: ['lesson:sha256:aa', 'lesson:sha256:zz'] })
+  assert.deepEqual(resolved.lessons.map(row => row.statement),
+    ['switching to a contrastive loss  improved the metric'])
+  assert.deepEqual(resolved.lessons[0].evidence, [4, 2])
+  // An earlier run's lesson carried in as a prior. A card claiming fewer lessons than it cites
+  // would be quietly wrong, so the shortfall is reported rather than swallowed.
+  assert.deepEqual(resolved.unresolved, ['lesson:sha256:zz'])
+  assert.deepEqual(cardLessons(STATE, { lesson_refs: [] }), { lessons: [], unresolved: [] })
+})
+
 // ── the rendered Inspector, so a structurally-plausible wrong pane fails here ─────────────────────
 
 const render = props => renderToStaticMarkup(React.createElement(Inspector, {
