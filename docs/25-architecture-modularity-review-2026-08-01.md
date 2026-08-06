@@ -7727,8 +7727,8 @@ What was NOT cut, with the measurement: the stable-decision-prefix block (~30 li
 loop-carried names through two `continue`s and a `break`, which is the shape ES-03 correctly
 declined; and `state.paused` stays inline because it settles the same in-flight build but then
 breaks WITHOUT finishing, a different terminal that a shared ladder would have to special-case
-anyway. After the four cuts the loop body is 44 top-level statements whose largest is 22 lines —
-the "table of guarded steps" its own §4 comment claims it is — so further splitting would group
+anyway. After the four cuts the loop body is 46 top-level statements, median 2 lines and largest 22
+— the "table of guarded steps" its own §4 comment claims it is — so further splitting would group
 neighbours rather than cut a concern.
 
 All four helpers stay IN `orchestrator.py`. Two of them fold, and `fold` there is the module-global
