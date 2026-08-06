@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 162
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 163
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -35,7 +35,10 @@ SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 162
 # tests/test_config_docs_sync.py, which keeps configuration.md's "N of the M direct Settings
 # fields" sentence honest.
 SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "68cc772ffe46438a569e5be87abd16bae966ae5c22fdffe3f594466cf532a60d"
+# 163 rows since `concept_tidy` joined the form (the taxonomy-ratification stage): the one knob that
+# lets an agent's already-recorded merge become cross-run policy without a human in the moment. It
+# carries a warning row and pins `default: false`.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "05c1b8f2f397da0794a99803cf6a3063545aa93a94e634b88bbc3c7cf8c58893"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")
