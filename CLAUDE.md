@@ -215,10 +215,15 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   canonical construction: toy task + its roles + a subprocess sandbox + `GreedyTree`, everything else
   passed through as keyword overrides). It is deliberately NOT a fixture — resume/crash tests build a
   second Engine over the same run dir — and migration of the existing call sites is opportunistic.
-- **A guard test must not be satisfiable by a COMMENT.** ~200 assertions in the suite read production
-  source (`inspect.getsource` + `in` / `.index()`). 62 are POSITIVE pins (`assert "<literal>" in
-  source`); none is vacuous today, and every one is one comment away from it, because the cheapest
-  mutation is *delete the code, leave a comment carrying the pinned literal*. Full call EXPRESSIONS
+- **A guard test must not be satisfiable by a COMMENT.** Roughly 200 assertions in the suite read
+  production source (`inspect.getsource` / `read_text` + `in` / `.index()`), split about evenly
+  between POSITIVE pins (`assert "<literal>" in source`) and negative ones — measured 97/96 across 63
+  files on 2026-08-06 by an AST scan for `assert "<lit>" [not] in <name-bound-from-source>`. Treat
+  those as a magnitude, not a census: the exact figures have drifted every time anyone re-counted,
+  partly because reasonable methods disagree on what counts as a pin, so do NOT reason from them and
+  do not trust a claim that "all N are non-vacuous" — nobody re-derives it. Re-run the scan if you
+  need a number. Every positive pin is one comment away from vacuous, because the cheapest mutation
+  is *delete the code, leave a comment carrying the pinned literal*. Full call EXPRESSIONS
   and their ORDER are not enough either: `pass  # self._record_eval_start_boundary(chosen)` satisfies
   all three `source.index()` lookups in `test_card_speculation_engine.py:1731-1733` **in order**
   while the boundary event is never written — the defect whose cost is recorded in invariant 1
@@ -234,10 +239,18 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
      rule in a `finally` whose guard clause no call site exercises yet — HOIST it into a named
      function and test its truth table (`core/llm.py::_stream_envelope_is_billable`). A rule nobody
      can state is a rule nobody reviews.
-  3. **AST, never substrings**, for the residue: that a call is REACHED, that two guards are in the
-     right ORDER. `tests/_source_scan.py::called_names` / `names_read` / `function_tree` resolve real
-     `ast.Call` / `ast.Name(Load)` nodes, and comments are not AST nodes.
-  NEGATIVE pins (`assert "x" not in source`, 35 of them) stay substrings on purpose — what must not
+  3. **AST, never substrings**, for the residue: that a call is PRESENT, that two guards appear in
+     the right ORDER. `tests/_source_scan.py::called_names` / `names_read` / `function_tree` resolve
+     real `ast.Call` / `ast.Name(Load)` nodes, and comments are not AST nodes.
+     **Know what this tier does NOT prove**, because it is routinely over-read: `called_names` walks
+     the whole function tree (nested `def`s included) and sorts by source position, so it shows the
+     call exists in the TEXT — not that it executes. A call behind a dead `if`, after an early
+     `return`, or inside a nested function nobody invokes all count as present; and "A before B" is
+     textual order, so two calls in opposite branches of one `if/else` report an order that never
+     happens at runtime. It is also blind to a decorator that wraps or replaces the function, since
+     the body it parses is still the original. When the property is really "this ran", tier 3 is not
+     enough — go back to tier 1 and observe the effect.
+  NEGATIVE pins (`assert "x" not in source`) stay substrings on purpose — what must not
   come back is the TEXT, and a commented-out copy of a re-derivation is as much of a drift risk as a
   live one. Finally, a source pin is not automatically what protects a property:
   `test_background_appendable.py:156-157`'s pins are evadable, but the property IS covered
