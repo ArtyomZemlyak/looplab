@@ -170,8 +170,12 @@ def test_upgrade_refreshes_old_cost_rollup_after_new_steward_usage(tmp_path):
     rollups = [event for event in events if event.type == "llm_cost"]
     assert len(rollups) == 2
     assert rollups[-1].seq > usage.seq
+    # `priced_calls` travels with the roll-up now. It has to: the timeline narrates the RAW event,
+    # and a missing counter used to read as "0 priced" -> a confident "unpriced" over a run that had
+    # really spent money. Pinned in the exact-dict assertion rather than exempted, so dropping it
+    # again turns this red.
     assert rollups[-1].data == {
-        "cost": 0.125, "calls": 1, "prompt_tokens": 8,
+        "cost": 0.125, "calls": 1, "priced_calls": 1, "prompt_tokens": 8,
         "completion_tokens": 4, "total_tokens": 12,
         "finalize_scope": scope, "finish_seq": finish_seq,
     }

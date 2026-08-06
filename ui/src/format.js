@@ -40,8 +40,14 @@ export function costPricing(c) {
   }
   const cost = typeof c.cost === 'number' && Number.isFinite(c.cost) ? c.cost : null
   const calls = typeof c.calls === 'number' && Number.isFinite(c.calls) ? c.calls : 0
+  // ABSENT is not ZERO, and this is the same distinction the whole function exists for, one level
+  // up. The FOLDED total always carries `priced_calls` (the fold backfills it), but a RAW
+  // `llm_cost` event written before it travelled with the payload does not — and the timeline reads
+  // raw events. Defaulting a missing key to 0 made this print a confident "unpriced" over a run
+  // that really spent $1.96 across 156 priced calls, while the Inspector showed the money from the
+  // folded state on the same run at the same moment. `null` = "this payload does not say".
   const priced = typeof c.priced_calls === 'number' && Number.isFinite(c.priced_calls)
-    ? c.priced_calls : 0
+    ? c.priced_calls : null
   if (cost === null) {
     return { text: '—', priced: false, partial: false, title: 'No cost was recorded.' }
   }
@@ -49,6 +55,13 @@ export function costPricing(c) {
   if (calls <= 0) {
     return { text: '$0', priced: true, partial: false,
              title: 'No model calls were made, so nothing was spent.' }
+  }
+  // The payload does not carry the counter: show the cost it DOES carry, and say the split is
+  // unknown rather than asserting either "unpriced" or "all priced".
+  if (priced === null) {
+    return { text: `$${fmt(cost)}`, priced: true, partial: false,
+             title: `This roll-up does not record how many of its ${calls.toLocaleString()} calls the`
+               + ' provider priced, so the figure may be a floor. Open the run to see the split.' }
   }
   if (priced <= 0) {
     return { text: 'unpriced', priced: false, partial: false,

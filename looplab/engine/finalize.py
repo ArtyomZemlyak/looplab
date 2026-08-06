@@ -927,6 +927,13 @@ def emit_llm_cost(
             "prompt_tokens": int(total.get("prompt_tokens", 0)),
             "completion_tokens": int(total.get("completion_tokens", 0)),
             "total_tokens": int(total.get("total_tokens", 0)),
+            # `priced_calls` MUST travel with the roll-up. The folded total carries it, but this
+            # event did not, and `ui/src/format.js::fmtCost` reads a missing key as ZERO priced —
+            # so the timeline printed "unpriced" for a run that really spent $1.96 across 156
+            # priced calls, while the Inspector (which reads the folded state) printed the money on
+            # the same run at the same moment. A confident false "spend is unknown" is worse than
+            # the "$0.00" it replaced: that at least did not claim to know.
+            "priced_calls": int(total.get("priced_calls", 0)),
         }
         if finalize_scope is not None:
             payload["finalize_scope"] = finalize_scope
