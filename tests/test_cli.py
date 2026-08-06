@@ -397,6 +397,48 @@ def test_receipt_backed_run_forces_narrow_profile_before_engine_construction(
         assert seen[field] == expected, field
 
 
+def test_a_receipt_does_not_drag_a_real_workload_into_the_offline_profile(tmp_path, monkeypatch):
+    """The companion of the test above, and the reason it stayed green while the hole was open.
+
+    That test only ever passes `--kind quadratic`, so it pins the calibrated lane and says nothing
+    about every other kind. The receipt branch used to apply the profile unconditionally: a real
+    Dataset run came out with `backend` toy (the model never called, the adapter's offline baseline
+    scored instead) and `trust_mode` trusted_local (an untrusted Docker sandbox downgraded to a host
+    subprocess) — and then reported success. Drive the real CLI, not the helper: the rewrite happens
+    ~60 lines before `validate_task`, so a unit test of the helper alone would not see that the
+    snapshot and `_engine` both receive the already-mutated object.
+    """
+    import looplab.cli as cli
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "train.csv").write_text("x,y\n1,2\n")
+    seen = {}
+
+    def _capture(_out, task, settings, _crash_after, **_kwargs):
+        seen["task_type"] = type(task).__name__
+        seen.update(settings.masked_snapshot())
+        raise RuntimeError("captured-before-run")
+
+    monkeypatch.setattr(cli, "_engine", _capture)
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text("{}")           # validity is irrelevant — the profile landed before any read
+    result = runner.invoke(app, [
+        "run", "--no-genesis", "--kind", "dataset", "--data", str(data_dir),
+        "--out", str(tmp_path / "dataset-run"),
+        "-s", "backend=llm", "-s", "trust_mode=untrusted", "-s", "max_nodes=5",
+        "-s", f"speculation_gate_receipt={receipt}",
+    ])
+    assert result.exit_code == 1, result.output
+    assert seen["task_type"] == "DatasetTask"
+    # The three the operator actually asked for. `backend` is the one that makes the run a lie:
+    # `agents/factory.py` returns the adapter's offline baseline for anything but "llm", so the
+    # endpoint is never contacted and the run still reports metrics.
+    assert seen["backend"] == "llm"
+    assert seen["trust_mode"] == "untrusted"
+    assert seen["speculation_gate_receipt"] == str(receipt)
+
+
 def test_ordinary_cli_engine_keeps_large_budget_outside_rollout_scope(
     tmp_path, monkeypatch,
 ):

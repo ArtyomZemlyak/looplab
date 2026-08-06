@@ -113,6 +113,20 @@ def kinds() -> list[str]:
     return list(_KINDS)
 
 
+def kinds_for(task_cls: type) -> frozenset[str]:
+    """The registered kind names that materialize EXACTLY `task_cls`.
+
+    One question, asked at two different times. `cli/__init__.py::_engine` narrows the calibrated
+    speculation lane with `type(task) is ToyTask` — it has the task object. `cli/run_cmds.py`'s
+    receipt gate has to ask the same question ~60 lines EARLIER, before `validate_task` has run, so
+    all it can read is the `kind` string. Deriving that answer from `_KINDS` rather than writing
+    `"quadratic"` at the call site is what keeps the two halves one rule: renaming a kind moves both,
+    and a kind that stops mapping to ToyTask stops matching here too. Hand-copying the literal is how
+    the early gate silently comes to match nothing while the late gate still works.
+    """
+    return frozenset(name for name, cls in _KINDS.items() if cls is task_cls)
+
+
 def normalize_task(data: dict) -> dict:
     """Front-end for the COMPOSABLE task schema — the single place old and new spellings converge.
 

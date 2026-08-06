@@ -29,7 +29,8 @@ from looplab.engine.orchestrator import (
 from looplab.engine.finalize import finalize_run, incomplete_finalize_scope
 from looplab.events.replay import fold
 from looplab.adapters.repo_task import eval_reader_path_errors
-from looplab.adapters.tasks import validate_task
+from looplab.adapters.tasks import kinds_for, validate_task
+from looplab.adapters.toytask import ToyTask
 from looplab.search.speculation_calibration import canonical_speculation_toy_task
 from looplab.core import appconfig
 from looplab.serve.run_files import run_config_write_lock
@@ -358,13 +359,32 @@ def _pending_finalization_inputs(run_dir: Path, task_id: str | None):
     return recovery_task, load_run_settings(run_dir, strict=True)
 
 
-def _pin_offline_speculation_profile(settings, *, calibration: bool, genesis: bool, goal) -> None:
+def _pin_offline_speculation_profile(settings, *, calibration: bool, genesis: bool, goal,
+                                     task_kind) -> None:
     """Force the immutable offline speculation profile when this run is a calibration/receipt run.
 
     Runs BEFORE Genesis client construction or any role wiring — the bootstrap must be provably
     offline, and merely resolving to a ToyTask AFTER a model-authored Genesis call is insufficient.
     Lifted out of `run` (doc 25 CT-02): it is a maintainer-only lane that most readers of `run`
     never need, and it was ~20 of the lines between "merge settings" and "author the task".
+
+    `task_kind` is the pre-Genesis `task_dict["kind"]`, and the RECEIPT branch is narrowed on it.
+    That branch used to apply the profile for ANY task: 63 of 193 Settings fields were overwritten
+    on a real Dataset/Repo/Command workload — `backend` llm->toy, so `agents/factory.py` returned
+    the adapter's offline baseline and the model was never called; `trust_mode` untrusted->
+    trusted_local, so a deliberate `--network none` Docker sandbox silently became a host
+    subprocess. The run then evaluated, produced metrics and reported success. Durable, not
+    per-invocation: `_publish_run_snapshots` writes the rewritten profile into
+    `config.snapshot.json`, and by engine invariant #6 every later `resume` adopts it. Reachable
+    with no `--set` and no banner via `LOOPLAB_SPECULATION_GATE_RECEIPT`, and receipt VALIDITY was
+    irrelevant — the profile landed before anything read the file, and `Engine` then declined the
+    invalid receipt into the product lane, so nothing refused the run.
+
+    `cli/__init__.py::_engine` was narrowed for exactly this in 15b7822f (`type(task) is ToyTask`)
+    and this half was missed, which is why it still has to happen HERE and not only there: the
+    rewrite lands ~60 lines before `validate_task`, and `_engine` sees the already-mutated object.
+    Leaving a non-toy run's settings alone loses nothing — for a genuine ToyTask `_engine` applies
+    the same profile itself.
     """
     if calibration:
         if genesis:
@@ -386,7 +406,12 @@ def _pin_offline_speculation_profile(settings, *, calibration: bool, genesis: bo
         if genesis and goal is not None:
             raise typer.BadParameter(
                 "receipt-backed Card speculation requires --no-genesis")
-        _apply_speculation_calibration_profile(settings)
+        # ...and ONLY for the offline toy benchmark the calibrated lane is measured on. Every other
+        # kind keeps the operator's settings verbatim (see the docstring). The refusal above is what
+        # makes the kind string trustworthy this early: with `--goal` + Genesis refused, nothing can
+        # author a task after this point, so `task_kind` is what the operator actually wrote.
+        if task_kind in kinds_for(ToyTask):
+            _apply_speculation_calibration_profile(settings)
 
 
 def _calibration_envelope_task_dict(task, settings) -> dict:
@@ -648,8 +673,8 @@ def run(
         # the active profile while retaining that profile's endpoint and credential binding.
         from looplab.core.llm import apply_llm_model_override
         apply_llm_model_override(settings, str(effective_model_override))
-    _pin_offline_speculation_profile(
-        settings, calibration=speculation_gate_calibration, genesis=genesis, goal=goal)
+    _pin_offline_speculation_profile(settings, calibration=speculation_gate_calibration,
+                                     genesis=genesis, goal=goal, task_kind=task_dict.get("kind"))
     # 3b. Genesis: you described the goal in words — let the LLM author the task (the headless
     # counterpart of the UI's "New run"). Fires on an explicit --goal (so no file-based / legacy flow
     # is affected). --kind does NOT skip it: it PINS the kind and Genesis fills the rest within it;
