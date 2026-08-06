@@ -11,7 +11,7 @@ import { deadlineGet, get, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId
   storageGet, storageSet, runApiPath } from './util.js'
 import { computeGroups, autoCollapseSet } from './grouping.js'
 import EnergyToggle from './EnergyToggle.jsx'
-import GlobalMenu from './GlobalMenu.jsx'
+import GlobalMenu, { BrandMark } from './GlobalMenu.jsx'
 import { OpIcon } from './icons.jsx'
 import LazyBoundary from './LazyBoundary.jsx'
 import WhyStrip from './WhyStrip.jsx'
@@ -2327,10 +2327,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       data-route-main tabIndex={-1} aria-label={workspaceRouteLabel}>
       <h1 className="sr-only">{workspaceRouteLabel}</h1>
       <div className="topbar run-head">
-        <span className="brand"><span className="dot">◉</span> LoopLab</span>
-        {/* The LoopLab menu is deliberately absent in review mode: that route is public (it bypasses
-            OwnerAuth) and must not advertise, let alone reach, installation-wide owner surfaces. */}
-        {!reviewMode && <GlobalMenu />}
+        {/* The mark IS the menu — one control, not a wordmark with a second "LoopLab ▾" button
+            beside it. In review mode it stays the inert mark instead: that route is public (it
+            bypasses OwnerAuth) and must not advertise, let alone reach, installation-wide owner
+            surfaces. The inert arm is a real mark rather than a disabled trigger, because a dead
+            button and a button that opens an empty menu both still advertise that the surfaces
+            exist. */}
+        {reviewMode ? <BrandMark /> : <GlobalMenu />}
         {onBack ? <button className="btn sm ghost" onClick={leaveRetainedPanelRoute}>← runs</button>
           : <span className="pill">read-only review</span>}
         <button type="button" className="btn sm ghost copy-view-btn" onClick={copyViewLink}
@@ -2603,7 +2606,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                   {/* Anchors, not buttons, for the same reason the LoopLab menu uses them: the hash
                       is a bookmarkable URL, so middle-click and copy-link work. Hidden in review
                       mode, which is public and must not advertise installation-wide surfaces —
-                      the same rule that keeps `<GlobalMenu />` out of that header. */}
+                      the same rule that leaves the header's LoopLab mark inert in review mode. */}
                   {label === INSTALLATION_LINK_HUB && !reviewMode && <>
                     <div className="mi-label">Whole installation</div>
                     {INSTALLATION_LINKS.map(entry => <a key={entry.key} role="menuitem" tabIndex={-1}

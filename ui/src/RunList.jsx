@@ -2098,7 +2098,14 @@ export default function RunList({ onOpen, onGlobalNavigate,
   return (
     <main ref={runsMainRef} className="app" data-route-main tabIndex={-1} aria-busy={navigationBusy}>
       <h1 className="sr-only">Runs</h1>
-      <div className="topbar home-head"><span className="brand"><span className="dot">◉</span> LoopLab</span>
+      <div className="topbar home-head">
+        {/* The mark is the menu. It was a wordmark here and a second "LoopLab ▾" button at the far
+            RIGHT of the same bar, among the theme/density toggles — two spellings of one name, and
+            the menu ended up filed with the display switches rather than with the identity it opens.
+            Atlas and Settings used to be two loose buttons in that same corner, which is why
+            cross-run memory, authored knowledge and the host's GPUs once hid in a RUN's menu. */}
+        <GlobalMenu current="list" disabled={navigationBusy}
+          buttonRef={globalMenuButtonRef} onNavigate={openGlobal} />
         <span className="muted home-subtitle">autonomous R&D — live runs</span>
         <button ref={projectsToggleRef} className="btn sm ghost projects-toggle" disabled={navigationBusy} onClick={() => setProjectsOpen(true)}
                 aria-expanded={projectsOpen} aria-controls="projects-drawer">
@@ -2125,11 +2132,6 @@ export default function RunList({ onOpen, onGlobalNavigate,
           <DensityToggle />
           <ThemeSwitcher />
           <EnergyToggle />
-          {/* Atlas preview and Settings used to be two loose buttons here and nowhere else, which is
-              why cross-run memory, authored knowledge and the host's GPUs ended up hiding in a RUN's
-              menu instead. They are all one menu now, and it is the same menu inside a run. */}
-          <GlobalMenu current="list" disabled={navigationBusy}
-            buttonRef={globalMenuButtonRef} onNavigate={openGlobal} />
         </div>
       </div>
       {missingStartOverRecoveries.map(item => <div key={item.runId}

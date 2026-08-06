@@ -24,7 +24,6 @@ export default function InstallationView({ view, onBack }) {
   if (!destination || !Body) return null
   return <div className="app">
     <div className="topbar">
-      <span className="brand"><span className="dot">◉</span> LoopLab</span>
       <GlobalMenu current={view} />
       <button className="btn sm ghost" onClick={onBack}>← runs</button>
       <span className="ttl" style={{ fontWeight: 700, fontSize: 15 }}>{destination.label}</span>
