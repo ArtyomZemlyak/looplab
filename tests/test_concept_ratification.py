@@ -215,12 +215,37 @@ def test_a_dry_run_writes_no_policy_and_no_receipt(portfolio):
     """
     curation_before = (portfolio / "concept_curation_log.jsonl").read_bytes()
     result = ratify_concept_merges(portfolio, dry_run=True)
-    assert {e["outcome"] for e in result["skipped"]} == {"would_apply"}
-    assert result["applied"] == [] and result["receipt"] is False
+    # `would_apply` counts as decided, so a preview and a real pass answer "how many merges is this"
+    # with the same number — the CLI header used to read "would apply 0" above six merge lines.
+    assert {e["outcome"] for e in result["applied"]} == {"would_apply"}
+    assert len(result["applied"]) == 3 and result["skipped"] == [] and result["receipt"] is False
     assert not (portfolio / "concept_aliases.jsonl").exists()
     assert not (portfolio / "concept_ratification_log.jsonl").exists()
     assert (portfolio / "concept_curation_log.jsonl").read_bytes() == curation_before
     assert load_concept_aliases(portfolio) == {}
+
+
+def test_a_dry_run_predicts_the_real_pass_when_proposals_conflict(tmp_path):
+    """The preview must agree with the apply, and the case that separates them is a real one.
+
+    The development corpus carries two proposals from different portfolio snapshots pointing AT EACH
+    OTHER. Judged against the untouched ledger both read as applicable; a real pass takes one and
+    refuses the other. A preview that says "6 would apply" before a pass that applies 5 is worse than
+    no preview, so the dry run projects its own decisions as it goes.
+    """
+    memory_dir = tmp_path / "mem"
+    _write_capsules(memory_dir, [_capsule("run-a", ["axis/one", "axis/two"])])
+    _append_proposal(memory_dir, merges=[_merge("axis/one", "axis/two")])
+    _append_proposal(memory_dir, merges=[_merge("axis/two", "axis/one")],
+                     run_id="r2", digest="e" * 64)
+
+    preview = ratify_concept_merges(memory_dir, dry_run=True)
+    real = ratify_concept_merges(memory_dir, at="now")
+
+    assert [e["from"] for e in preview["applied"]] == [e["from"] for e in real["applied"]] == [
+        "axis/one"]
+    assert [e["from"] for e in preview["skipped"]] == [e["from"] for e in real["skipped"]] == [
+        "axis/two"]
 
 
 # --------------------------------------------------------------------------- the undo

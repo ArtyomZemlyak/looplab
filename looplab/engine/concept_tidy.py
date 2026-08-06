@@ -379,12 +379,26 @@ def ratify_concept_merges(memory_dir, *, at: str = "", by: str = RATIFIER_ACTOR,
     applied: list[dict] = []
     skipped: list[dict] = []
     budget = max(0, int(limit))
+    # A dry run PROJECTS the decisions it would take onto the alias map as it goes, instead of
+    # judging each one against the untouched ledger. Without that the preview is wrong in exactly the
+    # case an operator most needs it: the real corpus here carries two proposals from different
+    # portfolio snapshots that point AT EACH OTHER (`experiment/validation/empirical` ->
+    # `validation/empirical_confirmation` and the reverse), and judged independently BOTH read as
+    # applicable while a real pass applies one and refuses the other. The projection is the same
+    # last-write-per-source rule `load_concept_aliases` uses, so the preview is exact for the
+    # sequential case — which is the case, since decisions are attempted in durable ledger order.
+    projected: dict = {}
     for merge in merges:
         entry = {"from": merge.source, "to": merge.target,
                  "proposal_key": merge.proposal_key, "why": merge.why}
         if dry_run:
             snapshot = concept_governance_snapshot(memory_dir)
+            snapshot = {**snapshot, "aliases": {**snapshot["aliases"], **projected}}
             outcome = _still_applicable(merge, snapshot) or "would_apply"
+            if outcome == "would_apply" and len(applied) < budget:
+                projected[merge.source] = merge.target
+            elif outcome == "would_apply":
+                outcome = "deferred_budget"
             detail: dict = {}
         elif len(applied) >= budget:
             outcome, detail = "deferred_budget", {}
@@ -392,7 +406,11 @@ def ratify_concept_merges(memory_dir, *, at: str = "", by: str = RATIFIER_ACTOR,
             outcome, detail = _ratify_one(memory_dir, merge, by=by, at=at)
         entry.update(detail)
         entry["outcome"] = outcome
-        (applied if outcome == "applied" else skipped).append(entry)
+        # `would_apply` belongs in `applied` so a preview and a real pass answer "how many merges is
+        # this" with the same number. Reporting it as skipped made `concept-ratify --dry-run` print
+        # "would apply 0 merge(s)" above six lines describing merges it would apply.
+        decided = outcome in ("applied", "would_apply")
+        (applied if decided else skipped).append(entry)
     result = {"applied": applied, "skipped": skipped,
               "pending": pending_curation_work(memory_dir), "receipt": False}
     if not dry_run and (applied or skipped):
