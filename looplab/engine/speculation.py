@@ -27,6 +27,7 @@ from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.replay import fold
 from looplab.engine.node_build import developer_crash_records
 from looplab.events.types import (
+    DIAGNOSTIC_EVENTS,
     EV_CARD_ADDED,
     EV_CARD_BUILD_ATTEMPTED,
     EV_CARD_BUILD_DONE,
@@ -368,12 +369,30 @@ class SpeculationMixin:
 
     @staticmethod
     def _proposal_authority_seq(events: list) -> int:
-        """Latest selection-authority seq, ignoring worker-owned LLM accounting telemetry."""
+        """Latest selection-authority seq, ignoring everything that carries no selection authority.
+
+        EVERY DIAGNOSTIC EVENT, not just the two LLM accounting rows this used to name. The fence is
+        captured before the slow paid `_prepare_node_idea` and compared for EQUALITY at commit
+        (`card_reservation.py`), so any row appended in that window discards a proposal the run has
+        already paid a Developer call for — reported as "a control/research/lifecycle event won the
+        CAS", which is exactly what it was not.
+        `train_monitor_alert` and the two ASHA rows are ON by default and fire on a TIMER from
+        concurrent evals, so they land in that window as a matter of course; measured, each moves the
+        fence 1 -> 2. `deps_installed` and `full_retrain_charged` do the same from the attempt loop.
+        None of them can change which action the policy would choose — that is what makes a
+        `DIAGNOSTIC_EVENT` diagnostic, and it is the property this fence actually needs.
+
+        This also retires a claim written in `types.py` and in CLAUDE.md's invariant 1: that a
+        fold-ignored event is splice-neutral BY CONSTRUCTION. The FOLD is not the only reader. It was
+        true of the fold and false of this fence, and a diagnostic row was silently costing paid
+        proposals before this list was widened.
+        """
 
         return max(
             (
                 event.seq for event in events
-                if event.type not in {EV_LLM_USAGE, EV_LLM_COST}
+                if event.type not in DIAGNOSTIC_EVENTS
+                and event.type not in {EV_LLM_USAGE, EV_LLM_COST}
                 and type(event.seq) is int
             ),
             default=-1,

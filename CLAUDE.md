@@ -67,8 +67,18 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    main task appends FOLDED events — with ONE typed exception: the concurrent-research task may append the
    selection-neutral FOLDED types in `events/types.py::BACKGROUND_APPENDABLE` (asserted at the append
    sites; `tests/test_background_appendable.py` proves splice-position neutrality). A concurrent task
-   MAY additionally append `DIAGNOSTIC_EVENTS` (fold-ignored, so splice-neutral BY CONSTRUCTION — the
-   fold never reads them): the training-monitor task appends `EV_TRAIN_MONITOR_ALERT` this way under
+   MAY additionally append `DIAGNOSTIC_EVENTS` (fold-ignored — the fold never reads them). **That is
+   NOT the same as splice-neutral, and this invariant claimed it was until 2026-08-06.** The fold is
+   not the only reader of the log: `engine/speculation.py::_proposal_authority_seq` fences a paid
+   proposal by comparing a max-seq for EQUALITY across the window in which `_prepare_node_idea` makes
+   the Developer call, and it excluded only the two LLM-accounting rows. So a `train_monitor_alert`
+   or `asha_rank` — both ON by default, both fired from concurrent evals on a TIMER, i.e. landing in
+   that window as a matter of course — moved the fence and discarded a proposal the run had already
+   paid for, reported as "a control/research/lifecycle event won the CAS". The fence now excludes
+   `DIAGNOSTIC_EVENTS` wholesale and `tests/test_card_speculation_engine.py` drives it from the
+   registry, so a diagnostic type added later inherits the property. When you add a non-folded
+   event, the question to ask is not "does the fold read it?" but **"does any reader key on its
+   position?"**: the training-monitor task appends `EV_TRAIN_MONITOR_ALERT` this way under
    `_write_lock`, asserting membership in `DIAGNOSTIC_EVENTS` at its append site.
    *An UNLOCKED main-task append* is the third accepted shape, and the one that is deliberately NOT in a
    registry: `EV_NODE_EVAL_STARTED` (`engine/evaluate.py::_record_eval_start_boundary`, called by the MAIN

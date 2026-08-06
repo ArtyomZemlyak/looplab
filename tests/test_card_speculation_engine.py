@@ -2884,3 +2884,40 @@ def test_a_ratcheted_run_resumes_through_the_real_pin_check(tmp_path, monkeypatc
     resumed._require_pinned_speculation_receipt(entry)      # must NOT raise
     assert resumed.speculation_depth == 0
     assert resumed._speculation_enabled() is False
+
+
+def test_a_diagnostic_row_cannot_discard_a_paid_proposal():
+    """The proposal fence must ignore EVERY diagnostic event, not just the two LLM accounting rows.
+
+    `_proposal_authority_seq` is captured BEFORE the slow paid `_prepare_node_idea` and compared for
+    EQUALITY at commit, so any row appended in that window discards a proposal the run has already
+    paid a Developer call for — and reports it as "a control/research/lifecycle event won the CAS",
+    which is the one thing it was not. `train_monitor_alert` and the two ASHA rows are ON by default
+    and fire on a TIMER from concurrent evals, so they land in that window as a matter of course.
+
+    This also pins the retraction of a claim that was written into `types.py` and CLAUDE.md: a
+    fold-ignored event is NOT splice-neutral "by construction", because the fold is not the only
+    reader. It was true of the fold and false of this fence.
+    """
+    from looplab.engine.speculation import SpeculationMixin
+    from looplab.events.eventstore import Event
+    from looplab.events.types import DIAGNOSTIC_EVENTS
+
+    def ev(kind, seq):
+        return Event(v=1, seq=seq, ts=0.0, type=kind, data={})
+
+    base = [ev("node_created", 1)]
+    assert SpeculationMixin._proposal_authority_seq(base) == 1
+
+    # EVERY diagnostic type, from the registry rather than a hand-copied list — a diagnostic event
+    # added later must inherit this property without anyone remembering to add it here.
+    for kind in sorted(DIAGNOSTIC_EVENTS):
+        assert SpeculationMixin._proposal_authority_seq(base + [ev(kind, 2)]) == 1, (
+            f"{kind} moved the proposal fence; a concurrent watchdog tick now discards a paid "
+            "Developer call and blames the CAS")
+
+    # …and the fence still moves for anything that really does carry selection authority, or it
+    # would stop protecting the thing it exists for.
+    for kind in ("node_evaluated", "pause", "policy_decision", "card_added"):
+        assert SpeculationMixin._proposal_authority_seq(base + [ev(kind, 2)]) == 2, (
+            f"{kind} no longer moves the fence — a real selection change would be committed over")

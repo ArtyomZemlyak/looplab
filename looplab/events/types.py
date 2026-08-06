@@ -328,8 +328,14 @@ EV_DEPS_INSTALLED = "deps_installed"
 # `node_repaired` the way `changed`/`stages_passed` do: that event is appended BEFORE the loop asks
 # `_repair_forces_full_retrain`, so the field would always carry the pre-charge count and a resume
 # would refund the last re-train — which is the one thing this cap exists to prevent, since it guards
-# GPU hours rather than attempts. Diagnostic, so the fold ignores it and its splice position cannot
-# matter; `engine/evaluate.py::_durable_full_retrains` reads it straight off the log.
+# GPU hours rather than attempts. Diagnostic, so the FOLD ignores it — which is NOT the same as "its
+# splice position cannot matter", as this comment claimed when the event was added on 2026-08-06.
+# Other readers key on position: `engine/speculation.py::_proposal_authority_seq` fenced a paid
+# proposal by comparing a max-seq for equality and excluded only the LLM-accounting rows, so any
+# diagnostic row appended during that window discarded a Developer call the run had paid for. That
+# fence now excludes DIAGNOSTIC_EVENTS wholesale, which is what makes this event's position
+# immaterial — a property of the READERS, not of the event.
+# `engine/evaluate.py::_durable_full_retrains` reads it straight off the log.
 EV_FULL_RETRAIN_CHARGED = "full_retrain_charged"
 EV_WORKSPACE_SEEDED = "workspace_seeded"
 # FOLDED (moved out of DIAGNOSTIC_EVENTS): the start of an arbitrary operator `run_setup` command is
