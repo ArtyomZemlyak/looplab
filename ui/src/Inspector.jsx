@@ -19,6 +19,8 @@ import {
 } from './traceProjection.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts, parseConceptTagsInput } from './conceptChips.js'
+import { cardText } from './cardBoardModel.js'
+import { nodeCardLink, nodeConceptLanes } from './inspectorLinks.js'
 import { conceptMaterializationStatus } from './nodeProjection.js'
 import { buildingMarkers } from './buildingModel.js'
 import { deadlineRequest } from './requestDeadline.js'
@@ -126,7 +128,7 @@ function ResetBtn({ runId, id, generation, onToast }) {
 // concept tree's) passes the jump, because from those surfaces "where does this sit in the run?" is
 // a real question, and it is exactly the jump the concept tree used to make without being asked.
 export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, readOnly = false,
-  onOpenLineage = null,
+  onOpenLineage = null, onOpenCard = null,
   historySeq = null, expectedGeneration = null, readOnlyReason = 'history', evidenceAvailable = true,
   commentsRevision = null, focusCommentId = null, traceClearRecoveryStore: sharedClearStore = null,
   traceClearRecoverySnapshot: sharedClearSnapshot = null,
@@ -373,7 +375,8 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
         </div>}
 
         {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId}
-          onToast={onToast} draftStore={draftStore} expectedGeneration={expectedGeneration} />}
+          onToast={onToast} draftStore={draftStore} expectedGeneration={expectedGeneration}
+          onOpenCard={onOpenCard} />}
         {activeTab === 'Comments' && <CommentsThread runId={runId} nodeId={n.id}
           nodeGeneration={n.attempt} expectedGeneration={expectedGeneration} refreshKey={commentsRevision}
           readOnly={readOnly} reviewMode={readOnlyReason === 'review'} focusCommentId={focusCommentId}
@@ -798,10 +801,69 @@ function ConceptTags({ n, state, runId, onToast, draftStore, expectedGeneration 
   </>
 }
 
-function Overview({ n, state, runId, onToast, draftStore, expectedGeneration }) {
+// The Card this experiment tested — item 3's "links to hypotheses", and the correction to the
+// standing misreading that one node IS one hypothesis. Since Cards absorbed Hypothesis, the Card IS
+// the hypothesis (`core/cards.py`: "1 card = 1 hypothesis"), so the honest shape of this section is
+// "the question, its verdict, and how many OTHER attempts there were" — never "the hypothesis of this
+// node". `inspectorLinks.js::nodeCardLink` owns which of its four answers applies.
+function CardLink({ link, onOpenCard }) {
+  if (link.kind === 'none') {
+    return <><div className="section-h">Work item (hypothesis)</div>
+      <div className="muted">This experiment carries no work-item stamp. A node may belong to no
+        Card (<code>Idea.card_id</code> is optional), so this is a fact about the node, not a
+        missing link.</div></>
+  }
+  if (link.kind === 'unknown') {
+    return <><div className="section-h">Work item (hypothesis)</div>
+      <div className="muted">Stamped <b>{link.cardId}</b>, which the displayed board does not
+        publish — a historical snapshot, or beyond the published card cap. The stamp is durable; the
+        record is simply not in this frame.</div></>
+  }
+  const { card, cardId, summary } = link
+  // `seed_statement` is the IMMUTABLE statement captured at `card_added` and the join key the whole
+  // Card ledger keys on; `statement` is an operator-editable DISPLAY overlay. When they differ, the
+  // operator paraphrased the question — and only showing the paraphrase hides that.
+  const seed = cardText(card.seed_statement)
+  const shown = cardText(card.statement)
+  const paraphrased = !!seed && !!shown && seed !== shown
+  return <>
+    <div className="section-h">Work item (hypothesis)
+      {onOpenCard && <button type="button" className="ctx-chip ctx-chip-action"
+        title="open this work item on the Cards board, with its full record and every attempt"
+        onClick={() => onOpenCard(cardId)}>↗ Open {cardId}</button>}
+    </div>
+    <div className="v">{shown || seed || cardId}</div>
+    {paraphrased && <div className="muted">Seed statement (immutable, the join key): {seed}</div>}
+    <div className="node-concepts-list">
+      <span className="chip xs">{cardId}</span>
+      {cardText(card.verdict) && cardText(card.verdict) !== 'open'
+        && <span className="chip xs">verdict · {card.verdict}</span>}
+      {cardText(card.status) && <span className="chip xs">{card.status}</span>}
+      {card.best_delta != null && <span className="chip xs">best Δ {fmt(card.best_delta)}</span>}
+    </div>
+    {/* The count IS the correction. One card, N attempts — including attempts that are merely
+        reserved for it and are not evidence yet, which is why the union and not `card.evidence`. */}
+    <div className="muted">{summary.total === 1
+      ? 'This is the only attempt at this work item.'
+      : `${summary.total} attempts at this work item — this one and ${summary.total - 1} other${summary.total === 2 ? '' : 's'}.`}
+      {summary.evidence > 0 && ` ${summary.evidence} in its evidence list`}
+      {summary.ownedOnly > 0 && `, ${summary.ownedOnly} reserved but not evidence yet`}
+      {summary.missing > 0 && `, ${summary.missing} not in this snapshot`}.
+    </div>
+  </>
+}
+
+function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, onOpenCard }) {
   const p = n.idea?.params || {}
   const uses = mergeSummary(n, state.nodes || {}, state)   // E3: for merges, which technique each parent fused
   const chg = nodeChip(n, state.nodes || {}, state)        // same chip as the card (sweep-aware; '' for merges)
+  const cardLink = nodeCardLink(state, n)
+  // Item 5: the node's OWN concepts already had a section (`ConceptTags`, editable). What was absent
+  // is the Card's `concept_tags`, a separately-derived set that can name concepts this attempt never
+  // carried — so it renders as its own lane, never folded into the node's list.
+  const lanes = nodeConceptLanes(
+    nodeCanonicalConcepts(state?.node_concepts || {}, n.id, state?.concept_consolidation || {}),
+    cardLink.card)
   return <>
     <div className="kv">
       <KV k="node" v={`#${n.id}`} />
@@ -813,8 +875,19 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration }) 
       <KV k="feasible" v={String(n.feasible)} />
       <KV k="eval seconds" v={fmt(n.eval_seconds)} />
     </div>
+    <CardLink link={cardLink} onOpenCard={onOpenCard} />
     <ConceptTags key={`${runId}:${expectedGeneration || '?'}:${n.id}:${n.attempt}`} n={n} state={state} runId={runId}
       onToast={onToast} draftStore={draftStore} expectedGeneration={expectedGeneration} />
+    {lanes.cardOnly.length > 0 && <>
+      <div className="section-h">Also on its work item</div>
+      {/* Kept OUT of the node's own list on purpose: a card tag is derived from the card's FIRST
+          linked node and carried across merges, so presenting it beside this node's memberships
+          would silently upgrade a card-level claim into a claim about this attempt's evidence. */}
+      <div className="node-concepts-list">{lanes.cardOnly.map(c =>
+        <span key={c} className="nc-tag" title={`${c} — carried by the work item, not by this experiment`}>{c}</span>)}</div>
+      <div className="muted">Concepts its work item carries that this attempt does not
+        {lanes.cardTagOrigin ? ` (card tags derived from: ${lanes.cardTagOrigin})` : ''}.</div>
+    </>}
     <StagePipeline stages={n.stages} failed={n.failed_stage} runId={runId} id={n.id} generation={n.attempt} onToast={onToast} />
     {chg && <><div className="section-h">What this node did</div><div className="v">{chg}</div></>}
     {uses.length > 0 && <><div className="section-h">Merge — techniques fused</div>

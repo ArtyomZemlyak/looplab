@@ -2288,6 +2288,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     resetKey={`node:${nodeId}`}>
     <Inspector runId={runId} nodeId={nodeId} state={state} live={live}
       onOpenLineage={view === 'dag' ? null : jumpToLineage}
+      // The Card board is owner-only (`REVIEW_SAFE_VIEWS`), so a review bearer is offered no link
+      // into it — the route would be refused and the button would be a dead end.
+      onOpenCard={reviewMode ? null : selectCard}
       tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}
       draftStore={inspectorDraftStoreRef.current}
       traceClearRecoveryStore={traceClearRecoveryStore}
