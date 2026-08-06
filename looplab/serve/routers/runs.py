@@ -1840,6 +1840,16 @@ def build_router(srv) -> APIRouter:
                 out["parent_id_diffed"] = p.id
         # spans.jsonl is a current sidecar rather than an event-versioned projection. Never label its
         # future contents as historical; the UI explains that trace is unavailable in History.
+        # Deliberately NO `?span_limit=` here, even though this payload is what the Inspector's Trace
+        # tab first renders. Three reasons, and the third is the one that bites: (1) this route folds
+        # the whole event log and assembles code/annotations/parent-diff, so paging a trace through it
+        # re-pays all of that per click, while `/nodes/{nid}/trace` is O(node) via the span index and
+        # already takes a `limit`; (2) the historical branch below returns NO trace at all, so the
+        # parameter would be dead exactly where the generation assertion is load-bearing; (3) a limit
+        # that DID apply here would have to be re-fenced against `_assert_historical_generation`,
+        # since the window is chosen after the first assertion and the payload is returned after the
+        # last — a second paging path is a second chance to publish a mixed-generation payload for a
+        # window the operator could already get from the endpoint built for it.
         if seq is None:
             out["trace"], out["trace_revision"] = _node_trace_snapshot(
                 rd, nid, attempt=n.attempt)
@@ -1984,21 +1994,24 @@ def build_router(srv) -> APIRouter:
                     **_trace_unavailable(nodes=[], rollup={}, summary={})}
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/trace")
-    def node_trace(run_id: str, nid: int, limit: int = 0,
+    def node_trace(run_id: str, nid: int, limit: int = Query(default=0, ge=0),
                    attempt: Optional[int] = Query(default=None, ge=0)):
         """The LIGHT trace tree for ONE node — the hot path for expanding a node's trace card. Reads
         only that node's spans via the index (O(node)), so the UI can fetch a node's trace lazily on
         expand instead of loading (and re-rendering) the whole-run timeline for a 4000-node run.
 
         `limit` (>0) is the UI's "load more spans" control: it raises this node's span ceiling on demand
-        (default 512, clamped to TRACE_NODE_SPAN_CAP_MAX in node_trace_view); 0/absent keeps the default."""
+        (default 512, clamped to TRACE_NODE_SPAN_CAP_MAX in node_trace_view); 0/absent keeps the default.
+        A negative limit is refused at the boundary (422) rather than silently read as the default — the
+        same wire contract as the conversation twin, so both pagers fail loudly on a client defect."""
         rd = _run_dir(run_id)
         if attempt is None:
             attempt = _node_attempt(srv.state(rd), nid)
             if attempt is None:
                 attempt = 0  # setup/legacy traces have no folded Node row
-        cap = int(limit) if limit and int(limit) > 0 else None
-        return _node_trace(rd, nid, cap=cap, attempt=attempt)
+        # 0/absent settles to the default inside `node_trace_view` — the one settle rule owns it, so
+        # this route does not get a second opinion about what an unrequested window means.
+        return _node_trace(rd, nid, cap=limit, attempt=attempt)
 
     @router.get("/api/runs/{run_id}/spans/{sid}")
     def span_io(run_id: str, sid: str):
@@ -2180,23 +2193,33 @@ def build_router(srv) -> APIRouter:
                                "visible_spans": len(shown), "omitted_spans": omitted}}
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/conversation")
-    def node_conversation(run_id: str, nid: int):
+    def node_conversation(run_id: str, nid: int, limit: int = Query(default=0, ge=0)):
         """The node's trace as a LINEAR, de-duplicated conversation: the system+user request shown
         once per sub-loop, then each generation's delta (reasoning + text + tool calls) interleaved
         with the tool executions — so the agent's activity reads without the recorded tree's per-turn
-        re-send of the whole message history. All text remains bounded/redacted for the browser."""
+        re-send of the whole message history. All text remains bounded/redacted for the browser.
+
+        `limit` (>0) is the Inspector's "load more" control, the conversation twin of the one on
+        `/trace`: it raises this node's conversation WINDOW — spans read, plus the stage/turn render
+        caps derived from it (`conversation_render_caps`) — on demand. 0/absent keeps the default
+        window; anything above TRACE_NODE_SPAN_CAP_MAX clamps to it (`settle_node_span_cap`), which
+        is the same ceiling the span tree pages against. A NEGATIVE limit is refused at the boundary
+        (422) rather than silently read as "default": it can only be a client defect, and a paging
+        control that quietly ignores its own argument is how a dead pager looks from the outside."""
         rd = _run_dir(run_id)
         try:
             from looplab.events.traceview import (
-                TRACE_CONVERSATION_SPAN_CAP, build_conversation, load_spans)
+                TRACE_CONVERSATION_SPAN_CAP, build_conversation, load_spans, settle_node_span_cap)
             from looplab.events.span_index import get_index
+            span_cap = settle_node_span_cap(limit, default=TRACE_CONVERSATION_SPAN_CAP)
             # Read only THIS node's traces' spans (by byte offset via the index), not the whole
             # spans.jsonl — a node's conversation on a 1 GB run no longer scans the entire file.
             idx = get_index(rd / "spans.jsonl")
             total = idx.node_span_count(nid) if idx is not None else None
-            spans = (idx.full_spans_for_node(nid, TRACE_CONVERSATION_SPAN_CAP)
+            spans = (idx.full_spans_for_node(nid, span_cap)
                      if idx is not None else load_spans(rd / "spans.jsonl"))
-            return build_conversation(srv.trace_scalars(rd), spans, nid, total_spans=total)
+            return build_conversation(srv.trace_scalars(rd), spans, nid, total_spans=total,
+                                      span_cap=span_cap)
         except Exception:  # noqa: BLE001
             return _trace_unavailable(run_id=run_id, node_id=str(nid), stages=[])
 
