@@ -430,16 +430,17 @@ export function measureAssetBuffer(file, buffer) {
 // `node --test` all run the UNMINIFIED source and are blind to it by construction.
 //
 // The signature is `!0`/`!1`, which is how the configured final pass (Terser) spells a boolean VALUE,
-// and it is decisive rather than heuristic: measured 2026-08-06 over both builds of the same tree, the
-// offending one contains the sequence ZERO times across all 34 chunks — the 486-byte one and the
-// 178 KiB one alike — while the corrected one carries 3,540 of them with every one of its 35 chunks
-// holding at least two. So "every JS chunk has one" needs no size threshold to be safe.
+// and it is decisive rather than heuristic. Measured 2026-08-06 on a controlled A/B — the same commit
+// built twice, 35 chunks each way, only this flag different: the rewritten build contains the sequence
+// ZERO times in ALL 35 chunks, the 486-byte one and the 178 KiB one alike, while every chunk of the
+// correct build has at least one (3,540 in total). So "every JS chunk has one" is exact in both
+// directions and needs no size threshold to be safe.
 //
 // The bare words `true`/`false` are deliberately NOT accepted as evidence: they survive the rewrite
 // inside STRING literals (`"aria-hidden":`true``, JSON payloads, prop values), and counting them would
-// have falsely rescued 23 of the 34 offending chunks. If the final minifier is ever changed to one
-// that emits the word form for values, this check goes red on the first build — recalibrate the
-// signature for that minifier's output, do not delete the check.
+// have falsely rescued 24 of those 35 chunks. If the final minifier is ever changed to one that emits
+// the word form for values, this check goes red on the first build — recalibrate the signature for
+// that minifier's output, do not delete the check.
 const BOOLEAN_LITERAL = /![01](?![\w$])/
 export function findIntegerBooleanChunks(assetText) {
   const violations = []
