@@ -94,6 +94,11 @@ def test_part_iv_v_openapi_publishes_response_envelopes_and_governance_inputs(tm
         ("/api/cross-run/concept-split", "post"): "ConceptSplitResponse",
         ("/api/cross-run/curation-log", "get"): "CurationLogResponse",
         ("/api/cross-run/concept-steward", "post"): "StewardProposalResponse",
+        # The canonicalization table a BROWSER applies. An empty `{}` schema here would let a
+        # generated client fail open on the one payload whose whole job is to be applied literally:
+        # a missing `split_sources` reads as "no id is context-dependent", which silently applies a
+        # split's alias hop as if it were the final answer.
+        ("/api/cross-run/concept-policy", "get"): "CrossRunConceptPolicyResponse",
     }
     for (path, method), model in expected_responses.items():
         response = paths[path][method]["responses"]["200"]["content"]["application/json"]["schema"]

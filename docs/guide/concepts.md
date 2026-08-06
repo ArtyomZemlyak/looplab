@@ -809,7 +809,16 @@ as zero; capsule-source completeness is a separate receipt, merged at the tool b
 (`search/concept_lens.py::project_concept_map`) takes concept SETS and cannot know how complete the rows
 behind them were. That fold is shared with the run list's `Concepts` view, which passes the live per-run
 rollup of the runs it is showing instead of capsules — one map rule, two populations, each named by its
-caller. The `is_a` relation has no edge list: a concept id spells its own ancestry, so the tree IS that
+caller. Because the fold takes no governance, the CALLER canonicalizes — and the browser caller gets
+that from `GET /api/cross-run/concept-policy`: `canonical` (`id -> canonical | null`, alias chains
+already resolved, `null` = purged, an absent id = itself) plus `split_sources`, the ids whose
+canonical form genuinely depends on each run's own siblings and which a client must therefore
+declare UNAPPLIED rather than re-derive. Without it a merged pair kept drawing two nodes and kept
+reading as spelling drift; with it a governed pair collapses to one node and leaves the drift
+report by itself, so what remains listed is exactly the residue nobody has ruled on. The same
+response returns `capsule_run_ids`, because the two populations above differ in practice and
+nothing else says so: on the development corpus the map draws 15 tagged runs while durable memory
+holds 3 capsules. The `is_a` relation has no edge list: a concept id spells its own ancestry, so the tree IS that
 relation. A pair below the `min_cooccurrence` floor (default 2 distinct runs) is counted and reported rather
 than dropped, so an empty pair list reads as "nothing repeats yet" and never as "nothing co-occurs". Typed
 owner governance actions add revision/action fencing and explicit clear operations — reachable both from

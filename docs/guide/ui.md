@@ -480,7 +480,9 @@ semantics, so paid scope actions can fail closed there even when ordinary file r
 work.
 
 The preview reads `GET /api/cross-run/atlas`, `GET /api/cross-run/claims`,
-`GET /api/cross-run/curation-log`, and `GET /api/cross-run/claim-curation-log`; the CLI equivalents are `looplab atlas`, `looplab claims`, and
+`GET /api/cross-run/curation-log`, `GET /api/cross-run/claim-curation-log`, and
+`GET /api/cross-run/concept-policy` (the canonicalization table the global concept map applies,
+plus which runs durable memory actually holds); the CLI equivalents are `looplab atlas`, `looplab claims`, and
 `looplab cross-run-search`. See the [CLI reference](cli-reference.md#atlas) for their scope and evidence
 limitations. The owner HTTP OpenAPI contract types the nested concept, research and combined-claim source
 receipts, governance revisions, visible claim rows and bounded context pack; consumers may accept additive
