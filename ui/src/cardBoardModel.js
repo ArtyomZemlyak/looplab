@@ -173,6 +173,109 @@ export function cardAttemptSummary(attempts) {
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Item 6: what else is worth showing for a Card. The survey behind these two is in the commit that
+// added them — every `Card` field is already ON the wire (`serve/public_cards.py::_FIELDS` publishes
+// all 41 and receipts every omission), so "what else to show" is a rendering question, not a
+// projection one, with exactly one exception: the per-card event history lives in
+// `INTERNAL_CARD_STATE_FIELDS` and is excluded at `appstate.py`, so a card TIMELINE is the one
+// feature that would need a new wire field. These two are the ones with real content behind them.
+// ---------------------------------------------------------------------------------------------
+
+// The 17 structured cue kinds `core/cards.py:193-219` closes over, in the operator's words. This is a
+// LABEL table, not a validator: an unknown kind renders its own id rather than being dropped, because
+// the vocabulary is versioned server-side and a silently-hidden new cue is worse than an ugly one.
+const STEERING_CUES = {
+  complexity: 'task complexity', eval_budget: 'evaluation budget',
+  experiment_time_budget: 'experiment time budget', gpu_constraint: 'GPU constraint',
+  failure_reflection: 'a failure reflection', watchdog_reflection: 'a watchdog reflection',
+  trust_reflection: 'a trust reflection', fault_localization: 'fault localization',
+  feature_engineering: 'feature engineering', reflection_prior: 'a reflection prior',
+  cross_run_advisory: 'a cross-run advisory', cross_run_tools: 'cross-run tools',
+  concept_authoring: 'concept authoring', concept_slug_reuse: 'concept slug reuse',
+  research_memo: 'a research memo', strategy: 'the Strategist', sweep: 'a sweep',
+}
+
+/**
+ * Why this work item was proposed — `steering_context`, plus the provenance fields beside it.
+ *
+ * `steering_context` is a compact STRUCTURED snapshot of the cues that were in scope when the card
+ * was minted (deliberately no verbatim capture). It is fully modelled, fully serialized, receipted
+ * for completeness — and rendered nowhere, which makes "why is this card here?" unanswerable from the
+ * UI even though the answer shipped. Each cue's extra keys travel as `detail` rather than being
+ * flattened into the label, so a cue that grows a field shows it instead of losing it.
+ *
+ * `paraphrased` is the other half: `statement` is an operator-editable display overlay and
+ * `seed_statement` is the immutable value the whole ledger joins on. Showing only the paraphrase
+ * hides that an operator rewrote the question.
+ */
+export function cardOrigin(card) {
+  const seed = cardText(card?.seed_statement)
+  const shown = cardText(card?.statement)
+  return {
+    seed,
+    paraphrased: !!seed && !!shown && seed !== shown,
+    rationale: cardText(card?.rationale),
+    createdAtNode: cardInt(card?.created_at_node),
+    // Ids folded INTO this canonical card by a merge. Never shown before, so a card that absorbed
+    // three sibling proposals looked identical to one that was minted alone.
+    aliases: Array.isArray(card?.aliases) ? card.aliases.filter(id => cardText(id)) : [],
+    cues: (Array.isArray(card?.steering_context) ? card.steering_context : [])
+      .filter(isRecord)
+      .map(cue => {
+        const kind = cardText(cue.kind)
+        if (!kind) return null
+        const detail = Object.entries(cue)
+          .filter(([key, value]) => key !== 'kind' && (typeof value === 'string' || typeof value === 'number'))
+          .map(([key, value]) => `${key} ${value}`)
+        return { kind, label: STEERING_CUES[kind] || kind, detail }
+      })
+      .filter(Boolean),
+  }
+}
+
+/**
+ * What this work item TAUGHT — `Card.lesson_refs` resolved to real statements.
+ *
+ * `lesson_refs` holds opaque `lesson:sha256:…` ids (stamped by `engine/research_cadence.py` onto
+ * `card_enriched`) and there is NO resolver from one back to a row in `lessons.jsonl` — the store
+ * never writes the id. That made the field unrenderable, and it has been carried unused since it
+ * shipped. But the SAME id is minted into this run's own `lessons_distilled` beside its statement, so
+ * the run's event log resolves it exactly and for free.
+ *
+ * `unresolved` is returned rather than swallowed: an id whose lesson was distilled in an EARLIER run
+ * (cross-run priors can carry them) has no entry in this log, and a card claiming fewer lessons than
+ * it references would be quietly wrong.
+ */
+export function cardLessons(state, card) {
+  const refs = (Array.isArray(card?.lesson_refs) ? card.lesson_refs : []).filter(id => cardText(id))
+  if (!refs.length) return { lessons: [], unresolved: [] }
+  const byId = new Map()
+  for (const batch of Array.isArray(state?.lessons_distilled) ? state.lessons_distilled : []) {
+    for (const lesson of Array.isArray(batch?.lessons) ? batch.lessons : []) {
+      const id = isRecord(lesson) ? cardText(lesson.lesson_id) : null
+      const statement = isRecord(lesson) ? cardText(lesson.statement) : null
+      if (id && statement && !byId.has(id)) {
+        byId.set(id, {
+          lessonId: id, statement, outcome: cardText(lesson.outcome),
+          evidence: cardNodes(lesson.evidence),
+        })
+      }
+    }
+  }
+  const seen = new Set()
+  const lessons = []
+  const unresolved = []
+  for (const id of refs) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    const found = byId.get(id)
+    if (found) lessons.push(found)
+    else unresolved.push(id)
+  }
+  return { lessons, unresolved }
+}
+
 // Which card the route's `card=` target resolves to. Deliberately NEVER auto-picks a fallback: a
 // shared link that silently opened a DIFFERENT card than the one it names would be worse than an
 // empty pane, and the empty pane is recoverable by clicking a lane card.
