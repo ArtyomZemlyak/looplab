@@ -7756,6 +7756,67 @@ they should.
 
 *Recommendation:* Split by responsibility, keeping replay-determinism: Engine.__init__ into named _init_* steps; normalize_control into a per-event-type dispatch table of small normalizers (the CONTROL_EVENTS registry already enumerates the types); _derive_cards into per-event helper functions composed by one driver.
 
+*Resolution (2026-08-06):* Adjudicated against the tree first. Two of the five targets were already
+gone and one had shrunk, which is why the measurement came before the work:
+
+| target | claimed | measured | verdict |
+|---|---|---|---|
+| `replay._derive_cards` | 818 | — | GONE. EV-01 moved it to `events/card_ledger.py` and decomposed it into numbered phases; the driver there is 40 lines. The recommendation for it was already implemented. |
+| `run_commands.normalize_control` | 775 | 37 | GONE. SC-02 replaced the if-chain with the five-table `ControlSpec` registry this finding itself suggests. |
+| `Engine.__init__` | 770 | 822 | Still the largest, and GREW. Handled by its own change (the 207-line speculation-lane admission decision → `engine/speculation_gate.py::admit_speculation_lane`); not part of this resolution. |
+| `_run_with_llm_broker` | 540 | 389 | Real, reduced by other work. Resolved below. |
+| `speculation_quality_gate` | 390 | 390 | Exact. Resolved below. |
+
+**`speculation_quality_gate` 390 → 105.** An earlier pass recorded both remaining targets as "single
+cohesive functions rather than a bundle of separable concerns". For this one that was wrong, and the
+module is its own evidence: `speculation_quality.py` is already built out of ~40 named
+`_validate_*`/`_analyze_*` helpers and the gate is the one driver that never got the same treatment.
+It is an ordered PIPELINE — scorer matrix, GPU evidence, the two host identities, the pair-count
+contract, the per-pair loop, the seed set, the aggregates, the body — and only the loop carried
+state. Thirteen cross-pair accumulators became one `_ReplicateInvariants` record, which is what let
+the 160-line per-pair contract become `_evaluate_pair` (no control flow crosses the boundary; the
+loop had no `break`/`continue` at all). Two rules that were spelled out six and five times are now
+stated once with truth tables: `_note_unique` (an identity seen in a second evidence lane — and the
+half that vanishes when it is hand-written is the RECORD, which makes the check vacuous rather than
+wrong) and `_replicate_invariant` (the first pair binds, a dissenter never re-binds, which matters
+because the bound values are PUBLISHED in the receipt and pin a later replay's envelope).
+
+The receipt is a contract — `validated_speculation_gate_receipt` recomputes the whole gate at read
+time — so this was proved behaviourally rather than by inspection: the same corpus scored by both
+trees, `canonical_json(body)` compared byte-for-byte over 18 corpora (one passing, 17 failing ones
+chosen to reach every rewritten branch). All identical.
+
+**`_run_with_llm_broker` 389 → 234.** Four cuts, each qualifying on a stated property rather than on
+line count:
+
+- `_enter_run` (the re-entry prologue) is the EXACT-cut shape: measured, nothing after it reads
+  either of its two locals, and its whole output is one flag.
+- `CreationRunawayCounters` makes the loop's four counters a record and its thirteen-line charging
+  rule a method — the rule was previously reachable only through a whole simulated spin.
+- `_run_spec_gates` and `_handle_no_actions` follow the ES-05 precedent: blocks that always
+  continued or broke and never fell through, so their outer-loop control flow becomes a returned
+  signal. (`_run_spec_gates` is the one that CAN fall through, so its signal is three-valued.)
+- `_settle_terminal_gate` names the settle-then-finish ladder four gates spelled out; the ORDER is
+  the rule, and it is now testable in the direction that matters — that finalization is not even
+  ATTEMPTED while a durable request head is open. (Named for the established
+  `_close_*_before_terminal_gate` family, and deliberately NOT `_terminal_gate`: the module already
+  has a `_run_terminal_gate` PREDICATE and the two would read as the same thing.)
+
+What was NOT cut, with the measurement: the stable-decision-prefix block (~30 lines) returns three
+loop-carried names through two `continue`s and a `break`, which is the shape ES-03 correctly
+declined; and `state.paused` stays inline because it settles the same in-flight build but then
+breaks WITHOUT finishing, a different terminal that a shared ladder would have to special-case
+anyway. After the four cuts the loop body is 46 top-level statements, median 2 lines and largest 22
+— the "table of guarded steps" its own §4 comment claims it is — so further splitting would group
+neighbours rather than cut a concern.
+
+All four helpers stay IN `orchestrator.py`. Two of them fold, and `fold` there is the module-global
+monkeypatch seam: moving them to a mixin would leave `monkeypatch.setattr(orch, "fold", …)` applying
+and simply not reaching them, which is a silent narrowing rather than a red test (the same hazard
+ES-01 recorded for `card_reservation.py::_fold`). `tests/test_orchestrator_internals.py` drives that
+seam directly for both, and resolves the signal vocabulary from real `ast.Return` constants — a
+typo'd `"brake"` reads as "not break" and turns a stop into another loop turn.
+
 #### XP-07 · MEDIUM · layering · effort: medium
 
 **search/speculation_quality.py reaches up into engine and binds calibration receipts to a hash of every .py file in the package**

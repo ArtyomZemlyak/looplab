@@ -28,8 +28,11 @@ from typing import Callable, Optional
 
 import orjson
 
+from looplab.core.errors import ConfigRefusal
 from looplab.search.speculation_calibration import (
+    SPECULATION_CALIBRATION_PROFILE_DIGEST,
     SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+    SPECULATION_POLICY_SCOPE,
     SPECULATION_CALIBRATION_SEEDS,
     canonical_speculation_toy_task,
     speculation_runtime_scope_digest,
@@ -272,3 +275,233 @@ def guard_calibrated_role_factory(engine, task) -> None:
         return pair
 
     engine.role_factory = _calibrated_role_factory
+
+
+def admit_speculation_lane(engine, rt: CalibrationRuntime, gate_receipt) -> None:
+    """Decide, once, which speculation lane this construction is entitled to, and stamp its identity.
+
+    Extracted from `Engine.__init__` (doc 25 XP-06): at 207 lines this single `if` was the largest
+    block in an 822-line constructor, and it is not construction at all — it is the gate's admission
+    DECISION, sibling to the envelope above it. Nothing after it in `__init__` reads any of its
+    locals (measured), and its whole output is the ten `_speculation_*` attributes it stamps, so the
+    cut is exact rather than a convenient place to stop.
+
+    The three lanes it chooses between are, in order: the calibration BOOTSTRAP (validate the narrow
+    envelope at the library boundary, so a caller cannot obtain the depth waiver by constructing
+    `Engine` directly with arbitrary roles), the calibrated REPLAY lane (the only lane a receipt
+    binds anything to, because it is the only one whose workload the receipt actually measured), and
+    the PRODUCT lane (the operator's setting is the whole authority, and a lane token a
+    receipt-authorized log can never match keeps re-entry from reinterpreting one lane as the other).
+
+    Body verbatim from the constructor apart from the `self` -> `engine` rename and this preamble.
+    """
+    _gate_receipt = gate_receipt
+    task, max_nodes = rt.task, rt.max_nodes
+    _calibration_runtime = rt
+    if engine._speculation_gate_calibration:
+        # Validate the bootstrap at the library boundary.  A caller cannot obtain the waiver by
+        # constructing Engine directly with arbitrary roles/settings, and no run artifact exists
+        # yet when these checks execute.
+        calibration_errors, expected_runtime_scope = narrow_runtime_envelope_errors(
+            engine, _calibration_runtime)
+        if engine.speculation_gate_receipt is not None:
+            calibration_errors.append("speculation_gate_receipt must be unset")
+
+        # The CLI has already created engine.lock.  An empty events file is also harmless; every
+        # material snapshot/artifact is forbidden because copied evidence must not bootstrap a run.
+        if engine.run_dir.exists():
+            unexpected = sorted(
+                path.name for path in engine.run_dir.iterdir()
+                if path.name not in {"engine.lock", "events.jsonl"}
+            )
+            event_path = engine.run_dir / "events.jsonl"
+            if unexpected:
+                calibration_errors.append(
+                    "run directory contains stale material: " + ", ".join(unexpected))
+            if event_path.exists() and event_path.stat().st_size:
+                calibration_errors.append("events.jsonl must be exactly empty")
+
+        try:
+            from looplab.core.hardware import effective_gpu_inventory
+            gpu_inventory = _stable_effective_gpu_inventory(effective_gpu_inventory())
+        except Exception:
+            gpu_inventory = []
+        if not gpu_inventory:
+            calibration_errors.append(
+                "effective CUDA_VISIBLE_DEVICES GPU inventory must be non-empty")
+        if calibration_errors:
+            raise ConfigRefusal(
+                "speculation gate calibration profile mismatch: "
+                + "; ".join(calibration_errors)
+            )
+
+        guard_calibrated_role_factory(engine, task)
+        engine._speculation_gate_admitted = True  # depth=0 baseline and depth>0 treatment
+        # SpeculationMixin's live enablement also requires a non-empty internal admission token.
+        # This value is never serialized as a receipt digest for calibration evidence; the durable
+        # authority is the explicit profile/GPU/seed envelope below.
+        engine._speculation_gate_receipt_digest = SPECULATION_CALIBRATION_PROFILE_DIGEST
+        engine._speculation_policy_scope = SPECULATION_POLICY_SCOPE
+        engine._speculation_calibration_profile_digest = (
+            SPECULATION_CALIBRATION_PROFILE_DIGEST
+        )
+        engine._speculation_calibration_gpu_inventory = gpu_inventory
+        engine._speculation_calibration_seed = task.seed
+        engine._speculation_runtime_scope_sha256 = expected_runtime_scope
+        from looplab.search.speculation_quality import speculation_implementation_digest
+        engine._speculation_implementation_digest = speculation_implementation_digest()
+    elif engine.card_driven_selection and engine.speculation_depth > 0:
+        # WHY THIS IS ADMITTED ON ANY TaskAdapter (2026-08-04 operator decision; this block used
+        # to additionally require `workload_scope == "quadratic_toy"` AND `type(task) is ToyTask`,
+        # so every real Dataset/Repo/Command workload was refused and the public knob only ever
+        # replayed its own benchmark):
+        #
+        # Card speculation pre-builds the code for the experiment PREDICTED to be selected next.
+        # A build whose prediction misses is DISCARDED BEFORE IT EVER RUNS — the discard is a
+        # `superseded` terminal appended from `_drop_stale_speculation`, which only reaches a node
+        # that is still `pending` on a fresh fold, is not in `eval_inflight`, and carries no
+        # durable eval-start boundary — so no sandbox, no workdir and no GPU second was ever spent
+        # on it. (The first two are IN-MEMORY facts and a resumed process has neither; the
+        # boundary, `events/types.py::EV_NODE_EVAL_STARTED`, is the durable one that survives a
+        # kill, and without it the refund is refused.) Its whole cost is one Developer call.
+        # The toy-only fence was never about that cost. It existed because a discarded build still
+        # consumed a slot of the run's NODE budget, so the same budget bought fewer real
+        # experiments: measured at equal task/seed/budget with speculation the only variable, the
+        # baseline evaluated 12/12 nodes while the depth-1 treatment evaluated 9/12 with three
+        # `superseded` discards and finished ~2.6% worse. That 2.6% IS the `normalized_regret` the
+        # calibration gate bounds — the gate protected the EXPERIMENT BUDGET, not search
+        # correctness. `core/models.py::is_unevaluated_speculative_discard` now refunds
+        # exactly that slot (and `_hard_node_reservation_limit` refunds the matching physical
+        # reservation), so the harm the evidence measured is gone and demanding per-workload
+        # evidence that "the harm is small" is ceremony.
+        #
+        # THE PROPERTY THIS ARGUMENT DEPENDS ON — a speculative miss is provably cheap ONLY while
+        # it never consumed a real evaluation. If any future path lets a speculative build reach
+        # an evaluation before its selection is confirmed, that is real GPU time and MUST NOT be
+        # admitted on this reasoning. It is asserted, not hoped for, at the single dispatch funnel:
+        # `engine/evaluate.py::_evaluate` -> `_assert_speculative_selection_confirmed`.
+        if not engine.run_dir.name.strip():
+            raise ConfigRefusal("positive Card speculation requires a non-empty run id")
+        if engine._policy_name != SPECULATION_POLICY_SCOPE:
+            # Not a workload fence: the speculative freshness test asks the POLICY for the
+            # counterfactual next action, and `greedy` is the one policy whose counterfactual the
+            # Card scorer/selector was built and measured against.
+            raise ConfigRefusal(
+                f"Card speculation requires policy={SPECULATION_POLICY_SCOPE!r}, "
+                f"got {engine._policy_name!r} — set `-s policy={SPECULATION_POLICY_SCOPE}`, or "
+                f"turn speculation off with `-s speculation_depth=0`"
+            )
+        from looplab.adapters.toytask import ToyTask
+        _calibrated_replay = bool(engine.speculation_gate_receipt) and type(task) is ToyTask
+        if engine.speculation_gate_receipt:
+            # A receipt is OPTIONAL now, but it is still revalidated end-to-end whenever it is
+            # supplied (schema, thresholds, self-digest, current implementation and environment
+            # digests, and a full recomputation from its own raw paired run dirs) — a stale or
+            # forged one is never silently honoured.
+            #
+            # WHAT REFUSAL MEANS depends on what the receipt is authorizing. On the calibration
+            # toy it IS the authority, so a bad receipt is a hard `ValueError`. On a real
+            # workload it authorizes nothing (the operator's setting is the authority), so a hard
+            # raise at `Engine.__init__` would take a whole Repo/GPU run down over an attestation
+            # the run does not need — and with `card_driven_selection` defaulting True that is a
+            # trap, not a safety property. There the receipt is DECLINED instead: the run
+            # proceeds in the product lane, and `run_started` durably records the product lane
+            # token, so the log never claims an attestation that did not hold.
+            #
+            # ...AND A HONOURED ONE BINDS NOTHING THERE EITHER. This block used to carry the
+            # receipt's identity into `run_started` on ANY workload, which meant a receipt that
+            # was valid at run start pinned `speculation_implementation_digest` — the whole-source
+            # digest — on a real Repo/GPU run. The next `pip install -U` (or any source edit)
+            # revoked the receipt, the resume fell into the product lane with an empty digest, and
+            # the re-entry equality check refused the run FOREVER; dropping the receipt from the
+            # resume command did not help, because that lands in the same product lane. That is
+            # precisely the trap the product lane below exists to avoid, so a receipt supplied on
+            # a workload it did not measure is now inert in BOTH directions: it never authorizes
+            # (it already did not) and it never pins.
+            from looplab.search.speculation_quality import (
+                speculation_task_profile_digest,
+                validated_speculation_gate_receipt,
+            )
+            _gate_receipt = validated_speculation_gate_receipt(
+                engine.speculation_gate_receipt,
+            )
+            if (
+                _gate_receipt is None
+                or _gate_receipt.get("require_gpu") is not True
+                or not _gate_receipt.get("gpu_inventory")
+                or _gate_receipt.get("policy_scope") != SPECULATION_POLICY_SCOPE
+                or _gate_receipt.get("calibration_profile_digest")
+                != SPECULATION_CALIBRATION_PROFILE_DIGEST
+                or _gate_receipt.get("workload_scope") != "quadratic_toy"
+                or not isinstance(_gate_receipt.get("implementation_digest"), str)
+                or not _gate_receipt.get("implementation_digest")
+            ):
+                if _calibrated_replay:
+                    raise ConfigRefusal(
+                        "speculation_gate_receipt is stale, invalid, non-GPU, "
+                        "policy-mismatched, or does not pass the current "
+                        "scorer/search-quality gates"
+                    )
+                _gate_receipt = None
+        if _calibrated_replay and _gate_receipt is not None:
+            # CALIBRATED REPLAY LANE — the ONLY lane a receipt binds anything to, because it is
+            # the only one whose workload the receipt actually measured. Re-running the
+            # benchmark's own workload under its own receipt gets the full narrow envelope: the
+            # exact Settings profile, roles, policy, sandbox, treatment depth, node budget and
+            # runtime-scope digest the evidence was measured under. Weakening this lane would let
+            # a receipt earned on one measured runtime authorize a different one under the same
+            # name — and this lane's own workload is the toy the receipt measured, so pinning the
+            # source digest here costs nothing: a re-measurement is minutes, not a lost GPU run.
+            runtime_errors, expected_runtime_scope = narrow_runtime_envelope_errors(
+                engine, _calibration_runtime)
+            if (
+                runtime_errors
+                or type(_gate_receipt.get("admitted_depth")) is not int
+                or _gate_receipt.get("admitted_depth") != engine.speculation_depth
+                or type(_gate_receipt.get("admitted_max_nodes")) is not int
+                or _gate_receipt.get("admitted_max_nodes") != max_nodes
+                or _gate_receipt.get("runtime_scope_sha256") != expected_runtime_scope
+                # The receipt is scoped to the shipped quadratic adapter, not merely to an
+                # arbitrary TaskAdapter/subclass that can spoof the same model_dump while
+                # executing a different workload.
+                or _gate_receipt.get("task_profile_sha256")
+                != speculation_task_profile_digest(task)
+            ):
+                raise ConfigRefusal(
+                    "speculation_gate_receipt is stale, invalid, non-GPU, "
+                    "policy/depth-mismatched, runtime-scope/max-nodes-mismatched, or does "
+                    "not pass the current scorer/search-quality gates"
+                )
+            guard_calibrated_role_factory(engine, task)
+            engine._speculation_runtime_scope_sha256 = expected_runtime_scope
+            engine._speculation_gate_receipt_digest = _gate_receipt["self_digest"]
+            engine._speculation_implementation_digest = _gate_receipt["implementation_digest"]
+        else:
+            from looplab.search.speculation_quality import (
+                speculation_product_authority_digests,
+            )
+            # PRODUCT LANE — the operator's setting is the whole authority. What stays pinned is
+            # the run's own search TREATMENT (selector, depth, policy scope) plus a lane token a
+            # receipt-authorized log can never match, so re-entry cannot reinterpret one lane's
+            # speculative prefix as the other's. A receipt supplied on a workload it did not
+            # measure lands HERE, valid or not: it authorized nothing, so it pins nothing, and the
+            # run stays resumable with or without it on the command line.
+            #
+            # It deliberately does NOT pin `speculation_implementation_digest`. That digest hashes
+            # every shipped Python file, so any source edit — a comment, a `pip install -U` —
+            # would make a half-finished Repo/GPU run permanently unresumable. It is an EVIDENCE
+            # identity for the lanes that claim evidence; this lane claims none, and the
+            # speculative prefix it writes is folded by the ordinary forward-compatible rules
+            # (invariant #5) like every other part of the log.
+            engine._speculation_product_lane = True
+            # Head = the token this run MINTS; the tail is superseded spellings of the same
+            # identity that re-entry still accepts, so a schema bump cannot strand a run that is
+            # already underway (see `speculation_product_authority_digests`).
+            _product_tokens = speculation_product_authority_digests(
+                policy_scope=SPECULATION_POLICY_SCOPE,
+                task_kind=str(getattr(task, "kind", "") or ""),
+            )
+            engine._speculation_gate_receipt_digest = _product_tokens[0]
+            engine._speculation_product_authority_tokens = frozenset(_product_tokens)
+        engine._speculation_policy_scope = SPECULATION_POLICY_SCOPE
+        engine._speculation_gate_admitted = True
