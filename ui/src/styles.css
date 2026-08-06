@@ -2703,7 +2703,12 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
     padding-right: calc(68px + env(safe-area-inset-right, 0px));
   }
   .topbar.run-head { gap: 6px; flex-wrap: wrap; align-items: stretch; }
-  .run-head .brand, .run-head > .phase, .run-head > .chip,
+  /* DIRECT CHILD, since the mark moved INSIDE the LoopLab menu trigger. The descendant selector
+     hid the wordmark within that button too, leaving a bare `▾` as the only installation-wide
+     control on every phone-width run view — the menu still opened, but nothing said what it was.
+     `> .brand` keeps the word inside the trigger and still hides the only other direct-child mark
+     in a run head, which is RunScreen's inert one. */
+  .run-head > .brand, .run-head > .phase, .run-head > .chip,
   .run-head > .spacer { display: none; }
   .run-head .view-toggle { flex: 1 1 180px; min-width: 0; margin-right: 0; }
   .run-head .view-toggle .vt { flex: 1; min-width: 0; padding-inline: 4px; white-space: nowrap; }
@@ -2739,6 +2744,10 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .run-head > .run-metric-chip.alarm { display: inline-flex; order: 3; align-self: flex-start; }
   .copy-view-label { display: none; }
   .copy-view-btn { min-width: 44px; justify-content: center; }
+  /* The LoopLab trigger left `.home-actions` when it became the mark, and with it the 44px touch
+     target that group gave it — it fell back to `.btn.sm`'s 24px. Restored explicitly rather than
+     by re-nesting it, because its POSITION (at the mark, left) is the whole point of the change. */
+  .home-head .global-menu-btn { min-height: 44px; }
   .concept-bar { padding-block: 6px; }
   .cb-chips { flex-wrap: nowrap; max-height: none; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
   .cb-chip { flex: 0 0 auto; max-width: min(78vw, 320px); min-height: 44px; }
