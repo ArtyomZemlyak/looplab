@@ -185,10 +185,18 @@ _REMEDIES: dict[str, str] = {
         "only travels with the endpoint it is bound to, so repointing a role's base_url drops it.",
     "model":
         "That endpoint answered and REFUSED the request (HTTP 400/403/404) — its own words are "
-        "quoted above and normally name the model. The endpoint and the credential are fine: fix "
-        "the model id (`--model`, LOOPLAB_LLM_MODEL, or the per-role `*_model` / profile field). "
+        "quoted above and normally name the model. The endpoint and the credential are usually fine: "
+        "fix the model id (`--model`, LOOPLAB_LLM_MODEL, or the per-role `*_model` / profile field). "
         "Use the bare name the endpoint advertises — a tier suffix such as `:max` or `:high` is a "
-        "DIFFERENT id and is refused as an unknown model.",
+        "DIFFERENT id and is refused as an unknown model. When the refusal is an allow-list one "
+        "(`team_model_access_denied`), READ THE QUOTED BODY: these endpoints typically ENUMERATE the "
+        "models the key may use, which is faster than guessing and is the only current list. "
+        "Two cases this bucket also catches, where changing the model id cannot help and repeated "
+        "`--model` attempts only look like the id is wrong: a 403 refusing your ORIGIN rather than "
+        "your request (a hosted gateway that allow-lists caller IPs — the fix is the route or the "
+        "proxy, not the model), and a 400 from something that is not the model server at all (a "
+        "base_url pointing at a login page or an HTML error, which arrives as a 400 with no model "
+        "named anywhere in it). If the quoted body never mentions a model, suspect these first.",
     "protocol":
         "That failure carries no HTTP status we can read, so this gate will NOT guess which of the "
         "causes above it is — whatever the transport reported is quoted verbatim above. It covers a "

@@ -374,10 +374,19 @@ _REAL_BODIES = {
                      "type": "token_not_found_in_db", "code": "401"}}, {}),
     503: ({"error": {"message": "The model is overloaded. Please try again later.",
                      "type": "server_error"}}, {}),
+    # The OTHER non-throttle 403: the gateway refused the CALLER, not the request. Unlike the
+    # `team_model_access_denied` body above, nothing here names a model — because the model was never
+    # the problem. This is not a hypothetical bucket: a hosted gateway we ran against allow-listed
+    # caller IPs and refused this host's egress address, and the `[model]` remedy's advice ("fix the
+    # model id") sends the operator through every id they have while none of them can work. It is
+    # keyed separately from 403 because `_REAL_BODIES` is keyed by status and both are 403s. Shape is
+    # representative rather than a verbatim capture; what is under test is the ABSENCE of a model.
+    "403-origin": ({"error": {"message": "Forbidden: source address not permitted for this key.",
+                              "type": "access_denied", "code": "403"}}, {}),
 }
 
 
-def _stub_endpoint(status: int):
+def _stub_endpoint(status: int, body_key=None):
     """Serve `_REAL_BODIES[status]` on a real loopback socket.
 
     Returns `(base_url, attempt_timestamps, server)` — the timestamps are how the tests below tell a
@@ -387,7 +396,7 @@ def _stub_endpoint(status: int):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     attempts: list[float] = []
-    doc, headers = _REAL_BODIES[status]
+    doc, headers = _REAL_BODIES[status if body_key is None else body_key]
     payload = _json.dumps(doc).encode()
 
     class _Handler(BaseHTTPRequestHandler):
@@ -412,10 +421,10 @@ def _stub_endpoint(status: int):
     return f"http://127.0.0.1:{server.server_address[1]}/v1", attempts, server
 
 
-def _refusal_for(status: int, monkeypatch, model="deepseek-v4-flash"):
+def _refusal_for(status: int, monkeypatch, model="deepseek-v4-flash", body_key=None):
     """The operator-facing refusal a live endpoint answering `status` produces, end to end."""
     from looplab.agents import preflight
-    base_url, attempts, server = _stub_endpoint(status)
+    base_url, attempts, server = _stub_endpoint(status, body_key)
     monkeypatch.setenv("NO_PROXY", "*")                 # a corp proxy must not answer for the stub
     monkeypatch.setenv("no_proxy", "*")
     settings = Settings(backend="llm", llm_model=model, llm_base_url=base_url,
@@ -481,6 +490,41 @@ def test_each_live_refusal_names_its_own_cause_and_offers_only_its_own_remedy(mo
     # Every refusal still ends with the offline escape and the reason the gate exists at all.
     for message in (model_msg, cred_msg, busy_msg):
         assert "backend=toy" in message and "fallback proposal" in message
+
+
+def test_the_model_bucket_also_covers_refusals_no_model_id_can_fix(monkeypatch):
+    """A non-throttle 403 is `[model]`, and for the allow-list case that is right — but the bucket
+    also catches refusals of the CALLER, where every `--model` the operator tries is refused for a
+    reason the model never had. The classification is deliberately unchanged (403 is ambiguous on
+    the wire and we do not parse vendor prose to guess), so the remedy is what has to carry it.
+
+    Two properties, and the second is the one the old text failed: the remedy must still lead with
+    the model id (the common case), AND it must tell an operator whose quoted body names no model
+    that a caller/route refusal and a base_url pointing at something that is not a model server both
+    land here. Without that, the only signal is the bucket name, which is confidently wrong.
+    """
+    origin_msg, _, _ = _refusal_for(403, monkeypatch, body_key="403-origin")
+
+    assert "[model]" in origin_msg
+    assert "source address not permitted" in origin_msg      # the endpoint's own words, verbatim
+    # The escape hatch for a body that names no model — the assertion the old remedy fails.
+    assert "If the quoted body never mentions a model, suspect these first." in origin_msg
+    assert "refusing your ORIGIN rather than" in origin_msg
+    assert "not the model server at all" in origin_msg
+    # …and it must not have become a different bucket's advice while gaining that.
+    assert "start the endpoint" not in origin_msg
+    assert "LOOPLAB_LLM_API_KEY" not in origin_msg
+    assert "is UP and answering" not in origin_msg           # not the throttled paragraph
+
+    # The allow-list 403 keeps leading with the model id, and now also says to read the body — the
+    # endpoint enumerates the permitted models there, which is the only current list of them.
+    allow_msg, _, _ = _refusal_for(403, monkeypatch, model="qwen3.5-122b:max")
+    assert "team_model_access_denied" in allow_msg           # quoted, so the body IS in front of them
+    assert "READ THE QUOTED BODY" in allow_msg
+    assert "models=['qwen3.5-122b', 'qwen3.6-35b', 'qwen3-emb-4b', 'deepseek-v4-flash']" in allow_msg
+    # Both 403s render the SAME paragraph — that is the point of putting it in `_REMEDIES` rather
+    # than branching on the body, and it is why the origin case cannot be served by a narrower fix.
+    assert "tier suffix" in origin_msg and "tier suffix" in allow_msg
 
 
 def test_a_transient_throttle_that_clears_inside_the_retries_is_forgiven(monkeypatch):
