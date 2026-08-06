@@ -119,7 +119,14 @@ function ResetBtn({ runId, id, generation, onToast }) {
   </span>
 }
 
+// `onOpenLineage` is the Inspector's ONE piece of host awareness, and it is deliberately a callback
+// rather than a view name: the Inspector must not learn to branch on which workspace is showing it.
+// A host that is already the Lineage graph passes null and the button does not render — an affordance
+// that lands you where you are is worse than none. Everyone else (the Card board's detail pane, the
+// concept tree's) passes the jump, because from those surfaces "where does this sit in the run?" is
+// a real question, and it is exactly the jump the concept tree used to make without being asked.
 export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, readOnly = false,
+  onOpenLineage = null,
   historySeq = null, expectedGeneration = null, readOnlyReason = 'history', evidenceAvailable = true,
   commentsRevision = null, focusCommentId = null, traceClearRecoveryStore: sharedClearStore = null,
   traceClearRecoverySnapshot: sharedClearSnapshot = null,
@@ -357,6 +364,13 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                 ? 'Start over is unresolved. Actions and live traces stay locked until the exact request is recovered.'
                 : `Snapshot seq ${historySeq} · read-only. Live traces, metrics sidecars and actions are hidden.`}</div>
           : <div className="insp-hint muted">Run actions (confirm · ablate · fork · promote) stay in chat. Use Comments for review, or attach <button className="ctx-chip ctx-chip-action" title="attach this node to assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context.<ResetBtn runId={runId} id={n.id} generation={n.attempt} onToast={onToast} /></div>}
+
+        {onOpenLineage && <div className="insp-hint">
+          <button type="button" className="ctx-chip ctx-chip-action"
+            title="open the Lineage graph with this experiment selected, among its parents and children"
+            onClick={() => onOpenLineage(n.id)}>↗ Show #{n.id} in Lineage</button>
+          <span className="muted"> — the experiment graph, with this node selected.</span>
+        </div>}
 
         {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId}
           onToast={onToast} draftStore={draftStore} expectedGeneration={expectedGeneration} />}
