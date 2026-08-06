@@ -189,7 +189,10 @@ export default function SharedAssistant({ sid }) {
         <h1 id={titleId} className="ttl" style={{ flex: 1 }}>{sess?.meta.title || 'Shared chat'}</h1>
         <div className="asst-shared-terms" role="note">
           <span className="pill">{sess ? (liveShare ? 'live · read-only' : 'frozen snapshot · read-only') : 'public · read-only'}</span>
-          {expiry && <span className="muted">Expires <time dateTime={new Date(expiry * 1000).toISOString()}>
+          {/* Number guard, not a truth test: `expiry` is epoch seconds, so its falsy value is a real
+              instant (1970) and `0 && <span/>` renders a bare `0` beside the share pill. Same shape
+              as the Card board's `||`-chain zero. */}
+          {typeof expiry === 'number' && <span className="muted">Expires <time dateTime={new Date(expiry * 1000).toISOString()}>
             {fmtDate(expiry)}</time></span>}
         </div>
         {sess && <button className="btn sm" type="button" disabled={refreshing}

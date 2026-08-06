@@ -1663,7 +1663,10 @@ function Metrics({ n, detail, state, runId }) {
         <td>{r.star ? '★ ' : ''}{r.k}</td><td>{fmt(r.mine)}</td>
         {showChamp && <td>{fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
     {n.confirmed_mean != null && <div className="kv confirmed-metric">
-      <KV k="robust mean ± std" v={`${fmt(n.confirmed_mean)} ± ${fmt(n.confirmed_std)} over ${n.confirmed_seeds || vals.length} seeds`} /></div>}
+      {/* Same rule as the `|| 'Multiple'` above: `||` falls through on a real 0 and would quietly
+          substitute the sample length for a recorded count of zero — a different number presented as
+          the recorded one. Only an ABSENT count may fall back. */}
+      <KV k="robust mean ± std" v={`${fmt(n.confirmed_mean)} ± ${fmt(n.confirmed_std)} over ${typeof n.confirmed_seeds === 'number' ? n.confirmed_seeds : vals.length} seeds`} /></div>}
     {vals.length > 0 && <>
       <div className="section-h">Per-seed confirmation</div>
       <DataTable caption="Per-seed confirmation metrics" card={false}><table className="tbl"><thead><tr><th>seed</th><th>metric</th></tr></thead>
@@ -1756,7 +1759,11 @@ function Trust({ n, drifts = [] }) {
   return <div className="inspector-trust">
     <div className="section-h">Robustness</div>
     {n.confirmed_mean != null
-      ? <><State tone="ok" label="Multi-seed confirmed" detail={`${n.confirmed_seeds || 'Multiple'} successful seeds are recorded for this node.`} /><div className="kv">
+      {/* `|| 'Multiple'` swallowed a REAL zero: a node reporting `confirmed_seeds: 0` alongside a
+          `confirmed_mean` is a contradiction worth seeing, and rewriting it to the reassuring word
+          "Multiple" is the one rendering that hides it. Print the count whenever it is a number —
+          including 0 — and reserve the word for a genuinely absent count. */}
+      ? <><State tone="ok" label="Multi-seed confirmed" detail={`${typeof n.confirmed_seeds === 'number' ? n.confirmed_seeds : 'Multiple'} successful seeds are recorded for this node.`} /><div className="kv">
         <KV k="single" v={fmt(n.metric)} />
         <KV k="robust mean" v={fmt(n.confirmed_mean)} />
         <KV k="std" v={fmt(n.confirmed_std)} />
@@ -1791,8 +1798,14 @@ function Cost({ state }) {
   return <div className="kv">
     <KV k="$ spent" v={<span title={pricing.title}>{pricing.text}</span>} />
     <KV k="calls" v={fmtInt(c.calls)} />
+    {/* `?? 0` here contradicted `costPricing` on the SAME object two lines up: that function treats an
+        absent `priced_calls` as "this payload does not say" and prints the figure with a caveat,
+        while this row rewrote the same absence into the hard claim "0 of N priced" — which reads as
+        "the provider priced nothing", the one conclusion the absent key cannot support. The row is
+        the EVIDENCE for the verdict above it, so it must not assert something the verdict declines
+        to. `fmtInt` already renders null/undefined as an em dash. */}
     <KV k="priced by provider" v={<span title={pricing.title}>
-      {fmtInt(c.priced_calls ?? 0)} of {fmtInt(c.calls)}</span>} />
+      {fmtInt(typeof c.priced_calls === 'number' ? c.priced_calls : null)} of {fmtInt(c.calls)}</span>} />
     <KV k="prompt tokens" v={fmtInt(c.prompt_tokens)} />
     <KV k="completion tokens" v={fmtInt(c.completion_tokens)} />
     <KV k="total tokens" v={fmtInt(c.total_tokens)} />

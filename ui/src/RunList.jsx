@@ -2494,7 +2494,11 @@ export default function RunList({ onOpen, onGlobalNavigate,
               <div className="run-card-metrics" style={{ textAlign: 'right' }}>
                 <div>best <b>{fmt(r.best_confirmed ?? r.best_metric)}</b></div>
                 <div className="muted">{r.nodes} nodes · {r.direction}</div>
-                {r.mtime && <div className="muted run-when"
+                {/* A NUMBER guard, not a truth test: `mtime` is epoch seconds, so the falsy value is
+                    a real timestamp (1970-01-01T00:00:00Z) and `0 && <div/>` renders a bare `0` into
+                    the run card instead of rendering nothing. Unreachable from a healthy run today,
+                    but this is the exact shape that put 120 stray zeros on the Card board. */}
+                {typeof r.mtime === 'number' && <div className="muted run-when"
                   title={`started ${fmtDate(r.created)} · updated ${fmtDate(r.mtime)}`}>
                   {fmtAgo(r.mtime)}</div>}
               </div>

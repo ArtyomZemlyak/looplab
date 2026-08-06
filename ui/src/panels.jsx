@@ -568,7 +568,11 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
       {robust && naive
         ? <>
           <TrustState value={robust.confirmed_mean != null
-            ? { tone: 'ok', label: 'Winner is multi-seed confirmed', detail: `${robust.confirmed_seeds || 'Multiple'} successful seeds produced ${fmt(robust.confirmed_mean)} ±${fmt(robust.confirmed_std)}.` }
+            // `|| 'Multiple'` turned a recorded ZERO into the reassuring word, on a panel whose whole
+            // job is to say whether seed luck was ruled out. A count of 0 beside a `confirmed_mean`
+            // is a contradiction the operator needs to see, not one to smooth over. Print any real
+            // number; reserve the word for an absent count. (Same fix in Inspector.jsx's Robustness.)
+            ? { tone: 'ok', label: 'Winner is multi-seed confirmed', detail: `${typeof robust.confirmed_seeds === 'number' ? robust.confirmed_seeds : 'Multiple'} successful seeds produced ${fmt(robust.confirmed_mean)} ±${fmt(robust.confirmed_std)}.` }
             : { tone: 'warn', label: 'Winner is single-evaluation', detail: 'Seed luck has not been ruled out; the selected winner is not a robust result yet.' }} />
           <div className="kv">
             <div className="k">single-eval leader</div><div className="v">#{naive.id} · {fmt(naive.metric)}</div>
