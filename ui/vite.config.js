@@ -33,8 +33,10 @@ export default defineConfig({
         // UNMINIFIED — painted a bare `0` on screen next to every popover trigger in the shipped
         // build (Theme, Energy, LoopLab ▾, the panel hubs, …). It costs ARIA too: `aria-expanded={open}`
         // serializes as `aria-expanded="0"`, which is not a valid ARIA boolean, so the collapsed state
-        // of every menu trigger was being reported as invalid rather than "false". The bytes it saved
-        // were low single digits; `test/minifierBooleanGuards.test.js` drives the property.
+        // of every menu trigger was being reported as invalid rather than "false". What it bought, on a
+        // controlled A/B of this tree with only this flag flipped: 3,680 B raw / 1,028 B gzip out of
+        // 488 KiB gzip — 0.2%. `test/minifierBooleanGuards.test.js` drives the property, and
+        // `scripts/check-bundle.mjs::findIntegerBooleanChunks` re-checks it over the emitted bytes.
       },
       mangle: true,
       format: { comments: false },
