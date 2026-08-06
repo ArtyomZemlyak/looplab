@@ -44,7 +44,7 @@ test('the data-quality table distinguishes zero missing values from unmeasured m
     const cells = name => {
       const at = markup.indexOf(`>${name}<`)
       assert.ok(at > 0, `column ${name} must be in the table`)
-      const row = markup.slice(at, markup.indexOf('</tr>', at))
+      const row = markup.slice(at + 1, markup.indexOf('</tr>', at))
       return row.split(/<[^>]*>/g).map(part => part.trim()).filter(Boolean)
     }
 
