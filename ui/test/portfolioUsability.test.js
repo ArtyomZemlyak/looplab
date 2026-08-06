@@ -82,6 +82,26 @@ test('saved portfolio views are bounded, sanitized, replaceable, and exact-state
   }).code, 'state')
 })
 
+test('every run-list representation can be SAVED as a view, Concepts included', () => {
+  // Authoring is strict: `preparePortfolioViewSave` refuses when the normalized view and the live
+  // state disagree. So a representation missing from `normalizeView`'s allow-list does not degrade
+  // quietly to List — it makes Save view REFUSE with `code: 'state'` for anyone looking at it, which
+  // reads as a broken Save button. Adding a view to the toolbar without adding it here is exactly
+  // that defect, and this is the test that says so.
+  for (const view of ['list', 'map', 'concepts']) {
+    const candidate = { ...state, view, compare: [] }
+    const saved = preparePortfolioViewSave([], `saved ${view}`, candidate)
+    assert.equal(saved.ok, true, `${view} must be savable`)
+    assert.equal(saved.view.view, view)
+    assert.equal(decodePortfolioViews(JSON.stringify(saved.views))[0].view, view)
+  }
+  // Compare stays the exception: it names specific runs, so one that no longer resolves to two of
+  // them falls back rather than restoring an empty comparison.
+  assert.equal(decodePortfolioViews([{ name: 'thin', view: 'compare', compare: ['only'] }])[0].view,
+    'list')
+  assert.equal(decodePortfolioViews([{ name: 'unknown', view: 'timeline' }])[0].view, 'list')
+})
+
 test('compare columns accept only the known persistent layout vocabulary', () => {
   assert.deepEqual(normalizeCompareColumns('not-json'), [...DEFAULT_COMPARE_COLUMNS])
   assert.deepEqual(normalizeCompareColumns(JSON.stringify(['cost', 'cost', 'unknown', 'best'])),
