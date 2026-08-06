@@ -226,8 +226,8 @@ edge("h_state","r","h_dedup","l",{c:C.r});
 edge("h_dedup","r","h_prio","l",{c:C.r});
 edge("h_prio","r","kanban","l",{c:C.r});
 // Layer 5: the board's PREDICTED-next Card is pre-built ahead of selection (positive speculation_depth
-// only — still opt-in, see the box), and a confirmed prediction hands the Developer stage a node that
-// is already built.
+// only — AUTO, which is the default since 2026-08-05, resolves to one; see the box), and a confirmed
+// prediction hands the Developer stage a node that is already built.
 edge("kanban","r","h_spec","l",{c:C.d,label:"predicted next"});
 edge("h_spec","t","implement","b",{c:C.d,dash:1,thin:1,label:"pre-built code",arc:210});
 edge("evaluate","b","kanban","t",{c:C.ev,dash:1,thin:1,label:"status",arc:220});
