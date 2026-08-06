@@ -24,9 +24,9 @@ export default function RunScreen({
   return <div className={'app' + (reviewMode ? ' review-mode' : '')}>
     <div className="topbar run-head">
       {/* The INERT mark, not the menu trigger, and that is a reachability statement like the two
-          props above: three of these six screens pass no `reviewMode` at all (see below), so this
-          shell cannot tell an owner from a reviewer. A trigger here would be a menu offered to a
-          public review capability on exactly the screens that render when the run itself cannot.
+          props above: three of these six screens pass no `reviewMode` at all (the note above says
+          why), so this shell cannot tell an owner from a reviewer. A trigger here would be a menu
+          offered to a public review capability on exactly the screens that render when a run cannot.
           The mark comes from GlobalMenu.jsx so the workspace header and these six screens keep
           rendering the same LoopLab mark rather than two copies that drift. */}
       <BrandMark />
