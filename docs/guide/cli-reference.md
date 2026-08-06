@@ -28,6 +28,7 @@ looplab cross-run-digest Read-only axis-prefix concept rollup (PART IV Step 7)
 looplab concept-merge   Append a concept alias/purge overlay (PART IV CR1a)
 looplab concept-split   Operator split one coarse concept into finer ones, re-tagged per run (PART IV §21.20.13)
 looplab concept-steward AGENTIC taxonomy curator: proposal-only merge/split/purge review (PART IV §22.4)
+looplab concept-ratify  Apply the steward's already-logged MERGE proposals (PART IV §22.4)
 looplab task-facets     AGENTIC task faceting: proposal-only LLM classify (domain/language/...) (PART IV §21.20.2)
 looplab task-facets-set Operator deterministic facet write (the ratify half of task-facets) (PART IV §22.4)
 looplab claims          Lean statement/reference claim projection (PART IV cross-run Step 4)
@@ -908,6 +909,52 @@ looplab concept-steward MEMORY_DIR --action-id ID [--apply] [--model M] [--max-p
 | `--max-proposals` | `12` | Cap the total merge/split/purge proposals per pass |
 | `--action-id` | *(required)* | Stable paid invocation identity. Reuse only to reconcile/replay that exact model/proposal-budget request; a changed request or CLI/HTTP surface is rejected before client construction |
 | `--json` | off | Emit `{proposals, receipt, invocation}` as JSON; `invocation` carries the durable action id/revision/outcome and whether this was a replay |
+
+---
+
+## `concept-ratify`
+
+PART IV §22.4 — **RATIFICATION**: apply the merges `concept-steward` already proposed. The steward is
+proposal-only and its proposals are durably logged, so without this step a portfolio accumulates
+correct, paid-for merges that never take effect. (That is not hypothetical: the original applier,
+`apply_concept_curation`, was removed on 2026-08-03 for bypassing the CAS discipline, and nothing
+replaced it until now.)
+
+What it does and does not do:
+
+- applies only **MERGE** proposals, through the same `record_concept_alias` that backs
+  `concept-merge` and the owner HTTP route: append-only, applied at READ time (raw per-run tags are
+  never rewritten), cycle-rejecting, and refused when the source or target is no longer live
+  canonical or has left the portfolio;
+- never applies a proposed **SPLIT** or **PURGE**. Those are not deduplication — a purge removes a
+  concept from every cross-run view and a split mints child ids no run authored — so they stay
+  operator work and are reported as pending;
+- stamps every row `by=concept-ratifier/v1`, so a ratified edge is never mistaken for a human's;
+- costs **no** inference and appends **no** run events.
+
+Each decision's `action_id` is derived from its own semantic payload, so a repeat is a replay of the
+original receipt rather than a second row. That is what makes the undo permanent: after
+`concept-alias-clear`, the cleared decision is never re-applied, and no "do not re-propose" list is
+needed. A later proposal naming a *different* target is a new decision and does apply.
+
+This is the same code path `Settings.concept_tidy` runs unattended at finalize, so `--dry-run` is an
+exact preview of the background stage.
+
+```bash
+looplab concept-ratify MEMORY_DIR [--dry-run] [--limit 32] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `concept_curation_log.jsonl` |
+| `--dry-run` | off | Report what would be applied and write no policy and no receipt |
+| `--limit` | `32` | Max merges to apply in this pass (capped by the stage); the rest are ratified next pass |
+| `--json` | off | Emit `{applied, skipped, pending, receipt}` as JSON |
+
+Each pass appends one audit row to `concept_ratification_log.jsonl` carrying what landed (with the
+alias row's `action_id` and revisions, and the agent's own `why`), what was skipped and why, and how
+much split/purge work is still waiting on you. A poisoned governance ledger fails the pass closed
+rather than reporting "nothing to do".
 
 ---
 

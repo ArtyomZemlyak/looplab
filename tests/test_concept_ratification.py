@@ -142,6 +142,25 @@ def test_two_proposals_of_the_same_merge_yield_one_decision(portfolio):
     assert sum(1 for m in merges if m.source == "regularization/rdrop") == 1
 
 
+def test_the_selection_reads_the_merges_list_and_nothing_else(tmp_path):
+    """A log carrying ONLY splits and purges yields no decisions at all.
+
+    The end-to-end test below asserts that neither becomes policy, which stays true under mutation of
+    any single guard (three independent checks stop a purge-shaped record). This one is the narrow
+    statement that is not: it fails the moment the selection widens beyond `proposals["merges"]`.
+    """
+    memory_dir = tmp_path / "mem"
+    _write_capsules(memory_dir, [_capsule("run-a", ["a/one", "noise/x", "coarse/thing"])])
+    _append_proposal(
+        memory_dir,
+        splits=[{"from_concept": "coarse/thing",
+                 "rules": [{"to": "coarse/left", "when_any": ["one"]}], "default": "coarse/thing"}],
+        purges=[{"from_concept": "noise/x"}])
+    assert proposed_merges(memory_dir) == []
+    assert ratify_concept_merges(memory_dir, at="now")["applied"] == []
+    assert load_concept_aliases(memory_dir) == {}
+
+
 def test_only_merges_are_ratified_and_the_rest_is_reported(tmp_path):
     """SPLIT and PURGE are not deduplication; the stage applies neither and says so."""
     memory_dir = tmp_path / "mem"
