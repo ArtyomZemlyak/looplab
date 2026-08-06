@@ -197,12 +197,23 @@ test('rows are ordered by id and children appear only under an open parent', () 
     ['objective', 'optimization', 'optimization/lr'])
 })
 
-test('row order does not move when only counts change', () => {
+test('row order does not move when only counts change — roots AND children', () => {
   // This surface re-renders on the run list's 2.5s poll. Ranking by size would slide click targets
-  // out from under the cursor every time an experiment finishes.
-  const before = buildConceptForest([run('a', { 'a/x': tag(1), 'b/y': tag(99) })])
-  const after = buildConceptForest([run('a', { 'a/x': tag(99), 'b/y': tag(1) })])
-  const ids = forest => visibleForestRows(forest, new Set(['a', 'b'])).map(row => row.id)
+  // out from under the cursor every time an experiment finishes. Both levels are asserted: a first
+  // version of this test only exercised roots, and a mutation that ranked CHILDREN by size survived it.
+  // Both plausible rankings are ruled out at once: between the two folds `a/x` and `a/z` swap their
+  // experiment counts AND their run counts, so neither ordering key can leave the rows where they were.
+  const open = new Set(['a', 'b'])
+  const ids = forest => visibleForestRows(forest, open).map(row => row.id)
+  const before = buildConceptForest([
+    run('r1', { 'a/x': tag(1), 'a/z': tag(99), 'b/y': tag(50) }), run('r2', { 'a/z': tag(40) }),
+  ])
+  const after = buildConceptForest([
+    run('r1', { 'a/x': tag(99), 'a/z': tag(1), 'b/y': tag(2) }), run('r2', { 'a/x': tag(40) }),
+  ])
+  assert.equal(before.nodes['a/z'].runs, 2)
+  assert.equal(after.nodes['a/x'].runs, 2)
+  assert.deepEqual(ids(before), ['a', 'a/x', 'a/z', 'b', 'b/y'])
   assert.deepEqual(ids(before), ids(after))
 })
 
