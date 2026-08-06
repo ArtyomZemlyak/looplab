@@ -220,64 +220,11 @@ def test_portfolio_overview_net_combines_opposite_signs_on_canonical_collapse():
     assert "loss/x" in rows and rows["loss/x"]["n_helped"] == 1 and rows["loss/x"]["n_hurt"] == 0
 
 
-def test_portfolio_concept_graph_builds_cross_run_cooccurrence_and_paths():
-    # PART V Phase 4/5: the GLOBAL cross-run concept map — nodes with run counts, is_a path spine, and
-    # co_occurs edges weighted by DISTINCT runs a pair appeared together in (min_cooccurrence gate).
-    from looplab.engine.memory import portfolio_concept_graph
-    caps = [
-        build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
-                              concepts=["loss/contrastive/dcl", "arch/moe"], concept_outcomes={}),
-        build_concept_capsule(run_id="r2", fingerprint=["k"], direction="max",
-                              concepts=["loss/contrastive/dcl", "arch/moe"], concept_outcomes={}),
-        build_concept_capsule(run_id="r3", fingerprint=["k"], direction="max",
-                              concepts=["loss/contrastive/dcl", "data/aug"], concept_outcomes={}),
-    ]
-    g = portfolio_concept_graph(caps, min_cooccurrence=2)
-    cruns = {c["concept"]: c["n_runs"] for c in g["concepts"]}
-    assert cruns["loss/contrastive/dcl"] == 3 and cruns["arch/moe"] == 2
-    edges = {(e["src"], e["rel"], e["dst"]) for e in g["edges"]}
-    assert ("loss/contrastive/dcl", "is_a", "loss/contrastive") in edges     # path spine
-    assert ("loss/contrastive", "is_a", "loss") in edges                     # materialized ancestor
-    assert ("arch/moe", "is_a", "arch") in edges
-    cooc = {(e["src"], e["dst"]): e["n_runs"] for e in g["edges"] if e["rel"] == "co_occurs"}
-    assert cooc[("arch/moe", "loss/contrastive/dcl")] == 2                   # co-occurred in r1 + r2 (sorted pair)
-    assert ("data/aug", "loss/contrastive/dcl") not in cooc                  # only 1 run -> below min_cooccurrence
-    assert g["edge_source_scope"] == "retained_snapshot" and g["edge_source_complete"] is True
-    assert g["edge_source_nodes_pruned"] == g["edges_outside_projection"] == 0
-    assert g["edges_outside_projection_unknown"] is False
-
-
-def test_portfolio_concept_graph_honors_alias_governance_and_is_deterministic():
-    from looplab.engine.memory import portfolio_concept_graph
-    caps = [build_concept_capsule(run_id=f"r{i}", fingerprint=["k"], direction="max",
-                                  concepts=["loss/a", "loss/b"], concept_outcomes={}) for i in range(3)]
-    aliases = {"loss/b": "loss/a"}                          # merge b into a -> the pair collapses to one node
-    g = portfolio_concept_graph(caps, aliases=aliases, min_cooccurrence=2)
-    names = {c["concept"] for c in g["concepts"]}
-    assert "loss/a" in names and "loss/b" not in names     # aliased away
-    # deterministic: same input -> byte-identical result
-    assert g == portfolio_concept_graph(caps, aliases=aliases, min_cooccurrence=2)
-
-
-def test_portfolio_concept_graph_bounds_pair_materialization_before_counting():
-    from looplab.engine.memory import portfolio_concept_graph
-
-    caps = [build_concept_capsule(
-        run_id=f"r{run:02}", fingerprint=["k"], direction="max",
-        concepts=[f"axis{run:02}/c{index:03}" for index in range(256)], concept_outcomes={},
-    ) for run in range(20)]
-
-    graph = portfolio_concept_graph(caps, min_cooccurrence=1)
-
-    assert len(graph["concepts"]) == 512
-    assert graph["pair_candidates"] <= 512 * 511 // 2
-    assert graph["pair_candidates"] == 2 * (256 * 255 // 2)
-    assert graph["edge_source_scope"] == "retained_node_projection"
-    assert graph["edge_source_complete"] is False
-    assert graph["edge_source_nodes_included"] == 512
-    assert graph["edge_source_nodes_pruned"] == graph["concepts_omitted"] == graph["n_concepts"] - 512
-    assert graph["edges_outside_projection"] is None
-    assert graph["edges_outside_projection_unknown"] is True
+# The three `portfolio_concept_graph` tests that stood here moved to `tests/test_concept_map.py`
+# with the function they guarded. The graph read run-end CAPSULES and called itself the global
+# concept map; so does the run list's `Concepts` view, over the live per-run rollup — two corpora,
+# one name. The surviving fold `search/concept_lens.py::concept_map` takes the population as an
+# argument, which is why its tests no longer belong in a capsule file.
 
 
 def test_portfolio_overview_rolls_up_help_hurt_counts_across_runs():
@@ -572,11 +519,8 @@ def test_store_concept_capsule_persists_partial_classifier_receipt(tmp_path, con
 
 
 def test_mixed_classifier_membership_stays_partial_through_portfolio_views(tmp_path):
-    from looplab.engine.memory import (
-        portfolio_concept_graph,
-        portfolio_concept_overview,
-        portfolio_digest,
-    )
+    from looplab.engine.memory import portfolio_concept_overview, portfolio_digest
+    from looplab.tools.cross_run_tools import CrossRunTools
 
     mem = tmp_path / "mem"
     mem.mkdir()
@@ -608,9 +552,15 @@ def test_mixed_classifier_membership_stays_partial_through_portfolio_views(tmp_p
     assert card["source_concept_evidence_nodes_incomplete"] == 1
     assert card["source_concept_evidence_complete"] is False
     assert card["source_concepts_complete"] is card["source_outcomes_complete"] is False
-    graph = portfolio_concept_graph([capsule], min_cooccurrence=1)
-    assert graph["source_complete"] is graph["edge_source_complete"] is False
     assert portfolio_digest([capsule])["source_complete"] is False
+    # The concept MAP surface used to carry this receipt inside the fold (`portfolio_concept_graph`
+    # merged `_capsule_source_summary` into its own payload). `concept_map` takes concept SETS and
+    # cannot know how complete the rows behind them were, so the receipt now lives at the call site
+    # that chose the population — and the property is driven where a reader actually meets it: the
+    # rendered tool must still say the source is partial, or an agent reads a bounded map as exact.
+    rendered = CrossRunTools(mem).execute("cross_run_concept_map", {})
+    assert "complete/x" in rendered and "partial/y" in rendered
+    assert "WARNING: PARTIAL capsule source" in rendered
 
 
 # --------------------------------------------------------------------------- #

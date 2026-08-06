@@ -745,25 +745,39 @@ class CrossRunTools:
         return "\n".join(lines)
 
     def _tool_cross_run_concept_map(self, args: dict, _governance: dict | None) -> str:
-        # PART V Phase 4/5: the caller-visible cross-run concept graph. Scoped to this run's task family when
+        # PART V Phase 4/5: the caller-visible cross-run concept map. Scoped to this run's task family when
         # bound; portfolio-wide for an unbound (assistant/CLI) caller — the same _scoped_capsules the
         # atlas uses. Aliases/splits honor the operator/steward taxonomy governance.
-        from looplab.engine.memory import portfolio_concept_graph
+        #
+        # This is the SAME fold the run list's `Concepts` view draws
+        # (`search/concept_lens.py::project_concept_map`, mirrored in `ui/src/conceptForest.js`). What
+        # differs is the POPULATION, and that is the whole
+        # reason the fold no longer chooses one: an agent must be told what the durable capsule ledger
+        # holds, because that is what novelty checks and priors will actually reuse, while the operator's
+        # map answers "what have the runs I am looking at studied". Feeding one fold from two scopes is
+        # honest; two folds that each pick their own scope is how they silently disagree.
+        from looplab.search.concept_lens import project_concept_map
         scoped_capsules = self._scoped_capsules()
         scope_receipt = self._capsule_scope_receipt
         governance = _governance
-        graph = portfolio_concept_graph(
-            scoped_capsules, aliases=governance["aliases"],
-            splits=governance["splits"])
+        _caps, canonical_sets = self._capsule_snapshot(
+            governance["aliases"], governance["splits"],
+            governance["concept_governance_revision"])
+        graph = project_concept_map([canonical_sets[id(cap)] for cap in scoped_capsules])
+        # The capsule SOURCE receipt is population-specific and therefore no longer inside the fold: a
+        # projection over concept sets cannot know whether the rows behind them were a complete read.
+        # It is merged here, where the population was chosen — the same place the scope receipt is.
+        from looplab.engine.memory import _capsule_source_summary
+        source_summary = _capsule_source_summary(scoped_capsules)
         # EXCLUDE the 0-run structural spine (materialized ancestor path prefixes) from the "explored"
         # display — they are hierarchy scaffolding, not concepts any run touched.
         explored = [e for e in graph["concepts"] if e.get("n_runs", 0) >= 1]
         if not explored:
-            if (graph.get("source_complete") is not True
+            if (source_summary.get("source_complete") is not True
                     or scope_receipt.get("scope_complete") is not True):
                 lines = ["(no retained scope-eligible cross-run concepts; partial source/scope is not "
                          "proof of absence)"]
-                lines += _partial_warnings(source=graph, scope=scope_receipt)
+                lines += _partial_warnings(source=source_summary, scope=scope_receipt)
                 return "\n".join(lines)
             return "(no cross-run concepts yet)"
         n_explored = int(graph.get("n_explored_concepts", len(explored)) or 0)
@@ -774,11 +788,11 @@ class CrossRunTools:
         else:
             lines = [f"{map_label}: {n_explored} explored concept(s) "
                      f"across {graph['n_runs']} run(s)."]
-        lines += _partial_warnings(source=graph, scope=scope_receipt)
-        if graph.get("edge_source_complete") is not True:
-            lines.append("WARNING: PARTIAL edge source — hierarchy/co-occurrence edges cover only "
-                         f"{graph.get('edge_source_nodes_included', 0)} retained top graph node(s); "
-                         f"{graph.get('edge_source_nodes_pruned', 0)} node(s) were pruned and edges "
+        lines += _partial_warnings(source=source_summary, scope=scope_receipt)
+        if graph.get("pair_source_complete") is not True:
+            lines.append("WARNING: PARTIAL pair source — co-occurrence covers only "
+                         f"{graph.get('pair_source_nodes_included', 0)} retained top map node(s); "
+                         f"{graph.get('pair_source_nodes_pruned', 0)} node(s) were pruned and pairs "
                          "touching them are UNKNOWN.")
         # the is_a hierarchy, surfaced as its top axes (the coarse structure of the map)
         axes = sorted({str(e.get("concept") or "").split("/", 1)[0] for e in explored} - {""})
@@ -787,18 +801,24 @@ class CrossRunTools:
         lines.append("Most explored: " + ", ".join(
             f"UNTRUSTED_MEMORY={_safe_text(e.get('concept'), 120)!r}(×{e.get('n_runs', 0)})"
             for e in explored[:12]))
-        cooc = [e for e in graph["edges"] if e.get("rel") == "co_occurs"]
+        cooc = graph["pairs"]
         if cooc:
             lines.append("Concept pairs that co-occur across runs: " + "; ".join(
-                f"UNTRUSTED_MEMORY={_safe_text(e.get('src'), 80)!r}+UNTRUSTED_MEMORY="
-                f"{_safe_text(e.get('dst'), 80)!r}(×{e.get('n_runs', 0)})" for e in cooc[:8]))
-        # Concepts use the exact full retained-snapshot total. Edge omissions stay exact only inside the
-        # declared edge-source projection; the warning above separately keeps out-of-projection edges UNKNOWN.
+                f"UNTRUSTED_MEMORY={_safe_text(e.get('a'), 80)!r}+UNTRUSTED_MEMORY="
+                f"{_safe_text(e.get('b'), 80)!r}(×{e.get('n_runs', 0)})" for e in cooc[:8]))
+        elif graph.get("pair_candidates"):
+            # A THRESHOLD result, not an empty one. Saying nothing here reads as "nothing co-occurs",
+            # when what happened is that no pair reached two distinct runs — which on a young corpus is
+            # the normal state and is itself the finding.
+            lines.append(f"No concept pair appeared together in {graph['min_cooccurrence']}+ distinct "
+                         f"runs ({graph['pair_candidates']} pair(s) were seen in one run only).")
+        # Concepts use the exact full scoped-population total. Pair omissions stay exact only inside the
+        # declared pair-source projection; the warning above separately keeps out-of-projection pairs UNKNOWN.
         hidden_c = max(0, n_explored - 12)
-        hidden_e = max(0, len(cooc) - 8) + graph.get("edges_omitted", 0)
+        hidden_e = max(0, len(cooc) - 8) + graph.get("pairs_omitted", 0)
         if hidden_c or hidden_e:
             edge_label = ("known retained-projection co-occurrence pair(s)"
-                          if graph.get("edge_source_complete") is not True
+                          if graph.get("pair_source_complete") is not True
                           else "more co-occurrence pair(s)")
             lines.append(f"(+{hidden_c} more concept(s), {hidden_e} {edge_label} not shown)")
         return "\n".join(lines)
@@ -1171,8 +1191,8 @@ class CrossRunTools:
                                                      normalize_key, resolve_slug)
         from looplab.engine.memory import (_capsule_source_summary,
                                            _portfolio_concept_overview_data,
-                                           _filter_capsule_rows, concept_profit_tendencies,
-                                           portfolio_concept_graph)
+                                           _filter_capsule_rows, concept_profit_tendencies)
+        from looplab.search.concept_lens import project_concept_map
 
         taxonomy = _governance
         aliases, splits = taxonomy["aliases"], taxonomy["splits"]
@@ -1319,24 +1339,27 @@ class CrossRunTools:
             lines.append("  cross-run tendency: consistently RANKED WORSE within comparable runs — "
                          "only revisit with a specific new hypothesis for why it would differ here.")
 
-        # Co-occurrence: concepts this one is usually paired with (scoped graph).
-        graph = portfolio_concept_graph(scoped_canon_caps, aliases=aliases, splits=splits)
+        # Co-occurrence: concepts this one is usually paired with, from the SAME map fold the run list's
+        # `Concepts` view draws. Only the population differs — here the capsules that carry `canon`,
+        # there the runs the operator has filtered to. The default floor of 2 distinct runs is kept
+        # deliberately: "usually paired with" must not be printed for a pair one run happened to emit,
+        # and this card's whole job is to stop an agent re-running a coincidence as if it were a pattern.
+        graph = project_concept_map(concepts for cap, concepts in canonical_caps
+                                    if canon in concepts and id(cap) in scoped_ids)
         partners: list[tuple] = []
-        for e in graph["edges"]:
-            if e.get("rel") != "co_occurs":
-                continue
-            if e.get("src") == canon:
-                partners.append((e.get("dst"), e.get("n_runs", 0)))
-            elif e.get("dst") == canon:
-                partners.append((e.get("src"), e.get("n_runs", 0)))
+        for e in graph["pairs"]:
+            if e["a"] == canon:
+                partners.append((e["b"], e["n_runs"]))
+            elif e["b"] == canon:
+                partners.append((e["a"], e["n_runs"]))
         partners.sort(key=lambda kv: (-kv[1], str(kv[0])))
         if partners:
             pair_label = "usually paired with" if scoped_complete else "paired in retained records with"
             lines.append(f"  {pair_label}: " + ", ".join(
                 f"UNTRUSTED_MEMORY={_safe_text(c, 80)!r}(×{n})" for c, n in partners[:6]))
-        if graph.get("edge_source_complete") is not True:
+        if graph.get("pair_source_complete") is not True:
             lines.append("  co-occurrence coverage: PARTIAL retained-node projection; "
-                         f"{graph.get('edge_source_nodes_pruned', 0)} graph node(s) were pruned and "
+                         f"{graph.get('pair_source_nodes_pruned', 0)} map node(s) were pruned and "
                          "partners outside the projection are UNKNOWN.")
 
         # Lessons that mention it (free-text pros/cons) — match the name token in the statement.

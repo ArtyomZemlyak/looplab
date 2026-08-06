@@ -4,9 +4,17 @@ Split out of `memory.py` (doc 25 EM-10), which was named for the episodic case l
 describes and had grown to hold five unrelated subsystems. This is the capsule one: what a valid
 capsule record IS (`_valid_capsule_record`, `_dedup_valid_capsules`), the receipts that say how
 complete it is (`_capsule_completeness`, `_capsule_source_summary`), the store that persists it
-(`ConceptCapsuleStore`), and the portfolio overview/graph projections built from it.
+(`ConceptCapsuleStore`), and the portfolio overview projection built from it.
 
-Moved VERBATIM, together with the 17 capsule/graph bound constants that only these functions use.
+Moved VERBATIM, together with the capsule/overview bound constants that only these functions use.
+
+`portfolio_concept_graph` used to live here too and is GONE — not deprecated, removed. It called
+itself "the GLOBAL cross-run concept MAP", and so does the run list's `Concepts` view, and the two
+read different corpora: capsules exist only for runs that finished and published one (measured on
+this box: 3, against 15 tagged runs in the list). Two functions claiming to be one lab's concept map
+is a population disagreement waiting to be rendered. The map is now ONE fold,
+`search/concept_lens.py::concept_map`, which takes per-run concept SETS and lets the caller own the
+population — capsules for an agent tool, the scoped run rows for the browser.
 
 The two helpers this band ALSO needed — `fingerprint_similarity` and the None-tolerant metric
 predicate — moved DOWN to `core` first (`core/text`, `core/fitness.finite_or_absent_metric`). That
@@ -737,104 +745,3 @@ def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[
     if len(cards) > len(result["runs"]):
         result["run_cards_omitted"] = len(cards) - len(result["runs"])
     return result, concepts
-
-_MAX_GRAPH_CONCEPTS = 512
-
-_MAX_GRAPH_EDGES = 2_048
-
-_MAX_GRAPH_PER_CONCEPT_CONCEPTS = 256   # cap a single run's concept set before the O(k^2) pairing
-
-def portfolio_concept_graph(capsules: list[dict], *, aliases: Optional[dict] = None,
-                            splits: Optional[dict] = None, min_cooccurrence: int = 2) -> dict:
-    """PART V Phase 4/5: the GLOBAL cross-run concept MAP — a portfolio-level graph aggregated over concept
-    capsules. Pure/deterministic, no LLM/IO, drillable. This is the 'мега общая карта концептов': a shared
-    taxonomy view across every returned run. ADVISORY — a read-model, never a selection input.
-
-    Nodes: each canonical concept seen across runs, with `n_runs` (how many runs explored it). Edges:
-      - `is_a` : the concept's immediate PATH parent (`a/b/c` -> `a/b`), so the map has a spine even with
-                 one run — asserted structure, `n_runs` = runs where the child appears.
-      - `co_occurs` : an UNORDERED concept PAIR that appeared TOGETHER in the same run's capsule, weighted by
-                 the number of DISTINCT runs the pair co-occurred in (cross-run evidence — the same reason
-                 the profit sign aggregates: a per-run boolean counted across runs). Only pairs meeting
-                 `min_cooccurrence` (default 2 runs) are kept, so a single-run coincidence is not an edge.
-    Canonicalized through aliases/splits like the overview (purged concepts drop; a split re-tags per that
-    run's siblings). Everything is bounded. Node omissions are exact for the full validated retained snapshot;
-    edge omissions are exact only inside the declared bounded node projection, while edges touching pruned
-    nodes stay explicitly unknown (computing their exact distinct-pair count would restore unbounded O(N²))."""
-    from looplab.engine.concept_registry import canonicalize_concepts
-
-    valid_capsules = _dedup_valid_capsules(capsules)
-
-    concept_runs: dict[str, int] = {}
-    for c in valid_capsules:
-        canon = sorted(set(canonicalize_concepts(
-            (c.get("concepts") or [])[:_MAX_GRAPH_PER_CONCEPT_CONCEPTS], aliases=aliases, splits=splits)))
-        for cid in canon:
-            concept_runs[cid] = concept_runs.get(cid, 0) + 1
-
-    # is_a spine from the concept PATHS (materialize each ancestor prefix as a node too).
-    prefixes: set[str] = set()
-    for cid in list(concept_runs):
-        parts = cid.split("/")
-        for depth in range(1, len(parts)):
-            prefixes.add("/".join(parts[:depth]))
-    for pfx in prefixes:
-        concept_runs.setdefault(pfx, 0)
-
-    concepts = sorted(concept_runs, key=lambda cid: (-concept_runs[cid], cid))
-    kept = set(concepts[:_MAX_GRAPH_CONCEPTS])
-    pruned_nodes = len(concepts) - len(kept)
-    edges: list[dict] = []
-    for cid in sorted(kept):
-        parent = cid.rsplit("/", 1)[0] if "/" in cid else ""
-        if parent and parent in kept:
-            edges.append({"src": cid, "rel": "is_a", "dst": parent, "n_runs": concept_runs[cid]})
-    is_a_candidates = len(edges)
-    # select the bounded node set BEFORE O(k^2) pairing. The old one-pass implementation
-    # retained pair sets for every source concept even though at most 512 nodes could reach the response.
-    pair_runs: dict[tuple[str, str], int] = {}
-    for c in valid_capsules:
-        canon = sorted(set(canonicalize_concepts(
-            (c.get("concepts") or [])[:_MAX_GRAPH_PER_CONCEPT_CONCEPTS],
-            aliases=aliases, splits=splits)) & kept)
-        for i, a in enumerate(canon):                       # unordered sorted pair; one count per unique run
-            for b in canon[i + 1:]:
-                pair_runs[(a, b)] = pair_runs.get((a, b), 0) + 1
-    try:
-        threshold = max(1, int(min_cooccurrence))       # a per-pair run-count floor; <=0 means "keep all"
-    except (TypeError, ValueError):
-        threshold = 2                                    # a contract-violating caller falls back to the default
-    cooc = sorted(((a, b, n_runs) for (a, b), n_runs in pair_runs.items()
-                   if n_runs >= threshold),
-                  key=lambda t: (-t[2], t[0], t[1]))
-    for a, b, n_runs in cooc:
-        if len(edges) >= _MAX_GRAPH_EDGES:
-            break
-        edges.append({"src": a, "rel": "co_occurs", "dst": b, "n_runs": n_runs})
-    edge_candidates = is_a_candidates + len(cooc)
-    # edge generation intentionally runs only over the bounded node projection. Keep that
-    # O(N^2) guard, but never present `edges_omitted` as a count of every edge in the full graph: edges that
-    # touch a pruned node were not materialized at all and their distinct-pair count is deliberately UNKNOWN.
-    capsule_source = _capsule_source_summary(valid_capsules)
-    # bounding is not the only way an edge can be missing.  A partial classifier membership
-    # can hide an entire node and every incident edge even when the retained graph fits under its node cap.
-    edge_source_complete = pruned_nodes == 0 and capsule_source["source_complete"] is True
-    return {
-        "n_runs": len(valid_capsules),
-        "n_concepts": len(concepts),
-        "n_explored_concepts": sum(1 for n_runs in concept_runs.values() if n_runs > 0),
-        "concepts": [{"concept": cid, "n_runs": concept_runs[cid]} for cid in concepts[:_MAX_GRAPH_CONCEPTS]],
-        "edges": edges[:_MAX_GRAPH_EDGES],
-        "concepts_omitted": pruned_nodes,
-        "edge_source_scope": ("retained_snapshot" if edge_source_complete
-                              else "retained_node_projection"),
-        "edge_source_complete": edge_source_complete,
-        "edge_source_nodes_included": len(kept),
-        "edge_source_nodes_pruned": pruned_nodes,
-        "edges_outside_projection": 0 if edge_source_complete else None,
-        "edges_outside_projection_unknown": not edge_source_complete,
-        # Exact only within `edge_source_scope`: response-cap omissions, not unknown out-of-projection edges.
-        "edges_omitted": max(0, edge_candidates - len(edges)),
-        "pair_candidates": len(pair_runs),
-        **capsule_source,
-    }

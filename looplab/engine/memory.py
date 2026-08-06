@@ -57,9 +57,6 @@ from looplab.engine.concept_capsules import (  # noqa: F401
     _MAX_CAPSULE_OUTCOMES,
     _MAX_CAPSULE_SOURCE_ITEMS,
     _MAX_CAPSULE_TOKEN_CHARS,
-    _MAX_GRAPH_CONCEPTS,
-    _MAX_GRAPH_EDGES,
-    _MAX_GRAPH_PER_CONCEPT_CONCEPTS,
     _MAX_OVERVIEW_CARD_CONCEPTS,
     _MAX_OVERVIEW_CONCEPTS,
     _MAX_OVERVIEW_RUNS_PER_CONCEPT,
@@ -76,7 +73,6 @@ from looplab.engine.concept_capsules import (  # noqa: F401
     _valid_capsule_record,
     build_concept_capsule,
     concept_profit_tendencies,
-    portfolio_concept_graph,
     portfolio_concept_overview,
 )
 

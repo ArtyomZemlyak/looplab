@@ -117,6 +117,57 @@ test('an all-untagged scope says so instead of rendering an empty tree', async (
   assert.match(html, /1 run in this scope carry|1 run in this scope carries|1 run/)
 })
 
+test('co-occurrence reaches the screen as a threshold result, never as silence', async () => {
+  // The corpus above has NO pair in two runs (every run is its own task), which is exactly the state
+  // the real 46-run corpus is in — one pair at the floor, 248 candidates below it. A blank panel here
+  // would read as "nothing co-occurs", so the empty state must name the threshold AND the candidates.
+  const html = await render({ runs: RUNS, scopeLabel: 'All runs' })
+  assert.match(html, /Studied together/)
+  assert.match(html, /No pair of concepts appeared together in 2 or more runs/)
+  assert.match(html, /5 pairing\(s\) were seen in a single run/)
+  assert.match(html, /not yet evidence of a pattern/)
+  // The floor is an operator control, defaulting to the same 2 the Python half ships.
+  assert.match(html, /aria-pressed="true"[^>]*>2\+ runs|2\+ runs/)
+  assert.match(html, /any run/)
+})
+
+test('a scope with nothing to pair says THAT, not "no pair reached the threshold"', async () => {
+  // Two distinguishable absences. "Every run named one concept" is a fact about tagging depth;
+  // "pairs exist but none repeats" is a fact about the lab. Rendering the second sentence for the
+  // first case blames the threshold for something the threshold never saw. (Mutation-proved: the
+  // zero-candidate branch survived until this test existed.)
+  const html = await render({
+    runs: [
+      { run_id: 'r1', task_id: 't', direction: 'max', concepts: { 'a/x': { count: 1 } } },
+      { run_id: 'r2', task_id: 't', direction: 'max', concepts: { 'b/y': { count: 2 } } },
+    ],
+    scopeLabel: 'All runs',
+  })
+  assert.match(html, /No run in this scope was tagged with two concepts, so there is nothing to pair/)
+  assert.equal(/No pair of concepts appeared together in/.test(html), false)
+})
+
+test('a repeated pair is listed with the number of DISTINCT runs behind it', async () => {
+  const paired = [
+    { run_id: 'r1', task_id: 't', direction: 'max',
+      concepts: { 'loss/contrastive': { count: 2, best_metric: 0.9 },
+                  'data/hard-negatives': { count: 2, best_metric: 0.9 } } },
+    { run_id: 'r2', task_id: 't', direction: 'max',
+      concepts: { 'loss/contrastive': { count: 1, best_metric: 0.8 },
+                  'data/hard-negatives': { count: 1, best_metric: 0.8 } } },
+    { run_id: 'r3', task_id: 't', direction: 'max',
+      concepts: { 'loss/contrastive': { count: 1, best_metric: 0.7 },
+                  'arch/moe': { count: 1, best_metric: 0.7 } } },
+  ]
+  const html = await render({ runs: paired, scopeLabel: 'All runs' })
+  const panel = html.slice(html.indexOf('Studied together'))
+  assert.match(panel, /data\/hard-negatives/)
+  assert.match(panel, /loss\/contrastive/)
+  assert.match(panel, /2 runs/)
+  // Below the floor and therefore absent from the list, not silently folded in at strength 1.
+  assert.equal(panel.slice(0, panel.indexOf('</ol>')).includes('arch/moe'), false)
+})
+
 test('the selection scope offers only what the operator has actually checked', async () => {
   const idle = await render({ runs: RUNS, selectedRuns: [], scopeLabel: 'All runs' })
   assert.match(idle, /Selected · 0/)

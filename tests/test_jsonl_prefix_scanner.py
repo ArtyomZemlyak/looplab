@@ -284,7 +284,7 @@ def test_concept_capsule_re_exports_are_the_same_objects():
 
     for name in ("ConceptCapsuleStore", "build_concept_capsule", "_dedup_valid_capsules",
                  "_capsule_rows", "_filter_capsule_rows", "_portfolio_concept_overview_data",
-                 "portfolio_concept_overview", "portfolio_concept_graph", "_valid_capsule_record",
+                 "portfolio_concept_overview", "_valid_capsule_record",
                  "_capsule_source_summary", "_capsule_completeness", "concept_profit_tendencies",
                  "CONCEPT_CAPSULE_VERSION"):
         assert getattr(memory, name) is getattr(concept_capsules, name), (

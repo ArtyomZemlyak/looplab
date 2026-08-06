@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { OpIcon } from './icons.jsx'
 import {
-  buildConceptForest, forestCoverage, forestPathTo, visibleForestRows,
+  buildConceptCooccurrence, buildConceptForest, forestCoverage, forestPathTo, partnersOf,
+  visibleForestRows,
 } from './conceptForest.js'
 import './portfolio-concepts.css'
 
@@ -21,6 +22,16 @@ import './portfolio-concepts.css'
 // makes the map and the concept tree the SAME vocabulary" is showing the id a run actually authored.
 
 const MAX_DETAIL_RUNS = 40
+const MAX_DETAIL_PARTNERS = 12
+const MAX_PAIR_ROWS = 12
+// The co-occurrence floor. 2 is the default everywhere (`search/concept_lens.py::project_concept_map`
+// ships the same number) because one run tagging `a` and `b` is a fact about that run's tagger.
+// Dropping to 1 is offered because the honest answer on a young corpus is often "nothing repeats yet",
+// and an operator has to be able to see the single-run pairings that lie behind that sentence.
+const PAIR_FLOORS = [
+  { value: 2, label: '2+ runs', hint: 'Pairs two or more runs studied together' },
+  { value: 1, label: 'any run', hint: 'Include pairs only one run named — a coincidence, not a pattern' },
+]
 
 const runLabel = run => run?.label || run?.run_id || ''
 
@@ -62,7 +73,34 @@ function ConceptRow({ row, selected, expanded, onToggle, onSelect, setRef }) {
   </li>
 }
 
-function ConceptDetail({ forest, id, runsById, onOpenRun, onClose }) {
+// The concepts this one was studied ALONGSIDE — the map's one relation that the id itself cannot
+// spell. `is_a` is the tree; a run naming two ids together is the only evidence of anything else, and
+// the floor is what keeps a single run's two labels from reading as a pattern.
+function Partners({ cooccurrence, node }) {
+  const partners = node.tagged ? partnersOf(cooccurrence, node.id) : []
+  return <>
+    <h4>Studied alongside</h4>
+    {!node.tagged
+      ? <p className="muted">This row is a grouping — no run named it, so nothing was named beside it.
+          Open a concept below it.</p>
+      : partners.length === 0
+        ? <p className="muted">No concept appeared with this one in {cooccurrence.minRuns}+ runs of this
+            scope. That is a statement about repetition, not about whether the pairing is interesting.</p>
+        : <ul className="pc-partners">
+            {partners.slice(0, MAX_DETAIL_PARTNERS).map(partner => <li key={partner.id}>
+              <code>{partner.id}</code>
+              <span className="muted">{partner.runs} run{partner.runs === 1 ? '' : 's'}</span>
+            </li>)}
+          </ul>}
+    {/* A pruned node's pairs were never counted. Saying "no partners" for it would turn a bound into
+        a finding, which is the same rule the tree's truncation notice follows. */}
+    {node.tagged && cooccurrence.pairsOutsideProjectionUnknown
+      && <p className="muted">Pairs touching {cooccurrence.pairSourceNodesPruned} less-used concept(s)
+        were not computed, so this list may be incomplete.</p>}
+  </>
+}
+
+function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, onClose }) {
   const node = id && forest.nodes[id]
   if (!node) return null
   const shown = node.runIds.slice(0, MAX_DETAIL_RUNS)
@@ -109,6 +147,7 @@ function ConceptDetail({ forest, id, runsById, onOpenRun, onClose }) {
     </ul>
     {node.runIds.length > shown.length
       && <p className="muted">+{node.runIds.length - shown.length} more runs not listed.</p>}
+    <Partners cooccurrence={cooccurrence} node={node} />
   </aside>
 }
 
@@ -119,6 +158,7 @@ export default function PortfolioConcepts({
   const [expanded, setExpanded] = useState(() => new Set())
   const [selected, setSelected] = useState('')
   const [query, setQuery] = useState('')
+  const [pairFloor, setPairFloor] = useState(PAIR_FLOORS[0].value)
   const rowRefs = useRef(new Map())
 
   const selectedIds = useMemo(() => new Set(selectedRuns.map(run => run.run_id)), [selectedRuns])
@@ -132,6 +172,12 @@ export default function PortfolioConcepts({
   const runsById = useMemo(() => new Map(active.map(run => [run.run_id, run])), [active])
   const forest = useMemo(() => buildConceptForest(active, { runsById }), [active, runsById])
   const coverage = forestCoverage(forest)
+  // `active`, not `runs` — the SAME array the tree above is folded from, so the pairs and the tree
+  // can never describe different populations. This is also why co-occurrence is not fetched: the
+  // server's cross-run corpus is the capsule ledger, whose membership is not this list's.
+  const cooccurrence = useMemo(
+    () => buildConceptCooccurrence(active, { minRuns: pairFloor, forest }),
+    [active, pairFloor, forest])
 
   const search = query.trim().toLowerCase()
   // Search OPENS the matching branches rather than filtering the tree down to them. A filtered tree
@@ -261,10 +307,59 @@ export default function PortfolioConcepts({
           {forest.untagged.runs > 0 && <span className="muted">They are not in the tree above. That is
             a gap in tagging, not evidence that nothing was learned in them.</span>}
         </div>
+
+        {/* The tree is the `is_a` relation — a concept id spells its own ancestry, so nesting is
+            RECOVERED and never inferred. Co-occurrence is the one relation no id can state about
+            itself, and it is folded from the same rows: a pair is two concepts one run was tagged
+            with, counted over DISTINCT runs. This section replaces what the removed
+            `portfolio_concept_graph` used to compute over the capsule ledger — same rule, but over
+            the population this view is actually showing. */}
+        {!coverage?.empty && <section className="pc-pairs" aria-label="Concept co-occurrence">
+          <div className="pc-pairs-h">
+            <h3>Studied together</h3>
+            <div className="seg pc-floor" role="group" aria-label="Co-occurrence threshold">
+              {PAIR_FLOORS.map(floor => <button key={floor.value} type="button"
+                aria-pressed={pairFloor === floor.value}
+                className={pairFloor === floor.value ? 'on' : ''} title={floor.hint}
+                onClick={() => setPairFloor(floor.value)}>{floor.label}</button>)}
+            </div>
+          </div>
+          {cooccurrence.pairs.length === 0
+            ? <p className="muted">
+                {cooccurrence.pairCandidates === 0
+                  ? 'No run in this scope was tagged with two concepts, so there is nothing to pair.'
+                  : `No pair of concepts appeared together in ${cooccurrence.minRuns} or more runs. `
+                    + `${cooccurrence.pairCandidates} pairing(s) were seen in a single run — a tagger `
+                    + 'emitting two labels once, which is not yet evidence of a pattern.'}
+              </p>
+            : <>
+                <ol className="pc-pair-list">
+                  {cooccurrence.pairs.slice(0, MAX_PAIR_ROWS).map(pair => <li key={`${pair.a} ${pair.b}`}>
+                    <button type="button" className="pc-pair" onClick={() => setSelected(pair.a)}>
+                      <code>{pair.a}</code>
+                    </button>
+                    <span aria-hidden="true">+</span>
+                    <button type="button" className="pc-pair" onClick={() => setSelected(pair.b)}>
+                      <code>{pair.b}</code>
+                    </button>
+                    <span className="pc-pair-n">{pair.runs} run{pair.runs === 1 ? '' : 's'}</span>
+                  </li>)}
+                </ol>
+                {cooccurrence.pairs.length > MAX_PAIR_ROWS
+                  && <p className="muted">+{cooccurrence.pairs.length - MAX_PAIR_ROWS} more pair(s)
+                    above the threshold, not listed.</p>}
+              </>}
+          {/* Two different absences, never merged. The cap above is exact — we counted them and showed
+              fewer. A pruned node's pairs were never materialized, so their count is UNKNOWN, and
+              printing it as zero would present a bound as a finding. */}
+          {cooccurrence.pairsOutsideProjectionUnknown && <p className="muted">
+            Only the {cooccurrence.pairSourceNodesIncluded} most-used concepts were paired;
+            pairs touching the other {cooccurrence.pairSourceNodesPruned} are unknown, not absent.</p>}
+        </section>}
       </div>
 
       {selected
-        ? <ConceptDetail forest={forest} id={selected} runsById={runsById}
+        ? <ConceptDetail forest={forest} cooccurrence={cooccurrence} id={selected} runsById={runsById}
             onOpenRun={onOpenRun} onClose={() => setSelected('')} />
         : <aside className="pc-detail pc-detail-idle">
             <p className="muted">Pick a concept to see which runs are evidence for it.</p>

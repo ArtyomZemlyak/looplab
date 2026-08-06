@@ -210,6 +210,89 @@ export function spellingVariants(ids = []) {
     .map(key => ({ key, ids: [...new Set(groups[key])].sort() }))
 }
 
+// CO-OCCURRENCE — the one relation a concept id cannot spell for itself.
+//
+// The tree above IS the `is_a` relation: `loss/contrastive/dcl` asserts its own ancestry, so nesting is
+// recovered, never inferred. What no id can tell you is which concepts a lab studies TOGETHER, and that
+// is the whole content of `co_occurs`: an unordered PAIR that appeared in the same run, weighted by the
+// number of DISTINCT runs the pair appeared in.
+//
+// WHY IT FOLDS HERE INSTEAD OF ARRIVING OVER HTTP. Co-occurrence is a pure fold over per-run concept
+// SETS, and the run rows already on screen carry exactly those. Fetching it instead would mean a second
+// code path that decides which runs count — and the server's cross-run corpus is the run-end capsule
+// ledger, which on the real corpus here holds 3 runs against the list's 15 tagged ones. Rendering that
+// inside a filtered view would be a lie about the population, whatever the numbers said. Folding it
+// from `runs` makes the scope shared BY CONSTRUCTION: change a filter and the pairs change with it.
+// `search/concept_lens.py::project_concept_map` is the Python half over its own population (capsules,
+// for the agent tools); the rules below are the same rules, `runs` here spelling its `n_runs`.
+//
+// THE FLOOR IS THE POINT. One run tagging `a` and `b` says a tagger emitted two labels in one run, not
+// that the lab pairs them. `minRuns` defaults to 2 so a single-run coincidence is not an edge, and the
+// candidates BELOW the floor are counted rather than dropped silently — "nothing reached 2 runs" and
+// "co-occurrence was not computed" must not render as the same blank space.
+const MAX_PAIR_NODES = 512
+const MAX_PAIRS = 2_000
+
+export function buildConceptCooccurrence(runs = [], { minRuns = 2, forest = null } = {}) {
+  const floor = Number.isSafeInteger(minRuns) && minRuns > 0 ? minRuns : 2
+  const rows = Array.isArray(runs) ? runs.filter(isRecord) : []
+  const tree = forest || buildConceptForest(rows)
+  // Pair only over ids a run actually NAMED, ranked by how many runs named them. A materialized
+  // ancestor is our grouping, so it is in no run's set and could never pair; the rank + cap is what
+  // keeps this quadratic in a bound rather than in the corpus, and the cap is reported.
+  const taggedIds = Object.keys(tree.nodes).filter(id => tree.nodes[id].tagged)
+  const ranked = taggedIds
+    .sort((a, b) => tree.nodes[b].directRuns - tree.nodes[a].directRuns || (a < b ? -1 : 1))
+  const scope = new Set(ranked.slice(0, MAX_PAIR_NODES))
+  const pruned = ranked.length - scope.size
+
+  const counts = new Map()
+  for (const run of rows) {
+    const ids = runConceptEntries(run).entries.map(entry => entry.id).filter(id => scope.has(id))
+    ids.sort()
+    for (let i = 0; i < ids.length; i += 1) {
+      for (let j = i + 1; j < ids.length; j += 1) {
+        const key = `${ids[i]} ${ids[j]}`
+        counts.set(key, (counts.get(key) || 0) + 1)
+      }
+    }
+  }
+  const above = []
+  for (const [key, runCount] of counts) {
+    if (runCount < floor) continue
+    const [a, b] = key.split(' ')
+    above.push({ a, b, runs: runCount })
+  }
+  // Rank by evidence, then by id. Unlike the TREE (ordered by id so click targets never move under
+  // the cursor on the 2.5s poll), this list has no expand/collapse targets and its whole question is
+  // "which pairs are best attested" — so strength first, with the id tie-break keeping it stable.
+  above.sort((x, y) => y.runs - x.runs || (x.a < y.a ? -1 : x.a > y.a ? 1 : x.b < y.b ? -1 : 1))
+  return {
+    minRuns: floor,
+    pairs: above.slice(0, MAX_PAIRS),
+    pairCandidates: counts.size,
+    pairsOmitted: Math.max(0, above.length - MAX_PAIRS),
+    // Two different ways a pair can be missing, kept apart on purpose. The cap above is EXACT — we
+    // counted them and showed fewer. A pruned node's pairs were never materialized at all, so their
+    // count is UNKNOWN, and reporting it as zero would turn a bound into a finding.
+    pairSourceComplete: pruned === 0 && !tree.truncated,
+    pairSourceNodesIncluded: scope.size,
+    pairSourceNodesPruned: pruned,
+    pairsOutsideProjectionUnknown: pruned > 0 || tree.truncated,
+  }
+}
+
+// The pairs incident to one concept, strongest first — "what has this lab studied alongside this?".
+// Exact ids only: a pair is evidence a run named BOTH, and rolling a subtree up would attribute a
+// child's partners to a parent nobody tagged.
+export function partnersOf(cooccurrence, id) {
+  const canonical = normalizeConceptId(id)
+  if (!canonical || !cooccurrence?.pairs) return []
+  return cooccurrence.pairs
+    .filter(pair => pair.a === canonical || pair.b === canonical)
+    .map(pair => ({ id: pair.a === canonical ? pair.b : pair.a, runs: pair.runs }))
+}
+
 // A stable DFS flattening honoring an `expanded` set — roots always shown, a node's children only when
 // it is open. Mirrors `conceptViewModel.js::visibleConceptRows` in shape so both concept trees behave
 // identically under the keyboard, but it is a separate function: that one defends against a malformed

@@ -271,10 +271,18 @@ def test_concept_map_tool_discloses_edges_outside_bounded_node_projection(tmp_pa
     out = CrossRunTools(tmp_path).execute("cross_run_concept_map", {})
 
     assert "showing 512 of 768 explored concept(s)" in out
-    assert "WARNING: PARTIAL edge source" in out
+    # The vocabulary moved with the fold: the map has no `is_a` EDGE list any more (the tree IS that
+    # relation), so the only edges it can lose to a node bound are co-occurrence PAIRS, and the
+    # receipt says so. The property is unchanged and re-verified here — a pruned node's pairs are
+    # UNKNOWN, never rendered as none.
+    assert "WARNING: PARTIAL pair source" in out
     assert "259 node(s) were pruned" in out
-    assert "edges touching them are UNKNOWN" in out
+    assert "pairs" in out and "touching them are UNKNOWN" in out
     assert "0 known retained-projection co-occurrence pair(s) not shown" in out
+    # …and the empty pair list is stated as a THRESHOLD outcome, not as silence. These three runs
+    # share no concept, so nothing reaches two distinct runs and the operator must be able to tell
+    # that apart from "co-occurrence was not computed".
+    assert "No concept pair appeared together in 2+ distinct runs" in out
 
 
 def test_execute_never_raises_on_junk(tmp_path):

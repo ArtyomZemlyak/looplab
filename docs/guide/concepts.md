@@ -802,10 +802,16 @@ withholds exact one-sided states across Atlas, retrieval, tools and advisory pro
 advisory metadata reserved for future ranking and currently neither grant
 visibility nor change ordering. External coding-agent Developer backends receive no D8 provider. Proactive
 prompt influence carries lean digest receipts. The `cross_run_concept_map` tool computes exact node/run totals
-from the validated retained capsule snapshot, but deliberately limits edge generation to the top 512 graph
-nodes before pair materialization. Its edge receipt distinguishes response-capped edges known within that
-projection from edges touching pruned nodes, whose count remains explicitly **unknown** rather than reported
-as zero; capsule-source completeness is a separate receipt. Typed
+from the validated retained capsule snapshot, but deliberately limits co-occurrence pairing to the top 512 map
+nodes before pair materialization. Its pair receipt distinguishes response-capped pairs known within that
+projection from pairs touching pruned nodes, whose count remains explicitly **unknown** rather than reported
+as zero; capsule-source completeness is a separate receipt, merged at the tool because the map fold
+(`search/concept_lens.py::project_concept_map`) takes concept SETS and cannot know how complete the rows
+behind them were. That fold is shared with the run list's `Concepts` view, which passes the live per-run
+rollup of the runs it is showing instead of capsules — one map rule, two populations, each named by its
+caller. The `is_a` relation has no edge list: a concept id spells its own ancestry, so the tree IS that
+relation. A pair below the `min_cooccurrence` floor (default 2 distinct runs) is counted and reported rather
+than dropped, so an empty pair list reads as "nothing repeats yet" and never as "nothing co-occurs". Typed
 owner governance actions add revision/action fencing and explicit clear operations — reachable both from
 the `/api/cross-run/concept-*` endpoints and, for the owner assistant, from mode+approver-gated
 `concept_merge` / `concept_purge` / `concept_split` / `concept_edit_clear` tools (read-only
