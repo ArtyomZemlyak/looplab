@@ -350,6 +350,59 @@ METRIC_READERS = {
 READERS_REQUIRING_PATH = frozenset({"file_json", "file_regex"})
 
 
+# The spec keys each reader turns into a FILESYSTEM PATH, and the only enumeration of them. This is
+# NOT `READERS_REQUIRING_PATH` and must not be folded into it: "needs a path" and "names a path" are
+# different facts about a reader. `_read_adapter` DEFAULTS its path (so it needs none) and still
+# builds one out of `spec["path"]` whenever the operator supplies one; `_read_host_score` names TWO
+# files, under other key names entirely, and one of them (`labels`) is the HOST-held answer key that
+# goes to `Path(...)` DIRECTLY rather than through `_confined` — so it is not even a `_confined`
+# call site, and a table keyed on "does this reader call `_confined`" would miss it.
+# It sits beside `METRIC_READERS` for the same reason the kind set does: a new reader whose path slot
+# is missing here is one `Path(workdir) / 123` away from taking the RUN down (see
+# `metric_spec_path_error` and `read_metric`, which are its two consumers).
+READER_PATH_KEYS = {
+    "file_json": ("path",),
+    "file_regex": ("path",),
+    "adapter": ("path",),
+    "host_score": ("predictions", "labels"),
+}
+
+
+# The corrected spec shown alongside a refusal, per reader. `file_json`/`file_regex` keep verbatim the
+# example the missing-`path` message has always shown (tests pin the literal); `adapter` and
+# `host_score` are reachable only through the non-string check and need their own, because telling a
+# `host_score` author to put the file in `path` sends them to a spec that reads nothing.
+_PATH_EXAMPLES = {
+    "file_json": '{"kind": "file_json", "path": "metrics.json", "key": "metric"}',
+    "file_regex": '{"kind": "file_regex", "path": "metrics.json", "key": "metric"}',
+    "adapter": '{"kind": "adapter", "path": "LOOPLAB_adapter.py"}',
+    "host_score": ('{"kind": "host_score", "predictions": "predictions.json", '
+                   '"labels": "/held-out/labels.json", "scorer": "rmse"}'),
+}
+
+
+def _nonstring_path_slot(spec) -> Optional[tuple]:
+    """The first `(key, value)` of `spec` that names a metric-source FILE but is not a string.
+
+    ONE statement of the rule for two consumers whose jobs differ: `metric_spec_path_error` turns it
+    into a submit-time refusal naming the field, and `read_metric` into a runtime ABSTENTION (the node
+    fails `no_metric`, like every other malformed-spec branch here) for the documents that refusal can
+    never reach — `adapters/repo_task.py::_grandfathered` reloads a run's recorded `task.snapshot.json`
+    WITHOUT re-validating it, which is exactly the spec that has already proved it crashes.
+
+    An ABSENT slot is not this function's business — whether a reader is dead without its path is the
+    per-reader fact `READERS_REQUIRING_PATH` holds. `str` is the only accepted spelling on purpose:
+    these specs are authored as JSON, where a path is a string, and every other type either raises
+    TypeError out of the path constructor (int/float/list/dict, and `bytes` too) or would need
+    confinement re-derived for a second representation.
+    """
+    for slot in READER_PATH_KEYS.get(spec.get("kind", "stdout_json"), ()):
+        value = spec.get(slot)
+        if value is not None and not isinstance(value, str):
+            return slot, value
+    return None
+
+
 # The slot-agnostic tail of the refusal. WHAT a pathless reader costs depends on which slot it is
 # in, and the four costs are genuinely different — measured: a pathless `metrics` entry is dropped
 # from the node's report, a pathless `constraints` entry reads as unverifiable (which `_violations`
@@ -365,24 +418,37 @@ _PATHLESS_COST = "Without `path` this reader can never return a value."
 def metric_spec_path_error(spec, *, consequence: Optional[str] = None) -> Optional[str]:
     """Why `spec` can never read a metric for want of a usable `path` — or None when it can.
 
-    A NON-STRING `path` is rejected too, and is the worse of the two failures: `_confined` catches
-    only (OSError, ValueError, RuntimeError), so `Path(workdir) / 123` raises an uncaught TypeError
-    out of `read_metric` and takes down the RUN rather than failing the node.
+    A PRESENT but NON-STRING path slot is rejected too, and is the worse of the two failures: it takes
+    down the RUN rather than failing the node. `_confined` catches only
+    (OSError, ValueError, RuntimeError), so `Path(workdir) / 123` raises an uncaught TypeError out of
+    `read_metric`, as does `_read_host_score`'s `Path(<labels>).resolve()`; the eval worker's only
+    handler is `except GpuPinUnenforceable` (`engine/evaluate.py`), so the node gets NO terminal event
+    and the run re-dies on every resume.
+
+    That check is asked of EVERY reader that builds a path out of the spec (`READER_PATH_KEYS`), not
+    only the two that REQUIRE one. It used to sit INSIDE the `kind not in READERS_REQUIRING_PATH`
+    early exit, which is why it protected `file_json`/`file_regex` alone and left `adapter`'s `path`
+    and `host_score`'s `predictions`/`labels` behind it — all three measured to raise TypeError out of
+    a real `read_metric` call. Do NOT fix that by adding those kinds to `READERS_REQUIRING_PATH`: a
+    MISSING path is a per-reader fact and stays exactly as it was (`_read_adapter` defaults its path,
+    the stdout readers have none), while a non-string one is universal.
 
     `consequence`: the caller's MEASURED failure mode for its own reader slot (see `_PATHLESS_COST`).
     """
     if not isinstance(spec, dict):
         return None
     kind = spec.get("kind", "stdout_json")
+    bad = _nonstring_path_slot(spec)
+    if bad is not None:
+        slot, value = bad
+        return (f"metric reader {kind!r} needs `{slot}` to be a STRING file path, got "
+                f"{type(value).__name__}: {str(value)[:60]!r}. e.g. {_PATH_EXAMPLES[kind]}")
     if kind not in READERS_REQUIRING_PATH:
         return None
     path = spec.get("path")
     if isinstance(path, str) and path.strip():
         return None
-    example = ('{"kind": "%s", "path": "metrics.json", "key": "metric"}' % kind)
-    if path is not None and not isinstance(path, str):
-        return (f"metric reader {kind!r} needs `path` to be a STRING file path relative to the eval "
-                f"workdir, got {type(path).__name__}: {str(path)[:60]!r}. e.g. {example}")
+    example = _PATH_EXAMPLES[kind]
     return (f"metric reader {kind!r} needs a `path`: the file the eval writes, relative to the node's "
             f"eval workdir. e.g. {example} — `key` is the key INSIDE that file, not the file name. "
             + (consequence or _PATHLESS_COST))
@@ -400,6 +466,17 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
 
     An unknown `kind` returns None (the node fails with no_metric) exactly as the old if-chain's
     fall-through did; `_valid_metric_kind` is what turns it into a submit-time error instead."""
+    # A PRESENT but non-string path slot is a REFUSAL here, not a crash — the same rule
+    # `metric_spec_path_error` refuses at SUBMIT, asked again at RUNTIME because the submit-time
+    # refusal cannot reach every spec that gets here: `adapters/repo_task.py::_grandfathered` reloads
+    # a run's recorded `task.snapshot.json` without re-validating it (CLAUDE.md invariant #6), so a
+    # document authored before the refusal existed still runs. Without this the malformed spec raises
+    # TypeError out of `_confined`/`Path(...)` (neither of which catches it) into the eval worker,
+    # whose only handler is `except GpuPinUnenforceable` — the node gets no terminal event and the RUN
+    # dies, then re-dies on every resume. Failing the node is what every other malformed-spec branch
+    # in this module does.
+    if _nonstring_path_slot(spec) is not None:
+        return None
     reader = METRIC_READERS.get(spec.get("kind", "stdout_json"))
     return reader(stdout, workdir, spec, wrap, since) if reader is not None else None
 

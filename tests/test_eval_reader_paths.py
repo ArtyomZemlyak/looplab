@@ -13,9 +13,12 @@ refusals do not share one consequence sentence:
   - `eval.cross_check` — `_drift(primary, None, tol)` is True by construction ("can't corroborate ->
                          drift"), so under ratify_freeze_drift EVERY node's metric is discarded.
 
-Every test below reproduces the runtime behaviour FIRST — against the untouched
-`runtime/command_eval.py`, which still does exactly what it did — and only then asserts the refusal.
-That ordering is the point: the refusal is only worth having if it stands in front of a real defect.
+Every test below reproduces the runtime behaviour FIRST — against `runtime/command_eval.py`, which
+still reads a PATHLESS spec exactly as it did — and only then asserts the refusal. That ordering is
+the point: the refusal is only worth having if it stands in front of a real defect. The one runtime
+behaviour that has since CHANGED is section 4's: a non-string path used to raise TypeError out of
+`read_metric` and kill the run, and now abstains like the pathless spec (the submit-time refusal
+could not stand alone there, because a grandfathered snapshot never passes it).
 
 NEW FILE because these span `runtime` (the message + reader table), `adapters` (the four slots and
 the refusal) and `cli` (the resume grandfathering), and the resume half has no home in any of them.
@@ -170,26 +173,42 @@ def test_the_pathless_cross_check_costs_the_whole_run_end_to_end(tmp_path):
     assert state.best_node_id is None
 
 
-# ------------------------------------------------- 4. a non-string path: it takes down the RUN
+# ------------------------------------------------- 4. a non-string path: it took down the RUN
 @pytest.mark.parametrize("slot,payload", [
     ("metrics", {"metrics": {"lat": _BAD_TYPE}}),
     ("constraints", {"constraints": [dict(_BAD_TYPE, name="lat", max=10.0)]}),
     ("cross_check", {"cross_check": _BAD_TYPE}),
 ])
-def test_a_non_string_path_in_any_slot_is_refused_because_it_crashes_the_run(slot, payload,
-                                                                            tmp_path):
+def test_a_non_string_path_in_any_slot_is_refused_at_submit_and_abstains_at_runtime(slot, payload,
+                                                                                    tmp_path):
     """Worse than missing, in every slot: `_confined` catches only (OSError, ValueError,
-    RuntimeError), so `Path(workdir) / 123` raises an uncaught TypeError out of `read_metric` —
-    the eval worker's only handler is `except GpuPinUnenforceable`, so the node gets NO terminal
-    event and the whole run dies (and re-dies on every resume). For a RepoTask it does not even get
+    RuntimeError), so `Path(workdir) / 123` raised an uncaught TypeError out of `read_metric` —
+    the eval worker's only handler is `except GpuPinUnenforceable`, so the node got NO terminal
+    event and the whole run died (and re-died on every resume). For a RepoTask it does not even get
     that far: `_eval_protected` used to `pre + 123` inside `repo_spec()`, i.e. inside
-    `Engine.__init__`."""
+    `Engine.__init__`.
+
+    The runtime half is now CLOSED as well: `read_metric` asks `_nonstring_path_slot` before it
+    dispatches, so the eval degrades to EXACTLY the pathless spec's measured cost in this slot
+    (asserted below, one branch per slot) and the NODE fails instead of the run. Both halves are
+    needed — `_grandfathered` reloads a run's recorded `task.snapshot.json` without re-validating it,
+    so a document authored before the submit-time refusal existed reaches `read_metric` regardless.
+    The per-reader coverage of the runtime guard lives in tests/test_metric_reader_confinement.py.
+    """
     kw = dict(payload)
     if slot == "cross_check":
         kw["enforce_drift"] = True
-    with pytest.raises(TypeError):                          # the defect, still there at runtime
-        _eval(tmp_path, **kw)
-    with pytest.raises(ValueError, match="STRING"):          # …and now unreachable from a submit
+    res = _eval(tmp_path, **kw)                              # the defect: this used to raise TypeError
+    assert res.extra_metrics is None                         # the broken reader produced nothing …
+    if slot == "constraints":                                # … and each slot pays the PATHLESS cost
+        assert res.metric == 1.0
+        assert res.violations == [{"name": "lat", "value": None, "max": 10.0, "min": None}]
+    elif slot == "cross_check":
+        assert res.metric is None
+        assert res.drift == {"primary": 1.0, "cross": None, "tolerance": 1e-6}
+    else:
+        assert res.metric == 1.0 and res.violations is None
+    with pytest.raises(ValueError, match="STRING"):          # …and unreachable from a submit
         RepoTask(**_task(**payload))
 
 

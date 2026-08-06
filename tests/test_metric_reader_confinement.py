@@ -22,8 +22,8 @@ import sys
 
 import pytest
 
-from looplab.runtime.command_eval import (METRIC_READERS, READERS_REQUIRING_PATH, _confined,
-                                           read_metric)
+from looplab.runtime.command_eval import (METRIC_READERS, READER_PATH_KEYS,
+                                           READERS_REQUIRING_PATH, _confined, read_metric)
 
 
 # ------------------------------------------------------------------ the guard itself
@@ -166,6 +166,92 @@ def test_every_path_touching_reader_is_registered_and_routes_through_the_guard()
     assert module_source.count("_is_within(") == 3, (
         "expected exactly three: the definition, `_confined`'s use, and host_score's labels-must-be-"
         "OUTSIDE check, which is the inverse assertion and deliberately not `_confined`")
+
+
+# -------------------------------------------- a non-string path slot: a refusal, not a dead RUN
+
+_NON_STRINGS = [123, 1.5, True, ["metrics.json"], {"path": "metrics.json"}, b"metrics.json"]
+_PATH_SLOTS = sorted((kind, slot) for kind, slots in READER_PATH_KEYS.items() for slot in slots)
+
+
+@pytest.mark.parametrize("kind,slot", _PATH_SLOTS, ids=[f"{k}.{s}" for k, s in _PATH_SLOTS])
+@pytest.mark.parametrize("value", _NON_STRINGS, ids=[type(v).__name__ for v in _NON_STRINGS])
+def test_a_nonstring_path_slot_fails_the_node_not_the_run(tmp_path, kind, slot, value):
+    """`Path(workdir) / 123` raises TypeError, which `_confined` does NOT catch (it catches
+    OSError/ValueError/RuntimeError), and neither does `host_score`'s `Path(<labels>).resolve()`.
+    Above `read_metric` the eval worker's only handler is `except GpuPinUnenforceable`
+    (`engine/evaluate.py`), so the escape gave the node NO terminal event and killed the whole RUN —
+    which then re-died on every resume. A malformed spec must fail the NODE, like every other
+    malformed-spec branch in this module.
+
+    Parametrized off `READER_PATH_KEYS` so the guard is asked of every slot that reaches a path
+    constructor, not just the two that `metric_spec_path_error` used to cover: the check lived INSIDE
+    that function's `kind not in READERS_REQUIRING_PATH` early exit, so `adapter`'s `path` and
+    `host_score`'s `predictions`/`labels` were unprotected and all three were measured to raise.
+
+    The submit-time refusal is not enough on its own, which is why this drives `read_metric` rather
+    than the validator: `adapters/repo_task.py::_grandfathered` reloads a run's recorded
+    `task.snapshot.json` WITHOUT re-validating it, so a spec authored before the refusal existed
+    still arrives here.
+    """
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    (workdir / "ok.json").write_text(json.dumps({"metric": 1.0}), encoding="utf-8")
+    # Every OTHER path slot of this reader gets a usable string, so the reader really would have run
+    # on to the bad one rather than abstaining earlier for an unrelated reason.
+    spec = {"kind": kind, **{s: "ok.json" for s in READER_PATH_KEYS[kind]}, slot: value}
+    assert read_metric("", str(workdir), spec) is None
+
+
+def test_the_nonstring_guard_refuses_the_type_not_the_reader(tmp_path):
+    """The other half: a guard that made every reader abstain would satisfy the test above while
+    silently disabling metric reading. The same readers with STRING paths still produce values."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    (workdir / "ok.json").write_text(json.dumps({"metric": 1.0}), encoding="utf-8")
+    (workdir / "LOOPLAB_adapter.py").write_text(
+        "def read_metric(workdir):\n    return 0.5\n", encoding="utf-8")
+    assert read_metric("", str(workdir), {"kind": "file_json", "path": "ok.json"}) == 1.0
+    assert read_metric("", str(workdir), {"kind": "adapter", "timeout": 60}) == pytest.approx(0.5)
+
+
+def _spec_string_keys(reader) -> set:
+    """Every `spec.get("<literal>")` key a reader reads, from its real AST.
+
+    Used to ENUMERATE inputs for the behavioural sweep below — the assertions are all made by
+    calling `read_metric` — so a reader that grows a new path slot is exercised without anyone
+    remembering to list it here or in `READER_PATH_KEYS`.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(reader).lstrip())
+    return {node.args[0].value for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get" and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "spec" and node.args
+            and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)}
+
+
+@pytest.mark.parametrize("kind", sorted(METRIC_READERS))
+def test_no_spec_field_of_any_reader_can_raise_out_of_read_metric(tmp_path, kind):
+    """The generalization, and the part that survives a NEW reader: every field a registered reader
+    reads out of the spec, given a value of the wrong type, must fail the node rather than the run.
+
+    `READER_PATH_KEYS` is a registry, and a registry nobody re-derives rots — a reader added with a
+    `checkpoint` path slot would pass the parametrized test above (which reads the registry) while
+    crashing exactly as `adapter` did. This one reads the READER, so it goes red instead.
+
+    `kind` is excluded and is the one genuine gap: an unhashable `kind` raises TypeError out of
+    `METRIC_READERS.get(...)` itself, which predates this guard and belongs to the dispatch, not to
+    the path slots.
+    """
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    (workdir / "ok.json").write_text(json.dumps({"metric": 1.0}), encoding="utf-8")
+    for field in sorted(_spec_string_keys(METRIC_READERS[kind]) - {"kind"}):
+        for value in _NON_STRINGS:
+            read_metric("", str(workdir), {"kind": kind, field: value})   # must not raise
 
 
 # ------------------------------------------------------------------ the reader table is the registry
