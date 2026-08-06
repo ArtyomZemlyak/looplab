@@ -111,11 +111,12 @@ test('virtual timeline is bounded, variable-height, generation-scoped, and polit
 })
 
 test('feed-hidden bookkeeping keeps the pagebar and unread badge honest about what renders', async () => {
-  const dock = await source('Dock.jsx')
+  const [dock, narration] = await Promise.all([source('Dock.jsx'), source('narration.js')])
   // The curated feed is an ALLOW-LIST: only narrated event types render. Everything unnarrated (finalize
   // gates, per-call cost, the concept-cadence read-model sidecars, verifier scores, resume/restart
   // plumbing) is kept out — so a new event type can never regress into a raw-JSON blob in the feed.
-  assert.match(dock, /const isCuratedType = \(type\) => Object\.hasOwn\(NARR, type\)/)
+  // The allow-list itself moved to the narration model (doc 25 UI-08); Dock still consumes it.
+  assert.match(narration, /export const isCuratedType = \(type\) => Object\.hasOwn\(NARR, type\)/)
   // A run carrying any non-curated row is detected so the counts can compensate.
   assert.match(dock, /const hiddenPresent = useMemo\(\(\) => log\.some\(\(e\) => !isCuratedType\(e\.type\)\), \[log\]\)/)
   // Pagebar: whenever the feed is a strict subset of the loaded window (hidden rows or a time-scrub),
@@ -130,8 +131,12 @@ test('feed-hidden bookkeeping keeps the pagebar and unread badge honest about wh
 })
 
 test('bounded omissions and loaded-window search limitations are explicit on both event surfaces', async () => {
-  const [dock, panels] = await Promise.all([source('Dock.jsx'), source('panels.jsx')])
-  assert.match(dock, /details omitted \(\$\{omittedBytes\.toLocaleString\(\)\} source bytes exceed page limit\)/)
+  const [dock, panels, narration] = await Promise.all([
+    source('Dock.jsx'), source('panels.jsx'), source('narration.js')])
+  // The omission notice is written by the narration model (doc 25 UI-08); the row that shows the same
+  // receipt inline still lives in Dock. `dockNarration.test.js` drives the narrated wording for real.
+  assert.match(narration, /details omitted \(\$\{omittedBytes\.toLocaleString\(\)\} source bytes exceed page limit\)/)
+  assert.match(dock, /\{omittedBytes\.toLocaleString\(\)\} source bytes exceed the bounded page response/)
   assert.match(dock, /Filters search loaded events only/)
   assert.match(dock, /rawPreview = JSON\.stringify\(event\.data \?\? \{\}\)\.slice\(0, 500\)/)
   assert.match(dock, /`\$\{event\.type \|\| ''\} \$\{narration\} \$\{rawPreview\}`\.toLowerCase\(\)/)

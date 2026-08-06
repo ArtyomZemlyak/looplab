@@ -1145,6 +1145,36 @@ paid-retry exposure is the KNOWN GAP already documented on `_maybe_snapshot_conc
 
 *Recommendation:* Split each cue into a small method (or a list of (gate, render) callables) returning (hint_fragment, steering_entries); _set_complexity_hint becomes a loop that concatenates fragments and stamps the researcher once. This keeps byte-identical output while making cue addition/removal local, and lets test_signal_delivery reference cue functions instead of substrings.
 
+*Resolution (2026-08-05):* Done as recommended. Fifteen `_cue_*` methods, each returning
+`(hint_fragment, steering_entries)` under a uniform `(state, parent, researcher)` signature, listed
+in `PROPOSAL_CUES`; `_set_complexity_hint` is a loop plus the tail that stamps the researcher.
+
+Two things the mechanical description hides. **The cue ORDER is a contract twice over** — `hint` is
+prompt text the Researcher reads top-down, and `steering` becomes the Card's public
+`_steering_context` list — so a driver that sorted or set-collected the fragments would be a
+behaviour change with every fragment byte-identical. It is pinned as a literal, and the guard proves
+the pin bites by reordering two cues and by making the driver `sorted()`. **Two steering appends stay
+in the driver on purpose**: `sweep` and `strategy` contribute no hint TEXT (sweep stamps its own
+`_sweep_hint` attribute) and run AFTER the `_complexity_hint` stamp, so they are the tail, not cues.
+The guard pins them BY KIND rather than banning inline appends outright — a new text cue appending
+inline still fails.
+
+`_cue_cross_run_advisory` is the one cue with a side effect beyond its fragment, which is why it
+takes the researcher: it stamps `_cross_run_advisory_receipt`, the provenance tie between the node
+and the corpus its text came from. Computing the text without stamping would be worse than not
+computing it, so the side effect travels with the cue rather than being hoisted.
+
+Byte-identity was VERIFIED, not asserted: a scratch harness loaded the pre-split module alongside the
+new one and compared `_complexity_hint`, `_steering_context`, `_sweep_hint` and
+`_cross_run_advisory_receipt` across 400 randomised gate/state combinations — zero mismatches. That
+harness needs both versions of the module, so it cannot ship; what ships is
+`tests/test_proposal_cue_registry.py` (24), which pins the structure that keeps it true: the two-way
+registry scan (an unlisted cue is silently DEAD — the driver calls only what the tuple names), the
+order, the driver staying a driver, and that every cue returns the empty pair rather than `None`
+when gated off. The order test uses a real steering `kind`, because `normalize_steering_context`
+enforces a closed vocabulary and drops the whole snapshot on an unknown one — invented kinds would
+have compared an empty list to an empty list and proved nothing.
+
 #### EC-09 · MEDIUM · under-decomposition · effort: medium
 
 **strategy.py mixes four loosely-related subsystems; _concept_coverage_snapshot alone is ~240 lines**
@@ -2101,6 +2131,38 @@ directory-entry publish, uncertain-sync fence) against BOTH appenders.
 
 *Recommendation:* Extract the concept-envelope section into `_fold_node_concept_envelope(st, ctx, n, raw_idea, current, current_provenance)` living next to _on_node_concepts/_on_concept_tag_edited so all concept-membership writers sit together; _on_node_created then reads as lifecycle logic only.
 
+*Resolution (2026-08-05):* Done, with one signature deviation and one subtlety the recommendation
+did not name.
+
+`_fold_node_concept_envelope(st, ctx, n, d, current)` now owns the sub-machine and sits immediately
+before `_on_node_concepts`; `_on_node_created` reads as lifecycle plus one delegation. The block moved
+BYTE-IDENTICALLY (verified by diffing the extracted text against the pre-change file), which matters
+here more than usual: it is the most comment-dense policy in the fold, and the comments carry the
+provenance rules.
+
+Deviation: the recommendation's `raw_idea` and `current_provenance` parameters are derived INSIDE
+instead. Both are one-line derivations from `d` and `st` that no caller has a reason to know about;
+passing them would move two lines up a level and add two ways to call the function wrong.
+
+The subtlety, and why this finding got a test file rather than just a move: `current` — the node this
+event REPLACES — MUST stay a parameter. Receipt protection compares the replaced node's idea against
+the new one, and the caller captures it before `st.nodes[n.id]` is rebound. Re-deriving it inside (the
+inviting "cleanup" now that `st` is in scope) compares the new node with ITSELF, reports every
+replacement as unchanged, and silently preserves a CLASSIFIER receipt describing an idea that no
+longer exists — which then feeds novelty admission and cross-run evidence as verified.
+
+That direction had NO coverage. `test_concept_tag_edited.py` drove the RETAIN half; nothing drove a
+replacement whose idea genuinely changed. `tests/test_node_concept_envelope_fold.py` (8) now pins both
+halves of the truth table plus the exclusion of the proposer's own concept fields from subject
+equality. Verified by applying exactly that cleanup on a scratch copy: it fails the two tests written
+for it and leaves the other 193 replay/concept tests green — which is the measurement of how exposed
+the property was.
+
+`st.nodes[n.id] = n` moved from the MIDDLE of the block to just above the call. Nothing in the block
+reads `st.nodes`, so this is a pure reordering, and a guard asserts it stays true — if the helper ever
+read `st.nodes` it would see the already-rebound node and the hoist would stop being safe, the same
+aliasing that makes re-deriving `current` wrong.
+
 #### EV-09 · LOW · mergeable-entities · effort: small
 
 **Twin handlers and quadruplicated request-queue purges for the force_confirm/force_ablate/fork intent family**
@@ -2320,6 +2382,41 @@ test now pins both behaviours rather than trusting the docstrings that describe 
 *Evidence:* Every card event has a hypothesis twin folded by a mirrored handler: _on_hypothesis_ranked vs _on_card_ranked (the latter's comment: "mirrors _on_hypothesis_ranked"), _on_hypothesis_merged vs _on_card_merged, _on_hypothesis_added vs _on_card_added, hypothesis_updated drop/abandon vs card_dropped — and _derive_cards must then zip both families ([(True, cards_added)] + [(False, hypotheses_added)] at 4874-4877, same for merges at 5014-5016, ranking fallback at 5371, abandon/delete overrides at 5156/5559). This is documented back-compat ("st.cards now SUBSUMES the removed st.hypotheses board"), so it is not a defect per se, but the compat layer is load-bearing inside the largest function in the package and every card change must be reasoned against the shadow family too.
 
 *Recommendation:* Keep the fold handlers (old logs must replay), but isolate the hypothesis-shadow merging into an explicit adapter step at the top of the card derivation (normalize hypotheses_added/merged/ranking into synthetic card-shaped rows once), so the 800-line derivation reasons over one input family instead of interleaving both throughout.
+
+*Resolution (2026-08-05):* The shared part is extracted; the recommendation's premise is REJECTED
+with the reason, and the invariant it was really protecting now has a test it did not have.
+
+What was actually duplicated is the ORDERING, not the row shape. Both phases that walk the two
+families depend on one rule — native rows FIRST, because dedup is first-wins, so a hypothesis twin
+that claims the id first makes the real `card_added` row hit `if cid in cards: continue` and its
+receipt (rationale, snapshot, footprint, action ownership) vanishes. That rule was written out as a
+literal list concatenation at each site: one invariant, two places to drift. It is now
+`_native_first(native, shadow)`, and the argument order IS the precedence.
+
+REJECTED: "normalize hypotheses into synthetic card-shaped rows once, so the derivation reasons over
+one input family". The two families are not one family in different clothes, and the `native` flag
+cannot be normalized away. Only a native row can carry an ownership receipt — `_card_added_snapshot`
+and `_card_added_ownership` are meaningless on a hypothesis row, which must resolve to
+`receipt_valid=False`; only a SHADOW row is excluded by `ambiguous_seeds` (both at the id and at each
+alias in the merge phase); and the two produce different `card_origins` provenance
+(`card_added_unbound` vs `hypothesis_shadow`). A synthetic row that made a hypothesis LOOK native
+would have to carry a "not really native" bit anyway — the same flag, one layer further from the
+branch that reads it, which is worse than the flag.
+
+The finding's own framing already conceded this is documented back-compat rather than a defect, and
+the genuine risk it names — "every card change must be reasoned against the shadow family too" — is
+the ordering rule, which is now stated once and guarded.
+
+`tests/test_card_native_first.py` (6). It drives a real log where a `hypothesis_added` and a
+`card_added` name the same statement, in BOTH log orders, and asserts the native receipt survives —
+plus an AST pin that both phases take their order from the helper with the native family first.
+Nothing covered this before: flipping the two concatenation arms on a scratch copy fails 3 of the new
+tests and leaves all 239 other replay/card tests GREEN, which is the measurement of how exposed the
+invariant was. Re-growing a hand-written concatenation at one site fails the AST pin.
+
+Not done: the ranking fallback (`st.card_ranking or st.hypothesis_ranking`) stays inline — it is a
+single scalar fallback, not a row family, and routing it through a shared helper would be one call
+site pretending to be a pattern.
 
 
 ### 4.5 Core
@@ -3328,6 +3425,47 @@ for a single named record).
 
 *Recommendation:* Extract a CommandTracker (stage/persist/observe/reconcile one turn) used by _control, _apply_plan and _reconcile_pending, and split report-refresh reconciliation into its own method; rendering helpers can move to tui_format.
 
+*Resolution (2026-08-05):* Split the reconciliation, unified the staging prologue, **rejected the
+CommandTracker** — with the measurement that says why.
+
+DONE, the headline. `_reconcile_report_refresh` now owns the paid-receipt protocol end to end and
+`_reconcile_pending`'s loop body runs the generic command protocol only; the two `unresolved = True`
+assignments the branch used to make became the method's return value, and the loop folds it back.
+The protocols really were different systems sharing a `for`: the paid one identifies a row by its own
+durable idempotency key (there is no server-issued command id yet), re-asks with `refresh_report`,
+and treats a 200 saying `ok` as NOT yet success unless it carries a valid event receipt for the
+expected generation.
+
+DONE, unlisted but the same duplication the finding is pointing at. Both submit paths wrote the
+pre-POST staging prologue separately — append, index, `_persist`, and on failure mark the row failed
+— including the failure string, in the one place where the wording IS the promise ("nothing was
+submitted"). That is now `_stage_action_turn` plus the `_STAGE_COMMAND_FAILURE` constant, with the
+rendering left at the call sites, which is where the two genuinely differ.
+
+REJECTED: the CommandTracker itself. The three sites do not share the taxonomy the recommendation
+assumes. Measured on the tree: the unknown-status arm is *terminal-failed* at submit time
+(`_apply_plan`, `_control`) and *keep-pending* at reconcile time (`_reconcile_pending`) — a
+deliberate difference, since believing an unrecognised status during reconciliation would resolve a
+row whose command may still be running. Staging is unconditional in `_apply_plan` but conditional on
+`history is not None` in `_control` (the dashboard calls it with no chat). `_control` returns the raw
+command record to its caller and, on an ambiguous transport failure, synthesises
+`{**staged_turn["command"], "status": "executing"}`; `_apply_plan` returns nothing and instead uses
+the verdict to decide whether the REST of the ordered plan is submitted. A tracker covering all three
+needs a verdict hook, a render hook and a staging flag, i.e. three parameters standing in for the
+three bodies — no net reduction in a path where a mistake loses an idempotency key.
+
+Guards: `tests/test_tui_report_refresh_protocol.py` (16). Nothing pinned the extracted behaviour
+before — every existing reconciliation test drives `_reconcile_pending` from the outside and passes
+whether the protocols are separate or interleaved. Verified by breaking each property on a scratch
+copy: making the transient-failure arm return resolved, making the pending-code arm return resolved,
+and dropping the caller's `unresolved` fold each failed only the new tests (1, 9, 10 of them) and
+left the rest of `test_tui.py` green. Removing `_stage_action_turn`'s refusal failed the new paid-path
+test together with its two existing command siblings. The structural guards scan `ast.unparse` output
+with the docstring popped, because both docstrings describe the *other* protocol on purpose and a
+raw `inspect.getsource` scan matches its own explanation.
+
+Not done: moving rendering helpers to `tui_format`, and the ~880-line class itself.
+
 #### SC-16 · LOW · over-engineering · effort: small
 
 **Micro over-engineering in deletion_service and run_commands helper wrappers**
@@ -4160,6 +4298,62 @@ failure.
 *Evidence:* Two 'CODEX AGENT:' comments in card_score's helpers flag active defects: (1) :693-696 — a Card's coverage bonus is computed from card.concept_tags, 'self-reported by the same Researcher competing for selection. A plausible new slug earns maximal exploration bonus before independent classification'; (2) :778-781 — 'provenance-free model self-confidence is known by the foresight module to be outcome-uncorrelated, yet it carries 65% of this active selection signal' (the Pearson≈0 / §21.12 evidence lives in foresight.py's own comments) (foresight = 0.65*confidence + 0.35*priority). Both comments prescribe fixes (require an independent concept-source receipt; admit only verifier-calibrated confidence) that were not applied, so the exploit/explore stance ranks partly on gameable, known-uncorrelated inputs.
 
 *Recommendation:* Either implement the prescribed gating (verifier-calibrated confidence via ForesightPanelResearcher.verify_score plumbing; trusted post-classification tags for coverage) or demote these terms to tie-breaks, and convert the CODEX comments into tracked issues rather than shipped annotations.
+
+*Resolution (2026-08-05):* CONFIRMED live and fixed, taking the recommendation's second branch for
+confidence and a third option for coverage. Both CODEX annotations are gone from the source; what they
+prescribed is now behaviour, and the reasoning lives beside the code it governs.
+
+Confirmed first: `Settings.card_driven_selection` defaults to **True**, so this was not a dormant
+path. And `Card.confidence` is worse-provenanced than the annotation says — it is not merely
+"provenance-free", it is `search/foresight.py::_prioritize`'s `conf`, copied verbatim by
+`engine/audit.py` onto `card_ranked`: the foresight ranker's self-assessment of its own board
+ordering. The same module's `_verifier_confidence` exists specifically to REPLACE that number with a
+calibrated §12-verifier score, but only on the idea path, never on the board ranking that stamps the
+Card. So the repository builds the antidote and does not apply it here.
+
+**Confidence — demoted.** `foresight` was `0.65 * confidence + 0.35 * priority`. These are two
+different things and only one is evidence: `priority` is the rank the ranker CHOSE, `confidence` is
+its opinion of that choice, and §21.12 measures the latter at Pearson≈0 with realized outcome. A
+number measured not to predict is not a defensible default majority of an active selection signal.
+`_foresight_signal(confidence, priority, confidence_weight)` now takes the weight from
+`CardScoring.confidence_weight`, which defaults to **0.0** — the rank stands alone. Confidence is not
+discarded: it remains a tie-break component of the score key, which is exactly what the
+recommendation's "demote these terms to tie-breaks" asked for. The shape is a WEIGHT rather than a
+deletion so the escape hatch can express the old behaviour exactly for anyone wanting to A/B it —
+`0.65` reproduces the historical blend, and the guard checks that against the literal formula rather
+than against itself.
+
+**Coverage — capped, not replaced.** The prescribed fix ("score only post-build trusted tags") does
+not work as stated: a Card is scored BEFORE its node is built, so post-build tags do not exist yet
+and the term would be dead for every candidate. What DOES exist is `Card.concept_source`, the exact
+`CardConceptSource` receipt — so the gate is "does a COMPLETE receipt from a non-proposer source back
+these tags", and the answer decides a CEILING rather than a value. The asymmetry is the whole design:
+the exploit only runs upward (mint a slug, every tag falls outside `explored`, score 1.0), so an
+unverified claim is capped at the neutral `0.5` while an honest low fraction passes through
+untouched. Replacing the value with 0.5 outright — the obvious reading — would have INFLATED exactly
+the honest case worth protecting, and that mutation is one of the breaks the guard is verified
+against. The midpoint rather than the floor follows `_UNGRADED_NOVELTY`'s own recorded reasoning:
+unverified is unknown, not disproved.
+
+**Withheld from the Strategist on purpose.** `confidence_weight` is deliberately NOT in
+`strategist.py::_CARD_SCORING_FIELDS`. That is a trust decision, not a search stance: letting an LLM
+Strategist raise it would let the model hand its own self-report back its majority share of a signal
+it was measured not to predict. The existing exact-set match rejects a proposal naming it, whole, so
+the omission needs no new branch — but it needed the comment, because the next person adding a
+`CardScoring` field will otherwise assume the two lists should match.
+
+Also corrected: `_independently_classified` checks `receipt_valid`, `membership_present` and
+`complete` separately even though `CardConceptSource._coherent_owner` already implies the first two
+from the third. That is not redundancy — `card_score` is a documented PUBLIC scoring hook, so an
+external policy can pass a source object no validator ever saw, and `complete` alone would then trust
+a hand-built receipt that says complete while admitting it is invalid. Both halves are pinned: the
+duck-typed path per clause, and the fact that the model makes those combinations unconstructible.
+
+`tests/test_card_selection_trust.py` (22) and a `docs/guide/configuration.md` paragraph. NOTHING
+covered either term before: this change altered live selection and all 191 existing card/strategist
+tests stayed green. Verified by three breaks on a scratch copy — removing the cap, turning the cap
+into a replacement, and restoring `confidence_weight = 0.65` as the default — each failing only its
+own assertions.
 
 #### SE-12 · LOW · over-engineering · effort: medium
 
@@ -5116,6 +5310,41 @@ of the existing sites would catch.
 cross-branch variable leakage (the `_sig` UnboundLocalError fix the finding cites as evidence), and
 it needs room to verify the staged and single-command branches against each other rather than a
 mechanical lift. Left explicit so the remaining work is visible.
+
+*Resolution (2026-08-05), the remaining half.* `_run_stages` and `_run_single` now hold the two eval
+paths and `run_command_eval` keeps only setup, the dispatch and the metric read.
+
+The point is not the line count. Both helpers return an `_EvalRun` whose EVERY field has a default,
+and the tail reads that one object — so the leak the finding names becomes unrepresentable rather
+than fixed. The `_sig` bug was exactly this: the name was bound only inside the stage loop, a
+pipeline where no stage ran (all reused via `start_stage`, or a stage whose command expands to `[]`)
+reached `RunResult(..., stalled=_salvageable_stall(_sig))` unbound, and the UnboundLocalError came
+straight out of the eval worker — the node got NO terminal event at all. The fix at the time was to
+pre-bind one more name in one branch, which closes the instance and leaves the class open for the
+next field anyone adds. An early return (a failed stage, or one whose inter-stage check raised a
+concern) is now `_EvalRun.early`, a RunResult the caller returns as is.
+
+`_EvalExec` carries the ten knobs both paths handed `run_argv` unchanged, including the four
+closures `run_command_eval` builds once (the GPU-flag cap + in-container `timeout` prefix, the docker
+wrap, the live log path, the tracer span).
+
+Guards: `tests/test_command_eval_run_split.py` (14) — the defaults, the fresh-dict `signals` default
+(a shared mutable one would carry a watchdog verdict into the next eval, and that verdict decides
+whether a crashed run's metric is salvaged), and the first DIRECT coverage of both helpers: until the
+split they were reachable only through the 23-parameter front door. Verified by removing the
+`signals` default (fails 3 new tests plus the pre-existing `test_no_stage_actually_running_still_
+returns_a_result` — they guard the same class) and by dropping the caller's `early` return (fails the
+two staged-salvage tests).
+
+`tests/test_command_eval_folds.py`'s two site-count guards had to move with the change rather than be
+re-greened: they scanned `run_command_eval`'s source, and two of the three run sites left it, so both
+went red reporting a missing fold that was in fact intact — the stranded-test failure mode CLAUDE.md
+calls out. They now scan the three run-site functions and DERIVE the expected count from the
+`run_argv` calls found there instead of pinning a literal, because the failure being guarded is a run
+site added without the fold — and a literal has to be bumped by the same change that adds one, which
+is exactly when nobody notices. The site count itself is still pinned, so the derivation cannot pass
+vacuously at zero. `_read_adapter`'s `run_argv` is deliberately out of scope: it gates on
+`rc == 0 and not to`, so a container timeout is already excluded by its non-zero exit.
 
 One process note, because it cost a cycle: `runtime/command_eval.py` carries a UTF-8 BOM, so a
 scripted edit that reads it as plain `utf-8` hands `ast.parse` a leading U+FEFF and dies before
@@ -6283,6 +6512,81 @@ server answered, no rethrow out of an event handler, plus source guards that the
 *Evidence:* NARR (94 event-type render entries) and NARR_VALID (64 validator entries) are separate objects keyed by the same event types and must be updated in tandem; the file's own comments record past drift ('the duplicate keys here were dead: the later definitions always won. arch-review §5 P3'). GROUPS/TYPE2GROUP/GROUP_GLYPH/TYPE_GLYPH add two more per-type tables. All of this is pure data + pure functions (eventNarration, kindOf) living inside a 1,605-line component file, while the sibling pure module timelineModel.js already exists and is unit-tested.
 
 *Recommendation:* Merge NARR/NARR_VALID into one table of {validate?, render} entries and move it (with GROUPS/kindOf/eventNarration) into timelineModel.js or a new narration.js so it gains direct unit-test coverage and Dock returns to being a component.
+
+*Resolution (2026-08-05):* Merged and moved to a NEW `ui/src/narration.js` — one entry per event type
+carrying both halves (`{validate?, render}`), plus `GROUPS`/`TYPE2GROUP`/`GROUP_GLYPH`/`TYPE_GLYPH`/
+`kindOf`, the `isCuratedType` allow-list and `eventNarration`. `Dock.jsx` imports all of it and drops
+from 1,684 to 1,358 lines.
+
+**`timelineModel.js` was rejected as the destination, by measurement.** `test/timelineModel.test.js`
+imports it with a PLAIN node ESM import (`from '../src/timelineModel.js'`), and the narration
+renderers need `stripMd`, which lives in `markdown.jsx`. Node refuses a `.jsx` file outright —
+`ERR_UNKNOWN_FILE_EXTENSION` for `src/markdown.jsx`, confirmed by running it — so folding narration
+into `timelineModel.js` would have broken that test at load time and dragged React into every
+`timelineModel` consumer (`useTimeline.js`, `panels.jsx`). `narration.js` therefore keeps the same
+loading contract the narration code already had: its tests reach it through `vite.ssrLoadModule`,
+exactly as `dockNarration.test.js` already did.
+
+The finding's numbers are all stale: `NARR` holds **97** render entries (not 94), `NARR_VALID` **65**
+validators (not 64), `Dock.jsx` is **1,684** lines (not 1,605), and each of the four cited line ranges
+is 15–40 lines short. The coverage claim is wrong too — `eventNarration` was ALREADY exported from
+`Dock.jsx` and directly unit-tested by `test/dockNarration.test.js`. What genuinely had no coverage is
+the agreement BETWEEN the tables, which is what the new guard adds.
+
+"Must be updated in tandem" also overstates the old coupling in one direction and understates it in the
+other. A validator is optional — only 65 of 97 types have one — so key identity was never required.
+The real hazard runs the other way: a validator keyed to a type with NO renderer is silently DEAD,
+because `eventNarration` consults `validate` only once a `render` exists. Zero such entries exist today
+(measured), and the merged shape makes such an entry visible rather than impossible — so the guard is
+what actually closes it.
+
+The table keeps the name `NARR` rather than becoming `NARRATION`, so the comments that name it
+("Promoting a type into the feed = giving it a NARR entry above") stay literally true instead of being
+reworded around a rename. The only comment edited is `eventNarration`'s own prototype-key note, which
+named `NARR_VALID`; the merge collapses its two own-property reads into one, since both halves now hang
+off the same entry. `EventRow`'s `!NARR[e.type]` raw-bracket read is preserved character-for-character:
+entries are objects rather than functions but are equally truthy, and that read is deliberately NOT
+own-property guarded.
+
+Behaviour was verified differentially against `HEAD:ui/src/Dock.jsx` (a scratch copy with `export`
+prefixes added and nothing else changed) loaded alongside the new module: **144,125 comparisons over
+108 event types** — the 97 narrated types plus forward-compat and prototype-key hostile spellings
+(`constructor`, `toString`, `__proto__`, `hasOwnProperty`, `''`) — covering `eventNarration` over
+seeded-random payloads drawn from the field names harvested from the renderers themselves, four
+envelope shapes each (including a truncated `_log_page`), every validator called directly, `kindOf`,
+`isCuratedType`, `!NARR[type]`, and the four kind tables. Zero differences. The harness was proven
+non-vacuous by injecting a one-character mutation into `node_evaluated`'s renderer (`→` to `->`),
+which it reported immediately. The one intended difference is declaration ORDER: `NARR_VALID` declared
+the three watchdog validators near its top while `NARR` declares those renderers near its bottom, and
+the merged table follows `NARR`'s order — the validator SET is identical.
+
+The guard is `ui/test/narrationModel.test.js` (6 tests). It drives the model rather than reading it:
+every entry must carry a callable `render` — argued by ADDING a `{validate}`-only entry at runtime and
+showing `eventNarration` ignores it, which is the dead-validator case written down as an executable
+fact; every one of the 65 validators must reject `{}` AND its type must then fall back to the generic
+line (the second assertion is what proves `validate` is wired into `eventNarration` at all, the first
+is what stops it going vacuous if a validator ever turns permissive); no renderer may be reached with a
+non-object payload; the kind tables must cover EXACTLY the narrated types in both directions, with no
+type claimed by two groups and no orphan glyph override; the allow-list is the table itself, prototype
+keys included. The Dock↔model edge is read from vite's resolved module graph, not from the text, so a
+commented-out import cannot satisfy it. Only the "a second copy must not come back" assertions are
+substrings, which is what the repo reserves negative pins for.
+
+Each guard was proven to bite by mutating the tree and watching WHICH assertion fired: deleting the
+`if (render && entry.validate && !entry.validate(data))` block failed test 2 at line 62 (the fallback
+assertion) while line 60 stayed green, exactly as intended; adding a narrated `brand_new_event` with no
+`GROUPS` membership failed test 4 on "a narrated event type has no kind group"; adding a
+`half_entry: { validate }` with no renderer failed test 1 on "half_entry must carry a callable render";
+and replacing Dock's `import … from './narration.js'` with a COMMENT carrying the same text failed test
+6 on the module-graph edge, listing Dock's twelve remaining imports.
+
+Two tests moved with the contract: `dockNarration.test.js` now loads `/src/narration.js`, and
+`timelineSemantics.test.js`'s two source pins (the `isCuratedType` definition and the omission-notice
+literal) were re-pointed at `narration.js`, with the Dock-side inline omission receipt pinned separately
+so both halves of that property stay covered. Suite: 690 tests, 688 pass, 2 fail. Both failures are
+pre-existing and unrelated — `dockNarration.test.js:70` (an `asha_verdict` row with no `status`, which
+its own validator rejects) and `settingsSchemaResource.test.js:16` (162 !== 158) fail identically on a
+`git archive HEAD` copy of the tree, which scores 684 tests / 682 pass / 2 fail.
 
 #### UI-09 · MEDIUM · under-decomposition · effort: large
 

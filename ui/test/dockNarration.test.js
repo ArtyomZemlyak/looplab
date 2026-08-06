@@ -11,7 +11,7 @@ test('timeline narration stays renderable for malformed and forward-compatible e
     server: { middlewareMode: true },
   })
   try {
-    const { eventNarration } = await vite.ssrLoadModule('/src/Dock.jsx')
+    const { eventNarration } = await vite.ssrLoadModule('/src/narration.js')
     assert.equal(eventNarration({ type: 'future_event' }), '{}')
     assert.equal(eventNarration({ type: 'node_created', data: null }),
       'node_created — details could not be summarized')

@@ -23,6 +23,7 @@ import re
 import sys
 import time
 from contextlib import nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -835,6 +836,196 @@ def _stall_window_for(stall_timeout: Optional[float], budget: float,
     return stall_timeout if stall_timeout is not None else _stall_window(budget, stall_cap)
 
 
+@dataclass(frozen=True)
+class _EvalExec:
+    """The execution knobs both eval paths hand to `run_argv` unchanged (doc 25 RA-02).
+
+    Ten values were threaded identically through the staged loop and the single-command branch, so
+    the two run sites read as different code while differing only in what they run and how long for.
+    `bound`, `wrap_argv`, `log` and `span` are the closures `run_command_eval` builds once: the
+    GPU-flag cap plus the in-container `timeout` prefix, the docker wrap, the live log path, and the
+    tracer span.
+    """
+    wd: Path
+    env: Optional[dict]
+    cancel: object
+    max_output_bytes: int
+    grace: float
+    is_docker: bool
+    wrap: object
+    stall_timeout: Optional[float]
+    stall_cap: Optional[float]
+    bound: object
+    wrap_argv: object
+    log: object
+    span: object
+
+
+@dataclass
+class _EvalRun:
+    """What one eval path produced, for the metric read that follows it.
+
+    Every field has a default ON PURPOSE. The tail of `run_command_eval` reads rc/out/err/timed_out
+    and the watchdog signals from whichever branch ran, and a branch that left one unbound raised
+    UnboundLocalError out of the eval worker — so the node got no terminal event at all. That is the
+    `_sig` bug doc 25 RA-02 cites as its evidence, and it was fixed by adding one more pre-binding
+    to one branch. Reading the tail off a single object with defaults makes the whole CLASS of
+    cross-branch leak unrepresentable instead of fixing its latest instance.
+
+    `early` is a RunResult the caller returns AS IS: a failed stage, or one whose inter-stage check
+    raised a concern, is terminal and never reaches the metric read.
+    """
+    rc: int = 0
+    out: str = ""
+    err: str = ""
+    timed_out: bool = False
+    signals: dict = field(default_factory=dict)
+    stage_results: Optional[list] = None
+    early: Optional[RunResult] = None
+
+
+def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Optional[str],
+                metric: dict, eval_started: float, check_fn) -> _EvalRun:
+    """Run the declared stage pipeline in order; the LAST stage's output feeds the metric read.
+
+    Multi-stage pipeline (data_prep → train → eval): run each stage in ORDER in the SAME workdir
+    (artifacts persist across stages), each in its own span + <name>.log, tracking pass/fail. The
+    FIRST failure stops the pipeline and returns "failed at stage <name>" — so a crash in `train`
+    is pinpointed (not hidden behind an opaque single command) and the good earlier stages' outputs
+    stay on disk for a later stage-scoped re-run. The LAST stage's stdout carries the metric.
+    Stage-scoped re-run (Phase 2): `start_stage` re-runs the pipeline FROM that stage, reusing the
+    earlier stages' on-disk artifacts (the checkpoint `train` wrote survives in the workdir). So a
+    crashed `eval` is fixed without paying to re-`train`. Stages before it are marked "reused".
+    An UNKNOWN name leaves `_run_from` at 0 — a FULL re-run, the fail-safe direction, since
+    reusing on a typo would score a stale artifact. Pinned end-to-end (reuse, the zero-work
+    markers, and that fallback) by tests/test_command_eval.py::
+    test_start_stage_reuses_earlier_stages_instead_of_paying_for_them_again.
+    """
+    _run_from = 0
+    if start_stage:
+        for _i, _s in enumerate(stages):
+            if str(_s.get("name")) == str(start_stage):
+                _run_from = _i
+                break
+    run = _EvalRun(stage_results=[])
+    stage_results = run.stage_results
+    for _i, _stg in enumerate(stages):
+        _sname = str(_stg.get("name") or f"stage{_i}")
+        _scmd = list(_stg.get("command") or [])
+        if _i < _run_from:
+            # Reused: an earlier repair attempt already ran this stage and its on-disk artifacts
+            # (e.g. the train checkpoint) are kept, so it does NOT re-run. Still emit a zero-work
+            # marker span so the trace SHOWS the stage on this re-eval (labeled "reused") instead of
+            # the band silently vanishing — otherwise the user sees no Train span after a repair.
+            with ex.span(_sname, kind="operation", stage=_sname, reused=True):
+                pass
+            stage_results.append({"name": _sname, "status": "reused", "exit_code": 0, "seconds": 0.0})
+            continue
+        _sto = finite_timeout(_stg.get("timeout", timeout), timeout)
+        if not _scmd:
+            continue
+        _t0 = time.monotonic()
+        with ex.span(_sname, kind="operation", sandboxed=bool(ex.wrap), stage=_sname) as _sh:
+            # Live-band anchor: a training subprocess emits NO child LLM/tool spans, and this stage's
+            # operation span is written to spans.jsonl only on CLOSE (tracing.Tracer.span), so without
+            # a live child the trace view shows nothing for the whole ~hour of training and the
+            # "Train"/"Evaluate" block appears only at the end. A zero-work child span carries the
+            # phase stamp (see tracing._phase_ctx), which the live view bands under this stage the
+            # instant it opens — the intended live mechanism, just given something to anchor on.
+            with ex.span("stage_started", kind="tool", stage=_sname):
+                pass
+            # health_check: a declared stage is where TRAINING runs (often multi-hour). Watch its live
+            # stdout for a diverged (non-finite) loss and tree-kill early instead of burning the whole
+            # timeout on a model that can no longer learn — the killed stage then fails with a DIVERGED
+            # marker the agent reads. Off for the short scorer `cmd` (it is not a training loop).
+            # `run.signals` is the AUTHENTICATED watchdog verdict. `err` mixes the watchdog marker with
+            # the CANDIDATE's own stderr, so `STALL_SENTINEL in err` is forgeable — and this is the
+            # only health_check=True path, where the DIVERGE watchdog forces a non-zero exit against
+            # the candidate's will. A forged stall marker turned that fail-closed verdict back into
+            # an accepted self-reported metric; read the out-of-band flag instead.
+            run.signals = {}
+            run.rc, run.out, run.err, run.timed_out = run_argv(
+                ex.wrap_argv(ex.bound(_scmd, _sto), str(ex.wd)), ex.wd, _sto + ex.grace, ex.env,
+                ex.max_output_bytes, ex.cancel,
+                log_path=ex.log(f"{_sname}.log"), health_check=True,
+                stall_timeout=_stall_window_for(ex.stall_timeout, _sto, ex.stall_cap),
+                signals=run.signals)
+            run.timed_out = _timed_out(run.timed_out, run.rc, ex.is_docker)
+            if _sh is not None:
+                _sh.set_many(exit_code=run.rc, timed_out=run.timed_out, stage=_sname)
+        _status = "timeout" if run.timed_out else ("ok" if run.rc == 0 else "fail")
+        stage_results.append({"name": _sname, "status": _status, "exit_code": run.rc,
+                              "seconds": round(time.monotonic() - _t0, 3)})
+        if _status != "ok":
+            # STALL-SALVAGE parity with the single-command path: that path reads the metric whenever
+            # the run was not a hard timeout and reports the same authenticated `_sig` verdict, so
+            # evaluate.py's gate (`metric is not None and not timed_out and (exit==0 or stalled)`)
+            # can rescue a train+eval that printed its metric then hung on teardown (a wedged CUDA
+            # finalize, a distributed barrier) and was tree-killed by the stall watchdog. Mirror it
+            # for the FINAL (metric-producing) stage — an earlier stage's failure has no metric to
+            # salvage, and the read is only attempted when it wasn't a hard timeout, via the call-site
+            # `not to` gate below (the same gate the single-command path uses). A plain crash reads a
+            # value too but stays unsalvaged (stalled False, exit!=0), exactly as in single-command mode.
+            _salvaged = (read_metric(run.out, str(ex.wd), metric, wrap=ex.wrap, since=eval_started)
+                         if (_i == len(stages) - 1 and not run.timed_out) else None)
+            run.early = RunResult(
+                exit_code=run.rc, stdout=run.out, stderr=f"stage '{_sname}' failed:\n{run.err}",
+                metric=_salvaged, timed_out=run.timed_out, stages=stage_results,
+                failed_stage=_sname, stalled=_salvageable_stall(run.signals))
+            return run
+        # Phase 3 — optional inter-stage verify: a stage flagged `"check": true` hands its output tail
+        # to an agentic checker (Researcher/Developer) BEFORE the next stage runs; a returned concern
+        # stops the pipeline early ("failed verification") so a bad artifact (e.g. a diverged train)
+        # doesn't silently feed the next stage. No check_fn / no flag => never called (zero overhead).
+        if _stg.get("check") and check_fn is not None:
+            try:
+                _concern = check_fn(_sname, run.out[-4000:])
+            except Exception:  # noqa: BLE001 — a checker failure must not crash the eval
+                _concern = None
+            if _concern:
+                stage_results[-1]["status"] = "check_failed"
+                stage_results[-1]["concern"] = str(_concern)[:300]
+                run.early = RunResult(
+                    exit_code=0, stdout=run.out, metric=None, timed_out=False,
+                    stderr=f"stage '{_sname}' failed verification: {_concern}",
+                    stages=stage_results, failed_stage=_sname)
+                return run
+    # all stages passed -> the LAST stage's `out`/`rc`/`to` flow into read_metric below.
+    return run
+
+
+def _run_single(command: list, ex: _EvalExec, *, timeout: float) -> _EvalRun:
+    """Run the eval as ONE command; its stdout feeds the metric read."""
+    run = _EvalRun()
+    with ex.span("command", sandboxed=bool(ex.wrap)) as _h:
+        # Live-band anchor (see the multi-stage branch): flush a child the instant the single eval
+        # command starts, so the "Evaluate" block shows live instead of only when the command ends.
+        with ex.span("stage_started", kind="tool", phase="evaluate"):
+            pass
+        # A single-command RepoTask eval IS the training (train->eval in one process, often
+        # multi-hour), not just a short scorer — so it gets the STALL watchdog too (health_check
+        # stays off here: the NaN scan is for declared training stages, and a scorer may legitimately
+        # print 'nan'; the stall watchdog is output-based and safe for any command).
+        # `run.signals` is the AUTHENTICATED watchdog verdict, exactly as the staged branch above uses
+        # it. `err` mixes the watchdog's marker with the CANDIDATE's own stderr, so
+        # `STALL_SENTINEL in err` is forgeable: a solution that prints its metric, echoes the
+        # marker to stderr and exits non-zero used to report stalled=True, and evaluate.py's
+        # salvage gate (`metric is not None and not timed_out and (exit == 0 or stalled)`) then
+        # accepted a CRASHED run's self-reported score. This path is the common RepoTask eval, so
+        # it needs the out-of-band flag just as much as the staged one.
+        run.signals = {}
+        run.rc, run.out, run.err, run.timed_out = run_argv(
+            ex.wrap_argv(ex.bound(command, timeout), str(ex.wd)), ex.wd, timeout + ex.grace, ex.env,
+            ex.max_output_bytes, ex.cancel,
+            log_path=ex.log("eval.log"),
+            stall_timeout=_stall_window_for(ex.stall_timeout, timeout, ex.stall_cap),
+            signals=run.signals)
+        run.timed_out = _timed_out(run.timed_out, run.rc, ex.is_docker)
+        if _h is not None:
+            _h.set_many(exit_code=run.rc, timed_out=run.timed_out)
+    return run
+
+
 def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      env: Optional[dict] = None, max_output_bytes: int = 64_000,
                      setup: Optional[list] = None, setup_timeout: float = 600.0,
@@ -923,138 +1114,18 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # command that produced no new output can't promote an old metric. Captured before the child so its
     # writes are strictly newer. stdout readers are inherently this-run and unaffected.
     _eval_started = time.time()
-    stage_results = None
-    if stages:
-        # Multi-stage pipeline (data_prep → train → eval): run each stage in ORDER in the SAME workdir
-        # (artifacts persist across stages), each in its own span + <name>.log, tracking pass/fail. The
-        # FIRST failure stops the pipeline and returns "failed at stage <name>" — so a crash in `train`
-        # is pinpointed (not hidden behind an opaque single command) and the good earlier stages' outputs
-        # stay on disk for a later stage-scoped re-run. The LAST stage's stdout carries the metric.
-        # Stage-scoped re-run (Phase 2): `start_stage` re-runs the pipeline FROM that stage, reusing the
-        # earlier stages' on-disk artifacts (the checkpoint `train` wrote survives in the workdir). So a
-        # crashed `eval` is fixed without paying to re-`train`. Stages before it are marked "reused".
-        # An UNKNOWN name leaves `_run_from` at 0 — a FULL re-run, the fail-safe direction, since
-        # reusing on a typo would score a stale artifact. Pinned end-to-end (reuse, the zero-work
-        # markers, and that fallback) by tests/test_command_eval.py::
-        # test_start_stage_reuses_earlier_stages_instead_of_paying_for_them_again.
-        _run_from = 0
-        if start_stage:
-            for _i, _s in enumerate(stages):
-                if str(_s.get("name")) == str(start_stage):
-                    _run_from = _i
-                    break
-        stage_results = []
-        # Bound even if every stage is reused/empty (defensive). `_sig` belongs here for the same
-        # reason as rc/out/err/to and was missing: when no stage actually runs — all reused via
-        # `start_stage`, or a stage whose command expands to `[]` (`if not _scmd: continue`, reachable
-        # from `["%params%"]` with empty params and from the unvalidated `score` stage
-        # `engine/eval_stages.py` appends) — the loop never binds it, and the closing
-        # `RunResult(..., stalled=_salvageable_stall(_sig))` raised UnboundLocalError out of the eval
-        # worker, so the node got no terminal event at all.
-        rc, out, err, to, _sig = 0, "", "", False, {}
-        for _i, _stg in enumerate(stages):
-            _sname = str(_stg.get("name") or f"stage{_i}")
-            _scmd = list(_stg.get("command") or [])
-            if _i < _run_from:
-                # Reused: an earlier repair attempt already ran this stage and its on-disk artifacts
-                # (e.g. the train checkpoint) are kept, so it does NOT re-run. Still emit a zero-work
-                # marker span so the trace SHOWS the stage on this re-eval (labeled "reused") instead of
-                # the band silently vanishing — otherwise the user sees no Train span after a repair.
-                with _sp(_sname, kind="operation", stage=_sname, reused=True):
-                    pass
-                stage_results.append({"name": _sname, "status": "reused", "exit_code": 0, "seconds": 0.0})
-                continue
-            _sto = finite_timeout(_stg.get("timeout", timeout), timeout)
-            if not _scmd:
-                continue
-            _t0 = time.monotonic()
-            with _sp(_sname, kind="operation", sandboxed=bool(wrap), stage=_sname) as _sh:
-                # Live-band anchor: a training subprocess emits NO child LLM/tool spans, and this stage's
-                # operation span is written to spans.jsonl only on CLOSE (tracing.Tracer.span), so without
-                # a live child the trace view shows nothing for the whole ~hour of training and the
-                # "Train"/"Evaluate" block appears only at the end. A zero-work child span carries the
-                # phase stamp (see tracing._phase_ctx), which the live view bands under this stage the
-                # instant it opens — the intended live mechanism, just given something to anchor on.
-                with _sp("stage_started", kind="tool", stage=_sname):
-                    pass
-                # health_check: a declared stage is where TRAINING runs (often multi-hour). Watch its live
-                # stdout for a diverged (non-finite) loss and tree-kill early instead of burning the whole
-                # timeout on a model that can no longer learn — the killed stage then fails with a DIVERGED
-                # marker the agent reads. Off for the short scorer `cmd` (it is not a training loop).
-                # `_sig` is the AUTHENTICATED watchdog verdict. `err` mixes the watchdog marker with
-                # the CANDIDATE's own stderr, so `STALL_SENTINEL in err` is forgeable — and this is the
-                # only health_check=True path, where the DIVERGE watchdog forces a non-zero exit against
-                # the candidate's will. A forged stall marker turned that fail-closed verdict back into
-                # an accepted self-reported metric; read the out-of-band flag instead.
-                _sig: dict = {}
-                rc, out, err, to = run_argv(
-                    _w(_bound(_scmd, _sto), str(wd)), wd, _sto + grace, env, max_output_bytes, cancel,
-                    log_path=_log(f"{_sname}.log"), health_check=True,
-                    stall_timeout=_stall_window_for(stall_timeout, _sto, stall_cap),
-                    signals=_sig)
-                to = _timed_out(to, rc, is_docker)
-                if _sh is not None:
-                    _sh.set_many(exit_code=rc, timed_out=to, stage=_sname)
-            _status = "timeout" if to else ("ok" if rc == 0 else "fail")
-            stage_results.append({"name": _sname, "status": _status, "exit_code": rc,
-                                  "seconds": round(time.monotonic() - _t0, 3)})
-            if _status != "ok":
-                # STALL-SALVAGE parity with the single-command path: that path reads the metric whenever
-                # the run was not a hard timeout and reports the same authenticated `_sig` verdict, so
-                # evaluate.py's gate (`metric is not None and not timed_out and (exit==0 or stalled)`)
-                # can rescue a train+eval that printed its metric then hung on teardown (a wedged CUDA
-                # finalize, a distributed barrier) and was tree-killed by the stall watchdog. Mirror it
-                # for the FINAL (metric-producing) stage — an earlier stage's failure has no metric to
-                # salvage, and the read is only attempted when it wasn't a hard timeout, via the call-site
-                # `not to` gate below (the same gate the single-command path uses). A plain crash reads a
-                # value too but stays unsalvaged (stalled False, exit!=0), exactly as in single-command mode.
-                _salvaged = (read_metric(out, str(wd), metric, wrap=wrap, since=_eval_started)
-                             if (_i == len(stages) - 1 and not to) else None)
-                return RunResult(exit_code=rc, stdout=out, stderr=f"stage '{_sname}' failed:\n{err}",
-                                 metric=_salvaged, timed_out=to, stages=stage_results,
-                                 failed_stage=_sname, stalled=_salvageable_stall(_sig))
-            # Phase 3 — optional inter-stage verify: a stage flagged `"check": true` hands its output tail
-            # to an agentic checker (Researcher/Developer) BEFORE the next stage runs; a returned concern
-            # stops the pipeline early ("failed verification") so a bad artifact (e.g. a diverged train)
-            # doesn't silently feed the next stage. No check_fn / no flag => never called (zero overhead).
-            if _stg.get("check") and check_fn is not None:
-                try:
-                    _concern = check_fn(_sname, out[-4000:])
-                except Exception:  # noqa: BLE001 — a checker failure must not crash the eval
-                    _concern = None
-                if _concern:
-                    stage_results[-1]["status"] = "check_failed"
-                    stage_results[-1]["concern"] = str(_concern)[:300]
-                    return RunResult(exit_code=0, stdout=out, metric=None, timed_out=False,
-                                     stderr=f"stage '{_sname}' failed verification: {_concern}",
-                                     stages=stage_results, failed_stage=_sname)
-        # all stages passed -> the LAST stage's `out`/`rc`/`to` flow into read_metric below.
-    else:
-        with _sp("command", sandboxed=bool(wrap)) as _h:
-            # Live-band anchor (see the multi-stage branch): flush a child the instant the single eval
-            # command starts, so the "Evaluate" block shows live instead of only when the command ends.
-            with _sp("stage_started", kind="tool", phase="evaluate"):
-                pass
-            # A single-command RepoTask eval IS the training (train->eval in one process, often
-            # multi-hour), not just a short scorer — so it gets the STALL watchdog too (health_check
-            # stays off here: the NaN scan is for declared training stages, and a scorer may legitimately
-            # print 'nan'; the stall watchdog is output-based and safe for any command).
-            # `_sig` is the AUTHENTICATED watchdog verdict, exactly as the staged branch above uses
-            # it. `err` mixes the watchdog's marker with the CANDIDATE's own stderr, so
-            # `STALL_SENTINEL in err` is forgeable: a solution that prints its metric, echoes the
-            # marker to stderr and exits non-zero used to report stalled=True, and evaluate.py's
-            # salvage gate (`metric is not None and not timed_out and (exit == 0 or stalled)`) then
-            # accepted a CRASHED run's self-reported score. This path is the common RepoTask eval, so
-            # it needs the out-of-band flag just as much as the staged one.
-            _sig: dict = {}
-            rc, out, err, to = run_argv(
-                _w(_bound(command, timeout), str(wd)), wd, timeout + grace, env, max_output_bytes, cancel,
-                log_path=_log("eval.log"),
-                stall_timeout=_stall_window_for(stall_timeout, timeout, stall_cap),
-                signals=_sig)
-            to = _timed_out(to, rc, is_docker)
-            if _h is not None:
-                _h.set_many(exit_code=rc, timed_out=to)
+    _ex = _EvalExec(wd=wd, env=env, cancel=cancel, max_output_bytes=max_output_bytes, grace=grace,
+                    is_docker=is_docker, wrap=wrap, stall_timeout=stall_timeout,
+                    stall_cap=stall_cap, bound=_bound, wrap_argv=_w, log=_log, span=_sp)
+    # ONE object carries what either path produced into the metric read below, so the tail can never
+    # read a name the branch that ran happened not to bind (doc 25 RA-02).
+    _run = (_run_stages(stages, _ex, timeout=timeout, start_stage=start_stage, metric=metric,
+                        eval_started=_eval_started, check_fn=check_fn)
+            if stages else _run_single(command, _ex, timeout=timeout))
+    if _run.early is not None:
+        return _run.early
+    rc, out, err, to, _sig = _run.rc, _run.out, _run.err, _run.timed_out, _run.signals
+    stage_results = _run.stage_results
     with _sp("read_metric", kind=metric.get("kind", "stdout_json")):
         m = read_metric(out, str(wd), metric, wrap=wrap, since=_eval_started) if not to else None
     # F13 stage-reuse: on a stage-scoped re-run (`start_stage`), the earlier stages are DELIBERATELY

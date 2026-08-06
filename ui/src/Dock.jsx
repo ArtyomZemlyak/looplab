@@ -1,21 +1,21 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { get, fmt, fmtCost, workingId, getRunCommand, retryRunCommand, runCommand,
+import { get, fmt, workingId, getRunCommand, retryRunCommand, runCommand,
   commandFeedback, commandErrorMessage, commandFailureRecord, commandCanRetry, createIdempotencyKey,
   commandActionForEvent, commandRecordMatchesAction, commandEventForAction,
   loadRunTransport, saveRunTransport, clearRunTransport, isTransientCommandReadError,
   clearRunCommandLock, loadRunCommandLock, saveRunCommandLock, subscribeRunCommandLock,
   COMMAND_SUCCEEDED, COMMAND_FAILED, storageGet, storageSet, runApiPath, runNodeApiPath } from './util.js'
 import { usePoll } from './hooks.js'
-import Markdown, { stripMd } from './markdown.jsx'
+import Markdown from './markdown.jsx'
 import { NodeTrace, TraceUnavailable } from './Inspector.jsx'
 import { OpIcon } from './icons.jsx'
 import { runLifecycle } from './runIndex.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { DataTable } from './accessibility.jsx'
-import { NODE_TRACE_SPAN_WINDOW, NODE_TRACE_SPAN_WINDOW_MAX, tracePartial,
-  traceUnavailable } from './traceProjection.js'
-import { crossRunPriorNarration } from './crossRunPrior.js'
+import { tracePartial, traceUnavailable } from './traceProjection.js'
+import { NARR, GROUPS, GROUP_GLYPH, TYPE2GROUP, kindOf, isCuratedType,
+  eventNarration } from './narration.js'
 import { buildingGenerations, buildingMarkers } from './buildingModel.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 
@@ -23,283 +23,6 @@ import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 // The run's EVENTS window (round-9): one scrubbable, filterable feed that renders every run event
 // as a differentiated message. The per-run "boss" chat moved to the single persistent assistant, so
 // there is no composer here — just the timeline, scrubber, filters, and transport.
-const note = (value, limit = 80) => value ? ` — ${String(value).slice(0, limit)}` : ''
-
-const strategySummary = (strategy = {}) => {
-  const s = strategy && typeof strategy === 'object' && !Array.isArray(strategy) ? strategy : {}
-  const bits = []
-  if (s.policy) bits.push(s.policy + (s.fidelity ? '/' + s.fidelity : ''))
-  else if (s.fidelity) bits.push(s.fidelity)
-  if (s.eval_parallel != null) bits.push(`eval=${s.eval_parallel}`)
-  if (s.llm_parallel != null) bits.push(`LLM=${s.llm_parallel}`)
-  const lanes = s.llm_lane_limits
-  if (lanes && typeof lanes === 'object' && !Array.isArray(lanes)) {
-    bits.push(`lanes ${Object.entries(lanes).slice(0, 5)
-      .map(([lane, width]) => `${lane}:${width}`).join(',')}`)
-  }
-  const cardScoring = s.card_scoring
-  if (cardScoring && typeof cardScoring === 'object' && !Array.isArray(cardScoring)) {
-    bits.push(`cards ${cardScoring.stance || 'balanced'} n:${cardScoring.novelty_weight} c:${cardScoring.coverage_weight}`)
-  }
-  return bits.join(' / ') || 'no change'
-}
-
-// The speculation tail of a `budget` checkpoint, or '' when the receipt does not carry one.
-// ABSENT and ZERO are different claims here: a receipt written before the observation existed has no
-// `speculation` key, and printing "0 discarded" for it would invent a measurement. `depth: 0` means
-// speculation was OFF, which is worth saying once and is not the same as "on and it discarded
-// nothing". Only integers are interpolated, so a partial payload degrades to silence, not "undefined".
-const budgetSpeculation = (s) => {
-  if (s === null || typeof s !== 'object' || Array.isArray(s)) return ''
-  const n = (key) => (Number.isSafeInteger(s[key]) ? s[key] : null)
-  const depth = n('depth')
-  if (depth === 0) return ' · speculation off'
-  const [committed, discarded, charged] = [n('committed'), n('discarded'), n('charged_discards')]
-  if (committed === null) return ''
-  const bits = [`speculation depth ${depth ?? '?'}`, `${committed} committed`]
-  if (discarded !== null) bits.push(`${discarded} discarded`)
-  // The only one that costs the operator something, so name the cost rather than the count alone.
-  if (charged) bits.push(`${charged} charged to the node budget`)
-  return ' · ' + bits.join(', ')
-}
-
-const NARR = {
-  run_started: (d) => `run started — ${d.goal || d.task_id} (${d.direction})`,
-  node_building: (d) => `building node #${d.node_id} via ${d.operator || 'improve'}…`,
-  node_created: (d) => `node #${d.node_id} via ${d.operator}${d.idea?.rationale ? ' — ' + stripMd(d.idea.rationale).slice(0, 80) : ''}`,
-  node_evaluated: (d) => `node #${d.node_id} → ${fmt(d.metric)}`,
-  node_eval_started: (d) => `node #${d.node_id} started evaluating`,
-  node_failed: (d) => `node #${d.node_id} failed (${d.reason})${d.triage_action === 'reject_idea' ? ' — idea rejected' + (d.triage_rationale ? ': ' + String(d.triage_rationale).slice(0, 70) : '') : ''}`,
-  node_repaired: (d) => `node #${d.node_id} repaired (attempt ${d.attempt})${note(d.rationale)}`,
-  node_confirmed: (d) => `node #${d.node_id} confirmed: ${fmt(d.mean)} ±${fmt(d.std)} (${d.seeds}×)`,
-  best_confirmed: (d) => `robust winner: #${d.node_id}${d.significant ? ' (significant >1SE)' : ''}`,
-  ablate: (d) => `ablated #${d.parent_id}: ${Object.entries(d.impacts || {}).map(([k, v]) => `${k}=${fmt(v, 2)}`).join(', ')}`,
-  data_leakage: (d) => `leakage scan: ${d.leak ? 'LEAK DETECTED' : 'clean'}`,
-  approval_requested: (d) => `awaiting approval of #${d.node_id}`,
-  approval_granted: (d) => `approved #${d.node_id}`,
-  pause: () => 'stopped (frozen — not finalized)',
-  // (`resume` / `run_abort` are defined once, below with the richer wording — the duplicate keys here
-  // were dead: the later definitions always won. arch-review §5 P3.)
-  node_abort: (d) => `stop requested for #${d.node_id}`,
-  budget_extend: (d) => {
-    const bits = []
-    if (d.add_nodes) bits.push(`+${d.add_nodes} experiment node${d.add_nodes === 1 ? '' : 's'}`)
-    if (d.max_seconds != null) bits.push(`wall-clock ${d.max_seconds}s`)
-    if (d.max_eval_seconds != null) bits.push(`per-eval ${d.max_eval_seconds}s`)
-    return `run budget extended — ${bits.join(', ') || 'no change'}`
-  },
-  hint: (d) => `hint: ${d.text}`, promote: (d) => `promoted #${d.node_id} → ${d.alias || 'champion'}`,
-  policy_decision: (d) => `chose #${d.chosen}${d.reason ? ' (' + d.reason + ')' : ''} over ${Object.keys(d.scores || {}).length} candidate(s)`,
-  strategy_decision: (d) => `strategy → ${strategySummary(d.strategy)}${d.strategy?.rationale ? ' — ' + d.strategy.rationale.slice(0, 70) : ''}`,
-  rung_promoted: (d) => `ASHA rung ↑${d.rung}: promoted ${(d.survivors || []).map(s => '#' + s).join(', ')}`,
-  set_strategy: (d) => `operator pinned strategy → ${strategySummary(d.strategy)}`,
-  deep_research: () => 'deep research requested',
-  research_completed: (d) => `deep research (${d.trigger || 'auto'})${note(d.memo?.summary)}`,
-  report_generated: (d) => `run report updated${note(d.content?.headline, 90)}`,
-  reflection_note: (d) => `memory: ${d.n_lessons || 0} lesson${(d.n_lessons || 0) === 1 ? '' : 's'}${d.n_skills ? `, ${d.n_skills} skill${d.n_skills === 1 ? '' : 's'}` : ''}${note(d.note)}`,
-  proxy_scored: (d) => `proxy scored #${d.node_id}: ${fmt(d.score)}${d.skipped ? ' (skipped full eval)' : ''}`,
-  reward_hack_suspected: (d) => `reward-hack suspected on #${d.node_id}: ${(d.signals || []).map(s => s.signal).join(', ')}`,
-  novelty_rejected: (d) => `dedup: proposal near #${d.near_node} (dist ${fmt(d.distance, 3)}) nudged to diversify`,
-  hypothesis_ranked: (d) => `ranked ${d.n || (d.order || []).length} hypotheses by payoff${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}${note(d.reason, 70)}`,
-  foresight_selected: (d) => `foresight picked ${d.kind === 'solution' ? 'implementation' : 'idea'} ${(d.chosen ?? 0) + 1} of ${d.n || (d.order || []).length}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}${note(d.reason, 70)}`,
-  run_finished: (d) => (d?.reason === 'aborted' || d?.reason === 'finalized') ? 'run finalized (wrapped up)'
-    : `run finished${d.reason ? ' (' + d.reason + ')' : ''}`,
-  llm_cost: (d) => `LLM: ${d.total_tokens} tokens, ${fmtCost(d)}`,
-  // --- operator/boss control INTENTS + their engine confirmations. Every event the agentic boss can
-  // produce gets a plain-English line here, so an action never shows in the feed as a raw-JSON blob. ---
-  force_confirm: (d) => `requested a multi-seed confirm of #${d.node_id}`,
-  force_ablate: (d) => `requested an ablation probe on #${d.node_id}`,
-  fork: (d) => `forked a fresh improve-branch from #${d.from_node_id}`,
-  inject_node: (d) => { const i = d.idea || {}; return `added experiment: ${i.operator || 'improve'}${d.parent_id != null ? ' from #' + d.parent_id : ''}${i.rationale ? ' — ' + stripMd(i.rationale).slice(0, 70) : ''}` },
-  annotation: (d) => `note on #${d.node_id}: ${String(d.text || '').slice(0, 80)}`,
-  run_reopened: () => 'run reopened to keep going',
-  resume: () => 'run resumed — continuing',
-  run_abort: (d) => `finalize requested${d.reason ? ' (' + d.reason + ')' : ''} — wrapping up`,
-  command_ack: (d) => `engine acknowledged command${d.event_seq != null ? ` at event ${d.event_seq}` : ''}`,
-  hypothesis_added: (d) => `hypothesis added${d.source ? ' (' + d.source + ')' : ''} — ${String(d.statement || '').slice(0, 90)}`,
-  hypothesis_merged: (d) => `hypotheses merged — ${String(d.statement || '').slice(0, 80)}${(d.aliases || []).length ? ` (${(d.aliases || []).length} paraphrase${(d.aliases || []).length === 1 ? '' : 's'} folded)` : ''}`,
-  lessons_distilled: (d) => `distilled ${d.count || 0} lesson${d.count === 1 ? '' : 's'}${d.trigger ? ' (' + d.trigger + ')' : ''}`,
-  lessons_refreshed: (d) => d.skipped ? 'cross-run lessons refresh skipped' : 'cross-run lessons refreshed',
-  coverage_snapshot: (d) => `coverage — ${d.themes || 0} theme${d.themes === 1 ? '' : 's'} · ${d.niches || 0} niche${d.niches === 1 ? '' : 's'}${d.dominant_theme_frac != null ? ` · dominant ${Math.round(d.dominant_theme_frac * 100)}%` : ''}`,
-  deps_installed: (d) => `dependencies installed${d.packages ? ': ' + (Array.isArray(d.packages) ? d.packages.slice(0, 6).join(', ') : String(d.packages).slice(0, 80)) : ''}`,
-  fork_done: () => 'fork fulfilled — branch added',
-  inject_done: () => 'experiment injected into the tree',
-  confirm_done: (d) => `multi-seed confirm finished for #${d.node_id}`,
-  confirm_eval: (d) => `confirm seed ${d.seed} on #${d.node_id} → ${fmt(d.metric)}`,
-  agent_decision: (d) => `agent chose ${d.chosen?.kind || '?'}${d.chosen?.node_id != null ? ' → #' + d.chosen.node_id : ''} (of ${(d.legal || []).length} legal move${(d.legal || []).length === 1 ? '' : 's'})${note(d.rationale, 70)}`,
-  agent_validated: (d) => `developer validated #${d.node_id}${d.fell_back ? ' (fell back to a simpler build)' : d.ok === false ? ' (checks failed)' : ' ✓'}`,
-  spec_proposed: () => 'eval spec proposed — awaiting ratification',
-  spec_approval_requested: () => 'awaiting your approval of the eval spec',
-  spec_approved: () => 'eval spec ratified',
-  spec_drift: (d) => `spec drift on #${d.node_id}${d.seed != null ? ' (seed ' + d.seed + ')' : ''} — metric discarded`,
-  drift_unavailable: (d) => `drift check unavailable${note(d.reason)}`,
-  data_profiled: (d) => { const c = d.columns; const n = Array.isArray(c) ? c.length : Object.keys(c || {}).length; return `dataset profiled (${n} column${n === 1 ? '' : 's'})` },
-  data_provenance: (d) => { const n = Object.keys(d.assets || {}).length; return `dataset provenance pinned (${n} asset${n === 1 ? '' : 's'})` },
-  // Setup phase (task + data), made watchable: these appear live between run start and the first node.
-  setup_started: (d) => `setting up task & data${d.repo ? ' (repo)' : ''}…`,
-  setup_step: (d) => `setup: ${d.step}${d.detail ? ' — ' + String(d.detail).slice(0, 80) : (d.sources?.length ? ' (' + d.sources.join(', ') + ')' : '')}`,
-  setup_finished: (d) => `setup done${d.seconds != null ? ` (${d.seconds}s)` : ''}`,
-  workspace_seeded: (d) => `seeded node #${d.node_id ?? '?'} workspace: ${(d.materialized || []).join(', ').slice(0, 90)}`,
-  run_setup_started: (d) => `run setup (once): ${(d.command || []).join(' ').slice(0, 80)}`,
-  run_setup_finished: (d) => `run setup ${d.exit_code === 0 ? 'ok' : 'FAILED (exit ' + d.exit_code + ')'}`,
-  host_grading: (d) => `host-side grading active${d.scorer ? ' (' + d.scorer + ')' : ''}${d.competition ? ' · ' + d.competition : ''}`,
-  diversity_archive: () => 'diversity archive updated',
-  workspace_changed: () => 'workspace changed since the last run — re-grounding',
-  // The `speculation` half of this receipt (engine/finalize.py -> speculation_budget_observation)
-  // was computed, written and then read by nobody: `charged_discards` is the ONE number that says
-  // prefetching cost the run node budget it did not get back, and the feed rendered the checkpoint
-  // without it. Only mention the counters when the payload actually carries them — a legacy receipt
-  // has no `speculation` key at all, and "0 discarded" would be a claim about a run that never
-  // reported one (see `budgetSpeculation`).
-  budget: (d) => `checkpoint — ${d.nodes} node${d.nodes === 1 ? '' : 's'}, `
-    + `${fmt(d.elapsed_s, 3)}s elapsed${budgetSpeculation(d.speculation)}`,
-  // Meaningful events that previously LEAKED as raw JSON (no narration + not hidden). Narrated here so
-  // they read cleanly. The high-volume / internal read-model events (node_concepts and the rest of the
-  // concept-cadence sidecars, verifier scores, resume/restart plumbing) are deliberately left WITHOUT a
-  // narration — the curated feed is now an allow-list (see `isCuratedType`), so anything unnarrated stays
-  // out of the feed (still in events.jsonl + the raw Event Explorer) instead of rendering as a JSON blob.
-  node_reset: (d) => `re-running node #${d.node_id} from ${d.from_stage || d.stage || 'propose'}`,
-  node_tombstoned: (d) => { const ids = Array.isArray(d.node_ids) ? d.node_ids : (d.node_id != null ? [d.node_id] : []); return ids.length ? `deleted node${ids.length === 1 ? '' : 's'} ${ids.map(n => '#' + n).join(', ')}` : 'deleted a node subtree' },
-  holdout_evaluated: (d) => `holdout (final-exam) score for #${d.node_id} → ${fmt(d.metric)}`,
-  novelty_graded: (d) => `novelty graded ${d.node_id != null ? '#' + d.node_id + ' ' : ''}level ${d.level}${d.grade ? ' (' + d.grade + ')' : ''} → ${d.recommendation || 'allow'}`,
-  // A capsule's best metric is run-wide, not the matched concept's outcome. Only the
-  // v2 retained-outcome row earns concept-level wording; every fallback says "run best" explicitly.
-  cross_run_prior: crossRunPriorNarration,
-  comment_created: (d) => `comment on #${d.node_id ?? '?'}: ${String(d.text || d.body || '').slice(0, 80)}`,
-  comment_edited: (d) => `comment edited on #${d.node_id ?? '?'}`,
-  comment_resolution_changed: (d) => `comment ${d.resolved === true ? 'resolved' : d.resolved === false ? 'reopened' : 'resolution changed'} on #${d.node_id ?? '?'}`,
-  concept_tag_edited: (d) => `operator re-tagged #${d.node_id}: ${(d.concepts || []).slice(0, 4).join(', ') || '(cleared)'}`,
-  // `d.priority` is the 0-BASED wire value while every operator surface is 1-based (the board chip
-  // renders priority+1, the form says "1 is highest", savePriority submits visible-1) — so pinning
-  // "1 (highest)" narrated as "pinned to 0". Narrate the operator's number, guarding a non-int.
-  card_reprioritized: (d) => `Card ${d.id.slice(0, 80)} priority pinned to `
-    + `${Number.isSafeInteger(d.priority) ? d.priority + 1 : d.priority}`,
-  card_edited: (d) => `Card ${d.id.slice(0, 80)} display statement edited${note(d.statement, 70)}`,
-  card_resource_pinned: (d) => `Card ${d.id.slice(0, 80)} resource override: ${d.gpus} GPU${d.gpus === 1 ? '' : 's'}${d.gpu_mem_mib != null ? ` · ${d.gpu_mem_mib} MiB/GPU` : ''}`,
-  card_dropped: (d) => `Card ${d.id.slice(0, 80)} dropped${note(d.reason, 70)}`,
-  card_auto_dropped: (d) => `Card ${d.id.slice(0, 80)} automatically dropped${note(d.reason, 70)}`,
-  hypothesis_updated: (d) => `hypothesis updated — ${String(d.statement || '').slice(0, 80)}`,
-  trust_gate_changed: (d) => `trust gate changed${d.gate ? ` — ${d.gate}` : ''}`,
-  inject_failed: (d) => `experiment injection failed${note(d.reason)}`,
-  env_changed: () => 'environment changed since run start — re-grounding',
-  // Failure/audit + progress events whose SUCCESS or sibling twins are already narrated — hiding only the
-  // failure/correction case was the wrong asymmetry, so surface them here too (found by the coverage audit).
-  report_refresh_failed: (d) => `report refresh failed${note(d.reason || d.error || d.message)}`,
-  log_repaired: (d) => `event log repaired${d.dropped_lines != null ? ` — dropped ${d.dropped_lines} corrupt line${d.dropped_lines === 1 ? '' : 's'}, kept ${d.good_records ?? '?'}` : ' at divergence'}`,
-  stage_finished: (d) => `stage ${d.name || d.stage || '?'} ${d.status === 'ok' || d.status === 'passed' || d.ok === true ? '✓' : (d.status || 'finished')}${d.node_id != null ? ` (#${d.node_id})` : ''}`,
-  lessons_reconciled: (d) => `lessons reconciled${d.n_retired != null || d.n_added != null ? ` — ${d.n_retired || 0} retired, ${d.n_added || 0} re-derived` : ''}`,
-  // The verdict is about ONE eval phase, and saying so is the difference between "the training is
-  // broken" and "the data_prep stage printed something odd". `log_role`/`stage` are additive (rows
-  // predating them render exactly as before); only `training` may have killed anything.
-  train_monitor_alert: (d) => `training monitor: #${d.node_id} ${d.log_role && d.log_role !== 'training'
-    ? `${d.stage ? `stage ${d.stage}` : 'a non-training phase'} looks ${d.status} (advisory)`
-    : `looks ${d.status}`}${d.reason ? ' — ' + String(d.reason).slice(0, 90) : ''}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}`,
-  // asha_rank carries RECOVERY edges too — asha_monitor publishes both precisely so projections can
-  // CLEAR the flag — so ignoring `d.underperforming` rendered a recovery as another warning.
-  asha_rank: (d) => `ASHA: #${d.node_id} ${fmt(d.intermediate)} ${d.underperforming === false
-    ? 'rank recovered'
-    : `${d.endpoint_underperforming === false ? 'same-resource' : 'endpoint'} rank warning`}`,
-  // asha_verdict is the STOP DECISION taken over a persistent rank flag — the rank test is only the
-  // evidence. The COMMON row is a judge that kept the run alive, so render the DECISION (`stop_decided`)
-  // and the CLAIM (`kill`) separately, which is what the row actually records: branching on `d.kill`
-  // alone printed a superseded stop as `keep running (stop)`. Neither bit says the node stopped —
-  // `_evaluate` reaches its kill branch only after a reset/abort/usable-result pre-emption — so the
-  // wording stays "claimed", and the node's own terminal remains the authority. `unavailable` means
-  // nobody answered (no client / capped), which never kills. Legacy rows carry no `stop_decided`, so
-  // they fall back to the flag they do have.
-  asha_verdict: (d) => `ASHA judge: #${d.node_id} ${(d.stop_decided ?? d.kill) === true
-    ? (d.kill === false
-      ? `STOP decided — superseded by ${d.kill_superseded_by || 'another watchdog'}`
-      : 'STOP decided — early-kill claimed')
-    : `keep running (${d.status || 'unavailable'})`}${d.reason ? ' — ' + String(d.reason).slice(0, 90) : ''}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}`,
-  restart: () => 'run restart requested (pause-and-resume handoff)',
-}
-
-const ownValue = (value, key) => value !== null && typeof value === 'object'
-  && Object.hasOwn(value, key) && value[key] !== null && value[key] !== undefined
-const ownAny = (value, keys) => keys.some(key => ownValue(value, key))
-const nestedValue = (value, parent, key) => ownValue(value, parent) && ownValue(value[parent], key)
-const objectValue = (value, key) => ownValue(value, key) && value[key] !== null
-  && typeof value[key] === 'object' && !Array.isArray(value[key])
-// Narration is a compatibility surface over append-only logs. Optional fields may enrich a line,
-// but fields that define the claim itself must be present before a renderer interpolates them. This
-// avoids coercing missing legacy/partial values into authoritative-looking "#undefined", "clean",
-// or "FAILED (exit undefined)" prose while preserving legitimate user text containing that word.
-const NARR_VALID = {
-  run_started: d => ownAny(d, ['goal', 'task_id']) && ownValue(d, 'direction'),
-  node_building: d => ownValue(d, 'node_id'),
-  node_created: d => ownValue(d, 'node_id') && ownValue(d, 'operator'),
-  node_evaluated: d => ownValue(d, 'node_id') && ownValue(d, 'metric'),
-  node_failed: d => ownValue(d, 'node_id') && ownValue(d, 'reason'),
-  node_repaired: d => ownValue(d, 'node_id') && ownValue(d, 'attempt'),
-  node_confirmed: d => ['node_id', 'mean', 'std', 'seeds'].every(key => ownValue(d, key)),
-  best_confirmed: d => ownValue(d, 'node_id'),
-  ablate: d => ownValue(d, 'parent_id') && objectValue(d, 'impacts'),
-  data_leakage: d => typeof d?.leak === 'boolean',
-  approval_requested: d => ownValue(d, 'node_id'),
-  approval_granted: d => ownValue(d, 'node_id'),
-  node_abort: d => ownValue(d, 'node_id'),
-  hint: d => ownValue(d, 'text'),
-  promote: d => ownValue(d, 'node_id'),
-  policy_decision: d => ownValue(d, 'chosen') && objectValue(d, 'scores'),
-  strategy_decision: d => nestedValue(d, 'strategy', 'policy'),
-  rung_promoted: d => ownValue(d, 'rung') && Array.isArray(d?.survivors),
-  set_strategy: d => nestedValue(d, 'strategy', 'policy'),
-  proxy_scored: d => ownValue(d, 'node_id') && ownValue(d, 'score'),
-  reward_hack_suspected: d => ownValue(d, 'node_id') && Array.isArray(d?.signals)
-    && d.signals.every(signal => ownValue(signal, 'signal')),
-  novelty_rejected: d => ownValue(d, 'near_node') && ownValue(d, 'distance'),
-  hypothesis_ranked: d => ownValue(d, 'n') || Array.isArray(d?.order),
-  foresight_selected: d => ownValue(d, 'kind') && ownValue(d, 'chosen')
-    && (ownValue(d, 'n') || Array.isArray(d?.order)),
-  llm_cost: d => ownValue(d, 'total_tokens') && ownValue(d, 'cost'),
-  force_confirm: d => ownValue(d, 'node_id'),
-  force_ablate: d => ownValue(d, 'node_id'),
-  fork: d => ownValue(d, 'from_node_id'),
-  inject_node: d => objectValue(d, 'idea'),
-  annotation: d => ownValue(d, 'node_id') && ownValue(d, 'text'),
-  train_monitor_alert: d => ownValue(d, 'node_id') && ownValue(d, 'status'),
-  asha_rank: d => ownValue(d, 'node_id') && ownValue(d, 'intermediate'),
-  asha_verdict: d => ownValue(d, 'node_id') && ownValue(d, 'status'),
-  hypothesis_added: d => ownValue(d, 'statement'),
-  hypothesis_merged: d => ownValue(d, 'statement'),
-  lessons_distilled: d => ownValue(d, 'count'),
-  coverage_snapshot: d => ownValue(d, 'themes') && ownValue(d, 'niches'),
-  confirm_done: d => ownValue(d, 'node_id'),
-  confirm_eval: d => ['seed', 'node_id', 'metric'].every(key => ownValue(d, key)),
-  agent_decision: d => nestedValue(d, 'chosen', 'kind') && Array.isArray(d?.legal),
-  agent_validated: d => ownValue(d, 'node_id'),
-  spec_drift: d => ownValue(d, 'node_id'),
-  data_profiled: d => ownValue(d, 'columns') && d.columns !== null
-    && typeof d.columns === 'object',
-  data_provenance: d => objectValue(d, 'assets'),
-  setup_step: d => ownValue(d, 'step'),
-  workspace_seeded: d => ownValue(d, 'node_id') && Array.isArray(d?.materialized),
-  run_setup_started: d => Array.isArray(d?.command),
-  run_setup_finished: d => ownValue(d, 'exit_code'),
-  budget: d => ownValue(d, 'nodes') && ownValue(d, 'elapsed_s'),
-  // Newly narrated types: guard the field that DEFINES the claim so a partial/legacy payload degrades to
-  // the generic line instead of "#undefined"/"level undefined" (the file's documented anti-#undefined rule).
-  node_reset: d => ownValue(d, 'node_id'),
-  node_tombstoned: d => (Array.isArray(d?.node_ids) && d.node_ids.length > 0) || ownValue(d, 'node_id'),
-  holdout_evaluated: d => ownValue(d, 'node_id') && ownValue(d, 'metric'),
-  novelty_graded: d => ownValue(d, 'level'),
-  cross_run_prior: d => Array.isArray(d?.matched_concepts) && Array.isArray(d?.prior_runs)
-    && d.matched_concepts.length > 0 && d.prior_runs.length > 0,
-  comment_created: d => ownValue(d, 'node_id') && ownValue(d, 'text'),
-  comment_edited: d => ownValue(d, 'node_id'),
-  comment_resolution_changed: d => ownValue(d, 'node_id'),
-  concept_tag_edited: d => ownValue(d, 'node_id') && Array.isArray(d?.concepts),
-  card_reprioritized: d => typeof d?.id === 'string' && d.id.length > 0 && ownValue(d, 'priority'),
-  card_edited: d => typeof d?.id === 'string' && d.id.length > 0
-    && typeof d?.statement === 'string',
-  card_resource_pinned: d => typeof d?.id === 'string' && d.id.length > 0
-    && ownValue(d, 'gpus'),
-  card_dropped: d => typeof d?.id === 'string' && d.id.length > 0,
-  card_auto_dropped: d => typeof d?.id === 'string' && d.id.length > 0,
-  hypothesis_updated: d => ownValue(d, 'statement'),
-  stage_finished: d => ownAny(d, ['name', 'stage']),
-}
 
 // The node an event refers to, if any — lets a feed click drill into that node.
 function eventNode(e) {
@@ -322,55 +45,6 @@ function verifiableCreatedAttempt(e, currentAttempt) {
   // resolve that row instead of guessing which lifecycle it represents.
   return (Object.hasOwn(e?.data || {}, 'generation') || currentAttempt === 0) ? attempt : null
 }
-
-// Coarse "kind" per event type: drives the icon, the accent color, and the filter chips. One place so
-// the legend, the row, and the filter all agree.
-// [key, label] — the icon is a monochrome glyph (GROUP_GLYPH), not an emoji (round-7 readability pass).
-const GROUPS = [
-  ['proposal', 'proposals', 'node_building node_created'],
-  ['eval', 'results', 'node_eval_started node_evaluated node_failed node_repaired node_confirmed best_confirmed proxy_scored ablate deps_installed confirm_done confirm_eval agent_validated holdout_evaluated stage_finished'],
-  ['decision', 'decisions', 'policy_decision strategy_decision rung_promoted agent_decision set_strategy hypothesis_ranked foresight_selected coverage_snapshot'],
-  ['research', 'research', 'research_completed deep_research hypothesis_added hypothesis_merged lessons_refreshed lessons_distilled cross_run_prior hypothesis_updated lessons_reconciled'],
-  ['report', 'report', 'report_generated reflection_note report_refresh_failed'],
-  ['trust', 'trust', 'reward_hack_suspected data_leakage spec_drift novelty_rejected drift_unavailable workspace_changed novelty_graded train_monitor_alert asha_rank asha_verdict'],
-  ['control', 'actions', 'hint pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart'],
-  ['lifecycle', 'lifecycle', 'run_started run_finished llm_cost budget data_profiled data_provenance host_grading diversity_archive setup_started setup_step setup_finished workspace_seeded run_setup_started run_setup_finished env_changed log_repaired card_auto_dropped'],
-]
-const TYPE2GROUP = Object.fromEntries(GROUPS.flatMap(([group, , types]) =>
-  types.split(' ').map(type => [type, group])))
-// Monochrome glyph per kind (default) + a few high-signal per-type overrides. Names resolve in
-// icons.jsx GLYPHS (unknown → 'dot' fallback). Color is carried by CSS (only user/trust/highlighted).
-const GROUP_GLYPH = {
-  proposal: 'trending', eval: 'target', decision: 'gitbranch', research: 'search',
-  report: 'doc', trust: 'alert', control: 'gear', lifecycle: 'flag',
-}
-const TYPE_GLYPH = {
-  node_failed: 'bug', node_repaired: 'gear', node_confirmed: 'target', best_confirmed: 'star',
-  run_started: 'play', run_finished: 'stop', report_generated: 'doc', research_completed: 'search',
-  deep_research: 'search', agent_decision: 'bot', run_reopened: 'play', inject_node: 'gitbranch',
-  fork: 'gitbranch', agent_validated: 'target', hypothesis_ranked: 'bulb', foresight_selected: 'bulb',
-}
-function kindOf(type) {
-  // Own-property reads: a forward-compat event type equal to an Object.prototype key ("constructor",
-  // "toString", …) must not resolve to an inherited function (which would corrupt the icon/group).
-  const g = (Object.hasOwn(TYPE2GROUP, type) && TYPE2GROUP[type]) || 'lifecycle'
-  const glyph = (Object.hasOwn(TYPE_GLYPH, type) && TYPE_GLYPH[type])
-    || (Object.hasOwn(GROUP_GLYPH, g) && GROUP_GLYPH[g]) || 'dot'
-  return { group: g, glyph }
-}
-
-// The curated feed is an ALLOW-LIST: an event shows iff it has a human-readable narration (a NARR
-// entry). Everything else is internal bookkeeping — the finalize state-machine's per-step checklist
-// (`finalize_step` {scope, step}) and exact-finish ack (`finalization_finished` {finish_seq}), the
-// per-LLM-call cost delta `llm_usage` (the aggregate `llm_cost` "LLM: N tokens, $X" is the human total),
-// the concept-cadence read-model sidecars (`node_concepts`, `concept_edge`, `concept_consolidation`,
-// `concept_coverage_snapshot`, `hypothesis_concepts`), internal verifier scores, and resume/restart
-// plumbing. These stay in events.jsonl and the raw Event Explorer, but never leak into the curated
-// timeline as an opaque JSON blob. Promoting a type into the feed = giving it a NARR entry above.
-// (Was an opt-OUT blacklist `FEED_HIDDEN`, which silently leaked every type nobody remembered to add —
-// e.g. `node_concepts` rendered as raw `{"node_id":67,"concepts":[…]}`. The allow-list can't regress
-// that way: a new event type is invisible-until-narrated instead of raw-JSON-until-hidden.)
-const isCuratedType = (type) => Object.hasOwn(NARR, type)
 
 // Events whose row expands to a "why" detail card (reasoning, considered alternatives, context).
 const REASONING_TYPES = new Set(['node_created', 'policy_decision', 'strategy_decision', 'research_completed'])
@@ -413,6 +87,7 @@ function collectThinking(trace, nid) {
 // reading a dead "projection is partial" notice. TRACE_LIMIT_MAX matches the /trace/tail server cap.
 const TRACE_LIMIT_DEFAULT = 40
 const TRACE_LIMIT_MAX = 400
+const NODE_TRACE_CAP_MAX = 4096
 
 function LiveTrace({ runId, generation, active }) {
   const scope = `${runId}:${generation || 'pending'}`
@@ -687,33 +362,6 @@ function GenericDetail({ e }) {
     <React.Fragment key={i}><div className="section-h">{k}</div><div className="v">{v}</div></React.Fragment>)}</div>
 }
 
-export function eventNarration(event) {
-  const omittedBytes = event?._log_page?.truncated ? Number(event._log_page.raw_bytes || 0) : 0
-  if (event?._log_page?.truncated === true) {
-    return `${event.type || 'event'} — details omitted (${omittedBytes.toLocaleString()} source bytes exceed page limit)`
-  }
-  try {
-    // Own-property reads so an event type equal to an Object.prototype key ("toString", "constructor")
-    // can't resolve `render`/`NARR_VALID` to an inherited function (would emit "[object …]" search text).
-    const type = event?.type
-    const render = Object.hasOwn(NARR, type) ? NARR[type] : undefined
-    const data = event?.data
-    if (render && (data === null || typeof data !== 'object' || Array.isArray(data))) {
-      throw new TypeError('invalid event narration payload')
-    }
-    if (render && Object.hasOwn(NARR_VALID, type) && !NARR_VALID[type](data)) {
-      throw new TypeError('incomplete event narration payload')
-    }
-    const value = render ? render(data) : JSON.stringify(data ?? {}).slice(0, 80)
-    // Narration contains agent/user prose. Validate its structured input and renderer
-    // result; never infer a template failure from a legitimate word inside the rendered data.
-    if (!value) throw new TypeError('incomplete event narration')
-    return String(value || event?.type || 'event')
-  } catch {
-    return `${event?.type || 'event'} — details could not be summarized`
-  }
-}
-
 // The trace of ONE sub-operation (strategy_consult / hypothesis_merge …), fetched lazily by the
 // event's own trace_id — so a strategy_decision row shows only the strategist's reasoning, not the
 // whole node. Rendered with the same span-tree component as a node's trace.
@@ -771,11 +419,8 @@ function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt = null, auto
   const [nodeTraceNonce, setNodeTraceNonce] = useState(0)
   // Use the server's documented default explicitly, then double to its bounded ceiling.
   // This removes the special zero/default request path without changing the first response window.
-  // Both constants come from traceProjection.js so this surface and the node Inspector page the same
-  // route to the same ceiling — a second local copy is how the two drifted apart before.
-  const [nodeTraceLimit, setNodeTraceLimit] = useState(NODE_TRACE_SPAN_WINDOW)
-  const loadMoreNodeTrace = () =>
-    setNodeTraceLimit(value => Math.min(value * 2, NODE_TRACE_SPAN_WINDOW_MAX))
+  const [nodeTraceLimit, setNodeTraceLimit] = useState(512)
+  const loadMoreNodeTrace = () => setNodeTraceLimit(value => Math.min(value * 2, NODE_TRACE_CAP_MAX))
   // Keep the inline evidence on the same attempt as the row destination. An unstamped legacy
   // node_created after a reset is ambiguous, so it keeps its rationale but does not guess a trace.
   const traceGeneration = e.type === 'node_created' ? nodeCreatedAttempt : eventNodeAttempt(e)
@@ -857,7 +502,7 @@ function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt = null, auto
           </div>}
           {hasTrace && nodeTrace != null && <NodeTrace spans={nodeSpans}
             projection={nodeTrace.projection} runId={runId} onRetry={retryNodeTrace}
-            onLoadMore={nodeTraceLimit < NODE_TRACE_SPAN_WINDOW_MAX ? loadMoreNodeTrace : undefined} />}
+            onLoadMore={nodeTraceLimit < NODE_TRACE_CAP_MAX ? loadMoreNodeTrace : undefined} />}
           {opTraceId && <OpTrace runId={runId} traceId={opTraceId} />}
         </div>}
       </div>

@@ -539,6 +539,20 @@ already-eligible Cards and does not replace the policy. Unknown, partial, non-fi
 maps are rejected as a whole. Card mode grants it to the Strategist implicitly unless the governance
 map explicitly overrides/revokes it; in Card mode an operator may pin it through `set_strategy`.
 
+Two of the selector's inputs are deliberately distrusted, because before a Card's node is built they
+are written by the candidate itself:
+
+* **Coverage** is computed from the proposal's own `concept_tags`, so a self-minted slug would score
+  as unexplored ground. An unverified membership is therefore CAPPED at the neutral `0.5`, not
+  replaced by it — an honest claim below the cap passes through unchanged, and only an *upward*
+  claim is limited. A complete independent receipt (`classifier` or `operator-edited` provenance)
+  lifts the cap and restores the full `0..1` range.
+* **Confidence** is the foresight ranker's self-assessment of its own board ordering, measured at
+  Pearson≈0 with realized outcome (§21.12). The foresight term is now the ranker's chosen RANK
+  alone; confidence remains a tie-break. `CardScoring.confidence_weight` (a scorer field, **not** a
+  Strategist-proposable one — an LLM must not be able to restore its own self-report's weight)
+  defaults to `0.0`; setting it to `0.65` reproduces the historical blend exactly.
+
 ## Evaluation rigor & confirmation
 
 | Setting | Env | Default | Description |
