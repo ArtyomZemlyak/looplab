@@ -2099,9 +2099,9 @@ export default function RunList({ onOpen, onGlobalNavigate,
     <main ref={runsMainRef} className="app" data-route-main tabIndex={-1} aria-busy={navigationBusy}>
       <h1 className="sr-only">Runs</h1>
       <div className="topbar home-head">
-        {/* The mark is the menu. It was a wordmark here and a second "LoopLab ▾" button at the far
-            RIGHT of the same bar, among the theme/density toggles — two spellings of one name, and
-            the menu ended up filed with the display switches rather than with the identity it opens.
+        {/* The mark is the menu. It was a wordmark here and a second button carrying the same word
+            at the far RIGHT of this bar, among the theme/density toggles — two spellings of one
+            name, and the menu filed with the display switches rather than with what it opens.
             Atlas and Settings used to be two loose buttons in that same corner, which is why
             cross-run memory, authored knowledge and the host's GPUs once hid in a RUN's menu. */}
         <GlobalMenu current="list" disabled={navigationBusy}

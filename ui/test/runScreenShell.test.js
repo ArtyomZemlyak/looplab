@@ -111,7 +111,12 @@ test('RunView holds exactly one topbar and reaches the rest through the shell', 
   // fail, which a positive substring pin would not.
   assert.equal(count(/<div className="topbar run-head">/g), 1,
     'only the workspace itself may declare the run topbar; the six screens share RunScreen')
-  assert.equal(count(/className="brand"/g), 1)
+  // The mark is no longer spelled here. It has one definition (GlobalMenu.jsx::BrandMark, which
+  // renders the same bytes HEAD pins above), and in the workspace header it is the menu TRIGGER —
+  // so what this counts now is the one ternary that chooses between the owner and review arms.
+  // Still an exact count for the same reason: a commented-out copy pushes it to 2.
+  assert.equal(count(/className="brand"/g), 0)
+  assert.equal(count(/\{reviewMode \? <BrandMark \/> : <GlobalMenu \/>\}/g), 1)
   assert.equal(count(/<RunScreen\b/g), 6)
   assert.equal(count(/<\/RunScreen>/g), 6)
   // The per-screen variations, counted where they belong.

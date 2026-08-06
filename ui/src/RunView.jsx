@@ -2327,8 +2327,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       data-route-main tabIndex={-1} aria-label={workspaceRouteLabel}>
       <h1 className="sr-only">{workspaceRouteLabel}</h1>
       <div className="topbar run-head">
-        {/* The mark IS the menu — one control, not a wordmark with a second "LoopLab ▾" button
-            beside it. In review mode it stays the inert mark instead: that route is public (it
+        {/* The mark IS the menu — one control, not a wordmark with a second button carrying the
+            same word beside it. In review mode it stays the inert mark: that route is public (it
             bypasses OwnerAuth) and must not advertise, let alone reach, installation-wide owner
             surfaces. The inert arm is a real mark rather than a disabled trigger, because a dead
             button and a button that opens an empty menu both still advertise that the surfaces

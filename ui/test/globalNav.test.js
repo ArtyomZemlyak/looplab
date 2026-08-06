@@ -80,14 +80,25 @@ test('the two Settings are named apart and the LoopLab menu reaches both scopes'
     "the run's own config button must say which scope it edits")
   assert.ok(GLOBAL_DESTINATIONS.some(entry => entry.hash === '#/settings' && entry.label === 'Settings'))
   // Both planes mount the same menu, so "what about LoopLab" is answerable without leaving a run.
+  // The menu is now the LoopLab MARK itself rather than a second "LoopLab ▾" button beside it —
+  // `brandMenu.test.js` renders that trigger and owns its shape; what stays here is that each plane
+  // reaches the menu at all, and that the run list still names its own destination as the open one.
   assert.ok(runView.includes('<GlobalMenu />'))
   assert.ok(runList.includes('<GlobalMenu current="list"'))
 })
 
 test('a public review link never advertises installation surfaces', async () => {
   const runView = await source('RunView.jsx')
-  assert.ok(runView.includes('{!reviewMode && <GlobalMenu />}'),
+  // The guard used to be `{!reviewMode && <GlobalMenu />}` — render the menu or render nothing.
+  // Now that the mark IS the trigger, rendering nothing would delete the wordmark from the public
+  // review header, so the review arm is the inert mark instead: same refusal, still spelled at the
+  // one call site that knows `reviewMode`. `brandMenu.test.js` proves that arm renders no button,
+  // no `aria-haspopup` and no destination — the properties that make it safe on a route which
+  // bypasses OwnerAuth.
+  assert.ok(runView.includes('{reviewMode ? <BrandMark /> : <GlobalMenu />}'),
     'the review route bypasses OwnerAuth, so it must not render the owner LoopLab menu')
+  assert.ok(!runView.includes('reviewMode && <GlobalMenu'),
+    'the owner menu must never be reachable from the review arm')
 })
 
 test('an installation destination renders as a page, not a modal over an empty shell', async () => {
