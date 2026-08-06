@@ -31,9 +31,8 @@
 // by `scripts/check-bundle.mjs::findIntegerBooleanChunks`, which CI already runs after every build.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { minify } from 'terser'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
