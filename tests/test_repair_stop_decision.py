@@ -202,8 +202,9 @@ def test_a_verdict_nobody_can_parse_is_not_permission_to_continue():
 
 def test_only_an_engine_side_marker_admits_the_provider_outage_verdict():
     """`unanswerable` reaches the engine from a return value through ONE door: the
-    `TRIAGE_TRANSPORT_FAILURE_KEY` marker that `UnifiedAgent`'s `_fallback` stamps when `resilient`
-    contained a transport failure. The word alone proves nothing — the wire can carry it."""
+    `TRIAGE_TRANSPORT_FAILURE_KEY` marker that `UnifiedAgent`'s `_transport_failed` stamps when
+    `resilient` contained a transport failure. The word alone proves nothing — the wire can carry
+    it."""
     marked = {"action": "unanswerable", TRIAGE_TRANSPORT_FAILURE_KEY: True, "rationale": "gone"}
     assert is_transport_failure_verdict(marked)
     # The word without the marker: a live model echoing the engine's own vocabulary.

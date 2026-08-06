@@ -1133,6 +1133,11 @@ def test_concept_card_decodes_and_reports_cross_run_track_record(tmp_path):
     assert "consistently RANKED BETTER" in out
     # co-occurrence: r-drop appears with loss/plain in BOTH runs
     assert "usually paired with:" in out and "loss/plain" in out
+    # …and nothing was pruned here, so the receipt must SAY the projection is complete. The other
+    # half of the pair with `test_concept_card_discloses_partial_cooccurrence_projection`: with only
+    # the `false` case asserted, a receipt hardwired to `false` (which is what a missing key
+    # produces) was indistinguishable from a working one.
+    assert "cooccurrence_source_complete=true cooccurrence_nodes_pruned=0" in out
 
 
 def test_concept_card_does_not_claim_complete_denominators_from_matching_rows_only(tmp_path):
@@ -1184,7 +1189,14 @@ def test_concept_card_discloses_partial_cooccurrence_projection(tmp_path):
     assert "co-occurrence coverage: PARTIAL retained-node projection" in out
     assert "partners outside the projection are UNKNOWN" in out
     assert "cooccurrence_source_complete=false" in out
-    assert "cooccurrence_nodes_pruned=" in out
+    # The COUNT, not the key. `cooccurrence_nodes_pruned=` was a prefix-only assertion and
+    # `…_complete=false` passes on `None is True` — so both survived the receipt reading a key
+    # `project_concept_map` does not emit (`edge_source_*`, `portfolio_concept_graph`'s removed
+    # spelling), which pinned this line to `false`/`0` on every card ever printed. A guard that
+    # cannot tell "partial coverage" from "the key is missing" is guarding nothing; the paired
+    # `…=true` case is asserted in `test_concept_card_decodes_and_reports_cross_run_track_record`.
+    pruned = int(out.split("cooccurrence_nodes_pruned=")[1].split()[0])
+    assert pruned > 0, "the pruning fixture must report the nodes it actually pruned"
 
 
 def test_concept_card_fuzzy_resolves_respelling(tmp_path):

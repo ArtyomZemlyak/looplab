@@ -736,9 +736,32 @@ def _clear_build_marker(st: RunState, d: dict, nid: int) -> None:
         st.buildings.pop(nid, None)
 
 
+def event_generation_binds(d: dict, generation: int, *, legacy_attempt: bool = False) -> bool:
+    """Does the lifecycle stamp on RAW event data `d` bind to `generation`?
+
+    PUBLIC because a raw-log reader outside `events/` needs exactly this question and there must be
+    one answer to it. `engine/evaluate.py`'s three durable per-node budgets (repair attempts, dep
+    rounds, full re-trains) read `node_repaired`/`deps_installed`/`full_retrain_charged` straight off
+    the log rather than through the fold — the fold keeps the latest state, they need the trajectory
+    — and each of them hand-spelled this rule as `"generation" in d and d.get("generation") !=
+    generation` under a comment claiming it keyed "exactly as `replay._generation_matches` keys it".
+    It did not: measured over 18 raw values, `generation: true` was admitted by the `!=` and dropped
+    by the fold (`bool` subclasses `int`, so `True != 1` is False, while `coerce_node_id` rejects a
+    bool on purpose), and `generation: "1"` was the reverse. A budget charged against rows the fold
+    does not have is not the log's budget, which is that family's whole premise.
+
+    Exported rather than declared in `tests/test_cross_package_private_seams.py`, per that registry's
+    own rule ("the moment to ask whether it should be public instead"): the alternative was to leak
+    `_event_generation` AND the `_MISSING` sentinel across the package boundary, and a sentinel is
+    not an API. `_generation_matches` is the Node-side twin and now delegates here, so there is one
+    implementation and no second copy to drift.
+    """
+    stamped = _event_generation(d, legacy_attempt=legacy_attempt)
+    return stamped is _MISSING or (stamped is not None and stamped == generation)
+
+
 def _generation_matches(n: Node, d: dict, *, legacy_attempt: bool = False) -> bool:
-    generation = _event_generation(d, legacy_attempt=legacy_attempt)
-    return generation is _MISSING or (generation is not None and generation == n.attempt)
+    return event_generation_binds(d, n.attempt, legacy_attempt=legacy_attempt)
 
 
 def _control_generation_matches(n: Node, d: dict) -> bool:

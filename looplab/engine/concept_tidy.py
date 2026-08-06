@@ -227,20 +227,32 @@ def proposed_merges(memory_dir) -> list[ProposedMerge]:
             try:
                 prepared = prepare_concept_alias(
                     merge.get("from_concept") or "", merge.get("to_concept") or "")
+                if not prepared["to"]:
+                    continue      # an empty target is a PURGE, which this stage never applies
+                candidate = ProposedMerge(
+                    source=prepared["from"], target=prepared["to"],
+                    proposal_key=_proposal_key(row),
+                    why=str(merge.get("why") or "")[:_MAX_WHY], revision=revision)
+                # THE DIGEST IS INSIDE THE TRY, and that is the whole of the fix. `action_id` is a
+                # PROPERTY, so reading it here runs `ratification_action_id`, whose `.encode("utf-8")`
+                # raises `UnicodeEncodeError` on a lone surrogate — an escape an LLM-authored
+                # `from_concept` can carry, which `prepare_concept_alias` above does not reject and
+                # `governance_health._validate_curation_row` does not inspect. Outside the try it
+                # escaped `proposed_merges`, and `engine/finalize.py`'s `except Exception: pass` then
+                # made EVERY later finalize on that portfolio ratify nothing, silently and forever —
+                # exactly the "reads as nothing to do" failure `ratify_concept_merges`' docstring says
+                # must not happen. `UnicodeEncodeError` IS a `ValueError`, so it belongs to the same
+                # class this handler already names: a proposal the durable writer would refuse outright.
+                action_id = candidate.action_id
             except ValueError:
-                # A proposal that the durable writer would refuse outright (empty source, self-link)
-                # is not a decision this stage can carry forward. `_validate_curation` already drops
-                # these at proposal time; a historical row may predate that.
+                # A proposal that the durable writer would refuse outright (empty source, self-link,
+                # a key that cannot be encoded) is not a decision this stage can carry forward.
+                # `_validate_curation` already drops these at proposal time; a historical row may
+                # predate that.
                 continue
-            if not prepared["to"]:
-                continue          # an empty target is a PURGE, which this stage never applies
-            candidate = ProposedMerge(
-                source=prepared["from"], target=prepared["to"],
-                proposal_key=_proposal_key(row),
-                why=str(merge.get("why") or "")[:_MAX_WHY], revision=revision)
-            if candidate.action_id in seen:
+            if action_id in seen:
                 continue
-            seen.add(candidate.action_id)
+            seen.add(action_id)
             out.append(candidate)
     return out
 

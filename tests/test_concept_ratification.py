@@ -122,14 +122,58 @@ def test_the_action_id_is_a_pure_function_of_the_semantic_payload(tmp_path):
     def row(src, dst):
         return {"v": 1, "action": "set", "from": src, "to": dst}
 
+    from looplab.engine.concept_registry import prepare_concept_alias
+
     same = ratification_action_id("  Model/Gradient_Boosting ", "model/gradient-boosting")
     assert same == ratification_action_id("model/gradient_boosting", "model/gradient-boosting")
-    assert _idempotency_payload(row("model/gradient_boosting", "model/gradient-boosting")) == \
-        _idempotency_payload(row("  Model/Gradient_Boosting ".strip().lower(),
-                                 "model/gradient-boosting"))
+    # The link the docstring names, through the SHIPPED normalizer. This used to hand-roll
+    # `.strip().lower()` and then compare `_idempotency_payload(row(a, b))` against
+    # `_idempotency_payload(row(a, b))` — literally the same dict on both sides, so it held for any
+    # implementation of either function and never joined the id to the payload at all.
+    for raw_src in ("  Model/Gradient_Boosting ", "model/gradient_boosting", "MODEL/GRADIENT_BOOSTING"):
+        prepared = prepare_concept_alias(raw_src, "model/gradient-boosting")
+        assert ratification_action_id(raw_src, "model/gradient-boosting") == same
+        assert _idempotency_payload(row(prepared["from"], prepared["to"])) == \
+            _idempotency_payload(row("model/gradient_boosting", "model/gradient-boosting"))
     # A different TARGET is a different decision and must get a different id, or a refinement would
     # be swallowed as a replay of the earlier merge.
     assert same != ratification_action_id("model/gradient_boosting", "model/gbm")
+
+
+def test_a_key_that_cannot_be_encoded_declines_one_proposal_not_the_whole_stage(tmp_path):
+    """`ratification_action_id` is a PROPERTY read, and it can raise.
+
+    A lone UTF-16 surrogate in an LLM-authored `from_concept` survives `prepare_concept_alias`
+    (which never encodes) and reaches `hashlib.sha256(...encode("utf-8"))`, which refuses it.
+    `proposed_merges` read `candidate.action_id` OUTSIDE its `except ValueError`, so the raise
+    escaped the whole stage — and `engine/finalize.py` contains it with `except Exception: pass`,
+    which means every later finalize on that portfolio ratifies nothing, silently and permanently.
+    That is precisely the "reads as *there was nothing to do*" failure `ratify_concept_merges`'
+    docstring says must not happen, and it is a per-run failure caused by one bad proposal.
+
+    One poisoned proposal must cost exactly that proposal."""
+    with pytest.raises(UnicodeEncodeError):          # the raise is real, not hypothetical
+        ratification_action_id("axis/\ud800", "axis/two")
+    # …and it belongs to the class `proposed_merges` already declines on, which is why the fix is to
+    # bring the digest inside that handler rather than to add a second one.
+    assert issubclass(UnicodeEncodeError, ValueError)
+
+    memory_dir = tmp_path / "mem"
+    _write_capsules(memory_dir, [_capsule("run-c", ["regularization/r-drop", "regularization/rdrop"])])
+    _append_proposal(memory_dir, merges=[
+        _merge("axis/\ud800", "axis/two"),                          # the poisoned one
+        _merge("regularization/rdrop", "regularization/r-drop"),    # a healthy sibling behind it
+    ])
+
+    merges = proposed_merges(memory_dir)             # must not raise
+    assert [(m.source, m.target) for m in merges] == [
+        ("regularization/rdrop", "regularization/r-drop")], (
+        "one un-encodable proposal must cost exactly that proposal — not every merge behind it, and "
+        "not every future finalize pass on this portfolio")
+    # And the stage as a whole still does its work rather than dying inside finalize's `except: pass`.
+    result = ratify_concept_merges(memory_dir, by=RATIFIER_ACTOR, at="finalize")
+    assert [(r["from"], r["to"]) for r in result["applied"]] == [
+        ("regularization/rdrop", "regularization/r-drop")]
 
 
 def test_two_proposals_of_the_same_merge_yield_one_decision(portfolio):

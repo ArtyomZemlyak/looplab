@@ -145,14 +145,10 @@ def _durable_row_belongs(d, node_id: int, generation: int) -> bool:
     """
     if not isinstance(d, Mapping):
         return False
-    if coerce_node_id(d) != node_id:
-        return False
-    row_generation = _event_generation(d)
-    return (row_generation is _EVENT_GENERATION_MISSING
-            or (row_generation is not None and row_generation == generation))
+    return coerce_node_id(d) == node_id and event_generation_binds(d, generation)
 
 
-def _durable_int(value, default: int = 0) -> int:
+def _durable_int(value, default=0):
     """A durable counter field as an int, or `default` — TOTAL over an untrusted log.
 
     `int(d.get("unparseable_repairs") or 0)` raised `ValueError` on a string and `TypeError` on a
@@ -282,10 +278,11 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
         rows.append(row)
     return attempts, rows, unparseable
 from looplab.events.replay import fold
-# The fold's OWN generation reader, imported rather than re-derived — `_durable_row_belongs` above
-# is the single place the durable ledgers key a raw row, and it must agree with `replay` by
-# construction. `_MISSING` is the legacy-unstamped sentinel that reader returns.
-from looplab.events.replay import _MISSING as _EVENT_GENERATION_MISSING, _event_generation
+# The fold's OWN generation rule, CALLED rather than re-derived — `_durable_row_belongs` above is
+# the single place the durable ledgers key a raw row, and it must agree with `replay` by
+# construction. Public on purpose (see its docstring): the alternative was importing the private
+# reader plus its `_MISSING` sentinel across the package boundary.
+from looplab.events.replay import event_generation_binds
 from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.events.types import (EV_CARD_DROPPED, EV_DEPS_INSTALLED, EV_FULL_RETRAIN_CHARGED, EV_NODE_ABORT,
                                   EV_NODE_EVAL_STARTED,
