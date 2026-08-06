@@ -1375,7 +1375,13 @@ function usePagedNodeTrace({ runId, nodeId, attempt, limit, nonce, working, enab
   return enabled ? paged : null
 }
 
-function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, working, onReload,
+// Exported ONLY so a test can mount it (test/inspectorTracePager.test.js). Nothing in the app
+// imports it — the Inspector renders it directly below. It is exported because the property that
+// matters here is not "the file contains a button": it is that clicking the button issues a request
+// for a BIGGER window and the bigger response reaches the screen, and no amount of reading this
+// file's text can see that. The Inspector shipped a dead partial notice for months underneath pins
+// that were all green.
+export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, working, onReload,
   detailStatus = 'ready',
   reloadPending = false, clearScope, clearRecoveryStore, recoverClearState = null,
   clearRecoverySignal = null, publishClearRecovery }) {
