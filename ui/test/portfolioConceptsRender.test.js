@@ -131,6 +131,22 @@ test('co-occurrence reaches the screen as a threshold result, never as silence',
   assert.match(html, /any run/)
 })
 
+test('a scope with nothing to pair says THAT, not "no pair reached the threshold"', async () => {
+  // Two distinguishable absences. "Every run named one concept" is a fact about tagging depth;
+  // "pairs exist but none repeats" is a fact about the lab. Rendering the second sentence for the
+  // first case blames the threshold for something the threshold never saw. (Mutation-proved: the
+  // zero-candidate branch survived until this test existed.)
+  const html = await render({
+    runs: [
+      { run_id: 'r1', task_id: 't', direction: 'max', concepts: { 'a/x': { count: 1 } } },
+      { run_id: 'r2', task_id: 't', direction: 'max', concepts: { 'b/y': { count: 2 } } },
+    ],
+    scopeLabel: 'All runs',
+  })
+  assert.match(html, /No run in this scope was tagged with two concepts, so there is nothing to pair/)
+  assert.equal(/No pair of concepts appeared together in/.test(html), false)
+})
+
 test('a repeated pair is listed with the number of DISTINCT runs behind it', async () => {
   const paired = [
     { run_id: 'r1', task_id: 't', direction: 'max',
