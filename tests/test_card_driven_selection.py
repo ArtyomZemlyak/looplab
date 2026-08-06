@@ -60,6 +60,10 @@ def _ready_card(
     concepts: tuple[str, ...] = (),
     confidence: float | None = None,
     novelty_level: int | None = None,
+    # The foresight ranker's chosen ORDER (0 = best). This is what carries the exploit stance;
+    # `confidence` is the same ranker's opinion OF that order and no longer feeds the primary term
+    # by default (doc 25 SE-11).
+    priority: int | None = None,
     pinned: bool = False,
 ) -> Card:
     parent_id = parents[0] if parents else None
@@ -95,6 +99,7 @@ def _ready_card(
         parent_ids=list(parents),
         concept_tags=list(concepts),
         confidence=confidence,
+        priority=priority,
         novelty_verdict=novelty,
         pinned=pinned,
     )
@@ -541,8 +546,17 @@ def test_operator_pinned_card_owns_the_top_band_over_the_policy_hot_card():
     ) == [{"kind": "improve", "parent_id": 0, "_card_id": "pinned"}]
 
 
-def test_explore_vs_exploit_stance_changes_only_the_open_band_order():
-    state = RunState(
+def _stance_board():
+    """Two cards the stances should order oppositely.
+
+    The exploit-worthy card is the one the foresight ranker put FIRST; the explore-worthy one is the
+    novel, uncovered region it ranked second. Until doc 25 SE-11 this board separated the two by
+    `confidence=1.0` vs `0.0` instead — the ranker's self-assessment of its own ordering, measured at
+    Pearson≈0 with outcome. That made the test pin the very signal SE-11 removed from the primary
+    term, so it is now separated by the RANK the ranker actually chose. The property under test is
+    unchanged: the stance knob flips the open band's order and nothing else.
+    """
+    return RunState(
         nodes={0: _node(0, concepts=("seen",))},
         node_concepts={0: ["seen"]},
         best_node_id=0,
@@ -551,13 +565,17 @@ def test_explore_vs_exploit_stance_changes_only_the_open_band_order():
             # and 5 is `wrongly_abandoned` (re-opens a direction this run already failed), so the
             # explore-worthy card is the level-0 one.
             "exploit": _ready_card(
-                "exploit", concepts=("seen",), confidence=1.0, novelty_level=5,
+                "exploit", concepts=("seen",), confidence=1.0, priority=0, novelty_level=5,
             ),
             "explore": _ready_card(
-                "explore", concepts=("new",), confidence=0.0, novelty_level=0,
+                "explore", concepts=("new",), confidence=0.0, priority=1, novelty_level=0,
             ),
         },
     )
+
+
+def test_explore_vs_exploit_stance_changes_only_the_open_band_order():
+    state = _stance_board()
     policy = GreedyTree(n_seeds=1, max_nodes=8, debug_depth=0)
 
     exploit = card_next_actions(
@@ -570,6 +588,46 @@ def test_explore_vs_exploit_stance_changes_only_the_open_band_order():
     )
     assert exploit[0]["_card_id"] == "exploit"
     assert explore[0]["_card_id"] == "explore"
+
+
+def test_an_unranked_board_gives_the_exploit_stance_nothing_to_exploit():
+    """The behaviour SE-11 changed, stated as a property rather than left implicit.
+
+    With no `card_ranked` event neither card has a rank, so the foresight term carries no information
+    at all and both stances fall through to exploration. Before SE-11 the exploit stance still had an
+    answer here — the self-reported confidence — which is exactly the case where that number is doing
+    the most work and has the least backing.
+    """
+    state = _stance_board()
+    for card in state.cards.values():
+        card.priority = None
+    policy = GreedyTree(n_seeds=1, max_nodes=8, debug_depth=0)
+
+    for stance in ("exploit", "explore"):
+        picked = card_next_actions(
+            state, policy, 8,
+            scoring={"stance": stance, "novelty_weight": 1.0, "coverage_weight": 0.0},
+        )
+        assert picked[0]["_card_id"] == "explore", (
+            f"stance={stance!r} ranked on a confidence nobody calibrated")
+
+
+def test_the_escape_hatch_restores_the_confidence_driven_order_end_to_end():
+    """`confidence_weight=0.65` reproduces the historical blend, and this proves it through the whole
+    selector rather than through the scoring helper alone — the escape hatch is only worth having if
+    it actually reaches selection."""
+    state = _stance_board()
+    for card in state.cards.values():
+        card.priority = None
+    policy = GreedyTree(n_seeds=1, max_nodes=8, debug_depth=0)
+
+    picked = card_next_actions(
+        state, policy, 8,
+        scoring={"stance": "exploit", "novelty_weight": 1.0, "coverage_weight": 0.0,
+                 "confidence_weight": 0.65},
+    )
+
+    assert picked[0]["_card_id"] == "exploit"
 
 
 def test_a_recorded_grade_never_out_explores_an_unremarked_proposal():
