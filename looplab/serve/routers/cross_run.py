@@ -325,6 +325,19 @@ class CrossRunAtlasResponse(_CrossRunResponse):
     revisions: CrossRunRevisions
 
 
+class CrossRunConceptPolicyResponse(_CrossRunResponse):
+    # `canonical` is `id -> canonical | null`, null meaning PURGED. Typed as an open str->str|None
+    # map rather than a row list: the client's operation is one lookup with an identity default, and
+    # a list would invite it to iterate and re-derive rather than index.
+    canonical: dict[str, str | None]
+    canonical_omitted: int = Field(ge=0)
+    split_sources: list[str]
+    split_sources_omitted: int = Field(ge=0)
+    capsule_run_ids: list[str]
+    capsule_run_ids_omitted: int = Field(ge=0)
+    revisions: CrossRunRevisions
+
+
 class CrossRunClaimsResponse(_CrossRunResponse):
     claims: list[CrossRunClaim]
     n: int
@@ -511,6 +524,25 @@ def build_router(srv) -> APIRouter:
         except (GovernanceLedgerUnavailable, EventStoreLockError) as exc:
             _raise_governance_error(exc)
 
+    def _capsule_run_ids(memory_dir) -> tuple[list[str], int]:
+        """The run ids durable cross-run memory actually holds, bounded and reported.
+
+        Deliberately the RAW capsule population, with no filtering: the point is to expose the gap
+        between what the map draws and what memory knows, so any narrowing here would hide exactly
+        the fact being disclosed. A quarantined store still reports the rows it retained — an
+        incomplete answer that says how many it dropped beats refusing to answer, because this field
+        is advisory disclosure and never an authority for a governance write (that fence is
+        `_observed_concept_snapshot`, which does fail closed on an incomplete store).
+        """
+        from looplab.engine.concept_capsules import ConceptCapsuleStore
+
+        path = Path(memory_dir) / "concept_capsules.jsonl"
+        if not path.exists():
+            return [], 0
+        store = ConceptCapsuleStore(path)
+        ids = sorted({str(capsule.get("run_id") or "") for capsule in store.all()} - {""})
+        return ids[:2_000], max(0, len(ids) - 2_000)
+
     def _read_governed_evidence(project):
         """Keep policy corruption and unavailable evidence snapshots as distinct safe contracts."""
         from looplab.engine.governance_health import GovernanceLedgerUnavailable
@@ -608,6 +640,53 @@ def build_router(srv) -> APIRouter:
             "revision": revision,
             "portfolio_id": portfolio_id,
         }
+
+    @router.get("/api/cross-run/concept-policy", response_model=CrossRunConceptPolicyResponse)
+    def concept_policy():
+        """The alias/split registry as a lookup table a browser can APPLY, plus who is in memory.
+
+        The GLOBAL concept map (`search/concept_lens.py::project_concept_map` and its browser half
+        `ui/src/conceptForest.js`) takes per-run concept SETS and no governance, so the CALLER
+        canonicalizes. Every server-side caller has `canonicalize_concepts`; the browser had nothing,
+        which is why a merged pair still drew two nodes and still read as spelling drift. This route
+        is what the browser applies, and `concept_registry.py::concept_canonicalization_policy`
+        documents the two-field contract (`canonical` with chains resolved, `split_sources` declared
+        UNAPPLIED because a split's answer depends on each run's own siblings).
+
+        `capsule_run_ids` is a POPULATION disclosure, not decoration. Two surfaces of one lab count
+        different runs: the map folds the live per-run rollup of every run the list is showing (46
+        runs, 15 tagged on the development corpus), while durable cross-run memory — what agent
+        priors, novelty grading, the atlas and the taxonomy steward all read — holds capsules for 3.
+        Nothing said so anywhere. Returning the ids lets the map render the intersection with its own
+        scope instead of implying that governance covers everything it draws.
+
+        Read-only and revision-bearing: the whole table comes from ONE governance-locked snapshot, so
+        a merge landing mid-render is wholly visible or wholly invisible, never half.
+        """
+        from looplab.engine.concept_registry import concept_canonicalization_policy
+
+        memory_dir, portfolio_id = _portfolio()
+
+        def _project():
+            policy = concept_canonicalization_policy(memory_dir)
+            run_ids, omitted = _capsule_run_ids(memory_dir)
+            return {
+                **policy,
+                "capsule_run_ids": run_ids,
+                "capsule_run_ids_omitted": omitted,
+                "revisions": {
+                    "claims": 0,
+                    "concept_aliases": policy["alias_revision"],
+                    "concept_splits": policy["split_revision"],
+                    "concept_governance": policy["governance_revision"],
+                },
+                "portfolio_id": portfolio_id,
+            }
+
+        payload = _read_governed_evidence(_project)
+        _assert_portfolio_current(memory_dir, portfolio_id)
+        return sanitize_cross_run_projection(
+            payload, max_chars=1_000_000, max_items=4_096, max_total_items=16_384)
 
     @router.post("/api/cross-run/claim-decide", response_model=ClaimDecisionResponse)
     def claim_decide(body: _ClaimDecision):

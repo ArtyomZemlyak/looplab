@@ -1066,3 +1066,104 @@ def test_an_unhealthy_projection_refuses_the_steward_before_any_paid_call(tmp_pa
 
     assert response.status_code >= 400, response.text
     assert not claimed, "an unhealthy projection must not reach the durable paid-call claim"
+
+
+# --------------------------------------------------------------------------- #
+# GET /api/cross-run/concept-policy — the canonicalization table the BROWSER applies.
+#
+# `search/concept_lens.py::project_concept_map` takes per-run concept sets and no governance, so the
+# caller canonicalizes. Every server caller has `canonicalize_concepts`; the browser had nothing, and
+# a merged pair therefore kept drawing two nodes in the run list's map. These drive the route against
+# real registry writes rather than a stub, because the property is "what the client applies equals
+# what the server would have applied".
+# --------------------------------------------------------------------------- #
+
+def test_concept_policy_publishes_a_table_that_reproduces_server_canonicalization(tmp_path):
+    from looplab.engine.concept_registry import canonicalize_concepts, load_concept_aliases
+
+    _seed_memory()
+    with TestClient(make_app(tmp_path)) as client:
+        assert client.post("/api/cross-run/concept-merge", json={
+            "from_concept": "hard-neg", "to_concept": "hn", "expected_revision": 0,
+            "expected_governance_revision": 0, "action_id": "merge-1"}).status_code == 200
+        assert client.post("/api/cross-run/concept-purge", json={
+            "from_concept": "z", "confirm": "purge", "expected_revision": 1,
+            "expected_governance_revision": 1, "action_id": "purge-1"}).status_code == 200
+        policy = client.get("/api/cross-run/concept-policy").json()
+
+    assert policy["canonical"]["hard-neg"] == "hn"
+    assert policy["canonical"]["z"] is None                      # purged
+    assert policy["canonical_omitted"] == 0
+    assert policy["revisions"]["concept_aliases"] == 2
+
+    # The client rule is ONE lookup with an identity default. Applying it must equal the server's own
+    # canonicalization for every id — that equality is the whole contract, so drive it, do not assert
+    # the shape and hope.
+    aliases = load_concept_aliases(str(Path(os.environ["LOOPLAB_MEMORY_DIR"])))
+    for raw in ("hard-neg", "hn", "z", "x", "data/aug"):
+        client_side = policy["canonical"].get(raw, raw)
+        server_side = canonicalize_concepts([raw], aliases=aliases)
+        assert (server_side == [] if client_side is None else server_side == [client_side])
+
+
+def test_concept_policy_declares_split_dependent_ids_unapplied_instead_of_guessing(tmp_path):
+    _seed_memory()
+    with TestClient(make_app(tmp_path)) as client:
+        assert client.post("/api/cross-run/concept-split", json={
+            "from_concept": "coarse",
+            "rules": [{"to": "fine", "when_any": ["hard"]}],
+            "default": "coarse", "expected_revision": 0, "expected_governance_revision": 0,
+            "action_id": "split-1"}).status_code == 200
+        # An alias whose TARGET is a split source is equally context-dependent: canonicalization is
+        # ALIAS -> SPLIT -> ALIAS, so publishing only the alias hop would look like a full answer.
+        assert client.post("/api/cross-run/concept-merge", json={
+            "from_concept": "a", "to_concept": "coarse", "expected_revision": 0,
+            "expected_governance_revision": 1, "action_id": "merge-into-split"}).status_code == 200
+        policy = client.get("/api/cross-run/concept-policy").json()
+
+    assert set(policy["split_sources"]) == {"coarse", "a"}
+    assert "coarse" not in policy["canonical"] and "a" not in policy["canonical"]
+    assert policy["revisions"]["concept_splits"] == 1
+
+
+def test_concept_policy_discloses_which_runs_durable_memory_actually_holds(tmp_path):
+    """The population gap, made visible: the map draws the run LIST, governance knows CAPSULES."""
+    _seed_memory()
+    with TestClient(make_app(tmp_path)) as client:
+        policy = client.get("/api/cross-run/concept-policy").json()
+    assert policy["capsule_run_ids"] == ["concept-seed"]
+    assert policy["capsule_run_ids_omitted"] == 0
+
+
+def test_concept_policy_makes_a_ratified_merge_visible_to_the_map(tmp_path):
+    """End to end: the background stage decides, and the browser's map can see the decision.
+
+    Without this route the ratification stage is invisible exactly where it matters — the run list's
+    global map would keep drawing both spellings and keep reporting them as drift.
+    """
+    from looplab.engine.concept_tidy import RATIFIER_ACTOR, ratify_concept_merges
+    from looplab.engine.concept_registry import _append_governance
+    from looplab.engine.governance_health import curation_source_key
+
+    md = _seed_memory()
+    _append_governance(md / "concept_curation_log.jsonl", {
+        "v": 2, "curation_key": "concept:v2:" + "d" * 64,
+        "source_key": curation_source_key(run_id="r1", task_id="t", finish_seq=1),
+        "run_id": "r1", "task_id": "t", "finish_seq": 1, "input_digest": "d" * 64,
+        "input_schema": "finalize-concept-curation/v3", "model": "m", "parser": "tool_call_once",
+        "outcome": "proposed", "auto": False, "auto_requested": False, "receipt": None,
+        "proposals": {"merges": [{"from_concept": "data/hard-neg", "to_concept": "data/aug",
+                                  "why": "same technique"}], "splits": [], "purges": []},
+    }, require_durable=True)
+
+    applied = ratify_concept_merges(str(md), at="2026-08-06T00:00:00")
+    assert [entry["from"] for entry in applied["applied"]] == ["data/hard-neg"]
+
+    with TestClient(make_app(tmp_path)) as client:
+        policy = client.get("/api/cross-run/concept-policy").json()
+    assert policy["canonical"]["data/hard-neg"] == "data/aug"
+
+    # And the ledger says WHO decided it, so the map can tell a governed merge from an inferred one.
+    rows = [json.loads(line) for line in
+            (md / "concept_aliases.jsonl").read_text(encoding="utf-8").splitlines() if line]
+    assert [row["by"] for row in rows] == [RATIFIER_ACTOR]

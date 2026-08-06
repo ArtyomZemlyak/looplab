@@ -721,6 +721,70 @@ def canonicalize_concepts(concepts, aliases: Optional[dict] = None,
     return sorted(out)
 
 
+MAX_POLICY_ENTRIES = 2_000
+
+
+def concept_canonicalization_policy(memory_dir) -> dict:
+    """The registry as a CLIENT-APPLICABLE lookup table, from ONE governance-locked snapshot.
+
+    Every server-side consumer canonicalizes by calling `canonicalize_concepts`. The browser cannot:
+    `search/concept_lens.py::project_concept_map` deliberately takes per-run concept SETS and no
+    governance, so the caller owns canonicalization — and the browser caller (`ui/src/conceptForest.js`)
+    had no way to obtain it. The visible consequence is structural, not cosmetic: after a merge of
+    `model/gradient_boosting` into `model/gradient-boosting`, the run list's map still draws two nodes
+    and still reports them as spelling drift. Governance was invisible to the one surface whose whole
+    job is showing the operator what the lab studied.
+
+    So this is the read side of "merge iff someone said so". Two fields, and the split between them is
+    the whole design:
+
+    * `canonical` — `{normalized id -> canonical id | None}`, with alias CHAINS already resolved and
+      `None` meaning PURGED. An id absent from this table canonicalizes to itself, so the client's rule
+      is a single lookup with an identity default and never a chain walk. A chain walked in the browser
+      is a second implementation of `resolve_slug`, cycle handling included.
+    * `split_sources` — ids whose canonical form is genuinely NOT a function of the id. A split re-tags
+      from each run's OWN sibling concepts (`resolve_split` over `_ctx_tokens`), so there is no single
+      answer to publish; a client must declare these UNAPPLIED rather than re-derive an NFKC/casefold
+      tokenizer in JavaScript and get a different answer than the server. This includes ids that merely
+      RESOLVE INTO a split source: `canonicalize_concept` applies ALIAS -> SPLIT -> ALIAS, so an alias
+      whose target is split is equally context-dependent, and publishing the alias hop alone would look
+      like a complete answer.
+
+    With this table a governed pair collapses to ONE node in the map and drops out of the drift report
+    by itself — which is what turns `spellingVariants` from a nag into exactly the residue nobody has
+    ruled on yet. Bounded and REPORTED: a portfolio past `MAX_POLICY_ENTRIES` decisions returns a
+    truncated table that SAYS it is truncated, because a client that silently under-applies governance
+    is worse than one that knows it cannot.
+    """
+    empty = {"canonical": {}, "canonical_omitted": 0, "split_sources": [],
+             "split_sources_omitted": 0, "alias_revision": 0, "split_revision": 0,
+             "governance_revision": 0}
+    if not memory_dir:
+        return empty
+    snapshot = concept_governance_snapshot(memory_dir)
+    aliases, splits = snapshot["aliases"], snapshot["splits"]
+    context_dependent: set[str] = set(splits)
+    canonical: dict[str, Optional[str]] = {}
+    for source in aliases:
+        resolved = resolve_slug(source, aliases)
+        if resolved is not None and resolved in splits:
+            context_dependent.add(source)
+            continue
+        canonical[source] = resolved
+    ordered = sorted(canonical)
+    kept = ordered[:MAX_POLICY_ENTRIES]
+    sources = sorted(context_dependent)
+    return {
+        "canonical": {key: canonical[key] for key in kept},
+        "canonical_omitted": len(ordered) - len(kept),
+        "split_sources": sources[:MAX_POLICY_ENTRIES],
+        "split_sources_omitted": max(0, len(sources) - MAX_POLICY_ENTRIES),
+        "alias_revision": snapshot["alias_revision"],
+        "split_revision": snapshot["split_revision"],
+        "governance_revision": snapshot["governance_revision"],
+    }
+
+
 def _observed_concept_snapshot(memory_dir, *, aliases: Optional[dict] = None,
                                splits: Optional[dict] = None) -> tuple[set[str], str]:
     """Live canonical concept vocabulary plus a content digest for governance receipts.
