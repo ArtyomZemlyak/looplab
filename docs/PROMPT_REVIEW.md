@@ -1,5 +1,12 @@
 # LoopLab — Agent-Prompt & Daily-Diff Mega-Review (2026-07-09)
 
+> **Historical point-in-time review.** Every `file:line` reference below is as of `8a53520` and is
+> deliberately left at the path it named then, so do not chase them against today's tree — several
+> modules have since moved or been renamed. Notably every `trust/verify.py` reference below is today's
+> `looplab/trust/memo_verify.py` (renamed in `fc88a993`); `looplab/__init__.py::_RENAMED` still resolves
+> the old import path to the SAME module object, so the monkeypatch seams described here are intact.
+> Use the current source for truth.
+
 **Scope.** (a) Every commit of 2026-07-09 (`2786b88…8a53520`, 20 commits; the reviewed diff range
 was `2786b88~1..8a53520`, 51 files, +1509/−179);
 (b) every LLM-facing prompt string in the codebase — `agents/` (roles, tool-loop, strategist,
@@ -57,7 +64,7 @@ worst case.
 | D11 | nit (defensive-only) | `events/replay.py:236-247` | Unkeyed (legacy) `confirm_eval` duplicates still double-count seconds; a re-eval of the same (node, seed) has its seconds dropped while its metric still overwrites. *Verification: no producer at HEAD can emit either shape (both confirm emitters memo-skip seen seeds; `confirm_eval` has always carried node_id+seed) — guard-incompleteness note, not a live defect.* |
 | D12 | nit | `orchestrator.py:2351` | `not spec.get('edit', False)` in `_data_binds` is dead after the DataSpec coercion — the all-mounts-read-only invariant now rests solely on the validator; a hand-rolled `repo_spec` dict would silently get a writable bind. |
 | D13 | minor | tests | The reuse feature's **loop wiring is untested** (only the static helpers are unit-tested): nothing asserts `next_start` actually reaches `run_command_eval` on re-eval, that the retrain-cap abandon fires, or `node_logs` for `cmd.stages` runs. |
-| D14 | minor (adjacent, **pre-existing** — found during verification, not introduced today) | `events/replay.py:187-197` + `trust/confirm_phase.py:101-104,133-136` | `EV_NODE_RESET` clears `confirmed_mean/std/seeds` and holdout but never clears `st.confirm_seed_results[node_id]` — a reset (even re-developed) node's later confirm memo-skips every seed and re-emits `node_confirmed` from the **pre-reset** seed metrics for post-reset code. |
+| D14 | minor (adjacent, **pre-existing** — found during verification, not introduced today) | `events/replay.py:187-197` + `engine/confirm_phase.py:101-104,133-136` | `EV_NODE_RESET` clears `confirmed_mean/std/seeds` and holdout but never clears `st.confirm_seed_results[node_id]` — a reset (even re-developed) node's later confirm memo-skips every seed and re-emits `node_confirmed` from the **pre-reset** seed metrics for post-reset code. |
 
 Prompt-text changes today were limited and consistent: `machine_runs_tools.py (runs_tools.py at review time):281-286` (goal-is-the-only-
 task-text block), `machine_runs_tools.py (runs_tools.py at review time):331-338` + `serve_prompts.py:60-70` (mount/edit coercion wording
