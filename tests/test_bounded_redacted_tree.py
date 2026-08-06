@@ -220,6 +220,71 @@ def test_an_exhausted_budget_is_reported_not_silently_swallowed():
     assert cut is True and out is not None
 
 
+# ---------------------------------------------------------- the receipt LIED in both directions
+#
+# The test above only reaches the secret-KEY branch, which never calls the text bounder at all. The
+# receipt for every OTHER value was inferred inside `safe_text` by comparing the redacted output
+# against the RAW input — and `redact_persisted_text` normalizes and redacts BEFORE it bounds, so
+# output length is not a proxy for "something was cut" in either direction. Both errors shipped, and
+# both reached an operator: `misc._bounded_json_value` -> `params_truncated` (the memory browser) and
+# `genesis._bounded_evidence_value` -> `defaults_truncated`.
+
+def test_masking_a_credential_INSIDE_a_value_is_not_truncation_either():
+    """DIRECTION 2, the common case: masking reported AS truncation. `redact_secrets` masks a
+    credential wherever it appears, including under a perfectly benign key, so `sk-` + 30 chars (33)
+    became `sk-***` (6) — measured shorter than its input, hence "truncated". Every row containing
+    any credential said so, at any budget, however generous."""
+    out, cut = _walk_cut({"note": "sk-" + "A" * 30, "epochs": 3}, chars=65_536, str_cap=500)
+    assert out == {"note": "sk-***", "epochs": 3}, out
+    assert cut is False, "a masked credential is not truncation — nothing was dropped for SIZE"
+
+
+def test_content_the_cap_REPLACED_with_a_hash_marker_IS_reported():
+    """DIRECTION 1, the dangerous one: silent truncation reported as truncated=False. Redaction runs
+    BEFORE the bound and can GROW the text — NFKC expands each `ﬄ` to three characters — so a
+    300-character field becomes 900, is replaced wholesale by its digest at the 500-char cap, and
+    still measures 500 > 300. The operator was shown a destroyed field and told nothing was cut."""
+    out, cut = _walk_cut({"note": "ﬄ" * 300}, chars=65_536, str_cap=500)
+    assert "[redacted preview:" in out["note"], out
+    assert cut is True, "a field replaced by its own digest is exactly what the receipt is for"
+
+
+def test_a_receipt_is_never_a_COINCIDENCE_of_two_lengths():
+    """The inference could also be defeated by arithmetic alone. `password=x` is 10 characters;
+    masked it is `password=***`, 12; hashed down to a 10-character budget it is 10 again. Equal
+    lengths, so the strict `<` said nothing had happened — to a value that by then was nine
+    characters of digest tail."""
+    out, cut = _walk_cut("password=x", chars=10, str_cap=None)
+    assert "password" not in out, out
+    assert cut is True
+
+
+def test_BOTH_shipped_receipts_report_the_same_two_facts():
+    """Driven through the two projectors that actually serve these flags, not just the walker: the
+    routers read this out-cell verbatim into `params_truncated` / `defaults_truncated`, so an
+    operator reading either endpoint was told the opposite of the truth in both directions."""
+    from looplab.serve.routers.genesis import _bounded_evidence_value
+    from looplab.serve.routers.misc import _bounded_json_value
+
+    for project in (_bounded_evidence_value, _bounded_json_value):
+        masked, cut = project({"note": "sk-" + "A" * 30, "epochs": 3})
+        assert masked == {"note": "sk-***", "epochs": 3}, masked
+        assert cut is False, f"{project.__name__} calls a masked credential a truncated config"
+
+        destroyed, cut = project({"note": "ﬄ" * 300})
+        assert "[redacted preview:" in destroyed["note"], destroyed
+        assert cut is True, f"{project.__name__} hid a destroyed field behind a clean receipt"
+
+
+def test_NORMALIZATION_alone_is_not_truncation():
+    """The rule the deleted comparison could not state: folding, control characters becoming spaces
+    and `single_line` collapsing whitespace all change the length without dropping any of the value.
+    A key normalized this way used to spend the whole payload's receipt."""
+    out, cut = _walk_cut({"a  b\tc": 1})
+    assert out == {"a b c": 1}, out
+    assert cut is False
+
+
 def test_the_two_serve_projectors_delegate_rather_than_walking_themselves():
     """The SR-06 collapse. A private recursive walk in either router is the second implementation
     coming back, and the drift it produces is invisible: both outputs still look redacted, they just
