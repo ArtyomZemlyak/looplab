@@ -497,6 +497,46 @@ Scope: `looplab/engine/`: orchestrator.py, node_build.py, eval_dispatch.py, eval
 
 *Recommendation:* Extract (1) the calibration profile + envelope validation into looplab/search/speculation_calibration.py (where SPECULATION_CALIBRATION_SEEDS etc. already live) or a new engine/speculation_gate.py, and (2) the Card ledger into an engine/card_ledger.py mixin, following the established pattern. For the Card cluster's internal fold() calls, either import fold from the canonical home (as evaluate.py does, with the same docstring note that the orchestrator seam gates creation only) or route through a small engine hook, and verify the two fold-monkeypatching tests still intercept the paths they target.
 
+*Resolution (2026-08-05):* Both halves done, and the finding's own instruction about the `fold` seam
+does not survive measurement.
+
+**(b) the Card ledger** is `engine/card_reservation.py::CardReservationMixin` — the stem
+`card_ledger` was already taken by `events/card_ledger.py` (EV-01). The cluster measured larger than
+the finding says: 27 methods, not 19, contiguous from `_record_dropped_batch_cards` through
+`_mirror_hypothesis_card_merges`. orchestrator.py 6,644 → 5,500 lines. `_BuildReservation` /
+`_CardReservationPlan` moved with it and are imported back, so `looplab.orchestrator._BuildReservation`
+still resolves.
+
+**The `fold` instruction was wrong twice.** The finding names "the two fold-monkeypatching tests";
+there are FOUR files patching the seam through the orchestrator module — `test_continuous_dispatch`,
+`test_gpu_resources`, `test_creation_runaway_guard`, `test_hypothesis_merge`. Counted by wrapping the
+shim, only ONE reaches this cluster and only once (`test_creation_runaway_guard`, via a real
+`Engine`); the two dispatch files drive `_dispatch_evals` on a stub host that owns none of these
+methods, and `test_hypothesis_merge` never gets here. **And all 59 of those tests stay GREEN with the
+ledger folding through its own import** — so re-verifying the named files, as the finding asks, would
+have proved nothing. The real cost of the offered `from looplab.events.replay import fold` is not a
+red test: it is that `monkeypatch.setattr(orch, "fold", …)` silently stops covering ~1,100 lines of
+engine, and `test_creation_runaway_guard`'s own stated reasoning about the Card lane under an empty
+fold quietly stops being true of what it runs. Every fold here therefore goes through `_fold`, which
+resolves `orchestrator.fold` as a module ATTRIBUTE at call time.
+`tests/test_card_reservation_fold_seam.py` is the coverage that was missing and it DRIVES the
+property — a real toy run with a watched seam, asserting the interceptions include frames from
+`looplab.engine.card_reservation`.
+
+**(a) is half stale.** The calibration PROFILE construction the finding puts at 141-310 had already
+moved to `search/speculation_calibration.py`, with `tests/test_calibration_profile_home.py` guarding
+that home. What was still inline is now `engine/speculation_gate.py`: the two `__init__` closures
+(`_narrow_runtime_envelope_errors`, 96 lines; `_guard_calibrated_role_factory`) plus the two
+module-level helpers they call. The point is not `__init__`'s length — as closures over twenty
+construction locals the envelope could not be STATED, so no test could reach a single rule of the
+check that decides whether a caller may claim the speculation-depth waiver. `CalibrationRuntime`
+names those twenty inputs once and `tests/test_speculation_gate_envelope.py` is the 48-case truth
+table that becomes writable. Bodies are the closures' own text; the only edits are the signature
+lines, a rebinding preamble, and an AST-located `self` → `engine` rename.
+
+`_require_pinned_speculation_receipt` stays in orchestrator.py: it is read by the run spine at three
+re-entry boundaries and by `cli/run_cmds.py`, so it is engine surface, not envelope.
+
 #### ES-02 · HIGH · duplication · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
 **Three node-creation paths triplicate a ~70-line commit epilogue that has already forced the same fix to be applied three times**
