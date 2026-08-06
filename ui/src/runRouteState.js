@@ -4,10 +4,22 @@
 
 export const RUN_ROUTE_TABS = ['Overview', 'Comments', 'Trials', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 export const RUN_ROUTE_PANELS = [
-  'overview', 'queue', 'hypotheses', 'research', 'failures', 'trust', 'pareto', 'data',
+  'overview', 'queue', 'research', 'failures', 'trust', 'pareto', 'data',
   'compare', 'sensitivity', 'importance', 'crossrun', 'artifacts', 'registry', 'memory',
   'collab', 'authoring', 'events', 'gpu', 'config',
 ]
+// The Card board is no longer a panel: it is the `cards` workspace view. `?panel=hypotheses` was a
+// live deep link (and the run menu's own spelling), so it is MIGRATED rather than rejected —
+// dropping it from RUN_ROUTE_PANELS alone would make every saved link report "Unknown panel was
+// ignored" and land on the graph. This is the one legacy panel name with a view successor; see
+// `sanitizeRunRouteState`, which is where the translation happens so that BOTH the parse path and
+// an in-memory `route.update({ panel: 'hypotheses' })` from stale code reach the same place.
+export const LEGACY_PANEL_VIEWS = { hypotheses: 'cards' }
+export const RUN_ROUTE_VIEWS = ['dag', 'cards', 'concepts', 'report']
+// Views a review bearer may reach. `cards` joins `concepts` on the owner-only side: the Card board
+// is an operator CONTROL surface (edit/priority/resources/drop/abandon) and `hypotheses` was never
+// in REVIEW_SAFE_PANEL_NAMES, so promoting it to a view must not quietly widen the review scope.
+export const REVIEW_SAFE_VIEWS = ['dag', 'report']
 export const TIMELINE_KIND_ORDER = [
   'proposal', 'eval', 'decision', 'research', 'report', 'trust', 'control', 'lifecycle',
 ]
@@ -22,7 +34,10 @@ const TAB_TO_WIRE = new Map(RUN_ROUTE_TABS.map(tab => [tab, tab.toLowerCase()]))
 const PANEL_SET = new Set(RUN_ROUTE_PANELS)
 const REVIEW_PANEL_SET = new Set(REVIEW_SAFE_PANEL_NAMES)
 const KIND_SET = new Set(TIMELINE_KIND_ORDER)
-const KNOWN_KEYS = new Set(['gen', 'view', 'node', 'attempt', 'tab', 'comment', 'panel', 'focus', 'seq', 'q', 'kinds'])
+const KNOWN_KEYS = new Set(
+  ['gen', 'view', 'card', 'node', 'attempt', 'tab', 'comment', 'panel', 'focus', 'seq', 'q', 'kinds'])
+const VIEW_SET = new Set(RUN_ROUTE_VIEWS)
+const REVIEW_VIEW_SET = new Set(REVIEW_SAFE_VIEWS)
 const GENERATION_RE = /^[0-9a-f]{64}$/
 const COMMENT_ID_RE = /^[A-Za-z0-9_-]{8,160}$/
 const INTEGER_RE = /^(0|[1-9][0-9]*)$/
