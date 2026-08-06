@@ -108,6 +108,7 @@ from looplab.engine.concept_registry import (
     ConceptGovernanceGlobalConflict,
     _append_governance,
     concept_governance_snapshot,
+    load_concept_aliases,
     normalize_key,
     prepare_concept_alias,
     record_concept_alias,
@@ -340,6 +341,19 @@ def _ratify_one(memory_dir, merge: ProposedMerge, *, by: str, at: str) -> tuple[
             return "revision_conflict", {}
         except (ValueError, GovernanceLedgerUnavailable) as exc:
             return _decline_reason(exc), {}
+        # A successful call does NOT prove this pass wrote the row. `_append_governance` resolves
+        # action-id idempotency BEFORE CAS and validation, so a repeat returns the ORIGINAL receipt —
+        # which is exactly the mechanism that protects an operator's undo, and exactly why "the call
+        # returned" cannot be read as "the merge is now in force". The two cases it hides are
+        # opposite: a concurrent twin just wrote the same decision (in force), or the operator has
+        # CLEARED it and the append-only ledger still carries the original row (not in force, and
+        # must stay that way). Only re-resolving the source separates them.
+        if resolve_slug(merge.source, load_concept_aliases(memory_dir)) != merge.target:
+            return "cleared_not_reapplied", {}
+        # NOTE the exact meaning of `applied`: "in force as of this pass", not "written by this
+        # pass". Under a real race two processes can both report it, and that is deliberate — the
+        # ledger is the single authority on WHO wrote a decision (`action_id` + `revision`, both
+        # carried below), and a second count kept here would be a second source of truth about it.
         return "applied", {"revision": record.get("revision"),
                            "governance_revision": record.get("governance_revision")}
     return "revision_conflict", {}
