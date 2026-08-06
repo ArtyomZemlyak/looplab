@@ -288,32 +288,31 @@ class CreationRunawayCounters:
 
     Lifted out of `Engine._run_with_llm_broker` (doc 25 XP-06), where these were four loop-carried
     locals and the charging rule was thirteen lines in the middle of a 389-line function: no test
-    could reach the RULE, only the whole simulated spin around it. The commentary below is the
-    loop's own, unchanged apart from the counters losing their leading underscore.
+    could reach the RULE, only the whole simulated spin around it. Every comment below is the loop's
+    own, unchanged apart from the counters losing their leading underscore.
     `tests/test_creation_runaway_guard.py` still drives both bounds end to end through a real run.
-
-    # Creation-level runaway guard: if the loop keeps CREATING nodes while NO node reaches a
-    # terminal (evaluated/failed), it is spinning — e.g. `fold` returning empty `nodes` makes
-    # `_create_node` re-mint id 0 forever (the 184MB node_created(0) spin). The eval loop bounds
-    # its own inline-repair runaway (the triage model's stop verdict + `inline_repair_attempts`),
-    # but node CREATION had nothing. Local counters (not replayed) → on trip we
-    # append run_finished (which IS replayed), so resume sees a cleanly-finished run.
-    #
-    # It charges nodes actually MINTED, counted from the LOG (`node_created` rows), not from the
-    # planned `len(creates)` and not from `len(state.nodes)`. Both alternatives were wrong, in
-    # opposite directions:
-    #   * planned creates over-charge a lane that plans work and mints nothing — the Card lane
-    #     stages/elects per turn, so a Card-side stall was reported as "node creation not
-    #     converging" when not one node had been created. That is the misdiagnosis this counter
-    #     caused for the whole speculation-depth defect, and the reason the message is now split;
-    #   * folded `nodes` under-charges to zero in the exact spin the guard exists for: the
-    #     empty-nodes fold that re-mints id 0 forever leaves `len(state.nodes)` at 0 every turn.
-    # The log is the one view that sees both. `no_mint_turns` is the companion bound for the
-    # other half — a create lane that keeps planning work and minting nothing — because a
-    # mint-only charge on its own would turn that stall into an unbounded loop.
     """
 
     def __init__(self) -> None:
+        # Creation-level runaway guard: if the loop keeps CREATING nodes while NO node reaches a
+        # terminal (evaluated/failed), it is spinning — e.g. `fold` returning empty `nodes` makes
+        # `_create_node` re-mint id 0 forever (the 184MB node_created(0) spin). The eval loop bounds
+        # its own inline-repair runaway (the triage model's stop verdict + `inline_repair_attempts`),
+        # but node CREATION had nothing. Local counters (not replayed) → on trip we
+        # append run_finished (which IS replayed), so resume sees a cleanly-finished run.
+        #
+        # It charges nodes actually MINTED, counted from the LOG (`node_created` rows), not from the
+        # planned `len(creates)` and not from `len(state.nodes)`. Both alternatives were wrong, in
+        # opposite directions:
+        #   * planned creates over-charge a lane that plans work and mints nothing — the Card lane
+        #     stages/elects per turn, so a Card-side stall was reported as "node creation not
+        #     converging" when not one node had been created. That is the misdiagnosis this counter
+        #     caused for the whole speculation-depth defect, and the reason the message is now split;
+        #   * folded `nodes` under-charges to zero in the exact spin the guard exists for: the
+        #     empty-nodes fold that re-mints id 0 forever leaves `len(state.nodes)` at 0 every turn.
+        # The log is the one view that sees both. `no_mint_turns` is the companion bound for the
+        # other half — a create lane that keeps planning work and minting nothing — because a
+        # mint-only charge on its own would turn that stall into an unbounded loop.
         self.created_no_terminal = 0
         self.prev_terminal = -1
         # `None` until the first observation: on RESUME the log already holds every earlier
@@ -1562,11 +1561,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if state.finished:
                 break
             if isinstance(state.leakage, dict) and state.leakage.get("leak"):
-                if self._terminal_gate(state, "leakage", decision_seq=decision_seq) == "break":
+                if self._settle_terminal_gate(state, "leakage", decision_seq=decision_seq) == "break":
                     break
                 continue
             if state.stop_requested:
-                if self._terminal_gate(state, "aborted", decision_seq=decision_seq) == "break":
+                if self._settle_terminal_gate(state, "aborted", decision_seq=decision_seq) == "break":
                     break
                 continue
             if state.paused:
@@ -1602,7 +1601,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             max_s, max_es = self._apply_control_overrides(state)
             # Budget (I13): per-invocation wall-clock ceiling (resets on each resume).
             if max_s is not None and (time.time() - start) >= max_s:
-                if self._terminal_gate(state, "time_budget", decision_seq=decision_seq,
+                if self._settle_terminal_gate(state, "time_budget", decision_seq=decision_seq,
                                        max_es=max_es, drain_forced_request=True) == "break":
                     break
                 continue
@@ -1611,7 +1610,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # the silent multi-hour sweep that real training runs can produce.
             if (max_es is not None
                     and state.total_eval_seconds >= max_es):
-                if self._terminal_gate(state, "eval_budget", decision_seq=decision_seq,
+                if self._settle_terminal_gate(state, "eval_budget", decision_seq=decision_seq,
                                        max_es=max_es, drain_forced_request=True) == "break":
                     break
                 continue
@@ -1732,9 +1731,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # trace.json + tree.html. Event emission order is preserved exactly.
         return finalize_run(self, entry_finished=entry_finished, start_time=start)
 
-    def _terminal_gate(self, state, reason: str, *, decision_seq: int,
-                       max_es: Optional[float] = None,
-                       drain_forced_request: bool = False) -> str:
+    def _settle_terminal_gate(self, state, reason: str, *, decision_seq: int,
+                              max_es: Optional[float] = None,
+                              drain_forced_request: bool = False) -> str:
         """One terminal gate: settle what is in flight, then finish only if the log is quiescent.
 
         Four gates in the run loop spelled this ladder out (leakage, aborted, time_budget,
@@ -1747,6 +1746,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
         `state.paused` deliberately does NOT come through here even though it settles the same
         in-flight build: it then breaks WITHOUT finishing, which is a different terminal.
+
+        Named for the `_close_*_before_terminal_gate` family it drives, and deliberately NOT
+        `_terminal_gate`: this module already has a `_run_terminal_gate` PREDICATE ("has the run
+        stopped accepting eval work"), and the two would read as the same thing.
         """
         if self._close_card_build_before_terminal_gate(state, max_es):
             return "continue"

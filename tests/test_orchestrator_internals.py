@@ -224,7 +224,7 @@ class _GateProbe:
 def _drive_gate(probe, reason="aborted", **kwargs):
     from looplab.engine.orchestrator import Engine
 
-    return Engine._terminal_gate(probe, object(), reason, decision_seq=7, **kwargs)
+    return Engine._settle_terminal_gate(probe, object(), reason, decision_seq=7, **kwargs)
 
 
 def test_a_terminal_gate_never_attempts_finalization_while_a_build_head_is_open():

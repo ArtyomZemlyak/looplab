@@ -7717,9 +7717,11 @@ line count:
 - `_run_spec_gates` and `_handle_no_actions` follow the ES-05 precedent: blocks that always
   continued or broke and never fell through, so their outer-loop control flow becomes a returned
   signal. (`_run_spec_gates` is the one that CAN fall through, so its signal is three-valued.)
-- `_terminal_gate` names the settle-then-finish ladder four gates spelled out; the ORDER is the
-  rule, and it is now testable in the direction that matters — that finalization is not even
-  ATTEMPTED while a durable request head is open.
+- `_settle_terminal_gate` names the settle-then-finish ladder four gates spelled out; the ORDER is
+  the rule, and it is now testable in the direction that matters — that finalization is not even
+  ATTEMPTED while a durable request head is open. (Named for the established
+  `_close_*_before_terminal_gate` family, and deliberately NOT `_terminal_gate`: the module already
+  has a `_run_terminal_gate` PREDICATE and the two would read as the same thing.)
 
 What was NOT cut, with the measurement: the stable-decision-prefix block (~30 lines) returns three
 loop-carried names through two `continue`s and a `break`, which is the shape ES-03 correctly
