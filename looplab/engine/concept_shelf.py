@@ -218,7 +218,9 @@ def shelf_tree(tiers: dict) -> dict:
     # Deferred: `search` imports `agents` at module scope and this module is reached from the engine's
     # import graph, so the tree projector is pulled in at CALL time to keep the engine's module-level
     # dependency surface unchanged (CLAUDE.md layering).
-    from looplab.search.concept_graph import project_hierarchy
+    # doc 25 SE-09/SE-10 split `concept_graph` into vocabulary/analytics/lens/map/tagging;
+    # the hierarchy PROJECTION lives in `concept_lens` now.
+    from looplab.search.concept_lens import project_hierarchy
     tree = project_hierarchy(sorted(counts))
     tree["counts"] = dict(sorted(counts.items()))
     return tree
