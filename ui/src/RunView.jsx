@@ -27,6 +27,7 @@ import { initialDagOverviewDecision } from './dagViewport.js'
 import {
   captureMergeIntent, mergeIntentCommand, mergeIntentMatches, selectMergeTarget,
 } from './mergeIntent.js'
+import { GLOBAL_DESTINATIONS, INSTALLATION_ROUTE_VIEWS } from './globalNav.js'
 import { nodeIsActive } from './nodeProjection.js'
 import { createInspectorDraftStore } from './inspectorDraftStore.js'
 import { installNavigationLossGuard } from './navigationLossGuard.js'
@@ -141,7 +142,17 @@ const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
 // the LoopLab menu (globalNav.js::GLOBAL_DESTINATIONS) beside Runs, Atlas and Settings, which is
 // reachable from this header too — the split is about which QUESTION each menu answers, not about
 // making the operator leave the run to ask it. The panel components still mount below for old
-// `?panel=memory|authoring|gpu` links; they are simply not offered here.
+// `?panel=memory|authoring|gpu` links.
+//
+// BUT REMOVING THE ENTRIES REMOVED THE PATH. Reported by the operator on 2026-08-06: "you took
+// something out of the run menus and now it is nowhere". The reasoning above is about SCOPE and it
+// is right; what it got wrong is that an operator standing in a run does not re-derive it. They open
+// the run's menus, do not find Memory, and conclude it is gone — the LoopLab menu one row above
+// does not announce that it is where memory went. So the three are offered here again, at the foot
+// of `Lab`, as LINKS to their installation home rather than as run panels: they navigate to
+// `#/memory` / `#/knowledge` / `#/gpu`, under a heading that says whose they are. The scope split
+// survives (nothing pretends to be run-scoped, and the destination is the same one screen the
+// LoopLab menu reaches); the path back is what returns.
 // Cross-run and Registry stay: both are anchored on THIS run (its task id, its champion and
 // promotions) and read the run list only as context for it.
 const HUBS = [
@@ -151,6 +162,13 @@ const HUBS = [
   ['Lab', [['artifacts', 'Files'], ['registry', 'Registry'], ['collab', 'Comments & sharing'], ['events', 'Events']]],
 ]
 const HUB_OF = Object.fromEntries(HUBS.flatMap(([label, items]) => items.map(([k]) => [k, label])))
+// The hub whose menu also carries the installation links, and the links themselves — derived from
+// the same two tables the LoopLab menu uses, so a destination added or renamed there cannot leave a
+// stale copy here. `Lab` because that is where Files/Registry/Events already sit: the group that is
+// about the workbench rather than about this run's search.
+const INSTALLATION_LINK_HUB = 'Lab'
+const INSTALLATION_LINKS = GLOBAL_DESTINATIONS.filter(
+  entry => INSTALLATION_ROUTE_VIEWS.includes(entry.key))
 // Historical overlays must derive only from the exact folded snapshot. Panels that fetch current
 // config, raw detail, another run, or a sidecar stay closed so `seq + panel` cannot create a hybrid.
 const HISTORY_SAFE_PANELS = new Set(['sensitivity', 'importance', 'failures', 'pareto', 'data'])
@@ -2535,6 +2553,16 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                       if (!panelAllowed(k)) return
                       panelReturnFocusRef.current = hubTriggerRef.current; closeHub(false); setPanel(k)
                     }}>{l}</button>)}
+                  {/* Anchors, not buttons, for the same reason the LoopLab menu uses them: the hash
+                      is a bookmarkable URL, so middle-click and copy-link work. Hidden in review
+                      mode, which is public and must not advertise installation-wide surfaces —
+                      the same rule that keeps `<GlobalMenu />` out of that header. */}
+                  {label === INSTALLATION_LINK_HUB && !reviewMode && <>
+                    <div className="mi-label">Whole installation</div>
+                    {INSTALLATION_LINKS.map(entry => <a key={entry.key} role="menuitem" tabIndex={-1}
+                      className="mi" href={entry.hash} title={entry.title}
+                      onClick={() => closeHub(false)}>{entry.label} ↗</a>)}
+                  </>}
                 </div>
               </>}
             </div>)}
