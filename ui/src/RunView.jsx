@@ -5,7 +5,8 @@ import { useMediaQuery, useRunState, useScopedResource } from './hooks.js'
 import { useToast } from './useToast.js'
 import { useTimeline } from './useTimeline.js'
 import { takeRunPanelHistoryEntry, useRunRouteState } from './useRunRouteState.js'
-import { reviewInspectorTabs, reviewPanelAllowed, runRouteStateHasTarget } from './runRouteState.js'
+import { REVIEW_SAFE_VIEWS, reviewInspectorTabs, reviewPanelAllowed,
+  runRouteStateHasTarget } from './runRouteState.js'
 import { deadlineGet, get, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback,
   storageGet, storageSet, runApiPath } from './util.js'
 import { computeGroups, autoCollapseSet } from './grouping.js'
@@ -49,6 +50,10 @@ const Dag = lazy(() => import('./Dag.jsx'))
 const Dock = lazy(() => import('./Dock.jsx'))
 const ReportView = lazy(() => import('./Report.jsx'))
 const ConceptView = lazy(() => import('./ConceptView.jsx'))
+// A view, so it loads like the other views (its own chunk) rather than through `loadPanels`. It
+// still shares the CardBoard module with the legacy `HypothesisBoard` re-export in `panels.jsx`;
+// vite hoists that into a chunk both entry points reach, so the board is not shipped twice.
+const CardWorkspace = lazyNamed(() => import('./CardBoard.jsx'), 'CardWorkspace')
 const ConceptChipBar = lazy(() => import('./ConceptChipBar.jsx'))
 
 let inspectorPromise
@@ -122,7 +127,6 @@ const CollabPanel = lazy(() => import('./CollabPanel.jsx'))
 const OverviewPanel = lazyNamed(loadPanels, 'OverviewPanel')
 const ResearchPanel = lazyNamed(loadPanels, 'ResearchPanel')
 const ArtifactsPanel = lazyNamed(loadPanels, 'ArtifactsPanel')
-const HypothesisBoard = lazyNamed(loadPanels, 'HypothesisBoard')
 const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
 
 // The panel bar, grouped by importance then process order (Report is the [Search|Report] toggle, and
@@ -144,8 +148,13 @@ const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
 // `?panel=memory|authoring|gpu` links; they are simply not offered here.
 // Cross-run and Registry stay: both are anchored on THIS run (its task id, its champion and
 // promotions) and read the run list only as context for it.
+// Cards LEFT this bar: it is now a workspace view in the toggle above, beside Search / Concepts /
+// Report. The board needed 96% of the viewport as a modal (see `PanelShell.jsx::PANEL_WIDTHS`) and
+// has a detail pane no overlay could hold, so it stopped being a detour over the workspace. Old
+// `?panel=hypotheses` links still work — `runRouteState.js::LEGACY_PANEL_VIEWS` migrates them to
+// `?view=cards` rather than reporting an unknown panel.
 const HUBS = [
-  ['Progress', [['queue', 'Queue'], ['hypotheses', 'Cards'], ['research', 'Research'], ['failures', 'Failures']]],
+  ['Progress', [['queue', 'Queue'], ['research', 'Research'], ['failures', 'Failures']]],
   ['Trust', [['trust', 'Trust'], ['pareto', 'Pareto / diversity'], ['data', 'Data quality']]],
   ['Analysis', [['compare', 'Compare'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['crossrun', 'Cross-run']]],
   ['Lab', [['artifacts', 'Files'], ['registry', 'Registry'], ['collab', 'Comments & sharing'], ['events', 'Events']]],
@@ -360,6 +369,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const retainedCommentWorkUnsafe = retainedCommentEntries.length > 0
     || retainedCommentDurableCount > 0 || retainedCommentRecoveryUnavailable
   const viewSeq = routeState.sequence
+  const selectedCardId = routeState.cardId
   const selectedId = routeState.nodeId
   const inspectTab = routeState.inspectTab
   const panel = routeState.panel
@@ -625,9 +635,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const autoReport = !historyActive && liveTerminalReady && !landedRef.current
     && !deepLinkLandingRef.current && !groupNavigation
     && !runRouteStateHasTarget(routeState, { reviewMode })
-  // review capabilities do not expose concept frames. Owner history does, through an
-  // exact seq; redirect only the unsupported review route instead of hiding owner history.
-  const requestedView = reviewMode && requestedRouteView === 'concepts' ? 'dag' : requestedRouteView
+  // review capabilities do not expose concept frames, and the Card board is an operator CONTROL
+  // surface (edit / priority / resources / drop / abandon) that `panel=hypotheses` never offered a
+  // reviewer either. Owner history does expose both, through an exact seq; redirect only the
+  // unsupported review routes instead of hiding owner history. `runRouteState` already refuses these
+  // two views for a review bearer — this is the render-side half, kept so a review scope reaching
+  // this component with a stale in-memory route still cannot land on an owner-only surface.
+  const requestedView = reviewMode && !REVIEW_SAFE_VIEWS.includes(requestedRouteView)
+    ? 'dag' : requestedRouteView
   const view = autoReport ? 'report' : requestedView
   const routeMainRef = useRef(null)
   const workspaceToolbarRef = useRef(null)
@@ -1944,7 +1959,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     : routeFenceBlocked ? `fence:${generationMismatch ? 'mismatch' : 'pending'}`
     : historyActive && !hist ? `history:${history.status}` : 'ready'
   const workspaceRouteLabel = `${live?.label || live?.run_id || runId} run workspace · ${
-    view === 'concepts' ? 'Concepts' : view === 'report' ? 'Report' : 'Search'}`
+    view === 'cards' ? 'Cards' : view === 'concepts' ? 'Concepts'
+      : view === 'report' ? 'Report' : 'Search'}`
   useEffect(() => {
     // The dialog owns focus while it is mounting and open. Keeping the opener intact here also lets
     // an explicit Close consume the panel's history entry and restore the exact launching control.
@@ -2226,6 +2242,32 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const hasInspectorContext = selectedId != null || selectedGroup != null
   const groupDetailsOpen = selectedId == null && selectedGroup != null
   const showInspector = compactWorkspace ? (compactInspectorOpen && hasInspectorContext) : (!sideC && hasInspectorContext)
+  // ONE spelling of the node Inspector, mounted from both the graph workspace and the Card board's
+  // detail pane. It is a genuinely shared component and not a shared shape: the Inspector takes a
+  // node id plus this run's stores and knows nothing about the DAG's projection, viewport or edges,
+  // so hosting it under a Card costs nothing and forking it would immediately drift. Keeping it a
+  // single expression is what makes "the card pane hosts the node Inspector" true rather than
+  // approximately true — a second copy of these fifteen props is a second set of defaults.
+  const renderNodeInspector = nodeId => <LazyBoundary label="experiment inspector"
+    resetKey={`node:${nodeId}`}>
+    <Inspector runId={runId} nodeId={nodeId} state={state} live={live}
+      tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}
+      draftStore={inspectorDraftStoreRef.current}
+      traceClearRecoveryStore={traceClearRecoveryStore}
+      traceClearRecoverySnapshot={traceClearRecoverySnapshot}
+      publishTraceClearRecovery={publishTraceClearRecovery}
+      readOnly={mutationReadOnlyMode} historySeq={history.resolvedSeq}
+      expectedGeneration={generation} commentsRevision={state?.comments_revision}
+      focusCommentId={commentAttemptMatches ? routeState.commentId : null}
+      readOnlyReason={mutationReadOnlyReason} evidenceAvailable={!reviewMode || reviewEvidence} />
+  </LazyBoundary>
+  // Card selection is route state, so a Card is linkable and Back works over it. Picking a DIFFERENT
+  // card clears the inspected node: that node was an attempt at the previous card's question, and
+  // leaving it selected would show the new card beside an experiment that never tested it.
+  const selectCard = cardId => route.update(current => routeWithSelectedNode({
+    ...current, view: 'cards', cardId: cardId || null,
+  }, cardId === current.cardId ? current.nodeId : null))
+  const selectCardNode = nodeId => route.update(current => routeWithSelectedNode(current, nodeId))
   const activateReportTimeline = () => {
     if (reportTimelineActivated) return
     setTimelineActivation({ runId, active: true, focusPending: true })
@@ -2286,6 +2328,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           onKeyDown={onWorkspaceToolbarKeyDown} onFocus={onWorkspaceToolbarFocus}>
           <button type="button" data-workspace-control="dag" tabIndex={workspaceTabStop === 'dag' ? 0 : -1}
             aria-pressed={view === 'dag'} className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>Search</button>
+          <button type="button" data-workspace-control="cards" tabIndex={workspaceTabStop === 'cards' ? 0 : -1}
+            aria-pressed={view === 'cards'} className={'vt' + (view === 'cards' ? ' on' : '')}
+            disabled={reviewMode} onClick={() => setView('cards')}
+            title={reviewMode ? 'The Card board is an operator control surface and is not included in review capabilities'
+              : 'card board — the work items the run is testing, and the experiments under each'}>Cards</button>
           <button type="button" data-workspace-control="concepts" tabIndex={workspaceTabStop === 'concepts' ? 0 : -1}
             aria-pressed={view === 'concepts'} className={'vt' + (view === 'concepts' ? ' on' : '')}
             disabled={reviewMode} onClick={() => setView('concepts')}
@@ -2604,6 +2651,37 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                 }} />
             </LazyBoundary>
           </div></div>
+        : view === 'cards'
+        ? <LazyBoundary label="card board" resetKey={`${runId}:${generation || 'pending'}`}>
+            <CardWorkspace state={state} runId={runId} runGeneration={generation}
+              onToast={showToast}
+              selectedCardId={selectedCardId} onSelectCard={selectCard}
+              selectedNodeId={selectedId} onSelectNode={selectCardNode}
+              renderInspector={renderNodeInspector}
+              onSelect={(id) => {
+                // The lane cards' evidence buttons still mean "take me to this experiment on the
+                // graph", the same jump they made from the modal. Only the detail pane's attempt
+                // rows keep you on the board.
+                route.update(current => ({ ...current, view: 'dag', nodeId: id,
+                  nodeGeneration: null, cardId: null, commentId: null }))
+                commitGroupNavigation(null, { mode: 'replace' })
+                if (compactWorkspace) setCompactInspectorOpen(true)
+                else setSideC(false)
+              }}
+              // The board borrows the workspace's OWN pane chrome rather than growing a second one:
+              // same persisted `ll.sideW`, same drag/keyboard splitter, same <900px drawer. A second
+              // width would drift from the graph's and would not survive the same resize clamp.
+              pane={{
+                width: sideW, compact: compactWorkspace,
+                splitter: !compactWorkspace && <div className="splitter v"
+                  onPointerDown={startDrag('side')} onKeyDown={resizeWithKeys('side')}
+                  role="separator" tabIndex={0} aria-orientation="vertical"
+                  aria-label="Resize work item details" aria-valuemin={280}
+                  aria-valuemax={Math.max(280, window.innerWidth - 486)}
+                  aria-valuenow={Math.round(sideW)}
+                  title="Drag or use arrow keys to resize" />,
+              }} />
+          </LazyBoundary>
         : view === 'concepts'
         ? <div className="main"><LazyBoundary label="concept tree"
             resetKey={`${runId}:${generation || 'pending'}:${historyActive ? viewSeq : 'live'}`}>
@@ -2670,24 +2748,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                           aria-label={`${compactWorkspace ? 'Close' : 'Collapse'} ${groupDetailsOpen ? 'group details' : 'experiment inspector'}`}
                           onClick={() => compactWorkspace ? closeCompactInspector() : collapseSideInspector()}>⟩</button>
                 </div>
-                <LazyBoundary label={groupDetailsOpen ? 'group details' : 'experiment inspector'}
-                  resetKey={groupDetailsOpen ? `group:${selectedGroup}` : `node:${selectedId}`}>
-                  {groupDetailsOpen
-                    ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
+                {groupDetailsOpen
+                  ? <LazyBoundary label="group details" resetKey={`group:${selectedGroup}`}>
+                      <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
                         state={state} themeFilter={themeFilter} highlightIds={conceptHighlight}
                         onSelectNode={focusGroupMember}
                         onClose={() => selectGroup(null)} />
-                    : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
-                         tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}
-                         draftStore={inspectorDraftStoreRef.current}
-                         traceClearRecoveryStore={traceClearRecoveryStore}
-                        traceClearRecoverySnapshot={traceClearRecoverySnapshot}
-                        publishTraceClearRecovery={publishTraceClearRecovery}
-                        readOnly={mutationReadOnlyMode} historySeq={history.resolvedSeq}
-                        expectedGeneration={generation} commentsRevision={state?.comments_revision}
-                        focusCommentId={commentAttemptMatches ? routeState.commentId : null}
-                        readOnlyReason={mutationReadOnlyReason} evidenceAvailable={!reviewMode || reviewEvidence} />}
-                </LazyBoundary>
+                    </LazyBoundary>
+                  : renderNodeInspector(selectedId)}
               </aside>
             </>}
       </div>
@@ -2761,9 +2829,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId} onToast={showToast} onClose={closePanel} />}
       {panel === 'trust' && panelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} readOnly={mutationReadOnlyMode} />}
       {panel === 'queue' && panelAllowed('queue') && <QueuePanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} />}
-      {panel === 'hypotheses' && panelAllowed('hypotheses') && <HypothesisBoard state={state}
-        runId={runId} runGeneration={generation} onSelect={selectNodeFromPanel} onToast={showToast}
-        onClose={closePanel} />}
       {panel === 'sensitivity' && panelAllowed('sensitivity') && <SensitivityPanel state={state} onSelect={selectNodeFromPanel} onClose={closePanel} />}
       {panel === 'importance' && panelAllowed('importance') && <HyperImportancePanel state={state} onClose={closePanel} />}
       {panel === 'failures' && panelAllowed('failures') && <FailuresPanel state={state} onSelect={selectNodeFromPanel} onClose={closePanel} />}

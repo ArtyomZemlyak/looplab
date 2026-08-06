@@ -195,7 +195,13 @@ test('Card controls use only generation-fenced command helpers and never client 
     'card_reprioritized', 'card_edited', 'card_resource_pinned', 'card_dropped',
   ]) assert.match(controls, new RegExp(`runCommand\\([^)]*['"]${eventType}['"]`, 's'))
   assert.doesNotMatch(controls, /source\s*:|dropped_by\s*:|pinned\s*:/)
-  assert.match(runView, /\['hypotheses', 'Cards'\]/)
+  // The board moved out of the run menu's Progress hub and became a workspace VIEW, so the
+  // reachability half of this guard is re-pointed rather than dropped: it still has to be reachable,
+  // just from the view toggle now. (`cardWorkspace.test.js` holds the URL side of the same move.)
+  assert.doesNotMatch(runView, /\['hypotheses', 'Cards'\]/)
+  assert.match(runView, /setView\('cards'\)/)
+  // The generation fence is the property that actually matters here and it is unchanged: the board
+  // must be handed the run generation, or its commands cannot be fenced against a reset.
   assert.match(runView, /runGeneration=\{generation\}/)
 })
 
