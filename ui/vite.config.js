@@ -25,7 +25,18 @@ export default defineConfig({
         passes: 4, pure_getters: true, keep_fargs: false,
         hoist_props: true, unsafe: true, unsafe_arrows: true, unsafe_methods: true,
         unsafe_comps: true, unsafe_proto: true, unsafe_regexp: true,
-        builtins_ecma: 2022, booleans_as_integers: true,
+        builtins_ecma: 2022,
+        // NEVER re-enable `booleans_as_integers` here. It rewrites `false` to `0` and `true` to `1`,
+        // which is value-preserving for every JS operator and NOT value-preserving for React: `0` is
+        // falsy but React RENDERS numbers, so the house guard `{open && <Menu/>}` — correct in source,
+        // invisible in dev, invisible to SSR, invisible to every unit test, because they all run
+        // UNMINIFIED — painted a bare `0` on screen next to every popover trigger in the shipped
+        // build (Theme, Energy, LoopLab ▾, the panel hubs, …). It costs ARIA too: `aria-expanded={open}`
+        // serializes as `aria-expanded="0"`, which is not a valid ARIA boolean, so the collapsed state
+        // of every menu trigger was being reported as invalid rather than "false". What it bought, on a
+        // controlled A/B of this tree with only this flag flipped: 3,680 B raw / 1,028 B gzip out of
+        // 488 KiB gzip — 0.2%. `test/minifierBooleanGuards.test.js` drives the property, and
+        // `scripts/check-bundle.mjs::findIntegerBooleanChunks` re-checks it over the emitted bytes.
       },
       mangle: true,
       format: { comments: false },
