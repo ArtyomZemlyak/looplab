@@ -17,6 +17,9 @@ import {
   ownerRunEnded, reviewLinkEnded, runSnapshotIdentity, snapshotMovedBackwards,
   streamCursorMatchesSnapshot, terminalSnapshot,
 } from './runStateModel.js'
+import {
+  NODE_TRACE_SPAN_WINDOW, NODE_TRACE_SPAN_WINDOW_MAX, nextNodeSpanWindow,
+} from './traceProjection.js'
 
 // Keep responsive behavior in React aligned with the CSS breakpoints.  The workspace uses this to
 // switch persistent desktop panes into temporary drawers on smaller screens; listening to the media
@@ -94,6 +97,28 @@ export function usePoll(fn, ms, deps = [], { pauseHidden = false, immediate = tr
     }
     // deps come from the caller (they list what their fn reads), mirroring the effects this replaces
   }, deps)
+}
+
+// The ONE per-node "load more" window, shared by BOTH surfaces that page a node's trace: the chat
+// feed's inline waterfall (Dock) and the Inspector's Trace tab (span tree AND conversation, which
+// share one window per node — an operator asking for more of a node means the node, not one of its
+// two readings). It owns the whole rule, so a consumer cannot hold a correct limit with a wrong
+// ceiling, or a correct ceiling it forgets to stop at:
+//   * the starting window and the doubling step (traceProjection.js, mirroring the server constants),
+//   * `canPage`, which is also what the traceWindow/conversationWindow rules key their ACTIONABLE
+//     branch on — so "there is a button" and "the button can do something" are one fact;
+//   * `loadMore` going UNDEFINED at the ceiling. Returning a dead callback is how a pager keeps
+//     rendering after it stops working, which is the failure this whole change exists to remove.
+// The Inspector had none of this and rendered a dead "Trace projection is partial." notice over the
+// same routes the Dock was already paging; the constants living in two files is what let that happen.
+export function useNodeSpanWindow() {
+  const [limit, setLimit] = useState(NODE_TRACE_SPAN_WINDOW)
+  const canPage = limit < NODE_TRACE_SPAN_WINDOW_MAX
+  return {
+    limit,
+    canPage,
+    loadMore: canPage ? () => setLimit(nextNodeSpanWindow) : undefined,
+  }
 }
 
 // The ONE durable-command status poll (doc 25 UI-01), replacing the two byte-identical effects Dock

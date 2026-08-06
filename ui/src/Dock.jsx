@@ -5,7 +5,7 @@ import { get, fmt, workingId, getRunCommand, retryRunCommand, runCommand,
   loadRunTransport, saveRunTransport, clearRunTransport,
   clearRunCommandLock, loadRunCommandLock, saveRunCommandLock, subscribeRunCommandLock,
   COMMAND_SUCCEEDED, COMMAND_FAILED, storageGet, storageSet, runApiPath, runNodeApiPath } from './util.js'
-import { useCommandStatusPoll, usePoll } from './hooks.js'
+import { useCommandStatusPoll, useNodeSpanWindow, usePoll } from './hooks.js'
 import {
   commandIntentPreserved, commandLockIdentity, commandLockMismatch, commandStorageUnavailableRecord,
   foreignCommandLock, interruptedCommandRecovery, observeCommandError, protocolCommandRecord,
@@ -92,7 +92,6 @@ function collectThinking(trace, nid) {
 // reading a dead "projection is partial" notice. TRACE_LIMIT_MAX matches the /trace/tail server cap.
 const TRACE_LIMIT_DEFAULT = 40
 const TRACE_LIMIT_MAX = 400
-const NODE_TRACE_CAP_MAX = 4096
 
 function LiveTrace({ runId, generation, active }) {
   const scope = `${runId}:${generation || 'pending'}`
@@ -424,8 +423,9 @@ function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt = null, auto
   const [nodeTraceNonce, setNodeTraceNonce] = useState(0)
   // Use the server's documented default explicitly, then double to its bounded ceiling.
   // This removes the special zero/default request path without changing the first response window.
-  const [nodeTraceLimit, setNodeTraceLimit] = useState(512)
-  const loadMoreNodeTrace = () => setNodeTraceLimit(value => Math.min(value * 2, NODE_TRACE_CAP_MAX))
+  // The window rule itself is the shared one (hooks.js::useNodeSpanWindow) — this surface used to own
+  // a private copy of the ceiling, and the Inspector's copy of the same route had no pager at all.
+  const { limit: nodeTraceLimit, loadMore: loadMoreNodeTrace } = useNodeSpanWindow()
   // Keep the inline evidence on the same attempt as the row destination. An unstamped legacy
   // node_created after a reset is ambiguous, so it keeps its rationale but does not guess a trace.
   const traceGeneration = e.type === 'node_created' ? nodeCreatedAttempt : eventNodeAttempt(e)
@@ -507,7 +507,7 @@ function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt = null, auto
           </div>}
           {hasTrace && nodeTrace != null && <NodeTrace spans={nodeSpans}
             projection={nodeTrace.projection} runId={runId} onRetry={retryNodeTrace}
-            onLoadMore={nodeTraceLimit < NODE_TRACE_CAP_MAX ? loadMoreNodeTrace : undefined} />}
+            onLoadMore={loadMoreNodeTrace} />}
           {opTraceId && <OpTrace runId={runId} traceId={opTraceId} />}
         </div>}
       </div>
