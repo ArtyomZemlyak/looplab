@@ -533,8 +533,11 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         {imp.length > 0 && <>
           <div className="muted" style={{ marginTop: 6 }}>which knobs mattered (|correlation| with the metric)</div>
           <DataTable caption="Report hyperparameter importance" card={false}><table className="tbl"><thead><tr><th>param</th><th>importance</th><th>r</th><th>n</th></tr></thead><tbody>
+            {/* `row.r >= 0` is TRUE for null, so an unmeasurable correlation used to sign its own
+                absence as "+—". A param no node varied has nothing to report here. */}
             {imp.map(row => <tr key={row.k}><td>{row.k}</td><td>{fmt(row.imp, 3)}</td>
-              <td className="muted">{row.r >= 0 ? '+' : ''}{fmt(row.r, 3)}</td><td className="muted">{row.n}</td></tr>)}
+              <td className="muted">{row.r == null ? '—' : `${row.r >= 0 ? '+' : ''}${fmt(row.r, 3)}`}</td>
+              <td className="muted">{row.n}</td></tr>)}
           </tbody></table></DataTable></>}
         {memos.length > 0 && <div style={{ marginTop: 8 }}>
           {memoProjection.omitted > 0 && <div className="muted">

@@ -2220,21 +2220,31 @@ export function GpuPanel({ onClose }) {
 export function HyperImportancePanel({ state, onClose }) {
   const nodes = Object.values(state.nodes).filter(n => n.status === 'evaluated' && n.metric != null && n.feasible !== false)
   const rows = hyperImportance(state)
-  const top = rows[0]?.imp || 1
+  // Rows are sorted with the unmeasurable ones last, so the first NUMERIC importance is the max.
+  // `rows[0]?.imp` alone would be `null` for a run where nothing could be measured, and `|| 1` then
+  // silently rescaled every gauge against a denominator nobody chose.
+  const top = rows.find(row => typeof row.imp === 'number')?.imp || 1
   return (
     <Panel title="Hyperparameter importance" sub={`${nodes.length} evaluated`} onClose={onClose}>
       {rows.length
         ? <><div className="section-h">|correlation| of each param with the metric (run-wide)</div>
             <DataTable caption="Run-wide hyperparameter importance" card={false}><table className="tbl"><thead><tr><th>param</th><th>importance</th><th>r</th><th>n</th><th>relative importance</th></tr></thead><tbody>
+              {/* `row.r >= 0` is TRUE for null, so an unmeasurable param used to sign its own
+                  absence as "+—". A param nothing varied gets the honest cell instead: a gauge at
+                  0% is a claim, and this row has no measurement to make one from. */}
               {rows.map(row => <tr key={row.k}>
                 <td>{row.k}</td><td>{fmt(row.imp, 3)}</td>
-                <td className="muted">{row.r >= 0 ? '+' : ''}{fmt(row.r, 3)}</td><td className="muted">{row.n}</td>
-                <td style={{ width: 160 }}><MetricGauge value={row.imp} max={top}
-                  label={`${row.k} relative importance`}
-                  valueText={`${fmt(row.imp / top * 100, 1)}%`} /></td></tr>)}
+                <td className="muted">{row.r == null ? '—' : `${row.r >= 0 ? '+' : ''}${fmt(row.r, 3)}`}</td>
+                <td className="muted">{row.n}</td>
+                <td style={{ width: 160 }}>{row.imp == null
+                  ? <span className="muted" title={`every evaluated node used the same ${row.k}, so its correlation with the metric is undefined — vary it to measure one`}>not varied</span>
+                  : <MetricGauge value={row.imp} max={top}
+                      label={`${row.k} relative importance`}
+                      valueText={`${fmt(row.imp / top * 100, 1)}%`} />}</td></tr>)}
             </tbody></table></DataTable>
             <div className="muted" style={{ marginTop: 8 }}>Sign of r shows direction: with a {state.direction === 'min' ? 'minimize' : 'maximize'} objective,
-              a {state.direction === 'min' ? 'negative' : 'positive'} r means a larger value tends to help. Needs ≥3 evaluated nodes per param.</div></>
+              a {state.direction === 'min' ? 'negative' : 'positive'} r means a larger value tends to help. Needs ≥3 evaluated nodes per param,
+              and a param every node set to the same value has no correlation to measure — it reads <b>—</b>, never 0.</div></>
         : <div className="muted">Not enough numeric-param data yet — run more experiments (≥3 evaluated nodes that share a numeric param).</div>}
     </Panel>
   )
