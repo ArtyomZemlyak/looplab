@@ -324,6 +324,13 @@ EV_INJECT_FAILED = "inject_failed"
 EV_BUDGET = "budget"
 EV_READMODEL_SKIPPED = "readmodel_skipped"
 EV_DEPS_INSTALLED = "deps_installed"
+# One charge against `inline_repair_retrain_cap`, recorded WHERE IT HAPPENS. It cannot ride on
+# `node_repaired` the way `changed`/`stages_passed` do: that event is appended BEFORE the loop asks
+# `_repair_forces_full_retrain`, so the field would always carry the pre-charge count and a resume
+# would refund the last re-train — which is the one thing this cap exists to prevent, since it guards
+# GPU hours rather than attempts. Diagnostic, so the fold ignores it and its splice position cannot
+# matter; `engine/evaluate.py::_durable_full_retrains` reads it straight off the log.
+EV_FULL_RETRAIN_CHARGED = "full_retrain_charged"
 EV_WORKSPACE_SEEDED = "workspace_seeded"
 # FOLDED (moved out of DIAGNOSTIC_EVENTS): the start of an arbitrary operator `run_setup` command is
 # the only evidence that its side effects may have been applied. Without folding it, a kill between
@@ -466,7 +473,7 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 # source-scan test went dead after the fold became a dispatch table, leaving coverage unprotected).
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
-    EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_WORKSPACE_SEEDED,
+    EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_FULL_RETRAIN_CHARGED, EV_WORKSPACE_SEEDED,
     EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,
     EV_CONCEPT_LENS_STARTED, EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED,

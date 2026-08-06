@@ -115,6 +115,69 @@ def _effective_repair_cap(inline_repair_attempts: int) -> int:
     return int(inline_repair_attempts) or _UNLIMITED_REPAIR_CEILING
 
 
+def _durable_dep_rounds(events, node_id: int, generation: int) -> int:
+    """How many env-prep install ROUNDS this node has already spent, from the log.
+
+    Same defect and the same fix as `_durable_repair_ledger` below, one counter over: `dep_rounds`
+    was a loop local starting at 0, so every resume handed the node a fresh `_MAX_DEP_ROUNDS`. The
+    bound exists to stop an offline or misnamed package looping, and a bound that resets on re-entry
+    does not bound anything across a flapping provider.
+
+    Reconstructible with no new field, because `deps_installed` already carries `round` — it is a
+    DIAGNOSTIC event, so the fold ignores it and reading it here is a raw-log read exactly like the
+    repair ledger's. `max` rather than a count: the round number is the authority, and a duplicated
+    append (a crash between `store.append` and `continue`) must not inflate it.
+
+    Generation-keyed exactly as `replay._generation_matches` keys it — an absent stamp binds, a
+    present-but-mismatched one is rejected — so a `node_reset` genuinely starts a fresh env budget.
+    """
+    rounds = 0
+    for e in events or []:
+        if e.type != EV_DEPS_INSTALLED:
+            continue
+        d = e.data or {}
+        if d.get("node_id") != node_id:
+            continue
+        if "generation" in d and d.get("generation") != generation:
+            continue
+        n = d.get("round")
+        rounds = max(rounds, int(n)) if isinstance(n, int) else rounds + 1
+    return rounds
+
+
+def _durable_full_retrains(events, node_id: int, generation: int) -> int:
+    """Full re-trains already spent on this node, from the log.
+
+    The third of the same family, and the only one that needed a new FIELD: nothing was appended
+    when a repair forced a full re-train, so `full_retrains` was reconstructible from nothing and a
+    resume restored the whole expensive-compute allowance. `inline_repair_retrain_cap` is a guard on
+    GPU hours, which is exactly the budget a resume must not refund.
+
+    It could NOT ride on `node_repaired` the way `changed` and `stages_passed` do, and that is worth
+    stating because it is the obvious design and it is wrong: that event is appended BEFORE the loop
+    asks `_repair_forces_full_retrain`, so the field would carry the count as of the PREVIOUS repair
+    and a resume would refund the most recent re-train — precisely the charge this cap exists to
+    hold, since it guards GPU hours rather than attempts. So the charge gets its own diagnostic
+    event, appended where it is decided, exactly as `deps_installed` records a dep round.
+
+    A log written before that event existed contributes 0, which is the honest reading: we do not
+    know that it re-trained, and inventing a charge for an old log would abandon nodes that never
+    spent anything.
+    """
+    spent = 0
+    for e in events or []:
+        if e.type != EV_FULL_RETRAIN_CHARGED:
+            continue
+        d = e.data or {}
+        if d.get("node_id") != node_id:
+            continue
+        if "generation" in d and d.get("generation") != generation:
+            continue
+        n = d.get("spent")
+        spent = max(spent, int(n)) if isinstance(n, int) else spent + 1
+    return spent
+
+
 def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, list[dict], int]:
     """This node's repair ledger as the EVENT LOG records it: (attempts, judge rows, unparseables).
 
@@ -172,7 +235,7 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
     return attempts, rows, unparseable
 from looplab.events.replay import fold
 from looplab.runtime.sandbox import GpuPinUnenforceable
-from looplab.events.types import (EV_CARD_DROPPED, EV_DEPS_INSTALLED, EV_NODE_ABORT,
+from looplab.events.types import (EV_CARD_DROPPED, EV_DEPS_INSTALLED, EV_FULL_RETRAIN_CHARGED, EV_NODE_ABORT,
                                   EV_NODE_EVAL_STARTED,
                                   EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
                                   EV_NODE_RESET, EV_PAUSE, EV_PROXY_SCORED,
@@ -943,7 +1006,10 @@ class EvaluateMixin:
             _repair_cap = _effective_repair_cap(self._inline_repair_attempts)
             attempt, _durable_rows, unparseable_repairs = _durable_repair_ledger(
                 events_at_start, node_id, generation)
-            dep_rounds = 0                   # env-prep auto-install + re-run rounds (separate from repair attempts)
+            # Seeded from the log for the same reason `attempt` is: a bound that a resume refunds is
+            # not a bound. `_MAX_DEP_ROUNDS` exists so an offline or misnamed package cannot loop,
+            # and `inline_repair_retrain_cap` is a guard on GPU hours — both were process-local.
+            dep_rounds = _durable_dep_rounds(events_at_start, node_id, generation)
             total_eval = 0.0                 # summed subprocess wall-clock across all attempts (cost)
             async def _record_superseded() -> None:
                 async with self._write_lock:
@@ -990,7 +1056,7 @@ class EvaluateMixin:
             # re-train when only the score script was fixed; None = a full re-run). `full_retrains` counts
             # the EXPENSIVE full re-runs a repair forced, bounded by inline_repair_retrain_cap.
             next_start = _UNSET
-            full_retrains = 0
+            full_retrains = _durable_full_retrains(events_at_start, node_id, generation)
             while True:
                 _t0 = time.time()
                 # repair/retry attempts reuse the workdir and sandbox stage logs append.
@@ -1465,6 +1531,15 @@ class EvaluateMixin:
                             "(a budgeted inter-node debug node can still pick it up)")
                         break
                     full_retrains += 1
+                    # Recorded HERE, where the compute is actually committed, so a resume reads the
+                    # charge back instead of being handed a fresh allowance (`_durable_full_retrains`).
+                    # Diagnostic and fold-ignored, so this append is splice-neutral by construction and
+                    # needs no BACKGROUND_APPENDABLE membership; it is on the main task under the write
+                    # lock like every other append in this loop.
+                    async with self._write_lock:
+                        self.store.append(EV_FULL_RETRAIN_CHARGED, {
+                            "node_id": node_id, "generation": generation,
+                            "spent": full_retrains, "attempt": attempt})
                 # loop -> re-run the eval with the corrected code (reusing earlier stages when safe)
             sp.set_many(eval_seconds=total_eval, exit_code=res.exit_code, timed_out=res.timed_out,
                         metric=res.metric, ok=ok, repair_attempts=attempt)
