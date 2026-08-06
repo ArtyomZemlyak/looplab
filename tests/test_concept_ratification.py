@@ -145,9 +145,13 @@ def test_two_proposals_of_the_same_merge_yield_one_decision(portfolio):
 def test_the_selection_reads_the_merges_list_and_nothing_else(tmp_path):
     """A log carrying ONLY splits and purges yields no decisions at all.
 
-    The end-to-end test below asserts that neither becomes policy, which stays true under mutation of
-    any single guard (three independent checks stop a purge-shaped record). This one is the narrow
-    statement that is not: it fails the moment the selection widens beyond `proposals["merges"]`.
+    MEASURED, so the claim is not stronger than the evidence: "a proposed purge never becomes policy"
+    is guarded THREE deep — the selection reads only `proposals["merges"]`, the empty-target check
+    drops a purge-shaped record, and `_still_applicable` refuses a target that is not live canonical.
+    Removing any ONE or any TWO of them leaves this test and the one below green; removing all three
+    turns both red. So neither test isolates a single guard, and neither is vacuous: what they assert
+    is the OUTCOME, which is the property that matters and the only one that survives a refactor of
+    which guard happens to catch it first.
     """
     memory_dir = tmp_path / "mem"
     _write_capsules(memory_dir, [_capsule("run-a", ["a/one", "noise/x", "coarse/thing"])])
