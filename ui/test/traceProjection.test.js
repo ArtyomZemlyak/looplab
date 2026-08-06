@@ -2,7 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import {
-  traceDetailState, tracePartial, traceUnavailable, unavailableTraceDetail,
+  NODE_TRACE_SPAN_WINDOW, NODE_TRACE_SPAN_WINDOW_MAX, TRACE_PARTIAL_NOTICE,
+  conversationWindow, conversationWindowNotice, nextNodeSpanWindow, spansOmitted,
+  traceDetailState, tracePartial, traceUnavailable, traceWindow, traceWindowNotice,
+  unavailableTraceDetail,
 } from '../src/traceProjection.js'
 
 test('trace omission truth reconciles malformed server counters and local caps', () => {
@@ -49,6 +52,109 @@ test('HTTP-200 unavailable receipt takes precedence over empty or partial detail
   }), { status: 'unavailable', attributes: {}, partial: false })
 })
 
+test('a bounded span window owes an ACTIONABLE control, or an honest count', () => {
+  const omitting = { truncated: true, total_spans: 14507, visible_spans: 512, omitted_spans: 13995 }
+  // The whole defect in one pair of assertions: the same payload is a pager where the surface can
+  // page and a stated remainder where it cannot. Neither is ever the bare adjective.
+  assert.equal(traceWindow(omitting, { canPage: true }).kind, 'pageable')
+  assert.equal(traceWindow(omitting, { canPage: false }).kind, 'capped')
+  assert.equal(traceWindowNotice(traceWindow(omitting)),
+    'Showing 512 of 14507 spans; 13995 more are not displayed.')
+
+  // `truncated` is a UNION. Per-span TEXT clamping sets it with nothing omitted, and no limit can
+  // ever surface a clamped attribute — offering "load more" there is a button that cannot work.
+  const clampedOnly = { truncated: true, total_spans: 40, visible_spans: 40, omitted_spans: 0,
+    truncated_spans: 7 }
+  assert.equal(tracePartial(clampedOnly), true, 'the raw union still reports partial…')
+  assert.equal(traceWindow(clampedOnly, { canPage: true }).kind, 'complete',
+    '…but nothing is REACHABLE, so no pager may be offered')
+
+  // A payload that states no usable numbers must fail SAFE (assume spans remain), and say so
+  // without inventing a count.
+  assert.equal(spansOmitted({ truncated: true }), null)
+  assert.equal(traceWindow({ truncated: true }, { canPage: true }).kind, 'pageable')
+  assert.equal(traceWindowNotice(traceWindow({ truncated: true })), TRACE_PARTIAL_NOTICE)
+})
+
+test('the conversation states what IT hides — stages and turns, never spans', () => {
+  // The live shape from runs/rubert-dr-0804 node 1: 13,995 spans omitted, and yet every one of the
+  // 192 withheld stages was derivable from the 512 spans the response already held. Reading this
+  // through the span rule would quote a number about a quantity the reader cannot see.
+  const live = {
+    truncated: true, total_spans: 14507, visible_spans: 512, omitted_spans: 13995,
+    total_stages: 256, visible_stages: 64, omitted_stages: 192,
+    total_turns: 425, visible_turns: 105, omitted_turns: 320,
+  }
+  const pageable = conversationWindow(live, { canPage: true })
+  assert.equal(pageable.kind, 'pageable')
+  assert.equal(pageable.omittedStages, 192)
+  assert.equal(conversationWindowNotice(pageable),
+    'Showing the most recent 105 of at least 425 steps.')
+  assert.equal(conversationWindow(live, { canPage: false }).kind, 'capped')
+
+  // With every span in hand the stage/turn totals are EXACT, so the notice drops the hedge. This is
+  // the case the server's own test drives: nothing omitted by the span read, everything by the caps.
+  const exact = {
+    truncated: true, total_spans: 400, visible_spans: 400, omitted_spans: 0,
+    total_stages: 200, visible_stages: 64, omitted_stages: 136,
+    total_turns: 400, visible_turns: 128, omitted_turns: 272,
+  }
+  assert.equal(conversationWindow(exact, { canPage: true }).kind, 'pageable')
+  assert.equal(conversationWindowNotice(conversationWindow(exact)),
+    'Showing the most recent 128 of 400 steps.')
+
+  // Fully paged: nothing hidden, no control, no notice — even though per-span text is still clamped.
+  const whole = {
+    truncated: true, truncated_spans: 3, total_spans: 400, visible_spans: 400, omitted_spans: 0,
+    total_stages: 200, visible_stages: 200, omitted_stages: 0,
+    total_turns: 400, visible_turns: 400, omitted_turns: 0,
+  }
+  assert.equal(conversationWindow(whole, { canPage: true }).kind, 'complete')
+
+  // A payload predating the stage/turn counters must NOT read two absent fields as "nothing hidden";
+  // it falls back to the span receipt.
+  assert.equal(conversationWindow({ truncated: true, omitted_spans: 9 }, { canPage: true }).kind,
+    'pageable')
+  assert.equal(conversationWindow({ truncated: false, omitted_spans: 0 }).kind, 'complete')
+})
+
+test('one window rule: the doubling step stops exactly at the shared ceiling', () => {
+  assert.equal(NODE_TRACE_SPAN_WINDOW, 512)
+  assert.equal(nextNodeSpanWindow(NODE_TRACE_SPAN_WINDOW), 1024)
+  // Climb from the default and confirm the walk terminates AT the ceiling, never past it. A pager
+  // that overshoots asks the server for a window it will silently clamp, so the button stops
+  // changing the response while still looking live.
+  let window = NODE_TRACE_SPAN_WINDOW
+  const walk = []
+  for (let step = 0; step < 20; step += 1) {
+    window = nextNodeSpanWindow(window)
+    walk.push(window)
+  }
+  assert.deepEqual(walk.slice(0, 3), [1024, 2048, 4096])
+  assert.equal(window, NODE_TRACE_SPAN_WINDOW_MAX)
+  assert.ok(walk.every(value => value <= NODE_TRACE_SPAN_WINDOW_MAX))
+  // A malformed current window restarts from the default rather than doubling nonsense.
+  for (const malformed of [undefined, null, 0, -8, 1.5, '512', NaN]) {
+    assert.equal(nextNodeSpanWindow(malformed), 1024)
+  }
+})
+
+test('neither trace surface keeps a private copy of the node span window', async () => {
+  const [dock, hooks] = await Promise.all([
+    readFile(new URL('../src/Dock.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/hooks.js', import.meta.url), 'utf8'),
+  ])
+  // NEGATIVE pins stay substrings on purpose: what must not come back is the TEXT. Dock owned a
+  // `NODE_TRACE_CAP_MAX = 4096` beside the Inspector's identical route with no pager at all, which
+  // is precisely how the two drifted. The ceiling is now reachable only through traceProjection.js.
+  assert.doesNotMatch(dock, /NODE_TRACE_CAP_MAX|4096/,
+    'the node-trace ceiling must not be re-spelled in Dock')
+  assert.match(dock, /useNodeSpanWindow\(\)/)
+  assert.match(hooks, /NODE_TRACE_SPAN_WINDOW_MAX/,
+    'the shared hook reads the ceiling from the model, it does not restate it')
+  assert.doesNotMatch(hooks.slice(hooks.indexOf('export function useNodeSpanWindow')), /= 4096/)
+})
+
 test('Inspector and Dock preserve projection truth through every trace surface', async () => {
   const [inspector, dock] = await Promise.all([
     readFile(new URL('../src/Inspector.jsx', import.meta.url), 'utf8'),
@@ -59,17 +165,29 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   assert.match(inspector,
     /conversation\.status === 'fulfilled'[\s\S]*?: \{ stages: \[\], projection: \{ unavailable: true \} \}[\s\S]*?catch\(\(\) => \{[\s\S]*?if \(alive\(\)\) setConv\(\{ stages: \[\], projection: \{ unavailable: true \} \}\)/,
     'conversation transport failures need an explicit unavailable receipt')
-  assert.match(inspector, /if \(!spans\.length && !agent\)[\s\S]*?if \(unavailable\)[\s\S]*?<TraceUnavailable[\s\S]*?if \(partial\)[\s\S]*?no observations were included[\s\S]*?No execution spans/,
-    'an empty node trace must check unavailable and partial before successful empty')
+  assert.match(inspector, /if \(!spans\.length && !agent\)[\s\S]*?if \(unavailable\)[\s\S]*?<TraceUnavailable[\s\S]*?if \(spanWindow\.kind !== 'complete'\)[\s\S]*?TRACE_PARTIAL_EMPTY_NOTICE[\s\S]*?No execution spans/,
+    'an empty node trace must check unavailable and the window before successful empty')
   assert.ok(inspector.indexOf("if (view === 'conversation')") < inspector.indexOf('if (!spans.length && !agent)'),
     'the selected conversation view must load before raw-tree empty/unavailable branches')
   assert.match(inspector, /\[open, io, runId, s\.span_id, kind\][\s\S]*?const retryIo = \(\) => setIo\(null\)[\s\S]*?<TraceUnavailable label="Trace detail unavailable\." onRetry=\{retryIo\}/,
     'span detail unavailable must be retryable even after the first expansion')
-  assert.match(inspector, /function Conversation\(\{[\s\S]*?onRetry[\s\S]*?\[runId, n\.id, working, reloadNonce\][\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/,
-    'a finished conversation one-shot must expose an explicit retry')
+  assert.match(inspector, /function Conversation\(\{[\s\S]*?onRetry[\s\S]*?\[runId, n\.id, working, reloadNonce, spanLimit\][\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/,
+    'a finished conversation one-shot must expose an explicit retry, and re-read when paged')
+  assert.match(inspector, /nodeConversation\(runId, n\.id, \{ signal, limit: spanLimit \}\)/,
+    'the conversation must actually SEND the window it was given, or the control is decorative')
   assert.match(inspector, /export function NodeTrace\(\{ spans, runId, projection = \{\}, onRetry, onLoadMore \}\)[\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/)
-  assert.match(inspector, /const loadMore = \(partial && onLoadMore\)[\s\S]*?onClick=\{onLoadMore\}[\s\S]*?load more spans/,
-    'a partial node trace with a pager must offer a "load more spans" button instead of a dead notice')
+  assert.match(inspector, /const spanWindow = traceWindow\(projection, \{ canPage: !!onLoadMore \}\)[\s\S]*?spanWindow\.kind === 'pageable'[\s\S]*?onClick=\{onLoadMore\}[\s\S]*?load more spans/,
+    'a pageable node trace must offer "load more spans" instead of a dead notice')
+  assert.match(inspector, /spanWindow\.kind === 'capped'[\s\S]*?traceWindowNotice\(spanWindow\)/,
+    'a surface with nowhere to page still owes the COUNT, never a bare adjective')
+  // The operator's own report: the CONVERSATION view is the default, and it had no control at all.
+  assert.match(inspector, /const convWindow = conversationWindow\(conv\.projection, \{ canPage: !!onLoadMore \}\)[\s\S]*?convWindow\.kind === 'pageable'[\s\S]*?onClick=\{onLoadMore\}[\s\S]*?load more of this conversation/,
+    'the conversation view must offer its own pager, not print a dead partial notice')
+  assert.doesNotMatch(
+    inspector.slice(inspector.indexOf('function Conversation('),
+      inspector.indexOf('function RunSetupLog(')),
+    /'Trace projection is partial\.'/,
+    'the conversation must not re-inline the dead notice this change removed')
   assert.match(inspector, />span tree<\/button>/)
   assert.doesNotMatch(inspector, />raw spans<\/button>|every span's full I\/O|nothing is lost|WHOLE re-sent/)
 
