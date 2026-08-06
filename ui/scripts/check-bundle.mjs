@@ -422,6 +422,41 @@ export function measureAssetBuffer(file, buffer) {
   }
 }
 
+// A minifier that rewrites `false`/`true` into `0`/`1` is value-preserving for every JS operator and
+// NOT value-preserving for React: `0` is falsy but React RENDERS numbers, so the house guard
+// `{open && <Menu/>}` paints a bare `0` next to every closed popover, and `aria-expanded={open}`
+// serializes as the invalid `aria-expanded="0"`. Terser's `booleans_as_integers` did exactly that to
+// a shipped build; the property is checked HERE, over the emitted bytes, because dev, SSR and
+// `node --test` all run the UNMINIFIED source and are blind to it by construction.
+//
+// The signature is `!0`/`!1`, which is how the configured final pass (Terser) spells a boolean VALUE,
+// and it is decisive rather than heuristic: measured 2026-08-06 over both builds of the same tree, the
+// offending one contains the sequence ZERO times across all 34 chunks — the 486-byte one and the
+// 178 KiB one alike — while the corrected one carries 3,540 of them with every one of its 35 chunks
+// holding at least two. So "every JS chunk has one" needs no size threshold to be safe.
+//
+// The bare words `true`/`false` are deliberately NOT accepted as evidence: they survive the rewrite
+// inside STRING literals (`"aria-hidden":`true``, JSON payloads, prop values), and counting them would
+// have falsely rescued 23 of the 34 offending chunks. If the final minifier is ever changed to one
+// that emits the word form for values, this check goes red on the first build — recalibrate the
+// signature for that minifier's output, do not delete the check.
+const BOOLEAN_LITERAL = /![01](?![\w$])/
+export function findIntegerBooleanChunks(assetText) {
+  const violations = []
+  for (const [file, text] of assetText instanceof Map ? assetText : Object.entries(assetText || {})) {
+    if (assetKind(file) !== 'js') continue
+    if (BOOLEAN_LITERAL.test(text)) continue
+    violations.push({
+      code: 'integer_booleans',
+      message: `Emitted chunk ${file} contains no boolean literal, which is the signature of a `
+        + 'minifier rewriting booleans to 0/1 (Terser `compress.booleans_as_integers`). React renders '
+        + 'numbers, so every `{flag && <El/>}` guard in that chunk paints a bare 0 and every '
+        + 'aria-* boolean serializes as "0"/"1". Turn the option off rather than reworking the guards.',
+    })
+  }
+  return violations
+}
+
 const statFor = (assetStats, file) => assetStats instanceof Map
   ? assetStats.get(file)
   : assetStats?.[file]
@@ -657,11 +692,15 @@ export async function loadBundle(distDir) {
   }
   const files = collectAssetFiles(manifest, Object.keys(manifest))
   const assetStats = new Map()
+  // The emitted TEXT of every JS chunk is kept beside its measurement so `findIntegerBooleanChunks`
+  // can read what actually shipped. It is a second decode of bytes already in hand, not a second read.
+  const assetText = new Map()
   for (const file of files) {
     const buffer = await readFile(safeAssetPath(distDir, file))
     assetStats.set(file, measureAssetBuffer(file, buffer))
+    if (assetKind(file) === 'js') assetText.set(slash(file), buffer.toString('utf8'))
   }
-  return { manifest, assetStats }
+  return { manifest, assetStats, assetText }
 }
 
 export function parseCliArgs(argv, defaultDist) {
@@ -689,7 +728,11 @@ async function main() {
   const uiRoot = resolve(scriptDir, '..')
   const { distDir, reportOnly } = parseCliArgs(process.argv.slice(2), resolve(uiRoot, 'dist'))
   const bundle = await loadBundle(distDir)
+  // Deliberately NOT folded into `evaluateBundle`: that function's contract is the SIZE/reachability
+  // policy over the manifest graph, its callers pass measurements only, and widening its required
+  // inputs would silently retire the nine cases in test/bundleBudget.test.js that call it with two.
   const result = evaluateBundle(bundle)
+  result.violations.push(...findIntegerBooleanChunks(bundle.assetText))
   console.log(formatBundleReport(result))
   if (result.violations.length && !reportOnly) process.exitCode = 1
 }
