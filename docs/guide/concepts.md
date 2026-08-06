@@ -689,7 +689,7 @@ An explicit empty `node_concepts` row is authoritative and stays untagged; it mu
 `idea.theme`. Only a genuinely missing folded row may migrate through legacy `idea.theme`, then the first
 authored concept axis. This projection is intentionally lossy and run-local. The retired run-URL `focus`
 parameter is ignored with a visible notice directing the operator to the Concepts filter.
-On a mixed-era run, that legacy fallback may still group the Search DAG while the Concepts view remains
+On a mixed-era run, that legacy fallback may still group the Lineage DAG while the Concepts view remains
 honestly empty until folded memberships exist; the UI explains the distinction instead of treating authored
 legacy text as canonical ConceptFrame membership.
 
@@ -744,7 +744,7 @@ The frame drives two run-view surfaces:
   objective scope, missing metric display name/unit, minimize/maximize orientation and normalized Δ
   semantics. Row order remains the hierarchy/relationship projection order; enabling a metric column does
   not silently sort by Δ.
-- **Search** adds canonical breadcrumb chips over the lineage DAG. Chips are sorted by canonical ID so live
+- **Lineage** adds canonical breadcrumb chips over the lineage DAG. Chips are sorted by canonical ID so live
   count changes do not move controls, support minimal OR subtree selections, retain a trailing exact “· here”
   chip when a drilled path has direct memberships, and highlight current matching nodes. Expanded and
   collapsed groups use the same active-lifecycle boundary; an active filter shows matched/total, dims a zero

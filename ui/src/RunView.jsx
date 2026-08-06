@@ -254,7 +254,11 @@ function DagEmptyOverlay({ presentation, transport, onAction }) {
     role={presentation.liveRegion === 'assertive' ? 'alert' : 'status'}
     aria-live={presentation.liveRegion} aria-atomic="true">
     {presentation.tone === 'progress' && <span className="dag-empty-spinner" aria-hidden="true" />}
-    <span className="dag-empty-eyebrow">Search canvas</span>
+    {/* The eyebrow IS the view's name — `styles.css` sets it uppercase, so this is the largest
+        piece of text on an empty canvas. It said "Search canvas" while the toggle button 40px above
+        it said `Lineage`, which is the rename's most visible survivor. The KEY is still `dag`; only
+        the label moved. */}
+    <span className="dag-empty-eyebrow">Lineage canvas</span>
     <h2>{presentation.title}</h2>
     <p>{presentation.body}</p>
     {transport?.failure && <p className="dag-empty-command-note">

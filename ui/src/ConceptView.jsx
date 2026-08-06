@@ -1276,7 +1276,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   else if (empty) stateCard = { tone: 'empty', title: 'No concepts have been tagged yet',
     action: refresh, pending: refreshing, stale: current.status === 'stale',
     body: hasLegacyAxisFallback
-      ? 'Some active experiments have only a legacy axis. Search can show that compatibility grouping, but Concepts stays empty until folded memberships exist; LoopLab does not infer a taxonomy.'
+      // Names the view the operator can actually SEE in the toggle: `Search` became `Lineage` and
+      // this sentence is a navigation instruction, so a stale name here strands them.
+      ? 'Some active experiments have only a legacy axis. Lineage can show that compatibility grouping, but Concepts stays empty until folded memberships exist; LoopLab does not infer a taxonomy.'
       : 'This view fills after the Researcher assigns concepts. LoopLab does not invent a taxonomy meanwhile.' }
   const recoveryNeedsSurface = !!savedLensIntent
     || ['checking', 'polling', 'resolving', 'error', 'settled'].includes(currentRecovery.status)

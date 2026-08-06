@@ -2119,7 +2119,11 @@ export default function RunList({ onOpen, onGlobalNavigate,
           ＋ New run
         </button>
         <span className="spacer" style={{ flex: 1 }} />
-        <div className="seg">
+        {/* Named, because `Lineage` is now the label of TWO different surfaces — this one and the
+            run workspace's DAG. The workspace toggle is a `role="toolbar" aria-label="Run workspace
+            controls"`, so a screen reader announces its scope; this group announced a bare
+            "Lineage, button" with nothing to tell the two apart. */}
+        <div className="seg" role="group" aria-label="Run list views">
           {/* LINEAGE, not "Map", and CONCEPTS beside it — because the two answer different questions
               and calling one of them "the map" is why the second one was missing for so long. This
               view draws which run descends from which, inside which project: ancestry, i.e. lineage.
@@ -2395,12 +2399,15 @@ export default function RunList({ onOpen, onGlobalNavigate,
           </div>}
           {view === 'map' && (!['ready', 'stale'].includes(projectsState) || projectScopeBlocked) && runs
             && <div className="notice resource-warning" role="status">
-              <span>Map needs the project list before it can place runs reliably.</span>
+              <span>Lineage needs the project list before it can place runs reliably.</span>
               <button type="button" className="btn sm" onClick={() => setView('list')}>Show List</button>
             </div>}
           {view === 'map' && ['ready', 'stale'].includes(projectsState) && !projectScopeBlocked
             && runs && mapRuns.length > 0 && <div className="map-stage">
-            <LazyBoundary label="run map" resetKey={`map:${sel}`}>
+            {/* `label` is rendered verbatim by LazyBoundary — "Loading run lineage…" and
+                "run lineage could not be opened." — so it is operator-visible text and follows the
+                LABEL, not the `map` route key beside it. */}
+            <LazyBoundary label="run lineage" resetKey={`map:${sel}`}>
               <MapView onOpen={id => { if (!navigationBusy) openRun(id) }} runs={mapRuns} projects={proj.projects}
                 collapsed={mapCollapsed} onToggle={toggleMapCluster}
                 initialViewport={mapViewport?.signature === mapViewportSignature

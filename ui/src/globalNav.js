@@ -14,7 +14,9 @@
 export const GLOBAL_DESTINATIONS = Object.freeze([
   Object.freeze({
     key: 'list', hash: '#/', label: 'Runs',
-    title: 'Every run in this installation — list, map, portfolio comparison and projects',
+    // Enumerates the run list's FOUR representations by their visible labels. It said "map" after
+    // that view was relabelled `Lineage`, and it never learned about `Concepts` at all.
+    title: 'Every run in this installation — list, lineage, concepts, portfolio comparison and projects',
   }),
   Object.freeze({
     key: 'research-atlas', hash: '#/atlas', label: 'Research Atlas',

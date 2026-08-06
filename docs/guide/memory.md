@@ -209,7 +209,7 @@ children, but this is not a versioned taxonomy/entity release. Typed
 claim decisions do fence a current claim and its observed evidence digest. An owner-only `#/atlas`
 **Experimental portfolio diagnostic** now renders the bounded read models. Its claim/evidence slices carry
 coherent source identity, but the four independently fetched projections are not the complete canonical
-Research Atlas. The home Runs Map and a
+Research Atlas. The home Runs Lineage view and a
 run's theme grouping are different surfaces (see [Web UI](ui.md#which-graph-am-i-looking-at)).
 
 Concept capsule v2 has additive bounded-source receipts for its applicability fingerprint and both stored
