@@ -128,6 +128,55 @@ export function nodeLessons(state, nodeId, attempt, store = null) {
 }
 
 /**
+ * The other direction: LIVE cross-run lessons that still credit this experiment.
+ *
+ * This is not a duplicate of `nodeLessons` and the difference is the whole reason both exist.
+ * `nodeLessons` walks history forward and asks "is what this experiment produced still there".
+ * This walks the live store backward and asks "what does memory still say, citing this node" — and
+ * after a consolidation those are different sets. Measured across the 46 runs in `runs/` on
+ * 2026-08-06: of 16 node-attributed lessons in the event logs, 15 were no longer present as written,
+ * while the surviving CONSOLIDATED rows still carried `evidence` naming those same nodes. So without
+ * this lane the section is almost entirely "no longer in memory", which is true and useless; with it,
+ * the operator sees the sentence memory actually holds about their experiment.
+ *
+ * `attemptMatch` is reported, never enforced. `evidence_generations` is absent on rows written before
+ * `evidence_sig`, and — more often — on a consolidated survivor whose base came from a run that
+ * recorded no signature for this id. Dropping those would hide real lessons; silently showing them as
+ * attempt-matched would repeat the bug the fence exists to stop. So: `'exact' | 'other' | 'unrecorded'`,
+ * with `'other'` filtered out (it is provably a different lifecycle) and `'unrecorded'` kept and marked.
+ */
+export function liveLessonsForNode(store, nodeId, attempt) {
+  const id = Number(nodeId)
+  if (!record(store) || !Number.isSafeInteger(id)) return []
+  const out = []
+  for (const row of list(store.lessons)) {
+    if (!record(row)) continue
+    const evidence = list(row.evidence).filter(value => Number.isSafeInteger(value))
+    if (!evidence.includes(id)) continue
+    const recorded = record(row.evidence_generations) ? row.evidence_generations[String(id)] : undefined
+    const attemptMatch = !Number.isSafeInteger(recorded) ? 'unrecorded'
+      : attempt == null || recorded === attempt ? 'exact' : 'other'
+    if (attemptMatch === 'other') continue
+    const statement = text(row.statement)
+    if (!statement) continue
+    out.push({
+      statement,
+      outcome: text(row.outcome),
+      claimStance: text(row.claim_stance),
+      attemptMatch,
+      // `evidence_count` is the ONLY thing consolidation accumulates (`lesson_hygiene.py:146`), so a
+      // count larger than the credited ids is the visible fingerprint of a merge: other runs agreed
+      // and their own provenance was dropped. Surfacing it is how "3 agreeing observations, 2 of
+      // them no longer traceable" becomes sayable at all.
+      evidenceCount: Number.isSafeInteger(row.evidence_count) ? row.evidence_count : null,
+      alsoFrom: evidence.filter(value => value !== id),
+      concepts: list(row.concepts).filter(value => typeof value === 'string'),
+    })
+  }
+  return out
+}
+
+/**
  * The run-level tiers, which is all that exists for notes and cases — and for the run-end reflect
  * lessons that never reach `lessons_distilled`.
  *

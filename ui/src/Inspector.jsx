@@ -21,7 +21,7 @@ import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts, parseConceptTagsInput } from './conceptChips.js'
 import { cardText } from './cardBoardModel.js'
 import { nodeCardLink, nodeConceptLanes } from './inspectorLinks.js'
-import { nodeLessons } from './derivedMemory.js'
+import { liveLessonsForNode, nodeLessons } from './derivedMemory.js'
 import { conceptMaterializationStatus } from './nodeProjection.js'
 import { buildingMarkers } from './buildingModel.js'
 import { deadlineRequest } from './requestDeadline.js'
@@ -874,7 +874,11 @@ const LESSON_STANDING = {
 // a node that did teach something costs one bounded run-scoped read.
 function DerivedMemory({ n, state, runId }) {
   const history = useMemo(() => nodeLessons(state, n.id, n.attempt, null), [state?.lessons_distilled, n.id, n.attempt])
-  const wanted = history.length > 0 && !!runId
+  // The store read is worth making for a node with no event-log lesson too, because consolidation
+  // runs the other way: measured across `runs/`, the surviving MERGED row usually still credits the
+  // node whose own lesson was absorbed. Gated on the run having distilled anything at all, so a run
+  // with no lessons still costs nothing.
+  const wanted = (history.length > 0 || (state?.lessons_distilled || []).length > 0) && !!runId
   const storeResource = useScopedResource(
     signal => get(`/api/memory?run_id=${encodeURIComponent(runId)}`, { cache: 'no-store', signal }), {
       scope: `node-memory:${runId}`,
@@ -891,8 +895,29 @@ function DerivedMemory({ n, state, runId }) {
   const store = ['ready', 'stale'].includes(storeResource.status) ? storeResource.data : null
   const rows = useMemo(() => nodeLessons(state, n.id, n.attempt, store),
     [state?.lessons_distilled, n.id, n.attempt, store])
-  if (!history.length) return null
+  const live = useMemo(() => liveLessonsForNode(store, n.id, n.attempt), [store, n.id, n.attempt])
+  if (!history.length && !live.length) return null
   return <>
+    {live.length > 0 && <>
+      <div className="section-h">What memory still says about this experiment</div>
+      <div className="muted">Live cross-run lessons whose recorded evidence names this experiment.
+        These are the current text, re-read each time — consolidation may have rewritten them.</div>
+      <ul className="bul">{live.map(row => <li key={`live:${row.statement}`}>
+        <span className="v">{row.statement}</span>
+        <div className="node-concepts-list">
+          {row.outcome && <span className="chip xs">{row.outcome}</span>}
+          {row.attemptMatch === 'unrecorded' && <span className="chip xs warn"
+            title="This row records no node attempt for this experiment, so it may have been drawn from an earlier attempt of the same id.">attempt not recorded</span>}
+          {/* The visible fingerprint of a merge: more agreeing observations than traceable ids. */}
+          {row.evidenceCount != null && row.evidenceCount > row.alsoFrom.length + 1
+            && <span className="chip xs" title="Consolidation keeps only a count when it merges rows from other runs; their own evidence is not retained.">
+              {row.evidenceCount} agreeing observations, {row.alsoFrom.length + 1} still traceable</span>}
+          {row.concepts.map(id => <span key={id} className="nc-tag">{id}</span>)}
+        </div>
+        {row.alsoFrom.length > 0 && <div className="muted">Also credits {row.alsoFrom.map(id => `#${id}`).join(', ')}.</div>}
+      </li>)}</ul>
+    </>}
+    {history.length > 0 && <>
     <div className="section-h">What this experiment taught</div>
     <div className="muted">From this run’s own event log, which is append-only — so this list is what
       the experiment produced, not what memory happens to hold now. Each row’s standing below is read
@@ -912,6 +937,7 @@ function DerivedMemory({ n, state, runId }) {
           with {row.alsoFrom.map(id => `#${id}`).join(', ')}.</div>}
       </li>
     })}</ul>
+    </>}
     {storeResource.status === 'error' && <div className="muted">{storeResource.error}</div>}
     {/* The run-end whole-run reflection is a DIAGNOSTIC event: not folded, not on the wire, and its
         projection carries neither a lesson id nor evidence. For most runs those are the MAJORITY of

@@ -187,6 +187,47 @@ test('store standing: present, absorbed, and the truncated window that must NOT 
   assert.equal(nodeLessons(STATE, 4, 0, null)[0].storeStatus, 'unknown')
 })
 
+// The lane that makes the section useful rather than a wall of "absorbed". Measured across the 46
+// runs in `runs/` on 2026-08-06: 15 of 16 node-attributed lessons were no longer present as written,
+// while the surviving CONSOLIDATED rows still carried `evidence` naming those same nodes.
+test('live lessons crediting this node are found even when its own lesson was absorbed', () => {
+  const { liveLessonsForNode, nodeLessons } = derivedMemory
+  const store = {
+    lessons: [{
+      // The paraphrased survivor of a merge: text no run produced verbatim, evidence from the base
+      // row only, and an evidence_count carrying the erased contributors.
+      statement: 'changing x and y parameters regressed the metric',
+      run_id: 'r', evidence: [4, 2], evidence_generations: { 4: 0, 2: 0 },
+      evidence_count: 3, outcome: 'failed', concepts: ['objective/quadratic'],
+    }],
+    page: { tiers: { lessons: { limit: 200, returned: 1, skipped: 0, filtered: 0,
+      source_window_truncated: false, unavailable: false } } },
+  }
+  // The node's OWN lesson is gone …
+  assert.equal(nodeLessons(STATE, 4, 0, store)[0].storeStatus, 'absorbed')
+  // … and yet memory still says something about it. Both facts, neither hidden.
+  const live = liveLessonsForNode(store, 4, 0)
+  assert.equal(live.length, 1)
+  assert.equal(live[0].attemptMatch, 'exact')
+  assert.deepEqual(live[0].alsoFrom, [2])
+  assert.equal(live[0].evidenceCount, 3,
+    'the count is the only visible trace that other runs agreed and their provenance was dropped')
+})
+
+test('a live lesson recorded against a DIFFERENT attempt is excluded; an unrecorded one is marked', () => {
+  const { liveLessonsForNode } = derivedMemory
+  const row = extra => ({ statement: 's', run_id: 'r', evidence: [7], ...extra })
+  const at = (attempt, extra) => liveLessonsForNode({ lessons: [row(extra)] }, 7, attempt)
+  // Provably a different lifecycle of the same numeric id — the fence that stops a re-run node
+  // inheriting its previous life.
+  assert.equal(at(2, { evidence_generations: { 7: 0 } }).length, 0)
+  assert.equal(at(0, { evidence_generations: { 7: 0 } })[0].attemptMatch, 'exact')
+  // No recorded attempt: real for pre-`evidence_sig` rows and for consolidated survivors. Keeping it
+  // out would hide a genuine lesson; showing it unmarked would repeat the bug the fence prevents.
+  assert.equal(at(2, {})[0].attemptMatch, 'unrecorded')
+  assert.equal(liveLessonsForNode(null, 7, 0).length, 0)
+})
+
 test('run-level memory reports the lessons NO event-log entry attributes to a node', () => {
   const { runMemory } = derivedMemory
   const store = {
