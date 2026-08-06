@@ -350,6 +350,26 @@ METRIC_READERS = {
 READERS_REQUIRING_PATH = frozenset({"file_json", "file_regex"})
 
 
+def spec_kind(spec) -> str:
+    """`spec["kind"]` as something safe to look a reader up BY, defaulting like the readers do.
+
+    Every `kind` lookup in this module goes through here, because the raw value is operator- or
+    model-authored JSON and `dict.get` is not total over it: `{"kind": ["file_json"]}` raises an
+    uncaught `TypeError: unhashable type: 'list'` out of `METRIC_READERS.get(...)`, which escapes
+    `read_metric` into the eval worker exactly as a non-string path slot did — no node terminal, and
+    a run that re-dies on every resume. It escaped `metric_spec_path_error` too, so the submit-time
+    refusal that exists to catch malformed specs crashed on this one instead of naming it.
+
+    An unhashable or non-string kind resolves to a sentinel that is in no reader table, so it takes
+    the SAME route an unknown kind already takes — `read_metric` returns None and the node fails
+    `no_metric`, `_valid_metric_kind` refuses it at submit. Deliberately not `"stdout_json"`: that is
+    the default for an ABSENT kind, and silently scoring a malformed spec with the default reader
+    would turn a typo into a plausible-looking metric.
+    """
+    kind = spec.get("kind", "stdout_json") if isinstance(spec, dict) else "stdout_json"
+    return kind if isinstance(kind, str) else "\x00unhashable-or-non-string-kind"
+
+
 # The spec keys each reader turns into a FILESYSTEM PATH, and the only enumeration of them. This is
 # NOT `READERS_REQUIRING_PATH` and must not be folded into it: "needs a path" and "names a path" are
 # different facts about a reader. `_read_adapter` DEFAULTS its path (so it needs none) and still
@@ -396,7 +416,7 @@ def _nonstring_path_slot(spec) -> Optional[tuple]:
     TypeError out of the path constructor (int/float/list/dict, and `bytes` too) or would need
     confinement re-derived for a second representation.
     """
-    for slot in READER_PATH_KEYS.get(spec.get("kind", "stdout_json"), ()):
+    for slot in READER_PATH_KEYS.get(spec_kind(spec), ()):
         value = spec.get(slot)
         if value is not None and not isinstance(value, str):
             return slot, value
@@ -437,7 +457,7 @@ def metric_spec_path_error(spec, *, consequence: Optional[str] = None) -> Option
     """
     if not isinstance(spec, dict):
         return None
-    kind = spec.get("kind", "stdout_json")
+    kind = spec_kind(spec)
     bad = _nonstring_path_slot(spec)
     if bad is not None:
         slot, value = bad
@@ -477,7 +497,7 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
     # in this module does.
     if _nonstring_path_slot(spec) is not None:
         return None
-    reader = METRIC_READERS.get(spec.get("kind", "stdout_json"))
+    reader = METRIC_READERS.get(spec_kind(spec))
     return reader(stdout, workdir, spec, wrap, since) if reader is not None else None
 
 

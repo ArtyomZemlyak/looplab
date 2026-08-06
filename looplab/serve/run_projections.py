@@ -66,7 +66,8 @@ def run_summaries(srv) -> list:
             # Stored as (signature, summary): the flattened `(*sig, summary)` made the tuple WIDTH
             # load-bearing, so widening the signature by one field silently turned `cached[4]` into
             # a stat number the dashboard would have served as a run summary.
-            if cached is not None and cached[0] == sig:   # unchanged log -> reuse (finished runs never re-fold)
+            # An unchanged log is reused as-is (a finished run never re-folds).
+            if cached is not None and cached[0] == sig:
                 out.append(cached[1])
                 continue
             events = srv.events(rd)

@@ -23,7 +23,8 @@ import sys
 import pytest
 
 from looplab.runtime.command_eval import (METRIC_READERS, READER_PATH_KEYS,
-                                           READERS_REQUIRING_PATH, _confined, read_metric)
+                                           READERS_REQUIRING_PATH, _confined,
+                                           metric_spec_path_error, read_metric)
 
 
 # ------------------------------------------------------------------ the guard itself
@@ -242,9 +243,8 @@ def test_no_spec_field_of_any_reader_can_raise_out_of_read_metric(tmp_path, kind
     `checkpoint` path slot would pass the parametrized test above (which reads the registry) while
     crashing exactly as `adapter` did. This one reads the READER, so it goes red instead.
 
-    `kind` is excluded and is the one genuine gap: an unhashable `kind` raises TypeError out of
-    `METRIC_READERS.get(...)` itself, which predates this guard and belongs to the dispatch, not to
-    the path slots.
+    `kind` is excluded here because it is not a path slot — it selects the reader rather than being
+    read by one, so it belongs to the dispatch. It is covered by the test below instead.
     """
     workdir = tmp_path / "work"
     workdir.mkdir()
@@ -252,6 +252,36 @@ def test_no_spec_field_of_any_reader_can_raise_out_of_read_metric(tmp_path, kind
     for field in sorted(_spec_string_keys(METRIC_READERS[kind]) - {"kind"}):
         for value in _NON_STRINGS:
             read_metric("", str(workdir), {"kind": kind, field: value})   # must not raise
+
+
+@pytest.mark.parametrize("kind", [["file_json"], {"a": 1}, {"file_json"}, 42, 1.5, b"file_json",
+                                  None, True])
+def test_a_kind_that_is_not_a_string_fails_the_node_not_the_run(tmp_path, kind):
+    """The same defect one layer UP from the path slots, and it was worse in one respect.
+
+    `METRIC_READERS.get(spec["kind"])` is not total over operator- or model-authored JSON: an
+    UNHASHABLE kind (`{"kind": ["file_json"]}`) raised `TypeError: unhashable type: 'list'` straight
+    out of the dict lookup. That escaped `read_metric` into the eval worker exactly as a non-string
+    path slot did — no node terminal, and a run that re-dies on every resume. And unlike the path
+    slots it also escaped `metric_spec_path_error`, so the submit-time refusal whose whole job is to
+    name a malformed spec crashed on this one instead.
+
+    Both entry points are driven, because the refusal cannot reach a spec reloaded from a run's own
+    `task.snapshot.json` (invariant #6) and the runtime abstention cannot name the field for an
+    operator who is still authoring one.
+
+    `None` and `True` are in the list for a reason: `None` must NOT resolve to the absent-kind
+    default (a JSON `"kind": null` is a mistake, not a request for `stdout_json`), and `True` is a
+    hashable non-string that would otherwise sail through an `isinstance(kind, Hashable)` guard.
+    """
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    assert read_metric("", str(workdir), {"kind": kind, "path": "m.json"}) is None
+    assert metric_spec_path_error({"kind": kind, "path": "m.json"}) is None
+    # Not silently scored by the absent-kind default either: a real metrics.json next door must not
+    # turn a malformed kind into a plausible-looking number.
+    (workdir / "m.json").write_text(json.dumps({"metric": 1.0}), encoding="utf-8")
+    assert read_metric('{"metric": 2.0}', str(workdir), {"kind": kind, "path": "m.json"}) is None
 
 
 # ------------------------------------------------------------------ the reader table is the registry
