@@ -191,6 +191,39 @@ def test_finalize_wrap_up_runs_once_and_re_entry_is_idempotent(tmp_path):
     assert sum(e.type == "run_finished" for e in ev2) == 1      # STILL one — the wrap-up did not re-run
 
 
+def test_finalize_says_when_it_did_nothing(tmp_path, capsys):
+    """The one line `looplab finalize` prints must distinguish "I wrapped it up" from "I looked".
+
+    The reason an operator types this command is usually the SUSPICION that a run's wrap-up did not
+    happen. Both branches used to print the identical bytes — `finalized <dir>` — and both exit 0, so
+    the command answered that suspicion with a sentence that is true either way and settles nothing.
+    Neither a human nor a script could tell the cases apart.
+
+    Driven end to end on a real completed run rather than pinned in source: the no-op branch must
+    ALSO really be a no-op, and asserting the message without asserting that would let a future
+    change keep the wording while quietly appending an event.
+    """
+    import anyio
+    from looplab import cli
+    rd = tmp_path / "done"
+    anyio.run(_toy_engine(rd).run)
+    before = list(EventStore(rd / "events.jsonl").read_all())
+    capsys.readouterr()                                   # drop the run's own output
+
+    try:
+        cli.finalize(rd)
+    except SystemExit:
+        pass
+    out = capsys.readouterr().out
+
+    assert "nothing to do" in out, (
+        "a finalize that took no action must say so; it is the whole reason the command was run")
+    assert "already finalized" in out
+    after = list(EventStore(rd / "events.jsonl").read_all())
+    assert [e.seq for e in after] == [e.seq for e in before], (
+        "the no-op branch appended an event — the message would then be a lie in the other direction")
+
+
 def test_error_finished_pending_finalize_retry_reruns_wrap_up(tmp_path):
     """Unlike an ordinary completed re-entry, an errored wrap-up is incomplete and retryable."""
     import anyio

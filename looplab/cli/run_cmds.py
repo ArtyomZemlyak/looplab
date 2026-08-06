@@ -1030,7 +1030,17 @@ def finalize(
             # Already complete is a pure read/no-op. Appending a fresh run_abort here would leave a
             # misleading last_stop_request_seq newer than last_finish_seq and make a later raw resume
             # look like an unserved FINALIZE request.
-            typer.echo(f"finalized {run_dir}")
+            #
+            # SAY THAT IT WAS A NO-OP. This branch used to print the exact bytes the working path
+            # prints at the end of this function — `finalized <dir>` — so the one output the operator
+            # gets could not distinguish "I ran the wrap-up for you" from "I looked, and did
+            # nothing". They are not interchangeable: the reason to type `looplab finalize` at all is
+            # usually the suspicion that a run's wrap-up did NOT happen, and answering that suspicion
+            # with the same sentence either way is the least useful thing the command can do. It also
+            # defeats scripting, since both paths also exit 0. The distinction is free — this branch
+            # already knows it took none of the four actions its condition rules out.
+            typer.echo(f"already finalized {run_dir} — nothing to do "
+                       f"(finished, wrap-up complete, no pending finalize, no pending resume)")
             return
         if wrap_up_incomplete or _pending_finalize(before):
             break
