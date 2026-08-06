@@ -170,9 +170,12 @@ def test_the_two_cost_flushes_really_do_differ_on_absence(tmp_path):
 class _without:
     """A read-through view of *srv* with one attribute missing, i.e. its producer never mounted.
 
-    `delattr` is not available: `AppState.__init__` sets these to `None`, so deleting leaves the
-    class attribute or an AttributeError depending on the name — and `None` is not the same state
-    as absent for a `getattr(srv, name, None)` probe's SECOND argument to be reached."""
+    A proxy rather than `delattr`, because the two states are NOT the same and the registry's two
+    halves reach them differently. `AppState.__init__` declares `list_*_fn = None`, so those exist
+    and are falsy; the two `flush_*_run_costs` are declared NOWHERE — they simply do not exist until
+    `boss.build_router` runs, which is how unwritten the protocol was. A probe spelled
+    `getattr(srv, name, None)` cannot tell the two apart, and it is the probe under test, so the
+    proxy reproduces the genuinely-absent case for either kind."""
 
     def __init__(self, srv, missing: str):
         self._srv, self._missing = srv, missing
