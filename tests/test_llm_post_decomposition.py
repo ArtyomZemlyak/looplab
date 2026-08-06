@@ -18,6 +18,8 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import subprocess
+import sys
 import textwrap
 
 import httpx as _httpx
@@ -439,3 +441,32 @@ def test_the_dispatcher_holds_no_policy_of_its_own():
     tests = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
              and isinstance(n.func, ast.Name) and n.func.id == "isinstance"]
     assert len(tests) == 1, "the dispatcher grew its own type checks alongside the table"
+
+
+def test_the_package_still_imports_without_the_openai_sdk():
+    """`core/llm.py` guards its openai import and degrades to `openai = None` for stripped/offline
+    installs — but a CLASS BODY runs at import, so `_RETRY_POLICY` dereferencing `openai.*` there
+    took the whole package down: `core.config` imports from this module, so every CLI command,
+    including the offline `looplab replay`, died with `AttributeError: 'NoneType' has no attribute
+    'BadRequestError'`. Nothing covered it, which is why it shipped.
+
+    A SUBPROCESS, not an in-process meta_path block: the import has to happen with a clean
+    `sys.modules`, and poisoning this interpreter's would leak into every later test in the file.
+    """
+    probe = textwrap.dedent("""
+        import sys
+        class _Block:
+            def find_module(self, name, path=None):
+                return self if name == "openai" else None
+            def load_module(self, name):
+                raise ModuleNotFoundError("No module named 'openai'")
+        sys.meta_path.insert(0, _Block())
+        import looplab.core.config          # the import every CLI command makes
+        from looplab.core.llm import OpenAICompatibleClient as C
+        # The SDK-independent tail must survive: without openai no openai exception can be raised,
+        # so an empty head is the only reachable policy, not a weakened one.
+        print(",".join(name for _types, name in C._RETRY_POLICY))
+    """)
+    done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, f"import failed without the openai SDK:\n{done.stderr}"
+    assert done.stdout.strip() == "_policy_unparseable,_policy_unclassified", done.stdout

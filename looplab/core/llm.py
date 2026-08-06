@@ -1116,15 +1116,25 @@ class OpenAICompatibleClient:
     # load-bearing: SUBCLASS dispatch (`APITimeoutError` must reach the `APIConnectionError` handler,
     # and `RateLimitError`/`InternalServerError` share one) and ORDER — the entries are tried
     # top-down, exactly as the `except` ladder they replaced. `None` is the catch-all tail.
-    _RETRY_POLICY: tuple = (
+    #
+    # The openai rows are built ONLY when the SDK imported. This module deliberately degrades to
+    # `openai = None` for stripped/offline installs (see the guarded import at the top), and a class
+    # BODY runs at import: dereferencing `openai.BadRequestError` here took the whole package down
+    # with `AttributeError: 'NoneType' has no attribute ...` — `core.config` imports from this
+    # module, so every CLI command died, including the offline `looplab replay`. The tail is
+    # unconditional because `json.JSONDecodeError` and the catch-all do not depend on the SDK, and
+    # without the SDK no openai exception can be raised in the first place, so an empty head is not
+    # a weakened policy — it is the only reachable one.
+    _RETRY_POLICY: tuple = (((
         (openai.BadRequestError, "_policy_bad_request"),
         (openai.AuthenticationError, "_policy_auth"),
         ((openai.RateLimitError, openai.InternalServerError), "_policy_throttled"),
         (openai.APIConnectionError, "_policy_connection"),
         (openai.PermissionDeniedError, "_policy_forbidden"),
+    ) if openai is not None else ()) + (
         (json.JSONDecodeError, "_policy_unparseable"),
         (None, "_policy_unclassified"),
-    )
+    ))
 
     def _retry_or_raise(self, exc: BaseException, attempt: int, use_stream: bool) -> bool:
         """This client's per-exception retry policy for ONE failed attempt (doc 25 CO-05).
