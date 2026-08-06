@@ -1,22 +1,26 @@
-"""The late-bound cross-router callables and the mount-time check on them (doc 25 XP-05).
+"""The late-bound router-produced callables and the mount-time check on them (doc 25 XP-05).
 
-Two route modules need something a SIBLING route module computes, and no router may import a router
-(`tests/test_serve_module_seams.py`, doc 25 SR-12). So the producer's `build_router` assigns its
-route body onto the shared `AppState` and the consumer reads it back off `srv` at REQUEST time. The
-failure that shape invites is the one nothing catches: drop the producing router from the mount
-list, and the app still imports, still constructs, still serves every other route, and 500s on ONE
-endpoint the first time a client asks for it — with a traceback naming the consumer, not the router
-that is missing.
+Code that cannot import a router still needs what a router computes — a sibling route module (no
+router may import a router: `tests/test_serve_module_seams.py`, doc 25 SR-12), or the destructive
+and command layers, which must not import one at all. So the producer's `build_router` assigns onto
+the shared `AppState` and the consumer reads it back off `srv` at REQUEST time. Drop the producing
+router from the mount list and the app still imports, still constructs, still serves every other
+route, and then either 500s on ONE endpoint — with a traceback naming the consumer, not the router
+that is missing — or, for the three consumers that probe `getattr(srv, "<name>", None)`, skips its
+step and says nothing at all.
 
 Two halves here, and the first is the one that matters:
 
-* the BEHAVIOURAL half drives that exact scenario. It mounts a real app without the producing
-  router, shows the endpoint really does fail at request time when the check is bypassed, and shows
-  `mount_routers` refusing at construction when it is not. Nothing here is satisfiable by a comment.
-* the SOURCE-SCAN half keeps the registry honest in both directions — every `srv.<x>_fn = …` in a
-  router is some row's producer, every `srv.<x>_fn` READ is some row's consumer. Without it the
-  registry is a list someone has to remember to update, which is the same unwritten protocol one
-  indirection further out.
+* the BEHAVIOURAL half drives those scenarios. It mounts a real app without the producing router and
+  shows the endpoint really does fail at request time when the check is bypassed; it shows
+  `mount_routers` refusing at construction when it is not; and it drives the asymmetry between the
+  two cost flushes, where the silent branch is the failure. Nothing here is satisfiable by a comment.
+* the SOURCE-SCAN half keeps the registry honest in both directions — every `srv.<x> = …` in a
+  router is some row's producer, every read of one of those names anywhere in `serve/` is some row's
+  consumer. Without it the registry is a list someone has to remember to update, which is the same
+  unwritten protocol one indirection further out. Deliberately not keyed on the `_fn` suffix the
+  finding describes: that convention covers two of the four rows, and the two it misses are the ones
+  whose absence costs money rather than raising.
 """
 from __future__ import annotations
 

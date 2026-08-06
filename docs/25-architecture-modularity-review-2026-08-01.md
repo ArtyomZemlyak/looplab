@@ -7536,28 +7536,55 @@ the part it leads with.*
 | runs.py sets `srv.list_runs_fn` | CONFIRMED | `routers/runs.py:862` |
 | misc.py sets `srv.list_tasks_fn`, genesis reads it | CONFIRMED | `misc.py:1297` → `genesis.py:195` |
 | "no static guarantee the producer router was mounted" | CONFIRMED | and this is the finding |
+| the late-bound edges are all `*_fn` | INCOMPLETE | `boss.py` assigns two `flush_*_run_costs` too |
 
 An AST scan for `srv.<x>_fn` assignments and loads across `looplab/serve/` returns two producers and
 ONE consumer — not the three-edge mesh the finding describes. Half of that mesh was closed by SR-12
-the day before. What is left is one live edge and one attribute nothing production reads.
+the day before.
+
+**But the finding's defect class is real and BIGGER than the finding, and the `_fn` spelling is what
+hides it.** Dropping the suffix filter and scanning for any `srv.<attr>` assigned inside a router
+finds two more edges, and they are the ones that matter. `routers/boss.py::build_router` assigns
+`srv.flush_pending_run_costs` and `srv.flush_durable_run_costs`; the consumers are
+`serve/deletion_service.py`, `serve/reset_route.py` and `serve/run_commands.py::destructive_guard`
+— none of them a router, so a router-to-router framing cannot see them at all. They read through
+`getattr(srv, "<name>", None)`, which the finding's mental model does not cover either.
+
+The asymmetry between the two is the finding's "no static guarantee" half with a cost attached.
+`flush_durable_run_costs`'s two consumers fail closed on absence — a reset or delete returns 503.
+All three consumers of `flush_pending_run_costs` SKIP: an unmounted boss router does not fail the
+destructive operation, it lets an irreversible mutation proceed with a paid call still waiting for
+durable run-cost accounting, and reports nothing anywhere. For that row the defensive fallback IS
+the failure.
 
 **Done: the contract is enumerable and checked at mount time.** `serve/router_wiring.py` holds the
 mount ORDER (moved verbatim out of `make_app`, minus two parentheticals SR-12 had falsified) and
-`LATE_BOUND_ROUTER_CALLABLES`; `mount_routers` includes every router and then refuses an app that
-does not satisfy it. Two shapes, both previously silent until a request arrived: a CONSUMER mounted
-without its PRODUCER, and a producer mounted that no longer assigns (the assignment moved behind a
-condition, or lost its name in a rename). Note the mount order does not establish the contract by
-itself and never did — genesis mounts 7th and its producer misc 12th, which works only because the
-read is at request time. That is precisely why it has to be checked rather than argued from the list.
+`LATE_BOUND_ROUTER_CALLABLES` — four rows; `mount_routers` includes every router and then refuses an
+app that does not satisfy it. Two shapes, both previously silent until a request arrived: a live
+CONSUMER without its PRODUCER, and a producer mounted that no longer assigns (the assignment moved
+behind a condition, or lost its name in a rename). Note the mount order does not establish the
+contract by itself and never did — genesis mounts 7th and its producer misc 12th, which works only
+because the read is at request time. That is precisely why it has to be checked rather than argued
+from the list.
+
+`LateBoundCallable` splits `router_consumers` from `service_consumers` because their LIVENESS
+differs: a router consumer exists only when mounted, a service consumer is imported code and is
+always live. Folding them into one tuple would let a row whose only readers are services pass a
+mount that omits its producer — which is exactly the two boss rows, i.e. the check would have been
+approximately right in precisely the place it needed to be exactly right.
 
 `RuntimeError`, deliberately not an `OperatorRefusal`: a mount list that does not satisfy its own
-registry is a defect in this package, not a mistake in something the operator typed.
+registry is a defect in this package, not a mistake in something the operator typed. The consumers'
+own `getattr(..., None)` guards stay untouched — each is defensive code at a site that cannot import
+the router. What changes is that in a correctly mounted app the fallback is now unreachable, so it
+stops being the thing that quietly decides an operator's cost accounting.
 
-**Rejected: the shared-services object.** With one live edge it is scaffolding for a single wire,
-and the two survivors are route BODIES — `list_tasks` reads the on-disk catalogue relative to the
-repo, `list_runs` overlays engine-liveness facts with a best-effort resume re-spawn. Promoting
-either into `AppState` puts HTTP concerns in the state bag, which is what SR-12 declined one day
-earlier for the same reason. Overturning that without new evidence would be churn.
+**Rejected: the shared-services object.** Every row is a route BODY or a closure over `srv` built
+inside `build_router` — `list_tasks` reads the on-disk catalogue relative to the repo, `list_runs`
+overlays engine-liveness facts with a best-effort resume re-spawn, and the two flushes are
+`paid_work` functions partially applied to `srv`. Promoting any of them into `AppState` puts HTTP and
+paid-work concerns in the state bag, which is what SR-12 declined one day earlier for the same
+reason. Overturning that without new evidence would be churn.
 
 `list_runs_fn`'s row carries an EMPTY consumer tuple, which is the finding's most interesting
 casualty: SR-12 gave the scope reports their own `run_membership()` because a report GET must not
@@ -7589,12 +7616,16 @@ The honest measurement is also that the finding's premise has inverted since it 
 by a third each. Whoever picks the extraction up should re-derive the targets rather than trust the
 table above — including this row.
 
-Pinned by `tests/test_router_wiring.py` (11): the deficient mount really does 500 at request time
-when the check is bypassed (so the refusal below has a cost attached), `mount_routers` refusing both
-shapes, the empty-consumer branch, and the two-way AST scan tying every `srv.*_fn` assignment and
-read in a router back to a registry row. Teeth-tested against 5 breaks, all biting — including the
-two written to be comment-satisfiable (`pass  # srv.list_tasks_fn = list_tasks` and a commented-out
-`mount_routers(app, srv)` beside a hand include loop), which the AST checks ignore as they should.
+Pinned by `tests/test_router_wiring.py` (14): the deficient mount really does 500 at request time
+when the check is bypassed (so the refusal has a cost attached), `mount_routers` refusing both
+shapes, the empty-consumer and service-consumer branches, the two cost flushes actually differing on
+absence, and the two-way AST scan tying every `srv.<x>` assignment in a router and every read of one
+of those names anywhere in `serve/` back to a registry row — attribute loads and
+`getattr(srv, "<name>", …)` alike, since the string-literal spelling is the one all three service
+consumers use. Teeth-tested against 8 breaks, all biting — including three written to be
+comment-satisfiable (`pass  # srv.list_tasks_fn = list_tasks`, the same for the boss flush, and a
+commented-out `mount_routers(app, srv)` beside a hand include loop), which the AST checks ignore as
+they should.
 
 #### XP-06 · MEDIUM · under-decomposition · effort: large
 
