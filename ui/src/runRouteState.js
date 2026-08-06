@@ -4,10 +4,22 @@
 
 export const RUN_ROUTE_TABS = ['Overview', 'Comments', 'Trials', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 export const RUN_ROUTE_PANELS = [
-  'overview', 'queue', 'hypotheses', 'research', 'failures', 'trust', 'pareto', 'data',
+  'overview', 'queue', 'research', 'failures', 'trust', 'pareto', 'data',
   'compare', 'sensitivity', 'importance', 'crossrun', 'artifacts', 'registry', 'memory',
   'collab', 'authoring', 'events', 'gpu', 'config',
 ]
+// The Card board is no longer a panel: it is the `cards` workspace view. `?panel=hypotheses` was a
+// live deep link (and the run menu's own spelling), so it is MIGRATED rather than rejected —
+// dropping it from RUN_ROUTE_PANELS alone would make every saved link report "Unknown panel was
+// ignored" and land on the graph. This is the one legacy panel name with a view successor; see
+// `sanitizeRunRouteState`, which is where the translation happens so that BOTH the parse path and
+// an in-memory `route.update({ panel: 'hypotheses' })` from stale code reach the same place.
+export const LEGACY_PANEL_VIEWS = { hypotheses: 'cards' }
+export const RUN_ROUTE_VIEWS = ['dag', 'cards', 'concepts', 'report']
+// Views a review bearer may reach. `cards` joins `concepts` on the owner-only side: the Card board
+// is an operator CONTROL surface (edit/priority/resources/drop/abandon) and `hypotheses` was never
+// in REVIEW_SAFE_PANEL_NAMES, so promoting it to a view must not quietly widen the review scope.
+export const REVIEW_SAFE_VIEWS = ['dag', 'report']
 export const TIMELINE_KIND_ORDER = [
   'proposal', 'eval', 'decision', 'research', 'report', 'trust', 'control', 'lifecycle',
 ]
@@ -22,7 +34,10 @@ const TAB_TO_WIRE = new Map(RUN_ROUTE_TABS.map(tab => [tab, tab.toLowerCase()]))
 const PANEL_SET = new Set(RUN_ROUTE_PANELS)
 const REVIEW_PANEL_SET = new Set(REVIEW_SAFE_PANEL_NAMES)
 const KIND_SET = new Set(TIMELINE_KIND_ORDER)
-const KNOWN_KEYS = new Set(['gen', 'view', 'node', 'attempt', 'tab', 'comment', 'panel', 'focus', 'seq', 'q', 'kinds'])
+const KNOWN_KEYS = new Set(
+  ['gen', 'view', 'card', 'node', 'attempt', 'tab', 'comment', 'panel', 'focus', 'seq', 'q', 'kinds'])
+const VIEW_SET = new Set(RUN_ROUTE_VIEWS)
+const REVIEW_VIEW_SET = new Set(REVIEW_SAFE_VIEWS)
 const GENERATION_RE = /^[0-9a-f]{64}$/
 const COMMENT_ID_RE = /^[A-Za-z0-9_-]{8,160}$/
 const INTEGER_RE = /^(0|[1-9][0-9]*)$/
@@ -33,6 +48,7 @@ const MAX_FILTER_CHARS = 500
 export const emptyRunRouteState = () => ({
   generation: null,
   view: 'dag',
+  cardId: null,
   nodeId: null,
   nodeGeneration: null,
   inspectTab: 'Overview',
@@ -100,10 +116,27 @@ function normalizeKinds(value, issues) {
   return TIMELINE_KIND_ORDER.filter(kind => selected.has(kind))
 }
 
+// A Card id as the wire actually bounds it: `core/models.py::_read_bounded_card_id` admits a
+// non-empty printable string of at most 256 chars that equals its own trim, and the UI already
+// spells the same rule as `CardBoard.jsx::canonicalHypothesisId`. Kept as a positive shape test
+// rather than a charset allow-list because card ids are minted server-side (`card-N` today) and a
+// narrower client rule would make a legitimate future id silently unlinkable.
+export function canonicalCardId(value) {
+  return typeof value === 'string' && value === value.trim() && value.length > 0
+    && [...value].length <= 256 && !/\p{C}/u.test(value)
+}
+
 export function sanitizeRunRouteState(input = {}, { reviewMode = false } = {}) {
   const state = emptyRunRouteState()
   if (GENERATION_RE.test(String(input.generation || ''))) state.generation = String(input.generation)
-  if (input.view === 'report' || (!reviewMode && input.view === 'concepts')) state.view = input.view
+  // The ONE place `?panel=hypotheses` becomes `view=cards`, so the parse path and any in-memory
+  // `route.update({ panel: 'hypotheses' })` left in older code reach the same successor instead of
+  // one of them silently landing on the graph. Applied before the view is read so an explicit
+  // `?view=…` alongside the legacy panel still wins — the panel is the weaker, deprecated signal.
+  const migratedView = !reviewMode ? LEGACY_PANEL_VIEWS[input.panel] : undefined
+  const requestedView = VIEW_SET.has(input.view) && input.view !== 'dag' ? input.view : migratedView
+  if (requestedView && (!reviewMode || REVIEW_VIEW_SET.has(requestedView))) state.view = requestedView
+  if (state.view === 'cards' && canonicalCardId(input.cardId)) state.cardId = input.cardId
   if (Number.isSafeInteger(input.nodeId) && input.nodeId >= 0) state.nodeId = input.nodeId
   const nodeGeneration = state.nodeId != null && Number.isSafeInteger(input.nodeGeneration)
     && input.nodeGeneration >= 0 ? input.nodeGeneration : null
@@ -165,12 +198,20 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
   }
   const view = single(params, 'view', issues)
   if (view != null && view !== '') {
-    if (view === 'report') state.view = 'report'
-    else if (view === 'concepts') {
-      if (reviewMode) issues.push('Concept view is unavailable in review links.')
-      else state.view = 'concepts'
-    }
-    else if (view !== 'dag') issues.push('Unknown workspace view was ignored.')
+    if (!VIEW_SET.has(view)) issues.push('Unknown workspace view was ignored.')
+    else if (reviewMode && !REVIEW_VIEW_SET.has(view)) {
+      // Name the refused view rather than a generic message: a reviewer handed a `#…?view=cards`
+      // link needs to know the board is owner-only, not that their link was malformed.
+      issues.push(`The ${view === 'cards' ? 'Card board' : 'Concept'} view is unavailable in review links.`)
+    } else state.view = view
+  }
+  const card = single(params, 'card', issues)
+  if (card != null && card !== '') {
+    if (!canonicalCardId(card)) issues.push('Invalid Card target was ignored.')
+    // A Card target is meaningless outside the board, and silently switching the view for it would
+    // let `?view=report&card=…` yank the operator off the report. Refuse rather than redirect.
+    else if (state.view !== 'cards') issues.push('Card target without the Card board view was ignored.')
+    else state.cardId = card
   }
   state.nodeId = integer(single(params, 'node', issues), 'node id', issues)
   const attemptSupplied = params.has('attempt')
@@ -212,6 +253,11 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
   const panel = single(params, 'panel', issues)
   if (panel != null && panel !== '') {
     if (PANEL_SET.has(panel)) state.panel = panel
+    // `?panel=hypotheses` is a live link shape (it was the run menu's own spelling until the board
+    // became a view). It is carried through as the panel value so `sanitizeRunRouteState` — the ONE
+    // owner of the translation — turns it into `view=cards`, and it must NOT report "Unknown panel"
+    // on the way: a migrated link is honoured, not diagnosed. An explicit `?view=` still wins there.
+    else if (Object.hasOwn(LEGACY_PANEL_VIEWS, panel)) state.panel = panel
     else issues.push('Unknown panel was ignored.')
   }
   const legacyFocus = boundedText(single(params, 'focus', issues), 'legacy Direction focus', MAX_FOCUS_CHARS, issues)
@@ -256,7 +302,8 @@ export function encodeRunRouteState(input, { reviewMode = false, forceGeneration
   if (state.generation && (forceGeneration || runRouteStateHasTarget(state, { reviewMode }))) {
     params.set('gen', state.generation)
   }
-  if (state.view === 'report' || state.view === 'concepts') params.set('view', state.view)
+  if (state.view !== 'dag') params.set('view', state.view)
+  if (state.cardId) params.set('card', state.cardId)
   if (state.nodeId != null) {
     params.set('node', String(state.nodeId))
     if (state.nodeGeneration != null) params.set('attempt', String(state.nodeGeneration))

@@ -613,6 +613,53 @@ button { font: inherit; }
   background: color-mix(in srgb, var(--alarm) 6%, transparent); color: var(--fg-dim); }
 .card-kanban-unknown { margin-top: 5px; font-size: 10px; }
 .card-kanban-evidence .muted, .card-empty { font-size: 10px; }
+
+/* ── Card board as a workspace VIEW ─────────────────────────────────────────
+   Lanes left, one work item's full record right. The lanes keep `.card-board`'s own horizontal
+   scroll, which is the point of the promotion: as a modal the board's intrinsic minimum
+   (6 x 225px + 5 x 8px = 1390px) had to fit inside the panel, so PanelShell grew a second
+   `board` width to hold it. Here the lanes own a flex column that may scroll on its own, so the
+   lane count stops driving the shell width at all — and the JupyterHub proxy's narrower window
+   scrolls the lanes instead of clipping them. The detail pane deliberately re-uses `.side`
+   (width, border, drawer behaviour) so it is the SAME pane as the graph inspector's. */
+.card-workspace { min-height: 0; }
+.card-lanes-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column;
+  padding: 8px 10px; overflow: auto; }
+.card-lanes-head { display: flex; flex-direction: column; gap: 4px; font-size: 11px; flex: none; }
+.card-lanes-head .card-projection-note { margin-bottom: 4px; }
+.card-workspace .card-board { flex: 1; min-height: 0; align-content: start; }
+/* A lane card is a summary you pick, not a record you read: the facts moved to the pane. The whole
+   face is one button so the hit target is the card, not a link inside it. */
+.card-lane-card { padding: 0; overflow: hidden; }
+.card-lane-card.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.card-lane-open { display: flex; flex-direction: column; gap: 4px; width: 100%; padding: 7px;
+  border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.card-lane-open:hover { background: var(--bg-2); }
+.card-lane-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.card-detail-side { overflow: hidden; }
+.card-detail { flex: 1; min-height: 0; overflow: auto; padding: 8px; font-size: 11px; }
+.card-detail-empty { display: flex; align-items: center; padding: 16px; }
+.card-detail-node { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.card-detail-crumb { display: flex; align-items: center; gap: 6px; flex: none;
+  padding: 4px 8px; border-bottom: 1px solid var(--line); font-size: 11px; }
+/* The section that says a Card is not an experiment. It leads the pane on purpose: the count is the
+   fact the board never showed, and it is the one an operator gets wrong. */
+.card-attempts { margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.card-attempts-h { display: flex; align-items: center; gap: 6px; margin: 0 0 4px;
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+.card-attempts-note { margin: 0 0 6px; font-size: 10px; line-height: 1.4; }
+.card-attempt-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.card-attempt { display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 6px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg-3); color: inherit;
+  font: inherit; font-size: 11px; text-align: left; cursor: pointer; }
+.card-attempt:hover:not(:disabled) { background: var(--bg-2); }
+.card-attempt.on { border-color: var(--accent); background: var(--accent-dim); color: var(--accent-ink); }
+.card-attempt:disabled, .card-attempt.missing { cursor: default; color: var(--fg-mut); opacity: .7; }
+.card-attempt-id { font-weight: 600; flex: none; }
+.card-attempt-op { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-attempt-metric { margin-left: auto; font-variant-numeric: tabular-nums; }
+.card-workspace-legacy { overflow: auto; }
+
 .card-kanban-controls { margin-top: 7px; border-top: 1px solid var(--line); padding-top: 5px; }
 .card-kanban-controls > summary { color: var(--fg-mut); cursor: pointer; font-size: 10px; }
 .card-control-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px;
