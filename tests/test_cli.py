@@ -2,6 +2,7 @@
 (e.g. an option assigned to a non-existent Settings field)."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -11,6 +12,20 @@ from looplab.cli import REFUSAL_EXIT_CODE, app
 ROOT = Path(__file__).resolve().parents[1]
 runner = CliRunner()
 
+
+
+# Rich colours a Typer usage error, and it splices SGR escapes INSIDE the text — `--max-nodes`
+# arrives as `--max` + an escape + `-nodes`, so a plain `in result.output` misses a message that is
+# perfectly correct on screen. Whether it happens at all depends on terminal detection, so the same
+# assertion passes on one machine and fails on another; here it failed both in the full suite and in
+# isolation while the CLI printed exactly the sentence being looked for. Assert against the STRIPPED
+# text: what the operator reads is the glyphs, never the escapes.
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def plain(result) -> str:
+    """A CliRunner result's output with SGR escapes removed."""
+    return _ANSI.sub("", result.output)
 
 def test_run_mlebench_offline_with_agent_flags(tmp_path):
     # backend=toy -> mlebench's templated k-NN runs offline. The agent flags must be accepted and
@@ -57,7 +72,7 @@ def test_resume_rejects_a_nonpositive_max_nodes_override(tmp_path):
     for bad in ("0", "-3"):
         result = runner.invoke(app, ["resume", str(out), "--max-nodes", bad])
         assert result.exit_code != 0, result.output
-        assert "max-nodes" in result.output.lower()
+        assert "max-nodes" in plain(result).lower()
     # `resume` is ALSO called as a plain function (test_finalization_recovery, test_stop_finalize_resume).
     # There an omitted `max_nodes` is Typer's OptionInfo sentinel, not None, so the guard must key on
     # "is a real int" — otherwise it either crashes on the comparison or assigns the sentinel as a budget.
@@ -337,7 +352,7 @@ def test_speculation_gate_calibration_requires_no_genesis_before_model_call(
         "--speculation-gate-calibration",
     ])
     assert result.exit_code == 2
-    assert "requires --no-genesis" in result.output
+    assert "requires --no-genesis" in plain(result)
 
 
 def test_speculation_gate_calibration_rejects_stale_snapshot_without_events(

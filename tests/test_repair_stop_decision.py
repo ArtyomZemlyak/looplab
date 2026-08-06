@@ -1020,3 +1020,100 @@ def test_the_two_ledger_apportionment_is_gone():
             assert gone not in names | literals, f"{mod.__name__} still speaks {gone}"
     assert not hasattr(triage, "_environment_failure")
     assert not hasattr(triage, "_normalize_error_sig")
+
+
+def test_the_other_two_per_node_budgets_are_the_log_s_too():
+    """`dep_rounds` and `full_retrains` were the last process-local bounds in the attempt loop.
+
+    Same defect as the repair budget above, and the same reason it matters: a bound a resume refunds
+    is not a bound. `_MAX_DEP_ROUNDS` exists so an offline or misnamed package cannot loop forever,
+    and `inline_repair_retrain_cap` guards GPU HOURS — which is exactly the budget a flapping
+    provider's pause -> resume cycle must not hand back.
+
+    Both are read straight off the log, generation-keyed exactly as `replay._generation_matches`
+    keys everything else: an ABSENT stamp binds to whichever lifecycle is asking (a legacy log
+    cannot say), a PRESENT-but-different one is rejected, and an explicit null is invalid rather
+    than unstamped.
+    """
+    from looplab.engine.evaluate import _durable_dep_rounds, _durable_full_retrains
+    from looplab.events.eventstore import Event
+
+    def _dep(**data):
+        return Event(v=1, seq=0, ts=0.0, type="deps_installed", data=data)
+
+    def _rt(**data):
+        return Event(v=1, seq=0, ts=0.0, type="full_retrain_charged", data=data)
+
+    deps_rows = [
+        _dep(node_id=0, generation=0, packages=["numpy"], round=1),
+        _dep(node_id=0, generation=0, packages=["scipy"], round=2),
+        _dep(node_id=1, generation=0, packages=["torch"], round=7),   # another node
+        _dep(node_id=0, generation=1, packages=["pandas"], round=1),  # a newer lifecycle
+    ]
+    assert _durable_dep_rounds(deps_rows, 0, 0) == 2
+    assert _durable_dep_rounds(deps_rows, 0, 1) == 1     # the reset lifecycle starts fresh
+    assert _durable_dep_rounds(deps_rows, 5, 0) == 0     # a node that installed nothing
+    assert _durable_dep_rounds([], 0, 0) == 0
+    # `max`, not a count: a crash between the append and the `continue` can duplicate the row, and a
+    # duplicate must not inflate a budget. The round number is the authority.
+    assert _durable_dep_rounds([deps_rows[0], deps_rows[0], deps_rows[1]], 0, 0) == 2
+    assert _durable_dep_rounds([_dep(node_id=0, generation=None, round=3)], 0, 0) == 0
+
+    retrain_rows = [
+        _rt(node_id=0, generation=0, spent=1, attempt=2),
+        _rt(node_id=0, generation=0, spent=2, attempt=4),
+        _rt(node_id=0, generation=1, spent=1, attempt=1),
+    ]
+    assert _durable_full_retrains(retrain_rows, 0, 0) == 2
+    assert _durable_full_retrains(retrain_rows, 0, 1) == 1
+    assert _durable_full_retrains(retrain_rows, 9, 0) == 0
+    assert _durable_full_retrains([], 0, 0) == 0
+    assert _durable_full_retrains([_rt(node_id=0, generation=None, spent=5)], 0, 0) == 0
+    # A log written before the event existed contributes 0 — the honest reading. Inventing a charge
+    # for an old log would abandon nodes that never spent any compute.
+    assert _durable_full_retrains([
+        Event(v=1, seq=0, ts=0.0, type="node_repaired",
+              data={"node_id": 0, "generation": 0, "attempt": 1})], 0, 0) == 0
+
+
+def test_the_retrain_charge_cannot_ride_on_node_repaired():
+    """Why `full_retrain_charged` is its own event, stated as a property rather than a comment.
+
+    `node_repaired` is appended BEFORE the loop asks `_repair_forces_full_retrain`, so a field on
+    that event would always carry the count as of the PREVIOUS repair — and a resume would refund
+    the most recent re-train, the single charge this cap exists to hold. This pins the ordering that
+    makes the separate event necessary; if someone reorders the loop so the append follows the
+    decision, this test is where they will find out that the event can then be folded back in.
+    """
+    import inspect
+    from looplab.engine.orchestrator import Engine
+
+    src = inspect.getsource(Engine._evaluate)
+    append_at = src.index("EV_NODE_REPAIRED, repair_payload")
+    decide_at = src.index("_repair_forces_full_retrain(res, next_start)")
+    assert append_at < decide_at, (
+        "the node_repaired append no longer precedes the re-train decision — the charge can now "
+        "ride on that event as an additive field, and EV_FULL_RETRAIN_CHARGED can retire")
+    charge_at = src.index("EV_FULL_RETRAIN_CHARGED")
+    assert decide_at < charge_at, "the charge must be appended after the decision that makes it"
+
+
+def test_the_attempt_loop_actually_seeds_from_the_durable_ledgers():
+    """The functions above are useless unless the LOOP calls them, and testing them in isolation
+    does not check that — measured: reverting both seeds to `= 0` left every assertion above green.
+
+    AST, not a substring: `called_names` resolves real `ast.Call` nodes, so a commented-out call
+    does not satisfy it. This is tier 3 by CLAUDE.md's ladder and it is honest about what it proves —
+    that the call is PRESENT in `_evaluate`, not that it executed. Reaching the seeding behaviourally
+    needs a real sandboxed evaluation that fails in exactly the right way and is then resumed by a
+    second Engine over the same run dir; the three ledger readers are pure and fully driven above,
+    so what is left uncovered is the wiring, which is what this pins.
+    """
+    from tests._source_scan import called_names
+    from looplab.engine.orchestrator import Engine
+
+    called = called_names(Engine._evaluate)
+    for fn in ("_durable_repair_ledger", "_durable_dep_rounds", "_durable_full_retrains"):
+        assert fn in called, (
+            f"{fn} is no longer called by the attempt loop — that budget silently went back to being "
+            "process-local, and a resume refunds it")
