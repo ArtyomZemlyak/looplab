@@ -207,6 +207,120 @@ def concept_touch_counts(node_concepts) -> dict:
     return dict(sorted(c.items()))
 
 
+# --------------------------------------------------------------------------- #
+# The GLOBAL concept MAP (PART V Phase 4/5) — one fold, any population.
+#
+# This used to be `engine/concept_capsules.py::portfolio_concept_graph`, which read run-end concept
+# CAPSULES and canonicalized them itself. That made the population part of the function, and the
+# population is exactly what a second consumer disagrees about: the browser's `Concepts` view folds
+# the LIVE per-run `concepts` rollup of the runs the list is showing, and on the real corpus here the
+# two populations were 15 tagged runs versus 3 capsules. Two maps of one lab, neither wrong about its
+# own corpus, is how a view silently reports a different population than the surface around it.
+#
+# So the fold takes per-run concept SETS and nothing else. The CALLER chooses and scopes the
+# population, and the caller canonicalizes (the governance alias/split registry belongs to whoever
+# owns the population's provenance, not to a projection). `ui/src/conceptForest.js` is the browser
+# half and mirrors these field names, exactly as it already mirrors `project_hierarchy` — one
+# vocabulary, two runtimes, no second rule.
+# --------------------------------------------------------------------------- #
+
+MAX_MAP_CONCEPTS = 512
+
+MAX_MAP_PAIRS = 2_048
+
+MAX_MAP_RUN_CONCEPTS = 256      # cap ONE run's set before the O(k^2) pairing
+
+
+def concept_map(run_concepts, *, min_cooccurrence: int = 2) -> dict:
+    """The GLOBAL cross-run concept MAP over an ALREADY-SCOPED population — 'мега общая карта концептов'.
+
+    `run_concepts` is an iterable of per-RUN concept-id iterables: one element per run, each the ids that
+    run is evidence for. Pure/deterministic, no I/O, no governance lookup, ADVISORY — a read-model, never
+    a selection input. Ids cross `core.concepts.normalize_concept_id`, the same bounded identity contract
+    the run-list rollup and `project_hierarchy` use, so the Python map and the browser forest join.
+
+    The SPINE is `project_hierarchy` verbatim: the parent of `a/b/c` is `a/b`, every ancestor prefix is
+    materialized so `loss` groups even when only `loss/contrastive/dcl` was tagged, and `tagged` marks
+    the ids a run actually named. There is deliberately no `is_a` EDGE list any more — the tree IS the
+    is_a relation, and a second spelling of it is a second thing to keep in sync.
+
+    The one relation that is not derivable from an id is `co_occurs`: an UNORDERED concept PAIR that
+    appeared TOGETHER in one run, weighted by the number of DISTINCT runs the pair co-occurred in.
+    `min_cooccurrence` (default 2 runs) is a FLOOR, so a single-run coincidence is not an edge — one run
+    tagging `a` and `b` says the tagger emitted two labels, not that the lab pairs them.
+
+    Everything is bounded, and every bound is REPORTED. Node omissions are exact for the whole scoped
+    population; pair omissions are exact only INSIDE the retained node projection, and pairs touching a
+    pruned node stay explicitly UNKNOWN (their exact distinct-pair count would restore an unbounded
+    O(N^2)) — never counted as zero.
+    """
+    per_run: list[set[str]] = []
+    concept_runs: dict[str, int] = {}
+    for concepts in (run_concepts or ()):
+        canon = set()
+        # Cap the run's own set BEFORE pairing, and take the lexical head so the retained subset is the
+        # same on every process (a raw-set slice follows PYTHONHASHSEED and would make the map differ
+        # run to run for one corpus).
+        for cid in sorted({c for c in (_normalize_concept_id(x) for x in (concepts or ())) if c}):
+            if len(canon) >= MAX_MAP_RUN_CONCEPTS:
+                break
+            canon.add(cid)
+        per_run.append(canon)
+        for cid in canon:
+            concept_runs[cid] = concept_runs.get(cid, 0) + 1
+
+    explored = len(concept_runs)
+    hierarchy = project_hierarchy(concept_runs.keys())
+    for cid in hierarchy["nodes"]:
+        concept_runs.setdefault(cid, 0)          # a materialized ancestor nobody tagged: structure, 0 runs
+    ranked = sorted(concept_runs, key=lambda cid: (-concept_runs[cid], cid))
+    kept = set(ranked[:MAX_MAP_CONCEPTS])
+    pruned_nodes = len(ranked) - len(kept)
+
+    # Select the bounded node set BEFORE the O(k^2) pairing: retaining pair sets for every source
+    # concept when at most `MAX_MAP_CONCEPTS` of them can reach the response is the cost this ordering
+    # exists to avoid.
+    pair_runs: dict[tuple[str, str], int] = {}
+    for canon in per_run:
+        inside = sorted(canon & kept)
+        for i, a in enumerate(inside):           # unordered sorted pair; one count per distinct run
+            for b in inside[i + 1:]:
+                pair_runs[(a, b)] = pair_runs.get((a, b), 0) + 1
+    try:
+        threshold = max(1, int(min_cooccurrence))     # a per-pair run-count floor; <=0 means "keep all"
+    except (TypeError, ValueError):
+        threshold = 2                            # a contract-violating caller falls back to the default
+    above = sorted(((a, b, n) for (a, b), n in pair_runs.items() if n >= threshold),
+                   key=lambda t: (-t[2], t[0], t[1]))
+    pairs = [{"a": a, "b": b, "n_runs": n} for a, b, n in above[:MAX_MAP_PAIRS]]
+
+    # Bounding is not the only way a pair can be missing: a pruned node hides every pair incident to it
+    # even when the retained pairs fit under their own cap. Keep those two facts separate.
+    complete = pruned_nodes == 0
+    return {
+        "n_runs": len(per_run),
+        "n_concepts": len(ranked),
+        "n_explored_concepts": explored,
+        "concepts": [{"concept": cid, "n_runs": concept_runs[cid]} for cid in ranked[:MAX_MAP_CONCEPTS]],
+        "concepts_omitted": pruned_nodes,
+        "roots": [cid for cid in hierarchy["roots"] if cid in kept],
+        "nodes": {cid: {**node, "n_runs": concept_runs[cid],
+                        "children": [c for c in node["children"] if c in kept]}
+                  for cid, node in hierarchy["nodes"].items() if cid in kept},
+        "min_cooccurrence": threshold,
+        "pairs": pairs,
+        "pair_candidates": len(pair_runs),
+        # Exact only within `pair_source_scope`: response-cap omissions, not unknown out-of-projection pairs.
+        "pairs_omitted": max(0, len(above) - len(pairs)),
+        "pair_source_scope": "scoped_population" if complete else "retained_node_projection",
+        "pair_source_complete": complete,
+        "pair_source_nodes_included": len(kept),
+        "pair_source_nodes_pruned": pruned_nodes,
+        "pairs_outside_projection": 0 if complete else None,
+        "pairs_outside_projection_unknown": not complete,
+    }
+
+
 def default_lenses() -> list[dict]:
     """The shipped lens pack — each a pure PROJECTION spec (no data of its own). `is_a` nests by concept
     path; the rest nest by a stored typed-edge relation. Order = display order; `is_a` is the default."""
