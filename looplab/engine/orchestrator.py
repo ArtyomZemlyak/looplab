@@ -280,6 +280,79 @@ _BUDGET_WAIT_MIN_S = 0.5
 _BUDGET_WAIT_MAX_S = 4.0
 
 
+class CreationRunawayCounters:
+    """The two creation-level bounds the run loop carries from one turn to the next.
+
+    Lifted out of `Engine._run_with_llm_broker` (doc 25 XP-06), where these were four loop-carried
+    locals and the charging rule was thirteen lines in the middle of a 389-line function: no test
+    could reach the RULE, only the whole simulated spin around it. Every comment below is the loop's
+    own, unchanged apart from the counters losing their leading underscore.
+    `tests/test_creation_runaway_guard.py` still drives both bounds end to end through a real run.
+    """
+
+    def __init__(self) -> None:
+        # Creation-level runaway guard: if the loop keeps CREATING nodes while NO node reaches a
+        # terminal (evaluated/failed), it is spinning — e.g. `fold` returning empty `nodes` makes
+        # `_create_node` re-mint id 0 forever (the 184MB node_created(0) spin). The eval loop bounds
+        # its own inline-repair runaway (the triage model's stop verdict + `inline_repair_attempts`),
+        # but node CREATION had nothing. Local counters (not replayed) → on trip we
+        # append run_finished (which IS replayed), so resume sees a cleanly-finished run.
+        #
+        # It charges nodes actually MINTED, counted from the LOG (`node_created` rows), not from the
+        # planned `len(creates)` and not from `len(state.nodes)`. Both alternatives were wrong, in
+        # opposite directions:
+        #   * planned creates over-charge a lane that plans work and mints nothing — the Card lane
+        #     stages/elects per turn, so a Card-side stall was reported as "node creation not
+        #     converging" when not one node had been created. That is the misdiagnosis this counter
+        #     caused for the whole speculation-depth defect, and the reason the message is now split;
+        #   * folded `nodes` under-charges to zero in the exact spin the guard exists for: the
+        #     empty-nodes fold that re-mints id 0 forever leaves `len(state.nodes)` at 0 every turn.
+        # The log is the one view that sees both. `no_mint_turns` is the companion bound for the
+        # other half — a create lane that keeps planning work and minting nothing — because a
+        # mint-only charge on its own would turn that stall into an unbounded loop.
+        self.created_no_terminal = 0
+        self.prev_terminal = -1
+        # `None` until the first observation: on RESUME the log already holds every earlier
+        # `node_created`, and charging that history to this process's guard would false-trip a long
+        # healthy run on its first loop turn. Only rows minted from here on are this loop's spin.
+        self.minted_charged: Optional[int] = None
+        # The REACH of that companion bound, which is narrower than "the loop is bounded".
+        # `no_mint_turns` is incremented in exactly ONE place, `_handle_create_actions`,
+        # which the loop reaches only through the `if creates:` branch. Every `continue` above it is
+        # outside its reach, and at least two are real lanes: the speculation head-request/`buildings`
+        # session and `_drop_stale_speculation` both restart the turn before `_select_actions` runs.
+        # A loop confined to those advances NEITHER counter — `created_no_terminal` does not cover
+        # the gap either, because it is charged only when the log gains `node_created` rows and BOTH
+        # counters reset on any node reaching terminal, so a request → build → discard cycle (which
+        # mints and terminalizes every pass) resets them every pass. What bounds that lane is
+        # elsewhere: the refund cap (`search/card_selection.py::refunded_node_reservations`, one whole
+        # operator budget) and the monotonic id ceiling (`_node_id_ceiling`, which never reuses an id).
+        # A new `continue` above the create branch is an unbounded turn unless it carries its own
+        # bound. The AUTO depth ratchet below carries one by being ONE-WAY: it settles the depth to 0,
+        # which switches off `_speculation_enabled()` and with it the branch it returns through.
+        self.no_mint_turns = 0
+
+    def charge(self, *, minted_now: int, terminal_now: int) -> None:
+        """Observe one loop turn: `minted_now` is the LOG's `node_created` count, `terminal_now`
+        the folded count of nodes past `pending`.
+
+        Three rules, and each one is load-bearing in a direction the other two are not.  The FIRST
+        observation only calibrates (a resume inherits the whole log's history and must not be
+        charged for it).  A mint is creation progress, so it clears the no-mint bound but not the
+        mint bound.  ANY node reaching terminal is real progress and clears both.
+        """
+        if self.minted_charged is None:
+            self.minted_charged = minted_now
+        elif minted_now != self.minted_charged:
+            self.created_no_terminal += max(0, minted_now - self.minted_charged)
+            self.minted_charged = minted_now
+            self.no_mint_turns = 0                   # a mint IS creation progress
+        if terminal_now != self.prev_terminal:       # a node reached terminal (progress) -> reset
+            self.created_no_terminal = 0
+            self.no_mint_turns = 0
+            self.prev_terminal = terminal_now
+
+
 class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
              ConceptCadenceMixin, VerifierTiebreakMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
@@ -1173,7 +1246,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         with llm_broker_scope(broker), llm_lane_scope("engine"):
             return await self._run_with_llm_broker()
 
-    async def _run_with_llm_broker(self) -> RunState:
+    def _enter_run(self) -> bool:
+        """Authorize re-entry, recover, ACK and set up: everything before the first loop turn.
+
+        An EXACT cut out of `_run_with_llm_broker` (doc 25 XP-06).  Measured rather than assumed:
+        nothing after this block reads either of its two locals — `events` is dead after the setup
+        gate and `state` is re-folded at the top of every loop turn — so its entire output is the
+        one `entry_finished` flag finalization needs.
+
+        It stays in THIS module because it folds twice.  `fold` here is the module-global
+        monkeypatch seam (`tests/test_creation_runaway_guard.py` and friends replace it), and a
+        method that reached it from another engine file would bind a different object; see
+        `engine/card_reservation.py::_fold` for the deferred-attribute pattern that costs.
+        """
         events = self.store.read_all()
         state = fold(events)
         # Re-entry authorization is the first semantic boundary.  Recovery, command ACK and setup all
@@ -1201,48 +1286,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 and not state.finalization_pending()):
             self._setup_phase(state)
 
-        entry_finished = self._reentry_repin()
+        return self._reentry_repin()
+
+    async def _run_with_llm_broker(self) -> RunState:
+        entry_finished = self._enter_run()
         start = time.time()
-        # Creation-level runaway guard: if the loop keeps CREATING nodes while NO node reaches a
-        # terminal (evaluated/failed), it is spinning — e.g. `fold` returning empty `nodes` makes
-        # `_create_node` re-mint id 0 forever (the 184MB node_created(0) spin). The eval loop bounds
-        # its own inline-repair runaway (the triage model's stop verdict + `inline_repair_attempts`),
-        # but node CREATION had nothing. Local counters (not replayed) → on trip we
-        # append run_finished (which IS replayed), so resume sees a cleanly-finished run.
-        #
-        # It charges nodes actually MINTED, counted from the LOG (`node_created` rows), not from the
-        # planned `len(creates)` and not from `len(state.nodes)`. Both alternatives were wrong, in
-        # opposite directions:
-        #   * planned creates over-charge a lane that plans work and mints nothing — the Card lane
-        #     stages/elects per turn, so a Card-side stall was reported as "node creation not
-        #     converging" when not one node had been created. That is the misdiagnosis this counter
-        #     caused for the whole speculation-depth defect, and the reason the message is now split;
-        #   * folded `nodes` under-charges to zero in the exact spin the guard exists for: the
-        #     empty-nodes fold that re-mints id 0 forever leaves `len(state.nodes)` at 0 every turn.
-        # The log is the one view that sees both. `_no_mint_turns` is the companion bound for the
-        # other half — a create lane that keeps planning work and minting nothing — because a
-        # mint-only charge on its own would turn that stall into an unbounded loop.
-        _created_no_terminal = 0
-        _prev_terminal = -1
-        # `None` until the first observation: on RESUME the log already holds every earlier
-        # `node_created`, and charging that history to this process's guard would false-trip a long
-        # healthy run on its first loop turn. Only rows minted from here on are this loop's spin.
-        _minted_charged: Optional[int] = None
-        # The REACH of that companion bound, which is narrower than "the loop is bounded".
-        # `_no_mint_turns` is incremented in exactly ONE place, `_handle_create_actions`,
-        # which this loop reaches only through the `if creates:` branch. Every `continue` above it is
-        # outside its reach, and at least two are real lanes: the speculation head-request/`buildings`
-        # session and `_drop_stale_speculation` both restart the turn before `_select_actions` runs.
-        # A loop confined to those advances NEITHER counter — `_created_no_terminal` does not cover
-        # the gap either, because it is charged only when the log gains `node_created` rows and BOTH
-        # counters reset on any node reaching terminal, so a request → build → discard cycle (which
-        # mints and terminalizes every pass) resets them every pass. What bounds that lane is
-        # elsewhere: the refund cap (`search/card_selection.py::refunded_node_reservations`, one whole
-        # operator budget) and the monotonic id ceiling (`_node_id_ceiling`, which never reuses an id).
-        # A new `continue` above the create branch is an unbounded turn unless it carries its own
-        # bound. The AUTO depth ratchet below carries one by being ONE-WAY: it settles the depth to 0,
-        # which switches off `_speculation_enabled()` and with it the branch it returns through.
-        _no_mint_turns = 0
+        # The creation-level runaway guard's two bounds and the rule that charges them — see
+        # `CreationRunawayCounters`, which carries the whole argument for why they read the LOG.
+        runaway = CreationRunawayCounters()
         while True:
             decision_events = self.store.read_all()
             state = fold(decision_events)
@@ -1302,17 +1353,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if state.finished:
                 break
             if isinstance(state.leakage, dict) and state.leakage.get("leak"):
-                if self._close_card_build_before_terminal_gate(state):
-                    continue
-                if self._finish_with_report_if_quiescent(
-                        state, {"reason": "leakage"}, after_seq=decision_seq):
+                if self._settle_terminal_gate(state, "leakage", decision_seq=decision_seq) == "break":
                     break
                 continue
             if state.stop_requested:
-                if self._close_card_build_before_terminal_gate(state):
-                    continue
-                if self._finish_with_report_if_quiescent(
-                        state, {"reason": "aborted"}, after_seq=decision_seq):
+                if self._settle_terminal_gate(state, "aborted", decision_seq=decision_seq) == "break":
                     break
                 continue
             if state.paused:
@@ -1334,64 +1379,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 continue
             # Charge the runaway guard for what the log says was MINTED since the previous turn. Read
             # off the events rather than the fold so the empty-nodes spin (which folds to no nodes at
-            # all while appending a `node_created` per turn) is still counted — see `_minted_charged`.
-            _minted_now = sum(1 for _e in decision_events if _e.type == EV_NODE_CREATED)
-            if _minted_charged is None:
-                _minted_charged = _minted_now
-            elif _minted_now != _minted_charged:
-                _created_no_terminal += max(0, _minted_now - _minted_charged)
-                _minted_charged = _minted_now
-                _no_mint_turns = 0                   # a mint IS creation progress
-            _terminal_now = sum(1 for _n in state.nodes.values()
-                                if _n.status is not NodeStatus.pending)
-            if _terminal_now != _prev_terminal:      # a node reached terminal (progress) -> reset
-                _created_no_terminal = 0
-                _no_mint_turns = 0
-                _prev_terminal = _terminal_now
-            # Onboarding pre-phase (Phase 3, ADR-7): the agent proposes a trusted eval
-            # spec + metric adapter; a human ratifies it once (or autonomous auto-confirms);
-            # then it's frozen + protected and the optimization loop trusts it.
-            if self.onboarder is not None and not state.spec_confirmed:
-                if state.proposed_spec is None:
-                    with self.tracer.span("onboard", new_trace=True), \
-                            llm_lane_scope("enrichment"):
-                        proposal = self.onboarder()
-                    self.store.append(EV_SPEC_PROPOSED, proposal)
-                    continue
-                if self.eval_trust_mode == "autonomous":
-                    self.store.append(EV_SPEC_APPROVED, {})   # no human gate
-                    continue
-                if not state.spec_approval_requested:
-                    self.store.append(EV_SPEC_APPROVAL_REQUESTED,
-                                      {"eval": state.proposed_spec.get("eval_spec")})
-                break  # pause for `LoopLab approve` (ratify_freeze)
-            if self.onboarder is not None and not self._spec_activated:
-                self._activate_spec(state.proposed_spec)
-            # Drift coverage (#8): ratify_freeze_drift only corroborates the metric if a
-            # cross_check reader exists. An adapter metric (agent-authored reader) with no
-            # cross_check would make the drift guard a SILENT no-op exactly where it matters
-            # most — surface it loudly once instead of pretending the metric is corroborated.
-            if (self.eval_trust_mode == "ratify_freeze_drift" and self._eval_spec
-                    and not self._drift_warned):
-                self._drift_warned = True
-                _m = self._eval_spec.get("metric", {})
-                if _m.get("kind") == "adapter" and not self._eval_spec.get("cross_check"):
-                    self.store.append(EV_DRIFT_UNAVAILABLE, {
-                        "reason": "ratify_freeze_drift selected but the adapter metric has no "
-                                  "cross_check; the agent-authored reader is trusted WITHOUT "
-                                  "independent corroboration. Add eval.cross_check (a built-in "
-                                  "reader) to enable the drift guard."})
+            # all while appending a `node_created` per turn) is still counted — see `minted_charged`.
+            runaway.charge(
+                minted_now=sum(1 for _e in decision_events if _e.type == EV_NODE_CREATED),
+                terminal_now=sum(1 for _n in state.nodes.values()
+                                 if _n.status is not NodeStatus.pending),
+            )
+            _signal = self._run_spec_gates(state)
+            if _signal == "break":
+                break
+            if _signal == "continue":
+                continue
             max_s, max_es = self._apply_control_overrides(state)
             # Budget (I13): per-invocation wall-clock ceiling (resets on each resume).
             if max_s is not None and (time.time() - start) >= max_s:
-                if self._close_card_build_before_terminal_gate(state, max_es):
-                    continue
-                if self._close_node_creating_forced_request_before_terminal_gate(
-                    state, reason="time_budget",
-                ):
-                    continue
-                if self._finish_with_report_if_quiescent(
-                        state, {"reason": "time_budget"}, after_seq=decision_seq):
+                if self._settle_terminal_gate(state, "time_budget", decision_seq=decision_seq,
+                                       max_es=max_es, drain_forced_request=True) == "break":
                     break
                 continue
             # Eval-compute budget (#2): cumulative time spent inside evals across the whole run
@@ -1399,14 +1402,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # the silent multi-hour sweep that real training runs can produce.
             if (max_es is not None
                     and state.total_eval_seconds >= max_es):
-                if self._close_card_build_before_terminal_gate(state, max_es):
-                    continue
-                if self._close_node_creating_forced_request_before_terminal_gate(
-                    state, reason="eval_budget",
-                ):
-                    continue
-                if self._finish_with_report_if_quiescent(
-                        state, {"reason": "eval_budget"}, after_seq=decision_seq):
+                if self._settle_terminal_gate(state, "eval_budget", decision_seq=decision_seq,
+                                       max_es=max_es, drain_forced_request=True) == "break":
                     break
                 continue
 
@@ -1470,44 +1467,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
             actions = self._select_actions(state)
             if not actions:
-                # Optional multi-seed confirmation pass (I12) before finishing:
-                # re-evaluate the top-k under several seeds and record robust metrics.
-                if (self.confirm_top_k > 0 and self.confirm_seeds > 0
-                        and not self._already_confirmed(state)):
-                    await self._confirm_phase(state)
-                    continue
-                # D1 holdout-gated promotion: AFTER the confirm pass (so confirmed means pick the
-                # top-k), re-score the val-leaders' predictions on the reserved holdout partition.
-                # Free (no re-training) and replay-safe (gated per node). The fold then lets the
-                # unseen signal pick the champion (holdout_select) + surfaces the gap.
-                if self._holdout_pending(state):
-                    await self._holdout_phase(state)
-                    continue
-                # HITL gate (I21, ADR-11): pause for human approval of the final best.
-                # Approval flows through the event log (a UI/human appends
-                # `approval_granted`); the engine, sole writer of domain events, reads it.
-                if self.require_approval and not state.approved:
-                    best = state.best()
-                    # No real candidate can ever be approved. Do not create an impossible HITL gate;
-                    # fall through to the normal report/finalization path with an explicit reason.
-                    if best is not None and not state.awaiting_approval:
-                        self.store.append(EV_APPROVAL_REQUESTED, {
-                            "node_id": best.id, "generation": best.attempt,
-                            "metric": best.metric, "after_seq": decision_seq})
-                        # An abort/reset can win between the stale loop snapshot and this append. Fold
-                        # again and stop only if the exact lifecycle request actually landed; otherwise
-                        # keep the engine alive to select/confirm the remaining candidate set.
-                        requested = fold(self.store.read_all())
-                        if (not requested.awaiting_approval
-                                or requested.approval_subject != best.id
-                                or requested.approval_generation != best.attempt):
-                            continue
-                    if best is not None:
-                        break  # awaiting approval -> stop without finishing
-                finish_data = ({"reason": "no_eligible_candidate"}
-                               if state.best() is None else {})
-                if self._finish_with_report_if_quiescent(
-                        state, finish_data, after_seq=decision_seq):
+                if await self._handle_no_actions(state, decision_seq=decision_seq) == "break":
                     break
                 continue
 
@@ -1529,9 +1489,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # doc 25 ES-05: the 220-line branch that used to live here is now a §4 phase
                 # helper. It always continued or broke the loop, never fell through, so the
                 # signal is acted on unconditionally.
-                _signal, state, _no_mint_turns = await self._handle_create_actions(
-                    creates, state, created_no_terminal=_created_no_terminal,
-                    no_mint_turns=_no_mint_turns,
+                _signal, state, runaway.no_mint_turns = await self._handle_create_actions(
+                    creates, state, created_no_terminal=runaway.created_no_terminal,
+                    no_mint_turns=runaway.no_mint_turns,
                     decision_seq=decision_seq, max_es=max_es, max_s=max_s, start=start)
                 # Any run-global pause a build QUEUED must become durable here, on the main task,
                 # before the next fold. The branch has nine exits and only two of them drained,
@@ -1562,6 +1522,130 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # diversity archive, LLM cost roll-up, case store + reflection note, read-model,
         # trace.json + tree.html. Event emission order is preserved exactly.
         return finalize_run(self, entry_finished=entry_finished, start_time=start)
+
+    def _settle_terminal_gate(self, state, reason: str, *, decision_seq: int,
+                              max_es: Optional[float] = None,
+                              drain_forced_request: bool = False) -> str:
+        """One terminal gate: settle what is in flight, then finish only if the log is quiescent.
+
+        Four gates in the run loop spelled this ladder out (leakage, aborted, time_budget,
+        eval_budget) and the ORDER is the whole rule — a Card build or a forced Node creator still
+        in flight must be settled BEFORE finalization can win, or the run finishes with its own
+        durable request head unacknowledged. Returns the outer loop's signal: "break" once the run
+        is durably finished, "continue" to re-enter every gate on a fresh fold. An in-flight head
+        also yields "continue", because the settle attempt churns the tail either way and its return
+        value means "a head existed", not "this CAS succeeded".
+
+        `state.paused` deliberately does NOT come through here even though it settles the same
+        in-flight build: it then breaks WITHOUT finishing, which is a different terminal.
+
+        Named for the `_close_*_before_terminal_gate` family it drives, and deliberately NOT
+        `_terminal_gate`: this module already has a `_run_terminal_gate` PREDICATE ("has the run
+        stopped accepting eval work"), and the two would read as the same thing.
+        """
+        if self._close_card_build_before_terminal_gate(state, max_es):
+            return "continue"
+        if drain_forced_request and self._close_node_creating_forced_request_before_terminal_gate(
+            state, reason=reason,
+        ):
+            return "continue"
+        if self._finish_with_report_if_quiescent(
+                state, {"reason": reason}, after_seq=decision_seq):
+            return "break"
+        return "continue"
+
+    def _run_spec_gates(self, state) -> Optional[str]:
+        """The eval-spec onboarding pre-phase and its drift warning (doc 25 XP-06 phase helper).
+
+        Lifted verbatim out of the run loop. Unlike `_handle_create_actions` this block CAN fall
+        through — the activation and drift-warning steps run and the turn carries on — so the
+        signal is three-valued and `None` means "keep going", not "nothing happened".
+        """
+        # Onboarding pre-phase (Phase 3, ADR-7): the agent proposes a trusted eval
+        # spec + metric adapter; a human ratifies it once (or autonomous auto-confirms);
+        # then it's frozen + protected and the optimization loop trusts it.
+        if self.onboarder is not None and not state.spec_confirmed:
+            if state.proposed_spec is None:
+                with self.tracer.span("onboard", new_trace=True), \
+                        llm_lane_scope("enrichment"):
+                    proposal = self.onboarder()
+                self.store.append(EV_SPEC_PROPOSED, proposal)
+                return "continue"
+            if self.eval_trust_mode == "autonomous":
+                self.store.append(EV_SPEC_APPROVED, {})   # no human gate
+                return "continue"
+            if not state.spec_approval_requested:
+                self.store.append(EV_SPEC_APPROVAL_REQUESTED,
+                                  {"eval": state.proposed_spec.get("eval_spec")})
+            return "break"  # pause for `LoopLab approve` (ratify_freeze)
+        if self.onboarder is not None and not self._spec_activated:
+            self._activate_spec(state.proposed_spec)
+        # Drift coverage (#8): ratify_freeze_drift only corroborates the metric if a
+        # cross_check reader exists. An adapter metric (agent-authored reader) with no
+        # cross_check would make the drift guard a SILENT no-op exactly where it matters
+        # most — surface it loudly once instead of pretending the metric is corroborated.
+        if (self.eval_trust_mode == "ratify_freeze_drift" and self._eval_spec
+                and not self._drift_warned):
+            self._drift_warned = True
+            _m = self._eval_spec.get("metric", {})
+            if _m.get("kind") == "adapter" and not self._eval_spec.get("cross_check"):
+                self.store.append(EV_DRIFT_UNAVAILABLE, {
+                    "reason": "ratify_freeze_drift selected but the adapter metric has no "
+                              "cross_check; the agent-authored reader is trusted WITHOUT "
+                              "independent corroboration. Add eval.cross_check (a built-in "
+                              "reader) to enable the drift guard."})
+        return None
+
+    async def _handle_no_actions(self, state, *, decision_seq) -> str:
+        """The empty-action ladder: confirm -> holdout -> HITL approval -> finish (doc 25 XP-06).
+
+        Lifted verbatim out of the run loop's `if not actions:` branch, which — like the ES-05
+        `creates` branch before it — always continued or broke and never fell through. Its six
+        outer-loop `break`/`continue` statements cannot cross a function boundary, so they return a
+        signal instead; the caller acts on it unconditionally.
+
+        It stays in THIS module because it folds: `fold` is the module-global monkeypatch seam.
+        """
+        # Optional multi-seed confirmation pass (I12) before finishing:
+        # re-evaluate the top-k under several seeds and record robust metrics.
+        if (self.confirm_top_k > 0 and self.confirm_seeds > 0
+                and not self._already_confirmed(state)):
+            await self._confirm_phase(state)
+            return "continue"
+        # D1 holdout-gated promotion: AFTER the confirm pass (so confirmed means pick the
+        # top-k), re-score the val-leaders' predictions on the reserved holdout partition.
+        # Free (no re-training) and replay-safe (gated per node). The fold then lets the
+        # unseen signal pick the champion (holdout_select) + surfaces the gap.
+        if self._holdout_pending(state):
+            await self._holdout_phase(state)
+            return "continue"
+        # HITL gate (I21, ADR-11): pause for human approval of the final best.
+        # Approval flows through the event log (a UI/human appends
+        # `approval_granted`); the engine, sole writer of domain events, reads it.
+        if self.require_approval and not state.approved:
+            best = state.best()
+            # No real candidate can ever be approved. Do not create an impossible HITL gate;
+            # fall through to the normal report/finalization path with an explicit reason.
+            if best is not None and not state.awaiting_approval:
+                self.store.append(EV_APPROVAL_REQUESTED, {
+                    "node_id": best.id, "generation": best.attempt,
+                    "metric": best.metric, "after_seq": decision_seq})
+                # An abort/reset can win between the stale loop snapshot and this append. Fold
+                # again and stop only if the exact lifecycle request actually landed; otherwise
+                # keep the engine alive to select/confirm the remaining candidate set.
+                requested = fold(self.store.read_all())
+                if (not requested.awaiting_approval
+                        or requested.approval_subject != best.id
+                        or requested.approval_generation != best.attempt):
+                    return "continue"
+            if best is not None:
+                return "break"  # awaiting approval -> stop without finishing
+        finish_data = ({"reason": "no_eligible_candidate"}
+                       if state.best() is None else {})
+        if self._finish_with_report_if_quiescent(
+                state, finish_data, after_seq=decision_seq):
+            return "break"
+        return "continue"
 
     async def _handle_create_actions(self, creates, state, *, created_no_terminal,
                                      no_mint_turns, decision_seq, max_es, max_s, start):

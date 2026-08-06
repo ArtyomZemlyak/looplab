@@ -2424,23 +2424,56 @@ def _bounded_error(value: object) -> str:
     return str(value).replace("\r", " ").replace("\n", " ")[:_MAX_ERROR_CHARS]
 
 
-def speculation_quality_gate(
-    pairs: Sequence[object],
-    require_gpu: bool = True,
-    gpu_inventory: object = None,
-    *,
-    implementation_digest_fn: Callable[[], str] | None = None,
-    environment_fingerprint: object = None,
-) -> dict[str, Any]:
-    """Evaluate fixed v1 paired-run thresholds and return a deterministic receipt body.
+def _note_unique(seen: set, key: Any, errors: list[str], message: str) -> None:
+    """The no-clone rule: an identity already seen in another evidence lane is an error.
 
-    ``gpu_inventory`` and ``implementation_digest_fn`` are explicit test/air-gapped seams.  Neither
-    can change thresholds or replace raw run evidence.
+    Two statements, and the SECOND is the one that vanishes when this is written out by hand — as
+    it was, six times: the key is recorded on every sighting, including the first.  A copy that
+    checks membership but never records makes its own clone check permanently vacuous, and a
+    vacuous check here admits six copies of ONE run as three independent replicate pairs.
     """
+    if key in seen:
+        errors.append(message)
+    seen.add(key)
 
+
+def _replicate_invariant(bound: Any, value: Any, errors: list[str], message: str) -> Any:
+    """The replicate-invariant rule: the first pair BINDS the value, a later mismatch is an error.
+
+    Returns the binding to keep.  A mismatch never re-binds — the admitted value stays the first
+    pair's, so the receipt reports the envelope the corpus actually agreed on rather than the last
+    dissenting pair's.
+    """
+    if bound is None:
+        return value
+    if bound != value:
+        errors.append(message)
+    return bound
+
+
+def _unavailable_aggregates(pair_count: int) -> dict[str, Any]:
+    """The bounded fail-closed aggregate row: the counts only, every derived metric absent.
+
+    Two paths reach it — an aggregate that will not compute, and a report that will not fit the
+    receipt byte bound — and they used to spell the same seven keys twice.
+    """
+    return {
+        "pair_count": pair_count,
+        "valid_metric_pairs": 0,
+        "mean_normalized_regret": None,
+        "max_pair_normalized_regret": None,
+        "mean_hit_rate": None,
+        "max_pair_divergence_rate": None,
+        "min_pair_coverage_ratio": None,
+    }
+
+
+def _scorer_fidelity_section() -> tuple[dict[str, Any], list[str]]:
+    """Run the scorer-compatibility matrix and decide whether it admits a receipt.
+
+    Returns the report body that goes into the receipt verbatim, plus the errors it raised.
+    """
     errors: list[str] = []
-    pair_reports: list[dict[str, Any]] = []
-
     # This call is unconditional: malformed pair input must not bypass the scorer compatibility gate.
     try:
         raw_scorer = scorer_fidelity_gate()
@@ -2485,7 +2518,18 @@ def speculation_quality_gate(
         or scorer.get("passed") is not True
     ):
         errors.append("scorer fidelity has mismatches")
+    return scorer, errors
 
+
+def _gpu_evidence_section(
+    require_gpu: object, gpu_inventory: object,
+) -> tuple[bool, list[dict[str, Any]], list[str]]:
+    """Settle the real-GPU requirement and the host inventory every lane is checked against.
+
+    `require_gpu` comes back SETTLED: a non-boolean is refused and forced to the strict value, so a
+    malformed argument can never be the thing that relaxes the inventory check below it.
+    """
+    errors: list[str] = []
     if type(require_gpu) is not bool:
         errors.append("require_gpu must be boolean")
         require_gpu = True
@@ -2499,7 +2543,19 @@ def speculation_quality_gate(
         errors.append(f"invalid GPU inventory: {_bounded_error(exc)}")
     if require_gpu and not inventory:
         errors.append("a nonempty real GPU inventory is required")
+    return require_gpu, inventory, errors
 
+
+def _gate_identity_section(
+    implementation_digest_fn: Callable[[], str] | None,
+    environment_fingerprint: object,
+) -> tuple[str, str, list[str]]:
+    """The two host identities every lane's evidence must have been produced under.
+
+    An identity that cannot be derived becomes the empty string, which no run report can equal —
+    so an unavailable digest fails every pair rather than matching vacuously.
+    """
+    errors: list[str] = []
     try:
         implementation_digest = _implementation_digest(implementation_digest_fn)
     except Exception as exc:
@@ -2513,215 +2569,221 @@ def speculation_quality_gate(
     except Exception as exc:
         environment_sha256 = ""
         errors.append(f"environment fingerprint unavailable: {_bounded_error(exc)}")
+    return implementation_digest, environment_sha256, errors
 
-    # Read the PUBLISHED threshold, not the seed set directly, so the receipt's `min_pairs` row and
-    # this check can never disagree.
-    exact_pair_count = SPECULATION_QUALITY_THRESHOLDS["min_pairs"]
-    if not isinstance(pairs, Sequence) or isinstance(pairs, (str, bytes)):
-        pair_values: list[object] = []
-        errors.append("pairs must be the exact bounded calibration sequence")
-    elif len(pairs) != exact_pair_count:
-        pair_values = list(pairs[:exact_pair_count])
-        errors.append(f"pair count must be exactly {exact_pair_count}")
-    else:
-        pair_values = list(pairs)
 
-    seen_dirs: set[str] = set()
-    seen_run_ids: set[str] = set()
-    seen_event_digests: set[str] = set()
-    seen_source_identities: set[tuple[str, str, str]] = set()
-    seen_semantic_trajectories: set[str] = set()
-    seen_calibration_seeds: set[int] = set()
-    admitted_depth: int | None = None
-    admitted_max_nodes: int | None = None
-    runtime_scope_sha256: str | None = None
-    task_profile_sha256: str | None = None
-    replicate_comparable_config: dict[str, Any] | None = None
-    replicate_provenance: dict[str, str] | None = None
-    valid_pair_metrics: list[dict[str, float]] = []
-    all_pair_contracts = len(pair_values) == exact_pair_count
-    for pair_index, raw_pair in enumerate(pair_values):
-        pair_errors: list[str] = []
-        baseline_report: dict[str, Any] | None = None
-        treatment_report: dict[str, Any] | None = None
-        quality: dict[str, float] | None = None
-        try:
-            baseline_dir, treatment_dir = _normalize_pair(raw_pair)
-            baseline_report, baseline_config, baseline_task = _analyze_speculation_run(baseline_dir)
-            treatment_report, treatment_config, treatment_task = _analyze_speculation_run(treatment_dir)
-            for report in (baseline_report, treatment_report):
-                path = report["run_dir"]
-                identity = _run_dir_identity(path)
-                if identity in seen_dirs:
-                    pair_errors.append("run directory is reused across pairs")
-                seen_dirs.add(identity)
-                run_id = report["run"]["run_id"]
-                if run_id in seen_run_ids:
-                    pair_errors.append("run_id is reused across evidence lanes")
-                seen_run_ids.add(run_id)
-                event_digest = report["sources"]["events"]["sha256"]
-                if event_digest in seen_event_digests:
-                    pair_errors.append("events source is cloned across evidence lanes")
-                seen_event_digests.add(event_digest)
-                source_identity = (
-                    event_digest,
-                    report["sources"]["config"]["sha256"],
-                    report["sources"]["task"]["sha256"],
-                )
-                if source_identity in seen_source_identities:
-                    pair_errors.append("complete source identity is cloned across evidence lanes")
-                seen_source_identities.add(source_identity)
-                semantic_trajectory = report["sources"]["semantic_trajectory_sha256"]
-                if semantic_trajectory in seen_semantic_trajectories:
-                    pair_errors.append(
-                        "semantic execution trajectory is cloned across evidence lanes")
-                seen_semantic_trajectories.add(semantic_trajectory)
-            if _run_dir_identity(baseline_report["run_dir"]) == _run_dir_identity(
-                treatment_report["run_dir"]
-            ):
-                pair_errors.append("baseline and treatment must be distinct directories")
-            if baseline_task != treatment_task:
-                pair_errors.append("task.snapshot.json bytes differ inside pair")
-            pair_task_profile = baseline_report["sources"]["task_profile_sha256"]
-            if treatment_report["sources"]["task_profile_sha256"] != pair_task_profile:
-                pair_errors.append("task profiles differ inside pair")
-            if task_profile_sha256 is None:
-                task_profile_sha256 = pair_task_profile
-            elif task_profile_sha256 != pair_task_profile:
-                pair_errors.append("task profile differs across replicate pairs")
-            if _comparable_config(baseline_config) != _comparable_config(treatment_config):
-                pair_errors.append("pair configs differ outside allowed treatment fields")
-            pair_comparable_config = _comparable_config(baseline_config)
-            if replicate_comparable_config is None:
-                replicate_comparable_config = pair_comparable_config
-            elif pair_comparable_config != replicate_comparable_config:
-                pair_errors.append("comparable config differs across replicate pairs")
+class _ReplicateInvariants:
+    """The cross-pair state one pair's evaluation reads and extends.
 
-            for report, lane in ((baseline_report, "baseline"),
-                                 (treatment_report, "treatment")):
-                if report["run"]["implementation_digest"] != implementation_digest:
-                    pair_errors.append(
-                        f"{lane} was not produced by the current implementation digest")
-                if report["sources"]["environment_sha256"] != environment_sha256:
-                    pair_errors.append(
-                        f"{lane} was not produced by the current environment fingerprint")
-                if report["run"]["calibration_gpu_inventory"] != inventory:
-                    pair_errors.append(
-                        f"{lane} effective GPU inventory differs from the gate host")
+    These thirteen names were loop-carried locals of `speculation_quality_gate`, which is what kept
+    the 160-line per-pair contract inside it.  Bundling them is what makes `_evaluate_pair` a
+    function: the `seen_*` sets carry the no-clone rule across evidence lanes, the six bound fields
+    carry the replicate-invariant rule across pairs, and `valid_pair_metrics` collects exactly the
+    pairs the aggregates may be computed from.
+
+    A plain `__init__` rather than a dataclass: `field` is already a loop variable elsewhere in this
+    module, and the initializers below are the gate's own lines unchanged.
+    """
+
+    def __init__(self) -> None:
+        self.seen_dirs: set[str] = set()
+        self.seen_run_ids: set[str] = set()
+        self.seen_event_digests: set[str] = set()
+        self.seen_source_identities: set[tuple[str, str, str]] = set()
+        self.seen_semantic_trajectories: set[str] = set()
+        self.seen_calibration_seeds: set[int] = set()
+        self.admitted_depth: int | None = None
+        self.admitted_max_nodes: int | None = None
+        self.runtime_scope_sha256: str | None = None
+        self.task_profile_sha256: str | None = None
+        self.replicate_comparable_config: dict[str, Any] | None = None
+        self.replicate_provenance: dict[str, str] | None = None
+        self.valid_pair_metrics: list[dict[str, float]] = []
+
+
+def _evaluate_pair(
+    pair_index: int,
+    raw_pair: object,
+    inv: _ReplicateInvariants,
+    *,
+    implementation_digest: str,
+    environment_sha256: str,
+    inventory: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Evaluate ONE baseline/treatment pair against the fixed v1 contract; return its report.
+
+    Every check appends to this pair's own error list and none of them raises: the contract is a
+    complete verdict per pair, not its first failure.  The single containment `except` is the one
+    the inline loop had, so a malformed run directory fails its own pair instead of the gate.
+    """
+    pair_errors: list[str] = []
+    baseline_report: dict[str, Any] | None = None
+    treatment_report: dict[str, Any] | None = None
+    quality: dict[str, float] | None = None
+    try:
+        baseline_dir, treatment_dir = _normalize_pair(raw_pair)
+        baseline_report, baseline_config, baseline_task = _analyze_speculation_run(baseline_dir)
+        treatment_report, treatment_config, treatment_task = _analyze_speculation_run(treatment_dir)
+        for report in (baseline_report, treatment_report):
+            # Five spellings of ONE rule, in this order.  Each was three hand-written lines whose
+            # `.add` half is the easy one to lose (see `_note_unique`): no identity of a completed
+            # run may appear in a second evidence lane.
+            _note_unique(inv.seen_dirs, _run_dir_identity(report["run_dir"]), pair_errors,
+                         "run directory is reused across pairs")
+            _note_unique(inv.seen_run_ids, report["run"]["run_id"], pair_errors,
+                         "run_id is reused across evidence lanes")
+            event_digest = report["sources"]["events"]["sha256"]
+            _note_unique(inv.seen_event_digests, event_digest, pair_errors,
+                         "events source is cloned across evidence lanes")
+            _note_unique(inv.seen_source_identities,
+                         (event_digest,
+                          report["sources"]["config"]["sha256"],
+                          report["sources"]["task"]["sha256"]), pair_errors,
+                         "complete source identity is cloned across evidence lanes")
+            _note_unique(inv.seen_semantic_trajectories,
+                         report["sources"]["semantic_trajectory_sha256"], pair_errors,
+                         "semantic execution trajectory is cloned across evidence lanes")
+        if _run_dir_identity(baseline_report["run_dir"]) == _run_dir_identity(
+            treatment_report["run_dir"]
+        ):
+            pair_errors.append("baseline and treatment must be distinct directories")
+        if baseline_task != treatment_task:
+            pair_errors.append("task.snapshot.json bytes differ inside pair")
+        pair_task_profile = baseline_report["sources"]["task_profile_sha256"]
+        if treatment_report["sources"]["task_profile_sha256"] != pair_task_profile:
+            pair_errors.append("task profiles differ inside pair")
+        inv.task_profile_sha256 = _replicate_invariant(
+            inv.task_profile_sha256, pair_task_profile, pair_errors,
+            "task profile differs across replicate pairs")
+        if _comparable_config(baseline_config) != _comparable_config(treatment_config):
+            pair_errors.append("pair configs differ outside allowed treatment fields")
+        pair_comparable_config = _comparable_config(baseline_config)
+        inv.replicate_comparable_config = _replicate_invariant(
+            inv.replicate_comparable_config, pair_comparable_config, pair_errors,
+            "comparable config differs across replicate pairs")
+
+        for report, lane in ((baseline_report, "baseline"),
+                             (treatment_report, "treatment")):
+            if report["run"]["implementation_digest"] != implementation_digest:
+                pair_errors.append(
+                    f"{lane} was not produced by the current implementation digest")
+            if report["sources"]["environment_sha256"] != environment_sha256:
+                pair_errors.append(
+                    f"{lane} was not produced by the current environment fingerprint")
+            if report["run"]["calibration_gpu_inventory"] != inventory:
+                pair_errors.append(
+                    f"{lane} effective GPU inventory differs from the gate host")
+        for material_key in (
+            "environment_sha256",
+            "workspace_sha256",
+            "dirty_inputs_sha256",
+            "data_provenance_sha256",
+        ):
+            if (baseline_report["sources"][material_key]
+                    != treatment_report["sources"][material_key]):
+                pair_errors.append(
+                    f"pair {material_key.removesuffix('_sha256')} provenance differs")
+        pair_provenance = {
+            material_key: baseline_report["sources"][material_key]
             for material_key in (
-                "environment_sha256",
                 "workspace_sha256",
                 "dirty_inputs_sha256",
                 "data_provenance_sha256",
-            ):
-                if (baseline_report["sources"][material_key]
-                        != treatment_report["sources"][material_key]):
+            )
+        }
+        if inv.replicate_provenance is None:
+            inv.replicate_provenance = pair_provenance
+        else:
+            for material_key, material_digest in pair_provenance.items():
+                if inv.replicate_provenance[material_key] != material_digest:
                     pair_errors.append(
-                        f"pair {material_key.removesuffix('_sha256')} provenance differs")
-            pair_provenance = {
-                material_key: baseline_report["sources"][material_key]
-                for material_key in (
-                    "workspace_sha256",
-                    "dirty_inputs_sha256",
-                    "data_provenance_sha256",
-                )
-            }
-            if replicate_provenance is None:
-                replicate_provenance = pair_provenance
-            else:
-                for material_key, material_digest in pair_provenance.items():
-                    if replicate_provenance[material_key] != material_digest:
-                        pair_errors.append(
-                            f"{material_key.removesuffix('_sha256')} provenance differs "
-                            "across replicate pairs"
-                        )
+                        f"{material_key.removesuffix('_sha256')} provenance differs "
+                        "across replicate pairs"
+                    )
 
-            baseline_run = baseline_report["run"]
-            treatment_run = treatment_report["run"]
-            pair_seed = baseline_run["calibration_seed"]
-            if treatment_run["calibration_seed"] != pair_seed:
-                pair_errors.append("baseline and treatment calibration seeds differ")
-            if pair_seed in seen_calibration_seeds:
-                pair_errors.append("calibration seed is reused across replicate pairs")
-            seen_calibration_seeds.add(pair_seed)
-            if baseline_run["finished"] is not True or treatment_run["finished"] is not True:
-                pair_errors.append("both runs must be finished")
-            if baseline_run["direction"] != treatment_run["direction"]:
-                pair_errors.append("pair directions differ")
-            if baseline_run["max_nodes"] != treatment_run["max_nodes"]:
-                pair_errors.append("pair max_nodes differ")
-            elif admitted_max_nodes is None:
-                admitted_max_nodes = baseline_run["max_nodes"]
-            elif baseline_run["max_nodes"] != admitted_max_nodes:
-                pair_errors.append("max_nodes differs across replicate pairs")
-            pair_runtime_scope = baseline_run["runtime_scope_sha256"]
-            if treatment_run["runtime_scope_sha256"] != pair_runtime_scope:
-                pair_errors.append("pair runtime scope digests differ")
-            elif runtime_scope_sha256 is None:
-                runtime_scope_sha256 = pair_runtime_scope
-            elif pair_runtime_scope != runtime_scope_sha256:
-                pair_errors.append("runtime scope differs across replicate pairs")
-            if baseline_run["card_driven_selection"] is not True:
-                pair_errors.append("baseline card_driven_selection is not true")
-            if treatment_run["card_driven_selection"] is not True:
-                pair_errors.append("treatment card_driven_selection is not true")
-            if baseline_run["speculation_depth"] != 0:
-                pair_errors.append("baseline speculation_depth is not zero")
-            if type(treatment_run["speculation_depth"]) is not int or treatment_run["speculation_depth"] <= 0:
-                pair_errors.append("treatment speculation_depth is not positive")
-            elif admitted_depth is None:
-                admitted_depth = treatment_run["speculation_depth"]
-            elif treatment_run["speculation_depth"] != admitted_depth:
-                pair_errors.append("treatment speculation_depth differs across replicate pairs")
-            if baseline_run["policy_scope"] != "greedy" or treatment_run["policy_scope"] != "greedy":
-                pair_errors.append("pair is outside the Greedy policy scope")
-            if (baseline_run["calibration_profile_digest"]
-                    != treatment_run["calibration_profile_digest"]):
-                pair_errors.append("pair calibration profile digests differ")
-            if baseline_report["metrics"]["accepted_requests"] != 0:
-                pair_errors.append("depth-zero baseline contains accepted speculative requests")
-            if baseline_report["metrics"]["committed_exact_links"] != 0:
-                pair_errors.append("depth-zero baseline contains committed speculative links")
-            if treatment_report["metrics"]["committed_exact_links"] <= 0:
-                pair_errors.append("treatment committed no exact speculative links")
+        baseline_run = baseline_report["run"]
+        treatment_run = treatment_report["run"]
+        pair_seed = baseline_run["calibration_seed"]
+        if treatment_run["calibration_seed"] != pair_seed:
+            pair_errors.append("baseline and treatment calibration seeds differ")
+        _note_unique(inv.seen_calibration_seeds, pair_seed, pair_errors,
+                     "calibration seed is reused across replicate pairs")
+        if baseline_run["finished"] is not True or treatment_run["finished"] is not True:
+            pair_errors.append("both runs must be finished")
+        if baseline_run["direction"] != treatment_run["direction"]:
+            pair_errors.append("pair directions differ")
+        if baseline_run["max_nodes"] != treatment_run["max_nodes"]:
+            pair_errors.append("pair max_nodes differ")
+        else:
+            inv.admitted_max_nodes = _replicate_invariant(
+                inv.admitted_max_nodes, baseline_run["max_nodes"], pair_errors,
+                "max_nodes differs across replicate pairs")
+        pair_runtime_scope = baseline_run["runtime_scope_sha256"]
+        if treatment_run["runtime_scope_sha256"] != pair_runtime_scope:
+            pair_errors.append("pair runtime scope digests differ")
+        else:
+            inv.runtime_scope_sha256 = _replicate_invariant(
+                inv.runtime_scope_sha256, pair_runtime_scope, pair_errors,
+                "runtime scope differs across replicate pairs")
+        if baseline_run["card_driven_selection"] is not True:
+            pair_errors.append("baseline card_driven_selection is not true")
+        if treatment_run["card_driven_selection"] is not True:
+            pair_errors.append("treatment card_driven_selection is not true")
+        if baseline_run["speculation_depth"] != 0:
+            pair_errors.append("baseline speculation_depth is not zero")
+        if type(treatment_run["speculation_depth"]) is not int or treatment_run["speculation_depth"] <= 0:
+            pair_errors.append("treatment speculation_depth is not positive")
+        else:
+            inv.admitted_depth = _replicate_invariant(
+                inv.admitted_depth, treatment_run["speculation_depth"], pair_errors,
+                "treatment speculation_depth differs across replicate pairs")
+        if baseline_run["policy_scope"] != "greedy" or treatment_run["policy_scope"] != "greedy":
+            pair_errors.append("pair is outside the Greedy policy scope")
+        if (baseline_run["calibration_profile_digest"]
+                != treatment_run["calibration_profile_digest"]):
+            pair_errors.append("pair calibration profile digests differ")
+        if baseline_report["metrics"]["accepted_requests"] != 0:
+            pair_errors.append("depth-zero baseline contains accepted speculative requests")
+        if baseline_report["metrics"]["committed_exact_links"] != 0:
+            pair_errors.append("depth-zero baseline contains committed speculative links")
+        if treatment_report["metrics"]["committed_exact_links"] <= 0:
+            pair_errors.append("treatment committed no exact speculative links")
 
-            if not pair_errors:
-                quality = _pair_quality(
-                    baseline_report, treatment_report, baseline_run["direction"])
-                valid_pair_metrics.append(quality)
-                if quality["normalized_regret"] > SPECULATION_QUALITY_THRESHOLDS[
-                    "max_pair_normalized_regret"
-                ]:
-                    pair_errors.append("pair normalized regret exceeds 0.10")
-                if quality["divergence_rate"] > SPECULATION_QUALITY_THRESHOLDS[
-                    "max_pair_divergence_rate"
-                ]:
-                    pair_errors.append("pair divergence rate exceeds 0.34")
-                if quality["coverage_ratio"] < SPECULATION_QUALITY_THRESHOLDS[
-                    "min_pair_coverage_ratio"
-                ]:
-                    pair_errors.append("pair trusted coverage ratio is below 0.90")
-        except Exception as exc:
-            pair_errors.append(_bounded_error(exc))
+        if not pair_errors:
+            quality = _pair_quality(
+                baseline_report, treatment_report, baseline_run["direction"])
+            inv.valid_pair_metrics.append(quality)
+            if quality["normalized_regret"] > SPECULATION_QUALITY_THRESHOLDS[
+                "max_pair_normalized_regret"
+            ]:
+                pair_errors.append("pair normalized regret exceeds 0.10")
+            if quality["divergence_rate"] > SPECULATION_QUALITY_THRESHOLDS[
+                "max_pair_divergence_rate"
+            ]:
+                pair_errors.append("pair divergence rate exceeds 0.34")
+            if quality["coverage_ratio"] < SPECULATION_QUALITY_THRESHOLDS[
+                "min_pair_coverage_ratio"
+            ]:
+                pair_errors.append("pair trusted coverage ratio is below 0.90")
+    except Exception as exc:
+        pair_errors.append(_bounded_error(exc))
 
-        passed = not pair_errors
-        all_pair_contracts = all_pair_contracts and passed
-        pair_reports.append({
-            "index": pair_index,
-            "baseline": baseline_report,
-            "treatment": treatment_report,
-            "quality": quality,
-            "errors": pair_errors,
-            "passed": passed,
-        })
+    passed = not pair_errors
+    return {
+        "index": pair_index,
+        "baseline": baseline_report,
+        "treatment": treatment_report,
+        "quality": quality,
+        "errors": pair_errors,
+        "passed": passed,
+    }
 
-    if seen_calibration_seeds != set(SPECULATION_CALIBRATION_SEEDS):
-        errors.append(
-            "calibration seed set must be exactly "
-            f"{list(SPECULATION_CALIBRATION_SEEDS)}"
-        )
-        all_pair_contracts = False
 
+def _quality_aggregates(
+    pair_reports: list[dict[str, Any]], valid_pair_metrics: list[dict[str, float]],
+) -> tuple[dict[str, Any], list[str]]:
+    """Roll the per-pair quality metrics up, or report that they are not derivable."""
+    errors: list[str] = []
     regrets = [row["normalized_regret"] for row in valid_pair_metrics]
     hits = [row["hit_rate"] for row in valid_pair_metrics]
     divergences = [row["divergence_rate"] for row in valid_pair_metrics]
@@ -2744,18 +2806,22 @@ def speculation_quality_gate(
             raise ValueError("derived aggregate quality metric is not finite")
     except (OverflowError, ValueError) as exc:
         errors.append(f"aggregate quality metrics unavailable: {_bounded_error(exc)}")
-        aggregates = {
-            "pair_count": len(pair_reports),
-            "valid_metric_pairs": 0,
-            "mean_normalized_regret": None,
-            "max_pair_normalized_regret": None,
-            "mean_hit_rate": None,
-            "max_pair_divergence_rate": None,
-            "min_pair_coverage_ratio": None,
-        }
-    aggregate_passed = bool(
-        len(pair_reports) == exact_pair_count
-        and len(valid_pair_metrics) == len(pair_reports)
+        aggregates = _unavailable_aggregates(len(pair_reports))
+    return aggregates, errors
+
+
+def _aggregate_thresholds_pass(
+    aggregates: Mapping[str, Any], *,
+    pair_count: int, valid_metric_pairs: int, exact_pair_count: int,
+) -> bool:
+    """The fixed v1 aggregate admission, stated once over the numbers it reads.
+
+    A COMPLETE corpus is part of the test, not a precondition of it: an absent metric or a missing
+    pair fails here rather than being compared as ``None``.
+    """
+    return bool(
+        pair_count == exact_pair_count
+        and valid_metric_pairs == pair_count
         and aggregates["mean_normalized_regret"] is not None
         and aggregates["max_pair_normalized_regret"] is not None
         and aggregates["mean_hit_rate"] is not None
@@ -2771,6 +2837,78 @@ def speculation_quality_gate(
         and aggregates["min_pair_coverage_ratio"]
         >= SPECULATION_QUALITY_THRESHOLDS["min_pair_coverage_ratio"]
     )
+
+
+def speculation_quality_gate(
+    pairs: Sequence[object],
+    require_gpu: bool = True,
+    gpu_inventory: object = None,
+    *,
+    implementation_digest_fn: Callable[[], str] | None = None,
+    environment_fingerprint: object = None,
+) -> dict[str, Any]:
+    """Evaluate fixed v1 paired-run thresholds and return a deterministic receipt body.
+
+    ``gpu_inventory`` and ``implementation_digest_fn`` are explicit test/air-gapped seams.  Neither
+    can change thresholds or replace raw run evidence.
+
+    The phases below are ORDERED and the order is part of the contract: the scorer matrix runs
+    before pair input is looked at, the two host identities are derived before any pair is compared
+    against them, and the aggregates are read only from pairs that passed their own contract.
+    `errors` is extended in that same order and deduplicated ONCE, at the receipt body — so a
+    reordered phase is a changed receipt.
+    """
+
+    errors: list[str] = []
+    pair_reports: list[dict[str, Any]] = []
+
+    scorer, scorer_errors = _scorer_fidelity_section()
+    errors.extend(scorer_errors)
+    require_gpu, inventory, gpu_errors = _gpu_evidence_section(require_gpu, gpu_inventory)
+    errors.extend(gpu_errors)
+    implementation_digest, environment_sha256, identity_errors = _gate_identity_section(
+        implementation_digest_fn, environment_fingerprint)
+    errors.extend(identity_errors)
+
+    # Read the PUBLISHED threshold, not the seed set directly, so the receipt's `min_pairs` row and
+    # this check can never disagree.
+    exact_pair_count = SPECULATION_QUALITY_THRESHOLDS["min_pairs"]
+    if not isinstance(pairs, Sequence) or isinstance(pairs, (str, bytes)):
+        pair_values: list[object] = []
+        errors.append("pairs must be the exact bounded calibration sequence")
+    elif len(pairs) != exact_pair_count:
+        pair_values = list(pairs[:exact_pair_count])
+        errors.append(f"pair count must be exactly {exact_pair_count}")
+    else:
+        pair_values = list(pairs)
+
+    inv = _ReplicateInvariants()
+    all_pair_contracts = len(pair_values) == exact_pair_count
+    for pair_index, raw_pair in enumerate(pair_values):
+        pair_report = _evaluate_pair(
+            pair_index, raw_pair, inv,
+            implementation_digest=implementation_digest,
+            environment_sha256=environment_sha256,
+            inventory=inventory,
+        )
+        all_pair_contracts = all_pair_contracts and pair_report["passed"]
+        pair_reports.append(pair_report)
+
+    if inv.seen_calibration_seeds != set(SPECULATION_CALIBRATION_SEEDS):
+        errors.append(
+            "calibration seed set must be exactly "
+            f"{list(SPECULATION_CALIBRATION_SEEDS)}"
+        )
+        all_pair_contracts = False
+
+    aggregates, aggregate_errors = _quality_aggregates(pair_reports, inv.valid_pair_metrics)
+    errors.extend(aggregate_errors)
+    aggregate_passed = _aggregate_thresholds_pass(
+        aggregates,
+        pair_count=len(pair_reports),
+        valid_metric_pairs=len(inv.valid_pair_metrics),
+        exact_pair_count=exact_pair_count,
+    )
     if not aggregate_passed:
         errors.append("fixed v1 aggregate thresholds are not satisfied")
 
@@ -2784,10 +2922,10 @@ def speculation_quality_gate(
         "policy_scope": SPECULATION_POLICY_SCOPE,
         "workload_scope": SPECULATION_WORKLOAD_SCOPE,
         "calibration_seeds": list(SPECULATION_CALIBRATION_SEEDS),
-        "task_profile_sha256": task_profile_sha256 or "",
-        "admitted_depth": admitted_depth,
-        "admitted_max_nodes": admitted_max_nodes,
-        "runtime_scope_sha256": runtime_scope_sha256 or "",
+        "task_profile_sha256": inv.task_profile_sha256 or "",
+        "admitted_depth": inv.admitted_depth,
+        "admitted_max_nodes": inv.admitted_max_nodes,
+        "runtime_scope_sha256": inv.runtime_scope_sha256 or "",
         "calibration_profile_digest": (
             pair_reports[0]["baseline"]["run"]["calibration_profile_digest"]
             if pair_reports and isinstance(pair_reports[0].get("baseline"), dict)
@@ -2804,15 +2942,7 @@ def speculation_quality_gate(
         body["pairs"] = []
         body["errors"] = ["gate report exceeds the receipt byte bound"]
         body["passed"] = False
-        body["aggregates"] = {
-            "pair_count": len(pair_reports),
-            "valid_metric_pairs": 0,
-            "mean_normalized_regret": None,
-            "max_pair_normalized_regret": None,
-            "mean_hit_rate": None,
-            "max_pair_divergence_rate": None,
-            "min_pair_coverage_ratio": None,
-        }
+        body["aggregates"] = _unavailable_aggregates(len(pair_reports))
     return body
 
 

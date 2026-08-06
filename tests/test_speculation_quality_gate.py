@@ -1850,3 +1850,145 @@ def test_the_quality_module_never_imports_upward_into_the_engine():
     offenders = [line.strip() for line in text.split("\n")
                  if "import" in line and "looplab.engine" in line and not line.strip().startswith("#")]
     assert not offenders, f"search reaches up into the engine: {offenders}"
+
+
+# --- doc 25 XP-06: the two rules the 390-line gate spelled out six and five times ---------------
+# `speculation_quality_gate` used to carry the whole per-pair contract inline, so neither of these
+# rules could be STATED, let alone reviewed: each existed only as a repeated three- or four-line
+# shape over loop-carried locals. Each is now a named function, and this is its truth table.
+
+
+def test_the_no_clone_rule_records_every_sighting_so_the_check_is_never_vacuous():
+    """A copy that checks membership but forgets to RECORD is the drift that matters: its clone
+    check silently becomes vacuous, and six copies of one run pass as three replicate pairs."""
+    seen: set[str] = set()
+    errors: list[str] = []
+
+    quality._note_unique(seen, "run-a", errors, "cloned")
+    assert seen == {"run-a"}, "the first sighting must be recorded, or nothing is ever detected"
+    assert errors == []
+
+    quality._note_unique(seen, "run-a", errors, "cloned")
+    assert errors == ["cloned"]
+    quality._note_unique(seen, "run-b", errors, "cloned")
+    assert errors == ["cloned"] and seen == {"run-a", "run-b"}
+
+
+def test_the_replicate_invariant_binds_the_first_pair_and_a_dissenter_never_rebinds():
+    """`admitted_depth`, `admitted_max_nodes`, `runtime_scope_sha256` and `task_profile_sha256` are
+    PUBLISHED in the receipt and pin a later replay's envelope. If a mismatching pair re-bound the
+    value, the receipt would attest the last dissenting pair's envelope instead of the corpus's."""
+    errors: list[str] = []
+
+    bound = quality._replicate_invariant(None, "scope-0", errors, "drift")
+    assert bound == "scope-0" and errors == []
+
+    bound = quality._replicate_invariant(bound, "scope-0", errors, "drift")
+    assert bound == "scope-0" and errors == [], "an agreeing pair is silent"
+
+    bound = quality._replicate_invariant(bound, "scope-9", errors, "drift")
+    assert errors == ["drift"]
+    assert bound == "scope-0", "a dissenting pair must not become the admitted value"
+
+    # ...so the THIRD pair is still compared against the first pair, not against the dissenter.
+    bound = quality._replicate_invariant(bound, "scope-9", errors, "drift")
+    assert bound == "scope-0" and errors == ["drift", "drift"]
+
+
+def test_the_fail_closed_aggregate_row_carries_every_key_a_derived_one_does(tmp_path):
+    """Both fail-closed paths (aggregates that will not compute, and a report over the receipt byte
+    bound) publish this row. A reader indexing `aggregates["mean_hit_rate"]` must not KeyError on
+    it, so its key set is the derived row's key set."""
+    derived = _gate(_pairs(tmp_path / "runs"))["aggregates"]
+    assert set(quality._unavailable_aggregates(3)) == set(derived)
+    assert quality._unavailable_aggregates(3)["pair_count"] == 3
+    assert all(value is None for key, value in quality._unavailable_aggregates(3).items()
+               if key not in {"pair_count", "valid_metric_pairs"})
+
+
+def _aggregates(**overrides) -> dict:
+    row = {
+        "pair_count": 3,
+        "valid_metric_pairs": 3,
+        "mean_normalized_regret": 0.0,
+        "max_pair_normalized_regret": 0.0,
+        "mean_hit_rate": 1.0,
+        "max_pair_divergence_rate": 0.0,
+        "min_pair_coverage_ratio": 1.0,
+    }
+    row.update(overrides)
+    return row
+
+
+def _admits(aggregates, *, pair_count=3, valid_metric_pairs=3) -> bool:
+    return quality._aggregate_thresholds_pass(
+        aggregates, pair_count=pair_count, valid_metric_pairs=valid_metric_pairs,
+        exact_pair_count=quality.SPECULATION_QUALITY_THRESHOLDS["min_pairs"],
+    )
+
+
+def test_the_aggregate_admission_needs_a_complete_corpus_before_any_threshold():
+    assert _admits(_aggregates())
+    assert not _admits(_aggregates(), pair_count=2), "a short corpus is refused, not averaged"
+    assert not _admits(_aggregates(), valid_metric_pairs=2), (
+        "a pair whose own contract failed must not be silently dropped from the denominator")
+
+
+@pytest.mark.parametrize("key", [
+    "mean_normalized_regret",
+    "max_pair_normalized_regret",
+    "mean_hit_rate",
+    "max_pair_divergence_rate",
+    "min_pair_coverage_ratio",
+])
+def test_the_aggregate_admission_refuses_an_absent_metric_rather_than_comparing_none(key):
+    assert _admits(_aggregates()) is True
+    assert not _admits(_aggregates(**{key: None}))
+
+
+_AT_THE_LINE = {
+    "mean_normalized_regret": "max_mean_normalized_regret",
+    "max_pair_normalized_regret": "max_pair_normalized_regret",
+    "mean_hit_rate": "min_mean_hit_rate",
+    "max_pair_divergence_rate": "max_pair_divergence_rate",
+    "min_pair_coverage_ratio": "min_pair_coverage_ratio",
+}
+
+
+@pytest.mark.parametrize("key, step", [
+    ("mean_normalized_regret", 1e-9),
+    ("max_pair_normalized_regret", 1e-9),
+    ("mean_hit_rate", -1e-9),
+    ("max_pair_divergence_rate", 1e-9),
+    ("min_pair_coverage_ratio", -1e-9),
+])
+def test_every_published_aggregate_threshold_is_read_at_its_boundary(key, step):
+    """Each threshold admits its own exact published boundary and refuses one step past it, so a
+    flipped comparison or a dropped clause is a red test rather than a quietly looser gate."""
+    boundary = quality.SPECULATION_QUALITY_THRESHOLDS[_AT_THE_LINE[key]]
+    assert _admits(_aggregates(**{key: boundary})), f"{key} must admit its published boundary"
+    assert not _admits(_aggregates(**{key: boundary + step})), (
+        f"{key} must refuse one step past it")
+
+
+def test_the_receipt_lists_its_refusals_in_phase_order(_stable_scorer_gate):
+    """The phase order IS the receipt: `errors` is appended in scorer -> gpu -> identity -> pairs ->
+    seeds -> aggregates order and deduplicated once, at the body. A reordered phase is a different
+    receipt for the same evidence, so it is pinned as a list, not a set."""
+
+    def unavailable():
+        raise RuntimeError("no digest here")
+
+    report = _gate(object(), require_gpu="yes", gpu_inventory=[],
+                   implementation_digest_fn=unavailable)
+    assert report["errors"] == [
+        "require_gpu must be boolean",
+        "a nonempty real GPU inventory is required",
+        "implementation digest unavailable: no digest here",
+        "pairs must be the exact bounded calibration sequence",
+        "calibration seed set must be exactly "
+        f"{list(SPECULATION_CALIBRATION_SEEDS)}",
+        "fixed v1 aggregate thresholds are not satisfied",
+    ]
+    assert _stable_scorer_gate == [True], (
+        "the scorer matrix is reached even when the pair input never parses")

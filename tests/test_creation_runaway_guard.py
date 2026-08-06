@@ -46,6 +46,85 @@ class _Dev:
         return ""
 
 
+# --- the charging RULE, now that it is statable (doc 25 XP-06) --------------------------------
+# Until the four counters became `CreationRunawayCounters`, the thirteen lines below were inline in
+# a 389-line `_run_with_llm_broker` and the only way to reach them was a whole simulated spin — so
+# the three rules could only ever be exercised together, in one direction each. This is the table.
+
+
+def _counters():
+    from looplab.engine.orchestrator import CreationRunawayCounters
+
+    return CreationRunawayCounters()
+
+
+def test_the_first_observation_only_calibrates_so_a_resume_is_not_charged_its_own_history():
+    """A resumed run's log already holds every earlier `node_created`. Charging that history to
+    this process's guard false-trips a long healthy run on its very first loop turn.
+
+    `prev_terminal` is primed on purpose. It starts at -1, which no real terminal count can equal,
+    so the terminal-RESET rule also fires on the very first charge and zeroes the counter whatever
+    the calibration did — the two are defence in depth over that one turn, and asserting through
+    both would leave this rule untested. Every later turn is the state primed here."""
+    c = _counters()
+    c.prev_terminal = 0
+    c.charge(minted_now=4_000, terminal_now=0)
+    assert c.created_no_terminal == 0, "the inherited log is calibration, not this loop's spin"
+    assert c.minted_charged == 4_000
+
+    c.charge(minted_now=4_001, terminal_now=0)
+    assert c.created_no_terminal == 1, "only rows minted from here on are charged"
+
+
+def test_only_the_delta_since_the_previous_turn_is_charged():
+    c = _counters()
+    c.charge(minted_now=0, terminal_now=0)
+    for expected, minted in ((3, 3), (5, 5), (5, 5), (9, 9)):
+        c.charge(minted_now=minted, terminal_now=0)
+        assert c.created_no_terminal == expected
+
+
+def test_a_mint_is_creation_progress_and_clears_only_the_no_mint_bound():
+    """The two bounds answer different questions: `no_mint_turns` asks whether the create lane is
+    minting at all, `created_no_terminal` whether anything it mints ever finishes. A mint answers
+    the first and says nothing about the second."""
+    c = _counters()
+    c.charge(minted_now=0, terminal_now=0)
+    c.no_mint_turns = 7
+
+    c.charge(minted_now=1, terminal_now=0)
+    assert c.no_mint_turns == 0
+    assert c.created_no_terminal == 1, "a mint must not forgive the un-terminated nodes"
+
+
+def test_any_node_reaching_terminal_clears_both_bounds():
+    c = _counters()
+    c.charge(minted_now=0, terminal_now=0)
+    c.charge(minted_now=6, terminal_now=0)
+    c.no_mint_turns = 4
+    assert c.created_no_terminal == 6
+
+    c.charge(minted_now=6, terminal_now=1)
+    assert (c.created_no_terminal, c.no_mint_turns) == (0, 0), "a terminal is real progress"
+    assert c.prev_terminal == 1
+
+    # ...and only a CHANGE is progress: the same terminal count next turn resets nothing.
+    c.no_mint_turns = 2
+    c.charge(minted_now=6, terminal_now=1)
+    assert c.no_mint_turns == 2
+
+
+def test_the_charge_survives_the_empty_nodes_spin_it_exists_for():
+    """The 184MB spin folds to NO nodes at all while appending a `node_created` every turn. Reading
+    the mint count off the LOG is the only view that still sees it; the folded terminal count stays
+    frozen, so nothing resets the bound and it trips."""
+    c = _counters()
+    for minted in range(60):
+        c.charge(minted_now=minted, terminal_now=0)   # folded state never moves
+    assert c.created_no_terminal == 59
+    assert c.no_mint_turns == 0
+
+
 def test_creation_runaway_guard_terminates(tmp_path, monkeypatch):
     """With `fold` stuck returning EMPTY nodes (the spin condition — a leaked fold / swallowed
     glitch), the loop cannot see its own progress. The guard must FINISH the run (bounded), not hang.
