@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import os
+import random
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -143,7 +144,76 @@ def test_clamp_fill_leaves_swept_dims_to_the_grid():
     assert "degree" not in out2.params and out2.params["lam"] == 5.0
 
 
-def test_clamp_fill_never_leaves_an_idea_outside_its_own_space():
+# The bounds `classification.py` carried at the time of the incident (it has since gained `degree`;
+# these three are unchanged, and the properties below are about the clamp, not the task).
+_INCIDENT_BOUNDS = {"lr": (0.001, 1.0), "l2": (0.0, 1.0), "iters": (10.0, 500.0)}
+
+
+def _clamp_fill_population():
+    """(label, params, space, bounds) over the whole shape space `_clamp_fill` decides in.
+
+    A structured table FIRST, because the interesting cases are structural rather than statistical:
+    a grid entirely above / below / straddling / inside the task bounds, a SINGLE-VALUE grid (which
+    `Idea._clamp_params_to_space` deliberately ignores — it needs two points — so it is the one class
+    of sweep whose breakage is invisible to a revalidation check and visible only in the Developer
+    prompt), a swept key present in params vs absent, and a NON-swept key inside vs outside its
+    bounds vs missing entirely. Then 400 seeded random draws over the same axes, so a mutant that
+    special-cases the named instances has nowhere to hide. Seeded, so any failure names a case id.
+    """
+    yield ("live incident /tmp/ll-s1/spec",
+           {"lr": 0.5, "l2": 0.001, "iters": 5000.0},
+           {"lr": [0.1, 0.5, 1.0], "iters": [1000.0, 5000.0]}, _INCIDENT_BOUNDS)
+    # The SECOND independent live reproduction, `/tmp/ll-s4/run` card-0 — a different task run, a
+    # different grid, the identical failure. Both battery runs that died "stuck" carry exactly one
+    # such Card and no other run does, which is the perfect correlation the report noticed from the
+    # other end (`producer_failed` forces the serial claim, and the serial claim can never succeed).
+    yield ("live incident /tmp/ll-s4/run",
+           {"lr": 0.3, "l2": 0.001, "iters": 2000.0, "degree": 2.0},
+           {"lr": [0.05, 0.1, 0.3, 0.5], "l2": [0.0001, 0.001, 0.01, 0.1],
+            "iters": [1000.0, 2000.0]}, _INCIDENT_BOUNDS)
+    grids = {
+        "grid above bounds": [1000.0, 5000.0],
+        "grid below bounds": [-8.0, -6.0],
+        "grid straddling hi": [400.0, 900.0],
+        "grid straddling lo": [-5.0, 60.0],
+        "grid inside bounds": [100.0, 200.0],
+        "single-value grid inside": [100.0],
+        "single-value grid above": [4000.0],
+        "single-value grid below": [-40.0],
+        "grid spanning the bounds": [-900.0, 900.0],
+    }
+    for name, grid in grids.items():
+        for present, value in (("param present in grid", grid[0]),
+                               ("param present off grid", 0.5),
+                               ("param absent", None)):
+            params = {} if value is None else {"iters": value}
+            yield (f"{name} / {present}", params, {"iters": list(grid)}, _INCIDENT_BOUNDS)
+    for name, value in (("non-swept above hi", 9_000.0), ("non-swept below lo", -9_000.0),
+                        ("non-swept inside", 250.0)):
+        yield (name, {"iters": value}, {}, _INCIDENT_BOUNDS)
+    yield ("non-swept missing entirely", {}, {}, _INCIDENT_BOUNDS)
+
+    rng = random.Random(20260806)
+    keys = ("lr", "l2", "iters", "degree")
+    for case in range(400):
+        params, space, bounds = {}, {}, {}
+        for key in keys:
+            if rng.random() < 0.75:
+                params[key] = round(rng.uniform(-50.0, 50.0), 4)
+            if rng.random() < 0.6:
+                # 1-value grids on purpose, and grids that may sit anywhere relative to the bounds.
+                size = rng.choice([1, 1, 2, 3, 4])
+                start = rng.uniform(-50.0, 50.0)
+                step = rng.uniform(0.001, 20.0)
+                space[key] = [round(start + step * i, 6) for i in range(size)]
+            if rng.random() < 0.8:
+                edges = sorted((round(rng.uniform(-50.0, 50.0), 4),
+                                round(rng.uniform(-50.0, 50.0), 4)))
+                bounds[key] = (edges[0], edges[1])
+        yield (f"random case {case}", params, space, bounds)
+
+
+def test_clamp_fill_pins_the_general_property_not_the_two_live_instances():
     """A bounds clamp on a SWEPT key used to break the Idea's fixed-point property, and that killed runs.
 
     `_clamp_fill` mutates `idea.params` directly, which bypasses `Idea._clamp_params_to_space`. When
@@ -156,32 +226,51 @@ def test_clamp_fill_never_leaves_an_idea_outside_its_own_space():
     `params.iters=500`, reconstruction said 1000, and the run burned 74 loop turns in one second before
     dying "stuck: 1 action(s) planned … without creating a node" at 2 of 8 nodes.
 
-    The property this pins is the general one, not the one instance: whatever `_clamp_fill` returns
-    must survive `Idea` revalidation unchanged."""
+    This test used to CLAIM to pin "the general property, not the one instance" and pinned two
+    hand-written instances instead. Measured by mutating a throwaway tree: three mutants passed it and
+    the test above while breaking what both docstrings say — `swept = {k for k, v in space.items() if
+    len(v) > 1}` (a single-value grid stops being a sweep, so it gets midpoint-filled and the Developer
+    prompt says "sweep degree in [3.0]" AND "degree=2.0" — the exact contradiction the test above is
+    about, 132/400 cases), clamping a swept dim to its own grid instead of leaving it alone (135/400),
+    and DELETING the bounds clamp entirely, which the old `out.params["l2"] == 0.001` assertion could
+    not see because 0.001 was already inside `(0.0, 1.0)`.
+
+    So state the three properties over the whole shape space instead:
+      1. the GRID owns a swept dimension — `_clamp_fill` neither fills nor changes it, whatever the
+         grid's size or its relation to the task bounds (this is what the prompt contract needs);
+      2. whatever comes back is a FIXED POINT of `Idea`'s validators (this is what the Card claim
+         needs — it is the free-spin property);
+      3. a bounded NON-swept dimension is still present and inside its bounds (the crash-guard the
+         function exists for, which properties 1 and 2 alone would let a mutant delete).
+    """
     from looplab.agents.roles import _clamp_fill
     from looplab.core.models import Idea
-    # classification.py's numeric bounds at the time of the incident (it has since gained `degree`;
-    # these three are unchanged, and the property below is about the clamp, not the task).
-    bounds = {"lr": (0.001, 1.0), "l2": (0.0, 1.0), "iters": (10.0, 500.0)}
-    live = Idea(operator="draft", params={"lr": 0.5, "l2": 0.001, "iters": 5000.0},
-                space={"lr": [0.1, 0.5, 1.0], "iters": [1000.0, 5000.0]})
-    out = _clamp_fill(live, bounds)
-    assert out.params["iters"] == 5000.0        # the grid owns a swept dim, not the task bounds
-    assert out.params["l2"] == 0.001            # a non-swept param is still bounds-clamped
-    # THE property: revalidating the Idea (what every Card claim does) must not move anything.
-    assert Idea.model_validate(out.model_dump()).params == out.params
 
-    # The SECOND independent live reproduction, `/tmp/ll-s4/run` card-0 — a different task run, a
-    # different grid, the identical failure. Both battery runs that died "stuck" carry exactly one
-    # such Card and no other run does, which is the perfect correlation the report noticed from the
-    # other end (`producer_failed` forces the serial claim, and the serial claim can never succeed).
-    second = Idea(operator="draft",
-                  params={"lr": 0.3, "l2": 0.001, "iters": 2000.0, "degree": 2.0},
-                  space={"lr": [0.05, 0.1, 0.3, 0.5], "l2": [0.0001, 0.001, 0.01, 0.1],
-                         "iters": [1000.0, 2000.0]})
-    out2 = _clamp_fill(second, bounds)
-    assert out2.params["degree"] == 2.0         # an unbounded param is untouched either way
-    assert Idea.model_validate(out2.model_dump()).params == out2.params
+    for label, params, space, bounds in _clamp_fill_population():
+        idea = Idea(operator="draft", params=dict(params), space=dict(space),
+                    rationale="clamp population", hypothesis="clamp population")
+        # `Idea` already normalizes params into their grid at construction; the property is about what
+        # `_clamp_fill` does to that starting point, so compare against the VALIDATED starting point.
+        before = dict(idea.params)
+        out = _clamp_fill(idea, bounds)
+
+        for key in space:
+            # (1) neither filled nor clamped — the grid owns the dimension ENTIRELY.
+            assert (key in out.params) == (key in before), f"{label}: swept {key} gained/lost a param"
+            if key in before:
+                assert out.params[key] == before[key], f"{label}: swept {key} was moved"
+
+        # (2) THE free-spin property: revalidating (what every Card claim does) must move nothing.
+        assert Idea.model_validate(out.model_dump()).params == out.params, \
+            f"{label}: result is not a fixed point of Idea's validators"
+
+        for key, (lo, hi) in bounds.items():
+            # (3) the crash guard, stated where it is not vacuous: a bounded non-swept dimension is
+            # always present and always inside its bounds.
+            if key in space:
+                continue
+            assert key in out.params, f"{label}: non-swept {key} was not filled"
+            assert lo <= out.params[key] <= hi, f"{label}: non-swept {key} left its bounds"
 
 
 def test_emit_survives_a_non_json_value_after_every_trial_trained(capsys):

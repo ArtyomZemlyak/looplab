@@ -32,6 +32,7 @@ from looplab.core.models import (
     Node,
     NodeStatus,
     RunState,
+    card_ownership_receipt,
 )
 from looplab.engine.options import EngineOptions
 from looplab.engine.orchestrator import (
@@ -2755,22 +2756,32 @@ def _unclaimable_card(engine: Engine, card_id: str) -> None:
 
     Reproduces exactly what the live run wrote: a `params` value its own `space` grid forbids, which
     `Idea` snaps back on every reconstruction, so `_prepare_existing_card_claim` compares the rebuilt
-    action against the receipt, disagrees, and refuses — identically, forever. Written through the
-    ordinary payload builder so the receipt/digest are genuine; only the params/space pair is skewed
-    (the writer-side producer of that skew is fixed in `roles.py::_clamp_fill`).
+    action against the receipt, disagrees, and refuses — identically, forever.
+
+    THE SHIPPED WRITER CAN NO LONGER PRODUCE THIS. `_card_added_payload` now proves the round trip at
+    the mint and refuses, which is the fix for the two producers that used to reach it. What these
+    tests own is the other half — the retirement ladder that has to work on a durable log a PRE-FIX
+    writer already wrote — so forge that log directly: the receipt is genuinely recomputed over the
+    skewed action, exactly as the old writer's `card_ownership_receipt(…)` call did, so the fold's own
+    digest check still passes and only the Idea REBUILD disagrees. Minting a healthy Card and then
+    editing the durable bytes would fail the digest check instead, at a different guard.
     """
     idea = Idea(operator="draft", params={"x": 0.25, "y": -1.0},
                 rationale=f"unclaimable {card_id}",
                 hypothesis=f"unclaimable {card_id} improves the objective",
                 card_id=card_id)
-    # Attach the grid AFTER validation, the way a direct `params` mutation used to: constructing with
-    # both would let `_clamp_params_to_space` normalize it and there would be nothing to reproduce.
-    idea.space = {"x": [0.8, 0.9]}
     action = Engine._card_action(idea, [], {}, None, None, scored_against_empty=True)
     statement = Engine._card_statement(idea)
     assert statement is not None
-    engine.store.append("card_added", Engine._card_added_payload(
-        card_id, statement, action, idea, source="researcher", at_node=0))
+    payload = Engine._card_added_payload(
+        card_id, statement, action, idea, source="researcher", at_node=0)
+    # The grid the old writer stored beside those params. `x=0.25` is outside `[0.8, 0.9]`, so every
+    # reconstruction of this Card snaps it to 0.8 and the rebuilt action stops matching the receipt.
+    skewed = {**action, "space": {"x": [0.8, 0.9]}}
+    payload["idea"]["space"] = skewed["space"]
+    payload["ownership_receipt"] = card_ownership_receipt(card_id, statement, skewed)
+    assert payload["ownership_receipt"] is not None
+    engine.store.append("card_added", payload)
 
 
 def test_serial_claim_names_a_permanent_refusal_instead_of_returning_a_bare_none(tmp_path):
@@ -2850,9 +2861,12 @@ def test_a_ratcheted_run_resumes_through_the_real_pin_check(tmp_path, monkeypatc
     `_require_pinned_speculation_receipt` refuses a resume whose depth differs from the one the log
     pinned — that is invariant #6 and it is what keeps a config edit from changing a live run's search
     treatment. A depth that MOVES has to pass through the same check, and it does, because the check
-    reads the FOLDED depth (`run_started` ∧ every settle row) rather than `run_started` alone. This
-    drives the real method rather than asserting the arithmetic, because the failure it guards against
-    is exactly "the check and the value drifted apart".
+    reads the run's two depth facts SEPARATELY: an AUTO re-entry adopts the effective depth
+    (`run_started` ∧ every settle row) and a SPELLED one is measured against the launch pin
+    (`speculation_depth_pinned`). Reading only the folded effective depth for both is what made this
+    run refuse its own printed resume advice. This drives the real method rather than asserting the
+    arithmetic, because the failure it guards against is exactly "the check and the value drifted
+    apart".
     """
     engine, _producer = _engine(tmp_path / "ratchet-resume")
     _start(engine)

@@ -6,14 +6,19 @@ build reservation.  A native card is one engine-minted action receipt, linked fi
 """
 from __future__ import annotations
 
+import collections
+import random
 import threading
 from pathlib import Path
 
+import pydantic
 import pytest
 
+from tests.factories import make_engine
 from looplab.adapters.toytask import ToyTask
 from looplab.core.models import Idea, card_ownership_receipt, idea_proposal_ref
 from looplab.engine.orchestrator import Engine
+from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.events.types import (
     EV_CARD_ADDED,
@@ -30,6 +35,7 @@ from looplab.events.types import (
     EV_PAUSE,
 )
 from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.search.card_selection import card_action as projected_card_action
 from looplab.search.policy import GreedyTree
 
 
@@ -844,3 +850,177 @@ def test_novelty_sidecar_uses_the_final_reused_card_identity(tmp_path, monkeypat
     novelty = next(event for event in events if event.type == EV_NOVELTY_GRADED)
     assert novelty.data["proposal_ref"] == idea_proposal_ref(node.idea)
     assert fold(events).cards["card-7"].novelty_verdict["grade"] == "novel"
+
+
+# --------------------------------------------------------------------------- #
+# The mint's round-trip proof.
+#
+# `Idea.model_config` is empty — no `validate_assignment` — and both proposal funnels admit an
+# existing instance without re-validating it (`orchestrator.py::_prepare_node_idea._link` and
+# `novelty.py::_propose_batch._link_card` share the `candidate if isinstance(candidate, Idea) else
+# Idea.model_validate(candidate)` shape). So ANY producer that assigns onto an Idea can reach the
+# writer with values the Idea's own validators would have changed, and because the Card's ownership
+# digest is derived from the REBUILT form, such a Card can never be claimed: the selector re-elects
+# it, `_prepare_existing_card_claim` re-refuses it, and the create lane spins forever.
+#
+# Two producers have done this for real — `roles.py::_clamp_fill`'s bounds clamp on a swept key, and
+# `novelty.py`'s numeric nudge (`out.params = nudged` onto a `model_copy()`). These tests pin the
+# ROOT property instead of either instance: whatever reaches `_card_added_payload` is a fixed point
+# of its own validators, or no Card is written at all.
+# --------------------------------------------------------------------------- #
+
+
+def _mint_and_claim(engine: Engine, idea: Idea):
+    """(disposition, claim outcome) through the real mint, a real fold and the real claim."""
+    events = engine.store.read_all()
+    state = fold(events)
+    plan = engine._plan_native_card(
+        events, state, idea, parents=[], parent_generations={},
+        scored_against=state.best_node_id, source="researcher", at_node=1)
+    if plan.disposition != "mint":
+        return plan.disposition, "no-card"
+    engine.store.append(EV_CARD_ADDED, plan.payload)
+    events = engine.store.read_all()
+    state = fold(events)
+    card = state.cards[plan.card_id]
+    action = projected_card_action(card)
+    assert action is not None
+    engine._card_claim_refusal = None
+    claimed = engine._prepare_existing_card_claim(events, state, action, card, node_id=1)
+    if claimed is not None:
+        return "mint", "claimed"
+    return "mint", (engine._card_claim_refusal or "anonymous refusal")
+
+
+def _nudging_engine(run_dir):
+    """A Card-driven engine whose deterministic numeric novelty gate nudges EVERY proposal.
+
+    `novelty_mode="algo"` with a huge epsilon makes every proposal a "duplicate" of the seed node, so
+    the numeric nudge always fires. Reachable in production on `novelty_mode=algo`, on its legacy
+    alias `novelty_gate=true`, and on `novelty_mode=off` with a Strategist novelty stance of
+    "explore" — which `agents/strategist.py` can derive with no LLM at all.
+    """
+    engine = make_engine(
+        run_dir, n_seeds=0, max_nodes=8, card_driven_selection=True, speculation_depth=0,
+        novelty_mode="algo", novelty_epsilon=10.0, novelty_semantic=False)
+    engine.store.append("run_started", {"run_id": "nudge", "task_id": "toy", "goal": "g",
+                                        "direction": "min"})
+    engine.store.append(EV_NODE_CREATED, {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": Idea(operator="draft", params={"x": 0.25, "y": 0.25}, rationale="seed",
+                     hypothesis="seed h").model_dump(mode="json"),
+        "code": "print(1)", "files": {}})
+    engine.store.append(EV_NODE_EVALUATED, {"node_id": 0, "metric": 1.0, "generation": 0})
+    return engine
+
+
+def test_the_novelty_nudge_can_no_longer_mint_a_card_that_can_never_be_claimed(tmp_path):
+    """The second live producer, end to end: real gate -> real writer -> fold -> real claim."""
+    engine = _nudging_engine(tmp_path / "nudge-claimable")
+    proposed = Idea(operator="draft", params={"x": 0.25, "y": 0.25}, space={"x": [0.24, 0.26]},
+                    rationale="r", hypothesis="nudge repro improves the objective")
+
+    state = fold(engine.store.read_all())
+    nudged = engine._apply_novelty_gate(state, proposed, prospective_node_id=1)
+    # The PRODUCER is unchanged and still hands the writer a non-fixed-point Idea; these two are the
+    # PRECONDITION of the test, not something to be fixed here. (This seed nudges x to 0.223, but the
+    # binding statement is "outside its own grid", so a re-tuned nudge cannot silently make the test
+    # vacuous by landing back inside it.)
+    assert not 0.24 <= nudged.params["x"] <= 0.26
+    assert Idea.model_validate(nudged.model_dump()).params != nudged.params
+
+    disposition, outcome = _mint_and_claim(engine, nudged)
+    assert (disposition, outcome) == ("mint", "claimed")
+    card = fold(engine.store.read_all()).cards["card-0"]
+    # The durable Card carries the healed value — the same one every fold of the NODE would produce.
+    assert card.params["x"] == 0.24
+
+
+class _PluginIdea(Idea):
+    """A producer schema that opts out of the base space clamp — pydantic replaces a validator by NAME.
+
+    This is what makes the mint's proof more than a second spelling of the healing step: healing
+    re-runs the PRODUCER's validators, and this one round-trips to itself unchanged while the durable
+    `Idea` a claim rebuilds does not. A plugin/experimental Researcher subclass is the realistic
+    shape; the point is that the writer must not depend on every producer's schema agreeing with the
+    durable one.
+    """
+
+    @pydantic.model_validator(mode="after")
+    def _clamp_params_to_space(self) -> "_PluginIdea":
+        return self
+
+
+def test_a_producer_the_mint_cannot_heal_writes_no_card_at_all(tmp_path):
+    """Healing is not the guarantee; the round-trip PROOF is, and it fails closed."""
+    engine = _nudging_engine(tmp_path / "unhealable")
+    skewed = _PluginIdea(operator="draft", params={"x": 0.25, "y": -1.0}, space={"x": [0.8, 0.9]},
+                         rationale="skewed", hypothesis="skewed improves the objective")
+    # It is already a fixed point of its OWN validators, so re-validating it changes nothing…
+    assert _PluginIdea.model_validate(skewed.model_dump()).params == skewed.params
+    # …and is still not what the claim will rebuild.
+    assert Idea.model_validate(skewed.model_dump()).params != skewed.params
+
+    disposition, outcome = _mint_and_claim(engine, skewed)
+    assert (disposition, outcome) == ("invalid", "no-card")
+    # Fail CLOSED means exactly this: the run never acquires an unclaimable work item.
+    assert not [event for event in engine.store.read_all() if event.type == EV_CARD_ADDED]
+
+
+@pytest.mark.parametrize("label,idea_kwargs", [
+    ("nan param", {"params": {"x": float("nan")}}),
+    ("positive infinity", {"params": {"x": float("inf")}}),
+    ("negative infinity", {"params": {"x": float("-inf")}}),
+    ("sixty-five params", {"params": {f"k{index}": float(index) for index in range(65)}}),
+    ("oversized param key", {"params": {"k" * 201: 1.0}}),
+    ("sixty-five space keys",
+     {"params": {"x": 1.0}, "space": {f"s{index}": [0.0, 1.0] for index in range(65)}}),
+    ("oversized grid", {"params": {"x": 1.0}, "space": {"x": [float(i) for i in range(65)]}}),
+    ("non-finite grid value", {"params": {"x": 1.0}, "space": {"x": [0.0, float("inf")]}}),
+])
+def test_a_genuinely_invalid_idea_still_fails_closed_at_the_mint(tmp_path, label, idea_kwargs):
+    """The round-trip proof must not become a coercion step for input the digest already refuses.
+
+    Every case here is rejected by `card_ownership_receipt`'s own bounds BEFORE the rebuild runs, so
+    the writer returns `invalid` and no Card exists — which is what it did before the proof was added
+    and must keep doing. A silent coercion would put an action the operator never proposed under a
+    genuine ownership receipt.
+    """
+    engine = _nudging_engine(tmp_path / f"failclosed-{abs(hash(label))}")
+    idea = Idea(operator="draft", rationale=label, hypothesis=f"{label} improves the objective",
+                **idea_kwargs)
+    disposition, outcome = _mint_and_claim(engine, idea)
+    assert (disposition, outcome) == ("invalid", "no-card")
+    assert not [event for event in engine.store.read_all() if event.type == EV_CARD_ADDED]
+
+
+def test_every_minted_card_is_claimable_across_an_adversarial_producer_population(tmp_path):
+    """The general property, driven: assign onto a validated Idea however you like, and either the
+    writer refuses or the Card it wrote can be claimed. Never the third outcome — a durable Card the
+    claim refuses forever, which is the free spin.
+
+    The population is the SHAPE the root cause admits (a post-validation `params` assignment), not
+    either known instance, so a future third producer of that shape is covered by construction.
+    """
+    engine = _nudging_engine(tmp_path / "population")
+    rng = random.Random(20260806)
+    outcomes: collections.Counter = collections.Counter()
+    for case in range(120):
+        keys = ["x", "y", "z"][: rng.randint(1, 3)]
+        space = {key: sorted(round(rng.uniform(-5.0, 5.0) + i * rng.uniform(0.01, 2.0), 6)
+                             for i in range(rng.choice([1, 2, 3])))
+                 for key in keys if rng.random() < 0.7}
+        idea = Idea(operator="draft", params={key: round(rng.uniform(-5.0, 5.0), 4) for key in keys},
+                    space=space, rationale=f"case {case}",
+                    hypothesis=f"case {case} improves the objective")
+        # THE root-cause shape: a producer writes params onto an existing Idea, no validators.
+        mutated = idea.model_copy()
+        mutated.params = {key: round(value + rng.uniform(-2.0, 2.0), 4)
+                          for key, value in idea.params.items()}
+        engine.store = EventStore(engine.run_dir / f"case-{case}.jsonl")
+        engine.store.append("run_started", {"run_id": "pop", "task_id": "toy", "goal": "g",
+                                            "direction": "min"})
+        outcomes[_mint_and_claim(engine, mutated)] += 1
+    assert set(outcomes) <= {("mint", "claimed"), ("invalid", "no-card")}, dict(outcomes)
+    # …and the healing is what keeps that from being satisfied by refusing everything.
+    assert outcomes[("mint", "claimed")] == 120, dict(outcomes)

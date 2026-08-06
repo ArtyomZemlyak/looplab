@@ -46,7 +46,8 @@ import orjson
 from looplab.core.advisory_payloads import bounded_cross_run_advisory_receipt
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (Idea, RunState, card_action_digest, card_ownership_receipt,
-                                 idea_proposal_ref, normalize_researcher_footprint)
+                                 durable_idea_payload, idea_proposal_ref,
+                                 normalize_researcher_footprint)
 from looplab.engine.proposal_cues import normalize_steering_context
 from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.types import (EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED,
@@ -256,6 +257,68 @@ class CardReservationMixin:
         return kind, parents, parent_generations
 
     @staticmethod
+    def _fixed_point_idea(idea: Idea) -> Idea:
+        """Re-run an Idea through its OWN validators, so what the Card binds is a fixed point of them.
+
+        `Idea.model_config` is empty (`core/models.py`) — there is no `validate_assignment` — and the
+        two proposal funnels admit an existing instance WITHOUT re-validating it
+        (`orchestrator.py::_prepare_node_idea._link` and `novelty.py::_propose_batch._link_card` both
+        spell `candidate if isinstance(candidate, Idea) else Idea.model_validate(candidate)`). So any
+        producer that ASSIGNS onto an Idea escapes every validator on the way to the mint. Two live
+        instances so far — `agents/roles.py::_clamp_fill`'s bounds clamp on a swept key, and
+        `engine/novelty.py`'s numeric nudge (`out.params = nudged` onto a `model_copy()`) — and neither
+        was the cause: the cause is the unvalidated funnel, which is why the repair is here rather than
+        at each producer.
+
+        This is the HEALING half, and deliberately NOT the guarantee. It re-runs the PRODUCER's own
+        validators (`type(idea)`), while a claim rebuilds a base `Idea` from the durable ACTION — so a
+        subclass whose validators differ from the durable schema (pydantic lets a subclass replace a
+        validator by name, and a plugin schema that opts out of the space clamp round-trips to itself)
+        is healed to something the claim still will not reproduce. Re-validation that RAISES is
+        swallowed here too. `_card_added_payload` therefore still PROVES the round trip and refuses;
+        this only keeps the healable majority — a value nudged just outside its own declared grid,
+        which is both live producers — from being thrown away with it.
+
+        It re-validates through `durable_idea_payload`, NOT a raw `model_dump()`, and that is not a
+        stylistic choice: `durable_idea_payload` is the boundary `node_created` writes and the fold
+        rebuilds from, so this returns exactly the Idea replay will produce. A raw `model_dump()`
+        materializes the three concept-list defaults, which puts them in `model_fields_set` and turns
+        an ABSENT legacy concept envelope into an authored empty one — a different `idea_proposal_ref`
+        (measured: it broke exact crash-prefix Card reuse, which compares the whole writer payload).
+
+        A subclass that cannot rebuild itself from its own durable payload falls through unchanged and
+        is refused by that proof — never crashing the proposal path on the way there.
+        """
+        try:
+            return type(idea).model_validate(durable_idea_payload(idea))
+        except Exception:  # noqa: BLE001 - the mint's round-trip proof below is the fail-closed half
+            return idea
+
+    @staticmethod
+    def _rebuilt_claim_idea(card_id: str, statement: str, action: dict, rationale: str,
+                            concepts: Optional[dict] = None) -> Idea:
+        """Rebuild the Idea a claim will execute, from the immutable action its digest covers.
+
+        ONE spelling, called from both ends of the same round trip: `_card_added_payload` proves the
+        mint is a fixed point of it, `_prepare_existing_card_claim` runs it for real when the Card is
+        claimed. A second hand-synced copy would let the mint prove a rebuild the claim no longer
+        performs — the guard would go quietly vacuous instead of red, which is exactly the failure it
+        exists to stop.
+        """
+        return Idea(
+            operator=action["operator"],
+            params=dict(action.get("params") or {}),
+            space={key: list(values) for key, values in (action.get("space") or {}).items()},
+            rationale=rationale,
+            eval_profile=action.get("eval_profile"),
+            eval_timeout=action.get("eval_timeout"),
+            hypothesis=statement,
+            card_id=card_id,
+            footprint=normalize_researcher_footprint(action.get("footprint")),
+            **(concepts or {}),
+        )
+
+    @staticmethod
     def _card_action(idea: Idea, parents: list[int], parent_generations: dict[str, int],
                      scored_against: Optional[int], scored_against_generation: Optional[int],
                      *, scored_against_empty: bool) -> dict:
@@ -275,8 +338,8 @@ class CardReservationMixin:
             "footprint": footprint,
         }
 
-    @staticmethod
-    def _card_added_payload(card_id: str, statement: str, action: dict, idea: Idea, *,
+    @classmethod
+    def _card_added_payload(cls, card_id: str, statement: str, action: dict, idea: Idea, *,
                             source: str, at_node: int,
                             implementation_ref: Optional[str] = None,
                             steering_context=(), cross_run_receipt=None) -> dict:
@@ -289,6 +352,32 @@ class CardReservationMixin:
                 or source != source.strip() or not source.isprintable()
                 or type(at_node) is not int or not 0 <= at_node <= (1 << 31) - 1):
             raise ValueError("prepared idea cannot form a bounded native card receipt")
+        rationale = (idea.rationale or "")[:400]
+        # THE ROUND TRIP, PROVED WHERE THE RECEIPT IS MINTED — the one invariant that makes a Card
+        # claimable at all. `receipt` above digests THIS `action`; `_prepare_existing_card_claim`
+        # re-derives that digest by rebuilding the Idea from the durable Card and calling
+        # `_card_action` on it AGAIN. When the two disagree the digest can never match, so the Card is
+        # unclaimable from the instant it is written: the selector keeps electing it, the claim keeps
+        # refusing, and the create lane spins forever. Both live producers of that state assigned onto
+        # an existing Idea and so skipped `Idea`'s validators (see `_fixed_point_idea`), and the digest
+        # is computed from the REBUILT form — which is why the check belongs here, at the single place
+        # an ownership receipt is created, and not at either producer.
+        #
+        # It fails CLOSED, before a Card exists: every caller turns the refusal into an "invalid"
+        # disposition (`_plan_native_card`) or a declined reuse (`_card_event_matches`). A `params`
+        # that the digest itself rejects (NaN, inf, 65 keys, an oversized key) is already refused by
+        # `card_ownership_receipt` above and never reaches this rebuild.
+        rebuilt = cls._rebuilt_claim_idea(card_id, statement, action, rationale)
+        rebuilt_action = cls._card_action(
+            rebuilt, list(action.get("parent_ids") or []),
+            dict(action.get("parent_generations") or {}),
+            action.get("scored_against"), action.get("scored_against_generation"),
+            scored_against_empty=bool(action.get("scored_against_empty")),
+        )
+        if cls._card_statement(rebuilt) != statement or rebuilt_action != action:
+            raise ValueError(
+                "prepared idea is not a fixed point of its own validators: the card action cannot "
+                "be rebuilt from the receipt it would be minted under")
         if (implementation_ref is not None
                 and (not isinstance(implementation_ref, str)
                      or not implementation_ref.startswith("implementation:v1:")
@@ -300,7 +389,7 @@ class CardReservationMixin:
             "statement": statement,
             "source": source,
             "at_node": at_node,
-            "rationale": (idea.rationale or "")[:400],
+            "rationale": rationale,
             # Deliberately narrow: replay treats any future executable member in this block as an
             # incomplete v1 action rather than silently blessing lossy semantics.
             # the production writer also drops Idea.concepts, while novelty/card-enriched
@@ -426,6 +515,16 @@ class CardReservationMixin:
                           steering_context=(), cross_run_receipt=None,
                           superseded_card_id: Optional[str] = None) -> _CardReservationPlan:
         """Resolve exact live dedupe, crash-prefix reuse, or a fresh engine id without appending."""
+        # The funnel every native mint passes through, and therefore the place to heal a proposal that
+        # reached it un-revalidated (see `_fixed_point_idea`). Doing it HERE rather than at the two
+        # `_link`/`_link_card` callers covers all five call sites at once, and covers the ones that
+        # mutate AFTER the funnel too — `_stage_prepared_card` re-clamps the footprint through
+        # `model_copy(update=…)`, which is another validator bypass by construction. Healing is not a
+        # behaviour change for a healthy proposal: `model_validate` of a fixed point returns an equal
+        # Idea, so the minted bytes are identical. For an unhealthy one it costs nothing either — the
+        # NODE's Idea is rebuilt through the same validators at every fold, so the un-healed value was
+        # already not what replay saw, only what the Developer was handed.
+        idea = cls._fixed_point_idea(idea)
         score_snapshot = cls._card_score_snapshot(state, scored_against)
         if score_snapshot is None:
             return _CardReservationPlan("invalid", None, None, None)
@@ -888,18 +987,12 @@ class CardReservationMixin:
                     "space/two-dimensional",
                 ],
             } if self._speculation_gate_calibration else {})
-            idea = Idea(
-                operator=card.operator,
-                params=dict(card.params or {}),
-                space={key: list(values) for key, values in (card.space or {}).items()},
-                rationale=card.rationale,
-                eval_profile=card.eval_profile,
-                eval_timeout=card.eval_timeout,
-                hypothesis=card.seed_statement,
-                card_id=card.id,
-                footprint=normalize_researcher_footprint(card.footprint),
-                **calibration_concepts,
-            )
+            # THE rebuild — and the same one `_card_added_payload` proves the mint against, by
+            # construction rather than by hand-syncing two copies of this constructor. `receipt_action`
+            # is `_card_claim_receipt_action(card)`, i.e. exactly the action shape the mint digested.
+            idea = self._rebuilt_claim_idea(
+                card.id, card.seed_statement, receipt_action, card.rationale,
+                concepts=calibration_concepts)
         except Exception:  # hostile/future Card data cannot escape the closed Idea schema
             return None
         rebuilt_action = self._card_action(
@@ -1136,7 +1229,11 @@ class CardReservationMixin:
         with self._id_lock:
             events = self.store.read_all()
             state = _fold(events)
-            clean = idea.model_copy(deep=True, update={"card_id": None})
+            # Same funnel rule as `_plan_native_card`: this writer builds a real action and a real
+            # receipt (it pops the receipt only at the end, so the closed Card cannot be resurrected as
+            # executable work), so its Idea must reach `_card_added_payload` as a fixed point too or
+            # the round-trip proof there would silently cost every rejected proposal its audit Card.
+            clean = self._fixed_point_idea(idea).model_copy(deep=True, update={"card_id": None})
             statement = self._card_statement(clean)
             score_snapshot = self._card_score_snapshot(state, state.best_node_id)
             bounded_steering = normalize_steering_context(steering_context)
