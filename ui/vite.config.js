@@ -24,8 +24,32 @@ export default defineConfig({
       compress: {
         passes: 4, pure_getters: true, keep_fargs: false,
         hoist_props: true, unsafe: true, unsafe_arrows: true, unsafe_methods: true,
-        unsafe_comps: true, unsafe_proto: true, unsafe_regexp: true,
+        unsafe_proto: true, unsafe_regexp: true,
         builtins_ecma: 2022,
+        // NEVER re-enable `unsafe_comps` here — second verse of the same song as
+        // `booleans_as_integers` below. It lets Terser NEGATE a comparison (`a <= 0` -> `a > 0`) so
+        // it can swap a ternary's branches for shorter output. That is value-preserving for every
+        // operand except NaN — and `undefined`, a missing field and a non-numeric string all coerce
+        // to NaN, which in this UI is not an edge case: "this number is not known" is the normal
+        // shape of half these payloads, and the whole house rule is that an unknown number must not
+        // render as a number. So the SHIPPED build takes the OTHER branch from the source on exactly
+        // the inputs the branch exists for, and which way it flips is decided by Terser's size
+        // heuristic rather than by anything anyone wrote.
+        //
+        // It was not hypothetical. Measured 2026-08-06 by executing the REAL Rolldown+Terser SSR
+        // bundle of 44 models + 6 components against 183,008 calls and diffing it against the same
+        // tree built without this flag — it was the ONLY flag in this block with any behavioural
+        // difference at all (unsafe, unsafe_arrows, unsafe_methods, unsafe_proto, unsafe_regexp,
+        // pure_getters, keep_fargs, hoist_props: zero differences each), and it had 42, in two
+        // shipped surfaces:
+        //   traceProjection.conversationWindowNotice({visibleTurns: 5})
+        //       source "Showing the most recent 5 of undefined steps."  built "Trace projection is partial."
+        //   runMapModel.gridColumns(undefined)     source NaN            built 1
+        // Both flips happen to land on the tidier text, which is luck: the source spelling decides
+        // the direction, and `withhold ? … : show` and `show ? … : withhold` flip opposite ways.
+        // Invisible to dev, to SSR and to all of `node --test`, because they run UNMINIFIED.
+        // What it bought, measured on the same pair of builds: 74 B raw / 26 B gzip out of 305 KB
+        // raw / 96 KB gzip — 0.02%. `test/minifierComparisonGuards.test.js` drives the property.
         // NEVER re-enable `booleans_as_integers` here. It rewrites `false` to `0` and `true` to `1`,
         // which is value-preserving for every JS operator and NOT value-preserving for React: `0` is
         // falsy but React RENDERS numbers, so the house guard `{open && <Menu/>}` — correct in source,
