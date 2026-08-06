@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -13,11 +14,14 @@ import pytest
 from looplab.events.traceview import (
     TRACE_CONVERSATION_SPAN_CAP,
     TRACE_DETAIL_SPAN_CAP,
+    TRACE_NODE_SPAN_CAP,
+    TRACE_NODE_SPAN_CAP_MAX,
     TRACE_PROJECTION_SCHEMA,
     TRACE_VIEW_SPAN_CAP,
     _normalize_span,
     build_conversation,
     build_trace_view,
+    settle_node_span_cap,
 )
 
 
@@ -331,6 +335,153 @@ def test_node_trace_limit_pages_a_heavily_repaired_node_past_the_default_cap(tmp
     more = client.get("/api/runs/demo/nodes/0/trace", params={"limit": 2000}).json()
     assert len(_flatten_trace(more["nodes"])) > default_n   # the raised cap surfaces more of the node
     assert SECRET not in json.dumps(more)
+
+
+def _conversation_run(tmp_path, *, stages: int, spans_per_stage: int = 1):
+    """A run whose node 0 holds `stages` separate one-band traces. Returns its TestClient.
+
+    Each trace is a root operation plus generations stamped with `phase_span`, which is exactly the
+    shape `_stage_of` groups into one band per trace — so the number of bands is controlled directly
+    rather than inferred from a span count.
+    """
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    rows = []
+    for stage in range(stages):
+        root = f"root-{stage}"
+        rows.append({
+            "trace_id": f"trace-{stage}", "span_id": root, "parent_id": None, "run_id": "demo",
+            "name": "implement", "kind": "operation", "start": float(stage * 100),
+            "duration_s": 1.0, "status": "OK", "attributes": {"node_id": 0}, "events": [],
+        })
+        for turn in range(spans_per_stage):
+            rows.append({
+                "trace_id": f"trace-{stage}", "span_id": f"gen-{stage}-{turn}", "parent_id": root,
+                "run_id": "demo", "name": "generation", "kind": "generation",
+                "start": float(stage * 100 + turn + 1), "duration_s": 0.1, "status": "OK",
+                "attributes": {
+                    "node_id": 0, "phase": "implement", "phase_span": root,
+                    # Both carry the secret in shapes the projection is expected to redact, so the
+                    # widened-window assertions below are a real claim about the bigger response.
+                    "input": [{"role": "user", "content": f"work {URL}"}],
+                    "output": f"turn {turn} Authorization: Bearer {SECRET}",
+                },
+                "events": [],
+            })
+    (run_dir / "spans.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    return TestClient(make_app(tmp_path)), len(rows)
+
+
+def test_conversation_limit_unhides_stages_the_default_window_already_held(tmp_path):
+    """The operator's defect: "N steps hidden" with no way to see them, in the DEFAULT view.
+
+    This node is deliberately built SMALLER than the span window — 400 spans against a 512 default —
+    so `omitted_spans` is zero at every limit and the span read cannot be what changes. Everything
+    hidden is hidden by the stage/turn RENDER caps, which is what the live server showed on
+    runs/rubert-dr-0804 node 1: 192 stages and 320 turns withheld from a response that already held
+    every span they were derived from. A `limit` wired only to the span read passes nothing here.
+    """
+    pytest.importorskip("fastapi")
+
+    client, span_count = _conversation_run(tmp_path, stages=200)
+    assert span_count < TRACE_CONVERSATION_SPAN_CAP   # the span window is NOT the binding constraint
+
+    default = client.get("/api/runs/demo/nodes/0/conversation").json()
+    assert default["projection"]["omitted_spans"] == 0
+    assert len(default["stages"]) == 64               # every band past the render cap is withheld…
+    assert default["projection"]["omitted_stages"] == 136   # …and the receipt says so
+    assert default["projection"]["truncated"] is True
+    hidden_turns = default["projection"]["omitted_turns"]
+    assert hidden_turns > 0
+
+    # One click of the shared window (512 -> 1024) must actually deliver bands, not just re-read.
+    paged = client.get("/api/runs/demo/nodes/0/conversation", params={"limit": 1024}).json()
+    assert len(paged["stages"]) == 128
+    assert paged["projection"]["omitted_stages"] == 72
+    assert paged["projection"]["visible_turns"] > default["projection"]["visible_turns"]
+
+    # Paging to the ceiling reaches the whole conversation on a node this size.
+    whole = client.get("/api/runs/demo/nodes/0/conversation",
+                       params={"limit": TRACE_NODE_SPAN_CAP_MAX}).json()
+    assert len(whole["stages"]) == 200
+    assert whole["projection"]["omitted_stages"] == 0
+    assert whole["projection"]["omitted_turns"] == 0
+    # Every widened window stays inside the same browser contract as the default one.
+    assert SECRET not in json.dumps(whole)
+
+
+def test_conversation_limit_widens_the_span_window_and_clamps_to_the_one_ceiling(tmp_path):
+    """The other half: a node bigger than the ceiling. The window grows, then stops at ONE number."""
+    pytest.importorskip("fastapi")
+
+    client, span_count = _conversation_run(
+        tmp_path, stages=TRACE_NODE_SPAN_CAP_MAX, spans_per_stage=1)
+    assert span_count > TRACE_NODE_SPAN_CAP_MAX
+
+    default = client.get("/api/runs/demo/nodes/0/conversation").json()
+    assert default["projection"]["visible_spans"] == TRACE_CONVERSATION_SPAN_CAP
+    assert default["projection"]["omitted_spans"] > 0
+
+    paged = client.get("/api/runs/demo/nodes/0/conversation", params={"limit": 2048}).json()
+    assert paged["projection"]["visible_spans"] == 2048
+
+    # Both per-node surfaces stop at the SAME ceiling, and an absurd request clamps rather than
+    # refusing — a second ceiling anywhere would show up here as two different windows.
+    for absurd in (TRACE_NODE_SPAN_CAP_MAX + 1, 10 ** 9):
+        maxed = client.get("/api/runs/demo/nodes/0/conversation", params={"limit": absurd}).json()
+        assert maxed["projection"]["visible_spans"] == TRACE_NODE_SPAN_CAP_MAX
+        tree = client.get("/api/runs/demo/nodes/0/trace", params={"limit": absurd}).json()
+        assert tree["projection"]["visible_spans"] == TRACE_NODE_SPAN_CAP_MAX
+
+
+def test_node_span_window_limit_is_settled_never_trusted(tmp_path):
+    """`limit` comes off the wire. Its truth table, and the refusal both routes owe a bad one."""
+    pytest.importorskip("fastapi")
+
+    # Absent / no-request / malformed all mean "the default", and can never widen a window by
+    # accident. A request below the default cannot SHRINK one the client never asked about.
+    for unrequested in (0, None, -1, -(10 ** 9), "512", 512.0, True, False, [512]):
+        assert settle_node_span_cap(unrequested, default=TRACE_NODE_SPAN_CAP) == TRACE_NODE_SPAN_CAP
+    assert settle_node_span_cap(1, default=TRACE_NODE_SPAN_CAP) == TRACE_NODE_SPAN_CAP
+    assert settle_node_span_cap(1024, default=TRACE_NODE_SPAN_CAP) == 1024
+    assert settle_node_span_cap(10 ** 9, default=TRACE_NODE_SPAN_CAP) == TRACE_NODE_SPAN_CAP_MAX
+    # The conversation's default differs from the tree's in principle; the CEILING may not.
+    assert settle_node_span_cap(10 ** 9,
+                                default=TRACE_CONVERSATION_SPAN_CAP) == TRACE_NODE_SPAN_CAP_MAX
+
+    client, _ = _conversation_run(tmp_path, stages=4)
+    for route in ("trace", "conversation"):
+        for bad in ("-1", "abc", "1e9", "4.5"):
+            response = client.get(f"/api/runs/demo/nodes/0/{route}", params={"limit": bad})
+            assert response.status_code == 422, (route, bad)
+        # A well-formed request still succeeds on both, so the refusals above are about the VALUE.
+        assert client.get(f"/api/runs/demo/nodes/0/{route}",
+                          params={"limit": 1024}).status_code == 200
+
+
+def test_browser_and_server_share_one_node_span_window(tmp_path):
+    """The UI cannot import Python. Pin the mirror, because drift here is silent in both directions.
+
+    A UI ceiling below the server's leaves spans the operator can never reach; above it, the pager
+    keeps offering clicks that return the identical response. Both read as "load more is broken".
+    """
+    source = (Path(__file__).resolve().parents[1] / "ui" / "src" / "traceProjection.js").read_text()
+    mirrored = dict(
+        re.findall(r"^export const (NODE_TRACE_SPAN_WINDOW(?:_MAX)?) = (\d+)$", source, re.M))
+    assert mirrored == {
+        "NODE_TRACE_SPAN_WINDOW": str(TRACE_NODE_SPAN_CAP),
+        "NODE_TRACE_SPAN_WINDOW_MAX": str(TRACE_NODE_SPAN_CAP_MAX),
+    }
+    # The conversation pages against the same window, so its default must be the same number too.
+    assert TRACE_CONVERSATION_SPAN_CAP == TRACE_NODE_SPAN_CAP
 
 
 def test_trace_route_read_failures_are_not_reported_as_complete_empty_data(tmp_path, monkeypatch):

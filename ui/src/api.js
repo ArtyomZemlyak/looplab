@@ -1187,8 +1187,13 @@ export const spanDetail = (runId, spanId) =>
 
 // Linear, de-duplicated conversation view of a node's trace (request once per sub-loop, then each
 // generation's delta interleaved with tool calls) — the readable alternative to the raw span tree.
-export const nodeConversation = (runId, nid, options) =>
-  get(runNodeApiPath(runId, nid, '/conversation'), options)
+// `limit` is the Inspector's "load more" window. Sent EXPLICITLY from the first read (the same choice
+// the Dock made for /trace): it removes the special zero/default request path without changing the
+// first response window, since the shared window starts at the server's own default. A caller that
+// omits it still gets that default — the server owns it (traceview.settle_node_span_cap), never this.
+export const nodeConversation = (runId, nid, { limit, ...options } = {}) =>
+  get(runNodeApiPath(runId, nid,
+    limit ? `/conversation?limit=${encodeURIComponent(limit)}` : '/conversation'), options)
 
 // Stop an in-flight assistant turn server-side (survives a page reload, unlike aborting the local
 // stream). Also used to poll whether a turn is still running (reattach after switch/reload).

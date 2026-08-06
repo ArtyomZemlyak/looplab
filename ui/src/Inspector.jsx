@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState, useRef } from 'react'
 import { costPricing, deadlineGet, get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL,
   commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
   retryRunCommand, runNodeApiPath, submitCommand } from './util.js'
-import { usePoll, useScopedResource } from './hooks.js'
+import { useNodeSpanWindow, usePoll, useScopedResource } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { themeFilteredGroupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
@@ -13,7 +13,10 @@ import { diffLines } from './lineDiff.js'
 import { nodeFeasibilityStatus } from './trustSemantics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
-import { traceDetailState, tracePartial, traceUnavailable, unavailableTraceDetail } from './traceProjection.js'
+import {
+  NODE_TRACE_SPAN_WINDOW, TRACE_PARTIAL_EMPTY_NOTICE, conversationWindow, conversationWindowNotice,
+  traceDetailState, traceUnavailable, traceWindow, traceWindowNotice, unavailableTraceDetail,
+} from './traceProjection.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts, parseConceptTagsInput } from './conceptChips.js'
 import { conceptMaterializationStatus } from './nodeProjection.js'
@@ -1101,22 +1104,29 @@ function StageBlock({ s, t0, total, runId }) {
 export function NodeTrace({ spans, runId, projection = {}, onRetry, onLoadMore }) {
   const roots = spans || []
   if (traceUnavailable(projection)) return <TraceUnavailable onRetry={onRetry} />
-  const partial = tracePartial(projection)
-  // Prefer an ACTIONABLE control over a dead "projection is partial" notice. The receipt remains in
-  // projection; repeating its optional count in this hot render path added branches without utility.
-  const loadMore = (partial && onLoadMore)
+  // Route the partial handling through the ONE window rule (traceProjection.js) instead of the raw
+  // `truncated` union. That flag conflates "spans were omitted" (a bigger limit surfaces them) with
+  // "per-span text was clamped" (no limit ever will), so the old `tracePartial` branch rendered the
+  // pager on traces where clicking it could not add a single row — measured, 8 of the 13 real node
+  // traces in rubert-dr-0805 / rubertlite-dr-unified-v4 report truncated=true with omitted_spans=0.
+  // With no pager the rule still owes the operator the COUNT, never a bare adjective.
+  const spanWindow = traceWindow(projection, { canPage: !!onLoadMore })
+  const loadMore = spanWindow.kind === 'pageable'
     ? <button type="button" className="trace-loadmore disclosure-button" onClick={onLoadMore}>
-        ↧ load more spans
+        ↧ load more spans ({spanWindow.omitted == null ? 'more' : spanWindow.omitted} not shown)
       </button>
+    : null
+  const cappedNotice = spanWindow.kind === 'capped'
+    ? <div className="notice compact" role="status">{traceWindowNotice(spanWindow)}</div>
     : null
   if (!roots.length) {
     if (loadMore) return loadMore
-    if (partial) return <div className="notice compact" role="status">Trace projection is partial; no observations were included.</div>
+    if (spanWindow.kind !== 'complete') return <div className="notice compact" role="status">{TRACE_PARTIAL_EMPTY_NOTICE}</div>
     return <div className="muted trace-small">No execution spans captured yet.</div>
   }
   const { t0, total } = traceBounds(roots)
   return <div className="trace">
-    {loadMore || (partial && <div className="notice compact" role="status">Trace projection is partial.</div>)}
+    {loadMore || cappedNotice}
     {roots.map((s, i) => <StageBlock key={`${runId}:${s.span_id || i}`} s={s} t0={t0} total={total} runId={runId} />)}
   </div>
 }
@@ -1264,16 +1274,17 @@ function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
   </div>
 }
 
-function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRetry }) {
+function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRetry,
+  spanLimit = NODE_TRACE_SPAN_WINDOW, onLoadMore }) {
   const [conv, setConv] = useState(null)
   const [logs, setLogs] = useState({})   // {eval, stages:{train,score,…}} — the live stage/eval logs
   useEffect(() => {
     setConv(null)   // node changed → clear before the first load (poll ticks below don't clear, so no flash)
     setLogs({})     // …likewise the logs, else B's stage bands briefly render A's log text
-  }, [runId, n.id, working, reloadNonce])
+  }, [runId, n.id, working, reloadNonce, spanLimit])
   usePoll((alive) => {
     const timed = deadlineRequest(signal => Promise.allSettled([
-        nodeConversation(runId, n.id, { signal }),
+        nodeConversation(runId, n.id, { signal, limit: spanLimit }),
         get(runNodeApiPath(runId, n.id, '/logs'), { signal, cache: 'no-store' }),
       ]), 8000)
     timed.promise.then(([conversation, logs]) => {
@@ -1287,14 +1298,29 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
     })
     return timed
   }, working ? 4000 : null,   // interval only while the agent works this node (live-refresh); null = load once
-  [runId, n.id, working, reloadNonce])   // reloadNonce also re-runs a finished node's one-shot load
+  [runId, n.id, working, reloadNonce, spanLimit])   // reloadNonce also re-runs a finished node's one-shot load
   if (conv === null) return <div className="muted trace-small" role="status">loading…</div>
   const stages = conv.stages || []
   const unavailable = traceUnavailable(conv.projection)
-  const partial = tracePartial(conv.projection)
   if (unavailable) return <TraceUnavailable onRetry={onRetry} />
-  if (!stages.length) return <div className={partial ? 'notice compact' : 'muted'} role={partial ? 'status' : undefined}>{partial
-    ? 'Trace projection is partial.' : 'No conversation captured for this node yet.'}</div>
+  // The operator's actual complaint lives here: this view is the DEFAULT one, it is where "N steps
+  // hidden" is read, and until now it printed a dead "Trace projection is partial." and stopped.
+  // `conversationWindow` (not `traceWindow`) because what is hidden here is STAGES and TURNS, and the
+  // span counters in the same envelope describe a different quantity — see its comment.
+  const convWindow = conversationWindow(conv.projection, { canPage: !!onLoadMore })
+  const loadMore = convWindow.kind === 'pageable'
+    ? <button type="button" className="trace-loadmore disclosure-button" onClick={onLoadMore}>
+        ↧ load more of this conversation ({convWindow.omittedStages} earlier
+        {convWindow.omittedStages === 1 ? ' stage' : ' stages'} not shown)
+      </button>
+    : null
+  const windowNotice = convWindow.kind === 'complete' ? null
+    : <div className="notice compact" role="status">
+        {conversationWindowNotice(convWindow)} {loadMore ? null : 'The window is at its maximum.'}
+      </div>
+  if (!stages.length) return convWindow.kind === 'complete'
+    ? <div className="muted">No conversation captured for this node yet.</div>
+    : <div className="conv">{windowNotice}{loadMore}</div>
   // The live log for a stage band: a multi-stage eval logs per stage (stages[label]); a single-command
   // eval logs to eval.log ("evaluate"/"command"); the dep-install step to setup.log. Anything else
   // (propose/implement/…) has no subprocess log.
@@ -1303,7 +1329,11 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
   // `allOpen` is owned by the sticky Trace header (so collapse-all lives in the pinned bar). It's folded
   // into each band's key so a collapse/expand-all click remounts them at the new default; a live poll
   // (allOpen unchanged) keeps the key stable, so per-band toggles survive the 4s refresh.
-  return <div className="conv">{partial && <div className="notice compact" role="status">Trace projection is partial.</div>}
+  // Notice + control go ABOVE the bands, because that is where the gap is: every cap in this
+  // projection keeps the newest TAIL, so the missing stages are the OLDEST and the thread's first
+  // visible band is the truncation boundary. (The Dock's live tail puts "load earlier" at the top for
+  // the same reason.) Directly under the sticky header is also simply where it gets found.
+  return <div className="conv">{windowNotice}{loadMore}
     {stages.map((st, i) => <ConvStage key={`${st.trace_id || ''}:${st.label || ''}:${st.start || i}:${allOpen}`}
                                       st={st} defaultOpen={allOpen} log={logFor(st.label)} live={working} />)}
     {logs.run_setup ? <RunSetupLog text={logs.run_setup} /> : null}
@@ -1324,7 +1354,34 @@ function RunSetupLog({ text }) {
   </div>
 }
 
-function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, working, onReload,
+// The span tree's paged read. Returns null until the operator has raised the window (the detail
+// payload's default window is what renders until then), then this node's `/trace` projection at the
+// requested limit. Polls on the same cadence as the conversation while the node is being worked, so
+// paging a LIVE node does not freeze its trace at the moment it was paged; `nonce` re-reads after a
+// trace clear. A failed read stays null and falls back to the detail payload rather than blanking a
+// trace the operator can still see — asking for more must never cost them what they had.
+function usePagedNodeTrace({ runId, nodeId, attempt, limit, nonce, working, enabled }) {
+  const [paged, setPaged] = useState(null)
+  useEffect(() => { if (!enabled) setPaged(null) }, [enabled, runId, nodeId, attempt])
+  usePoll((alive) => get(runNodeApiPath(
+    runId, nodeId, `/trace?attempt=${attempt ?? 0}&limit=${limit}`), { cache: 'no-store' })
+    .then(d => {
+      // Same fence the Dock applies: a response for another node/attempt is a stale in-flight read
+      // from the previous scope, never this node's trace.
+      if (alive() && d?.node_id === nodeId && d?.attempt === (attempt ?? 0)) setPaged(d)
+    })
+    .catch(() => { if (alive()) setPaged(null) }),
+    working ? 4000 : null, [runId, nodeId, attempt, limit, nonce, working, enabled], { enabled })
+  return enabled ? paged : null
+}
+
+// Exported ONLY so a test can mount it (test/inspectorTracePager.test.js). Nothing in the app
+// imports it — the Inspector renders it directly below. It is exported because the property that
+// matters here is not "the file contains a button": it is that clicking the button issues a request
+// for a BIGGER window and the bigger response reaches the screen, and no amount of reading this
+// file's text can see that. The Inspector shipped a dead partial notice for months underneath pins
+// that were all green.
+export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, working, onReload,
   detailStatus = 'ready',
   reloadPending = false, clearScope, clearRecoveryStore, recoverClearState = null,
   clearRecoverySignal = null, publishClearRecovery }) {
@@ -1333,9 +1390,27 @@ function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, work
   const [nonce, setNonce] = useState(0)               // bumped after "clear trace" to reload the bands
   const bodyRef = useRef(null)
   const nodeGeneration = Number.isSafeInteger(n.attempt) && n.attempt >= 0 ? n.attempt : null
-  const spans = n.trace?.nodes || []
+  // ONE window for the node, shared by both readings of it (hooks.js::useNodeSpanWindow, the same
+  // hook the chat feed pages with). Not one per view: "show me more of experiment #7" is about the
+  // experiment, and two independent windows would let the span tree and the conversation disagree
+  // about how much of the same node they are each showing.
+  const { limit: spanLimit, canPage, loadMore } = useNodeSpanWindow()
+  // The span tree renders the node-DETAIL payload's default window until the operator asks for more,
+  // and only then pages through /nodes/{nid}/trace. Deliberately not a fetch on every mount: this tab
+  // must fill in live during a build off the detail poll that already runs, and the extra request is
+  // paid only by the operator who asked for it. (node_detail takes no limit ON PURPOSE — see the
+  // comment at its trace assembly; it folds the whole log and serves no trace at all in History.)
+  const paged = usePagedNodeTrace({
+    runId, nodeId: n.id, attempt: nodeGeneration, limit: spanLimit, nonce, working,
+    enabled: spanLimit > NODE_TRACE_SPAN_WINDOW,
+  })
+  const trace = paged || n.trace
+  const spans = trace?.nodes || []
+  // `unavailable` stays bound to the DETAIL payload, never the paged one. It feeds the trace-clear
+  // fence below, and a failed paging request is not evidence that this node's telemetry is
+  // unreadable — letting it flip `unavailable` would quietly change when a destructive clear is
+  // offered, which is not a thing a pager may do.
   const unavailable = traceUnavailable(n.trace?.projection)
-  const partial = tracePartial(n.trace?.projection)
   // "Clear trace" erases this node's spans (spans.jsonl is append-only, so a reset+rebuild would else
   // STACK new bands on the old attempt's). Two-click confirm; disabled while THIS node is being worked.
   // The phase machine, its durable recovery record and the request live in ./useTraceClear.js
@@ -1438,32 +1513,46 @@ function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, work
   </div>
   if (view === 'conversation')
     return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId} working={working} allOpen={allOpen}
-      reloadNonce={nonce} onRetry={() => setNonce(value => value + 1)} />
+      reloadNonce={nonce} onRetry={() => setNonce(value => value + 1)}
+      spanLimit={spanLimit} onLoadMore={loadMore} />
       {agent && <AgentReport r={agent} />}</div>
+  // The span tree's window rule, over whichever payload is rendering (paged read or detail default).
+  // Same `canPage` as the conversation, because both raise the SAME window.
+  const spanWindow = traceWindow(trace?.projection, { canPage })
+  const spanPager = spanWindow.kind === 'pageable'
+    ? <button type="button" className="trace-loadmore disclosure-button" onClick={loadMore}>
+        ↧ load more spans ({spanWindow.omitted == null ? 'more' : spanWindow.omitted} not shown)
+      </button>
+    : spanWindow.kind === 'capped'
+      ? <div className="notice compact" role="status">{traceWindowNotice(spanWindow)}</div>
+      : null
   if (!spans.length && !agent) {
     if (unavailable)
       return <div className="trace" ref={bodyRef}>{head}<TraceUnavailable
         onRetry={retryParentTrace} pending={reloadPending} /></div>
-    if (partial)
-      return <div className="trace" ref={bodyRef}>{head}<div className="notice compact" role="status">Trace projection is partial; no observations were included.</div></div>
+    if (spanWindow.kind !== 'complete')
+      return <div className="trace" ref={bodyRef}>{head}<div className="notice compact" role="status">{TRACE_PARTIAL_EMPTY_NOTICE}</div>{spanPager}</div>
     return <div className="trace" ref={bodyRef}>{head}<div className="muted">No execution spans yet. Offline nodes may have none; active nodes update here as they run.</div></div>
   }
   if (unavailable)
     return <div className="trace" ref={bodyRef}>{head}<TraceUnavailable
       onRetry={retryParentTrace} pending={reloadPending} />
       {agent && <AgentReport r={agent} />}</div>
-  if (!spans.length && partial)
-    return <div className="trace" ref={bodyRef}>{head}<div className="notice compact" role="status">Trace projection is partial; no observations were included.</div>
+  if (!spans.length && spanWindow.kind !== 'complete')
+    return <div className="trace" ref={bodyRef}>{head}<div className="notice compact" role="status">{TRACE_PARTIAL_EMPTY_NOTICE}</div>{spanPager}
       {agent && <AgentReport r={agent} />}</div>
   const { t0, total } = traceBounds(spans)
   // create_node already nests propose→implement; if an agent wrote the node, the report belongs
   // right after that authoring stage (placed by index), otherwise it trails the whole lifecycle.
   const authorIdx = spans.findIndex(s => ['create_node', 'implement', 'repair'].includes(s.name))
-  const roll = n.trace?.rollup || {}
+  // Rollup from the RENDERED payload, not always the detail one: after paging, the totals below
+  // describe the spans on screen, so reading them off the narrower window would caption a widened
+  // tree with the old window's generation/token counts.
+  const roll = trace?.rollup || {}
   const rtok = roll.tokens || {}
   return <div className="trace" ref={bodyRef}>
     {head}
-    {partial && <div className="notice compact" role="status">Trace projection is partial.</div>}
+    {spanPager}
     <div className="muted trace-rollup-intro">
       Node #{n.id} lifecycle · offset = start, bar = duration. Expand an observation for bounded,
       redacted I/O.

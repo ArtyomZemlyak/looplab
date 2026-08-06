@@ -34,12 +34,32 @@ _MAX_PARENT_HOPS = 1024
 TRACE_PROJECTION_SCHEMA = 2
 TRACE_VIEW_SPAN_CAP = 1024
 TRACE_NODE_SPAN_CAP = 512
-# Ceiling for the UI's "load more spans" control on a single node's trace: the default cap stays 512
-# (fast expand), but a user can page a heavily-repaired node up to this bound on demand. Still O(node)
-# — a bigger cap only surfaces more of THAT node's already-scoped spans (see appstate.node_trace_view).
+# The ONE ceiling for the UI's "load more" control on a single node — BOTH per-node surfaces (the span
+# tree and the linear conversation) page against this number. The default caps stay 512 (fast expand),
+# but a user can page a heavily-repaired node up to this bound on demand. Still O(node) — a bigger cap
+# only surfaces more of THAT node's already-scoped spans (see appstate.node_trace_view). A second
+# ceiling beside this one is how the two surfaces silently stop agreeing on what "everything" means.
 TRACE_NODE_SPAN_CAP_MAX = 4096
 TRACE_DETAIL_SPAN_CAP = 256
 TRACE_CONVERSATION_SPAN_CAP = 512
+
+
+def settle_node_span_cap(limit, *, default: int) -> int:
+    """The ONE settle rule for a client-supplied per-node span window (`?limit=`).
+
+    `limit` arrives from the wire, so it is settled rather than trusted. Absent/`0` and any
+    non-integral or negative value mean "no explicit request" and keep `default` — a malformed limit
+    must never widen a window by accident. A real request can only ever RAISE the window (never shrink
+    it below the default a client did not ask about), and every request is clamped to
+    ``TRACE_NODE_SPAN_CAP_MAX`` so one pathological node can never materialize an unbounded tree.
+
+    Both per-node readers route through this (`appstate.node_trace_view` and the conversation route):
+    a second copy of "default 512, floor 512, ceiling 4096" is exactly how the span tree and the
+    conversation would end up disagreeing about how far a single "load more" click reaches.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        return default
+    return max(default, min(limit, TRACE_NODE_SPAN_CAP_MAX))
 
 
 def trace_file_revision(path: str | os.PathLike) -> Optional[str]:
@@ -72,6 +92,25 @@ _STRUCT_DEPTH_CAP = 3
 _TOOL_CALLS_CAP = 16
 _CONVERSATION_STAGE_CAP = 64
 _CONVERSATION_TURN_CAP = 256
+
+
+def conversation_render_caps(span_cap: int) -> tuple[int, int]:
+    """Stages/turns to RENDER for a given conversation span window — they scale WITH the window.
+
+    Measured on `runs/rubert-dr-0804` node 1 (14,507 spans) before this existed: at the default
+    window the response carried 512 spans, and from those 512 spans the projection derived 256 stages
+    and 425 turns — of which it rendered 64 and 105. Every one of the missing 192 stages was already
+    IN HAND; only these two caps hid them. So raising the span window alone was a placebo: `?limit=`
+    at 1024 and at 4096 both returned the byte-identical 64-stage response, because the caps below
+    re-truncated the wider read back to the same 64.
+
+    That is why the conversation's "load more" moves all three numbers together instead of the span
+    window alone. The window stays the single knob (and TRACE_NODE_SPAN_CAP_MAX stays the single
+    ceiling); these caps are DERIVED from it, so the response size stays proportional to what the
+    operator explicitly asked for — measured 197 KB at x1 up to 1.6 MB at the x8 ceiling.
+    """
+    factor = max(1, int(span_cap) // TRACE_CONVERSATION_SPAN_CAP)
+    return _CONVERSATION_STAGE_CAP * factor, _CONVERSATION_TURN_CAP * factor
 
 
 def unavailable_projection(*, light: bool | None = None) -> dict:
@@ -957,12 +996,17 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
     return out
 
 
-def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spans=None) -> dict:
+def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spans=None,
+                       span_cap: int = TRACE_CONVERSATION_SPAN_CAP) -> dict:
     """Per-node linear conversation (companion to `build_trace_view`). One `stage` per trace tagged
     with this node (create_node / evaluate / …), each a de-duplicated thread of turns. Reader of
-    files-as-truth; caps every string for the browser, but never re-sends the growing history."""
-    selected, _observed_total = _bounded_node_trace_tail(
-        spans, node_id, TRACE_CONVERSATION_SPAN_CAP)
+    files-as-truth; caps every string for the browser, but never re-sends the growing history.
+
+    `span_cap` is the UI's "load more" window (settled by `settle_node_span_cap` at the route). It
+    widens the read AND, through `conversation_render_caps`, the stage/turn caps below in step — see
+    that function for why moving only one of the three surfaces nothing."""
+    stage_cap, turn_cap = conversation_render_caps(span_cap)
+    selected, _observed_total = _bounded_node_trace_tail(spans, node_id, span_cap)
     spans = _normalize_spans(selected)
     by_id = {s["span_id"]: s for s in spans}
     by_trace: dict[str, list[dict]] = defaultdict(list)
@@ -1080,8 +1124,8 @@ def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spa
     # Bound the rendered thread globally, not merely each text field.  A crafted trace
     # with thousands of tiny stages/turns otherwise remains a multi-megabyte response and DOM tree.
     visible: list[dict] = []
-    remaining = _CONVERSATION_TURN_CAP
-    for stage in reversed(stages[-_CONVERSATION_STAGE_CAP:]):
+    remaining = turn_cap
+    for stage in reversed(stages[-stage_cap:]):
         turns = stage.get("turns") or []
         keep = turns[-remaining:] if remaining else []
         omitted_here = max(0, len(turns) - len(keep))

@@ -14,6 +14,13 @@ export const tracePartial = p => p?.truncated === true || Math.max(
 export const NODE_TRACE_SPAN_WINDOW = 512
 export const NODE_TRACE_SPAN_WINDOW_MAX = 4096
 
+// The doubling step both node surfaces page by. Kept here rather than at the two call sites so the
+// Dock and the Inspector cannot end up climbing to the ceiling at different rates — which is how one
+// of them would reach a window the other silently cannot.
+export const nextNodeSpanWindow = current => Math.min(
+  (Number.isSafeInteger(current) && current > 0 ? current : NODE_TRACE_SPAN_WINDOW) * 2,
+  NODE_TRACE_SPAN_WINDOW_MAX)
+
 export const TRACE_PARTIAL_NOTICE = 'Trace projection is partial.'
 export const TRACE_PARTIAL_EMPTY_NOTICE
   = 'Trace projection is partial; no observations were included.'
@@ -61,6 +68,52 @@ export const traceWindowNotice = spanWindow =>
     ? TRACE_PARTIAL_NOTICE
     : `Showing ${spanWindow.visible} of ${spanWindow.total} spans; `
       + `${spanWindow.omitted} more are not displayed.`)
+
+const stated = value => (Number.isSafeInteger(value) && value >= 0 ? value : null)
+
+// The CONVERSATION's window rule, deliberately not `traceWindow`. The two receipts share a field name
+// and mean different things, and reading the conversation through the span rule is wrong twice over.
+// Measured on the live server (runs/rubert-dr-0804 node 1): the conversation reported 13,995 omitted
+// SPANS, while what the operator could not read was 192 omitted STAGES / 320 omitted TURNS — and
+// every one of those was already derivable from the 512 spans the response HAD. So the span count
+// names a quantity the reader cannot see and does not care about, and the span cap is not what hides
+// their steps.
+//   * a control driven off span omission is right that "something is hidden" and wrong about what;
+//   * a notice quoting 13,995 invites the operator to expect 13,995 more steps.
+// Both hidden counts move under the SAME `limit`, because the server derives its stage/turn caps from
+// the span window (traceview.conversation_render_caps) — so one control still raises all of it.
+// `totalsArePartial`: when spans are also omitted, the stage/turn TOTALS were themselves computed
+// over the windowed spans, so they are a floor, not the node's true count. Saying "of 425" flatly
+// would understate the run; the notice says "at least".
+export const conversationWindow = (projection, { canPage = false } = {}) => {
+  const omittedStages = stated(projection?.omitted_stages)
+  const omittedTurns = stated(projection?.omitted_turns)
+  const visibleTurns = count(projection?.visible_turns)
+  const totalTurns = count(projection?.total_turns)
+  const omittedSpans = spansOmitted(projection)
+  const base = {
+    omittedStages: omittedStages || 0,
+    omittedTurns: omittedTurns || 0,
+    visibleTurns,
+    totalTurns,
+    totalsArePartial: omittedSpans == null || omittedSpans > 0,
+  }
+  // A payload stating NEITHER conversation counter predates them; defer to the span receipt rather
+  // than reading two absent fields as proof that nothing is hidden.
+  const hidden = (omittedStages == null && omittedTurns == null)
+    ? omittedSpans !== 0
+    : base.omittedStages > 0 || base.omittedTurns > 0
+  if (!hidden) return { kind: 'complete', ...base }
+  return { kind: canPage ? 'pageable' : 'capped', ...base }
+}
+
+// Steps, because "steps" is what the collapsed bands already count for the operator. Never spans:
+// they asked why 50 steps were hidden, and a number about observations does not answer that.
+export const conversationWindowNotice = conversationView =>
+  (conversationView.visibleTurns <= 0 || conversationView.totalTurns <= 0
+    ? TRACE_PARTIAL_NOTICE
+    : `Showing the most recent ${conversationView.visibleTurns} of `
+      + `${conversationView.totalsArePartial ? 'at least ' : ''}${conversationView.totalTurns} steps.`)
 
 const record = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 

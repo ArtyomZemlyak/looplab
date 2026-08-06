@@ -498,10 +498,11 @@ class AppState:
         more of THAT node's already-scoped spans. ``generation`` fences a reset-surviving node id to
         one lifecycle before either count or cap is applied."""
         from looplab.events.span_index import get_index
-        from looplab.events.traceview import (TRACE_NODE_SPAN_CAP, TRACE_NODE_SPAN_CAP_MAX,
-                                              build_trace_view)
-        span_cap = (TRACE_NODE_SPAN_CAP if not cap
-                    else max(TRACE_NODE_SPAN_CAP, min(int(cap), TRACE_NODE_SPAN_CAP_MAX)))
+        from looplab.events.traceview import (TRACE_NODE_SPAN_CAP, build_trace_view,
+                                              settle_node_span_cap)
+        # One settle rule, shared with the conversation route — see settle_node_span_cap for why the
+        # floor/ceiling may not be re-spelled here.
+        span_cap = settle_node_span_cap(cap, default=TRACE_NODE_SPAN_CAP)
         idx = get_index(rd / "spans.jsonl")
         if idx is None:
             return build_trace_view(
