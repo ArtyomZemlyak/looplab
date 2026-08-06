@@ -283,9 +283,19 @@ export default function PortfolioConcepts({
           {group.ids.map(id => <code key={id}>{id}</code>)}
         </li>)}
       </ul>
+      {/* The old sentence sent the operator to "the Atlas, where it is recorded" for a merge. The
+          Atlas has no such control — the governed merge is `looplab governance concept-merge` and
+          `POST /api/cross-run/concept-alias`, neither of which is reachable from any screen. Worse,
+          performing it changes NOTHING here: the canonicalization lives behind
+          `GET /api/cross-run/concept-policy`, whose whole purpose is to be applied by the browser
+          (`concept_lens.py::project_concept_map` takes concept SETS and no governance, so the CALLER
+          canonicalizes — every server-side caller does, this one has nothing to do it with), and
+          nothing in `ui/` reads that route. So a merged pair still draws two roots and this very
+          notice still calls it drift. Say that, rather than describing a loop that does not close. */}
       <p className="muted">These differ only in <code>-</code> versus <code>_</code>. LoopLab does not
-        infer a taxonomy, so it keeps them apart rather than choosing one for you. Merging them is a
-        cross-run concept action in the Atlas, where it is recorded.</p>
+        infer a taxonomy, so it keeps them apart rather than choosing one for you. A governed merge
+        (<code>looplab governance concept-merge</code>) is recorded in cross-run memory, but this view
+        does not read that registry yet — a merged pair will still appear here as two.</p>
     </details>}
 
     <div className="pc-body">

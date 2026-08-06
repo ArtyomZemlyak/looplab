@@ -122,6 +122,42 @@ test('the restricted heading counts the runs folded, not the boxes ticked', asyn
   })
 })
 
+// ---------------------------------------------------------------------------------------------
+// The third population claim, and the only one that is about a loop that does not close.
+test('the spelling-variant notice does not promise a merge this view would ever show', async () => {
+  const runs = [TAGGED('a', ['optimization/hyperparameter-tuning']),
+    TAGGED('b', ['optimization/hyperparameter_tuning'])]
+  const html = await withComponent(({ PortfolioConcepts }) =>
+    renderToStaticMarkup(React.createElement(PortfolioConcepts, { runs, scopeLabel: 'Drift' })))
+
+  assert.match(html, /spelled\s*more than one way/)
+  // It must not send the operator to a control that does not exist. The governed merge is
+  // `looplab governance concept-merge` / `POST /api/cross-run/concept-alias`; the Atlas screen has
+  // no concept-governance control at all.
+  assert.ok(!/action in the Atlas/.test(html), 'the Atlas offers no concept merge')
+  // And it must say the merge will not change this tree, which is the load-bearing part.
+  assert.match(html, /does not read that registry yet/)
+})
+
+test('that notice stays true only while nothing here consumes the concept policy', async () => {
+  // The premise of the sentence above: `GET /api/cross-run/concept-policy` exists and returns the
+  // canonicalization the browser would have to APPLY (`concept_lens.py::project_concept_map` takes
+  // concept sets and no governance, so the caller canonicalizes), and no browser module reads it.
+  // When someone wires it, this goes red — which is the point: the copy has to change in the same
+  // breath, or the view starts under-claiming instead of over-claiming.
+  const { readdirSync, readFileSync } = await import('node:fs')
+  const src = fileURLToPath(new URL('../src', import.meta.url))
+  // A QUOTED path only: the comment above the notice names the route in prose, and a comment that
+  // explains why the route is unused must not read as the route being used.
+  const requested = /['"`]\/api\/cross-run\/concept-policy/
+  const consumers = readdirSync(src)
+    .filter(name => /\.(js|jsx)$/.test(name))
+    .filter(name => requested.test(readFileSync(`${src}/${name}`, 'utf8')))
+  assert.deepEqual(consumers, [],
+    'a module now reads the concept policy — apply it in conceptForest and rewrite the '
+    + 'spelling-variant notice, which currently tells the operator a merge will NOT show up here')
+})
+
 test('the view renders the heading and the out-of-scope notice from that one rule', async () => {
   const inScope = [TAGGED('a', ['loss/contrastive']), TAGGED('b', ['model/mlp'])]
   const html = await withComponent(({ PortfolioConcepts }) =>
