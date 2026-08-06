@@ -1978,7 +1978,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     : historyActive && !hist ? `history:${history.status}` : 'ready'
   const workspaceRouteLabel = `${live?.label || live?.run_id || runId} run workspace · ${
     view === 'cards' ? 'Cards' : view === 'concepts' ? 'Concepts'
-      : view === 'report' ? 'Report' : 'Search'}`
+      : view === 'report' ? 'Report' : 'Lineage'}`   // must track the view-toggle's label, below
   useEffect(() => {
     // The dialog owns focus while it is mounting and open. Keeping the opener intact here also lets
     // an explicit Close consume the panel's history entry and restore the exact launching control.
@@ -2344,8 +2344,15 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <div ref={workspaceToolbarRef} className="view-toggle" role="toolbar"
           aria-label="Run workspace controls" aria-orientation="horizontal"
           onKeyDown={onWorkspaceToolbarKeyDown} onFocus={onWorkspaceToolbarFocus}>
+          {/* LINEAGE, not "Search". This view draws the node DAG — which experiment was derived from
+              which, by which operator — so what it shows is ancestry, and that is the word for it.
+              "Search" named the ALGORITHM behind the run rather than the thing on screen, and it
+              collided with the ordinary meaning of the word everywhere else in this UI (the concept
+              search box, the run-list filter). The internal key stays `dag`: it is in bookmarked
+              `?view=` URLs and in the `data-workspace-control` ids the toolbar tests drive, and
+              renaming a label is no reason to break those. */}
           <button type="button" data-workspace-control="dag" tabIndex={workspaceTabStop === 'dag' ? 0 : -1}
-            aria-pressed={view === 'dag'} className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>Search</button>
+            aria-pressed={view === 'dag'} className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>Lineage</button>
           <button type="button" data-workspace-control="cards" tabIndex={workspaceTabStop === 'cards' ? 0 : -1}
             aria-pressed={view === 'cards'} className={'vt' + (view === 'cards' ? ' on' : '')}
             disabled={reviewMode} onClick={() => setView('cards')}
