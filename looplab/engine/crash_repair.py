@@ -109,8 +109,8 @@ class CrashRepairMixin:
         degrades to a permissive "repair" and never falls through to the deterministic rule — but the
         two ways it can fail are NOT the same condition and no longer share an answer:
 
-          * the TRANSPORT failed (the call raised, `resilient` caught an unreachable endpoint, the
-            loop never emitted) -> `unanswerable`, which the caller routes to the run-level circuit
+          * the TRANSPORT failed (the call raised, `resilient` caught an unreachable endpoint — the
+            request never completed) -> `unanswerable`, which the caller routes to the run-level circuit
             breaker. This is how the 2345-repair incident began and it is a RUN-level fact: every
             other node reaches the same endpoint.
           * the model ANSWERED something outside the vocabulary -> `unreadable`, a per-NODE stop with

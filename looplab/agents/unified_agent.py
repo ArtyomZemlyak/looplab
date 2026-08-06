@@ -176,7 +176,7 @@ class UnifiedAgent(WrapsDeveloper):
     )
 
     def _pilot_emit(self, messages: list, emit_spec: dict, finalize, fallback, *,
-                    state=None, bind_state: bool = True):
+                    state=None, bind_state: bool = True, transport_fallback=None):
         """Drive the pilot tool loop for one emit, containing everything but a budget stop.
 
         `choose_action` and `triage_crash` differ only in prompt, schema and coercion; this owns what
@@ -184,6 +184,20 @@ class UnifiedAgent(WrapsDeveloper):
         containment boundary. Each caller's `fallback` still carries its own meaning (the policy
         recommendation; the safe "attempt repair" action), so what degrades and why stays at the site
         that knows.
+
+        TWO DEGRADATIONS, NOT ONE — and only a caller that can tell them apart passes the second.
+        `drive_tool_loop` RETURNING its `fallback` means the endpoint answered and the model never
+        emitted (prose replies the client could not force into a tool call, the stuck detector, the
+        `emit_force` ceiling, turn/wall-clock exhaustion, an operator cancel). `drive_tool_loop`
+        RAISING means the transport failed — a transport error propagates out of the loop by design
+        and `resilient` is what contains it. Collapsing the two was a measured defect: with ONE
+        `fallback` carrying `triage_crash`'s transport marker, a demonstrably alive endpoint that
+        answers in prose (a local vLLM/SGLang that ignores `tool_choice`) produced
+        `node_failed reason='developer_crash'` plus a RUN-level pause telling the operator to check
+        credits, key and base URL — the exact incident the 2026-08-06 `unanswerable`/`unreadable`
+        split exists to prevent, reached through the other door. `transport_fallback` defaults to
+        `fallback`, so a caller whose two degradations really are the same value (the pilot's policy
+        recommendation) is unchanged.
 
         `bind_state` is a flag rather than an inference from `state is not None` because the two
         callers genuinely differ: the pilot binds unconditionally, while triage binds only when it
@@ -200,12 +214,14 @@ class UnifiedAgent(WrapsDeveloper):
         from looplab.agents.tool_loop import resilient
 
         # A hard budget stop propagates and ends the run; a transport failure degrades to the
-        # caller's fallback rather than crashing it. `resilient` is that rule written down once
-        # (doc 25 AG-06), and this is the new call site it was meant to be adopted at.
+        # caller's TRANSPORT fallback rather than crashing it. `resilient` is that rule written down
+        # once (doc 25 AG-06), and this is the new call site it was meant to be adopted at. The loop
+        # keeps its own no-emit `fallback`: only the exception path is evidence about the transport.
+        _transport = transport_fallback if transport_fallback is not None else fallback
         return resilient(
             lambda: drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
                                     finalize=finalize, fallback=fallback, **self._loop_opts),
-            lambda: fallback(messages))
+            lambda: _transport(messages))
 
     def choose_action(self, state: RunState, legal: list[dict], recommended: Optional[dict] = None,
                       *, brief: str = "") -> dict:
@@ -415,28 +431,52 @@ class UnifiedAgent(WrapsDeveloper):
             return {"action": action, "rationale": str((args or {}).get("rationale", ""))[:300],
                     "missing_dependency": str((args or {}).get("missing_dependency", ""))[:100]}
 
-        def _fallback(_messages) -> dict:
-            # A TRANSPORT FAILURE IS NOT A VERDICT. `resilient` calls this when the pilot loop could
-            # not complete — an unreachable endpoint, a 401/402, a model that never emitted. It
-            # answered "attempt repair", which is precisely the reading that let a dead provider keep
-            # a repair loop at full speed with no model in it. It says `unanswerable` instead, and
-            # its caller stops the node and pauses the RUN naming the provider — recoverable with
-            # `resume` once the endpoint is back.
+        def _no_emit(_messages) -> dict:
+            # THE LOOP ENDED WITHOUT AN EMIT, AND THE ENDPOINT ANSWERED THROUGHOUT. This is what
+            # `drive_tool_loop` RETURNS its `fallback` for: two prose replies the client could not
+            # force into a tool call, the stuck detector, the `emit_force` ceiling, turn/wall-clock
+            # exhaustion, an operator cancel. Every one of those completed its requests and produced
+            # bytes, so by the verdict contract this is `unreadable` — a per-NODE stop — and it
+            # carries NO transport marker.
+            #
+            # It used to be the same callable as `_transport_failed` below, and that collapse was the
+            # 2026-08-06 split's own defect seen from the other side: driven end-to-end, a live
+            # endpoint that ignores `tool_choice` and answers in prose (an ordinary local
+            # vLLM/SGLang deployment) produced `node_failed reason='developer_crash'` plus a RUN-level
+            # pause carrying `node_id=None` and the "check your credits, key and base URL" banner —
+            # on four successful HTTP requests, with zero repairs attempted. `_finalize` being
+            # unforgeable is not enough on its own: the model does not have to put the marker in its
+            # ANSWER when refusing to answer at all reaches the marked branch.
+            return {"action": DEFAULT_TRIAGE_ACTION,
+                    "rationale": "the crash-triage model answered but never returned a verdict "
+                                 "(no emit within the loop's turn/prose budget)",
+                    "missing_dependency": ""}
+
+        def _transport_failed(_messages) -> dict:
+            # A TRANSPORT FAILURE IS NOT A VERDICT. `resilient` calls this when the pilot loop RAISED
+            # — an unreachable endpoint, a 401/402, a transport error surviving the client's own
+            # retry ladder. It answered "attempt repair", which is precisely the reading that let a
+            # dead provider keep a repair loop at full speed with no model in it. It says
+            # `unanswerable` instead, and its caller stops the node and pauses the RUN naming the
+            # provider — recoverable with `resume` once the endpoint is back.
             #
             # THIS is the only path in the package that may say that word, and the ONLY reason the
             # engine believes it is `TRIAGE_TRANSPORT_FAILURE_KEY` below: the marker is what
-            # `engine/triage.py::is_transport_failure_verdict` requires, and it is unforgeable from
-            # the wire because `_finalize` above rebuilds its dict from the three schema properties
-            # alone. Without the marker this dict would be read as an ordinary unreadable answer —
-            # which is the correct fail-closed direction, since the wrong reading of THIS branch only
-            # costs a node while the wrong reading of the other one costs the run.
+            # `engine/triage.py::is_transport_failure_verdict` requires. It is unforgeable from the
+            # wire because `_finalize` above rebuilds its dict from the three schema properties alone
+            # AND because the only way to reach here is an exception escaping the loop — which no
+            # emit, and no refusal to emit, can produce. Without the marker this dict would be read
+            # as an ordinary unreadable answer — the correct fail-closed direction, since the wrong
+            # reading of THIS branch only costs a node while the wrong reading of it costs the run.
             return {"action": UNANSWERABLE_TRIAGE_ACTION,
                     TRIAGE_TRANSPORT_FAILURE_KEY: True,
-                    "rationale": "the crash-triage model did not return a verdict "
-                                 "(transport failure or no emit)",
+                    "rationale": "the crash-triage model could not be reached "
+                                 "(transport failure)",
                     "missing_dependency": ""}
 
-        # Binding only with a run state is what enables read_code / find_analogous on it; on any
-        # transport failure triage degrades to the fail-closed "unanswerable" verdict.
-        return self._pilot_emit(messages, emit_spec, _finalize, _fallback,
-                                state=state, bind_state=state is not None)
+        # Binding only with a run state is what enables read_code / find_analogous on it; a loop that
+        # ends without an emit degrades to `unreadable`, and only a raised transport failure to the
+        # run-halting `unanswerable`.
+        return self._pilot_emit(messages, emit_spec, _finalize, _no_emit,
+                                state=state, bind_state=state is not None,
+                                transport_fallback=_transport_failed)

@@ -506,6 +506,49 @@ def test_one_unreadable_verdict_does_not_take_healthy_siblings_down(tmp_path):
     assert repaired[0] == 0 and all(repaired[nid] == 2 for nid in (1, 2, 3)), repaired
 
 
+def test_a_live_endpoint_that_never_emits_stops_the_node_but_not_the_run(tmp_path):
+    """THE HOLE THE OTHER TESTS LEFT: every judge in this file is a hand-written dict-returning
+    double, so none of them ever exercised the REAL `UnifiedAgent` over the REAL `drive_tool_loop`.
+    Driven that way, an endpoint that COMPLETES EVERY REQUEST — it just answers in prose and ignores
+    `tool_choice`, i.e. an ordinary local vLLM/SGLang/llama.cpp deployment — used to reach
+    `triage_crash`'s TRANSPORT fallback, because `_pilot_emit` handed the same marked callable to
+    `resilient` (which fires on a raise) and to `drive_tool_loop` (which fires when the model never
+    emitted). Measured on this exact harness before the fix: four successful HTTP requests, zero
+    repairs, `node_failed reason='developer_crash'` and a RUN-level pause carrying `node_id=None`
+    telling the operator to check credits, key and base URL.
+
+    That is `test_a_live_model_answering_garbage_stops_the_node_but_not_the_run` all over again —
+    the marker being unforgeable from a model's ANSWER is not enough when refusing to answer at all
+    reaches the marked branch."""
+
+    class _AliveButProse:
+        """Every request completes and returns bytes; no `complete_tool`, so the forced-emit
+        salvage cannot rescue it either."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, messages, tools, tool_choice="auto"):
+            self.calls += 1
+            return {"content": "Let me think about this crash some more.", "tool_calls": []}
+
+    from looplab.agents.unified_agent import UnifiedAgent
+
+    client = _AliveButProse()
+    r, d = ToyTask.load(TASK).build_roles()
+    judge = UnifiedAgent(researcher=r, developer=d, strategist=None, pilot_client=client)
+    dev = _ScriptedDev([], first=_lazy_import_src("AlphaProcessor"), cycle=True)
+    evs, _ = _drive(tmp_path, dev, judge, inline_repair_attempts=12)
+
+    assert client.calls > 0, "the harness must actually reach the endpoint"
+    assert _repairs(evs) == []                       # still nothing repaired blind …
+    terminal = _terminals(evs)
+    assert len(terminal) == 1 and terminal[0].data["reason"] == "crash"   # NOT developer_crash
+    assert [e for e in evs if e.type == "pause"] == []                    # and NO run-level pause
+    assert fold(evs).paused is False
+    assert "could not read" in terminal[0].data["triage_rationale"]
+
+
 def test_an_older_triage_crash_signature_is_not_read_as_a_dead_provider(tmp_path):
     """`triage_crash` is a DUCK-TYPED seam — any object wired as `researcher` may implement it — and
     this change added three keyword arguments to it. Passing them unconditionally makes an
@@ -585,17 +628,32 @@ def test_the_agent_fallbacks_fail_closed_and_do_it_DIFFERENTLY():
     assert confused["action"] == UNREADABLE_TRIAGE_ACTION
     assert not is_transport_failure_verdict(confused)
 
-    # NOBODY ANSWERED — `resilient` contains the transport error and hands over to `_fallback`.
+    # NOBODY ANSWERED — the loop RAISES, `_pilot_emit`'s own `resilient` contains it and hands over
+    # to the TRANSPORT fallback. Raising is the whole simulation: an exception escaping
+    # `drive_tool_loop` is the only thing that distinguishes "the endpoint is gone" from "the model
+    # would not emit", so a stub that returns the loop's `fallback` (as this one used to) is
+    # simulating the OTHER condition. `resilient` is imported to state that rule, not to re-run it.
+    assert resilient(lambda: "ok", lambda: "fb") == "ok"
+
     def _dead(client, tools, messages, emit_spec, *, finalize=None, fallback=None, **kw):
-        def _boom():
-            raise ConnectionError("connection reset by peer")
-        return resilient(_boom, lambda: fallback(messages))
+        raise ConnectionError("connection reset by peer")
 
     outage = _with_loop(_dead)
     assert outage["action"] == UNANSWERABLE_TRIAGE_ACTION
     assert is_transport_failure_verdict(outage), (
         "the transport fallback must stamp the engine-side marker, or the engine reads a real "
         "outage as an ordinary unreadable answer and never pauses the run")
+
+    # NOBODY EMITTED, BUT THE ENDPOINT ANSWERED — the loop RETURNS its own `fallback`. Same
+    # fail-closed direction, different fact, and it must NOT carry the marker.
+    def _never_emits(client, tools, messages, emit_spec, *, finalize=None, fallback=None, **kw):
+        return fallback(messages)
+
+    silent = _with_loop(_never_emits)
+    assert silent["action"] == UNREADABLE_TRIAGE_ACTION
+    assert not is_transport_failure_verdict(silent), (
+        "a loop that ended without an emit is not evidence the transport failed — the requests all "
+        "completed; reading it as an outage pauses the whole run over a talkative model")
 
 
 # ------------------------------------------------------- the ledger is the LOG's, not the process's
