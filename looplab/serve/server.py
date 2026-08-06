@@ -658,9 +658,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         return {"ok": True, "required": bool(ui_token)}
 
     # The mount ORDER (load-bearing for the overlapping patterns) and the registry of late-bound
-    # cross-router callables both live in `serve/router_wiring.py` (doc 25 XP-05), which mounts and
-    # then REFUSES an app whose `srv.*_fn` contract is not satisfied — a producing router dropped
-    # from the list used to surface as a 500 on one endpoint, at request time, in the consumer.
+    # router-produced callables both live in `serve/router_wiring.py` (doc 25 XP-05), which mounts
+    # and then REFUSES an app that does not satisfy it. A producing router dropped from the list
+    # used to surface at REQUEST time — a 500 on one endpoint naming the consumer rather than the
+    # missing router, or, for the three consumers that probe `getattr`, no signal at all.
     mount_routers(app, srv)
     _warm_route_matching(app)
 
