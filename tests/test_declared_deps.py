@@ -274,6 +274,13 @@ def test_an_untrusted_tier_refuses_out_loud_rather_than_skipping_silently(tmp_pa
     _eng, cmd, row = _settle(tmp_path, trust="untrusted")
     assert cmd == [] and row["action"] == "refused_untrusted_tier"
     assert row["pins"]["transformers"] == "transformers==4.51.0"
+    # An OPERATOR's own run_setup was always skipped on this tier too, and calling that
+    # `operator_run_setup` would claim we ran a command we did not — the tier is asked first.
+    _eng2, cmd2, row2 = _settle(tmp_path, trust="untrusted", operator=["bash", "setup.sh"])
+    assert cmd2 == [] and row2["action"] == "refused_untrusted_tier"
+    # …and a repo with nothing to install is not "refused": there was nothing to refuse.
+    _eng3, cmd3, row3 = _settle(tmp_path, repo=False, trust="untrusted")
+    assert cmd3 == [] and row3["action"] == "nothing_declared"
 
 
 def test_a_repo_that_declares_nothing_says_so(tmp_path):

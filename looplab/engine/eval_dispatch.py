@@ -271,18 +271,21 @@ class EvalDispatchMixin:
         tracebacks" is what produced 2,345 repair attempts on `runs/rubert-dr-0804`."""
         from looplab.runtime import deps
         decl = self._declared_deps()
-        if operator_cmd:
+        if not decl.found and not operator_cmd:
+            action, cmd = "nothing_declared", []          # nothing to do at all
+        elif self.trust_mode != "trusted_local":
+            # There IS setup to do and this tier cannot do it. Asked BEFORE "who authored the
+            # command", because the answer does not depend on that: `_ensure_run_setup` has always
+            # skipped an operator's own `run_setup` here too, and recording that as
+            # `operator_run_setup` would claim we ran a command we did not.
+            action, cmd = "refused_untrusted_tier", []
+        elif operator_cmd:
             action, cmd = "operator_run_setup", list(operator_cmd)
-        elif not decl.found:
-            action, cmd = "nothing_declared", []
         elif not getattr(self, "_auto_install_deps", False):
-            # `_auto_install_deps` is already `auto_install_deps AND trust_mode == trusted_local`
-            # (orchestrator.py), so the tier is checked BEFORE it to keep the two refusals distinct:
-            # "you switched this off" and "this tier cannot" are different facts and lead an operator
-            # to different fixes.
-            action = ("refused_untrusted_tier" if self.trust_mode != "trusted_local"
-                      else "auto_install_disabled")
-            cmd = []
+            # Reached only on a trusted tier, so `_auto_install_deps` being False here can only mean
+            # the operator switched `auto_install_deps` off — a different fact from the tier refusal
+            # above, and it leads to a different fix.
+            action, cmd = "auto_install_disabled", []
         else:
             action = "installed"
             cmd = deps.declaration_argv(decl, python=getattr(self.sandbox, "python", None))
