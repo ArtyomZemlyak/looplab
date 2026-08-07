@@ -488,7 +488,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         ablate_every = _opt("ablate_every")
         strategist_every = _opt("strategist_every")
         concept_retag_every = _opt("concept_retag_every")
-        deep_research_every = _opt("deep_research_every")
         concurrent_research_repeat = _opt("concurrent_research_repeat")
         concurrent_research_interval_s = _opt("concurrent_research_interval_s")
         concurrent_research_max_calls = _opt("concurrent_research_max_calls")
@@ -583,7 +582,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # `engine/cadence.py::deep_research_window`, and applied at the two gates that read this
         # attribute — so `-1` (off), a junk value (off) and `0` (immediate) all mean here exactly
         # what the operator wrote, and the diagnostics that echo the knob do not lie about it.
-        self.deep_research_every = deep_research_every
+        # (Hence `_opt` inline: with no transform left, the local it used to be resolved into buys
+        # nothing — `tests/test_source_scan_helper.py` is the guard that says so.)
+        self.deep_research_every = _opt("deep_research_every")
         self.concurrent_research = _opt("concurrent_research")
         # Repeated concurrent research (don't idle a multi-day eval): the overlapped think re-runs on
         # an adaptive time cadence for the whole window instead of once. Off in the library default
