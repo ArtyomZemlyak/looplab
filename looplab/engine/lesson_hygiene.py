@@ -48,6 +48,44 @@ def _verdict_base(rows_newest_last: list[dict]) -> dict:
     return next((o for o in reversed(rows_newest_last)
                  if str(o.get("outcome") or "") in _VERDICTS), rows_newest_last[-1])
 
+def _accumulated_evidence(rows_newest_last: list[dict], base: dict) -> int:
+    """The ONE write-path rule for how much support a merged group carries — the twin of
+    `_verdict_base`, and shared by BOTH passes for the same reason.
+
+    Sum the stored `evidence_count` of every member that AGREES with the group's verdict, so a
+    lesson re-confirmed by N runs ends at ~N rather than capped at 2. A member with a CONFLICTING
+    verdict adds nothing (prior observations only add confidence when they agree). De-dup by
+    `run_id` among the FRESH single-evidence rows: a run that re-reflects (a reopened +
+    budget-extended run re-enters finalize and re-appends its own lessons; the mid-run
+    `lessons_every` cadence appends beside the run-end pass) must count ONCE, not inflate the
+    count. A pre-consolidated row (`evidence_count` > 1) already folds several runs, so it always
+    adds its stored weight and marks its representative run as seen — a later fresh re-append of
+    that same run then dedups against it.
+
+    This lived INSIDE `consolidate_lessons`'s exact-key loop and was never applied by
+    `_agentic_merge_lessons`, whose paraphrase merge summed member counts raw. That is a drift of
+    exactly the kind `_verdict_base` was hoisted to prevent, and it is not hypothetical: the
+    paraphrase pass exists to merge rows the exact key MISSES, and two rows of one run that differ
+    only in wording are precisely such a pair — so one run's two phrasings of one finding counted
+    as two runs' corroboration. `evidence_count` is read by `lesson_rank_key` (which clamps at 3)
+    and shown verbatim in the Memory panel, so the visible damage is the claim rather than the
+    ranking. Measured on the shared store on 2026-08-07: the two highest rows carry
+    `evidence_count` 55 and 49 against 46 distinct `run_id`s in the whole file — more corroborating
+    runs than the file has runs."""
+    total = 0
+    seen_runs: set = set()
+    for o in rows_newest_last:
+        if o.get("outcome") != base.get("outcome"):
+            continue
+        ev = int(o.get("evidence_count", 1) or 1)
+        rid = o.get("run_id")
+        if rid is not None and rid in seen_runs and ev == 1:
+            continue
+        total += ev
+        if rid is not None:
+            seen_runs.add(rid)
+    return total
+
 def normalize_statement(s: str) -> str:
     """Identity of a lesson claim: collapsed whitespace, lowercased, capped."""
     return " ".join(str(s or "").split()).lower()[:160]
@@ -120,30 +158,10 @@ def consolidate_lessons(lessons: list[dict], *, client=None, embed=None,
         # unknown outcomes are inert). Deterministic: a pure file-order scan.
         newest = _verdict_base(grp)
         merged = dict(newest)
-        # Accumulate ACROSS runs: sum the stored evidence_count of every group member that AGREES
-        # with the current (newest) verdict, so a lesson re-confirmed by N runs ends at ~N — not
-        # capped at 2. A prior consolidated row already carries its accumulated count; a fresh
-        # append carries 1. (Members with a conflicting verdict don't add support.) De-dup by run_id
-        # among the fresh single-evidence rows: a run that re-reflects (a reopened + budget-extended
-        # run re-enters finalize and re-appends its own lessons) must count ONCE, not inflate the
-        # count. Pre-consolidated rows (evidence_count>1) already fold multiple runs, so they always
-        # add their stored weight; only raw ev==1 rows sharing a run_id collapse.
-        total = 0
-        seen_runs: set = set()
-        for o in grp:
-            if o.get("outcome") != newest.get("outcome"):
-                continue
-            ev = int(o.get("evidence_count", 1) or 1)
-            rid = o.get("run_id")
-            # Skip a FRESH single-evidence row whose run already contributed (a run re-reflecting itself).
-            # A pre-consolidated row (ev>1) folds multiple runs, so it always adds its stored weight and
-            # marks its representative run as seen — a later fresh re-append of that same run then dedups.
-            if rid is not None and rid in seen_runs and ev == 1:
-                continue
-            total += ev
-            if rid is not None:
-                seen_runs.add(rid)
-        merged["evidence_count"] = total
+        # Accumulate ACROSS runs — see `_accumulated_evidence` for the shared rule (agreeing members
+        # only, fresh same-run rows deduped). The paraphrase pass below applies the SAME function, so
+        # the two passes cannot drift the way they had.
+        merged["evidence_count"] = _accumulated_evidence(grp, newest)
         out.append(merged)
     if client is None or len(out) < 2:
         return out
@@ -179,8 +197,10 @@ def _agentic_merge_lessons(rows: list[dict], *, client, embed=None,
                 row = dict(base)
                 if len(members) > 1:
                     row["statement"] = g["merged"]
-                    row["evidence_count"] = sum(int(rows[m].get("evidence_count", 1) or 1) for m in members
-                                                if rows[m].get("outcome") == base.get("outcome"))
+                    # Same accounting rule as the exact pass — `_accumulated_evidence`, not a raw sum.
+                    # The raw sum double-counted a run whose two WORDINGS of one finding the exact key
+                    # missed and the agent merged, which is the population this pass exists for.
+                    row["evidence_count"] = _accumulated_evidence([rows[m] for m in members], base)
                 keep.append((min(members), row))
         keep.sort(key=lambda t: t[0])
         return [row for _i, row in keep]
