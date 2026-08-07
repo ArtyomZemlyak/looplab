@@ -26,7 +26,7 @@ def grouped_beliefs(st: RunState) -> list[dict]:
     Pure, deterministic, and strictly additive: it NEVER mutates a card, a per-card verdict, or any
     folded field — the card identities and their own verdicts are untouched. Each group is
     ``{seed_hash, seed_digest, seed_statement, card_ids, evidence, statements, verdict}`` in
-    first-seen order, with ``evidence`` the ordered union of the NON-ABANDONED members' evidence and
+    first-seen order, with ``evidence`` the ASCENDING union of the NON-ABANDONED members' evidence and
     ``verdict`` a strength roll-up of the members' own verdicts (supported > testing > tested > open,
     matching ``_evidence_verdict``'s precedence on that same non-abandoned evidence; ``abandoned``
     only when EVERY member is abandoned). `card_ids` still lists every member (abandoned included)."""
@@ -47,7 +47,14 @@ def grouped_beliefs(st: RunState) -> list[dict]:
         # two distinct statements can share a short id (test_short_hash_collision_*), and keying on it
         # would silently merge unrelated beliefs + their evidence. The short hash rides only as a
         # display alias.
-        key = hypothesis_statement_digest(seed)
+        #
+        # That digest is now PUBLISHED as `Card.belief_id` (the fold derives it in
+        # `card_ledger.py::_apply_card_belief_lineage`), so read it rather than re-deriving: this view,
+        # `RunState.open_research_beliefs()` and any consumer must group by the SAME key, and three
+        # hand-synced copies of one identity is how they drift. The local fallback is not defensive
+        # padding — this function takes a `RunState`, and a caller may hand it one assembled by hand
+        # (four tests in `tests/test_cards.py` do exactly that) rather than one produced by `fold`.
+        key = card.belief_id or hypothesis_statement_digest(seed)
         group = groups.get(key)
         if group is None:
             group = {"seed_hash": hypothesis_id(seed), "seed_digest": key, "seed_statement": seed,
@@ -71,6 +78,12 @@ def grouped_beliefs(st: RunState) -> list[dict]:
     out: list[dict] = []
     for key in order:
         group = groups[key]
+        # Node ids, ASCENDING — like every per-card `evidence` list, which `_link_cards_to_nodes`
+        # builds over `sorted(st.nodes)`. The union inherited `st.cards` order instead, which is
+        # lexicographic on card ids, so a belief whose members were card-9 and card-10 published
+        # `evidence: [10, 9]` (measured on `runs/spec-live-0804`) — a group that reads as broken
+        # beside members that never do. Ordering is the only thing that changes; the SET is identical.
+        group["evidence"].sort()
         verdicts = group.pop("_verdicts")
         non_abandoned = [v for v in verdicts if v != "abandoned"]
         group["verdict"] = (max(non_abandoned, key=lambda v: _RANK.get(v, 1))
