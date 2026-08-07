@@ -571,11 +571,13 @@ untrusted tier.
   dedup + one informed re-propose even when the static gate is off) — so novelty pressure is one
   meta-decision, applied coherently, and always via the LLM roles rather than a hard-coded rule.
 - **Card-driven selection** (`card_driven_selection`, on by default) — the receipt-backed Card
-  queue owns the next macro action instead of the policy/pilot arm. The run-start record pins this
-  choice, and Card authority wins if `agent_drives_actions` is also enabled. The Strategist can shape
-  the separate atomic `card_scoring` treatment (explore/balanced/exploit plus bounded novelty and
-  coverage weights); it ranks only Cards that have already passed durable readiness and live-anchor
-  checks.
+  queue owns the next macro action instead of the policy/pilot arm. This flag alone both MINTS the
+  queue (each proposal lands as durable, selectable inventory — a `card_added` with no owner yet) and
+  selects from it; `speculation_depth` only decides who builds the selected Card. The run-start
+  record pins this choice, and Card authority wins if `agent_drives_actions` is also enabled. The
+  Strategist can shape the separate atomic `card_scoring` treatment (explore/balanced/exploit plus
+  bounded novelty and coverage weights); it ranks only Cards that have already passed durable
+  readiness and live-anchor checks.
 - **Speculative pre-build** (`speculation_depth`, `-1` = AUTO = **on by default** since 2026-08-05) —
   while the current experiments evaluate, the Card the scorer predicts you will pick next can
   *already be built* by an isolated second Researcher/Developer pair. AUTO resolves to the settled
@@ -584,7 +586,9 @@ untrusted tier.
   roles call no LLM (`--backend toy`), a policy other than `greedy`, a run directory with no run id —
   rather than refusing the run the way a spelled depth would. This is the half of the Card lane that
   `card_driven_selection` alone does not buy: speculation needs both, and at depth `0` nothing
-  pre-builds. A prediction that misses is discarded *before* it reaches a sandbox — a
+  pre-builds — but the queue itself is still maintained and still selects, because minting Card
+  inventory has belonged to `card_driven_selection` alone since 2026-08-07 (before that, an AUTO
+  depth settling to `0` silently reverted the run to `policy.next_actions`). A prediction that misses is discarded *before* it reaches a sandbox — a
   `node_failed(reason=superseded)` with zero eval seconds — and its node-budget slot is refunded when
   it can prove it never ran. See
   [what blocked speculation from being the default](configuration.md#what-blocked-speculation-from-being-the-default-fixed-2026-08-05).

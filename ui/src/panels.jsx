@@ -449,8 +449,11 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
           control either — so the old copy sent every reader who has no memos yet to a dead end. The
           cadence IS reachable, and it is the only browser-reachable trigger today. */}
       {!memos.length && <div className="muted">No deep-research memos yet. They arrive on the{' '}
-        <code>deep_research_every</code> cadence — set it in Config, save, then resume — or when the
-        Strategist asks for one. There is no one-off trigger in the browser yet.</div>}
+        <code>deep_research_every</code> cadence, which defaults to <code>0</code> — no waiting
+        window, so the first memo lands beside the run&rsquo;s first evaluation — or when the
+        Strategist asks for one. A run showing none either has no LLM backend, has the cadence set to{' '}
+        <code>-1</code> (off), or has not created its first node yet. Change it in Config, save, then
+        resume; there is no one-off trigger in the browser yet.</div>}
       {memoProjection.omitted > 0 && <div className="muted">
         Showing {memos.length} of {memoProjection.total} newest valid memos; older, malformed, or over-budget entries are omitted.
       </div>}
