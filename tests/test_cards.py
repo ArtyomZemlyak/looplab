@@ -1311,22 +1311,32 @@ def test_retry_of_is_not_invented_from_shared_wording():
     assert group["card_ids"] == ["card-0", "card-1"]
 
 
-def test_retry_of_needs_the_parent_nodes_own_card_claim():
+def test_retry_of_needs_the_parent_nodes_own_card_claim_not_its_evidence_membership():
     # The edge is resolved through the parent NODE ROW's own `idea.card_id` — the same "its own work
-    # item" notion step 9 uses — deliberately NOT through `Card.evidence`, which can name a node
-    # attached by the legacy statement-hash join that was never that card's work item. A debug card
-    # whose parent node claims no card therefore has no retry edge to report.
+    # item" notion step 9 builds for the debug exemption — and deliberately NOT through
+    # `Card.evidence`, which is a WIDER set: the legacy statement-hash join attaches a node to a card
+    # by hypothesis wording alone, and such a node is evidence that was never that card's work item.
+    #
+    # Node 1 below is exactly that: it re-states card-0's hypothesis, names no card of its own, and so
+    # lands in card-0's evidence. card-1 debugs it. Reading the owner map off `evidence` would report
+    # `card-1 retries card-0`, which card-0 never authored — a lineage claim invented out of wording.
+    other = "a completely different research direction with its own wording"
     st = fold(_mk([
         ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
-        # node 0 states the hypothesis but names NO card_id: it joins card-0 by statement hash only.
-        ("node_created", {"node_id": 0, "operator": "draft",
+        _receipted_card_added("card-0", _RETRY_STATEMENT, operator="draft", at_node=0),
+        _node_for_card(0, "card-0", _RETRY_STATEMENT, operator="draft"),
+        ("node_evaluated", {"node_id": 0, "metric": 0.5}),
+        # node 1 states card-0's hypothesis with NO card_id of its own -> hash-joined evidence only.
+        ("node_created", {"node_id": 1, "operator": "draft",
                           "idea": {"operator": "draft", "hypothesis": _RETRY_STATEMENT}}),
-        ("node_failed", {"node_id": 0, "reason": "boom", "eval_seconds": 1}),
-        _receipted_card_added("card-1", _RETRY_STATEMENT, operator="debug", parents=(0,), at_node=1),
-        _node_for_card(1, "card-1", _RETRY_STATEMENT, operator="debug", parents=(0,)),
+        ("node_failed", {"node_id": 1, "reason": "boom", "eval_seconds": 1}),
+        # …and the debug card carries its OWN wording, so it is not hash-joined into card-0 either.
+        _receipted_card_added("card-1", other, operator="debug", parents=(1,), at_node=2),
+        _node_for_card(2, "card-1", other, operator="debug", parents=(1,)),
     ]))
-    assert st.cards["card-1"].operator == "debug" and st.cards["card-1"].parent_ids == [0]
-    assert st.cards["card-1"].retry_of is None      # no forged edge out of a hash-joined shadow
+    assert st.cards["card-0"].evidence == [0, 1]          # node 1 IS card-0's evidence…
+    assert st.cards["card-1"].operator == "debug" and st.cards["card-1"].parent_ids == [1]
+    assert st.cards["card-1"].retry_of is None            # …and still NOT its work item
 
 
 def test_belief_id_is_the_full_digest_and_is_what_the_belief_views_read():
