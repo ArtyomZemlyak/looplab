@@ -408,6 +408,9 @@ class EvalStagesMixin:
                           "and cost its full runtime for nothing. To roll back to a stage you must "
                           "also CHANGE it — edit the script it runs (or something that script "
                           "imports) in the SAME repair that names it.")
+    ROLLBACK_NO_PIPELINE = ("cannot roll back to stage {suspect!r}: this node has no declared stage "
+                            "pipeline — the operator's command runs as ONE step, so there is no "
+                            "earlier stage to re-run. Fix the code that command runs.")
     ROLLBACK_PROTECTED = ("cannot roll back to stage {suspect!r}: it runs {script}, which is "
                           "PROTECTED — the operator owns that file and no edit you make can change "
                           "it, so re-running the stage would produce exactly what it produced before. "
@@ -467,10 +470,17 @@ class EvalStagesMixin:
         """
         names = [str(s.get("name")) for s in (stages or [])]
         suspect = str(suspect or "").strip()
-        if not suspect or not names:
-            return None, None                     # nothing was asked for / no pipeline to roll back in
+        if not suspect:
+            # THE COMMON CASE, and it must be free and SILENT: an empty ask is not a request, so it
+            # neither spends an allowance nor puts engine text in front of the next repair.
+            return None, None
         _fmt = {"suspect": suspect, "failed": str(failed_stage or ""),
                 "names": ", ".join(names) or "(none)", "script": ""}
+        if not names:
+            # Asked for on a single-command eval. Distinct from the silent case above: the Developer
+            # DID ask, so it gets an answer — an empty refusal would leave it re-asserting the same
+            # request every attempt with nothing to learn from.
+            return None, self.ROLLBACK_NO_PIPELINE.format(**_fmt)
         if suspect not in names:
             return None, self.ROLLBACK_UNKNOWN.format(**_fmt)
         si = names.index(suspect)

@@ -1296,7 +1296,13 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
         # and the EXISTING stage-scoped re-run with no new mid-loop vocabulary. That is the answer to
         # the BACKLOG's open question "what does verification failure DO": the stage FAILED, because a
         # stage that did not produce what it declared did not succeed, whatever it exited with.
-        _expect = _stg.get("expect") or {}
+        # `isinstance`, not `or {}`: every stage reaching a RUN has been through `validate_stages`,
+        # but `run_command_eval(stages=...)` is a public entry point a library caller can hand raw
+        # dicts to, and `"expect": "hard_negs.pkl"` would then raise AttributeError out of the eval
+        # WORKER — no node terminal, and the run re-dies on every resume. Same failure class as the
+        # unregistered metric-reader path slot in CLAUDE.md; a malformed declaration must degrade to
+        # "no contract", never take down the run.
+        _expect = _stg.get("expect") if isinstance(_stg.get("expect"), dict) else {}
         _artifact_problem = (verify_stage_artifacts(_expect, str(ex.wd), _w0, stage=_sname)
                              if _expect.get("files") else None)
         if _artifact_problem:

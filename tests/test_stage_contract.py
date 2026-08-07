@@ -499,10 +499,19 @@ def test_an_opaque_or_remapped_stage_allows_the_rollback_because_nothing_can_be_
 
 def test_no_rollback_asked_answers_nothing_rather_than_refusing(tmp_path):
     """The overwhelmingly common case has to be free and silent: an empty ask is not a refusal, so it
-    neither spends an allowance nor puts text in front of the next repair."""
+    neither spends an allowance nor puts engine text in front of the next repair."""
     eng = _rollback_engine(tmp_path)
     assert eng._rollback_start(_STAGES, "train", "", {"train.py"}, str(tmp_path)) == (None, None)
-    assert eng._rollback_start([], "train", "mine", {"train.py"}, str(tmp_path)) == (None, None)
+
+
+def test_a_rollback_asked_on_a_single_command_eval_is_answered_not_ignored(tmp_path):
+    """Distinct from the silent case above, and the distinction is the whole point: the Developer DID
+    ask, so it gets an answer. Returning `(None, None)` here would append a refusal row carrying no
+    reason and leave the model re-asserting the same impossible request every attempt."""
+    eng = _rollback_engine(tmp_path)
+    start, refusal = eng._rollback_start([], "train", "mine", {"train.py"}, str(tmp_path))
+    assert start is None
+    assert "no declared stage pipeline" in refusal
 
 
 def test_a_renamed_failed_stage_refuses_rather_than_re_running_everything(tmp_path):

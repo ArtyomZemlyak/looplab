@@ -1719,13 +1719,21 @@ class EvaluateMixin:
                         # The message names WHICH of the two ways this repair discarded completed
                         # work, because they call for different next moves by whoever reads the
                         # terminal: "keeps rewriting training code" is a Developer circling, while
-                        # "rolled back to <stage>" says the pipeline itself was suspected and the
+                        # "rolled the pipeline back" says the pipeline itself was suspected and the
                         # allowance for testing that is now spent.
+                        #
+                        # The NON-rollback branch is byte-identical to what it has always been, on
+                        # purpose. It is an operator-facing string two tests pin, and rewording it to
+                        # cover both cases at once ("expensive re-run(s)") stranded both of them on a
+                        # substring that no longer existed — a contract change dressed as a tidy-up.
+                        # A new case gets a new sentence; it does not get to edit the old one.
                         triage_outcome = ("abandon",
-                            (f"repair rolled the pipeline back to stage {next_start!r} and "
-                             if _rolled_back else "repair keeps changing earlier-stage (training) code — ")
-                            + f"{full_retrains} expensive re-run(s) already spent; abandoning in-node "
-                            "repair to avoid burning compute "
+                            (f"repair rolled the pipeline back to stage {next_start!r} — "
+                             f"{full_retrains} expensive re-run(s) already spent"
+                             if _rolled_back else
+                             "repair keeps changing earlier-stage (training) code — "
+                             f"{full_retrains} full re-train(s) already spent")
+                            + "; abandoning in-node repair to avoid burning compute "
                             "(a budgeted inter-node debug node can still pick it up)")
                         break
                     full_retrains += 1
