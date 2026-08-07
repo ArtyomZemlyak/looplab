@@ -90,7 +90,11 @@ class EvalDispatchMixin:
             # finish instead of racing ahead and evaluating against an unprepared interpreter. A failed
             # install leaves the flag False and re-runs (a non-zero run_setup aborts the run anyway, and
             # the fold records run_setup_done only for exit_code==0, so resume also re-runs a failed one).
-            self._do_run_setup(cmd)
+            # The Declaration travels only when the command is OURS: an operator's own `run_setup`
+            # is run exactly as written or not at all, so it is never rewritten into a reduced form.
+            self._do_run_setup(cmd, declared=(self._declared_deps()
+                                              if getattr(self, "_deps_setup_derived", False)
+                                              else None))
             self._run_setup_done = True
 
     # The closed vocabulary of what a run DID about its repo's declared dependencies. A bare string
@@ -102,6 +106,7 @@ class EvalDispatchMixin:
         "auto_install_disabled",  # auto_install_deps=false: the operator owns this environment
         "refused_untrusted_tier",  # a declaration exists but this tier runs --network none
         "nothing_declared",      # nothing we act on (`observed` may still name what we saw)
+        "installed_partial",     # …minus lines no index serves; a REVERSIBLE policy, see _do_run_setup
         "node_resync",           # a node's declaration differs from the run's — the Developer's ask
         "node_resync_failed",    # …and installing it did not succeed (the node evals unchanged)
         "node_resync_capped")    # …and this run has spent `_MAX_NODE_DEP_SYNCS`; refused
@@ -299,10 +304,13 @@ class EvalDispatchMixin:
             action = "installed"
             cmd = deps.declaration_argv(decl, python=getattr(self.sandbox, "python", None))
         assert action in self.DECLARED_DEPS_ACTIONS
+        # Whether the command about to run is OURS. Only a derived command may be retried in reduced
+        # form (`_do_run_setup`); an operator's own is run exactly as written or not at all.
+        self._deps_setup_derived = (action == "installed")
         self._record_declared_deps(decl, action, cmd)
         return cmd
 
-    def _record_declared_deps(self, decl, action: str, cmd: list, *, delta=None) -> None:
+    def _record_declared_deps(self, decl, action: str, cmd: list, *, delta=None, dropped=None) -> None:
         """Append the once-per-run `deps_declared` receipt: what the repo asked for, what we did.
 
         This is the row that would have made `runs/rubert-dr-0807` legible. Its log records that
@@ -344,6 +352,12 @@ class EvalDispatchMixin:
             # Only the node-resync path measures a delta here; the run-setup install reports its own
             # on `run_setup_finished`, which is where its exit code lives — one install, one row.
             "env_delta": dict(delta or {}),
+            # Declarations we could not honour, per line, verbatim from pip. Written from the SAME
+            # list `run_setup_finished.dropped_requirements` carries (one producer,
+            # `_retry_without_unsatisfiable`) — it appears here too because this row is the one that
+            # NAMES the decision (`installed_partial`), and a decision that does not carry its own
+            # evidence sends the reader to another event to find out what it means.
+            "dropped": list(dropped or []),
         }
         try:
             prior = [e for e in self.store.read_all() if e.type == EV_DEPS_DECLARED]
@@ -356,8 +370,9 @@ class EvalDispatchMixin:
         assert EV_DEPS_DECLARED in DIAGNOSTIC_EVENTS
         self.store.append(EV_DEPS_DECLARED, data)
 
-    def _do_run_setup(self, cmd: list) -> None:
+    def _do_run_setup(self, cmd: list, declared=None) -> None:
         from looplab.core.models import run_setup_key
+        from looplab.runtime import deps
         from looplab.runtime.sandbox import _run_argv
         # ONE root rule, shared with the declaration reader — but an arbitrary operator command
         # needs a cwd that EXISTS, so a repo-less run falls back to the run dir (see the docstring
@@ -395,6 +410,33 @@ class EvalDispatchMixin:
         watch = self._declared_watchlist()
         before = self._env_versions(watch)
         rc, out, err, timed = _run_argv(cmd, cwd, to, log_path=log)
+        # ONE DEAD LINE IN A REAL REPO'S requirements.txt MUST NOT STOP THE LAB.
+        #
+        # "The install could not run" and "one declared line has no distribution anywhere" are
+        # different failures, and only the first is a reason to refuse to start. Live and measured
+        # 2026-08-07: the dense-retrieval testbed declares `ecom-mlflow` at requirements.txt:24,
+        # nothing on this box serves it (no PIP_INDEX_URL, no pip.conf), and it is imported only from
+        # `test*.py` files the eval pipeline never executes — so under a whole-file contract every
+        # rubert run aborts at run start over a package no node would have imported.
+        #
+        # So: retry ONCE without exactly the unresolvable lines, and record per line which and why.
+        # WHAT STAYS FATAL, deliberately — a pip that crashed, a dead or missing index, any non-zero
+        # exit with no per-requirement complaint, a declaration too tangled to rewrite faithfully
+        # (`deps.can_reduce`), an unresolvable name the declaration does not even contain (a
+        # TRANSITIVE dep: dropping the line that pulled it is not what the operator asked), and the
+        # reduced set failing in its turn. `unsatisfied_requirements` returning {} is what makes all
+        # of those fall straight through to the raise below, unchanged.
+        #
+        # THIS IS A BEHAVIOUR CHOICE AND IT IS THE OWNER'S TO OVERRULE — recorded as such in the
+        # receipt vocabulary (`installed_partial`) and in docs/guide/configuration.md. It is not a
+        # silent degrade: if a dropped package IS needed, the run fails at the point of use with a
+        # traceback naming it, and `run_setup_finished.dropped_requirements` is the run-start record
+        # explaining exactly why it was absent — which is the thing that was missing before.
+        dropped: list = []
+        if rc != 0 and not timed and declared is not None:
+            dropped, retried = self._retry_without_unsatisfiable(declared, out, err, cwd, to, log)
+            if retried is not None:
+                rc, out, err, timed = retried
         # Carry the command so the fold can key the exactly-once record on it (arch-review §5 P2).
         # Both output tails go through `self._redact`, like every sibling tail (evaluate.py's
         # stdout_tail/stderr, train_monitor's reason). This one is persisted to the DURABLE event
@@ -406,13 +448,67 @@ class EvalDispatchMixin:
         # not carry it and every reader defaults it, and the fold has never read this payload beyond
         # `command`/`exit_code`. Empty dict = "nothing the repo declares moved", which is a real and
         # useful answer (a re-run of an already-satisfied install), distinct from an absent field.
+        # `dropped_requirements` sits beside `env_delta` on purpose: both answer "what environment
+        # did this run actually get?", both are per-item and machine-readable, and an operator must
+        # be able to see "we honoured 20 of 21 declarations, `ecom-mlflow` has no distribution"
+        # without opening a log. A stderr tail cannot be read by a tool.
         self.store.append(EV_RUN_SETUP_FINISHED,
                           {"command": cmd, "exit_code": rc, "timed_out": timed,
                            "stderr_tail": self._redact((err or "")[-2000:]),
-                           "env_delta": self._env_delta_since(watch, before)})
+                           "env_delta": self._env_delta_since(watch, before),
+                           "dropped_requirements": dropped})
         if rc != 0 or timed:
-            raise RuntimeError(f"run_setup failed (exit={rc}, timed_out={timed}); see {log}\n"
+            # Name the requirements pip refused, when it named any. "run_setup failed, see the log"
+            # and "your repo declares ecom-mlflow and nothing serves it" are the same event and not
+            # the same message — and this branch is now reached only when the reduced retry did not
+            # apply or did not help, which is exactly when the operator needs the name most.
+            unsat = deps.unsatisfied_requirements((err or "") + (out or ""))
+            named = ("; no distribution for: " + ", ".join(sorted(unsat))) if unsat else ""
+            raise RuntimeError(f"run_setup failed (exit={rc}, timed_out={timed}){named}; see {log}\n"
                                + self._redact((err or out or "")[-500:]))
+
+    def _retry_without_unsatisfiable(self, declared, out, err, cwd, to, log):
+        """Retry the DERIVED declaration install once, minus the lines pip could not resolve.
+
+        Returns `(dropped records, retry result | None)`. `None` means no retry was attempted and
+        the caller's original failure stands — see the conditions in `_do_run_setup`, which is where
+        the policy is stated. The dropped records are returned even when the retry then fails, so
+        the log says what was tried.
+
+        The reduced file is written into the RUN DIR, never into the operator's repo: a run must not
+        mutate the source tree it is reading, and `run_setup.log` records the file pip actually read.
+        It is only safe to move the file because `deps.can_reduce` has already refused any
+        declaration whose directives name relative paths."""
+        from looplab.runtime import deps
+        from looplab.runtime.sandbox import _run_argv
+        unsat = deps.unsatisfied_requirements((err or "") + (out or ""))
+        if not unsat or not deps.can_reduce(declared):
+            return [], None
+        # Only lines the DECLARATION itself carries. An unresolvable TRANSITIVE dependency names a
+        # distribution the operator never wrote down, and the only way to drop it would be to drop
+        # whichever declared line pulled it in — a guess about intent, so we refuse and stay fatal.
+        droppable = [n for n in unsat if n in declared.pins]
+        if not droppable or len(droppable) >= len(declared.pins):
+            return [], None            # nothing to drop, or nothing would be left to install
+        records = [{"name": n, "line": declared.pins[n],
+                    "reason": "no distribution found", "pip": unsat[n]} for n in sorted(droppable)]
+        try:
+            src = Path(declared.root) / declared.filename
+            reduced = Path(self.run_dir) / "requirements.reduced.txt"
+            reduced.write_text(
+                deps.reduced_requirements(src.read_text(encoding="utf-8", errors="replace"),
+                                          droppable), encoding="utf-8")
+        except OSError as e:           # unreadable source / unwritable run dir -> the original stands
+            _LOG.warning("could not write a reduced declaration (%s); the original failure stands", e)
+            return [], None
+        _LOG.warning("dependency install retrying without %d unresolvable declaration(s): %s",
+                     len(droppable), ", ".join(sorted(droppable)))
+        argv = deps.declaration_argv(declared, python=getattr(self.sandbox, "python", None))
+        argv = argv[:-1] + [str(reduced)]      # same command, pointed at the reduced copy
+        result = _run_argv(argv, cwd, to, log_path=log)
+        if result[0] == 0 and not result[3]:
+            self._record_declared_deps(declared, "installed_partial", argv, dropped=records)
+        return records, result
 
     def _data_binds(self, workdir) -> Optional[list]:
         """(host_path, read_only) binds for the untrusted tier: every data/reference source that was

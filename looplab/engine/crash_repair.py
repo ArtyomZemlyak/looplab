@@ -354,12 +354,20 @@ class CrashRepairMixin:
                 pkg = deps.pip_package(mod)
                 # AN INSTALL MUST NOT SILENTLY MOVE A PACKAGE THE REPO PINNED. `pip install
                 # pytorch-lightning` against a repo pinning `pytorch_lightning==1.5.1` is how
-                # `runs/rubert-dr-0804` acquired Lightning 2.6.5, and how `rubert-dr-0807` node 0 then
-                # died on the `find_unused_parameters` default 2.x flipped — 7 of its 12 repair
-                # attempts are artifacts of an API the repo never asked for. So when the declaration
-                # names this distribution, pip is handed the operator's own line VERBATIM rather than
-                # a bare name. Verbatim matters twice: LoopLab never has to parse a specifier
-                # grammar, and the receipt below quotes exactly what the repo wrote.
+                # `runs/rubert-dr-0804` acquired Lightning 2.6.5, and the Lightning-2.x SHAPE is then
+                # all over `rubert-dr-0807`'s repairs — read off its event log 2026-08-07, BOTH failing
+                # nodes carry it: a `pytorch_lightning/trainer/configuration_validator.py ...
+                # NotImplementedError` repair each, node 0's terminal is the DDP `_rebuild_buckets`
+                # RuntimeError, and node 2 carries a second "It looks like your Lightning ..." one.
+                # (An earlier note put it at 7 of that run's 12 repairs; that count is NOT re-derived
+                # here — the durable `error_in` tails are truncated, so treat it as the shape being
+                # pervasive rather than as a figure.) So when the declaration names this distribution,
+                # pip is handed the operator's own line VERBATIM rather than a bare name. Verbatim
+                # matters twice: LoopLab never has to parse a specifier grammar, and the receipt below
+                # quotes exactly what the repo wrote. Measured 2026-08-07 in a tmpfs venv: the declared
+                # 1.5.1 imports against this container's torch 2.4.0 and HAS
+                # `pytorch_lightning.utilities.cloud_io.get_filesystem` — the module 2.x deleted and
+                # the one node 0 died on in round 1.
                 #
                 # WHY NOT `-c requirements.txt`. A constraints file would bind the transitive
                 # resolution too, which is strictly stronger — and pip cannot read this repo's file

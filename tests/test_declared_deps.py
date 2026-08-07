@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from looplab.core.models import Idea
 from looplab.engine.eval_dispatch import _MAX_NODE_DEP_SYNCS, EvalDispatchMixin
 from looplab.engine.orchestrator import Engine
@@ -298,7 +300,10 @@ def test_every_action_the_engine_can_take_is_in_the_declared_vocabulary(tmp_path
     tree = ast.parse(textwrap.dedent(inspect.getsource(EvalDispatchMixin)))
     fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
     literals = set()
-    for name in ("_settle_declared_deps", "_sync_node_deps"):
+    # Every method that PASSES an action string. A new one added without being listed here shows up
+    # as an action in the vocabulary that no scanned body uses, and the equality below goes red —
+    # which is how `installed_partial` was caught when the partial-install retry landed.
+    for name in ("_settle_declared_deps", "_sync_node_deps", "_retry_without_unsatisfiable"):
         for node in ast.walk(fns[name]):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 literals.add(node.value)
@@ -321,6 +326,211 @@ def test_the_receipt_is_diagnostic_and_deduped_on_the_facts(tmp_path):
     eng._settle_declared_deps([])
     rows = _declared_rows(tmp_path / "run")
     assert len(rows) == 2 and rows[-1].data["pins"]["numpy"] == "numpy>=2"
+
+
+# --------------------------------------- one dead line in a real repo must not stop the lab
+# Live and measured 2026-08-07: the dense-retrieval testbed declares `ecom-mlflow` at
+# requirements.txt:24, no index reachable from the box serves it (no PIP_INDEX_URL, no pip.conf),
+# and it is imported only from `test*.py` the eval pipeline never runs. Under a whole-file contract
+# every run of the owner's headline experiment aborts at run start over a package no node imports.
+_NO_DIST = ("ERROR: Could not find a version that satisfies the requirement ecom-mlflow "
+            "(from versions: none)\nERROR: No matching distribution found for ecom-mlflow\n")
+
+
+def test_pip_s_two_spellings_of_unresolvable_name_it_once():
+    got = deps.unsatisfied_requirements(_NO_DIST)
+    assert list(got) == ["ecom-mlflow"]
+    # The reason is pip's OWN sentence, quoted not paraphrased: a reader must be able to tell a
+    # stale line from a network outage, and only pip's wording carries that.
+    assert got["ecom-mlflow"].startswith("Could not find a version that satisfies")
+    assert "(from versions: none)" in got["ecom-mlflow"]
+
+
+def test_pip_s_colour_codes_never_reach_the_durable_record():
+    """Measured against real pip 2026-08-07: the captured reason ended
+    `... (from versions: none)\\x1b[0m\\x1b[31m`, which would ride into a durable event and out to
+    every reader. Stripped BEFORE matching, or `(\\S+)` swallows a colour reset into the NAME — and
+    that name is what the reducer matches declaration lines on."""
+    coloured = ("\x1b[31mERROR: Could not find a version that satisfies the requirement "
+                "ecom-mlflow (from versions: none)\x1b[0m\x1b[31m\n\x1b[0m"
+                "\x1b[31mERROR: No matching distribution found for ecom-mlflow\x1b[0m\n")
+    got = deps.unsatisfied_requirements(coloured)
+    assert list(got) == ["ecom-mlflow"], "a colour reset was swallowed into the distribution name"
+    assert "\x1b" not in got["ecom-mlflow"]
+    assert got["ecom-mlflow"].endswith("(from versions: none)")
+    # …and the name still matches the declaration, which is the whole point of stripping early.
+    assert "ecom-mlflow" in deps.parse_requirements(_LIVE_SHAPES + "ecom-mlflow\n")[0]
+
+
+def test_a_failure_with_no_per_requirement_reason_names_nothing():
+    """The whole gate. A crashed pip, a dead index, a bare non-zero exit — none of these name a
+    requirement, so none of them can be turned into a partial install."""
+    for other in ("ERROR: Could not install packages due to an OSError",
+                  "WARNING: Retrying after connection broken by 'NewConnectionError'",
+                  "ERROR: Exception:\nTraceback (most recent call last):", "", None):
+        assert deps.unsatisfied_requirements(other) == {}
+
+
+def test_a_declaration_naming_relative_paths_is_never_rewritten():
+    """`-r base.txt` / `-e .` / `-f ./wheels` resolve relative to the FILE holding them, so a
+    reduced copy written into the run dir would resolve them somewhere else — installing something
+    different, or nothing. Fail whole instead."""
+    for d in ("-r base.txt", "-c pins.txt", "-e .", "-f ./wheels", "--find-links ./w"):
+        assert deps.can_reduce(deps.Declaration(filename="r.txt", pins={"a": "a"},
+                                                directives=(d,))) is False
+    # Position-independent options travel fine — and `--extra-index-url` must not be mistaken for
+    # `-e` by a prefix test.
+    for d in ("--index-url https://x", "--extra-index-url https://x", "--pre", "--no-binary :all:"):
+        assert deps.can_reduce(deps.Declaration(filename="r.txt", pins={"a": "a"},
+                                                directives=(d,))) is True
+
+
+def test_reduction_removes_the_line_and_leaves_a_readable_file():
+    text = _LIVE_SHAPES + "ecom-mlflow\n"
+    red = deps.reduced_requirements(text, ["ecom-mlflow"])
+    pins, _d = deps.parse_requirements(red)
+    assert "ecom-mlflow" not in pins
+    assert len(pins) == len(deps.parse_requirements(text)[0]) - 1   # exactly one line, not a purge
+    # COMMENTED, not deleted: run_setup.log records the file pip read, and an operator hunting a
+    # missing package must find the line there with the reason beside it, not an absence.
+    assert "# looplab dropped (no distribution found): ecom-mlflow" in red
+    assert pins["pytorch-lightning"] == "pytorch_lightning==1.5.1"   # everything else is untouched
+
+
+def test_a_continuation_split_requirement_is_dropped_as_ONE_line():
+    """The parser folds `\\`-continuations into one logical line; the reducer must use the SAME
+    reader, or half a version specifier survives in the file handed back to pip."""
+    red = deps.reduced_requirements("polars\nwrapped==\\\n1.2.3\n", ["wrapped"])
+    assert "1.2.3" not in deps.parse_requirements(red)[0]
+    assert deps.parse_requirements(red)[0] == {"polars": "polars"}
+
+
+def _setup_engine(tmp_path, monkeypatch, results, *, text=None):
+    """An engine whose run-setup runs a scripted `_run_argv`. `results` is consumed one per call."""
+    calls: list[tuple] = []
+
+    def fake_run_argv(argv, cwd, timeout, log_path=None):
+        calls.append((list(argv), str(cwd)))
+        return results[min(len(calls) - 1, len(results) - 1)]
+
+    monkeypatch.setattr("looplab.runtime.sandbox._run_argv", fake_run_argv)
+    eng = _engine(tmp_path / "run", auto_install_deps=True)
+    eng._repo_spec = {"editables": [{"name": ".",
+                                     "path": str(_repo(tmp_path, text or (_LIVE_SHAPES
+                                                                          + "ecom-mlflow\n")))}]}
+    eng._eval_spec = {"run_setup": [], "run_setup_timeout": 60.0}
+    return eng, calls
+
+
+def _finished(tmp_path):
+    rows = [e for e in EventStore(Path(tmp_path) / "run" / "events.jsonl").read_all()
+            if e.type == "run_setup_finished"]
+    return rows[-1].data if rows else None
+
+
+def test_one_unresolvable_line_is_dropped_and_the_run_starts(tmp_path, monkeypatch):
+    """THE blocker. 20 of 21 declarations honoured; the run proceeds."""
+    eng, calls = _setup_engine(tmp_path, monkeypatch,
+                               [(1, "", _NO_DIST, False), (0, "ok", "", False)])
+    eng._ensure_run_setup()                                    # must NOT raise
+
+    assert len(calls) == 2, "expected exactly one retry"
+    assert calls[0][0][-1] == "requirements.txt"                # the declaration, as written
+    assert calls[1][0][-1] == str(tmp_path / "run" / "requirements.reduced.txt")
+    # …written into the RUN DIR, never into the operator's repo.
+    assert not (tmp_path / "repo" / "requirements.reduced.txt").exists()
+
+    row = _finished(tmp_path)
+    assert row["exit_code"] == 0
+    # Per LINE and machine-readable, beside `env_delta` — an operator sees "we honoured 20 of 21,
+    # ecom-mlflow has no distribution" without opening a log.
+    assert [d["name"] for d in row["dropped_requirements"]] == ["ecom-mlflow"]
+    assert row["dropped_requirements"][0]["line"] == "ecom-mlflow"
+    assert row["dropped_requirements"][0]["reason"] == "no distribution found"
+    assert "from versions: none" in row["dropped_requirements"][0]["pip"]
+    # …and the DECISION is named in the receipt vocabulary, carrying its own evidence.
+    partial = [r.data for r in _declared_rows(tmp_path / "run")
+               if r.data["action"] == "installed_partial"]
+    assert partial and [d["name"] for d in partial[0]["dropped"]] == ["ecom-mlflow"]
+
+
+def test_a_failure_pip_gave_no_reason_for_stays_fatal(tmp_path, monkeypatch):
+    """Do NOT weaken the abort for a pip that crashed, a missing index, or a bare non-zero exit."""
+    eng, calls = _setup_engine(tmp_path, monkeypatch,
+                               [(1, "", "ERROR: Could not install packages due to an OSError", False)])
+    with pytest.raises(RuntimeError):
+        eng._ensure_run_setup()
+    assert len(calls) == 1, "nothing to reduce — there must be no retry"
+    assert _finished(tmp_path)["dropped_requirements"] == []
+
+
+def test_the_reduced_set_failing_in_its_turn_is_fatal(tmp_path, monkeypatch):
+    eng, calls = _setup_engine(tmp_path, monkeypatch,
+                               [(1, "", _NO_DIST, False), (1, "", "ERROR: boom", False)])
+    with pytest.raises(RuntimeError):
+        eng._ensure_run_setup()
+    assert len(calls) == 2                       # retried once, and only once
+    # The attempt is still recorded: the log says what was tried even though it did not work.
+    assert [d["name"] for d in _finished(tmp_path)["dropped_requirements"]] == ["ecom-mlflow"]
+    # No `installed_partial` — nothing was successfully installed partially.
+    assert not [r for r in _declared_rows(tmp_path / "run")
+                if r.data["action"] == "installed_partial"]
+
+
+def test_an_unresolvable_TRANSITIVE_dep_is_fatal(tmp_path, monkeypatch):
+    """The declaration never named it, so the only way to drop it would be to drop whichever
+    declared line pulled it in — a guess about intent. Refuse."""
+    tb = ("ERROR: Could not find a version that satisfies the requirement some-transitive-thing\n"
+          "ERROR: No matching distribution found for some-transitive-thing\n")
+    eng, calls = _setup_engine(tmp_path, monkeypatch, [(1, "", tb, False)])
+    with pytest.raises(RuntimeError, match="no distribution for: some-transitive-thing"):
+        eng._ensure_run_setup()
+    assert len(calls) == 1
+
+
+def test_dropping_EVERY_declaration_is_fatal(tmp_path, monkeypatch):
+    """Nothing would be left to install, so "partially installed" would be a lie."""
+    tb = ("ERROR: Could not find a version that satisfies the requirement polars\n"
+          "ERROR: No matching distribution found for polars\n")
+    eng, calls = _setup_engine(tmp_path, monkeypatch, [(1, "", tb, False)], text="polars\n")
+    with pytest.raises(RuntimeError):
+        eng._ensure_run_setup()
+    assert len(calls) == 1
+
+
+def test_a_timeout_is_never_a_partial_install(tmp_path, monkeypatch):
+    """A timed-out install proves nothing about which lines are resolvable."""
+    eng, calls = _setup_engine(tmp_path, monkeypatch, [(-1, "", _NO_DIST, True)])
+    with pytest.raises(RuntimeError):
+        eng._ensure_run_setup()
+    assert len(calls) == 1
+
+
+def test_an_operator_s_own_command_is_never_rewritten(tmp_path, monkeypatch):
+    """Their command runs exactly as written or not at all — we do not know what it means, so we
+    cannot know what a reduced form of it would mean."""
+    eng, calls = _setup_engine(tmp_path, monkeypatch, [(1, "", _NO_DIST, False)])
+    eng._eval_spec = {"run_setup": ["bash", "setup.sh"], "run_setup_timeout": 60.0}
+    with pytest.raises(RuntimeError):
+        eng._ensure_run_setup()
+    assert len(calls) == 1 and calls[0][0] == ["bash", "setup.sh"]
+
+
+def test_a_declaration_we_cannot_faithfully_rewrite_is_fatal(tmp_path, monkeypatch):
+    eng, calls = _setup_engine(tmp_path, monkeypatch, [(1, "", _NO_DIST, False)],
+                               text="-r base.txt\npolars\necom-mlflow\n")
+    with pytest.raises(RuntimeError):
+        eng._ensure_run_setup()
+    assert len(calls) == 1
+
+
+def test_the_abort_message_names_what_pip_refused(tmp_path, monkeypatch):
+    """"run_setup failed, see the log" and "your repo declares X and nothing serves it" are the
+    same event and not the same message."""
+    eng, _calls = _setup_engine(tmp_path, monkeypatch, [(1, "", _NO_DIST, False)],
+                                text="-r base.txt\npolars\necom-mlflow\n")
+    with pytest.raises(RuntimeError, match="no distribution for: ecom-mlflow"):
+        eng._ensure_run_setup()
 
 
 # ------------------------------------------------------ engine: the Developer's deliberate change
