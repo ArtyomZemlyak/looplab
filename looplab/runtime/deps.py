@@ -130,6 +130,31 @@ def missing_modules(stderr: str) -> list[str]:
     return list(seen)
 
 
+def submodule_only_modules(stderr: str) -> set[str]:
+    """Top-level names this traceback reports missing ONLY through a DOTTED path
+    (``No module named 'pytorch_lightning.utilities.cloud_io'`` -> ``{'pytorch_lightning'}``) — i.e.
+    exactly the names for which `missing_modules` above is REDUCING rather than reading.
+
+    That reduction is right when the distribution is genuinely absent: `torch.nn` is unimportable on
+    a box with no torch, and `torch` is the unit pip installs. It is WRONG when the distribution IS
+    installed and the code asked it for a submodule that VERSION does not have — the top-level name
+    resolves, so installing it changes nothing, and the failure is a version/API mismatch that only a
+    code repair (or a different pin) can fix. The two are indistinguishable in the traceback text,
+    which is why this is only half the answer: the caller pairs it with `is_present` (see
+    `engine/crash_repair.py::_prepare_env`, which carries the measurement).
+
+    A name the traceback ALSO reports BARE is excluded — that is direct evidence of absence and
+    outranks the reduction, so a log carrying both shapes still installs."""
+    bare: set[str] = set()
+    dotted: set[str] = set()
+    for m in _MISSING_RE.findall(stderr or ""):
+        top = m.split(".", 1)[0]
+        if not top:
+            continue
+        (dotted if "." in m else bare).add(top)
+    return dotted - bare
+
+
 # --- A missing distribution that never reaches `missing_modules` -------------------------------
 # A library may DEGRADE an absent optional dependency into something that is not an import error at
 # all, and then the module name appears nowhere in the exception. Live 2026-08-05

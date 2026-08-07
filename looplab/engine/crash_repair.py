@@ -301,6 +301,31 @@ class CrashRepairMixin:
         # it through a multi-minute pip install (max_parallel>1). Only contend for the lock when there
         # is real installable work.
         candidates = [m for m in deps.missing_modules(stderr) if deps.is_installable(m)]
+        # A MISSING SUBMODULE OF AN INSTALLED DISTRIBUTION IS NOT A MISSING DISTRIBUTION, and pip
+        # cannot tell the difference because it is never asked about the submodule. Live 2026-08-07
+        # (`runs/rubert-dr-0807` node 0, round 1): the repo's `utils.py` does
+        # `from pytorch_lightning.utilities.cloud_io import get_filesystem`, a module Lightning 2.x
+        # DELETED, so the traceback read `No module named 'pytorch_lightning.utilities.cloud_io'`.
+        # `missing_modules` reduced that to `pytorch_lightning` — installed at 2.6.5 — and
+        # `pip install pytorch-lightning` answered "Requirement already satisfied" with returncode 0
+        # in 2.19 s. `InstallResult.ok` is `returncode == 0`, so the engine recorded
+        # `deps_installed {"packages": ["pytorch-lightning"], "round": 1}`, spent one of
+        # `_MAX_DEP_ROUNDS`, and re-ran the node's whole stage pipeline into the byte-identical
+        # exception (the next `node_repaired.error_in` is that same traceback). Worse than the wasted
+        # eval: the receipt says the environment was just fixed, so the failure that follows reads as
+        # the agent's code being wrong.
+        #
+        # The probe is confined to the DOTTED-ONLY names on purpose. A bare `No module named 'torch'`
+        # keeps today's behaviour byte-for-byte, no extra interpreter spawn and no new way to fail:
+        # `is_present` fails closed to "present" = "do not install", and failing closed on the fresh-box
+        # case (nothing installed yet, which is the reason this module exists at all) would be a
+        # regression dressed as a safety check. Here the direction is right — doubt means "leave it to
+        # the repair path", which is where a version mismatch belongs anyway.
+        suspects = [m for m in candidates if m in deps.submodule_only_modules(stderr)]
+        if suspects:
+            python = getattr(self.sandbox, "python", sys.executable)
+            present = {m for m in suspects if deps.is_present(m, python=python)}
+            candidates = [m for m in candidates if m not in present]
         return self._install_missing(candidates)
 
     def _install_missing(self, candidates: list[str]) -> list[str]:
