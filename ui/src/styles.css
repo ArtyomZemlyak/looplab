@@ -1664,7 +1664,9 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 /* The scroll sentinel that replaced the "load more" button. It has to be a real, non-zero box: an
    IntersectionObserver on a collapsed element never reports an intersection in some engines, and
    this is the whole mechanism by which earlier steps arrive. */
-.trace-reach-zone { min-height: 12px; margin: 0 0 4px; }
+/* `position: relative` so the sr-only button below is clipped against THIS box rather than escaping
+   to whatever positioned ancestor the surrounding layout happens to provide. */
+.trace-reach-zone { position: relative; min-height: 12px; margin: 0 0 4px; }
 .trace-reach-status { min-height: 14px; text-align: center; }
 /* Visually hidden until focused: a pointer user reaches the earlier steps by scrolling and must not
    be shown a control that announces a limit, but a screen-reader user driving a virtual cursor never
