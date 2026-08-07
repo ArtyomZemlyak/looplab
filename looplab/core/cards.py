@@ -754,9 +754,11 @@ class CardSelectionProvenance(BaseModel):
 # ranking now consume `open_research_beliefs()` — `open_research_cards()` collapsed by seed-statement
 # digest, the representative work-item id preserved for evidence joins — so the model no longer re-reads
 # or re-ranks same-seed duplicates. `events/belief_projection.py::grouped_beliefs(st)` is the
-# additive FULL-board belief view (evidence + verdict aggregated across a belief's cards), AVAILABLE
-# for a future UI / lessons / verdict view — it has no production consumer yet, which is why it lives
+# additive FULL-board belief view (evidence + verdict aggregated across a belief's cards), which lives
 # with the other derived views rather than on the model (doc 25 CO-11).
+# Both of those sites used to re-derive the belief key inline; they now read `Card.belief_id`, the one
+# spelling the fold publishes (see the field's own comment below for why the belief facet needs an
+# identity separate from the work item's, and what it cost when it had none).
 class Card(BaseModel):
     """One stable-identity proposal/work item in the target Card queue (docs/23).
 
@@ -808,6 +810,39 @@ class Card(BaseModel):
     selection_ready: bool = False
     evidence: list[int] = Field(default_factory=list)   # node ids that tested it (== node_ids)
     best_delta: Optional[float] = None                  # best improvement-over-parent among evidence (audit)
+    # --- The RESEARCH-DIRECTION facet's own identity (DERIVED; `events/card_ledger.py`).
+    # `id` is the WORK-ITEM identity and `identity.action_digest` binds the executable action; neither
+    # can say "these two work items ask the same question". Until these two fields existed the work-item
+    # identity was doing double duty, so a debug RETRY of a failed card — which reuses the parent's Idea
+    # verbatim and only flips `operator` (`engine/orchestrator.py::_prepare_node_idea`) — minted a second
+    # card with a different action digest and the board rendered ONE hypothesis TWICE. Measured live in
+    # `runs/rubert-dr-0807`: card-0 (draft) and card-1 (debug) byte-identical in statement, rationale, all
+    # six params and footprint, differing only in `idea.operator`.
+    #
+    # Both are DERIVED overlays exactly like `verdict`/`status`/`selection_ready`: no event carries them,
+    # no digest covers them, and no receipt is minted from them. That is the whole point of putting the
+    # belief facet HERE instead of widening the action digest — the digest must keep binding the
+    # executable identity EXACTLY (a debug build genuinely is a different executable action), so the
+    # research-direction facet needs an identity of its own rather than a share of that one.
+    #
+    # `belief_id` is the seed-statement digest — the SAME key `events/belief_projection.py::grouped_beliefs`
+    # and `RunState.open_research_beliefs()` group on, published once here so those two sites and any
+    # consumer read ONE spelling instead of three hand-synced re-derivations of `hypothesis_statement_digest`.
+    # It is the FULL sha256, never the short display `hypothesis_id`: two distinct statements can share a
+    # short id, and keying on that would silently merge unrelated beliefs (test_short_hash_collision_*).
+    # None only for a card with no seed statement (a malformed `card_added`), which is never groupable.
+    belief_id: Optional[str] = None
+    # The work item this card is a RETRY of: for a `debug` card, the card that owned the failed node it
+    # repairs. Derived by resolving the durable parent NODE anchor back to that node's own `idea.card_id`
+    # (canonicalized through merges) — a link the payload has always carried and nothing consumed at the
+    # CARD level: `parent_id`/`parent_ids`/`parent_generations` are read only as NODE anchors, by
+    # `_card_action_has_live_anchors`, `_card_action_freshness` and `_build_parent_snapshot`.
+    # This is strictly MORE than "same wording": it distinguishes a genuine retry of one executable
+    # question from two different actions that merely share a formulaic statement (measured: the toy
+    # adapter's "random seed point" names three DIFFERENT param points in `runs/spec-live-0804`).
+    # The immediate edge only, never a walked chain — node parents are always older than their children,
+    # so the edges form a DAG, and publishing one hop keeps it that way for every consumer.
+    retry_of: Optional[str] = None
     # Identity / lineage.
     merged_into: Optional[str] = None                   # canonical id if this card was merged away
     aliases: list[str] = Field(default_factory=list)    # ids folded INTO this canonical card

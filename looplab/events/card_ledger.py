@@ -2039,6 +2039,70 @@ def _apply_card_operator_overlays(
             }
 
 
+def _apply_card_belief_lineage(
+        st: RunState, ledger: _CardLedger, aliases: _CardAliases) -> None:
+    """Publish the research-direction facet's OWN identity on every card: `belief_id` + `retry_of`.
+
+    Why this phase exists at all is recorded on the two fields in ``core/cards.py``; the short version
+    is that ``id`` names the work item, ``identity.action_digest`` binds the executable action, and
+    NEITHER can say "these two work items ask the same question".  A debug retry reuses its parent's
+    Idea verbatim and only flips ``operator``, so it is a different action (correctly) and therefore a
+    different card (correctly) — and the board had no way left to show it as the same hypothesis.
+
+    Strictly ADDITIVE and derived: this writes only the two new fields.  It never touches a receipt, a
+    digest, an action field, evidence, a verdict or a selection blocker, which is why it can run here
+    without re-opening any of step 9's fail-closed reasoning.  It runs BEFORE
+    ``_apply_card_selection_readiness`` only so the ledger's declared phase order stays "derive every
+    projected field, then gate on the final values"; nothing in step 9 reads either field.
+
+    ``retry_of`` resolves the durable parent NODE anchor back to a CARD, which is the join the payload
+    has always supported and nothing performed: ``parent_id``/``parent_ids``/``parent_generations`` are
+    consumed exclusively as node anchors (``_card_action_has_live_anchors``, ``_card_action_freshness``,
+    ``engine/card_reservation.py::_build_parent_snapshot``).  The owner map is keyed on the NODE ROW's
+    own ``idea.card_id`` — the same "its own work item" notion step 9 builds for the debug exemption,
+    and deliberately NOT ``Card.evidence``: evidence can name a node attached by the legacy
+    statement-hash join, which never was that card's work item, and reading it here would invent a
+    retry edge out of shared wording.  Canonicalized through ``_canon`` so a merged-away owner resolves
+    to its survivor.
+    """
+    cards = ledger.cards
+    _canon = aliases.canon
+
+    # node id -> the card that node was BUILT FOR. `Node.idea` is a required field, but a hostile or
+    # future log is folded through the same code path, so read it defensively rather than trusting it.
+    owner_card_by_node: dict[int, str] = {}
+    for node in st.nodes.values():
+        idea = getattr(node, "idea", None)
+        owner_card_id = getattr(idea, "card_id", None) if idea is not None else None
+        if isinstance(owner_card_id, str) and owner_card_id:
+            owner_card_by_node[node.id] = _canon(owner_card_id)
+
+    for cid, c in cards.items():
+        seed = (c.seed_statement or "").strip()
+        # The FULL sha256 statement digest, never the short display `hypothesis_id` — see the field.
+        c.belief_id = hypothesis_statement_digest(seed) if seed else None
+        c.retry_of = None
+        # Only `debug` is a retry. `improve`/`merge` also name parent nodes, but they propose a NEW
+        # point in the space: linking those would claim every child is a re-run of its parent's
+        # question, which is the opposite of what the operator needs to see.
+        if c.operator != "debug":
+            continue
+        parents = list(c.parent_ids or [])
+        if c.parent_id is not None and not parents:
+            parents = [c.parent_id]
+        # Exactly one anchor, matching the shape `_card_action_has_live_anchors` admits for `debug`.
+        # A two-parent "debug" is malformed, and guessing which half it retries would be a fabrication.
+        if len(parents) != 1:
+            continue
+        owner = owner_card_by_node.get(parents[0])
+        # A self-edge is not a retry (and is what a walked chain would need a cycle guard for). It is
+        # unreachable today — a card's own work item is its CHILD node, never the parent it debugs —
+        # so this is a fence against a future/corrupt log, not a live case.
+        if owner is None or owner == _canon(cid) or owner not in cards:
+            continue
+        c.retry_of = owner
+
+
 def _apply_card_actionable(ledger: _CardLedger) -> None:
     cards = ledger.cards
 
@@ -2233,7 +2297,11 @@ def derive_cards(st: RunState) -> None:
     them out, in the same order, and the order is load-bearing: ``_card_identity_map`` must see the
     whole log before any Card exists, the merge fold must run before verdicts (evidence is unioned),
     the operator overlay must run after enrichment and ranking (docs/23 decision 27), and
-    ``actionable`` / ``selection_ready`` read the FINAL status. Each phase is a pure function of the
+    ``actionable`` / ``selection_ready`` read the FINAL status. ``_apply_card_belief_lineage`` is the
+    one phase with NO ordering constraint of its own — it writes only the two derived research-direction
+    identities (``belief_id``/``retry_of``) and no later phase reads them — so it sits where the
+    sequence stays readable as "derive every projected field, then gate on the final values".
+    Each phase is a pure function of the
     folded ``RunState`` plus the explicit tables threaded through it — nothing here reads an Event,
     a clock or the outside world (engine invariant 5).
     """
@@ -2251,6 +2319,7 @@ def derive_cards(st: RunState) -> None:
     _apply_card_enrichment(st, ledger, aliases)
     _apply_card_ranking(st, identity, ledger, aliases)
     _apply_card_operator_overlays(st, ledger, aliases)
+    _apply_card_belief_lineage(st, ledger, aliases)
     _apply_card_actionable(ledger)
     _apply_card_selection_readiness(st, ledger, aliases, building_card_ids)
     _publish_visible_cards(st, ledger, control_ids)

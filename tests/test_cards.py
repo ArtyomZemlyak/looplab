@@ -11,10 +11,14 @@ import pytest
 
 from looplab.events.belief_projection import grouped_beliefs
 from looplab.core.models import (
+    CARD_ACTION_DIGEST_V1_FIELDS,
+    CARD_ACTION_DIGEST_V2_FIELDS,
     IDEA_PROPOSAL_DIGEST_V1_FIELDS,
     Event,
     Idea,
     IdeaEmission,
+    card_action_digest,
+    card_ownership_receipt,
     durable_idea_payload,
     hypothesis_id,
     hypothesis_statement_digest,
@@ -1198,3 +1202,219 @@ def test_grouped_beliefs_verdict_matches_evidence_verdict_on_the_union():
     }
     [group] = grouped_beliefs(st)
     assert group["verdict"] == "testing"          # active experiment not hidden by the finished sibling
+
+
+# --------------------------------------------------------------------------------------------------
+# The research-direction facet's OWN identity: `Card.belief_id` + `Card.retry_of`.
+#
+# The defect these drive was measured live in `runs/rubert-dr-0807`: card-0 (draft) and card-1 (debug)
+# byte-identical in statement, rationale, all six params and footprint, differing ONLY in
+# `idea.operator` — two work items, evidence [0] and [1], rendering as two identical hypotheses.
+# Every test below folds a REAL receipt-bound event sequence rather than assembling `RunState.cards`
+# by hand: the properties are about what a NATIVE card derives, and a faked receipt would leave every
+# row a non-selectable shadow and make the assertions vacuous.
+# --------------------------------------------------------------------------------------------------
+
+_RETRY_STATEMENT = ("Teacher-mined hard negatives filtered by a positive-aware 0.95 threshold raise "
+                    "test recall@100 by removing the false negatives that cap in-batch-only training.")
+
+
+def _receipted_card_added(card_id, statement, *, operator, parents=(), at_node=0, params=None):
+    """One native `card_added` in the shape `_card_added_payload` writes, with a REAL receipt."""
+    parent_ids = list(parents)
+    action = {
+        "operator": operator,
+        "params": dict(params or {}),
+        "space": {},
+        "eval_profile": None,
+        "eval_timeout": None,
+        "parent_id": parent_ids[0] if parent_ids else None,
+        "parent_ids": parent_ids,
+        "parent_generations": {str(parent): 0 for parent in parent_ids},
+        "scored_against": None,
+        "scored_against_generation": None,
+        "scored_against_empty": True,
+        "footprint": None,
+    }
+    receipt = card_ownership_receipt(card_id, statement, action)
+    assert receipt is not None
+    return ("card_added", {
+        "id": card_id, "statement": statement, "source": "researcher", "at_node": at_node,
+        "rationale": "",
+        "idea": {"operator": operator, "params": action["params"], "space": {},
+                 "eval_profile": None, "eval_timeout": None},
+        "parent_id": action["parent_id"], "parent_ids": parent_ids,
+        "parent_generations": action["parent_generations"],
+        "scored_against": None, "scored_against_generation": None, "scored_against_empty": True,
+        "footprint": None, "steering_context": [], "ownership_receipt": receipt,
+    })
+
+
+def _node_for_card(node_id, card_id, statement, *, operator, parents=()):
+    """The node row that CLAIMS a card — `idea.card_id` is what makes it that card's work item."""
+    return ("node_created", {
+        "node_id": node_id, "operator": operator, "parent_ids": list(parents),
+        "idea": {"operator": operator, "hypothesis": statement, "card_id": card_id, "params": {}},
+    })
+
+
+def _retry_run(second_operator="debug"):
+    """A draft card whose node FAILED, then a second card on that failed node reusing its wording.
+
+    With ``second_operator='debug'`` this is exactly the live `runs/rubert-dr-0807` shape.
+    """
+    return fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        _receipted_card_added("card-0", _RETRY_STATEMENT, operator="draft", at_node=0),
+        _node_for_card(0, "card-0", _RETRY_STATEMENT, operator="draft"),
+        ("node_failed", {"node_id": 0, "reason": "lightning_ddp", "eval_seconds": 1}),
+        # The repair path copies the PARENT's Idea verbatim and flips only `operator`
+        # (`engine/orchestrator.py::_prepare_node_idea`), so the statement is byte-identical.
+        _receipted_card_added("card-1", _RETRY_STATEMENT, operator=second_operator,
+                              parents=(0,), at_node=1),
+        _node_for_card(1, "card-1", _RETRY_STATEMENT, operator=second_operator, parents=(0,)),
+    ]))
+
+
+def test_debug_retry_is_one_belief_across_two_distinct_work_items():
+    # THE reported defect. The two cards must stay two work items with two distinct action digests —
+    # a debug build genuinely IS a different executable action — while the belief facet reports them
+    # as ONE hypothesis whose evidence is both nodes.
+    st = _retry_run()
+    card0, card1 = st.cards["card-0"], st.cards["card-1"]
+
+    assert card0.identity.kind == "native" and card1.identity.kind == "native"
+    assert card0.identity.action_digest != card1.identity.action_digest   # work items stay DISTINCT
+    assert card0.evidence == [0] and card1.evidence == [1]
+
+    # …and the belief facet joins them.
+    assert card0.belief_id == card1.belief_id is not None
+    assert card1.retry_of == "card-0"          # the debug card names the card it retries
+    assert card0.retry_of is None              # a draft retries nothing
+
+    [group] = grouped_beliefs(st)
+    assert group["card_ids"] == ["card-0", "card-1"]
+    assert group["evidence"] == [0, 1]         # the shape the operator should have seen all along
+
+
+def test_retry_of_is_not_invented_from_shared_wording():
+    # Only `debug` is a retry. `improve`/`merge` also name a parent NODE, but they propose a new point
+    # in the space; linking those would claim every child re-runs its parent's question. Same events,
+    # same statement, same parent — only the operator differs, and the retry edge must vanish.
+    st = _retry_run(second_operator="improve")
+    assert st.cards["card-1"].retry_of is None
+    assert st.cards["card-1"].operator == "improve"
+    # It is still one BELIEF (identical wording), which is exactly the distinction being drawn: same
+    # question, genuinely different experiment.
+    assert st.cards["card-0"].belief_id == st.cards["card-1"].belief_id
+    [group] = grouped_beliefs(st)
+    assert group["card_ids"] == ["card-0", "card-1"]
+
+
+def test_retry_of_needs_the_parent_nodes_own_card_claim_not_its_evidence_membership():
+    # The edge is resolved through the parent NODE ROW's own `idea.card_id` — the same "its own work
+    # item" notion step 9 builds for the debug exemption — and deliberately NOT through
+    # `Card.evidence`, which is a WIDER set: the legacy statement-hash join attaches a node to a card
+    # by hypothesis wording alone, and such a node is evidence that was never that card's work item.
+    #
+    # Node 1 below is exactly that: it re-states card-0's hypothesis, names no card of its own, and so
+    # lands in card-0's evidence. card-1 debugs it. Reading the owner map off `evidence` would report
+    # `card-1 retries card-0`, which card-0 never authored — a lineage claim invented out of wording.
+    other = "a completely different research direction with its own wording"
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        _receipted_card_added("card-0", _RETRY_STATEMENT, operator="draft", at_node=0),
+        _node_for_card(0, "card-0", _RETRY_STATEMENT, operator="draft"),
+        ("node_evaluated", {"node_id": 0, "metric": 0.5}),
+        # node 1 states card-0's hypothesis with NO card_id of its own -> hash-joined evidence only.
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": _RETRY_STATEMENT}}),
+        ("node_failed", {"node_id": 1, "reason": "boom", "eval_seconds": 1}),
+        # …and the debug card carries its OWN wording, so it is not hash-joined into card-0 either.
+        _receipted_card_added("card-1", other, operator="debug", parents=(1,), at_node=2),
+        _node_for_card(2, "card-1", other, operator="debug", parents=(1,)),
+    ]))
+    assert st.cards["card-0"].evidence == [0, 1]          # node 1 IS card-0's evidence…
+    assert st.cards["card-1"].operator == "debug" and st.cards["card-1"].parent_ids == [1]
+    assert st.cards["card-1"].retry_of is None            # …and still NOT its work item
+
+
+def test_retry_of_follows_a_merged_owner_to_its_canonical_survivor():
+    # The owner map is canonicalized through `_canon`, like every other id join in the ledger. Without
+    # it a debug card whose parent node claims a card that consolidation later merged away would report
+    # the DEAD alias — which, because merged aliases are dropped from `st.cards`, silently degrades to
+    # no edge at all. The survivor is the honest answer and the one a board can render.
+    other = "an independently authored card that consolidation keeps"
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        _receipted_card_added("card-0", _RETRY_STATEMENT, operator="draft", at_node=0),
+        _node_for_card(0, "card-0", _RETRY_STATEMENT, operator="draft"),
+        ("node_failed", {"node_id": 0, "reason": "boom", "eval_seconds": 1}),
+        _receipted_card_added("card-2", other, operator="draft", at_node=1),
+        _node_for_card(1, "card-2", other, operator="draft"),
+        ("node_evaluated", {"node_id": 1, "metric": 0.4}),
+        # card-0 is consolidated INTO card-2; node 0 still names card-0 on its own row.
+        ("card_merged", {"canonical": "card-2", "aliases": ["card-0"]}),
+        _receipted_card_added("card-1", _RETRY_STATEMENT, operator="debug", parents=(0,), at_node=2),
+        _node_for_card(2, "card-1", _RETRY_STATEMENT, operator="debug", parents=(0,)),
+    ]))
+    assert "card-0" not in st.cards                # the alias is gone from the board…
+    assert st.cards["card-1"].retry_of == "card-2"  # …and the edge follows it to the survivor
+
+
+def test_belief_id_is_the_full_digest_and_is_what_the_belief_views_read():
+    # The key is the FULL sha256, never the short display `hypothesis_id`: two distinct statements can
+    # share a short id, and keying on that would silently merge unrelated beliefs.
+    st = _retry_run()
+    assert st.cards["card-0"].belief_id == hypothesis_statement_digest(_RETRY_STATEMENT)
+    assert st.cards["card-0"].belief_id != hypothesis_id(_RETRY_STATEMENT)
+
+    # Non-vacuity for the "one spelling" claim: re-point ONE card's published belief_id and both views
+    # must follow it. A view that re-derived the digest from `seed_statement` would ignore this and
+    # keep reporting a single group — which is precisely the drift the published field removes.
+    st.cards["card-1"].belief_id = "sha256-of-some-other-belief"
+    assert [g["card_ids"] for g in grouped_beliefs(st)] == [["card-0"], ["card-1"]]
+    # `open_research_beliefs` keys on the same field; give both cards an open, untested lane first.
+    for card in st.cards.values():
+        card.verdict, card.status, card.evidence = "open", "proposed", []
+    assert [c.id for c in st.open_research_beliefs()] == ["card-0", "card-1"]
+    st.cards["card-1"].belief_id = st.cards["card-0"].belief_id
+    assert [c.id for c in st.open_research_beliefs()] == ["card-0"]      # collapsed to ONE belief
+
+
+def test_belief_lineage_leaves_the_action_receipt_exactly_where_it_was():
+    # The invariant the whole change is bounded by: the action digest must keep binding the executable
+    # identity EXACTLY, and a card that cannot be claimed must still be refused at the mint. Rebuild
+    # each native card's claim action with the ENGINE's own constructor and re-derive its receipt —
+    # this is the same round trip `_prepare_existing_card_claim` performs before a claim is allowed.
+    from looplab.engine.card_reservation import CardReservationMixin
+
+    st = _retry_run()
+    for card in st.cards.values():
+        assert card.identity.kind == "native"
+        action = CardReservationMixin._card_claim_receipt_action(card)
+        assert card_action_digest(card.id, card.seed_statement, action) == card.identity.action_digest
+        assert card_ownership_receipt(card.id, card.seed_statement, action) == {
+            "v": 2, "card_id": card.id, "action_digest": card.identity.action_digest}
+
+    # …and neither new field is in either frozen digest preimage, so no already-issued receipt moves.
+    for fields in (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGEST_V2_FIELDS):
+        assert "belief_id" not in fields and "retry_of" not in fields
+
+
+def test_grouped_beliefs_unions_evidence_in_ascending_node_order():
+    # Every per-card `evidence` list is ascending (`_link_cards_to_nodes` walks `sorted(st.nodes)`).
+    # The union used to inherit `st.cards` order, which is lexicographic on card ids, so a belief held
+    # by card-9 and card-10 published `evidence: [10, 9]` — measured on `runs/spec-live-0804`.
+    from looplab.core.models import Card, RunState
+    seed = "one belief carried by two lexicographically misordered work items"
+    st = RunState(direction="max", goal="g")
+    st.cards = {                                  # card-10 FIRST, exactly as dict ordering delivers it
+        "card-10": Card(id="card-10", seed_statement=seed, statement=seed, verdict="tested",
+                        evidence=[10], status="evaluated"),
+        "card-9": Card(id="card-9", seed_statement=seed, statement=seed, verdict="tested",
+                       evidence=[9], status="evaluated"),
+    }
+    [group] = grouped_beliefs(st)
+    assert group["card_ids"] == ["card-10", "card-9"]   # membership stays in board (first-seen) order
+    assert group["evidence"] == [9, 10]                 # …the node ids do not

@@ -224,6 +224,14 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   to a valid terminal result. The Card board is the single research board (1 card = 1 hypothesis); the
   operator **+ Add** / **abandon** affordances write `hypothesis_added` / `hypothesis_updated` control
   events that seed and update cards.
+  Note the board still renders **one row per work item**, and a `debug` RETRY of a failed card is a
+  separate work item with its own action digest — correctly, since a repair build is a different
+  executable action. Two such rows therefore show the same hypothesis twice (measured live in
+  `runs/rubert-dr-0807`: a draft card and its debug retry, byte-identical but for `idea.operator`).
+  The fold now derives the join the board needs — `Card.belief_id` (the seed-statement digest two work
+  items share) and `Card.retry_of` (the card a debug card repairs) — but neither is on the wire yet:
+  `serve/public_cards.py::_FIELDS` is an explicit allow-list, so publishing them is a deliberate
+  separate step. Until then the board can group by the already-published `seed_statement`.
 - **Inspector context** — the Inspector is one component mounted from three hosts (the Lineage
   workspace, the Cards board's detail pane and the Concepts tree's), and it takes its host awareness
   as callbacks rather than a view name. **Show in Lineage** appears only when that jump goes

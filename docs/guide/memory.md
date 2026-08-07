@@ -399,10 +399,13 @@ after the durable claim.
 <!-- CODEX AGENT: "open hypotheses" now means every open Card work item, even when several native Cards
 share one seed belief. The live prompt renders immutable `seed_statement`, not the operator-edited
 `statement`; this table should not claim a single current belief projection until identity and edit
-semantics are defined consistently. The additive `grouped_beliefs()` projection has no production
-consumer, and it keys solely on collision-prone `hypothesis_id` even though replay already requires
-`hypothesis_statement_digest` to keep distinct colliding statements apart; using it now can merge unrelated
-beliefs and evidence. -->
+semantics are defined consistently. The belief KEY is no longer in question and this note used to say
+otherwise: `grouped_beliefs()` keys on the full `hypothesis_statement_digest`, never the collision-prone
+short `hypothesis_id`, and that digest is now PUBLISHED as the derived `Card.belief_id`
+(`events/card_ledger.py::_apply_card_belief_lineage`) so the projection, `RunState.open_research_beliefs()`
+and any future consumer read one spelling. `grouped_beliefs()` itself still has no production consumer.
+Beside it, `Card.retry_of` names the card a `debug` card is a REPAIR of — the same belief AND the same
+executable question, which is what made a debug retry render as a second identical hypothesis. -->
 
 | Methodology | What it does | Touches |
 |---|---|---|

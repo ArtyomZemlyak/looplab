@@ -1429,13 +1429,17 @@ class RunState(BaseModel):
         duplicates the model re-reads and re-ranks. The FIRST-seen no-evidence card per belief is the
         representative (deterministic over `self.cards` insertion order); its distinct work-item id is
         preserved for the caller's evidence joins. `grouped_beliefs` remains the FULL-board view that
-        aggregates evidence + verdict across a belief's cards."""
+        aggregates evidence + verdict across a belief's cards.
+
+        The key is `Card.belief_id`, published by the fold (`card_ledger.py::_apply_card_belief_lineage`)
+        so this method and `grouped_beliefs` provably group on ONE spelling; the inline fallback covers a
+        hand-assembled `RunState` that never went through `fold`."""
         seen: set[str] = set()
         out: list["Card"] = []
         for c in self.open_research_cards():
             if c.evidence:                  # untested only (mirrors the consumers' `if not c.evidence`)
                 continue
-            key = hypothesis_statement_digest(c.seed_statement)
+            key = c.belief_id or hypothesis_statement_digest(c.seed_statement)
             if key in seen:
                 continue
             seen.add(key)
