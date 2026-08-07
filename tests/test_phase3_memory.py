@@ -294,6 +294,44 @@ def test_agentic_merge_base_skips_noted(monkeypatch):
     assert out[0]["claim_stance"] == "support"
 
 
+def test_agentic_merge_dedups_evidence_by_run_id(monkeypatch):
+    # The two passes share `_verdict_base` so their VERDICT rule cannot drift; they must share the
+    # EVIDENCE rule for the same reason, and until 2026-08-07 they did not — the paraphrase pass
+    # summed member `evidence_count` raw while the exact pass deduped fresh same-run rows
+    # (`test_consolidate_dedups_evidence_by_run_id` above).
+    #
+    # This is the pass's OWN population, not an edge case: it exists to merge rows the exact key
+    # MISSES, and one run's two wordings of one finding ("raise the learning rate" from the mid-run
+    # `lessons_every` cadence, "increase the learning rate" from the run-end reflection) are exactly
+    # such a pair. Raw-summed, one run's single finding claimed two runs' corroboration —
+    # `evidence_count` is shown verbatim in the Memory panel as how many experiments back a claim.
+    import looplab.search.hybrid_merge as hm
+    from looplab.engine.memory import _agentic_merge_lessons
+    monkeypatch.setattr(hm, "consolidate",
+                        lambda texts, client, **kw: [{"members": list(range(len(texts))),
+                                                      "merged": "increase the LR"}])
+    same_run = [
+        {"statement": "raise the learning rate", "outcome": "supported", "task_id": "t", "run_id": "R"},
+        {"statement": "increase the learning rate", "outcome": "supported", "task_id": "t", "run_id": "R"},
+    ]
+    out = _agentic_merge_lessons(same_run, client=object())
+    assert len(out) == 1 and out[0]["statement"] == "increase the LR"
+    assert out[0]["evidence_count"] == 1, "one run's two wordings are ONE run's support"
+
+    # Two DISTINCT runs still accumulate genuine cross-run support — the dedup must not flatten that.
+    two_runs = same_run + [{"statement": "bump the LR", "outcome": "supported",
+                            "task_id": "t", "run_id": "S"}]
+    assert _agentic_merge_lessons(two_runs, client=object())[0]["evidence_count"] == 2
+
+    # A pre-consolidated member (evidence_count > 1) already folds several runs, so it keeps its
+    # stored weight even when a fresh row of its own run merges into it — same as the exact pass.
+    folded = [{"statement": "raise the learning rate", "outcome": "supported", "task_id": "t",
+               "run_id": "R", "evidence_count": 3},
+              {"statement": "increase the learning rate", "outcome": "supported", "task_id": "t",
+               "run_id": "R"}]
+    assert _agentic_merge_lessons(folded, client=object())[0]["evidence_count"] == 3
+
+
 def test_agentic_merge_legacy_outcomeless_row_is_inert(monkeypatch):
     # The paraphrase pass shares `_verdict_base` too: a NEWER legacy member without `outcome` must
     # not carry the merged row (pre-fix, the `outcome != "noted"` scan let it win and drop the

@@ -92,6 +92,18 @@ def test_governance_snapshot_of_missing_directory_is_empty_and_read_only(tmp_pat
         "split_revision": 0, "governance_revision": 0,
     }
     assert not missing.exists()
+    # `concept_governance_snapshot` builds its empty projection and its real one as two hand-written
+    # dict literals, and the only thing holding them to the same SHAPE is that they sit in one
+    # function. A key added to one alone hands the caller a snapshot whose fields depend on whether
+    # the directory happened to exist — and since callers pass the revisions straight back as a CAS
+    # approval receipt, a missing field is a silently weaker approval rather than an error. That is
+    # not hypothetical: `withdrawn` was added to both literals and this assertion was not moved with
+    # it, which left the exact-equality pin above red on master. Drive the invariant instead of
+    # re-pinning the literal, so the next field costs one line here and cannot go unnoticed.
+    real = tmp_path / "store"
+    real.mkdir()
+    record_concept_alias(str(real), from_concept="loss/a", to_concept="loss/b")
+    assert set(concept_governance_snapshot(real)) == set(concept_governance_snapshot(missing))
 
 
 def test_uid_follows_canonical_identity_not_display():

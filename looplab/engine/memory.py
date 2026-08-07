@@ -24,6 +24,7 @@ from looplab.core.receipts import bounded_receipt_count
 from looplab.engine.lesson_hygiene import (  # noqa: F401
     _NEGATIVE,
     _VERDICTS,
+    _accumulated_evidence,
     _agentic_merge_lessons,
     _lesson_index_text,
     _verdict_base,
@@ -141,7 +142,9 @@ def task_fingerprint(kind: str, direction: str, goal: str, metric: str = "",
 # gets in `parse_credit_lessons`. It is neither positive nor negative, so it must never quarantine
 # a "supported" duplicate nor add support to one (an unknown/legacy outcome behaves the same way:
 # not "supported" and not in this set == inert). The WRITE path honors the same neutrality via
-# `_verdict_base` (the shared base-row rule for `consolidate_lessons` / `_agentic_merge_lessons`).
+# `_verdict_base` / `_accumulated_evidence` (the two shared per-group rules that `consolidate_lessons`
+# and `_agentic_merge_lessons` must both apply — which row carries the verdict, and how much support
+# the group ends up claiming).
 _NEUTRAL = "noted"
 # The full verdict vocabulary a row can carry; anything outside it never wins a duplicate group.
 _CLAIM_STANCES = frozenset({"support", "oppose", "neutral"})
