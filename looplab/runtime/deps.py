@@ -587,6 +587,11 @@ _UNSATISFIED_RES = (
 # One pip run naming more distinct unresolvable requirements than this is not a stale line, it is a
 # broken index or an offline box — and that is a whole-install failure, which stays fatal.
 UNSATISFIED_CAP = 25
+# pip COLOURS its errors, and `_run_argv` captures the bytes as they came. Left in, the escape
+# sequences ride into a durable event and out to every reader of it — measured 2026-08-07 against
+# real pip, the captured reason ended `... (from versions: none)\x1b[0m\x1b[31m`. The receipt quotes
+# pip's WORDS; the terminal control codes are not part of them.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 # A directive naming another PATH (`-r base.txt`, `-e .`, `-f ./wheels`) resolves RELATIVE TO THE
 # FILE CONTAINING IT. A reduced copy written anywhere else would resolve those against the wrong
@@ -607,9 +612,12 @@ def unsatisfied_requirements(pip_output: str) -> dict[str, str]:
     The sentence is pip's own, quoted rather than paraphrased: the receipt has to say why a
     declaration was dropped in the words of the tool that refused it, or a reader cannot tell a
     stale line from a network outage."""
+    # Stripped BEFORE matching, not after: `(\S+)` would otherwise swallow a trailing colour reset
+    # into the distribution NAME, and that name is what the reducer matches declaration lines on.
+    text = _ANSI_RE.sub("", pip_output or "")
     out: dict[str, str] = {}
     for rx in _UNSATISFIED_RES:
-        for m in rx.finditer(pip_output or ""):
+        for m in rx.finditer(text):
             named = _REQ_NAME_RE.match(m.group(1))
             if not named:
                 continue

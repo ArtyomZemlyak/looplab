@@ -346,6 +346,22 @@ def test_pip_s_two_spellings_of_unresolvable_name_it_once():
     assert "(from versions: none)" in got["ecom-mlflow"]
 
 
+def test_pip_s_colour_codes_never_reach_the_durable_record():
+    """Measured against real pip 2026-08-07: the captured reason ended
+    `... (from versions: none)\\x1b[0m\\x1b[31m`, which would ride into a durable event and out to
+    every reader. Stripped BEFORE matching, or `(\\S+)` swallows a colour reset into the NAME — and
+    that name is what the reducer matches declaration lines on."""
+    coloured = ("\x1b[31mERROR: Could not find a version that satisfies the requirement "
+                "ecom-mlflow (from versions: none)\x1b[0m\x1b[31m\n\x1b[0m"
+                "\x1b[31mERROR: No matching distribution found for ecom-mlflow\x1b[0m\n")
+    got = deps.unsatisfied_requirements(coloured)
+    assert list(got) == ["ecom-mlflow"], "a colour reset was swallowed into the distribution name"
+    assert "\x1b" not in got["ecom-mlflow"]
+    assert got["ecom-mlflow"].endswith("(from versions: none)")
+    # …and the name still matches the declaration, which is the whole point of stripping early.
+    assert "ecom-mlflow" in deps.parse_requirements(_LIVE_SHAPES + "ecom-mlflow\n")[0]
+
+
 def test_a_failure_with_no_per_requirement_reason_names_nothing():
     """The whole gate. A crashed pip, a dead index, a bare non-zero exit — none of these name a
     requirement, so none of them can be turned into a partial install."""
