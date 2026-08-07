@@ -481,6 +481,10 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
 - **Fix only the broken stage** — re-run the node *from* a stage (the Overview's clickable "eval
   pipeline" strip, `reset(stage)` in chat, or a `node_reset` with the stage name): earlier stages are
   marked *reused* and skipped, so a failed `eval` is fixed in seconds without paying to re-`train`.
+  A *reused* marker never erases the stage's real record: every repair attempt appends its own
+  `stage_finished` rows and the fold keeps the informative one, so `train ok / 6900 s` still reads as
+  a train that happened. (Before 2026-08-07 only the LAST attempt's rows were written, so a reused
+  stage folded to `reused / exit 0 / 0.0 s` and replay could not tell it from a stage that never ran.)
 - **Optional inter-stage verify** — a stage flagged `"check": true` hands its output to an agentic
   checker (Researcher/Developer) before the next stage runs; a concern stops the pipeline early so a
   diverged train can't silently feed eval.
