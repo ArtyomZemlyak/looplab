@@ -210,6 +210,45 @@ def test_a_non_stdout_metric_reader_gets_the_other_hint():
     assert "check the eval's metric reader" in text and "print(json.dumps(" not in text
 
 
+# The stage name is the one fact `Developer.repair` cannot get anywhere else: it receives this
+# string and nothing more (`failed_stage` rides only on the TERMINAL, appended after the repair loop
+# is over). `command_eval._run_stages` puts its marker at the FRONT of the stderr and this rule
+# takes the last 500 characters — so on a REAL traceback the name was simply gone. Measured on
+# runs/rubert-dr-0807: 9 of 12 `node_repaired.error_in` rows carried no stage name.
+
+def _staged_stderr(stage: str, body: str) -> str:
+    """Exactly what `command_eval._run_stages` builds for a failed stage."""
+    return f"stage '{stage}' failed:\n{body}"
+
+
+def test_a_traceback_longer_than_the_tail_still_names_the_stage():
+    text = _failure_text(_res(stderr=_staged_stderr("mine", "X" * 900 + "\nValueError: boom\n"),
+                              failed_stage="mine", exit_code=1))
+    assert "mine" in text, (
+        "the 500-char stderr TAIL cuts off the front-anchored `stage '<name>' failed:` marker, so "
+        "the repair model was told to fix a pipeline without being told which stage of it broke")
+    assert "ValueError: boom" in text, "the tail must keep its full budget, not be spent on the tag"
+
+
+def test_a_short_stage_failure_is_not_tagged_twice():
+    """A stderr short enough to keep its own marker reads exactly as it did before this rule."""
+    raw = _staged_stderr("score", "python: can't open file 'looplab_eval.py'\n")
+    assert _failure_text(_res(stderr=raw, failed_stage="score", exit_code=2)) == raw
+
+
+def test_a_single_command_eval_is_byte_identical():
+    """No pipeline, no `failed_stage`, nothing to name — the overwhelming majority of evals."""
+    assert _failure_text(_res(stderr="Traceback...\nZeroDivisionError\n")) == (
+        "Traceback...\nZeroDivisionError\n")
+
+
+def test_a_stage_that_failed_silently_is_named_by_the_fallback_too():
+    """The case where the stage name is the ONLY information there is: a stage that produced no
+    stderr at all. Tagging only the stderr branch would have left this one anonymous."""
+    text = _failure_text(_res(stderr="   \n ", failed_stage="prep", exit_code=1))
+    assert "prep" in text and "no_metric" in text
+
+
 # ---------------------------------------------- a repair may refine, never grow onto a sibling GPU
 
 class _FootprintHost:

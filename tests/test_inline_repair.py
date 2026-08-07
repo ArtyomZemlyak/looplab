@@ -683,6 +683,83 @@ def test_loop_renamed_later_stage_repair_still_consumes_retrain_cap(tmp_path, mo
     assert "full re-train" in failed[0].data.get("triage_rationale", "")
 
 
+# ------------------------------------------ what the LOG says a REPAIRED node's pipeline actually did
+# `stage_finished` used to be appended once per NODE — after the attempt loop, from the LAST
+# attempt's result. So the moment the reuse predicate started skipping a completed earlier stage,
+# the ONLY record that stage ever got was the next attempt's zero-work `reused` marker. The fold
+# carries a guard written for exactly that failure ("a reused marker must NOT clobber that attempt's
+# REAL completion record ... else the node reads as if it trained in 0s") and it was VACUOUS: its
+# test in test_events_replay.py builds the real record by hand, and no writer ever produced one.
+# Live on runs/rubert-dr-0807: a node that trained for ~6,900 s folded to
+# `train reused / exit 0 / 0.0 s`, and a Developer-declared `mine` stage that ran four times (two
+# crashes, then two successes) folded to `mine reused / 0.0 s` — on replay, indistinguishable from a
+# stage that never ran at all, which is how a silently skipped pipeline reads as a healthy one.
+
+def _fail_score_after_real_train(stderr, train_seconds=6900.0):
+    """train genuinely completed, and cost real wall-clock; the protected score stage then crashed."""
+    from looplab.runtime.sandbox import RunResult
+    return RunResult(exit_code=1, stdout="", stderr=stderr, metric=None, timed_out=False,
+                     failed_stage="score",
+                     stages=[{"name": "train", "status": "ok", "exit_code": 0,
+                              "seconds": train_seconds},
+                             {"name": "score", "status": "fail", "exit_code": 1, "seconds": 0.06}])
+
+
+def _ok_eval_reusing_train():
+    """The re-eval the safe-reuse predicate produced: train SKIPPED, the fixed score stage passing.
+    This is the shape whose `reused` marker used to be the node's whole pipeline record."""
+    from looplab.runtime.sandbox import RunResult
+    return RunResult(exit_code=0, stdout='{"metric": 1.0}', stderr="", metric=1.0, timed_out=False,
+                     stages=[{"name": "train", "status": "reused", "exit_code": 0, "seconds": 0.0},
+                             {"name": "score", "status": "ok", "exit_code": 0, "seconds": 0.1}])
+
+
+def _staged_rows(run_dir):
+    return [e.data for e in _events(run_dir) if e.type == "stage_finished"]
+
+
+def test_loop_a_reused_marker_never_erases_the_train_that_really_ran(tmp_path, monkeypatch):
+    """The folded state an operator (and every replay) reads must still show the REAL train."""
+    captured = []
+    results = [_fail_score_after_real_train("ModuleNotFoundError: No module named 'alpha'"),
+               _ok_eval_reusing_train()]
+    dev = _StagedDev(fixes=[{"looplab_eval.py": "print('score v1')\n"}])
+    eng = _staged_engine(tmp_path / "run", _staged_src(tmp_path), dev, monkeypatch, captured, results)
+    anyio.run(eng.run)
+    assert captured == [None, "score"], "precondition: reuse really did skip the train stage"
+
+    n = fold(_events(tmp_path / "run")).nodes[0]
+    assert n.status is NodeStatus.evaluated and n.metric == 1.0
+    train = next(s for s in n.stages if s["name"] == "train")
+    assert (train["status"], train["seconds"]) == ("ok", 6900.0), (
+        "the node's own log says it reused a train it has no record of ever running — replay "
+        "cannot tell a completed-and-reused stage from one that never ran, which is exactly what "
+        "the fold's reused-marker guard exists to prevent")
+
+
+def test_loop_every_attempts_pipeline_outcome_reaches_the_log_exactly_once(tmp_path, monkeypatch):
+    """The durable rows, not just the fold: each attempt contributes its own pipeline record, and
+    the failed attempt's `score` crash survives even though the node ends up evaluated. The exact
+    count is asserted because re-adding the old post-loop append would double every row while every
+    fold-level assertion above stayed green (the fold is last-wins by name)."""
+    captured = []
+    results = [_fail_score_after_real_train("ModuleNotFoundError: No module named 'alpha'"),
+               _ok_eval_reusing_train()]
+    dev = _StagedDev(fixes=[{"looplab_eval.py": "print('score v1')\n"}])
+    eng = _staged_engine(tmp_path / "run", _staged_src(tmp_path), dev, monkeypatch, captured, results)
+    anyio.run(eng.run)
+
+    rows = _staged_rows(tmp_path / "run")
+    assert [(r["name"], r["status"]) for r in rows] == [
+        ("train", "ok"), ("score", "fail"),          # attempt 1: trained, then the scorer crashed
+        ("train", "reused"), ("score", "ok")], (     # attempt 2: train skipped, fixed scorer passed
+        "one stage record per stage per ATTEMPT, in order — no more (a second append at the "
+        "terminal), no fewer (the old once-per-node write, which kept only the last attempt)")
+    # Every row lands BEFORE the terminal, which is the ordering the fold + trace depend on.
+    types = [e.type for e in _events(tmp_path / "run")]
+    assert types.index("node_evaluated") > len(types) - 1 - types[::-1].index("stage_finished")
+
+
 # #5 — the error-feedback repair loop fires for a repo task even when the failing node had
 #      empty files (e.g. after a baseline fallback)
 def test_repair_fires_for_repo_with_empty_files(tmp_path):
