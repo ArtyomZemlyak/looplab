@@ -31,6 +31,14 @@ _LOG = logging.getLogger(__name__)
 # silently dropped — see `_record_declared_deps`.
 _DECLARED_PINS_CAP = 400
 
+# How many DISTINCT dependency declarations one run may install (the run's own baseline counts as
+# the first). The digest gate and the seen-set already stop repetition; this bounds VARIETY, which
+# is what an agent that rewrites requirements.txt every node produces. A module constant rather than
+# a `Settings` field, matching its sibling bound `engine/triage.py::_MAX_DEP_ROUNDS`: both are
+# runaway guards on the same shared interpreter, and neither is a knob an operator tunes — the knob
+# is `auto_install_deps`, which turns the whole capability off.
+_MAX_NODE_DEP_SYNCS = 8
+
 
 class EvalDispatchMixin:
     """The engine's eval-dispatch cluster. See the module docstring for the mixin convention
@@ -93,7 +101,10 @@ class EvalDispatchMixin:
         "operator_run_setup",    # the operator wrote their own run_setup — it wins, untouched
         "auto_install_disabled",  # auto_install_deps=false: the operator owns this environment
         "refused_untrusted_tier",  # a declaration exists but this tier runs --network none
-        "nothing_declared")      # nothing we act on (`observed` may still name what we saw)
+        "nothing_declared",      # nothing we act on (`observed` may still name what we saw)
+        "node_resync",           # a node's declaration differs from the run's — the Developer's ask
+        "node_resync_failed",    # …and installing it did not succeed (the node evals unchanged)
+        "node_resync_capped")    # …and this run has spent `_MAX_NODE_DEP_SYNCS`; refused
 
     def _repo_deps_root(self) -> str:
         """The directory whose dependency declaration governs this run: the first editable repo's
@@ -101,6 +112,85 @@ class EvalDispatchMixin:
         command is `-r <basename>`, which only resolves if it runs where the file was found."""
         eds = (self._repo_spec or {}).get("editables", [])
         return eds[0]["path"] if eds else str(self.run_dir)
+
+    def _node_deps_root(self, workdir) -> str:
+        """Where the SAME repo's declaration lives inside a node's workdir — the mirror of
+        `_repo_deps_root`. The single-repo shorthand mounts at the workspace root (`name == "."`);
+        an `editables` entry mounts under its own subdir, so the file the agent edited is at
+        `<workdir>/<name>/requirements.txt`, not at the workspace root."""
+        eds = (self._repo_spec or {}).get("editables", [])
+        name = (eds[0].get("name") or ".") if eds else "."
+        base = Path(str(workdir))
+        return str(base if name in (".", "") else base / str(name).rstrip("/"))
+
+    def _sync_node_deps(self, workdir) -> None:
+        """Install this NODE's dependency declaration when the Developer changed it.
+
+        THE DELIBERATE-CHANGE PATH. The owner's requirement is that a Developer wanting a new
+        library or a different version rewrites the requirements file and the deps get reinstalled.
+        The write half already worked — `requirements.txt` is an ordinary file in the edit surface
+        (under the composable `repo:` default `["**/*"]`; NOT under the direct `RepoTask` default
+        `["**/*.py"]` — see `_record_declared_deps`, which reports which). The read half did not
+        exist: nothing re-read the file, so an edit was inert and the agent's only feedback was the
+        same ImportError it started with.
+
+        WHAT STOPS IT THRASHING THE ENVIRONMENT, in order:
+          1. **A content DIGEST, not a timestamp.** A node whose declaration is byte-identical to
+             the one the run already installed does nothing at all — no subprocess, no event, no
+             lock. That is the overwhelmingly common case (every node inherits the file unchanged),
+             so the steady-state cost of this hook is one small read and a sha256.
+          2. **A per-run SET of digests already installed.** A node that reverts to an earlier
+             file is a no-op too, so an agent oscillating between two dependency sets pays once for
+             each, not once per node.
+          3. **A hard per-run cap** (`_MAX_NODE_DEP_SYNCS`). 1 and 2 bound repetition, not variety:
+             an agent that appends a distinct comment line each node produces a new digest every
+             time. The cap is what makes that terminate, and the refusal is RECORDED so it reads as
+             a bound being hit rather than the edit being ignored.
+          4. **`_dep_lock`.** pip is not concurrency-safe and this is a shared interpreter; the
+             crash-time installer already serializes on this lock, so the two cannot interleave.
+
+        WHAT THIS IS NOT: a per-node environment. The install lands in the interpreter EVERY
+        concurrent eval shares, so a node that changes a version changes it under its siblings.
+        That is not a new hazard — `crash_repair` has pip-installed into this same shared
+        interpreter from a worker thread since it was written — but it is the reason the honest
+        answer here is a per-node venv, which is deliberately out of scope. The bound above plus the
+        `deps_declared` receipt make the exposure visible and finite rather than silent.
+
+        Best-effort throughout: a failed install is recorded and the node evaluates against the
+        unchanged environment (its own crash then drives the normal repair path). It must not abort
+        the RUN the way a failed run-setup does — a run-setup failure means the operator's
+        environment never came up, while this one means one node's speculative dependency edit did
+        not take."""
+        if not getattr(self, "_auto_install_deps", False):
+            return
+        from looplab.runtime import deps
+        base = self._declared_deps()
+        node_decl = deps.find_declaration(self._node_deps_root(workdir))
+        if not node_decl.found or node_decl.digest == base.digest:
+            return                       # gate 1: unchanged — the common path, and it costs nothing
+        seen = getattr(self, "_deps_synced_digests", None)
+        if seen is None:
+            seen = self._deps_synced_digests = {base.digest} if base.digest else set()
+        if node_decl.digest in seen:
+            return                       # gate 2: this exact file was already installed this run
+        seen.add(node_decl.digest)
+        if len(seen) > _MAX_NODE_DEP_SYNCS:
+            self._record_declared_deps(node_decl, "node_resync_capped", [])
+            return                       # gate 3: variety bound
+        argv = deps.declaration_argv(node_decl, python=getattr(self.sandbox, "python", None))
+        from looplab.runtime.sandbox import _run_argv
+        log = str(Path(self.run_dir) / "run_setup.log")   # same log as run-setup: one install story
+        with self._dep_lock:                              # gate 4: serialize with the crash installer
+            rc, out, err, timed = _run_argv(argv, node_decl.root, self._dep_install_timeout,
+                                            log_path=log)
+        if rc != 0 or timed:
+            _LOG.warning("node dependency re-sync failed (exit=%s, timed_out=%s); the node evaluates "
+                         "against the unchanged environment — see %s", rc, timed, log)
+        # The declaration we CACHE stays the run's baseline: the node's file is what a node asked
+        # for, not what the repo declares, and adopting it would make the next node's diff read
+        # against a sibling's speculative edit rather than against the source tree.
+        self._record_declared_deps(node_decl, "node_resync" if (rc == 0 and not timed)
+                                   else "node_resync_failed", argv)
 
     def _declared_deps(self):
         """This run's `runtime.deps.Declaration`, read once and cached.
@@ -322,6 +412,11 @@ class EvalDispatchMixin:
             params = node.idea.params if node is not None else {}
             cmd, timeout = command_eval.build_command(es, params, prof)
             root = str(Path(workdir).resolve())               # repo/workdir root
+            # The Developer's deliberate-change path: if THIS node's dependency declaration differs
+            # from the one the run installed, install it before the eval. Digest-gated, so the
+            # unchanged case (every node that did not touch the file) costs one read — see
+            # `_sync_node_deps` for the four bounds and for why this is not a per-node environment.
+            self._sync_node_deps(root)
             stages = self._resolve_stages(root, es, params,   # cmd-authoritative pipeline (+ %params% per stage)
                                           score_cmd=cmd, score_timeout=timeout)  # profile/timeout survive pipeline mode
             check_fn = (self._stage_check_fn(node)            # Phase 3: inter-stage verify (only if any stage asks)
