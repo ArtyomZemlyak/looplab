@@ -60,6 +60,19 @@ _REPO_DEV_SYSTEM_INTRO = (
     "implementation: the researcher proposed the experiment CONCEPT and "
     "hyperparameters; YOU decide how to realise it in code — which existing scripts to "
     "orchestrate, the stage structure, and how to compute + read the metric. ")
+# 2026-08-07: the "THAT FILE MUST EXIST in the workspace after your edits" rule below carries exactly
+# one carve-out — "unless the operator PROTECTED an existing scorer, which you must NOT rewrite" — and
+# that sentence is only TRUE because `engine/workspace.py::seed_protected_files` materializes the
+# operator's `protect` entries into every node workdir. It was NOT true before: `seed_mode="auto"`
+# seeds git-TRACKED files, so an uncommitted protected scorer was simply absent and this clause is
+# what told the model not to check. The model could not have checked usefully anyway — every view it
+# has of "the repo" (`_repo_context`, `_recipes`, `_results_context` and the `_scout_tools` scouts) is
+# rooted at the editable SOURCE, never at the node workdir the eval runs in, so `read_file` answers
+# for a filesystem the command never sees. Measured on runs/rubert-dr-0807 node 2: while the score
+# stage was dying on `can't open file '<workdir>/looplab_eval.py'`, the repair session's
+# `read_file("looplab_eval.py")` returned the file, and its two `write_file("looplab_eval.py")`
+# attempts were both refused by the write gate — the loop had no move left. If seeding ever stops
+# covering `protect`, this sentence becomes a lie again and the repair loop becomes unbounded.
 _REPO_DEV_SYSTEM_BODY = (
     "The repository's key source files are PREVIEWED below (each is TRUNCATED to save space). This is "
     "a preview, NOT the full code — to read a whole file or find an exact symbol/flag/signature, use "
