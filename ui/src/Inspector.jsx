@@ -1306,7 +1306,7 @@ function StageBlock({ s, t0, total, runId }) {
 // a keyboard user pressing Page Up, since that scrolls the container too — but a screen-reader user
 // driving a virtual cursor never scrolls it and would have no path to the earlier steps at all.
 function TraceReach({ state, notice, onReach, failed = false }) {
-  const { sentinelRef, onReachFocus } = useTraceScroll({ state, onReach })
+  const { sentinelRef, onReachFocus } = useTraceScroll({ state, onReach, failed })
   if (state === TRACE_SCROLL_SETTLED) return null
   if (state === TRACE_SCROLL_BOUNDED) {
     return <div className="notice compact" role="status">{notice} {traceScrollBoundedSuffix}</div>
@@ -1508,6 +1508,11 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
   const [read, setRead] = useState(null)
   const [reachFailed, setReachFailed] = useState(false)
   const [logs, setLogs] = useState({})   // {eval, stages:{train,score,…}} — the live stage/eval logs
+  // A ref mirror of the settled read, so the outcome below is computed OUTSIDE a setState updater.
+  // `usePoll` serializes ticks (one read unsettled at a time), so this is never behind; and an
+  // updater that calls another setState is impure — React may invoke it twice.
+  const readRef = useRef(null)
+  readRef.current = read
   useEffect(() => {
     setRead(null)   // node changed → clear before the first load (poll ticks below don't clear, so no flash)
     setLogs({})     // …likewise the logs, else B's stage bands briefly render A's log text
@@ -1517,33 +1522,37 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
   // for older steps took away the ones already on screen. The poll below still re-runs on it.
   }, [runId, n.id, working, reloadNonce])
   usePoll((alive) => {
+    // ONE settle rule for both outcomes below, so the deadline path and the rejected-response path
+    // cannot disagree about what a failure costs the operator.
+    const commit = (ok, payload) => {
+      const previous = readRef.current
+      const settled = settleTraceRead(previous?.payload, { ok, payload })
+      setReachFailed(settled.reachFailed === true)
+      if (settled.unavailable) {
+        setRead({ payload: { stages: [], projection: { unavailable: true } },
+          window: spanLimit, visible: 0 })
+        return
+      }
+      // A kept payload keeps its OWN window: recording the window we failed to reach would read as
+      // "that read landed", and the next widen would then look like no widen at all.
+      if (settled.reachFailed) return
+      const visible = settled.payload?.projection?.visible_turns
+      const next = { payload: settled.payload, window: spanLimit,
+        visible: Number.isSafeInteger(visible) && visible >= 0 ? visible : 0 }
+      setRead({ ...next, stalled: traceWidenStalled(previous, next) })
+    }
     const timed = deadlineRequest(signal => Promise.allSettled([
         nodeConversation(runId, n.id, { signal, limit: spanLimit }),
         get(runNodeApiPath(runId, n.id, '/logs'), { signal, cache: 'no-store' }),
       ]), traceReadDeadlineMs(spanLimit))
     timed.promise.then(([conversation, logs]) => {
       if (!alive()) return
-      setRead(previous => {
-        const settled = settleTraceRead(previous?.payload, {
-          ok: conversation.status === 'fulfilled',
-          payload: conversation.value || { stages: [] },
-        })
-        setReachFailed(settled.reachFailed === true)
-        if (settled.unavailable) return { payload: { stages: [], projection: { unavailable: true } },
-          window: spanLimit, visible: 0 }
-        // A kept payload keeps its OWN window: recording the window we failed to reach would read as
-        // "that read landed", and the next widen would then look like no widen at all.
-        if (settled.reachFailed) return previous
-        const visible = settled.payload?.projection?.visible_turns
-        const next = { payload: settled.payload, window: spanLimit,
-          visible: Number.isSafeInteger(visible) && visible >= 0 ? visible : 0 }
-        return { ...next, stalled: traceWidenStalled(previous, next) }
-      })
+      commit(conversation.status === 'fulfilled', conversation.value || { stages: [] })
       if (logs.status === 'fulfilled') setLogs(logs.value || {})
-    }).catch(() => {
-      if (alive()) setRead(previous => previous
-        || { payload: { stages: [], projection: { unavailable: true } }, window: spanLimit, visible: 0 })
-    })
+    // `allSettled` never rejects, so this branch is the DEADLINE — which is exactly the failure a
+    // widened read hits. Routing it through the same `commit` is what stops a timed-out widen from
+    // silently keeping the old payload with nothing said about it.
+    }).catch(() => { if (alive()) commit(false, null) })
     return timed
   }, working ? 4000 : null,   // interval only while the agent works this node (live-refresh); null = load once
   [runId, n.id, working, reloadNonce, spanLimit])   // reloadNonce also re-runs a finished node's one-shot load

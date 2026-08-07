@@ -142,11 +142,17 @@ export function useNodeSpanWindow() {
 // the top, so leaving `scrollTop` where it is puts the newly revealed OLDER steps exactly where they
 // were looking. Restoring their old offset instead would push what they just asked for off-screen,
 // and would fight `StageLog`'s live auto-tail for the same scroll container.
-export function useTraceScroll({ state, onReach }) {
+export function useTraceScroll({ state, onReach, failed = false }) {
   const observer = useRef(null)
   const armed = useRef(true)
   const latest = useRef(null)
   latest.current = { state, onReach }
+  // A widen that FAILED must spend the budget, and this is not the same as the spend at reach time:
+  // the operator goes on scrolling while the read is in flight, which re-arms it. Without this, a
+  // route that is failing gets re-asked on the very next intersection, forever, at seconds per call.
+  useEffect(() => {
+    if (failed) armed.current = armTraceScroll(armed.current, 'fail')
+  }, [failed])
   const reach = () => {
     const now = latest.current || {}
     if (!shouldWidenOnReach({ state: now.state, armed: armed.current })) return
@@ -182,9 +188,6 @@ export function useTraceScroll({ state, onReach }) {
       armed.current = armTraceScroll(armed.current, 'focus')
       reach()
     },
-    // A widen that failed spends the budget rather than leaving the observer to retry on every
-    // tick against a route that costs seconds per call.
-    notifyReachFailed: () => { armed.current = armTraceScroll(armed.current, 'fail') },
   }
 }
 
