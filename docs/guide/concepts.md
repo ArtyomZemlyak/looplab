@@ -586,9 +586,12 @@ untrusted tier.
   roles call no LLM (`--backend toy`), a policy other than `greedy`, a run directory with no run id —
   rather than refusing the run the way a spelled depth would. This is the half of the Card lane that
   `card_driven_selection` alone does not buy: speculation needs both, and at depth `0` nothing
-  pre-builds — but the queue itself is still maintained and still selects, because minting Card
-  inventory has belonged to `card_driven_selection` alone since 2026-08-07 (before that, an AUTO
-  depth settling to `0` silently reverted the run to `policy.next_actions`). A prediction that misses is discarded *before* it reaches a sandbox — a
+  pre-builds. What depth `0` does **not** switch off is the queue itself — minting Card inventory and
+  selecting from it has belonged to `card_driven_selection` alone since 2026-08-07, so a settled-to-0
+  run still works the board and just builds each selected Card serially. Before that date it did not,
+  and an AUTO depth settling to `0` silently reverted the run to `policy.next_actions` while
+  `run_started` still recorded `card_driven_selection: true`.
+  A prediction that misses is discarded *before* it reaches a sandbox — a
   `node_failed(reason=superseded)` with zero eval seconds — and its node-budget slot is refunded when
   it can prove it never ran. See
   [what blocked speculation from being the default](configuration.md#what-blocked-speculation-from-being-the-default-fixed-2026-08-05).
