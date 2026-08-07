@@ -1759,14 +1759,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     ),
                 )
                 if stageable:
-                    # Author one work item at a time. The live depth is filled by the isolated
-                    # steady-state proposer while eval runs; staging an unreserved wide seed
+                    # WITH PREFETCH: author one work item at a time. The live depth is filled by the
+                    # isolated steady-state proposer while eval runs; staging an unreserved wide seed
                     # batch here only creates stale inventory if the first fast eval moves best.
-                    # With prefetch OFF there is no steady-state proposer, and one-at-a-time is
-                    # still right: the next turn selects this Card and builds it serially, so the
-                    # queue is exactly one node deep and no inventory can go stale unbuilt.
-                    one = stageable[:1]
-                    if self._stage_card_creates(one, state):
+                    #
+                    # WITHOUT PREFETCH: stage the WHOLE lane. There is no steady-state proposer to
+                    # fill the depth, and the argument against a wide batch does not apply — it needs
+                    # an eval to finish between the staging and the selection, and on this path
+                    # nothing is in flight (`_dispatch_evals` is awaited, and a turn with `creates`
+                    # dispatches nothing). Truncating to one here would instead SERIALIZE every batch
+                    # the run would otherwise have built at once: the rung-0/seed width, and the
+                    # population lane of `evolutionary`/`mcts`/`asha` — none of which ever reached
+                    # this code before, because AUTO settles the depth to 0 for a non-greedy policy
+                    # and a spelled depth is refused there. `_stage_card_creates` already has the
+                    # multi-draft lane (one shared-Researcher diversity pass), `forced_card_actions`
+                    # hands back up to `width` ready drafts, and `_claim_existing_card_builds` claims
+                    # the complete lane in one tail-CAS group — so the batch shape survives the queue
+                    # rather than being flattened by it.
+                    lane = stageable if not self._speculation_enabled() else stageable[:1]
+                    if self._stage_card_creates(lane, state):
                         return "continue", state, _no_mint_turns
                     if self._create_paused:
                         # …but a staging attempt that GATED the run is not a "rejected" one. The

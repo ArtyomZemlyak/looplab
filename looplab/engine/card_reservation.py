@@ -43,6 +43,7 @@ from typing import NamedTuple, Optional
 
 import orjson
 
+from looplab.agents.roles import is_researcher_fallback
 from looplab.core.advisory_payloads import bounded_cross_run_advisory_receipt
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (Idea, RunState, card_action_digest, card_ownership_receipt,
@@ -101,9 +102,20 @@ class CardReservationMixin:
 
         The reason string is TRUNCATED and defaulted here rather than at three call sites: a card
         whose reason silently became the empty string reads on the board as a drop with no cause.
+
+        A DEGRADED FALLBACK is skipped, because it is not a rejected proposal — it is the ABSENCE of
+        one (`agents/roles.py::is_researcher_fallback`; the whole rule is in
+        `tests/test_proposal_provider_crash.py`). Recording it here would put the transport error on
+        the durable Card board as a hypothesis STATEMENT, which is the exact poisoning
+        `_refuse_degraded_proposal` exists to stop — five such rows per turn against a dead provider,
+        measured. It was unreachable while the only caller staged one action at a time (a one-action
+        lane never enters `_consume_batch_proposal`); widening the prefetch-off lane to the whole
+        batch on 2026-08-07 made it reachable, so the guard belongs on the writer, not on the caller.
         """
         for drop in dropped or []:
             if isinstance(drop, dict) and isinstance(drop.get("idea"), Idea):
+                if is_researcher_fallback(drop["idea"]):
+                    continue
                 self._record_node_less_card(
                     drop["idea"],
                     reason=str(drop.get("reason") or "proposal_rejected")[:160],
