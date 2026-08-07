@@ -163,8 +163,12 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   ])
   assert.match(inspector, /const unavailable = traceUnavailable\(conv\.projection\)[\s\S]*?if \(unavailable\) return <TraceUnavailable[\s\S]*?if \(!stages\.length\)/,
     'conversation unavailable must win over the ordinary empty state')
+  // BOTH outcomes go through one `commit`. `Promise.allSettled` never rejects, so the `.catch` is
+  // the DEADLINE — the failure a widened read actually hits (17.3 s measured at the ceiling) — and
+  // a second settle path there is how it went back to saying nothing. The behaviour itself is
+  // driven in inspectorTracePager.test.js; this only holds the single-path shape.
   assert.match(inspector,
-    /const settled = settleTraceRead\(previous\?\.payload, \{[\s\S]*?ok: conversation\.status === 'fulfilled',[\s\S]*?catch\(\(\) => \{[\s\S]*?setRead\(previous => previous[\s\S]*?projection: \{ unavailable: true \}/,
+    /const settled = settleTraceRead\(previous\?\.payload, \{ ok, payload \}\)[\s\S]*?if \(settled\.unavailable\) \{[\s\S]*?projection: \{ unavailable: true \}[\s\S]*?commit\(conversation\.status === 'fulfilled'[\s\S]*?\.catch\(\(\) => \{ if \(alive\(\)\) commit\(false, null\) \}\)/,
     'conversation failures route through the ONE settle rule: unavailable only with nothing in hand')
   assert.match(inspector, /if \(!spans\.length && !agent\)[\s\S]*?if \(unavailable\)[\s\S]*?<TraceUnavailable[\s\S]*?if \(spanWindow\.kind !== 'complete'\)[\s\S]*?TRACE_PARTIAL_EMPTY_NOTICE[\s\S]*?No execution spans/,
     'an empty node trace must check unavailable and the window before successful empty')
