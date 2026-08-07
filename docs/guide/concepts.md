@@ -91,6 +91,12 @@ never read as "these lines are everything the repo asked for" when part of it po
 looked. `run_setup_finished` then carries `env_delta`: for every distribution the repo declares, the
 version before and after. Honouring a pin can move a shared interpreter *backwards* — the version the
 repo asked for is not always the newest one present — and that has to be visible rather than inferred.
+Beside it, `dropped_requirements` names any declaration LoopLab could **not** honour: the declared
+line and pip's own sentence refusing it, one entry per line. A repo whose requirements file carries a
+line no reachable index serves is installed without it rather than refused outright (a deliberate,
+reversible choice — see `auto_install_deps` in [Configuration](configuration.md) for exactly what
+still aborts), and these two fields together are how an operator reads "we honoured 20 of 21
+declarations, and here is the one we did not" without opening a log.
 `deps_installed` covers the other, narrower mechanism (the crash-time installer for a library a
 traceback reports missing) and carries the same detail per package under `resolved`: which requirement
 string pip was handed, what the repo declared for it, and the before/after versions. Neither event is
