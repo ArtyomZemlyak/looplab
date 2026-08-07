@@ -2117,8 +2117,13 @@ def _fake_eval_engine(store, cmd, trust_mode="trusted_local"):
             self._run_setup_lock = threading.Lock()
             self.ran: list = []
 
-        def _do_run_setup(self, c):
+        # `declared` joined the real signature when LoopLab learned to install a repo's own
+        # declaration at run start; the double must accept it or `_ensure_run_setup` raises a
+        # TypeError from inside the setup thread. Recorded alongside the argv rather than dropped:
+        # what a double swallows is exactly what stops being observable.
+        def _do_run_setup(self, c, declared=None):
             self.ran.append(c)      # record instead of actually installing
+            self.declared = declared
 
     return _FakeEngine()
 

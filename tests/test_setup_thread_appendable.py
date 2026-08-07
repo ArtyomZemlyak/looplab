@@ -83,7 +83,17 @@ def test_thread_side_append_site_asserts_its_own_membership():
     src = inspect.getsource(eval_dispatch.EvalDispatchMixin._do_run_setup)
     assert "assert EV_RUN_SETUP_STARTED in SETUP_THREAD_APPENDABLE" in src
     assert "assert EV_RUN_SETUP_FINISHED in SETUP_THREAD_APPENDABLE" in src
-    # ...and this is the ONLY thread-side folded append in the module.
+    # ...and this is the ONLY thread-side FOLDED append in the module. The qualifier is load-bearing
+    # and this assertion did not carry it: it counted every `store.append(` line, so the moment
+    # `_record_declared_deps` added a DIAGNOSTIC `EV_DEPS_DECLARED` row the count went to 3 and the
+    # test went red over an event that is outside the property entirely. A fold-ignored append cannot
+    # widen `SETUP_THREAD_APPENDABLE`, which is what this test exists to stop — so exclude the
+    # diagnostic types by NAME, from the registry, rather than by loosening the count.
     module_src = inspect.getsource(eval_dispatch)
-    appends = [line for line in module_src.splitlines() if "self.store.append(" in line]
-    assert len(appends) == 2, appends
+    appends = [line.strip() for line in module_src.splitlines() if "self.store.append(" in line]
+    folded = [line for line in appends
+              if not any(f"({name}" in line or f"({name}," in line
+                         for name in ("EV_DEPS_DECLARED",))]
+    assert len(folded) == 2, folded
+    assert all(any(t in line for t in ("EV_RUN_SETUP_STARTED", "EV_RUN_SETUP_FINISHED"))
+               for line in folded), folded

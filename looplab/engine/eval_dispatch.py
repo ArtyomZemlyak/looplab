@@ -120,7 +120,11 @@ class EvalDispatchMixin:
         root. `_do_run_setup` falls back to the run dir instead, because a cwd must exist for an
         operator's arbitrary command — but a run DIRECTORY is not a repo, and reading a declaration
         out of one would let a stray `requirements.txt` beside `events.jsonl` govern installs."""
-        eds = (self._repo_spec or {}).get("editables", [])
+        # `getattr`, not attribute access: this is reached from `_ensure_run_setup`, whose callers
+        # include non-repo tasks and the test doubles that stand in for them — an Engine without a
+        # repo spec is a legitimate shape here, and reading it unguarded turned "this task declares
+        # no dependencies" into an AttributeError from inside a setup thread.
+        eds = (getattr(self, "_repo_spec", None) or {}).get("editables", [])
         return eds[0]["path"] if eds else ""
 
     def _node_deps_root(self, workdir) -> str:
