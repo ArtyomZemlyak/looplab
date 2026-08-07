@@ -284,8 +284,15 @@ export default function PortfolioConcepts({
         </li>)}
       </ul>
       {/* The old sentence sent the operator to "the Atlas, where it is recorded" for a merge. The
-          Atlas has no such control — the governed merge is `looplab governance concept-merge` and
-          `POST /api/cross-run/concept-alias`, neither of which is reachable from any screen. Worse,
+          Atlas has no such control — the governed merge is `looplab concept-merge` and
+          `POST /api/cross-run/concept-merge`, neither of which is reachable from any screen. (Both
+          spellings were wrong until 2026-08-07: this notice named a "governance" command GROUP that
+          the flat Typer app has never had — Typer answered "No such command" at exit 2 — and an
+          /api/cross-run/concept-alias route that does not exist either; the alias writes are
+          `/concept-merge`, `/concept-purge`, `/concept-alias-clear`. A UI string naming a command an
+          operator cannot run is the same defect class as a count nobody measured, so
+          `tests/test_ui_named_commands.py` now drives every code-formatted `looplab <cmd>` in
+          `ui/src/` against the real registry.) Worse,
           performing it changes NOTHING here: the canonicalization lives behind
           `GET /api/cross-run/concept-policy`, whose whole purpose is to be applied by the browser
           (`concept_lens.py::project_concept_map` takes concept SETS and no governance, so the CALLER
@@ -294,7 +301,7 @@ export default function PortfolioConcepts({
           notice still calls it drift. Say that, rather than describing a loop that does not close. */}
       <p className="muted">These differ only in <code>-</code> versus <code>_</code>. LoopLab does not
         infer a taxonomy, so it keeps them apart rather than choosing one for you. A governed merge
-        (<code>looplab governance concept-merge</code>) is recorded in cross-run memory, but this view
+        (<code>looplab concept-merge</code>) is recorded in cross-run memory, but this view
         does not read that registry yet — a merged pair will still appear here as two.</p>
     </details>}
 

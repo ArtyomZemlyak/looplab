@@ -443,7 +443,14 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
   }
   return (
     <Panel title="Deep research" sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose} wide>
-      {!memos.length && <div className="muted">No deep-research memos yet. Trigger one with <code>/deep-research</code> in the chat, or set a cadence in Config.</div>}
+      {/* Name only what an operator can actually DO. `/deep-research` was never a command: the chat's
+          direct vocabulary is assistantCommand.js::INTENTS (stop/pause/finalize/abort/resume/ratify/
+          approve) plus AssistantBar's /new draft, and no assistant tool maps to the deep_research
+          control either — so the old copy sent every reader who has no memos yet to a dead end. The
+          cadence IS reachable, and it is the only browser-reachable trigger today. */}
+      {!memos.length && <div className="muted">No deep-research memos yet. They arrive on the{' '}
+        <code>deep_research_every</code> cadence — set it in Config, save, then resume — or when the
+        Strategist asks for one. There is no one-off trigger in the browser yet.</div>}
       {memoProjection.omitted > 0 && <div className="muted">
         Showing {memos.length} of {memoProjection.total} newest valid memos; older, malformed, or over-budget entries are omitted.
       </div>}
@@ -680,8 +687,12 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
   return (
     <Panel title="Queue" sub={`${queuedCount} planned / in-flight`} onClose={onClose}>
       <div className="muted" style={{ marginBottom: 10 }}>
+        {/* `/experiment` was never a command either (same dead end as the research panel's old
+            `/deep-research`). The two shapes that DO append an inject/fork are the graph node menu's
+            own items, so name them exactly as Dag.jsx spells them. */}
         The next experiment is chosen by the search policy; this is the live work-list — cancel a
-        pending experiment, or add one from the chat (<code>/experiment</code>) or a node’s “explore”.
+        pending experiment, or add one from a node’s “Explore from here” / “Merge with…” menu on the
+        graph.
       </div>
       <div className="section-h">Pending experiments {pending.length > 0 && <span className="pill">{pending.length}</span>}</div>
       {pending.length
