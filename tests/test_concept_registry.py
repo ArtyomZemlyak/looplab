@@ -83,8 +83,12 @@ def test_governance_snapshot_returns_states_and_revisions_from_one_receipt(tmp_p
 
 def test_governance_snapshot_of_missing_directory_is_empty_and_read_only(tmp_path):
     missing = tmp_path / "not-created"
+    # An EXACT dict, deliberately: the empty snapshot is what every reader falls back to, so a key
+    # added to the real read and forgotten here would let a consumer see it on one path and not the
+    # other. `withdrawn` joined on 2026-08-07 (the pair-keyed projection of policy edges an operator
+    # took back) and this assertion is what caught the omission.
     assert concept_governance_snapshot(missing) == {
-        "aliases": {}, "splits": {}, "alias_revision": 0,
+        "aliases": {}, "splits": {}, "withdrawn": set(), "alias_revision": 0,
         "split_revision": 0, "governance_revision": 0,
     }
     assert not missing.exists()
