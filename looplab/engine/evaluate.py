@@ -1330,7 +1330,8 @@ class EvaluateMixin:
                         async with self._write_lock:
                             self.store.append(EV_DEPS_INSTALLED, {
                                 "node_id": node_id, "generation": generation,
-                                "packages": installed, "round": dep_rounds})
+                                "packages": installed, "round": dep_rounds,
+                                "resolved": self._drain_dep_receipts(installed)})
                         continue   # re-run now that the library is present (no repair attempt spent)
                 # Eval-budget stop: the inline-repair loop re-runs FULL evals with no budget check
                 # between attempts — the loop-top / per-eval guards only see `total_eval_seconds` from
@@ -1481,7 +1482,8 @@ class EvaluateMixin:
                         async with self._write_lock:
                             self.store.append(EV_DEPS_INSTALLED, {
                                 "node_id": node_id, "generation": generation,
-                                "packages": installed, "round": dep_rounds, "source": "triage"})
+                                "packages": installed, "round": dep_rounds, "source": "triage",
+                                "resolved": self._drain_dep_receipts(installed)})
                         continue   # re-run with the library present (no repair attempt spent)
                 # action == "repair": fix the code in place and re-eval (no new node, no budget spent).
                 # Snapshot the PRE-repair file set now (node is still the pre-repair fold) so we can

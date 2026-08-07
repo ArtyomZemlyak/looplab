@@ -25,6 +25,12 @@ from looplab.engine.options import _UNSET
 
 _LOG = logging.getLogger(__name__)
 
+# How many declared requirement lines the durable `deps_declared` receipt carries. Well past any
+# real file (the live dense-retrieval repo declares 21) and small enough that a pathological
+# generated requirements.txt cannot bloat every reader of the event log. Overflow is COUNTED, never
+# silently dropped — see `_record_declared_deps`.
+_DECLARED_PINS_CAP = 400
+
 
 class EvalDispatchMixin:
     """The engine's eval-dispatch cluster. See the module docstring for the mixin convention
@@ -37,7 +43,10 @@ class EvalDispatchMixin:
         in the first editable repo's SOURCE dir so `-r requirements.txt` resolves; output streams to
         `run_setup.log`. A non-zero/timed-out run_setup ABORTS the run (the env would be unusable).
         Only in trusted_local (an untrusted/docker eval is a fresh container — use per-node `setup`).
-        No-op when `run_setup` is unset. The in-process guard is set only AFTER a successful install, so
+        When `run_setup` is unset the command is DERIVED from what the repo declares
+        (`_settle_declared_deps`) — LoopLab preparing its own environment is the product promise, and
+        an operator who has to know their repo ships a `requirements.txt` is the bug. No-op only when
+        the repo declares nothing we act on. The in-process guard is set only AFTER a successful install, so
         a concurrent worker on the lock-free fast path blocks on the lock rather than racing ahead to
         evaluate against a half-installed interpreter.
 
@@ -55,7 +64,7 @@ class EvalDispatchMixin:
         with self._run_setup_lock:
             if self._run_setup_done:
                 return
-            cmd = list((self._eval_spec or {}).get("run_setup") or [])
+            cmd = self._settle_declared_deps(list((self._eval_spec or {}).get("run_setup") or []))
             if not cmd or self.trust_mode != "trusted_local":
                 self._run_setup_done = True
                 return
@@ -76,11 +85,144 @@ class EvalDispatchMixin:
             self._do_run_setup(cmd)
             self._run_setup_done = True
 
+    # The closed vocabulary of what a run DID about its repo's declared dependencies. A bare string
+    # is what `deps_declared.action` carries into the durable log, so a typo'd literal here would be
+    # invisible to every reader; `tests/test_declared_deps.py` drives the table from this tuple.
+    DECLARED_DEPS_ACTIONS: tuple[str, ...] = (
+        "installed",             # nothing operator-authored; we derived and ran the `-r` install
+        "operator_run_setup",    # the operator wrote their own run_setup — it wins, untouched
+        "auto_install_disabled",  # auto_install_deps=false: the operator owns this environment
+        "refused_untrusted_tier",  # a declaration exists but this tier runs --network none
+        "nothing_declared")      # nothing we act on (`observed` may still name what we saw)
+
+    def _repo_deps_root(self) -> str:
+        """The directory whose dependency declaration governs this run: the first editable repo's
+        SOURCE dir. The SAME rule `_do_run_setup` uses for its cwd, and deliberately so — the derived
+        command is `-r <basename>`, which only resolves if it runs where the file was found."""
+        eds = (self._repo_spec or {}).get("editables", [])
+        return eds[0]["path"] if eds else str(self.run_dir)
+
+    def _declared_deps(self):
+        """This run's `runtime.deps.Declaration`, read once and cached.
+
+        Cached because it is consulted twice for different reasons and must give the same answer to
+        both: here, to decide what to install, and at CRASH time
+        (`crash_repair.py::_install_missing`), to keep a bare-name install from moving a package the
+        repo pinned. If the two reads disagreed — because the Developer rewrote the file mid-run —
+        the run would install one set of pins and enforce another, which is a worse failure than
+        either policy alone. Lazily initialized rather than set in `Engine.__init__`: this is a
+        filesystem read, ~170 test call sites construct the Engine directly, and a run whose
+        `_ensure_run_setup` never fires should never pay for it."""
+        decl = getattr(self, "_deps_declaration", None)
+        if decl is None:
+            from looplab.runtime import deps
+            decl = deps.find_declaration(self._repo_deps_root())
+            self._deps_declaration = decl
+        return decl
+
+    def _settle_declared_deps(self, operator_cmd: list) -> list:
+        """Decide what this run installs from the repo's own declaration, record the decision, and
+        return the argv `_ensure_run_setup` should run.
+
+        THE COMPOSITION RULE: an explicit operator `run_setup` WINS ENTIRELY. Not prepended, not
+        merged, not appended. Someone who spelled a setup command meant it, and all three ways of
+        combining are wrong in a way the operator cannot undo — a prepend double-installs for the
+        (common) operator whose command already IS `pip install -r requirements.txt`, and an operator
+        who deliberately curated an environment against the repo's pins has no spelling left that
+        means "do not install these". The derived command is a DEFAULT, and a default that overrides
+        an explicit value is not a default.
+
+        The three gates, in the order they are asked:
+          * `auto_install_deps` (default true) is the operator's one switch for "LoopLab may change
+            my environment". It already gates the crash-time installer; gating this the same way is
+            what makes the switch mean one thing. Note it is ALSO where the operator says "run
+            nothing" now that an empty `run_setup` no longer means that.
+          * the tier: installs are `trusted_local` only, because the Docker tiers run
+            `--network none` and must not mutate a shared image. A detected declaration there is a
+            STATED refusal — the receipt says `refused_untrusted_tier` — rather than a silent skip,
+            because "we found your pins and could not honour them" is exactly the thing an operator
+            debugging a version mismatch needs to be told.
+          * whether the tree declares anything we act on at all.
+
+        Failure is LOUD by design and inherits `_do_run_setup`'s existing contract: a non-zero
+        `-r` install raises and aborts the run. Degrading to "the agent will work it out from
+        tracebacks" is what produced 2,345 repair attempts on `runs/rubert-dr-0804`."""
+        from looplab.runtime import deps
+        decl = self._declared_deps()
+        if operator_cmd:
+            action, cmd = "operator_run_setup", list(operator_cmd)
+        elif not decl.found:
+            action, cmd = "nothing_declared", []
+        elif not getattr(self, "_auto_install_deps", False):
+            # `_auto_install_deps` is already `auto_install_deps AND trust_mode == trusted_local`
+            # (orchestrator.py), so the tier is checked BEFORE it to keep the two refusals distinct:
+            # "you switched this off" and "this tier cannot" are different facts and lead an operator
+            # to different fixes.
+            action = ("refused_untrusted_tier" if self.trust_mode != "trusted_local"
+                      else "auto_install_disabled")
+            cmd = []
+        else:
+            action = "installed"
+            cmd = deps.declaration_argv(decl, python=getattr(self.sandbox, "python", None))
+        assert action in self.DECLARED_DEPS_ACTIONS
+        self._record_declared_deps(decl, action, cmd)
+        return cmd
+
+    def _record_declared_deps(self, decl, action: str, cmd: list) -> None:
+        """Append the once-per-run `deps_declared` receipt: what the repo asked for, what we did.
+
+        This is the row that would have made `runs/rubert-dr-0807` legible. Its log records that
+        `pytorch-lightning` was installed and nothing else; the repo pinned 1.5.1, the container held
+        2.6.5, and no artifact of that run carries either number. `run_started.env` does not help —
+        its `libs` map is a FIXED 17-package list owned by the speculation-quality receipt validator,
+        and pytorch-lightning is not in it (nor sentence-transformers, faiss, tensorboard,
+        accelerate, datasets). Changing THAT list is not an option: it is the calibration identity a
+        published receipt is revalidated against, so widening it silently revokes every issued
+        receipt. Hence a separate, purpose-built row.
+
+        DIAGNOSTIC (fold-ignored) and appended from the eval WORKER THREAD outside `_write_lock`,
+        beside the `SETUP_THREAD_APPENDABLE` pair below. Invariant #1's question for a non-folded
+        event is "does any reader key on its position?", and the answer here is no by construction:
+        `speculation.py::_proposal_authority_seq` excludes `DIAGNOSTIC_EVENTS` wholesale, and
+        `evaluate.py::_durable_dep_rounds` keys on `deps_installed` alone. Membership is asserted at
+        the append site the way the train-monitor asserts it.
+
+        Idempotent across resume ON THE FACTS: a re-append is skipped only when an existing row
+        already carries this digest AND this action. A resume that finds a DIFFERENT digest has
+        genuinely re-observed a rewritten declaration and must say so — that row is the audit trail
+        for the Developer-requested change."""
+        from looplab.events.types import DIAGNOSTIC_EVENTS, EV_DEPS_DECLARED
+        # Bounded: a declaration is operator/agent-authored text and this row is durable. The pins
+        # are the load-bearing part (they are what a version dispute is settled against), so they are
+        # carried whole up to a cap, with the overflow COUNTED rather than silently dropped.
+        pins = dict(list(decl.pins.items())[:_DECLARED_PINS_CAP])
+        data = {
+            "root": decl.root, "file": decl.filename, "digest": decl.digest, "action": action,
+            "pins": pins, "pin_count": len(decl.pins),
+            "pins_truncated": len(decl.pins) > _DECLARED_PINS_CAP,
+            # The directives (`-e .`, `--index-url …`, `-r other.txt`) are the part of the file we
+            # do NOT follow. Naming them is what stops the receipt reading as "these 21 lines are
+            # everything the repo asked for" when a `-r base.txt` pointed somewhere we never looked.
+            "directives": [str(d)[:200] for d in decl.directives[:_DECLARED_PINS_CAP]],
+            # Declarations we saw and deliberately left alone (pyproject.toml, environment.yml …).
+            "observed": list(decl.observed),
+            "command": list(cmd),
+        }
+        try:
+            prior = [e for e in self.store.read_all() if e.type == EV_DEPS_DECLARED]
+        except Exception:  # noqa: BLE001 - a receipt must never be what takes a run down
+            prior = []
+        if prior:
+            last = prior[-1].data or {}
+            if last.get("digest") == decl.digest and last.get("action") == action:
+                return
+        assert EV_DEPS_DECLARED in DIAGNOSTIC_EVENTS
+        self.store.append(EV_DEPS_DECLARED, data)
+
     def _do_run_setup(self, cmd: list) -> None:
         from looplab.core.models import run_setup_key
         from looplab.runtime.sandbox import _run_argv
-        eds = (self._repo_spec or {}).get("editables", [])
-        cwd = eds[0]["path"] if eds else str(self.run_dir)
+        cwd = self._repo_deps_root()     # ONE rule, shared with the declaration reader (see it)
         to = float((self._eval_spec or {}).get("run_setup_timeout", 1800.0))
         # A prior process appended this command's `run_setup_started` and never appended its finish:
         # its side effects may be complete, partial, or absent and no receipt can say which. The
