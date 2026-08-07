@@ -81,6 +81,21 @@ bought the same think, the same build, or the same install a second time. With t
   in between, and that repeat is stamped `after_interrupted_attempt` in the log. LoopLab cannot make
   an arbitrary operator command transactional, so prefer an idempotent one.
 
+**The environment a run actually got is a fact on the log, not something to reconstruct afterwards.**
+A repo task appends `deps_declared` once at run start: what its source tree declares (the requirement
+lines, verbatim), what LoopLab did about it (`installed` / `operator_run_setup` /
+`auto_install_disabled` / `refused_untrusted_tier` / `nothing_declared`), the declaration files it saw
+and deliberately did **not** act on (`pyproject.toml`, `environment.yml`, lockfiles), and the pip
+directives inside the file it does not follow (`-r other.txt`, `--index-url …`) — so the receipt can
+never read as "these lines are everything the repo asked for" when part of it points somewhere nobody
+looked. `run_setup_finished` then carries `env_delta`: for every distribution the repo declares, the
+version before and after. Honouring a pin can move a shared interpreter *backwards* — the version the
+repo asked for is not always the newest one present — and that has to be visible rather than inferred.
+`deps_installed` covers the other, narrower mechanism (the crash-time installer for a library a
+traceback reports missing) and carries the same detail per package under `resolved`: which requirement
+string pip was handed, what the repo declared for it, and the before/after versions. Neither event is
+folded; both exist so an operator can answer "what did this run run against?" from the log alone.
+
 Cross-run report generation is paid work over a *set* of runs, so no single run's usage ledger owns
 it: its spend lives in the report's own action receipt, written before the report may be published
 and before the action may claim success.
