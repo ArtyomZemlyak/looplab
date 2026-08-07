@@ -25,6 +25,20 @@ from looplab.engine.options import _UNSET
 
 _LOG = logging.getLogger(__name__)
 
+# How many declared requirement lines the durable `deps_declared` receipt carries. Well past any
+# real file (the live dense-retrieval repo declares 21) and small enough that a pathological
+# generated requirements.txt cannot bloat every reader of the event log. Overflow is COUNTED, never
+# silently dropped — see `_record_declared_deps`.
+_DECLARED_PINS_CAP = 400
+
+# How many DISTINCT dependency declarations one run may install (the run's own baseline counts as
+# the first). The digest gate and the seen-set already stop repetition; this bounds VARIETY, which
+# is what an agent that rewrites requirements.txt every node produces. A module constant rather than
+# a `Settings` field, matching its sibling bound `engine/triage.py::_MAX_DEP_ROUNDS`: both are
+# runaway guards on the same shared interpreter, and neither is a knob an operator tunes — the knob
+# is `auto_install_deps`, which turns the whole capability off.
+_MAX_NODE_DEP_SYNCS = 8
+
 
 class EvalDispatchMixin:
     """The engine's eval-dispatch cluster. See the module docstring for the mixin convention
@@ -37,7 +51,10 @@ class EvalDispatchMixin:
         in the first editable repo's SOURCE dir so `-r requirements.txt` resolves; output streams to
         `run_setup.log`. A non-zero/timed-out run_setup ABORTS the run (the env would be unusable).
         Only in trusted_local (an untrusted/docker eval is a fresh container — use per-node `setup`).
-        No-op when `run_setup` is unset. The in-process guard is set only AFTER a successful install, so
+        When `run_setup` is unset the command is DERIVED from what the repo declares
+        (`_settle_declared_deps`) — LoopLab preparing its own environment is the product promise, and
+        an operator who has to know their repo ships a `requirements.txt` is the bug. No-op only when
+        the repo declares nothing we act on. The in-process guard is set only AFTER a successful install, so
         a concurrent worker on the lock-free fast path blocks on the lock rather than racing ahead to
         evaluate against a half-installed interpreter.
 
@@ -55,7 +72,7 @@ class EvalDispatchMixin:
         with self._run_setup_lock:
             if self._run_setup_done:
                 return
-            cmd = list((self._eval_spec or {}).get("run_setup") or [])
+            cmd = self._settle_declared_deps(list((self._eval_spec or {}).get("run_setup") or []))
             if not cmd or self.trust_mode != "trusted_local":
                 self._run_setup_done = True
                 return
@@ -76,11 +93,276 @@ class EvalDispatchMixin:
             self._do_run_setup(cmd)
             self._run_setup_done = True
 
+    # The closed vocabulary of what a run DID about its repo's declared dependencies. A bare string
+    # is what `deps_declared.action` carries into the durable log, so a typo'd literal here would be
+    # invisible to every reader; `tests/test_declared_deps.py` drives the table from this tuple.
+    DECLARED_DEPS_ACTIONS: tuple[str, ...] = (
+        "installed",             # nothing operator-authored; we derived and ran the `-r` install
+        "operator_run_setup",    # the operator wrote their own run_setup — it wins, untouched
+        "auto_install_disabled",  # auto_install_deps=false: the operator owns this environment
+        "refused_untrusted_tier",  # a declaration exists but this tier runs --network none
+        "nothing_declared",      # nothing we act on (`observed` may still name what we saw)
+        "node_resync",           # a node's declaration differs from the run's — the Developer's ask
+        "node_resync_failed",    # …and installing it did not succeed (the node evals unchanged)
+        "node_resync_capped")    # …and this run has spent `_MAX_NODE_DEP_SYNCS`; refused
+
+    def _repo_deps_root(self) -> str:
+        """The directory whose dependency declaration governs this run: the first editable repo's
+        SOURCE dir. The SAME rule `_do_run_setup` uses for its cwd, and deliberately so — the derived
+        command is `-r <basename>`, which only resolves if it runs where the file was found.
+
+        EMPTY when there is no editable repo, and `find_declaration` answers "nothing" for an empty
+        root. `_do_run_setup` falls back to the run dir instead, because a cwd must exist for an
+        operator's arbitrary command — but a run DIRECTORY is not a repo, and reading a declaration
+        out of one would let a stray `requirements.txt` beside `events.jsonl` govern installs."""
+        eds = (self._repo_spec or {}).get("editables", [])
+        return eds[0]["path"] if eds else ""
+
+    def _node_deps_root(self, workdir) -> str:
+        """Where the SAME repo's declaration lives inside a node's workdir — the mirror of
+        `_repo_deps_root`. The single-repo shorthand mounts at the workspace root (`name == "."`);
+        an `editables` entry mounts under its own subdir, so the file the agent edited is at
+        `<workdir>/<name>/requirements.txt`, not at the workspace root."""
+        eds = (self._repo_spec or {}).get("editables", [])
+        name = (eds[0].get("name") or ".") if eds else "."
+        base = Path(str(workdir))
+        return str(base if name in (".", "") else base / str(name).rstrip("/"))
+
+    def _declared_watchlist(self) -> list:
+        """The distributions whose versions a receipt reports on: exactly the ones the repo
+        declares. Not "everything installed" — that is thousands of rows per event and most of it is
+        transitive noise; not the `run_started.env` list either, which is a FIXED 17-package
+        calibration identity that happens to contain none of this repo's pins."""
+        decl = self._declared_deps()
+        return sorted(decl.pins) if decl.found else []
+
+    def _env_versions(self, watch) -> dict:
+        from looplab.runtime import deps
+        return deps.installed_versions(watch, python=getattr(self.sandbox, "python", None)) if watch else {}
+
+    def _env_delta_since(self, watch, before) -> dict:
+        """What moved, measured against `before`. Bounded by construction — one entry per DECLARED
+        distribution at most, and the declaration itself is capped at read time."""
+        from looplab.runtime import deps
+        return deps.version_delta(before, self._env_versions(watch))
+
+    def _sync_node_deps(self, workdir) -> None:
+        """Install this NODE's dependency declaration when the Developer changed it.
+
+        THE DELIBERATE-CHANGE PATH. The owner's requirement is that a Developer wanting a new
+        library or a different version rewrites the requirements file and the deps get reinstalled.
+        The write half already worked — `requirements.txt` is an ordinary file in the edit surface
+        (under the composable `repo:` default `["**/*"]`; NOT under the direct `RepoTask` default
+        `["**/*.py"]` — see `_record_declared_deps`, which reports which). The read half did not
+        exist: nothing re-read the file, so an edit was inert and the agent's only feedback was the
+        same ImportError it started with.
+
+        WHAT STOPS IT THRASHING THE ENVIRONMENT, in order:
+          1. **A content DIGEST, not a timestamp** — the fast path. A node whose declaration is
+             byte-identical to the run's does nothing at all: no set, no subprocess, no event, no
+             lock. That is the overwhelmingly common case (every node inherits the file unchanged),
+             so the steady-state cost of this hook is one small read and a sha256. It is deliberately
+             NOT an independent CORRECTNESS bound: rule 2 below reaches the same answer for the same
+             input, which is why deleting the comparison is behaviour-preserving and no test catches
+             it (checked by mutation, 2026-08-07). What it buys is that the common path never
+             contends for `_dep_lock` — a node that did not touch the file must not wait behind
+             another node's multi-minute pip, which is the same reason `crash_repair._prepare_env`
+             parses its candidates before taking that lock.
+          2. **A per-run SET of digests already installed**, seeded with the run's own baseline. This
+             is the rule; 1 is its shortcut. It additionally covers a node that REVERTS to an earlier
+             file, so an agent oscillating between two dependency sets pays once for each rather than
+             once per node. Checked and extended UNDER `_dep_lock` with 3 and the install: it is a
+             check-then-act over run-global state, and two eval workers reach it concurrently.
+          3. **A hard per-run cap** (`_MAX_NODE_DEP_SYNCS`). 1 and 2 bound repetition, not variety:
+             an agent that appends a distinct comment line each node produces a new digest every
+             time. The cap is what makes that terminate, and the refusal is RECORDED so it reads as
+             a bound being hit rather than the edit being ignored.
+          4. **`_dep_lock`.** pip is not concurrency-safe and this is a shared interpreter; the
+             crash-time installer already serializes on this lock, so the two cannot interleave.
+
+        WHAT THIS IS NOT: a per-node environment. The install lands in the interpreter EVERY
+        concurrent eval shares, so a node that changes a version changes it under its siblings.
+        That is not a new hazard — `crash_repair` has pip-installed into this same shared
+        interpreter from a worker thread since it was written — but it is the reason the honest
+        answer here is a per-node venv, which is deliberately out of scope. The bound above plus the
+        `deps_declared` receipt make the exposure visible and finite rather than silent.
+
+        Best-effort throughout: a failed install is recorded and the node evaluates against the
+        unchanged environment (its own crash then drives the normal repair path). It must not abort
+        the RUN the way a failed run-setup does — a run-setup failure means the operator's
+        environment never came up, while this one means one node's speculative dependency edit did
+        not take."""
+        if not getattr(self, "_auto_install_deps", False):
+            return
+        from looplab.runtime import deps
+        base = self._declared_deps()
+        node_decl = deps.find_declaration(self._node_deps_root(workdir))
+        if not node_decl.found or node_decl.digest == base.digest:
+            return                       # gate 1: unchanged — the common path, and it costs nothing
+        argv = deps.declaration_argv(node_decl, python=getattr(self.sandbox, "python", None))
+        from looplab.runtime.sandbox import _run_argv
+        log = str(Path(self.run_dir) / "run_setup.log")   # same log as run-setup: one install story
+        # Watch the UNION of what the run declares and what this node declares: a node that DROPS a
+        # pin moves that distribution too, and watching only the node's list would miss it.
+        watch = sorted(set(self._declared_watchlist()) | set(node_decl.pins))
+        # Gates 2 and 3 are CHECK-THEN-ACT over run-global state and share `_dep_lock` with the
+        # install, so two eval workers whose nodes both changed the file cannot both pass the cap or
+        # both install. Gate 1 above is what keeps this lock off the common path — a node that did
+        # not touch the file must never wait behind a multi-minute pip, which is the same reason
+        # `crash_repair._prepare_env` parses its candidates before contending for this lock.
+        with self._dep_lock:                              # gate 4: serialize with the crash installer
+            seen = self._deps_synced_digests
+            if not seen and base.digest:
+                seen.add(base.digest)     # the run's own baseline is the first of the allowance
+            if node_decl.digest in seen:
+                return                    # gate 2: this exact file was already installed this run
+            seen.add(node_decl.digest)
+            if len(seen) > _MAX_NODE_DEP_SYNCS:
+                self._record_declared_deps(node_decl, "node_resync_capped", [])
+                return                    # gate 3: variety bound
+            before = self._env_versions(watch)
+            rc, out, err, timed = _run_argv(argv, node_decl.root, self._dep_install_timeout,
+                                            log_path=log)
+            delta = self._env_delta_since(watch, before)
+        if rc != 0 or timed:
+            _LOG.warning("node dependency re-sync failed (exit=%s, timed_out=%s); the node evaluates "
+                         "against the unchanged environment — see %s", rc, timed, log)
+        # The declaration we CACHE stays the run's baseline: the node's file is what a node asked
+        # for, not what the repo declares, and adopting it would make the next node's diff read
+        # against a sibling's speculative edit rather than against the source tree.
+        self._record_declared_deps(node_decl, "node_resync" if (rc == 0 and not timed)
+                                   else "node_resync_failed", argv, delta=delta)
+
+    def _declared_deps(self):
+        """This run's `runtime.deps.Declaration`, read once and cached.
+
+        Cached because it is consulted twice for different reasons and must give the same answer to
+        both: here, to decide what to install, and at CRASH time
+        (`crash_repair.py::_install_missing`), to keep a bare-name install from moving a package the
+        repo pinned. If the two reads disagreed — because the Developer rewrote the file mid-run —
+        the run would install one set of pins and enforce another, which is a worse failure than
+        either policy alone. Lazily initialized rather than set in `Engine.__init__`: this is a
+        filesystem read, ~170 test call sites construct the Engine directly, and a run whose
+        `_ensure_run_setup` never fires should never pay for it."""
+        decl = getattr(self, "_deps_declaration", None)
+        if decl is None:
+            from looplab.runtime import deps
+            decl = deps.find_declaration(self._repo_deps_root())
+            self._deps_declaration = decl
+        return decl
+
+    def _settle_declared_deps(self, operator_cmd: list) -> list:
+        """Decide what this run installs from the repo's own declaration, record the decision, and
+        return the argv `_ensure_run_setup` should run.
+
+        THE COMPOSITION RULE: an explicit operator `run_setup` WINS ENTIRELY. Not prepended, not
+        merged, not appended. Someone who spelled a setup command meant it, and all three ways of
+        combining are wrong in a way the operator cannot undo — a prepend double-installs for the
+        (common) operator whose command already IS `pip install -r requirements.txt`, and an operator
+        who deliberately curated an environment against the repo's pins has no spelling left that
+        means "do not install these". The derived command is a DEFAULT, and a default that overrides
+        an explicit value is not a default.
+
+        The three gates, in the order they are asked:
+          * `auto_install_deps` (default true) is the operator's one switch for "LoopLab may change
+            my environment". It already gates the crash-time installer; gating this the same way is
+            what makes the switch mean one thing. Note it is ALSO where the operator says "run
+            nothing" now that an empty `run_setup` no longer means that.
+          * the tier: installs are `trusted_local` only, because the Docker tiers run
+            `--network none` and must not mutate a shared image. A detected declaration there is a
+            STATED refusal — the receipt says `refused_untrusted_tier` — rather than a silent skip,
+            because "we found your pins and could not honour them" is exactly the thing an operator
+            debugging a version mismatch needs to be told.
+          * whether the tree declares anything we act on at all.
+
+        Failure is LOUD by design and inherits `_do_run_setup`'s existing contract: a non-zero
+        `-r` install raises and aborts the run. Degrading to "the agent will work it out from
+        tracebacks" is what produced 2,345 repair attempts on `runs/rubert-dr-0804`."""
+        from looplab.runtime import deps
+        decl = self._declared_deps()
+        if not decl.found and not operator_cmd:
+            action, cmd = "nothing_declared", []          # nothing to do at all
+        elif self.trust_mode != "trusted_local":
+            # There IS setup to do and this tier cannot do it. Asked BEFORE "who authored the
+            # command", because the answer does not depend on that: `_ensure_run_setup` has always
+            # skipped an operator's own `run_setup` here too, and recording that as
+            # `operator_run_setup` would claim we ran a command we did not.
+            action, cmd = "refused_untrusted_tier", []
+        elif operator_cmd:
+            action, cmd = "operator_run_setup", list(operator_cmd)
+        elif not getattr(self, "_auto_install_deps", False):
+            # Reached only on a trusted tier, so `_auto_install_deps` being False here can only mean
+            # the operator switched `auto_install_deps` off — a different fact from the tier refusal
+            # above, and it leads to a different fix.
+            action, cmd = "auto_install_disabled", []
+        else:
+            action = "installed"
+            cmd = deps.declaration_argv(decl, python=getattr(self.sandbox, "python", None))
+        assert action in self.DECLARED_DEPS_ACTIONS
+        self._record_declared_deps(decl, action, cmd)
+        return cmd
+
+    def _record_declared_deps(self, decl, action: str, cmd: list, *, delta=None) -> None:
+        """Append the once-per-run `deps_declared` receipt: what the repo asked for, what we did.
+
+        This is the row that would have made `runs/rubert-dr-0807` legible. Its log records that
+        `pytorch-lightning` was installed and nothing else; the repo pinned 1.5.1, the container held
+        2.6.5, and no artifact of that run carries either number. `run_started.env` does not help —
+        its `libs` map is a FIXED 17-package list owned by the speculation-quality receipt validator,
+        and pytorch-lightning is not in it (nor sentence-transformers, faiss, tensorboard,
+        accelerate, datasets). Changing THAT list is not an option: it is the calibration identity a
+        published receipt is revalidated against, so widening it silently revokes every issued
+        receipt. Hence a separate, purpose-built row.
+
+        DIAGNOSTIC (fold-ignored) and appended from the eval WORKER THREAD outside `_write_lock`,
+        beside the `SETUP_THREAD_APPENDABLE` pair below. Invariant #1's question for a non-folded
+        event is "does any reader key on its position?", and the answer here is no by construction:
+        `speculation.py::_proposal_authority_seq` excludes `DIAGNOSTIC_EVENTS` wholesale, and
+        `evaluate.py::_durable_dep_rounds` keys on `deps_installed` alone. Membership is asserted at
+        the append site the way the train-monitor asserts it.
+
+        Idempotent across resume ON THE FACTS: a re-append is skipped only when an existing row
+        already carries this digest AND this action. A resume that finds a DIFFERENT digest has
+        genuinely re-observed a rewritten declaration and must say so — that row is the audit trail
+        for the Developer-requested change."""
+        from looplab.events.types import DIAGNOSTIC_EVENTS, EV_DEPS_DECLARED
+        # Bounded: a declaration is operator/agent-authored text and this row is durable. The pins
+        # are the load-bearing part (they are what a version dispute is settled against), so they are
+        # carried whole up to a cap, with the overflow COUNTED rather than silently dropped.
+        pins = dict(list(decl.pins.items())[:_DECLARED_PINS_CAP])
+        data = {
+            "root": decl.root, "file": decl.filename, "digest": decl.digest, "action": action,
+            "pins": pins, "pin_count": len(decl.pins),
+            "pins_truncated": len(decl.pins) > _DECLARED_PINS_CAP,
+            # The directives (`-e .`, `--index-url …`, `-r other.txt`) are the part of the file we
+            # do NOT follow. Naming them is what stops the receipt reading as "these 21 lines are
+            # everything the repo asked for" when a `-r base.txt` pointed somewhere we never looked.
+            "directives": [str(d)[:200] for d in decl.directives[:_DECLARED_PINS_CAP]],
+            # Declarations we saw and deliberately left alone (pyproject.toml, environment.yml …).
+            "observed": list(decl.observed),
+            "command": list(cmd),
+            # Only the node-resync path measures a delta here; the run-setup install reports its own
+            # on `run_setup_finished`, which is where its exit code lives — one install, one row.
+            "env_delta": dict(delta or {}),
+        }
+        try:
+            prior = [e for e in self.store.read_all() if e.type == EV_DEPS_DECLARED]
+        except Exception:  # noqa: BLE001 - a receipt must never be what takes a run down
+            prior = []
+        if prior:
+            last = prior[-1].data or {}
+            if last.get("digest") == decl.digest and last.get("action") == action:
+                return
+        assert EV_DEPS_DECLARED in DIAGNOSTIC_EVENTS
+        self.store.append(EV_DEPS_DECLARED, data)
+
     def _do_run_setup(self, cmd: list) -> None:
         from looplab.core.models import run_setup_key
         from looplab.runtime.sandbox import _run_argv
-        eds = (self._repo_spec or {}).get("editables", [])
-        cwd = eds[0]["path"] if eds else str(self.run_dir)
+        # ONE root rule, shared with the declaration reader — but an arbitrary operator command
+        # needs a cwd that EXISTS, so a repo-less run falls back to the run dir (see the docstring
+        # there for why the declaration reader must NOT make that fallback).
+        cwd = self._repo_deps_root() or str(self.run_dir)
         to = float((self._eval_spec or {}).get("run_setup_timeout", 1800.0))
         # A prior process appended this command's `run_setup_started` and never appended its finish:
         # its side effects may be complete, partial, or absent and no receipt can say which. The
@@ -104,6 +386,14 @@ class EvalDispatchMixin:
         self.store.append(EV_RUN_SETUP_STARTED,
                           {"command": cmd, "cwd": cwd, "after_interrupted_attempt": interrupted})
         log = str(Path(self.run_dir) / "run_setup.log")
+        # What the environment held for the DECLARED distributions before this command ran. The
+        # `-r` install honours the repo's pins, and on the live testbed honouring them DOWNGRADES a
+        # package (`pytorch_lightning==1.5.1` into a container carrying 2.6.5). That is a policy
+        # question the operator owns, and one they cannot even be asked if no artifact records that
+        # it happened — so the delta is measured here rather than inferred later. Measured around
+        # an OPERATOR's command too: their `pip install -r …` moves the same versions.
+        watch = self._declared_watchlist()
+        before = self._env_versions(watch)
         rc, out, err, timed = _run_argv(cmd, cwd, to, log_path=log)
         # Carry the command so the fold can key the exactly-once record on it (arch-review §5 P2).
         # Both output tails go through `self._redact`, like every sibling tail (evaluate.py's
@@ -112,9 +402,14 @@ class EvalDispatchMixin:
         # command's stderr (pip echoing an index URL with an inline token, a git error carrying URL
         # userinfo, a traceback quoting an env var) used to land verbatim and stay there; the
         # RuntimeError below re-leaked the same bytes into the failure message.
+        # `env_delta` is an ADDITIVE data field on a FOLDED event (invariant 5): old logs simply do
+        # not carry it and every reader defaults it, and the fold has never read this payload beyond
+        # `command`/`exit_code`. Empty dict = "nothing the repo declares moved", which is a real and
+        # useful answer (a re-run of an already-satisfied install), distinct from an absent field.
         self.store.append(EV_RUN_SETUP_FINISHED,
                           {"command": cmd, "exit_code": rc, "timed_out": timed,
-                           "stderr_tail": self._redact((err or "")[-2000:])})
+                           "stderr_tail": self._redact((err or "")[-2000:]),
+                           "env_delta": self._env_delta_since(watch, before)})
         if rc != 0 or timed:
             raise RuntimeError(f"run_setup failed (exit={rc}, timed_out={timed}); see {log}\n"
                                + self._redact((err or out or "")[-500:]))
@@ -180,6 +475,11 @@ class EvalDispatchMixin:
             params = node.idea.params if node is not None else {}
             cmd, timeout = command_eval.build_command(es, params, prof)
             root = str(Path(workdir).resolve())               # repo/workdir root
+            # The Developer's deliberate-change path: if THIS node's dependency declaration differs
+            # from the one the run installed, install it before the eval. Digest-gated, so the
+            # unchanged case (every node that did not touch the file) costs one read — see
+            # `_sync_node_deps` for the four bounds and for why this is not a per-node environment.
+            self._sync_node_deps(root)
             stages = self._resolve_stages(root, es, params,   # cmd-authoritative pipeline (+ %params% per stage)
                                           score_cmd=cmd, score_timeout=timeout)  # profile/timeout survive pipeline mode
             check_fn = (self._stage_check_fn(node)            # Phase 3: inter-stage verify (only if any stage asks)

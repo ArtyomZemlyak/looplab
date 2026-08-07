@@ -324,6 +324,16 @@ EV_INJECT_FAILED = "inject_failed"
 EV_BUDGET = "budget"
 EV_READMODEL_SKIPPED = "readmodel_skipped"
 EV_DEPS_INSTALLED = "deps_installed"
+# What the repo's own source tree DECLARES its dependencies to be, and what LoopLab did about it —
+# appended once per run at run-setup, before any install. `deps_installed` records what pip was
+# asked for; this records what the REPO asked for, which is the half no run has ever carried. An
+# operator reading `runs/rubert-dr-0807` cannot today tell that its Lightning is 2.6.5 against a
+# `pytorch_lightning==1.5.1` pin, and `run_started.env` cannot tell them either — its `libs` list is
+# a FIXED 17 packages (`search/speculation_quality.py::speculation_environment_fingerprint`) chosen
+# to pin a calibration identity, and pytorch-lightning/sentence-transformers/faiss/tensorboard are
+# none of them. Carries the decision too (`action`), so a tier that may not install says so instead
+# of being silently absent.
+EV_DEPS_DECLARED = "deps_declared"
 # One charge against `inline_repair_retrain_cap`, recorded WHERE IT HAPPENS. It cannot ride on
 # `node_repaired` the way `changed`/`stages_passed` do: that event is appended BEFORE the loop asks
 # `_repair_forces_full_retrain`, so the field would always carry the pre-charge count and a resume
@@ -490,7 +500,8 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 # source-scan test went dead after the fold became a dispatch table, leaving coverage unprotected).
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
-    EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_FULL_RETRAIN_CHARGED, EV_STAGE_ROLLBACK,
+    EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
+    EV_STAGE_ROLLBACK,
     EV_WORKSPACE_SEEDED,
     EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,

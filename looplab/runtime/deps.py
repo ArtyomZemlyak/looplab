@@ -24,7 +24,7 @@ import re
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from looplab.runtime.sandbox import is_secret_env
@@ -362,6 +362,287 @@ def is_installable(module: str) -> bool:
 def pip_package(module: str) -> str:
     """pip package name for an import name (identity when unmapped)."""
     return _PIP_NAME.get(module, module)
+
+
+# --- What the REPO ITSELF declares -------------------------------------------------------------
+# Everything above answers "what does this traceback say is missing?". Nothing above ever asked the
+# repo what it wants, and that is the defect this section exists to close. Measured on
+# `runs/rubert-dr-0804`, joining pip's HTTP cache against the run's `deps_installed` rows:
+#
+#   pip fetched 20:39:44  transformers-5.14.1        repo pins  transformers==4.51.0
+#   pip fetched 20:39:55  pytorch_lightning-2.6.5    repo pins  pytorch_lightning==1.5.1
+#
+# `install()` above takes a BARE NAME, so pip resolved the latest release and moved a shared
+# interpreter off two pins the task's own code depends on. The 2.x Lightning that landed is where
+# `runs/rubert-dr-0807` node 0 then died: `find_unused_parameters` defaults flipped in 2.x, and 7 of
+# that node's 12 repair attempts are artifacts of an API the repo never asked for. Nothing else in
+# LoopLab reads a dependency declaration — `-r requirements.txt` appears only in comments and prompt
+# strings — so the repo's own answer never reached the installer at all.
+#
+# WHY WE ACT ON `requirements.txt` AND NOTHING ELSE. It is the only declaration whose meaning is
+# "install these into the interpreter I am about to run in". `pyproject.toml` means "this repo is a
+# package": acting on it means `pip install .`, which BUILDS the editable tree and can shadow the
+# very source files the Developer edits. `environment.yml` means "make a conda environment", which
+# either creates a new env the eval does not use or hands a solver the shared one. Both are real
+# actions with a blast radius nobody asked for, so they are OBSERVED and REPORTED (see
+# `OBSERVED_DECLARATION_FILES`) and never executed — an operator reading the run's log can see we
+# noticed, and decide.
+DECLARATION_FILES: tuple[str, ...] = ("requirements.txt",)
+
+# Declarations we can SEE but deliberately do not act on. Recorded in the run's `deps_declared`
+# receipt so "LoopLab installed nothing here" is a stated fact rather than an absence.
+OBSERVED_DECLARATION_FILES: tuple[str, ...] = (
+    "pyproject.toml", "setup.py", "setup.cfg", "environment.yml", "environment.yaml",
+    "Pipfile", "poetry.lock", "uv.lock", "constraints.txt")
+
+# A declaration file is operator/agent-authored text on a shared box; read it bounded. 1 MiB is
+# ~20k requirement lines — orders of magnitude past any real file, and small enough that a symlink
+# pointed at something enormous costs a bounded read rather than the run.
+DECLARATION_MAX_BYTES = 1_048_576
+
+# A leading `-`/`--` line is a pip OPTION or an indirection (`-r other.txt`, `-e .`, `--index-url`),
+# not a named requirement. We do not follow or evaluate them — they are kept verbatim in
+# `Declaration.directives` so the receipt can say the file carried them.
+_REQ_COMMENT_RE = re.compile(r"(^|\s)#.*$")
+# PEP 508 name, plus the optional extras bracket. The remainder (specifier, marker, URL) is not
+# parsed: we never REWRITE a requirement, we only ever pass the operator's own line back to pip.
+_REQ_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?")
+
+
+def _canon_dist(name: str) -> str:
+    """PEP 503 canonical DISTRIBUTION name: lowercase, every run of `-_.` folded to a single `-`.
+    So `pytorch_lightning`, `PyTorch-Lightning` and `pytorch.lightning` are one key.
+
+    Deliberately NOT `_normal` above, which folds `-` to `_` and leaves INTERIOR dots alone. That is
+    the right rule where it is used — `_alias_map`/`_tokens` read dotted MODULE paths, where a dot
+    separates a submodule and must stay separate (`transformers.utils` reduces to `transformers` by
+    splitting, not by folding). Here a dot is part of a distribution's name (`zope.interface`,
+    `ruamel.yaml`) and PEP 503 says it is the same character class as `-` and `_`. Two different
+    questions, so two different normalizers, stated against each other rather than re-derived."""
+    return re.sub(r"[-_.]+", "-", str(name or "").strip()).lower()
+
+
+def parse_requirements(text: str) -> tuple[dict[str, str], list[str]]:
+    """`(canonical dist name -> the declared requirement LINE, verbatim)`, and the non-requirement
+    directive lines the file also carried.
+
+    The line is kept VERBATIM on purpose. We hand it straight back to pip, so LoopLab never has to
+    understand a specifier grammar it might get wrong, and whatever the operator wrote is exactly
+    what a receipt quotes. A duplicate name keeps the FIRST occurrence, matching pip's own
+    "first requirement wins" behaviour for a repeated name in one file.
+
+    Line continuations (`\\` at end of line) are joined first — a requirement split across lines is
+    one requirement, and treating the tail as its own line would invent a distribution named after a
+    version specifier."""
+    pins: dict[str, str] = {}
+    directives: list[str] = []
+    joined: list[str] = []
+    pending = ""
+    for raw in (text or "").splitlines():
+        line = pending + raw
+        if line.rstrip().endswith("\\"):
+            pending = line.rstrip()[:-1]
+            continue
+        pending = ""
+        joined.append(line)
+    if pending:                       # a trailing continuation with no successor line
+        joined.append(pending)
+    for line in joined:
+        # Only a `#` at line start or after whitespace is a comment: `pkg @ https://h/p#egg=pkg`
+        # carries a fragment that is part of the URL, and stripping it would corrupt the requirement.
+        line = _REQ_COMMENT_RE.sub("", line).strip()
+        if not line:
+            continue
+        if line.startswith("-"):
+            directives.append(line)
+            continue
+        m = _REQ_NAME_RE.match(line)
+        if not m:
+            directives.append(line)   # not a name we can key on; still a fact about the file
+            continue
+        pins.setdefault(_canon_dist(m.group(1)), line)
+    return pins, directives
+
+
+@dataclass(frozen=True)
+class Declaration:
+    """What a repo's source tree says its dependencies are — the read-only result of looking.
+
+    `filename` is the ONE file we would install from (empty when the tree declares nothing we act
+    on); `observed` names the declarations we saw and deliberately left alone. `digest` is over the
+    file BYTES and is the key to "did anyone rewrite this?" — the Developer's requested-change path
+    and the resume path both compare it rather than re-reading semantics."""
+    root: str = ""
+    filename: str = ""
+    digest: str = ""
+    pins: dict = field(default_factory=dict)
+    directives: tuple = ()
+    observed: tuple = ()
+
+    @property
+    def found(self) -> bool:
+        return bool(self.filename)
+
+
+def find_declaration(root) -> Declaration:
+    """Look at `root` for a dependency declaration LoopLab can act on. Pure observation — no
+    install, no network, no write.
+
+    Best-effort by construction: an unreadable/oversized/undecodable file yields a Declaration with
+    no pins rather than raising. A dependency declaration we cannot parse must degrade to today's
+    behaviour (the bare-name crash-time installer), never take down a run at setup."""
+    import hashlib
+    from pathlib import Path
+    if not str(root or "").strip():
+        # An EMPTY root is "there is no repo here", not "look in the process cwd". Defaulting to `.`
+        # would let whatever directory the engine happens to run from govern a run's installs.
+        return Declaration()
+    base = Path(str(root))
+    observed = tuple(n for n in OBSERVED_DECLARATION_FILES if (base / n).is_file())
+    for name in DECLARATION_FILES:
+        p = base / name
+        try:
+            if not p.is_file():
+                continue
+            raw = p.open("rb").read(DECLARATION_MAX_BYTES + 1)
+        except OSError:
+            continue
+        if len(raw) > DECLARATION_MAX_BYTES:
+            # Present but not read: say so through `observed` so the receipt does not claim the
+            # tree declares nothing, and leave `filename` empty so nothing installs from it.
+            return Declaration(root=str(base), observed=(name,) + observed)
+        pins, directives = parse_requirements(raw.decode("utf-8", errors="replace"))
+        return Declaration(root=str(base), filename=name,
+                           digest=hashlib.sha256(raw).hexdigest()[:12],
+                           pins=pins, directives=tuple(directives), observed=observed)
+    return Declaration(root=str(base), observed=observed)
+
+
+def declaration_argv(decl: Declaration, *, python: Optional[str] = None) -> list[str]:
+    """The argv that installs `decl` — `<python> -m pip install -r <file>`, run in `decl.root`.
+
+    By BASENAME, not absolute path: `engine/eval_dispatch.py::_do_run_setup` already runs
+    `run_setup` in the first editable repo's SOURCE dir precisely "so `-r requirements.txt`
+    resolves", and a relative name keeps the command readable in the log and stable if the workspace
+    moves. Carries the same `--disable-pip-version-check --no-input` as `install()` above, for the
+    same reason: this runs unattended and a prompt would hang to the timeout."""
+    if not decl.found:
+        return []
+    return [python or sys.executable, "-m", "pip", "install",
+            "--disable-pip-version-check", "--no-input", "-r", decl.filename]
+
+
+def declared_requirement(module: str, decl: Optional[Declaration]) -> Optional[str]:
+    """The requirement line `decl` declares for the IMPORT name `module`, or None.
+
+    This is the answer to "we are about to `pip install transformers` — did the repo already say
+    which transformers?". Both spellings are tried: the import name and the allowlist's pip name
+    (`pytorch_lightning` -> `pytorch-lightning`), because a repo writes either.
+
+    Returning None is a real answer, not a failure — it means the repo's declaration does not
+    mention this distribution, so the caller installs the bare name AND records that the repo never
+    spoke about it. WHY NOT A FUZZY MATCH: the one known conflict of this shape is `_PIP_NAME`'s
+    `faiss -> faiss-cpu` against a repo pinning `faiss-gpu-cu12==1.9.0.0`, and no name rule can
+    connect those two without also connecting `torch` to `torchvision`. That conflict is instead
+    defused UPSTREAM — the run-setup `-r` install puts `faiss-gpu-cu12` in place, so `import faiss`
+    resolves and this path is never reached. A guess here would install the CPU wheel over a GPU
+    build that was already working."""
+    if decl is None or not decl.pins:
+        return None
+    for spelling in (module, pip_package(module)):
+        line = decl.pins.get(_canon_dist(spelling))
+        if line:
+            return line
+    return None
+
+
+def installed_versions(dists, *, python: Optional[str] = None,
+                       timeout: float = 60.0) -> dict[str, str]:
+    """`{distribution -> version}` for every name in `dists` the eval interpreter has, in ONE
+    interpreter spawn. Absent distributions are simply missing from the result.
+
+    Plural because the run-setup receipt asks about the WHOLE declaration: the live testbed pins 21
+    distributions, and 21 `installed_version` calls is 21 process spawns for one row. Metadata only
+    (`importlib.metadata`), so asking never imports a heavyweight library.
+
+    Best-effort: any failure yields `{}`. A receipt is an observation of the environment, and an
+    observation that cannot be made must not be the thing that takes down a run."""
+    names = [str(d).strip() for d in (dists or []) if str(d or "").strip()]
+    if not names:
+        return {}
+    probe = ("import json, sys\n"
+             "from importlib.metadata import version\n"
+             "out = {}\n"
+             "for n in json.loads(sys.argv[1]):\n"
+             "    try:\n"
+             "        out[n] = version(n)\n"
+             "    except Exception:\n"
+             "        pass\n"
+             "sys.stdout.write(json.dumps(out))\n")
+    try:
+        import json as _json
+        proc = subprocess.run([python or sys.executable, "-c", probe, _json.dumps(names)],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=timeout, env={k: v for k, v in os.environ.items()
+                                                    if k.upper().startswith("PIP_")
+                                                    or not is_secret_env(k, v)})
+        got = _json.loads(proc.stdout or "{}")
+    except Exception:  # noqa: BLE001 - see the docstring; a receipt never fails a run
+        return {}
+    return {k: str(v) for k, v in got.items()} if isinstance(got, dict) else {}
+
+
+def version_delta(before: dict, after: dict) -> dict[str, dict]:
+    """`{distribution -> {"before", "after", "direction"}}` for every distribution whose version
+    CHANGED, where direction is `added` | `removed` | `changed`.
+
+    This is what makes honouring a pin an EXPLICIT, loggable act rather than an accidental one. The
+    live testbed pins `pytorch_lightning==1.5.1` into a container carrying 2.6.5, so the very first
+    real run of the declarative install DOWNGRADES a package — which is a policy question the
+    operator owns, and one they cannot even be asked if no artifact records that it happened.
+
+    Deliberately NOT a comparison of version ORDER: `packaging` is not a hard dependency here and
+    hand-rolling PEP 440 ordering to label something a "downgrade" would be a new way to be wrong
+    about versions. Reporting both values and letting the reader see `2.6.5 -> 1.5.1` is exact."""
+    out: dict[str, dict] = {}
+    for name in sorted(set(before or {}) | set(after or {})):
+        b, a = (before or {}).get(name), (after or {}).get(name)
+        if b == a:
+            continue
+        out[name] = {"before": b, "after": a,
+                     "direction": "added" if b is None else "removed" if a is None else "changed"}
+    return out
+
+
+def installed_version(dist: str, *, python: Optional[str] = None,
+                      timeout: float = 30.0) -> Optional[str]:
+    """Version of the DISTRIBUTION `dist` in the eval interpreter, or None if absent/unknowable.
+
+    The before/after half of a `deps_installed` receipt: without it the log records that
+    `pytorch-lightning` was installed and an operator still cannot tell whether that moved 1.5.1 to
+    2.6.5 or was a no-op. `importlib.metadata` reads the installed METADATA (never imports the
+    package), so asking is cheap and cannot execute a heavyweight library's `__init__`."""
+    name = str(dist or "").strip()
+    if not name or any(c in name for c in " \t\n"):
+        return None
+    probe = ("import sys\n"
+             "from importlib.metadata import version\n"
+             "try:\n"
+             "    sys.stdout.write(version(sys.argv[1]))\n"
+             "except Exception:\n"
+             "    pass\n")
+    try:
+        # Same secret scrub as `install()`/`is_present`: any interpreter spawn runs site `.pth`
+        # code, so this child gets no more environment than they do.
+        proc = subprocess.run([python or sys.executable, "-c", probe, name],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=timeout, env={k: v for k, v in os.environ.items()
+                                                    if k.upper().startswith("PIP_")
+                                                    or not is_secret_env(k, v)})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = (proc.stdout or "").strip()
+    return out or None
 
 
 @dataclass

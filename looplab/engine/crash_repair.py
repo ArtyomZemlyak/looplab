@@ -343,18 +343,69 @@ class CrashRepairMixin:
                 return []
             python = getattr(self.sandbox, "python", sys.executable)
             installer = self._dep_installer or deps.install
+            # What the REPO says about these distributions. Read once per call, from the same cached
+            # Declaration `_ensure_run_setup` installed from, so the run cannot install one set of
+            # pins and enforce another. `None` for a non-repo task — then this whole block is inert
+            # and the behaviour below is byte-for-byte what it was.
+            decl = self._declared_deps()
             installed: list[str] = []
             for mod in mods:
                 self._dep_attempted.add(mod)    # one pip attempt per module per run (success or fail)
                 pkg = deps.pip_package(mod)
+                # AN INSTALL MUST NOT SILENTLY MOVE A PACKAGE THE REPO PINNED. `pip install
+                # pytorch-lightning` against a repo pinning `pytorch_lightning==1.5.1` is how
+                # `runs/rubert-dr-0804` acquired Lightning 2.6.5, and how `rubert-dr-0807` node 0 then
+                # died on the `find_unused_parameters` default 2.x flipped — 7 of its 12 repair
+                # attempts are artifacts of an API the repo never asked for. So when the declaration
+                # names this distribution, pip is handed the operator's own line VERBATIM rather than
+                # a bare name. Verbatim matters twice: LoopLab never has to parse a specifier
+                # grammar, and the receipt below quotes exactly what the repo wrote.
+                #
+                # WHY NOT `-c requirements.txt`. A constraints file would bind the transitive
+                # resolution too, which is strictly stronger — and pip cannot read this repo's file
+                # at all. Measured 2026-08-07 against the live testbed's own requirements.txt:
+                #     ERROR: Constraints cannot have extras
+                # because it declares `bm25s[full]`. A mechanism that fails closed on the very file
+                # it exists to honour is not a mechanism; per-package resolution degrades to today's
+                # behaviour for a line it cannot use, which is the right direction.
+                pin = deps.declared_requirement(mod, decl)
+                req = pin or pkg
+                before = deps.installed_version(pkg, python=python)
                 try:
-                    with self.tracer.span("install_dep", package=pkg):
-                        res = installer(pkg, python=python, timeout=self._dep_install_timeout)
+                    with self.tracer.span("install_dep", package=pkg, requirement=req):
+                        res = installer(req, python=python, timeout=self._dep_install_timeout)
                 except Exception:  # noqa: BLE001 - a misbehaving installer must degrade to "not installed",
                     res = None     # not crash the eval; the node then flows to normal triage/repair.
                 if getattr(res, "ok", False):
                     installed.append(pkg)
+                    # The before/after pair is the whole reportability story for an install: without
+                    # it the log says `pytorch-lightning` was installed and an operator still cannot
+                    # tell whether that was a no-op or a two-major-version move. Recorded on the
+                    # engine for `_evaluate` to stamp onto `deps_installed` — the append site is
+                    # there because that is where the write lock and the node/generation key are.
+                    self._dep_receipts[pkg] = {
+                        "package": pkg, "requirement": req, "declared": pin,
+                        "before": before, "after": deps.installed_version(pkg, python=python)}
             return installed
+
+    def _drain_dep_receipts(self, packages: list) -> list:
+        """The per-package install receipts for `packages`, REMOVED from the pending map.
+
+        `_install_missing` runs in a worker thread and records `{requirement, declared, before,
+        after}` per package; `_evaluate` stamps them onto `deps_installed` under `_write_lock`.
+        Draining rather than reading means a later round in the same node cannot re-report an
+        install that already has a receipt on the log — the rows would then disagree about how many
+        times a package moved.
+
+        Ordered by `packages` (the caller's own order) so the receipt list lines up index-for-index
+        with the `packages` field beside it. A package with no receipt is simply absent rather than a
+        `None` hole: the only way to get here without one is an injected test installer, and a list
+        of nulls would read as "we looked and found nothing" rather than "we did not look"."""
+        pending = getattr(self, "_dep_receipts", None)
+        if not pending:
+            return []
+        out = [pending.pop(p) for p in (packages or []) if p in pending]
+        return out
 
     def _prepare_env_from_triage(self, triage: dict, stderr: str) -> list[str]:
         """Environment self-prep for a missing library the TRACEBACK NEVER NAMES.

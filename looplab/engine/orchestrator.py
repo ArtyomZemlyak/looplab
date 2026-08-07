@@ -638,6 +638,23 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._dep_install_timeout = float(dep_install_timeout)
         self._dep_installer = dep_installer        # None => deps.install (real pip)
         self._dep_attempted: set[str] = set()
+        # Per-package install RECEIPTS ({pip name -> {requirement, declared, before, after}}), filled
+        # by `_install_missing` and drained onto the `deps_installed` event by `_evaluate`. They are
+        # produced under `_dep_lock` in a worker thread and consumed under `_write_lock` on the main
+        # task, which is why they land here rather than being returned: `_install_missing` returns the
+        # package NAMES its two callers already key on, and widening that return type would change
+        # both call sites plus the injected-installer seam ~10 tests drive.
+        self._dep_receipts: dict[str, dict] = {}
+        # The repo's own dependency declaration, read once and cached by
+        # `eval_dispatch.py::_declared_deps` (None until first asked). Both the run-setup install and
+        # the crash-time pin lookup read THIS object, so a run cannot install one set of pins and
+        # enforce another.
+        self._deps_declaration = None
+        # Declaration digests this run has already installed (the run's own baseline seeds it on
+        # first use). Read and mutated under `_dep_lock` by `_sync_node_deps` — a check-then-act over
+        # run-global state that two eval workers can reach at once — so it is created HERE rather
+        # than lazily, which would itself be the race.
+        self._deps_synced_digests: set[str] = set()
         import threading as _threading
         self._dep_lock = _threading.Lock()
         # Agent governance (Settings.agent_control): per-setting allow-list of which roles may change it

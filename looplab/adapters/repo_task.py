@@ -621,13 +621,63 @@ class RepoTask(BaseModel):
         setup = " ".join(self.eval.setup) if (self.eval and self.eval.setup) else ""
         deps = (f" Dependencies are installed before each eval by `{setup}`, so to add a "
                 "package, edit the requirements file it reads (if it is in your allowed "
-                "paths).") if setup else ""
+                "paths).") if setup else self._declared_deps_brief()
         return (f"You are improving an existing experiment repository to {goal} the eval "
                 f"metric. Goal: {self.goal}\n"
                 f"You may ONLY edit files matching: {surf}. Do NOT modify (the operator "
                 f"runs the evaluation): {prot}. The eval is run as: `{cmd}`.{deps}"
                 f"{self._data_brief()} Make one "
                 f"focused change to make the eval succeed and improve the metric, then stop.")
+
+    def _declared_deps_brief(self) -> str:
+        """The dependency sentence for a repo whose deps LoopLab installs itself.
+
+        Two facts the agent cannot discover and repeatedly got wrong without them. (1) The repo's
+        declared versions ARE installed now — before this, a run's environment was whatever the
+        crash-time bare-name installer happened to resolve, so the Developer was routinely writing
+        code against a library version the repo never asked for and then "fixing" the repo to match
+        it. On `runs/rubert-dr-0807` that migration ran the wrong way for 7 of node 0's 12 repair
+        attempts. (2) Whether it may CHANGE them. The direct `RepoTask` edit_surface default is
+        `["**/*.py"]`, which does not match `requirements.txt`, while the composable `repo:` default
+        is `["**/*"]`, which does — so the same sentence is true for one task and a lie for the
+        other. Telling an agent to edit a file the write gate will refuse costs a whole repair
+        attempt on the refusal, which is exactly what the old sentence's "(if it is in your allowed
+        paths)" parenthetical was papering over.
+
+        Silent when the repo declares nothing we act on: an absent sentence is correct there, and a
+        "there is no requirements.txt" sentence would invite the agent to create one."""
+        from looplab.runtime import deps
+        from looplab.tools.patch import SurfacePolicy
+        mounts = self._editable_mounts()
+        if not mounts:
+            return ""
+        ed = mounts[0]
+        decl = deps.find_declaration(ed["path"])
+        if not decl.found:
+            return ""
+        pre = "" if ed["name"] in (".", "") else ed["name"].rstrip("/") + "/"
+        rel = pre + decl.filename
+        # Ask the REAL write gate, not a glob comparison of our own: `SurfacePolicy` is what will
+        # actually refuse the agent's write, and a second implementation of "is this in the surface"
+        # is how a brief starts promising something the gate denies. Constructed exactly as
+        # `RepoWriteTools._gate` constructs it (`protected_exact=True`, `check_escapes=False`,
+        # namespaced prefixes) — the same object with different flags answers a different question.
+        surf: list[str] = []
+        prefixes: list[str] = []
+        for m in mounts:
+            p = "" if m["name"] in (".", "") else m["name"].rstrip("/") + "/"
+            surf += [p + g for g in m["surface"]]
+            if p:
+                prefixes.append(p.rstrip("/"))
+        writable = SurfacePolicy(surf, self._protected_names(), prefixes,
+                                 protected_exact=True, check_escapes=False).check(rel) is None
+        if writable:
+            return (f" Dependencies come from `{rel}`, which is installed for you before the eval — "
+                    "the versions it pins are the versions you have. To use a new library or a "
+                    f"different version, edit `{rel}`; it is re-installed when you change it.")
+        return (f" Dependencies come from `{rel}`, which is installed for you before the eval — the "
+                "versions it pins are the versions you have. You may NOT edit it, so write code "
+                "against those versions rather than migrating to a newer API.")
 
     def _data_brief(self) -> str:
         """Tell the agent what it may do with each mounted data source (per-source permissions)."""
