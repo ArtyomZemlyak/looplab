@@ -2300,7 +2300,8 @@ def derive_cards(st: RunState) -> None:
     ``actionable`` / ``selection_ready`` read the FINAL status. ``_apply_card_belief_lineage`` is the
     one phase with NO ordering constraint of its own — it writes only the two derived research-direction
     identities (``belief_id``/``retry_of``) and no later phase reads them — so it sits where the
-    sequence stays readable as "derive every projected field, then gate on the final values". Each phase is a pure function of the
+    sequence stays readable as "derive every projected field, then gate on the final values".
+    Each phase is a pure function of the
     folded ``RunState`` plus the explicit tables threaded through it — nothing here reads an Event,
     a clock or the outside world (engine invariant 5).
     """

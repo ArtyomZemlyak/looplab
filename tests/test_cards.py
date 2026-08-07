@@ -1339,6 +1339,29 @@ def test_retry_of_needs_the_parent_nodes_own_card_claim_not_its_evidence_members
     assert st.cards["card-1"].retry_of is None            # …and still NOT its work item
 
 
+def test_retry_of_follows_a_merged_owner_to_its_canonical_survivor():
+    # The owner map is canonicalized through `_canon`, like every other id join in the ledger. Without
+    # it a debug card whose parent node claims a card that consolidation later merged away would report
+    # the DEAD alias — which, because merged aliases are dropped from `st.cards`, silently degrades to
+    # no edge at all. The survivor is the honest answer and the one a board can render.
+    other = "an independently authored card that consolidation keeps"
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        _receipted_card_added("card-0", _RETRY_STATEMENT, operator="draft", at_node=0),
+        _node_for_card(0, "card-0", _RETRY_STATEMENT, operator="draft"),
+        ("node_failed", {"node_id": 0, "reason": "boom", "eval_seconds": 1}),
+        _receipted_card_added("card-2", other, operator="draft", at_node=1),
+        _node_for_card(1, "card-2", other, operator="draft"),
+        ("node_evaluated", {"node_id": 1, "metric": 0.4}),
+        # card-0 is consolidated INTO card-2; node 0 still names card-0 on its own row.
+        ("card_merged", {"canonical": "card-2", "aliases": ["card-0"]}),
+        _receipted_card_added("card-1", _RETRY_STATEMENT, operator="debug", parents=(0,), at_node=2),
+        _node_for_card(2, "card-1", _RETRY_STATEMENT, operator="debug", parents=(0,)),
+    ]))
+    assert "card-0" not in st.cards                # the alias is gone from the board…
+    assert st.cards["card-1"].retry_of == "card-2"  # …and the edge follows it to the survivor
+
+
 def test_belief_id_is_the_full_digest_and_is_what_the_belief_views_read():
     # The key is the FULL sha256, never the short display `hypothesis_id`: two distinct statements can
     # share a short id, and keying on that would silently merge unrelated beliefs.
