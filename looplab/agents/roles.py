@@ -248,7 +248,16 @@ DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
     # reads (engine/audit.py `_emit_agent_report`), and the seed/process/patch evidence the
     # ValidatingDeveloper's checks consume. Surfaced by the contract test's own first run —
     # the original census had missed all four.
-    "last_report", "last_seed", "last_run", "last_patch")
+    "last_report", "last_seed", "last_run", "last_patch",
+    # The repair session's STAGE ROLLBACK request: the suspect EARLIER stage this repair blamed, ""
+    # for none (`adapters/repo_developer.py::_repair_emit_spec` produces it,
+    # `engine/evaluate.py`'s attempt loop consumes it through `engine/eval_stages.py::_rollback_start`).
+    # It belongs in this registry for the sharpest version of the reason the tuple exists: the
+    # consumer's default is the FALSY one, so a rename would read as "no rollback was requested" on
+    # every attempt of every node — the feature silently ceasing to exist, with nothing red anywhere,
+    # and the only visible symptom a repair loop that keeps failing at `train` for reasons it already
+    # correctly diagnosed.
+    "last_rollback_stage")
 RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
 
 # Duck-typed attributes that answer "does building one node make provider calls at all?" — the seam

@@ -191,6 +191,35 @@ def _durable_dep_rounds(events, node_id: int, generation: int) -> int:
     return rounds
 
 
+def _durable_rollbacks(events, node_id: int, generation: int) -> set:
+    """Which earlier stages this node has ALREADY been rolled back to, from the log.
+
+    The fourth of the family, and the one whose bound is not a count but a SET: a rollback may be
+    tried at most once per suspect stage per node (`engine/eval_stages.py::_rollback_start` rung 3),
+    which is what makes the feature bounded by the pipeline's own length rather than by a budget.
+    Reading it off `stage_rollback` rows is what carries that across a resume — process-local, a
+    restarted node would re-offer every stage it had already re-run, which is precisely the thrash
+    the rung exists to stop, and the most expensive kind because each retry is a whole stage.
+
+    ONLY the accepted rows count. A refused request cost nothing and consumed nothing, so holding it
+    against the node would spend the one allowance on a decision the engine itself made — and would
+    make a typo'd stage name permanently un-nameable.
+
+    Old logs contribute nothing, which is honest: a node that never rolled back has no allowance to
+    reconstruct.
+    """
+    out: set = set()
+    for e in events or []:
+        if e.type != EV_STAGE_ROLLBACK:
+            continue
+        d = e.data or {}
+        if not _durable_row_belongs(d, node_id, generation):
+            continue
+        if d.get("accepted") is True and d.get("stage"):
+            out.add(str(d["stage"]))
+    return out
+
+
 def _durable_full_retrains(events, node_id: int, generation: int) -> int:
     """Full re-trains already spent on this node, from the log.
 
@@ -289,7 +318,7 @@ from looplab.events.types import (EV_CARD_DROPPED, EV_DEPS_INSTALLED, EV_FULL_RE
                                   EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
                                   EV_NODE_RESET, EV_PAUSE, EV_PROXY_SCORED,
                                   EV_REWARD_HACK_SUSPECTED,
-                                  EV_SPEC_DRIFT, EV_STAGE_FINISHED)
+                                  EV_SPEC_DRIFT, EV_STAGE_FINISHED, EV_STAGE_ROLLBACK)
 
 
 def _card_identity_spellings(state, raw_card_id) -> frozenset[str]:
@@ -428,11 +457,22 @@ def _repair_change_set(prev_files, prev_deleted, repaired_files,
     return changed, new_deleted
 
 
-def _repair_forces_full_retrain(res, next_start) -> bool:
+def _repair_forces_full_retrain(res, next_start, *, rolled_back: bool = False) -> bool:
     """Does this repair discard completed EARLIER-stage work, i.e. does it count against the cap?
 
     Three conditions with one meaning, which is why they are a named rule (doc 25 ES-03) rather
     than a compound `if` carrying fifteen lines of comment in the middle of the attempt loop.
+
+    `rolled_back` is the FOURTH condition and the reason this rule was worth extending instead of
+    giving rollback an accounting of its own. The question the cap asks is "is this repair throwing
+    away completed expensive work?", and a rollback is a yes by construction — `_rollback_start` only
+    ever accepts a suspect STRICTLY EARLIER than the failed stage, so an accepted rollback always
+    discards at least one stage that had already run to completion, plus everything after it. It is
+    therefore the same charge on the same ledger (`inline_repair_retrain_cap`, guarding GPU hours),
+    and a second counter would let a Developer alternate rollback / full-retrain and pay neither cap.
+    It is checked FIRST because the existing three conditions cannot see it: a rollback leaves
+    `next_start` set to the suspect's name, so `next_start is None` is False and the historical rule
+    reads an accepted rollback as free.
     """
     # Count a full re-train against the cap ONLY when completed EARLIER-stage work is being
     # discarded: a LATER stage failed yet reuse was refused because the repair could
@@ -450,6 +490,8 @@ def _repair_forces_full_retrain(res, next_start) -> bool:
     # point of counting the renamed case at all — leaving it uncounted let a
     # stage-renaming repair burn unlimited full trains); a renamed FIRST stage never had
     # earlier work to discard, so it must stay an ordinary retry.
+    if rolled_back:
+        return True
     was_first = len(res.stages or []) <= 1
     return bool(res.failed_stage) and not was_first and next_start is None
 
@@ -1126,6 +1168,13 @@ class EvaluateMixin:
             # the EXPENSIVE full re-runs a repair forced, bounded by inline_repair_retrain_cap.
             next_start = _UNSET
             full_retrains = _durable_full_retrains(events_at_start, node_id, generation)
+            # ROLLBACK state, both halves durable for the same reason the budget above is. `rolled_to`
+            # is the set of suspects already spent (at most one re-run per stage per node);
+            # `rollback_refusal` carries the engine's answer to a REFUSED request forward into the next
+            # repair prompt, because a Developer told nothing simply re-asserts the same guess — the
+            # thrash the rungs exist to stop would then just move up one level.
+            rolled_to = _durable_rollbacks(events_at_start, node_id, generation)
+            rollback_refusal = ""
             while True:
                 _t0 = time.time()
                 # repair/retry attempts reuse the workdir and sandbox stage logs append.
@@ -1497,10 +1546,15 @@ class EvaluateMixin:
                 # veto reuse for a deletion this node never made).
                 prev_files = dict(getattr(node, "files", {}) or {})
                 prev_deleted = set(getattr(node, "deleted", []) or [])
+                # A REFUSED rollback rides in FRONT of the eval error, not instead of it: the model
+                # still has to fix something, and the refusal only tells it which door is shut and
+                # why. Cleared on read so one refusal is carried exactly one attempt forward.
+                _err_in = f"{rollback_refusal}\n\n{err}" if rollback_refusal else err
+                rollback_refusal = ""
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
                     try:
                         new_code = self._repair(
-                            node, self._repair_error_context(reason, err, state=state, node=node),
+                            node, self._repair_error_context(reason, _err_in, state=state, node=node),
                             state)
                     except BudgetExceeded:
                         raise      # the hard budget stop propagates, exactly as in `_triage_crash`
@@ -1530,6 +1584,11 @@ class EvaluateMixin:
                 # even IS this repair's artifact.
                 repaired_files = dict(getattr(self.developer, "last_files", {}) or {})
                 repaired_deleted = list(getattr(self.developer, "last_deleted", []) or [])
+                # The rollback REQUEST, snapshotted in the same breath and for the same reason: this
+                # developer instance is shared across concurrent evals, so reading it after the next
+                # `await` would risk picking up a sibling node's answer and re-running an expensive
+                # stage on THIS node that nobody asked for.
+                _rollback_ask = str(getattr(self.developer, "last_rollback_stage", "") or "").strip()
                 # WAS THIS A REPAIR AT ALL, OR A DEAD PROVIDER? The four answers and the incident
                 # each one was retrofitted for live in `_repair_provider_failure`. The unparseable
                 # counter round-trips through the return value — it is per-NODE, not per-attempt, so
@@ -1621,18 +1680,52 @@ class EvaluateMixin:
                 # its blind spots: a deletion is invisible to the reachability closure (the file was
                 # unlinked by _write_node_files above), and a non-default cwd re-bases the stage
                 # scripts so the changed-vs-reachable intersection would prove nothing.
+                _cwd = (self._eval_spec or {}).get("cwd") if isinstance(self._eval_spec, dict) else None
                 next_start = self._safe_reuse_start(
                     _stages, res.failed_stage, changed, workdir,
-                    deleted=new_deleted,
-                    cwd=(self._eval_spec or {}).get("cwd") if isinstance(self._eval_spec, dict) else None)
+                    deleted=new_deleted, cwd=_cwd)
+                # ROLLBACK, asked only when the Developer named a suspect. It OVERRIDES `next_start`
+                # in the one direction the reuse predicate structurally cannot express: backwards,
+                # onto a stage that already completed. Consulted AFTER `_safe_reuse_start` and never
+                # instead of it — the reuse answer is what the run falls back to when the ladder
+                # refuses, and computing it first also means a refusal costs the node nothing.
+                _rolled_back = False
+                if _rollback_ask:
+                    _suspect, _refusal = self._rollback_start(
+                        _stages, res.failed_stage, _rollback_ask, changed, workdir,
+                        already_rolled_back=rolled_to, cwd=_cwd)
+                    if _suspect:
+                        next_start, _rolled_back = _suspect, True
+                        rolled_to = rolled_to | {_suspect}
+                    else:
+                        rollback_refusal = _refusal or ""
+                    async with self._write_lock:
+                        # BOTH outcomes are recorded. The refusals are the auditable half: a node
+                        # whose every rollback is refused is a Developer stuck on one guess, and that
+                        # is invisible if only the accepted ones are written. Diagnostic + fold-
+                        # ignored, so this append is splice-neutral by construction (see the event's
+                        # own note in events/types.py); on the main task under the write lock like
+                        # every other append in this loop.
+                        self.store.append(EV_STAGE_ROLLBACK, {
+                            "node_id": node_id, "generation": generation, "attempt": attempt,
+                            "stage": _rollback_ask, "failed_stage": str(res.failed_stage or ""),
+                            "accepted": bool(_suspect),
+                            "refusal": str(_refusal or "")[:300]})
                 # Which repairs count against the retrain cap, and why a renamed stage still does, is
                 # `_repair_forces_full_retrain`. Asked BEFORE incrementing so cap=N runs exactly N.
-                if _repair_forces_full_retrain(res, next_start):   # forces a full (expensive) re-train
+                if _repair_forces_full_retrain(res, next_start, rolled_back=_rolled_back):
                     if (self._inline_repair_retrain_cap
                             and full_retrains >= self._inline_repair_retrain_cap):
+                        # The message names WHICH of the two ways this repair discarded completed
+                        # work, because they call for different next moves by whoever reads the
+                        # terminal: "keeps rewriting training code" is a Developer circling, while
+                        # "rolled back to <stage>" says the pipeline itself was suspected and the
+                        # allowance for testing that is now spent.
                         triage_outcome = ("abandon",
-                            f"repair keeps changing earlier-stage (training) code — {full_retrains} full "
-                            "re-train(s) already spent; abandoning in-node repair to avoid burning compute "
+                            (f"repair rolled the pipeline back to stage {next_start!r} and "
+                             if _rolled_back else "repair keeps changing earlier-stage (training) code — ")
+                            + f"{full_retrains} expensive re-run(s) already spent; abandoning in-node "
+                            "repair to avoid burning compute "
                             "(a budgeted inter-node debug node can still pick it up)")
                         break
                     full_retrains += 1

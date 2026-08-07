@@ -248,6 +248,19 @@ _REPO_DEV_REPAIR_BLOCK = (
     "'skip if a checkpoint exists' logic to the code yourself (a partial or foreign artifact would "
     "silently freeze the metric); just repair the failing step. Do not start "
     "over from scratch. Files in this node's working set: {already}.\n"
+    "IF THE REAL CAUSE IS AN EARLIER STAGE, SAY SO. A stage that exited 0 was counted successful, but "
+    "exit 0 only means it did not crash — an earlier stage can 'succeed' having produced a fraction "
+    "of what it should have (this has happened: a mining stage exited 0 with hard negatives for 1.2% "
+    "of the queries, and training then failed or trained on nonsense). When the error you are looking "
+    "at is the SYMPTOM and an earlier stage is the CAUSE, do two things in THIS repair: (1) EDIT that "
+    "earlier stage's script so it does the job properly and fails loudly when it cannot, and (2) pass "
+    "`rollback_stage: \"<that stage's name>\"` to `done`. The engine then re-runs the pipeline from "
+    "that stage, throwing away its bad output and everything built on it. Both parts are required — "
+    "naming a stage you did not change is refused, because re-running it unchanged would produce the "
+    "same bytes. You get ONE rollback per stage on this node, and it costs the same budget a forced "
+    "full re-train does, so name a stage when you have evidence in the log, not on a hunch. If the "
+    "earlier stage's script is one you are not allowed to edit, you cannot fix it — say that in your "
+    "summary instead of guessing.\n"
     "--- eval error (stderr/stdout tail) ---\n")
 
 
@@ -306,6 +319,12 @@ class LLMRepoDeveloper:
         self.last_files: dict[str, str] = {}
         self.last_deleted: list[str] = []
         self.last_footprint: dict | None = None
+        # The suspect EARLIER stage this call's repair blamed, "" when it blamed none. Per-CALL like
+        # every other `last_*` output and registered in `agents/roles.py::DEVELOPER_OUTPUT_ATTRS` for
+        # the same reason they are: the engine reads it with `getattr(developer, ..., "")`, so a
+        # rename here would not fail — it would silently mean "no rollback was ever requested", i.e.
+        # the feature quietly ceasing to exist with every test still green.
+        self.last_rollback_stage: str = ""
 
     # Files most useful to PRELOAD verbatim so the agent authors the entrypoint without fumbling with
     # a (truncating) read tool. Order = priority; the rest of the surface is appended within budget.
@@ -468,6 +487,41 @@ class LLMRepoDeveloper:
                         "Call once the file(s) are written and the eval command would run and print "
                         "its metric. Briefly summarize what you wrote.",
                         {"summary": {"type": "string"}}, [])
+
+    def _repair_emit_spec(self) -> dict:
+        """The repair session's `done`, which carries ONE extra field the build sessions must not
+        have: `rollback_stage`.
+
+        A SEPARATE spec rather than an optional property on `_emit_spec` because the field is only
+        answerable in a repair — a fresh build has no failed stage to blame — and a schema property
+        that is inert wherever it appears is a property a model will eventually fill in anyway. The
+        build path keeps `_emit_spec` byte-identical, so nothing about a fresh implement changes.
+        """
+        from looplab.tools._base import fn_spec
+        return fn_spec("done",
+                        "Call once the repair is written and the eval would run. Briefly summarize "
+                        "what you changed.",
+                        {"summary": {"type": "string"},
+                         # The Developer's ONLY way to say "the stage that broke is not the stage
+                         # that is wrong". Everything the engine does with it is in
+                         # `engine/eval_stages.py::_rollback_start`; the two things the model has to
+                         # know are stated here because the tool description is what it reads at the
+                         # moment of answering: it must have CHANGED that stage, and it gets one
+                         # attempt per stage.
+                         "rollback_stage": {"type": "string", "description":
+                                            "Leave EMPTY unless the failure you just repaired was "
+                                            "CAUSED by an EARLIER pipeline stage that already "
+                                            "'succeeded' — e.g. a data/mining stage that exited 0 "
+                                            "having produced a fraction of what it should have, so "
+                                            "training was fed a broken input. Then name that earlier "
+                                            "stage and the engine will re-run the pipeline FROM it, "
+                                            "discarding its output and everything after. You must "
+                                            "have EDITED that stage's script (or something it "
+                                            "imports) in THIS repair, or the rollback is refused — "
+                                            "re-running it unchanged would produce the same bytes. "
+                                            "You get ONE rollback per stage per node, and it costs "
+                                            "the same budget a forced full re-train does, so use it "
+                                            "when you have evidence, not on a hunch."}}, [])
 
     def _session_opts(self, *, max_turns=None, time_budget=None):
         """loop_opts + the HARD per-session ceiling. A developer session ALWAYS gets a finite bound so
@@ -859,6 +913,12 @@ class LLMRepoDeveloper:
              base_deleted: Optional[list] = None) -> str:
         from looplab.agents.agent import run_phase
         from looplab.core import tracing
+        # Cleared per CALL, before anything can fail: this developer instance is SHARED across
+        # concurrent `_evaluate` tasks (see the `repaired_files` snapshot note in evaluate.py), so a
+        # stale value left by a sibling node's repair would make THIS node re-run an expensive stage
+        # nobody asked it to. Every early return below (including the `except` that mints the
+        # developer-error sentinel) therefore leaves it "" rather than the previous call's answer.
+        self.last_rollback_stage = ""
         # Resolved ONCE for the whole node: operator `cmd.stages` make declare_stages refuse (P12)
         # and drive the stage notes below; data-mount names make mount refusals honest.
         op_stages = self._operator_stage_list()
@@ -1009,9 +1069,17 @@ class LLMRepoDeveloper:
             else:
                 # repair / toy single session — terminal, so no summary (and repair isn't in a scope
                 # anyway when it runs inline during eval; the debug-operator repair gets an empty ledger).
-                run_phase(self.client, tools, messages, self._emit_spec(),
+                # A REPAIR additionally gets `rollback_stage` on its `done` (see `_repair_emit_spec`),
+                # captured into `last_rollback_stage` from the emit args — the engine reads it off the
+                # developer exactly as it reads `last_files`, through the DEVELOPER_OUTPUT_ATTRS seam.
+                def _finish(a):
+                    if error:
+                        self.last_rollback_stage = str((a or {}).get("rollback_stage", "")).strip()[:64]
+                    return (a or {}).get("summary", "")
+                run_phase(self.client, tools, messages,
+                          self._repair_emit_spec() if error else self._emit_spec(),
                           label=("Developer·repair" if error else "Developer·implement"), handoff=False,
-                          finalize=lambda a: (a or {}).get("summary", ""),
+                          finalize=_finish,
                           fallback=lambda m: "", **self._session_opts())
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup
             self.last_files = dict(write.files)
