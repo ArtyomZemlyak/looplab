@@ -416,8 +416,15 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       'button[aria-label="Show 1 tagged experiment for loss/a"]')
     assert.equal(evidenceToggle?.getAttribute('aria-expanded'), 'false')
     await click(evidenceToggle)
-    const experiment = document.querySelector('button[aria-label*="Open in Inspector"]')
+    // Selected by CLASS, not by prose: the accessible name of this control is product copy and it has
+    // already been rewritten once ("Open in Inspector" -> "Inspect it beside this tree", c5bddf9,
+    // when the tree became a place you inspect FROM). A selector that spells the copy does not fail
+    // loudly when it changes — it returns undefined, and every assertion below it silently stops
+    // running. The name is still pinned, one line down, where a mismatch reports the actual string.
+    const experiment = document.querySelector('button.cv-exp-button')
     assert.equal(experiment?.tagName, 'BUTTON')
+    assert.match(experiment.getAttribute('aria-label'), /Inspect it beside this tree$/,
+      'an inspectable evidence row must say the tree is where inspection happens')
     assert.equal(experiment?.getAttribute('role'), null, 'native button owns Enter and Space semantics')
     assert.match(experiment.textContent, /Experiment #0 · attempt 0.*evaluated/s)
     assert.match(experiment.textContent, /feasible.*membership · researcher-authored.*rollup · eligible/s,

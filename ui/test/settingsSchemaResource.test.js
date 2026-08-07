@@ -20,7 +20,13 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   `train_monitor_kill`, `train_monitor_kill_confidence` and `asha_live_kill_confidence`.
   //   Verified by diffing the catalogue's key set against the last 158-field revision, so this is
   //   real growth rather than a duplicated or renamed key.
-  assert.equal(Object.keys(schema.fieldByKey).length, 162)
+  //   162 -> 163 (2026-08-06): `concept_tidy` joined the form — the switch that lets an agent's
+  //   recorded merge become cross-run policy unattended. Same verification: diffing the packaged
+  //   catalogue's key set across that commit reports exactly `['concept_tidy']` added and nothing
+  //   removed. The Python side of this tripwire moved with it and this one did not, so the fixture
+  //   (which reads the REAL `looplab/serve/settings_ui_schema.json`) reported 163 against a literal
+  //   still pinned at 162 — see `tests/test_settings_ui_schema.py`, which pins the same growth.
+  assert.equal(Object.keys(schema.fieldByKey).length, 163)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')
   assert.equal(schema.fieldByKey.speculation_depth.minimum, 0)
   assert.equal(schema.fieldByKey.speculation_depth.maximum, 64)
