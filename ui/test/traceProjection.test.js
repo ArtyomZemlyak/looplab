@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import {
   NODE_TRACE_SPAN_WINDOW, NODE_TRACE_SPAN_WINDOW_MAX, TRACE_PARTIAL_NOTICE,
-  conversationPagerLabel, conversationWindow, conversationWindowNotice, nextNodeSpanWindow,
+  conversationWindow, conversationWindowNotice, nextNodeSpanWindow,
   spansOmitted,
   traceDetailState, tracePartial, traceUnavailable, traceWindow, traceWindowNotice,
   unavailableTraceDetail,
@@ -163,27 +163,38 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   ])
   assert.match(inspector, /const unavailable = traceUnavailable\(conv\.projection\)[\s\S]*?if \(unavailable\) return <TraceUnavailable[\s\S]*?if \(!stages\.length\)/,
     'conversation unavailable must win over the ordinary empty state')
+  // BOTH outcomes go through one `commit`. `Promise.allSettled` never rejects, so the `.catch` is
+  // the DEADLINE — the failure a widened read actually hits (17.3 s measured at the ceiling) — and
+  // a second settle path there is how it went back to saying nothing. The behaviour itself is
+  // driven in inspectorTracePager.test.js; this only holds the single-path shape.
   assert.match(inspector,
-    /conversation\.status === 'fulfilled'[\s\S]*?: \{ stages: \[\], projection: \{ unavailable: true \} \}[\s\S]*?catch\(\(\) => \{[\s\S]*?if \(alive\(\)\) setConv\(\{ stages: \[\], projection: \{ unavailable: true \} \}\)/,
-    'conversation transport failures need an explicit unavailable receipt')
+    /const settled = settleTraceRead\(previous\?\.payload, \{ ok, payload \}\)[\s\S]*?if \(settled\.unavailable\) \{[\s\S]*?projection: \{ unavailable: true \}[\s\S]*?commit\(conversation\.status === 'fulfilled'[\s\S]*?\.catch\(\(\) => \{ if \(alive\(\)\) commit\(false, null\) \}\)/,
+    'conversation failures route through the ONE settle rule: unavailable only with nothing in hand')
   assert.match(inspector, /if \(!spans\.length && !agent\)[\s\S]*?if \(unavailable\)[\s\S]*?<TraceUnavailable[\s\S]*?if \(spanWindow\.kind !== 'complete'\)[\s\S]*?TRACE_PARTIAL_EMPTY_NOTICE[\s\S]*?No execution spans/,
     'an empty node trace must check unavailable and the window before successful empty')
   assert.ok(inspector.indexOf("if (view === 'conversation')") < inspector.indexOf('if (!spans.length && !agent)'),
     'the selected conversation view must load before raw-tree empty/unavailable branches')
   assert.match(inspector, /\[open, io, runId, s\.span_id, kind\][\s\S]*?const retryIo = \(\) => setIo\(null\)[\s\S]*?<TraceUnavailable label="Trace detail unavailable\." onRetry=\{retryIo\}/,
     'span detail unavailable must be retryable even after the first expansion')
-  assert.match(inspector, /function Conversation\(\{[\s\S]*?onRetry[\s\S]*?\[runId, n\.id, working, reloadNonce, spanLimit\][\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/,
-    'a finished conversation one-shot must expose an explicit retry, and re-read when paged')
+  assert.match(inspector, /function Conversation\(\{[\s\S]*?onRetry[\s\S]*?\[runId, n\.id, working, reloadNonce\][\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/,
+    'a finished conversation one-shot must expose an explicit retry')
   assert.match(inspector, /nodeConversation\(runId, n\.id, \{ signal, limit: spanLimit \}\)/,
     'the conversation must actually SEND the window it was given, or the control is decorative')
-  assert.match(inspector, /export function NodeTrace\(\{ spans, runId, projection = \{\}, onRetry, onLoadMore \}\)[\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/)
-  assert.match(inspector, /const spanWindow = traceWindow\(projection, \{ canPage: !!onLoadMore \}\)[\s\S]*?spanWindow\.kind === 'pageable'[\s\S]*?onClick=\{onLoadMore\}[\s\S]*?load more spans/,
-    'a pageable node trace must offer "load more spans" instead of a dead notice')
-  assert.match(inspector, /spanWindow\.kind === 'capped'[\s\S]*?traceWindowNotice\(spanWindow\)/,
-    'a surface with nowhere to page still owes the COUNT, never a bare adjective')
+  assert.match(inspector, /export function NodeTrace\(\{ spans, runId, projection = \{\}, onRetry, onLoadMore,[\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/)
+  // The pager BUTTON is gone (2026-08-07): earlier steps arrive by scrolling. What must not be lost
+  // with it is the receipt — a surface that genuinely cannot reach further still owes the COUNT.
+  // That branch is `TRACE_SCROLL_BOUNDED` and it is DRIVEN in inspectorTracePager.test.js; these two
+  // pins only hold the wiring that a rendered-text test cannot see: that both surfaces feed the ONE
+  // window rule into the ONE scroll rule, rather than growing a second opinion about reachability.
+  assert.match(inspector, /const spanWindow = traceWindow\(projection, \{ canPage: !!onLoadMore \}\)[\s\S]*?traceScrollState\(\{ view: spanWindow, window: spanLimit \}\)/,
+    'the node trace must route its window through the shared scroll rule')
+  assert.match(inspector, /<TraceReach state=\{scroll\} onReach=\{onLoadMore\}[\s\S]*?notice=\{traceWindowNotice\(spanWindow\)\}/,
+    'a surface with nowhere to go still owes the COUNT, never a bare adjective')
   // The operator's own report: the CONVERSATION view is the default, and it had no control at all.
-  assert.match(inspector, /const convWindow = conversationWindow\(conv\.projection, \{ canPage: !!onLoadMore \}\)[\s\S]*?convWindow\.kind === 'pageable'[\s\S]*?onClick=\{onLoadMore\}[\s\S]*?load more of this conversation/,
-    'the conversation view must offer its own pager, not print a dead partial notice')
+  assert.match(inspector, /const convWindow = conversationWindow\(conv\.projection, \{ canPage: !!onLoadMore \}\)[\s\S]*?const scroll = traceScrollState\(\{[\s\S]*?view: convWindow,[\s\S]*?pending: spanLimit > read\.window,/,
+    'the conversation view must derive its own scroll state, not print a dead partial notice')
+  assert.doesNotMatch(inspector, /load more spans|load more of this conversation|at its maximum/,
+    'the removed pager text must not come back — scrolling is the only control now')
   assert.doesNotMatch(
     inspector.slice(inspector.indexOf('function Conversation('),
       inspector.indexOf('function RunSetupLog(')),
@@ -213,34 +224,37 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   assert.doesNotMatch(dock, /raw <think>|full I\/O of any observation|full, UNtruncated text|FULL content/)
 })
 
-test('the conversation pager names a counter that was actually stated', () => {
-  // The two omissions are computed independently by the server, so "pageable" does not imply the
-  // STAGE counter is the non-zero one. A heavily repaired node keeps its whole thread in a handful
-  // of stages: nothing is hidden by the stage cap, 144 turns are hidden by the turn cap, and the
-  // control is correctly offered — while the label used to interpolate the stage counter and print
-  // a bare "(0 earlier stages not shown)" on screen.
+test('an unstated conversation counter stays absent, and hidden-ness never depends on it', () => {
+  // `conversationPagerLabel` lived here until the pager button was removed. Its RULE outlives it and
+  // is what this now drives directly: an absent counter must stay `null` and never become `0`.
+  // Every consumer of these records — the notice, the scroll state, anything later — reads the same
+  // two fields, so absent-read-as-zero would go on inventing "0 earlier stages" wherever it lands.
+
+  // The two omissions are computed independently by the server, so "hidden" does not imply the STAGE
+  // counter is the non-zero one. A heavily repaired node keeps its whole thread in a handful of
+  // stages: nothing is hidden by the stage cap, 144 turns are hidden by the turn cap.
   const turnsOnly = conversationWindow({
     truncated: true, total_spans: 400, visible_spans: 400, omitted_spans: 0,
     total_stages: 12, visible_stages: 12, omitted_stages: 0,
     total_turns: 400, visible_turns: 256, omitted_turns: 144,
   }, { canPage: true })
   assert.equal(turnsOnly.kind, 'pageable')
-  assert.equal(conversationPagerLabel(turnsOnly), '144 earlier steps not shown')
+  assert.equal(turnsOnly.omittedStages, 0)
+  assert.equal(turnsOnly.omittedTurns, 144)
 
-  // Stages first when both are stated, and the singular is a singular.
-  assert.equal(conversationPagerLabel(conversationWindow({
-    omitted_stages: 1, omitted_turns: 9, total_turns: 10, visible_turns: 1,
-  }, { canPage: true })), '1 earlier stage not shown')
-
-  // A counter the payload does not state stays absent all the way to the label: a legacy projection
-  // carrying only the turn count must not have a stage count invented for it, and a window the SPAN
-  // receipt alone justified names no conversation count at all.
+  // A counter the payload does not state stays absent: a legacy projection carrying only the turn
+  // count must not have a stage count invented for it.
   const legacy = conversationWindow({ omitted_turns: 320, total_turns: 425, visible_turns: 105 },
     { canPage: true })
   assert.equal(legacy.omittedStages, null)
-  assert.equal(conversationPagerLabel(legacy), '320 earlier steps not shown')
+  assert.equal(legacy.omittedTurns, 320)
+  assert.equal(legacy.kind, 'pageable')
+
+  // A payload stating NEITHER conversation counter defers to the span receipt rather than reading
+  // two absent fields as proof that nothing is hidden.
   const deferred = conversationWindow({ truncated: true, total_spans: 900, visible_spans: 512,
     omitted_spans: 388 }, { canPage: true })
   assert.equal(deferred.kind, 'pageable')
-  assert.equal(conversationPagerLabel(deferred), 'more of this conversation is not shown')
+  assert.equal(deferred.omittedStages, null)
+  assert.equal(deferred.omittedTurns, null)
 })

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState, useRef } from 'react'
 import { costPricing, deadlineGet, get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL,
   commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
   retryRunCommand, runNodeApiPath, submitCommand } from './util.js'
-import { useNodeSpanWindow, usePoll, useScopedResource } from './hooks.js'
+import { useNodeSpanWindow, usePoll, useScopedResource, useTraceScroll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { themeFilteredGroupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
@@ -14,10 +14,15 @@ import { nodeFeasibilityStatus } from './trustSemantics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import {
-  NODE_TRACE_SPAN_WINDOW, TRACE_PARTIAL_EMPTY_NOTICE, conversationPagerLabel, conversationWindow,
+  NODE_TRACE_SPAN_WINDOW, TRACE_PARTIAL_EMPTY_NOTICE, conversationWindow,
   conversationWindowNotice,
   traceDetailState, traceUnavailable, traceWindow, traceWindowNotice, unavailableTraceDetail,
 } from './traceProjection.js'
+import {
+  TRACE_SCROLL_BOUNDED, TRACE_SCROLL_LOADING, TRACE_SCROLL_LOADING_LABEL, TRACE_SCROLL_REACH_LABEL,
+  TRACE_SCROLL_SETTLED, settleTraceRead, traceReadDeadlineMs, traceScrollBoundedSuffix,
+  traceScrollState, traceWidenStalled,
+} from './traceScrollModel.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts, parseConceptTagsInput } from './conceptChips.js'
 import { cardText } from './cardBoardModel.js'
@@ -1283,34 +1288,70 @@ function StageBlock({ s, t0, total, runId }) {
   </div>
 }
 
+// The ONE affordance every bounded trace surface uses to reveal its earlier steps. It replaces the
+// `↧` pager button the Inspector and the chat feed each carried, and the sentence that button's
+// ABSENCE used to print — the one claiming the window could go no further. That sentence was not
+// even true where it appeared most: it was keyed on "there is no pager", which is also the state of
+// any surface with no pager wired, so a node whose entire 258-span trace the server had already read
+// was told its window was maximal while eight doublings were still available (measured on
+// runs/rubert-dr-0807 node 2: 256 of 308 steps at the default, all 308 at ONE doubling).
+//
+// What renders, per traceScrollModel state:
+//   settled   → nothing at all
+//   reachable → an invisible sentinel; scrolling it into view widens the window
+//   loading   → the same sentinel plus a `role="status"` live region announcing the read
+//   bounded   → the honest terminal receipt: the count, and that this surface cannot go further
+// The focusable affordance is sr-only until focused (styles.css `.trace-reach`). Infinite scroll's
+// standard failure is exactly this: an IntersectionObserver fires for anyone who scrolls — including
+// a keyboard user pressing Page Up, since that scrolls the container too — but a screen-reader user
+// driving a virtual cursor never scrolls it and would have no path to the earlier steps at all.
+function TraceReach({ state, notice, onReach, failed = false }) {
+  const { sentinelRef, onReachFocus } = useTraceScroll({ state, onReach, failed })
+  if (state === TRACE_SCROLL_SETTLED) return null
+  if (state === TRACE_SCROLL_BOUNDED) {
+    return <div className="notice compact" role="status">{notice} {traceScrollBoundedSuffix}</div>
+  }
+  return <div className="trace-reach-zone" ref={sentinelRef}>
+    <button type="button" className="trace-reach" onFocus={onReachFocus} onClick={onReachFocus}>
+      {TRACE_SCROLL_REACH_LABEL}</button>
+    {/* One live region, always mounted while the zone is, so an assistive reader announces the
+        transition rather than a region appearing and disappearing under it. */}
+    <div className="muted trace-small trace-reach-status" role="status">
+      {state === TRACE_SCROLL_LOADING ? TRACE_SCROLL_LOADING_LABEL : ''}</div>
+    {failed && <div className="notice compact trace-reach-failed" role="alert">
+      Could not load earlier steps. Scroll again to retry.</div>}
+  </div>
+}
+
 // Reusable langfuse-style trace for ONE node's span forest — the lifecycle stages on a shared
 // timeline. Exported so the chat feed can show the same waterfall inline (Dock.jsx) as the Inspector.
-export function NodeTrace({ spans, runId, projection = {}, onRetry, onLoadMore }) {
+export function NodeTrace({ spans, runId, projection = {}, onRetry, onLoadMore,
+  spanLimit = NODE_TRACE_SPAN_WINDOW }) {
   const roots = spans || []
+  // The scroll affordance is a hook, so it is resolved before any early return. `unavailable` is
+  // still handled FIRST below: a failed observation never gets a sentinel (see traceScrollModel).
+  const spanWindow = traceWindow(projection, { canPage: !!onLoadMore })
+  const scroll = traceScrollState({ view: spanWindow, window: spanLimit })
   if (traceUnavailable(projection)) return <TraceUnavailable onRetry={onRetry} />
   // Route the partial handling through the ONE window rule (traceProjection.js) instead of the raw
   // `truncated` union. That flag conflates "spans were omitted" (a bigger limit surfaces them) with
   // "per-span text was clamped" (no limit ever will), so the old `tracePartial` branch rendered the
   // pager on traces where clicking it could not add a single row — measured, 8 of the 13 real node
   // traces in rubert-dr-0805 / rubertlite-dr-unified-v4 report truncated=true with omitted_spans=0.
-  // With no pager the rule still owes the operator the COUNT, never a bare adjective.
-  const spanWindow = traceWindow(projection, { canPage: !!onLoadMore })
-  const loadMore = spanWindow.kind === 'pageable'
-    ? <button type="button" className="trace-loadmore disclosure-button" onClick={onLoadMore}>
-        ↧ load more spans ({spanWindow.omitted == null ? 'more' : spanWindow.omitted} not shown)
-      </button>
-    : null
-  const cappedNotice = spanWindow.kind === 'capped'
-    ? <div className="notice compact" role="status">{traceWindowNotice(spanWindow)}</div>
-    : null
+  // With nowhere to go the rule still owes the operator the COUNT, never a bare adjective.
+  const reach = <TraceReach state={scroll} onReach={onLoadMore}
+    notice={traceWindowNotice(spanWindow)} />
   if (!roots.length) {
-    if (loadMore) return loadMore
-    if (spanWindow.kind !== 'complete') return <div className="notice compact" role="status">{TRACE_PARTIAL_EMPTY_NOTICE}</div>
-    return <div className="muted trace-small">No execution spans captured yet.</div>
+    if (spanWindow.kind === 'complete')
+      return <div className="muted trace-small">No execution spans captured yet.</div>
+    // A bounded surface's own notice already carries the count and says it cannot go further;
+    // stacking the generic empty notice on top of it says "partial" twice and adds nothing.
+    return <>{scroll === TRACE_SCROLL_BOUNDED ? null
+      : <div className="notice compact" role="status">{TRACE_PARTIAL_EMPTY_NOTICE}</div>}{reach}</>
   }
   const { t0, total } = traceBounds(roots)
   return <div className="trace">
-    {loadMore || cappedNotice}
+    {reach}
     {roots.map((s, i) => <StageBlock key={`${runId}:${s.span_id || i}`} s={s} t0={t0} total={total} runId={runId} />)}
   </div>
 }
@@ -1460,50 +1501,87 @@ function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
 
 function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRetry,
   spanLimit = NODE_TRACE_SPAN_WINDOW, onLoadMore }) {
-  const [conv, setConv] = useState(null)
+  // The last SETTLED read, carried with the window that produced it and what that window made
+  // visible. Both extra fields earn their place: the window is how "a wider read is in flight" is
+  // derived without a second piece of state, and the visible count is what proves a widen actually
+  // BOUGHT something — the auto-loader has to be provably terminating (traceScrollModel).
+  const [read, setRead] = useState(null)
+  const [reachFailed, setReachFailed] = useState(false)
   const [logs, setLogs] = useState({})   // {eval, stages:{train,score,…}} — the live stage/eval logs
+  // A ref mirror of the settled read, so the outcome below is computed OUTSIDE a setState updater.
+  // `usePoll` serializes ticks (one read unsettled at a time), so this is never behind; and an
+  // updater that calls another setState is impure — React may invoke it twice.
+  const readRef = useRef(null)
+  readRef.current = read
   useEffect(() => {
-    setConv(null)   // node changed → clear before the first load (poll ticks below don't clear, so no flash)
+    setRead(null)   // node changed → clear before the first load (poll ticks below don't clear, so no flash)
     setLogs({})     // …likewise the logs, else B's stage bands briefly render A's log text
-  }, [runId, n.id, working, reloadNonce, spanLimit])
+    setReachFailed(false)
+  // `spanLimit` is deliberately NOT in this list any more. Clearing on a widen blanked the thread to
+  // "loading…" for the whole read — 17 s at the ceiling on the measured stress node — so scrolling
+  // for older steps took away the ones already on screen. The poll below still re-runs on it.
+  }, [runId, n.id, working, reloadNonce])
   usePoll((alive) => {
+    // ONE settle rule for both outcomes below, so the deadline path and the rejected-response path
+    // cannot disagree about what a failure costs the operator.
+    const commit = (ok, payload) => {
+      const previous = readRef.current
+      const settled = settleTraceRead(previous?.payload, { ok, payload })
+      setReachFailed(settled.reachFailed === true)
+      if (settled.unavailable) {
+        setRead({ payload: { stages: [], projection: { unavailable: true } },
+          window: spanLimit, visible: 0 })
+        return
+      }
+      // A kept payload keeps its OWN window: recording the window we failed to reach would read as
+      // "that read landed", and the next widen would then look like no widen at all.
+      if (settled.reachFailed) return
+      const visible = settled.payload?.projection?.visible_turns
+      const next = { payload: settled.payload, window: spanLimit,
+        visible: Number.isSafeInteger(visible) && visible >= 0 ? visible : 0 }
+      setRead({ ...next, stalled: traceWidenStalled(previous, next) })
+    }
     const timed = deadlineRequest(signal => Promise.allSettled([
         nodeConversation(runId, n.id, { signal, limit: spanLimit }),
         get(runNodeApiPath(runId, n.id, '/logs'), { signal, cache: 'no-store' }),
-      ]), 8000)
+      ]), traceReadDeadlineMs(spanLimit))
     timed.promise.then(([conversation, logs]) => {
       if (!alive()) return
-      setConv(conversation.status === 'fulfilled'
-        ? conversation.value || { stages: [] }
-        : { stages: [], projection: { unavailable: true } })
+      commit(conversation.status === 'fulfilled', conversation.value || { stages: [] })
       if (logs.status === 'fulfilled') setLogs(logs.value || {})
-    }).catch(() => {
-      if (alive()) setConv({ stages: [], projection: { unavailable: true } })
-    })
+    // `allSettled` never rejects, so this branch is the DEADLINE — which is exactly the failure a
+    // widened read hits. Routing it through the same `commit` is what stops a timed-out widen from
+    // silently keeping the old payload with nothing said about it.
+    }).catch(() => { if (alive()) commit(false, null) })
     return timed
   }, working ? 4000 : null,   // interval only while the agent works this node (live-refresh); null = load once
   [runId, n.id, working, reloadNonce, spanLimit])   // reloadNonce also re-runs a finished node's one-shot load
-  if (conv === null) return <div className="muted trace-small" role="status">loading…</div>
+  if (read === null) return <div className="muted trace-small" role="status">loading…</div>
+  const conv = read.payload || { stages: [] }
   const stages = conv.stages || []
   const unavailable = traceUnavailable(conv.projection)
   if (unavailable) return <TraceUnavailable onRetry={onRetry} />
   // The operator's actual complaint lives here: this view is the DEFAULT one, it is where "N steps
-  // hidden" is read, and until now it printed a dead "Trace projection is partial." and stopped.
+  // hidden" is read, and until now it printed a count and then refused to pass it.
   // `conversationWindow` (not `traceWindow`) because what is hidden here is STAGES and TURNS, and the
   // span counters in the same envelope describe a different quantity — see its comment.
   const convWindow = conversationWindow(conv.projection, { canPage: !!onLoadMore })
-  const loadMore = convWindow.kind === 'pageable'
-    ? <button type="button" className="trace-loadmore disclosure-button" onClick={onLoadMore}>
-        ↧ load more of this conversation ({conversationPagerLabel(convWindow)})
-      </button>
-    : null
-  const windowNotice = convWindow.kind === 'complete' ? null
-    : <div className="notice compact" role="status">
-        {conversationWindowNotice(convWindow)} {loadMore ? null : 'The window is at its maximum.'}
-      </div>
+  const scroll = traceScrollState({
+    view: convWindow,
+    window: spanLimit,
+    // A widen is in flight exactly while the requested window is ahead of the settled one AND the
+    // last read did not fail. Both halves are needed: a failed widen leaves the settled window
+    // BEHIND the requested one forever (`settleTraceRead` deliberately does not record a window it
+    // could not reach), so the window comparison alone latches a spinner that never clears — and a
+    // surface stuck in `loading` never re-arms, so the failure would also be unretryable.
+    pending: !reachFailed && spanLimit > read.window,
+    stalled: read.stalled === true,
+  })
+  const reach = <TraceReach state={scroll} onReach={onLoadMore} failed={reachFailed}
+    notice={conversationWindowNotice(convWindow)} />
   if (!stages.length) return convWindow.kind === 'complete'
     ? <div className="muted">No conversation captured for this node yet.</div>
-    : <div className="conv">{windowNotice}{loadMore}</div>
+    : <div className="conv">{reach}</div>
   // The live log for a stage band: a multi-stage eval logs per stage (stages[label]); a single-command
   // eval logs to eval.log ("evaluate"/"command"); the dep-install step to setup.log. Anything else
   // (propose/implement/…) has no subprocess log.
@@ -1512,11 +1590,12 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
   // `allOpen` is owned by the sticky Trace header (so collapse-all lives in the pinned bar). It's folded
   // into each band's key so a collapse/expand-all click remounts them at the new default; a live poll
   // (allOpen unchanged) keeps the key stable, so per-band toggles survive the 4s refresh.
-  // Notice + control go ABOVE the bands, because that is where the gap is: every cap in this
-  // projection keeps the newest TAIL, so the missing stages are the OLDEST and the thread's first
-  // visible band is the truncation boundary. (The Dock's live tail puts "load earlier" at the top for
-  // the same reason.) Directly under the sticky header is also simply where it gets found.
-  return <div className="conv">{windowNotice}{loadMore}
+  // The sentinel goes ABOVE the bands, because that is where the gap is: every cap in this projection
+  // keeps the newest TAIL, so the missing stages are the OLDEST and the thread's first visible band is
+  // the truncation boundary. Scrolling UP is therefore the gesture that means "show me earlier", and
+  // the trigger has to sit where that gesture ends. (The Dock's live tail puts "load earlier" at the
+  // top for the same reason.)
+  return <div className="conv">{reach}
     {stages.map((st, i) => <ConvStage key={`${st.trace_id || ''}:${st.label || ''}:${st.start || i}:${allOpen}`}
                                       st={st} defaultOpen={allOpen} log={logFor(st.label)} live={working} />)}
     {logs.run_setup ? <RunSetupLog text={logs.run_setup} /> : null}
@@ -1707,13 +1786,13 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   // The span tree's window rule, over whichever payload is rendering (paged read or detail default).
   // Same `canPage` as the conversation, because both raise the SAME window.
   const spanWindow = traceWindow(trace?.projection, { canPage })
-  const spanPager = spanWindow.kind === 'pageable'
-    ? <button type="button" className="trace-loadmore disclosure-button" onClick={loadMore}>
-        ↧ load more spans ({spanWindow.omitted == null ? 'more' : spanWindow.omitted} not shown)
-      </button>
-    : spanWindow.kind === 'capped'
-      ? <div className="notice compact" role="status">{traceWindowNotice(spanWindow)}</div>
-      : null
+  // No `pending` here, and that is deliberate: `usePagedNodeTrace` keeps the previous payload
+  // rendered while the wider read is in flight and never blanks it, so there is nothing to announce
+  // beyond the rows arriving. `stalled` likewise has no state to hang on — this surface re-reads the
+  // whole window each time, and its termination is the ceiling the shared hook already stops at.
+  const spanPager = <TraceReach
+    state={traceScrollState({ view: spanWindow, window: spanLimit })}
+    onReach={loadMore} notice={traceWindowNotice(spanWindow)} />
   if (!spans.length && !agent) {
     if (unavailable)
       return <div className="trace" ref={bodyRef}>{head}<TraceUnavailable

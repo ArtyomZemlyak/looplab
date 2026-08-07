@@ -507,7 +507,7 @@ function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt = null, auto
           </div>}
           {hasTrace && nodeTrace != null && <NodeTrace spans={nodeSpans}
             projection={nodeTrace.projection} runId={runId} onRetry={retryNodeTrace}
-            onLoadMore={loadMoreNodeTrace} />}
+            onLoadMore={loadMoreNodeTrace} spanLimit={nodeTraceLimit} />}
           {opTraceId && <OpTrace runId={runId} traceId={opTraceId} />}
         </div>}
       </div>
