@@ -40,6 +40,14 @@ test('the four states, over the SAME window records the two trace surfaces alrea
   // At the ceiling there is genuinely nowhere to go, and THAT is when the count is owed.
   assert.equal(traceScrollState({ view: turnCapped, window: NODE_TRACE_SPAN_WINDOW_MAX }),
     TRACE_SCROLL_BOUNDED)
+  // …and so is a surface that wired no raise-the-window callback at all. The window rules already
+  // say this with `capped`, and re-deriving reachability from the window NUMBER alone armed a
+  // sentinel whose `onReach` was `undefined` — a dead control, and one that swallowed the count that
+  // surface still owed. (Caught by traceRecoveryContract.test.js, which renders NodeTrace both ways.)
+  const noCallback = traceWindow({ truncated: true }, { canPage: false })
+  assert.equal(noCallback.kind, 'capped')
+  assert.equal(traceScrollState({ view: noCallback, window: NODE_TRACE_SPAN_WINDOW }),
+    TRACE_SCROLL_BOUNDED)
   // …and so is a stall: a server that answers a wider window with no more rows.
   assert.equal(
     traceScrollState({ view: turnCapped, window: NODE_TRACE_SPAN_WINDOW, stalled: true }),

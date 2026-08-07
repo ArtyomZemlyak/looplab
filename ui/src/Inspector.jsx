@@ -1342,9 +1342,12 @@ export function NodeTrace({ spans, runId, projection = {}, onRetry, onLoadMore,
   const reach = <TraceReach state={scroll} onReach={onLoadMore}
     notice={traceWindowNotice(spanWindow)} />
   if (!roots.length) {
-    if (spanWindow.kind !== 'complete')
-      return <>{reach}<div className="notice compact" role="status">{TRACE_PARTIAL_EMPTY_NOTICE}</div></>
-    return <div className="muted trace-small">No execution spans captured yet.</div>
+    if (spanWindow.kind === 'complete')
+      return <div className="muted trace-small">No execution spans captured yet.</div>
+    // A bounded surface's own notice already carries the count and says it cannot go further;
+    // stacking the generic empty notice on top of it says "partial" twice and adds nothing.
+    return <>{scroll === TRACE_SCROLL_BOUNDED ? null
+      : <div className="notice compact" role="status">{TRACE_PARTIAL_EMPTY_NOTICE}</div>}{reach}</>
   }
   const { t0, total } = traceBounds(roots)
   return <div className="trace">

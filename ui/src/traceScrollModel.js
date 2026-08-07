@@ -98,6 +98,14 @@ export const traceReadDeadlineMs = window => {
 export const traceScrollState = ({ view, window, pending = false, stalled = false } = {}) => {
   if (!view || view.kind === 'complete') return TRACE_SCROLL_SETTLED
   if (pending) return TRACE_SCROLL_LOADING
+  // `capped` is the window rules' own word for "this surface has nowhere to go" — a caller that
+  // passed `canPage: false`, which in practice means it wired no raise-the-window callback at all.
+  // Honouring it rather than re-deriving reachability from the window number is what stops a
+  // sentinel being armed on a surface whose `onReach` is `undefined`: an affordance that cannot do
+  // anything is exactly the dead control this change exists to remove, and it would silently swallow
+  // the count that surface still owes. (The chat feed's inline waterfall renders NodeTrace both
+  // ways.)
+  if (view.kind === 'capped') return TRACE_SCROLL_BOUNDED
   if (stalled || !traceWindowCanGrow(window)) return TRACE_SCROLL_BOUNDED
   return TRACE_SCROLL_REACHABLE
 }
