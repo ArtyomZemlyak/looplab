@@ -172,6 +172,16 @@ the shipped `card_driven_selection` was effectively inert for *selection*. `spec
 defaults to `-1` (AUTO) and everything around it was already in place: AUTO resolution, the `run_started`
 pin, the node-budget refund, and three AUTO settle-to-off rules.
 
+> **Superseded on 2026-08-07, and this is the sentence to correct:** "inert for selection" was true
+> because the only writer of selectable Card *inventory* sat behind the prefetch gate, not because
+> selection genuinely needs a prefetch. It no longer does — `card_driven_selection` mints and selects
+> from the queue on its own, and `speculation_depth` only decides who builds the selected Card. That
+> matters beyond history, because AUTO settles itself to `0` in three documented cases (a build whose
+> roles call no LLM, a policy other than `greedy`, a run directory with no run id) and can ratchet to
+> `0` mid-run: in each of those the run used to change *selector* silently while `run_started` still
+> pinned `card_driven_selection: true`. Measured over the shipped corpus: seven such runs produced
+> **0** selection-ready Cards across 27 nodes, against 24 in the four speculation runs.
+
 What blocked it was a defect in the Card **debug** anchor that only a default would make everyone's
 problem. `events/card_ledger.py::_card_debuggable_leaf_ids` disqualified a failed node the moment it had
 *any* child — and a receipt-bound `debug` Card's own work item is such a child. So the instant the
@@ -216,6 +226,10 @@ that repair is never claimed. Measured at depth `0` and at AUTO on both shapes: 
 stays on `action_receipt_incomplete`, the node the lane builds for the same repair carries no
 `card_id`, and the board ends with one more orphaned Card than it should. After the fix that node
 claims the Card (its evidence, its `work_terminal` receipt) and the extra Card is not authored.
+(Those depth-`0` numbers were taken before 2026-08-07, when a depth-`0` run staged no Cards at all
+and every node was built from a raw policy action. A depth-`0` run now mints, selects and serially
+claims the same Card a depth-`1` run prefetches, so "the same proposal falls through to a serial
+build" is still the outcome — it just goes through the queue on the way.)
 
 The **runaway guard was split in the same change**, because it is what misdiagnosed the incident above:
 it now charges only nodes the log says were **minted** (`node_created` rows), so a Card lane that stages
