@@ -227,7 +227,22 @@ stages' inputs are unchanged, so a repair that **deletes** any file, changes any
 (a config/params/data file — invisible to import reachability), or runs under a non-default
 `cmd.cwd` also forces a full re-run, as does an opaque stage (`python -m`, a shell wrapper).
 `inline_repair_retrain_cap` bounds how many full re-trains a repair loop
-may burn before abandoning to the inter-node debug operator. Notes:
+may burn before abandoning to the inter-node debug operator.
+
+**When the stage that broke is not the stage that is wrong**, the repair can say so. An earlier stage
+that exited 0 was counted successful, but exit 0 only means it did not crash — a data/mining stage can
+"succeed" having produced a fraction of what it should have, and the failure then surfaces one stage
+later. A repair session's `done` emit carries `rollback_stage`: name that earlier stage and the engine
+re-runs the pipeline **from** it, discarding its output and everything built on it. Three things bound
+it, so a wrong guess cannot become an expensive loop: the repair must also have **changed** something
+that stage runs or imports (naming a stage you did not fix is refused — re-running it unchanged would
+produce the same bytes); each suspect stage may be rolled back to **at most once per node** (read back
+off the event log, so a resume does not refund it); and every accepted rollback is charged to
+`inline_repair_retrain_cap`, the same budget a forced full re-train spends. If the suspect stage's
+script is one you `protect`, the refusal says so and names your file — the agent cannot fix what the
+write gate refuses it, and that is a message for you, not a task for it.
+
+Notes:
 
 - Give `cmd.timeout` room for the whole schedule (often `7200`–`14400`s) — the 600s default SIGKILLs a
   long train into an undertrained checkpoint.

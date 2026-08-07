@@ -362,18 +362,184 @@ class EvalStagesMixin:
             return None
         return failed_stage
 
+    # The CONTRACT clause, appended to the sanity system prompt ONLY for a stage that DECLARED an
+    # `expect.assert`. Hoisted out of the closure because it is the one place the quality-judgement
+    # ban is deliberately narrowed, and a narrowing of a ban has to be readable on its own.
+    #
+    # Why this is not the thing the base prompt forbids. The ban exists because a checker with no
+    # contract has nothing to judge against except its own taste, and taste produced a measured
+    # incident: it failed the run's BEST model for having a loss around 14.6. A DECLARED condition is
+    # not taste — it is the declarer's own sentence about what this stage was for, and checking a
+    # stage against its own declaration is the opposite of ranking it against other stages' results.
+    # The clause therefore SEPARATES the two rather than relaxing one: the declared condition is
+    # judged, everything not covered by it keeps the ban verbatim.
+    #
+    # A stage's declared condition is the ONLY thing the checker may fail it for beyond the hard
+    # failures — it may not invent a second condition it thinks the stage should also have met.
+    STAGE_CONTRACT_CLAUSE = (
+        " THIS STAGE ALSO DECLARED A SUCCESS CONDITION — the sentence under DECLARED CONDITION "
+        "below, written by whoever declared the pipeline. Check the stage's output against THAT "
+        "sentence and FAIL the stage when the output shows the condition was not met (e.g. it "
+        "declares coverage of at least 90% of the training queries and the log reports 9,364 of "
+        "764,676). This is NOT the quality judgement forbidden above and does not relax it: you are "
+        "not ranking this result against any other run, you are checking whether the stage did the "
+        "job it declared. Judge ONLY the declared condition — do not invent a second one. If the "
+        "output does not say either way, reply OK: an unstated number is not a violation.")
+
+    # --- ROLLBACK: "this stage's failure is an EARLIER stage's fault" -----------------------------
+    # The refusal vocabulary, hoisted so the ladder has a truth table and so the strings a Developer
+    # reads back are pinnable. Each is a REASON THE ROLLBACK CANNOT HELP, not a reprimand: the text
+    # goes into the next repair prompt, so it has to leave the model with something to do instead.
+    # `{suspect}`/`{failed}`/`{names}`/`{script}` are the only placeholders.
+    ROLLBACK_UNKNOWN = ("cannot roll back to stage {suspect!r}: this node's pipeline has no such "
+                        "stage. Its stages, in order, are: {names}.")
+    ROLLBACK_NOT_EARLIER = ("cannot roll back to stage {suspect!r}: it is not EARLIER than the stage "
+                            "that failed ({failed!r}). Rolling back means re-running a stage that "
+                            "ALREADY COMPLETED because you believe its output is what broke the later "
+                            "one; re-running the failing stage itself is what the ordinary repair "
+                            "already does.")
+    ROLLBACK_REPEATED = ("cannot roll back to stage {suspect!r} again: this node has already re-run "
+                         "it once on that same suspicion and the failure came back. Re-running an "
+                         "expensive stage a second time on the same guess is not a new hypothesis — "
+                         "either fix the failing stage {failed!r} directly, name a DIFFERENT earlier "
+                         "stage, or say you no longer know what to change.")
+    ROLLBACK_NO_CHANGE = ("cannot roll back to stage {suspect!r}: this repair changed nothing that "
+                          "stage reads or runs, so re-running it would produce byte-identical output "
+                          "and cost its full runtime for nothing. To roll back to a stage you must "
+                          "also CHANGE it — edit the script it runs (or something that script "
+                          "imports) in the SAME repair that names it.")
+    ROLLBACK_NO_PIPELINE = ("cannot roll back to stage {suspect!r}: this node has no declared stage "
+                            "pipeline — the operator's command runs as ONE step, so there is no "
+                            "earlier stage to re-run. Fix the code that command runs.")
+    ROLLBACK_PROTECTED = ("cannot roll back to stage {suspect!r}: it runs {script}, which is "
+                          "PROTECTED — the operator owns that file and no edit you make can change "
+                          "it, so re-running the stage would produce exactly what it produced before. "
+                          "This is NOT something you can fix. If that stage's output really is wrong, "
+                          "the operator has to change {script} or unprotect it; meanwhile fix what you "
+                          "CAN reach, or report that you cannot.")
+
+    def _rollback_start(self, stages: list, failed_stage, suspect, changed_files, workdir,
+                        already_rolled_back=(), cwd=None):
+        """Should this repair RE-RUN an earlier, already-successful stage — and if not, why not?
+
+        Returns ``(start_stage, refusal)``: exactly one is non-None. `start_stage` is the suspect's
+        name, to be used as the next eval's `start_stage`, which re-runs the pipeline FROM there and
+        so discards every artifact the suspect and everything after it produced.
+
+        THE GAP THIS FILLS. `next_start` and `_safe_reuse_start` only ever move the start point
+        FORWARD: they answer "which completed stages may I skip". Neither can express the opposite
+        claim, which is the one a train failure most often warrants — that the stage which BROKE is
+        not the stage that is WRONG. On `runs/rubert-dr-0807` the `mine` stage exited 0 with 1.2%
+        coverage and `train` was handed the result; every repair the loop could make was a repair to
+        `train`, because naming `mine` was not something the Developer's action space could say.
+
+        THE LADDER, and each rung is a way a rollback would be pure cost:
+          1. UNKNOWN — the name is not in this node's pipeline. A typo must not silently re-run the
+             whole pipeline from stage 0 (which is what `_run_stages` does with an unmatched
+             `start_stage`, correctly, because for REUSE the fail-safe direction is to run MORE).
+             Here the fail-safe direction is the opposite: refuse, and say what the stages are.
+          2. NOT EARLIER — rolling back to the failed stage or a later one is either the ordinary
+             retry or nonsense. Not an error worth spending a re-run on.
+          3. REPEATED — this node already re-ran that stage on that suspicion. THE ANTI-THRASH RUNG,
+             and the one that makes the whole feature bounded independently of any budget: a suspect
+             may be tried at most once per node, so the worst case over a node's whole life is one
+             re-run per stage, not one per attempt. Seeded from the durable log, so a resume does not
+             hand back the allowance.
+          4. NO CHANGE — the repair did not touch anything the suspect stage runs or imports, so
+             re-running it produces the same bytes it produced before. This is the rung that makes
+             "name it AND fix it" the contract rather than "name it and hope". It is decided with the
+             SAME `_stage_reachable_files` closure `_safe_reuse_start` uses, read in the opposite
+             direction: there, an intersection FORBIDS reuse; here, an EMPTY intersection forbids the
+             re-run. Where the closure is OPAQUE (a `python -m` stage, a shell wrapper) it cannot
+             prove nothing changed, so the rollback is ALLOWED — fail-open here, bounded by rungs 3
+             and by the retrain cap the caller charges.
+          5. PROTECTED — rung 4 with the reason named. When the suspect's script is one the operator
+             protected, no repair can EVER satisfy rung 4, so the refusal has to name the operator's
+             file instead of reading as "try harder". This composes with the preflight
+             `_unrunnable_protected_scripts` rather than fighting it: that one refuses BEFORE the
+             pipeline runs when a protected script is absent, this one refuses a re-run of a protected
+             script that is present but unfixable. Both say the same thing — the operator is the only
+             participant who can act — and neither asks the agent to edit a file the write gate
+             refuses.
+
+        A non-default eval `cwd` skips rung 4/5 (allowing the rollback): changed-file keys and stage
+        script paths resolve against different bases there, exactly as `_safe_reuse_start` documents,
+        so the intersection proves nothing in EITHER direction. Allowing is the right default for an
+        unprovable rung because rung 3 still bounds it; refusing would make rollback permanently
+        unavailable on every subdir-cwd task.
+        """
+        names = [str(s.get("name")) for s in (stages or [])]
+        suspect = str(suspect or "").strip()
+        if not suspect:
+            # THE COMMON CASE, and it must be free and SILENT: an empty ask is not a request, so it
+            # neither spends an allowance nor puts engine text in front of the next repair.
+            return None, None
+        _fmt = {"suspect": suspect, "failed": str(failed_stage or ""),
+                "names": ", ".join(names) or "(none)", "script": ""}
+        if not names:
+            # Asked for on a single-command eval. Distinct from the silent case above: the Developer
+            # DID ask, so it gets an answer — an empty refusal would leave it re-asserting the same
+            # request every attempt with nothing to learn from.
+            return None, self.ROLLBACK_NO_PIPELINE.format(**_fmt)
+        if suspect not in names:
+            return None, self.ROLLBACK_UNKNOWN.format(**_fmt)
+        si = names.index(suspect)
+        # A failed stage the pipeline no longer contains (a repair renamed it) leaves `fi` at -1, so
+        # `si < fi` is False and the rollback is refused as NOT EARLIER. That is the right answer:
+        # with the failure's position unknown we cannot show the suspect precedes it, and this is the
+        # rung whose false ACCEPT costs a full re-run of everything from `si` onward.
+        fi = names.index(str(failed_stage)) if str(failed_stage) in names else -1
+        if fi < 0 or si >= fi:
+            return None, self.ROLLBACK_NOT_EARLIER.format(**_fmt)
+        if suspect in set(already_rolled_back or ()):
+            return None, self.ROLLBACK_REPEATED.format(**_fmt)
+        if cwd not in (None, "", "."):
+            return suspect, None                  # unprovable rung 4/5 — see the docstring
+        changed = {(f[2:] if isinstance(f, str) and f.startswith("./") else f)
+                   for f in (changed_files or [])}
+        reachable = self._stage_reachable_files([stages[si]], workdir)
+        if reachable is None:
+            return suspect, None                  # OPAQUE stage — cannot prove nothing changed
+        if changed & reachable:
+            return suspect, None                  # the repair really did change what this stage runs
+        # Nothing this stage reaches was changed. Say WHY it can never be, when that is the case: a
+        # protected script is the one shape where rung 4 is not advice but a permanent condition, and
+        # a Developer told only "change it first" would spend every remaining attempt trying to.
+        prot = set((self._repo_spec or {}).get("protected_names") or [])
+        blocked = sorted(p for p in reachable if p in prot)
+        if blocked:
+            return None, self.ROLLBACK_PROTECTED.format(**{**_fmt, "script": blocked[0]})
+        # A non-.py change is invisible to the import closure (`_stage_reachable_files` only bounds
+        # PYTHON imports), so an empty intersection does not prove the stage's inputs are unchanged —
+        # a rewritten config.yaml or params file the stage reads would not appear. Unprovable, so
+        # allow, exactly as the opaque and non-default-cwd cases do. Note the direction is the mirror
+        # image of `_safe_reuse_start`'s treatment of the same blind spot, and deliberately so: there
+        # an unprovable change forces a re-train (fail closed against a stale score), here it permits
+        # one (fail open toward doing the work), because the two mistakes cost different things — a
+        # wrong reuse silently scores a stale model, a wrong re-run only spends time.
+        if any(not str(c).endswith(".py") for c in changed):
+            return suspect, None
+        return None, self.ROLLBACK_NO_CHANGE.format(**_fmt)
+
     def _stage_check_fn(self, node):
-        """Phase 3 inter-stage verify: a callback (stage_name, log_tail) -> concern|None that asks an LLM
-        whether a `check`-flagged stage physically SUCCEEDED (train actually trained + saved a checkpoint,
-        no silent fallback) BEFORE the next stage runs. This is a SANITY gate, NOT a quality/ranking
-        judgment: it must fail a stage ONLY on a hard, unambiguous failure — never because the metric
-        looks 'not good enough' or 'below the previous best' (that is the search's job downstream). A
-        real incident motivated the tightening: the checker failed the run's BEST model (val recall@100
-        ≈ 0.855, above the champion) by (a) reading loss MAGNITUDE (~14.6) as 'no learning' — loss scale
-        depends on the loss/temperature and is not comparable across configs — and (b) grabbing a
+        """Phase 3 inter-stage verify: a callback (stage_name, log_tail, expect="") -> concern|None that
+        asks an LLM whether a `check`-flagged stage physically SUCCEEDED (train actually trained + saved a
+        checkpoint, no silent fallback) BEFORE the next stage runs. This is a SANITY gate, NOT a
+        quality/ranking judgment: it must fail a stage ONLY on a hard, unambiguous failure — never because
+        the metric looks 'not good enough' or 'below the previous best' (that is the search's job
+        downstream). A real incident motivated the tightening: the checker failed the run's BEST model (val
+        recall@100 ≈ 0.855, above the champion) by (a) reading loss MAGNITUDE (~14.6) as 'no learning' —
+        loss scale depends on the loss/temperature and is not comparable across configs — and (b) grabbing a
         bystander scalar (val recall@50 = 0.79) as 'the metric' and calling it below-best. Returns None
         (checks skipped) when no client is available. Runs inside the eval worker thread, so
-        complete_text blocks there — fine, like the eval."""
+        complete_text blocks there — fine, like the eval.
+
+        `expect` is the stage's own DECLARED success condition
+        (`runtime/command_eval.py::_validate_expect`), passed by `_call_stage_check` when the manifest
+        carries one. It is the ONE thing the checker may fail a stage for beyond a hard failure, and the
+        reason the ban above is not simply wrong: with no contract, "did this work?" and "is this good?"
+        are the same question and the checker answered the wrong one. Empty `expect` reproduces the
+        historical prompt byte-for-byte, so a stage using only `check: true` is unaffected."""
         try:
             client = self._reflect_client()
         except Exception:  # noqa: BLE001
@@ -396,7 +562,7 @@ class EvalStagesMixin:
         # wall time. `engine` is where its eval-path siblings already live (the repair loop reaches it
         # as the fallback lane), and it stays governed by a finite total when the operator sets one.
         @in_llm_lane("engine")
-        def _check(stage_name, tail):
+        def _check(stage_name, tail, expect: str = ""):
             msgs = [{"role": "system", "content":
                      "You are a SANITY checker for ONE stage of an ML eval pipeline, run BEFORE the next "
                      "stage. Decide ONLY whether this stage physically SUCCEEDED and produced a usable "
@@ -409,11 +575,13 @@ class EvalStagesMixin:
                      "depends on the loss function and temperature; a loss around 14 can be perfectly "
                      "healthy). A present, non-trivial validation metric is strong evidence the stage "
                      "SUCCEEDED. Reply EXACTLY 'OK' if the stage succeeded, otherwise a ONE-LINE concern "
-                     "naming the HARD failure."},
+                     "naming the HARD failure."
+                     + (EvalStagesMixin.STAGE_CONTRACT_CLAUSE if expect else "")},
                     {"role": "user", "content":
                      f"The run's objective metric is `{objective}` — ignore other scalars when judging "
                      f"whether the stage worked.\nExperiment: {idea_text[:400]}\n\n"
-                     f"Stage '{stage_name}' output tail:\n{tail}"}]
+                     + (f"DECLARED CONDITION for stage '{stage_name}': {expect}\n\n" if expect else "")
+                     + f"Stage '{stage_name}' output tail:\n{tail}"}]
             try:
                 out = (client.complete_text(msgs) or "").strip()
             except Exception:  # noqa: BLE001 — a checker failure must never fail the eval

@@ -46,6 +46,99 @@ from looplab.runtime.sandbox import (RunResult, _to_float, docker_gpu_argv,
 _STAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 MAX_STAGE_COUNT = 16
 
+# --- The per-stage SUCCESS CONTRACT (`expect`) --------------------------------------------------
+# WHAT A STAGE'S SUCCESS MEANS, declared by whoever declared the stage. Exit 0 is not an answer:
+# measured live on `runs/rubert-dr-0807`, a model-invented `mine` stage exited 0 having written
+# `hard_negs.pkl` for 9,364 of 764,676 unique queries — 1.2% — and `train` was then handed
+# `--n_hard_negatives 4` as if every query had them. Nothing objected, because the only two things
+# LoopLab checked were the exit code and an LLM sanity read of the log tail whose prompt CORRECTLY
+# forbids quality judgements (ranking is the search's job, not the checker's).
+#
+# The two halves answer the two different questions failure raises, and neither subsumes the other —
+# which is exactly why the BACKLOG's existence-only sketch would not have caught this one:
+#   • `files` — TECHNICAL, deterministic, no LLM: the artifacts this stage claims to produce must
+#     exist inside the workdir, be non-empty, and be FRESH (written by THIS stage, not left over by
+#     a previous attempt or a foreign experiment). `hard_negs.pkl` passes this. It is still worth
+#     having: it is the half that catches the stale/foreign artifact, and it costs a stat().
+#   • `assert` — ONE LINE stating the condition the stage's success MEANS, in the declarer's own
+#     words ("hard negatives for at least 90% of the training queries"). This is the half that
+#     catches 1.2%, and it is NOT a quality judgement: the search ranks metrics, this asks whether
+#     the stage did the job it itself declared. A checker with no contract cannot tell those apart,
+#     which is why it was right to forbid it the attempt; a checker holding the declarer's own
+#     sentence can.
+#
+# IT LIVES IN THE STAGE MANIFEST, NOT IN THE SCRIPT, and that is load-bearing. The scorer script is
+# Developer-authored on most repo tasks and operator-PROTECTED on some (the write gate refuses the
+# agent any edit to it), so a contract that could only be expressed as an assert INSIDE the script
+# would be undeclarable exactly when the operator owns the file. A manifest field is declarable in
+# both modes: the operator writes it on `cmd.stages`, the Developer writes it on
+# `looplab_stages.json`. The in-script assert is the recommended belt (see the repo-Developer
+# prompt's STAGE CHECKS block); this is the braces, and it is the half the ENGINE can enforce.
+MAX_STAGE_EXPECT_FILES = 16
+MAX_STAGE_ASSERT_CHARS = 300
+# Closed key set. An unknown key is REFUSED, not ignored: `expect`'s whole value is that a declared
+# condition is actually checked, so a silently-dropped `"assets"` typo would leave a stage
+# advertising a contract nothing enforces — which is the failure this field exists to end.
+STAGE_EXPECT_KEYS = ("files", "assert")
+
+
+def _validate_expect(nm: str, expect) -> tuple[Optional[dict], Optional[str]]:
+    """Validate one stage's `expect` block into its canonical form: (clean, None) or (None, reason).
+
+    Split out of `validate_stages` rather than inlined because it is the half a DECLARER reads its
+    error message from — the `declare_stages` tool bounces these strings straight back to the model —
+    so each refusal has to name the fix, and that is a lot of text to bury inside a loop body.
+
+    Paths are checked for SHAPE here (relative, no traversal, no NUL); actual containment is
+    re-decided at verification time against the real workdir by `_confined`, because a symlink the
+    candidate creates at eval time cannot be seen from a manifest.
+    """
+    if not isinstance(expect, dict):
+        return None, (f"stage {nm!r} `expect` must be an object like "
+                      "{\"files\":[\"ckpt/model.pt\"],\"assert\":\"what success means\"}.")
+    unknown = [k for k in expect if k not in STAGE_EXPECT_KEYS]
+    if unknown:
+        return None, (f"stage {nm!r} `expect` has unknown key(s) {sorted(unknown)!r}; only "
+                      f"{list(STAGE_EXPECT_KEYS)!r} are checked. A key nothing reads would advertise "
+                      "a contract that is never enforced.")
+    clean: dict = {}
+    files = expect.get("files")
+    if files is not None:
+        if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+            return None, f"stage {nm!r} `expect.files` must be a list of workdir-relative path strings."
+        if len(files) > MAX_STAGE_EXPECT_FILES:
+            return None, f"stage {nm!r} `expect.files` may name at most {MAX_STAGE_EXPECT_FILES} paths."
+        out: list = []
+        for f in files:
+            rel = f.strip()
+            while rel.startswith("./"):
+                rel = rel[2:]
+            if not rel or "\x00" in rel:
+                return None, f"stage {nm!r} `expect.files` contains an empty path."
+            if os.path.isabs(rel) or (len(rel) > 1 and rel[1] == ":"):
+                return None, (f"stage {nm!r} `expect.files` entry {f!r} must be RELATIVE to the eval "
+                              "workdir — an absolute path names something outside this node.")
+            if ".." in rel.replace("\\", "/").split("/"):
+                return None, (f"stage {nm!r} `expect.files` entry {f!r} escapes the eval workdir.")
+            if rel not in out:
+                out.append(rel)
+        if out:
+            clean["files"] = out
+    a = expect.get("assert")
+    if a is not None:
+        if not isinstance(a, str):
+            return None, f"stage {nm!r} `expect.assert` must be a one-line string."
+        a = " ".join(a.split())[:MAX_STAGE_ASSERT_CHARS]
+        if a:
+            clean["assert"] = a
+    if not clean:
+        # An `expect` that declares nothing is worse than no `expect`: it reads, to anyone auditing
+        # the manifest, like the stage carries a contract. Refuse it at authoring time.
+        return None, (f"stage {nm!r} `expect` declares nothing — give it `files` (the artifacts this "
+                      "stage produces) and/or `assert` (one line stating what its success MEANS), or "
+                      "drop the key.")
+    return clean, None
+
 # STALL watchdog window: a stage (train/eval) that emits NOTHING for this long while still ALIVE is
 # treated as hung (a distributed/DataParallel finalize deadlock, a wedged CUDA op, a lock never
 # released) and tree-killed early — instead of sitting until the full, often multi-hour, stage
@@ -726,8 +819,88 @@ def validate_stages(stages, *, reserved: tuple = ()) -> tuple[Optional[list], Op
             st["timeout"] = _t
         if s.get("check"):
             st["check"] = True
+        if s.get("expect") is not None:
+            # The per-stage SUCCESS CONTRACT (see `_validate_expect` and the block above it). Shared
+            # here rather than at each declaring site for the same reason every other stage rule is:
+            # `declare_stages` (authoring), `EvalSpec.stages` (operator submit) and `_resolve_stages`
+            # (consume) must accept exactly the same thing, or a contract one side records is a
+            # contract the other silently never checks.
+            exp, err = _validate_expect(nm, s["expect"])
+            if err is not None:
+                return None, err
+            st["expect"] = exp
         clean.append(st)
     return clean, None
+
+
+# What `verify_stage_artifacts` reports when a declared artifact is absent/empty/stale. Hoisted as a
+# constant family so the three refusals can be pinned and so the repair loop reads ONE vocabulary:
+# each names the DECLARATION as the thing that was broken, because that is what tells the Developer
+# whether to fix the code or the manifest. `{stage}`/`{path}` are the only placeholders.
+EXPECT_MISSING = ("stage {stage!r} exited 0 but did NOT produce its declared artifact {path!r}. The "
+                  "stage manifest DECLARES this stage produces it, so either the stage's code never "
+                  "wrote it (fix the code) or the declaration names the wrong path (fix "
+                  "looplab_stages.json). Do not delete the declaration to make this pass.")
+EXPECT_EMPTY = ("stage {stage!r} exited 0 but its declared artifact {path!r} is EMPTY (0 bytes). The "
+                "stage reported success while producing nothing — fix the code that writes it.")
+EXPECT_STALE = ("stage {stage!r} exited 0 but its declared artifact {path!r} was NOT written by this "
+                "run of the stage (its mtime predates the stage start), so what the next stage would "
+                "read is a leftover from an earlier attempt or another experiment. The stage must "
+                "(re)write it every time it runs — a 'skip if it already exists' shortcut is exactly "
+                "what freezes the metric.")
+EXPECT_ESCAPES = ("stage {stage!r} declares artifact {path!r}, which does not resolve inside the eval "
+                  "workdir (an absolute path, a `..` traversal, or a symlink out of the sandbox). "
+                  "Declared artifacts are workdir-relative.")
+
+
+def verify_stage_artifacts(expect, workdir, since: Optional[float], *, stage: str = "") -> Optional[str]:
+    """The TECHNICAL half of the stage success contract: None when every declared artifact is there,
+    otherwise a one-line reason naming the first one that is not. Deterministic, no LLM, one stat per
+    path.
+
+    THREE conditions, not one, and the reason each is separate is that they fail differently:
+      • ABSENT — the stage claimed to produce it and did not. This is the BACKLOG's existence check.
+      • EMPTY — a 0-byte file passes existence and carries nothing. Cheap to check, and the shape a
+        crashed-then-swallowed writer leaves behind (`open(p,"wb")` then an exception the script ate).
+      • STALE — it exists and is non-empty but predates this stage's start, so the next stage would
+        read a PREVIOUS attempt's artifact or a foreign experiment's. This is the one that matters
+        most on a repaired node, because the workdir deliberately persists across attempts so a
+        completed `train` can be reused: everything else in that design is what makes a stale
+        artifact plausible here, and `_safe_reuse_start` only bounds the stages the engine SKIPS,
+        never the ones it re-runs.
+
+    `since` is the stage's own wall-clock start (`time.time()`), not the eval's — a stage that
+    re-runs on attempt 3 must rewrite its artifact on attempt 3. `None` disables the freshness gate
+    for callers that have no start time (the check then degrades to existence + non-empty, which is
+    still strictly more than exit-code-only).
+
+    A DIRECTORY counts as produced when it exists and is non-empty (a checkpoint dir, a HF
+    `save_pretrained` output); its freshness is its own mtime, which POSIX updates when an entry is
+    created or removed inside it. Deliberately not a recursive newest-child walk: that is O(tree) in
+    the eval path for a checkpoint dir with thousands of shards, and the coarse answer is the
+    conservative one here — it can only ever report an untouched directory as stale, never a stale
+    one as fresh.
+    """
+    for rel in ((expect or {}).get("files") or []):
+        p = _confined(workdir, rel)
+        if p is None:
+            return EXPECT_ESCAPES.format(stage=stage, path=rel)
+        try:
+            st = p.stat()
+        except OSError:
+            return EXPECT_MISSING.format(stage=stage, path=rel)
+        if p.is_dir():
+            try:
+                empty = not any(p.iterdir())
+            except OSError:
+                empty = True
+            if empty:
+                return EXPECT_EMPTY.format(stage=stage, path=rel)
+        elif st.st_size <= 0:
+            return EXPECT_EMPTY.format(stage=stage, path=rel)
+        if not _file_is_fresh(p, since):
+            return EXPECT_STALE.format(stage=stage, path=rel)
+    return None
 
 
 def materialized_stages(manifest_obj, *, reserved: tuple = ("score",)) -> Optional[list]:
@@ -981,6 +1154,38 @@ class _EvalRun:
     early: Optional[RunResult] = None
 
 
+def _call_stage_check(check_fn, stage: str, tail: str, assertion: str):
+    """Call the inter-stage checker, handing it the stage's DECLARED success condition when it has
+    one and the callee can take it.
+
+    The signature grew a third argument, and `check_fn` is a duck-typed callback with doubles all
+    over the suite and an operator-replaceable engine factory behind it. Calling three-arg
+    unconditionally would raise `TypeError` inside `_run_stages`' `except Exception`, which SWALLOWS
+    it and returns None — i.e. every two-arg checker would go on being called and silently never
+    fire again. That is the "silent narrowing" shape CLAUDE.md warns about, so the arity is decided
+    by INSPECTION (the same reasoning as `engine/crash_repair.py::_accepted_kwargs`) and an
+    un-inspectable callable keeps the historical two-arg call rather than the new one.
+
+    No assertion declared => the two-arg call, byte-identical to what it always was, so a stage using
+    only `check: true` reaches the checker exactly as before.
+    """
+    if not assertion:
+        return check_fn(stage, tail)
+    import inspect
+    try:
+        params = inspect.signature(check_fn).parameters
+    except (TypeError, ValueError):
+        return check_fn(stage, tail)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()) or "expect" in params:
+        return check_fn(stage, tail, expect=assertion)
+    positional = [p for p in params.values()
+                  if p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                                inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+    if len(positional) >= 3 or any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params.values()):
+        return check_fn(stage, tail, assertion)
+    return check_fn(stage, tail)
+
+
 def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Optional[str],
                 metric: dict, eval_started: float, check_fn) -> _EvalRun:
     """Run the declared stage pipeline in order; the LAST stage's output feeds the metric read.
@@ -997,6 +1202,15 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
     reusing on a typo would score a stale artifact. Pinned end-to-end (reuse, the zero-work
     markers, and that fallback) by tests/test_command_eval.py::
     test_start_stage_reuses_earlier_stages_instead_of_paying_for_them_again.
+
+    SUCCESS CONTRACT (`expect`): a stage that exits 0 is then held to whatever it DECLARED. The
+    technical half runs first and unconditionally (`verify_stage_artifacts` — declared artifacts
+    exist, are non-empty, and were written by THIS run of the stage); only if that passes is the
+    declared `assert` sentence handed to the LLM checker, which is the half that can see "9,364 of
+    764,676". Order matters and is not cosmetic: the cheap deterministic check must not be gated
+    behind a model call that may be unwired, rate-limited, or simply absent — an operator running
+    without a reflect client still gets artifact verification, which is most of the value for none
+    of the cost.
     """
     _run_from = 0
     if start_stage:
@@ -1022,6 +1236,12 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
         if not _scmd:
             continue
         _t0 = time.monotonic()
+        # WALL-CLOCK stage start, beside the monotonic one that measures duration: the freshness half
+        # of the success contract compares against `st_mtime`, which is wall clock, and monotonic
+        # seconds are not comparable with it (on this box they differ by the machine's uptime — every
+        # declared artifact would read as stale). Taken here, before the command runs, so an artifact
+        # written by a PREVIOUS attempt of this same stage cannot pass as this one's.
+        _w0 = time.time()
         with ex.span(_sname, kind="operation", sandboxed=bool(ex.wrap), stage=_sname) as _sh:
             # Live-band anchor: a training subprocess emits NO child LLM/tool spans, and this stage's
             # operation span is written to spans.jsonl only on CLOSE (tracing.Tracer.span), so without
@@ -1070,13 +1290,42 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 metric=_salvaged, timed_out=run.timed_out, stages=stage_results,
                 failed_stage=_sname, stalled=_salvageable_stall(run.signals))
             return run
+        # THE SUCCESS CONTRACT, technical half. Runs on every stage that declared `expect`, needs no
+        # model, and fails the stage exactly the way a non-zero exit does — same `failed_stage`, same
+        # early return — so it flows into the EXISTING repair loop, the EXISTING `_safe_reuse_start`
+        # and the EXISTING stage-scoped re-run with no new mid-loop vocabulary. That is the answer to
+        # the BACKLOG's open question "what does verification failure DO": the stage FAILED, because a
+        # stage that did not produce what it declared did not succeed, whatever it exited with.
+        # `isinstance`, not `or {}`: every stage reaching a RUN has been through `validate_stages`,
+        # but `run_command_eval(stages=...)` is a public entry point a library caller can hand raw
+        # dicts to, and `"expect": "hard_negs.pkl"` would then raise AttributeError out of the eval
+        # WORKER — no node terminal, and the run re-dies on every resume. Same failure class as the
+        # unregistered metric-reader path slot in CLAUDE.md; a malformed declaration must degrade to
+        # "no contract", never take down the run.
+        _expect = _stg.get("expect") if isinstance(_stg.get("expect"), dict) else {}
+        _artifact_problem = (verify_stage_artifacts(_expect, str(ex.wd), _w0, stage=_sname)
+                             if _expect.get("files") else None)
+        if _artifact_problem:
+            stage_results[-1]["status"] = "expect_failed"
+            stage_results[-1]["concern"] = str(_artifact_problem)[:300]
+            run.early = RunResult(
+                exit_code=0, stdout=run.out, metric=None, timed_out=False,
+                stderr=f"stage '{_sname}' failed its declared artifact contract: {_artifact_problem}",
+                stages=stage_results, failed_stage=_sname)
+            return run
         # Phase 3 — optional inter-stage verify: a stage flagged `"check": true` hands its output tail
         # to an agentic checker (Researcher/Developer) BEFORE the next stage runs; a returned concern
         # stops the pipeline early ("failed verification") so a bad artifact (e.g. a diverged train)
         # doesn't silently feed the next stage. No check_fn / no flag => never called (zero overhead).
-        if _stg.get("check") and check_fn is not None:
+        #
+        # A declared `expect.assert` IMPLIES the gate. Requiring `check: true` as well would mean a
+        # stage that states its own success condition is silently never held to it — which is the
+        # whole defect, re-created one field over. `check: true` alone keeps its historical meaning:
+        # the contract-free sanity read, whose prompt still forbids quality judgements.
+        _assertion = str(_expect.get("assert") or "")
+        if (_stg.get("check") or _assertion) and check_fn is not None:
             try:
-                _concern = check_fn(_sname, run.out[-4000:])
+                _concern = _call_stage_check(check_fn, _sname, run.out[-4000:], _assertion)
             except Exception:  # noqa: BLE001 — a checker failure must not crash the eval
                 _concern = None
             if _concern:

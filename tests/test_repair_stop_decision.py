@@ -1229,7 +1229,13 @@ def test_the_retrain_charge_cannot_ride_on_node_repaired():
 
     src = inspect.getsource(Engine._evaluate)
     append_at = src.index("EV_NODE_REPAIRED, repair_payload")
-    decide_at = src.index("_repair_forces_full_retrain(res, next_start)")
+    # Keyed on the CALLEE NAME, not the whole call expression. The expression used to be pinned
+    # verbatim (`_repair_forces_full_retrain(res, next_start)`) and adding the rule's fourth
+    # condition — the `rolled_back=` keyword a stage ROLLBACK charges through — stranded this
+    # ordering assertion on a `ValueError: substring not found`, i.e. the property stopped being
+    # checked while the production code was fine. What the ordering is about is which STATEMENT runs
+    # first; the argument list is not part of it.
+    decide_at = src.index("_repair_forces_full_retrain(")
     assert append_at < decide_at, (
         "the node_repaired append no longer precedes the re-train decision — the charge can now "
         "ride on that event as an additive field, and EV_FULL_RETRAIN_CHARGED can retire")

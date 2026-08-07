@@ -197,6 +197,30 @@ _REPO_DEV_SYSTEM_BODY = (
     "manifest, so a downstream bug never costs a retrain.\n"
     "Never silently emit a fake/zero metric to hide an error — fail loudly (non-zero exit) so "
     "the failing stage can be repaired.\n"
+    "STAGE CHECKS — every stage must be able to FAIL. Exiting 0 is not evidence a stage worked: a "
+    "stage that produced 1% of what it was supposed to produce exits 0 exactly like one that "
+    "produced 100%, and the next stage then consumes the 1% as if it were complete. This has "
+    "happened: a hard-negative mining stage wrote its output file and exited 0 having mined "
+    "negatives for 9,364 of 764,676 queries — 1.2% — and the training stage was handed "
+    "`--n_hard_negatives 4` as though every query had them. Nothing objected, and the whole node's "
+    "result was meaningless. So:\n"
+    "  • PRINT the numbers that show the stage did its job — counts, coverage, shapes, ratios "
+    "(\"mined hard negatives for 731,203 / 764,676 queries (95.6%)\", \"wrote 512 x 384 embedding "
+    "matrix\"). Print them even when they are fine; an unprinted number cannot be checked by "
+    "anything, including you on the next attempt.\n"
+    "  • ASSERT the ones that must hold, in the stage's own code, and let the assert KILL the stage "
+    "(a bare `assert`, or a check that raises / sys.exit(1)). A stage that manufactures the training "
+    "signal must fail loudly when it manufactures 1% of it. Assert what would make the NEXT stage's "
+    "work meaningless if it were wrong: coverage/row counts against the input size, a non-empty "
+    "output, the expected number of files/shards, a shape or dtype the consumer requires. Do NOT "
+    "assert result QUALITY (a metric being 'good enough') — that is the search's job, not yours; "
+    "assert that the work was DONE.\n"
+    "  • DECLARE the same condition on the stage in `looplab_stages.json` via its `expect` field "
+    "(see the STAGES phase) so the engine holds the stage to it too. The two are not redundant: the "
+    "assert is inside code you may not always be allowed to edit (an operator-PROTECTED script is "
+    "off-limits to you), while `expect` is in the manifest and always yours to declare. When a "
+    "stage's script is protected, `expect` is the ONLY way to state what its success means — "
+    "declare it there.\n"
     "LOGGING: keep the training framework's logger (e.g. PyTorch Lightning's TensorBoardLogger) "
     "ENABLED and log SEVERAL metrics (the target metric AND related ones — loss, other recalls, "
     "lr), not just the objective; point its log dir at a STABLE path under the workdir so the "
@@ -224,6 +248,19 @@ _REPO_DEV_REPAIR_BLOCK = (
     "'skip if a checkpoint exists' logic to the code yourself (a partial or foreign artifact would "
     "silently freeze the metric); just repair the failing step. Do not start "
     "over from scratch. Files in this node's working set: {already}.\n"
+    "IF THE REAL CAUSE IS AN EARLIER STAGE, SAY SO. A stage that exited 0 was counted successful, but "
+    "exit 0 only means it did not crash — an earlier stage can 'succeed' having produced a fraction "
+    "of what it should have (this has happened: a mining stage exited 0 with hard negatives for 1.2% "
+    "of the queries, and training then failed or trained on nonsense). When the error you are looking "
+    "at is the SYMPTOM and an earlier stage is the CAUSE, do two things in THIS repair: (1) EDIT that "
+    "earlier stage's script so it does the job properly and fails loudly when it cannot, and (2) pass "
+    "`rollback_stage: \"<that stage's name>\"` to `done`. The engine then re-runs the pipeline from "
+    "that stage, throwing away its bad output and everything built on it. Both parts are required — "
+    "naming a stage you did not change is refused, because re-running it unchanged would produce the "
+    "same bytes. You get ONE rollback per stage on this node, and it costs the same budget a forced "
+    "full re-train does, so name a stage when you have evidence in the log, not on a hunch. If the "
+    "earlier stage's script is one you are not allowed to edit, you cannot fix it — say that in your "
+    "summary instead of guessing.\n"
     "--- eval error (stderr/stdout tail) ---\n")
 
 
@@ -282,6 +319,12 @@ class LLMRepoDeveloper:
         self.last_files: dict[str, str] = {}
         self.last_deleted: list[str] = []
         self.last_footprint: dict | None = None
+        # The suspect EARLIER stage this call's repair blamed, "" when it blamed none. Per-CALL like
+        # every other `last_*` output and registered in `agents/roles.py::DEVELOPER_OUTPUT_ATTRS` for
+        # the same reason they are: the engine reads it with `getattr(developer, ..., "")`, so a
+        # rename here would not fail — it would silently mean "no rollback was ever requested", i.e.
+        # the feature quietly ceasing to exist with every test still green.
+        self.last_rollback_stage: str = ""
 
     # Files most useful to PRELOAD verbatim so the agent authors the entrypoint without fumbling with
     # a (truncating) read tool. Order = priority; the rest of the surface is appended within budget.
@@ -445,6 +488,41 @@ class LLMRepoDeveloper:
                         "its metric. Briefly summarize what you wrote.",
                         {"summary": {"type": "string"}}, [])
 
+    def _repair_emit_spec(self) -> dict:
+        """The repair session's `done`, which carries ONE extra field the build sessions must not
+        have: `rollback_stage`.
+
+        A SEPARATE spec rather than an optional property on `_emit_spec` because the field is only
+        answerable in a repair — a fresh build has no failed stage to blame — and a schema property
+        that is inert wherever it appears is a property a model will eventually fill in anyway. The
+        build path keeps `_emit_spec` byte-identical, so nothing about a fresh implement changes.
+        """
+        from looplab.tools._base import fn_spec
+        return fn_spec("done",
+                        "Call once the repair is written and the eval would run. Briefly summarize "
+                        "what you changed.",
+                        {"summary": {"type": "string"},
+                         # The Developer's ONLY way to say "the stage that broke is not the stage
+                         # that is wrong". Everything the engine does with it is in
+                         # `engine/eval_stages.py::_rollback_start`; the two things the model has to
+                         # know are stated here because the tool description is what it reads at the
+                         # moment of answering: it must have CHANGED that stage, and it gets one
+                         # attempt per stage.
+                         "rollback_stage": {"type": "string", "description":
+                                            "Leave EMPTY unless the failure you just repaired was "
+                                            "CAUSED by an EARLIER pipeline stage that already "
+                                            "'succeeded' — e.g. a data/mining stage that exited 0 "
+                                            "having produced a fraction of what it should have, so "
+                                            "training was fed a broken input. Then name that earlier "
+                                            "stage and the engine will re-run the pipeline FROM it, "
+                                            "discarding its output and everything after. You must "
+                                            "have EDITED that stage's script (or something it "
+                                            "imports) in THIS repair, or the rollback is refused — "
+                                            "re-running it unchanged would produce the same bytes. "
+                                            "You get ONE rollback per stage per node, and it costs "
+                                            "the same budget a forced full re-train does, so use it "
+                                            "when you have evidence, not on a hunch."}}, [])
+
     def _session_opts(self, *, max_turns=None, time_budget=None):
         """loop_opts + the HARD per-session ceiling. A developer session ALWAYS gets a finite bound so
         a model that keeps writing/exploring without ever emitting `done` fails cleanly with the code
@@ -588,15 +666,42 @@ class LLMRepoDeveloper:
         from looplab.tools._base import fn_spec
         return fn_spec("declare_stages",
                         "Declare the ORDERED pipeline stages for this experiment and finish the stages "
-                        "phase. Each stage is {name, command:[argv...], timeout?, check?}; they run IN "
-                        "ORDER in the same workdir so artifacts (a trained checkpoint, prepared data) "
-                        "persist to later stages. Put `%params%` in a command to inject THIS node's "
+                        "phase. Each stage is {name, command:[argv...], timeout?, check?, expect?}; they "
+                        "run IN ORDER in the same workdir so artifacts (a trained checkpoint, prepared "
+                        "data) persist to later stages. Put `%params%` in a command to inject THIS node's "
                         "hyperparameters as `--key value`, or bake the values into the argv yourself. "
-                        "Give a long training stage a GENEROUS timeout (seconds).",
+                        "Give a long training stage a GENEROUS timeout (seconds). Give every stage an "
+                        "`expect` — what it produces and what its success MEANS — because exit code 0 "
+                        "alone does not tell the engine a stage did its job.",
                         {"stages": {"type": "array", "items": {"type": "object", "properties": {
                             "name": {"type": "string"},
                             "command": {"type": "array", "items": {"type": "string"}},
-                            "timeout": {"type": "number"}, "check": {"type": "boolean"}},
+                            "timeout": {"type": "number"}, "check": {"type": "boolean"},
+                            # The per-stage SUCCESS CONTRACT. The schema is the one place a model
+                            # reliably reads the field's shape, so both halves are described HERE as
+                            # well as in the phase prompt — and `assert` says what it is NOT, because
+                            # the near-miss ("the metric should beat 0.85") is a quality judgement the
+                            # search owns and the checker will refuse to enforce.
+                            "expect": {"type": "object", "description":
+                                       "What this stage must have produced for the pipeline to "
+                                       "continue. The engine enforces it after the stage exits 0.",
+                                       "properties": {
+                                           "files": {"type": "array", "items": {"type": "string"},
+                                                     "description":
+                                                     "Workdir-relative paths this stage WRITES (e.g. "
+                                                     "['hard_negs.pkl','ckpt/model.pt']). Each must "
+                                                     "exist, be non-empty, and be written by THIS run "
+                                                     "of the stage — a leftover from a previous "
+                                                     "attempt fails the stage."},
+                                           "assert": {"type": "string", "description":
+                                                      "ONE line stating what this stage's success "
+                                                      "MEANS, checkable against what the stage prints "
+                                                      "— e.g. 'hard negatives mined for at least 90% "
+                                                      "of the training queries' or 'all 30 epochs "
+                                                      "completed and a checkpoint saved'. State the "
+                                                      "WORK, never the result quality: 'the metric "
+                                                      "beats 0.85' is not a stage condition (the "
+                                                      "search ranks results, this does not)."}}}},
                             "required": ["name", "command"]}}},
                         ["stages"])
 
@@ -730,7 +835,26 @@ class LLMRepoDeveloper:
             "stages for data/feature PREPARATION, TRAINING (a fresh model every node — the pipeline must "
             "not point at another experiment's checkpoint), and TESTING; bake this node's "
             "hyperparameters into the `train` command (or use "
-            "`%params%`). Give training a generous timeout. Then call `declare_stages` once. You are NOT "
+            "`%params%`). Give training a generous timeout.\n\n"
+            "GIVE EVERY STAGE AN `expect` — this is what makes a stage's success mean something. A stage "
+            "that exits 0 has proved nothing: a mining stage that covered 1.2% of the queries exits 0 "
+            "exactly like one that covered 100%, and the next stage consumed the 1.2% as if it were "
+            "whole (this happened, and the node's whole result was meaningless). `expect` has two parts "
+            "and you should usually give both:\n"
+            "  • `files`: the workdir-relative paths this stage WRITES. The engine checks after the "
+            "stage that each exists, is non-empty, and was written by THIS run of the stage.\n"
+            "  • `assert`: ONE line stating what this stage's success MEANS, phrased so it can be "
+            "checked against what the stage PRINTS — 'hard negatives mined for at least 90% of the "
+            "training queries', 'all 30 epochs completed and a best-val checkpoint saved', 'embeddings "
+            "written for every document in the corpus'. State the WORK, not the result quality: 'recall "
+            "beats 0.85' is not a stage condition — the search ranks results, this only asks whether the "
+            "stage did its job.\n"
+            "Write the `assert` against a number the stage will actually print; the implement phase then "
+            "has to make the stage print it (and assert it in code). Declare `expect` for EVERY stage "
+            "you can, and especially for any stage whose script you will NOT be able to edit later "
+            "because the operator protected it — there, the manifest is the only place its success "
+            "condition can be stated at all.\n\n"
+            "Then call `declare_stages` once. You are NOT "
             "writing code yet — the plan + implement phases come next.")
 
     def _declare_stages_phase(self, idea: Idea, write, system: str) -> list:
@@ -789,6 +913,12 @@ class LLMRepoDeveloper:
              base_deleted: Optional[list] = None) -> str:
         from looplab.agents.agent import run_phase
         from looplab.core import tracing
+        # Cleared per CALL, before anything can fail: this developer instance is SHARED across
+        # concurrent `_evaluate` tasks (see the `repaired_files` snapshot note in evaluate.py), so a
+        # stale value left by a sibling node's repair would make THIS node re-run an expensive stage
+        # nobody asked it to. Every early return below (including the `except` that mints the
+        # developer-error sentinel) therefore leaves it "" rather than the previous call's answer.
+        self.last_rollback_stage = ""
         # Resolved ONCE for the whole node: operator `cmd.stages` make declare_stages refuse (P12)
         # and drive the stage notes below; data-mount names make mount refusals honest.
         op_stages = self._operator_stage_list()
@@ -939,9 +1069,17 @@ class LLMRepoDeveloper:
             else:
                 # repair / toy single session — terminal, so no summary (and repair isn't in a scope
                 # anyway when it runs inline during eval; the debug-operator repair gets an empty ledger).
-                run_phase(self.client, tools, messages, self._emit_spec(),
+                # A REPAIR additionally gets `rollback_stage` on its `done` (see `_repair_emit_spec`),
+                # captured into `last_rollback_stage` from the emit args — the engine reads it off the
+                # developer exactly as it reads `last_files`, through the DEVELOPER_OUTPUT_ATTRS seam.
+                def _finish(a):
+                    if error:
+                        self.last_rollback_stage = str((a or {}).get("rollback_stage", "")).strip()[:64]
+                    return (a or {}).get("summary", "")
+                run_phase(self.client, tools, messages,
+                          self._repair_emit_spec() if error else self._emit_spec(),
                           label=("Developer·repair" if error else "Developer·implement"), handoff=False,
-                          finalize=lambda a: (a or {}).get("summary", ""),
+                          finalize=_finish,
                           fallback=lambda m: "", **self._session_opts())
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup
             self.last_files = dict(write.files)

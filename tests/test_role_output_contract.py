@@ -19,7 +19,8 @@ _CONSUMER = re.compile(r'getattr\([A-Za-z_][\w.]*,\s*"((?:last_|choose_)[a-z_]+)
 # Producer writes: `self.last_files = …` / `obj.last_files = …` (also catches `last_filez =`
 # style renames as long as the prefix survives — the near-miss check below covers the rest).
 _PRODUCER = re.compile(
-    r'\.((?:last_files?|last_deleted|last_footprint|last_file|last_report|last_seed|last_run|last_patch|choose_action)[a-z_]*)\s*=[^=]')
+    r'\.((?:last_files?|last_deleted|last_footprint|last_file|last_report|last_seed|last_run|last_patch'
+    r'|last_rollback_stage|choose_action)[a-z_]*)\s*=[^=]')
 
 
 def test_every_consumer_probe_is_registered():

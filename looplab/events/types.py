@@ -337,6 +337,17 @@ EV_DEPS_INSTALLED = "deps_installed"
 # immaterial — a property of the READERS, not of the event.
 # `engine/evaluate.py::_durable_full_retrains` reads it straight off the log.
 EV_FULL_RETRAIN_CHARGED = "full_retrain_charged"
+# ONE stage ROLLBACK decision — the Developer asserting that a LATER stage's failure was caused by an
+# EARLIER stage that had already been counted successful, and the engine's answer. Written on BOTH
+# outcomes (`accepted` true/false, with `refusal` naming which rung of the ladder said no) because the
+# refusals are the half that has to be auditable: a rollback that is refused every attempt is a
+# Developer stuck on a wrong guess, and a run where none are ever accepted is a feature nobody can
+# use. Diagnostic for the same reason `full_retrain_charged` is, and safe for the same reason: no
+# reader keys on its position, since `_proposal_authority_seq` excludes DIAGNOSTIC_EVENTS wholesale.
+# `engine/evaluate.py::_durable_rollbacks` reads the ACCEPTED rows straight off the log, which is what
+# makes "at most one rollback per suspect stage per node" survive a resume — a bound a resume refunds
+# is not a bound, and this one guards hours of GPU time.
+EV_STAGE_ROLLBACK = "stage_rollback"
 EV_WORKSPACE_SEEDED = "workspace_seeded"
 # FOLDED (moved out of DIAGNOSTIC_EVENTS): the start of an arbitrary operator `run_setup` command is
 # the only evidence that its side effects may have been applied. Without folding it, a kill between
@@ -479,7 +490,8 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 # source-scan test went dead after the fold became a dispatch table, leaving coverage unprotected).
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
-    EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_FULL_RETRAIN_CHARGED, EV_WORKSPACE_SEEDED,
+    EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_FULL_RETRAIN_CHARGED, EV_STAGE_ROLLBACK,
+    EV_WORKSPACE_SEEDED,
     EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,
     EV_CONCEPT_LENS_STARTED, EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED,

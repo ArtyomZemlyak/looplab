@@ -442,8 +442,9 @@ guard, sanctioned mlebench grader import, PromptStore key table in the docs). It
 deliberately deferred, with rationale:
 
 ### Deferred design work
-- ⬜ **Per-stage ARTIFACT DECLARATION + technical verification (M–L).** User-requested direction
-  that supersedes the D1–D4 static-analysis line long-term: each pipeline stage DECLARES the
+- 🟡 **Per-stage ARTIFACT DECLARATION + technical verification (M–L)** — *PARTLY SHIPPED
+  2026-08-07 as the per-stage success contract `expect`. The reuse-keying half is deliberately NOT
+  built; see the cut below.* The original entry: each pipeline stage DECLARES the
   artifact paths it produces (checkpoints, processed data, predictions); after a stage the
   engine VERIFIES existence/freshness of the declared artifacts, and checkpoint-reuse keys on
   the declared artifacts instead of the import-closure heuristics (`_safe_reuse_start` +
@@ -453,6 +454,38 @@ deliberately deferred, with rationale:
   for freshness semantics (mtime vs content hash), for agent-declared vs operator-declared
   pipelines, and for what "verification failed" does mid-loop (bounce the stage vs fail the
   node). Retires the whole D1–D4 defect class instead of patching its holes one by one.
+
+  **SHIPPED** (`runtime/command_eval.py::_validate_expect` / `verify_stage_artifacts`,
+  `engine/eval_stages.py::STAGE_CONTRACT_CLAUSE`, `tests/test_stage_contract.py`):
+  `expect: {files?, assert?}` on any stage, from either declarer. `files` is the technical half —
+  each declared path must exist inside the workdir, be non-empty, and have been written by THIS run
+  of the stage. `assert` is one line stating what the stage's success MEANS, handed to the
+  inter-stage checker as its contract. The three open design questions were answered as:
+  **mtime, not content hash** — hashing a multi-GB checkpoint is real time on the eval path, and the
+  coarse answer is the conservative one (it can only report an untouched artifact as stale, never a
+  stale one as fresh); **one field for both declarers**, because the manifest is the only place a
+  contract can be stated for a stage whose script the operator PROTECTED, which is the mode where an
+  in-script assert is impossible; and **fail the stage**, exactly as a non-zero exit does, so it
+  flows into the existing repair loop, the existing `_safe_reuse_start` and the existing stage-scoped
+  re-run with no new mid-loop vocabulary.
+
+  **CUT, and it is a cut rather than a deferral: keying checkpoint REUSE on the declared artifacts.**
+  It trades a fail-CLOSED heuristic for a fail-OPEN declaration. `_safe_reuse_start` refuses reuse
+  whenever it cannot PROVE the earlier stages' inputs are unchanged; a declaration is written by the
+  agent, so keying reuse on it means an agent that under-declares gets its stale checkpoint scored —
+  a silent wrong metric, which is the single failure that predicate exists to prevent. The two are
+  now complementary rather than sequential: the import closure decides what may be SKIPPED, `expect`
+  decides whether what RAN did its job, and neither is asked the other's question. The D1–D4
+  fail-open holes therefore remain exactly as they were; this entry no longer claims to retire them.
+
+  **STILL OPEN.** Existence-only verification would NOT have caught the incident that motivated the
+  work (`runs/rubert-dr-0807`: `hard_negs.pkl` existed, was non-empty, and covered 9,364 of 764,676
+  queries) — that is what `assert` is for, and `assert` is judged by an LLM against the stage's
+  printed output, so it is only as good as what the stage prints. The prompt half (the repo
+  Developer's STAGE CHECKS block: print the numbers, assert them in code, declare the same condition
+  in the manifest) is what makes those numbers exist, and it is a recommendation, not an enforcement.
+  A cheaper model-free `assert` — a declared numeric relation the engine evaluates against a named
+  key the stage prints — is the obvious next step and is not built.
 - ⬜ **D5 · per-attempt stage-event accounting (S).** After an in-loop checkpoint-reuse re-eval,
   the node's only folded stage record is `train={reused, 0s}` — the attempt that actually spent
   the training wall-clock is never recorded for that node (the fold's guard only protects
