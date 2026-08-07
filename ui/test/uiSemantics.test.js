@@ -37,10 +37,18 @@ test('trace loading, partial, and unavailable states expose recovery semantics',
   assert.match(inspector, /className="muted trace-small" role="status">loading…<\/div>/)
   // The partial-projection copy moved into `traceProjection.js` when the pager landed, so the
   // Inspector renders the shared vocabulary instead of the literal. What this file owns is the LIVE
-  // REGION, so pin that at both sites plus the module that now owns the words. The words themselves
-  // are driven end to end by `inspectorTracePager.test.js`, which mounts Trace and reads the notice
-  // it actually renders.
-  assert.match(inspector, /className="notice compact" role="status">\{traceWindowNotice\(spanWindow\)\}/)
+  // REGION. Both the bounded receipt and the loading announcement now live in ONE component
+  // (`TraceReach`, 2026-08-07), so pin the region THERE plus the two call sites that hand it the
+  // right words, and the module that owns them. The words themselves are driven end to end by
+  // `inspectorTracePager.test.js`, which mounts Trace and reads the notice it actually renders.
+  assert.match(inspector,
+    /className="notice compact" role="status">\{notice\} \{traceScrollBoundedSuffix\}<\/div>/,
+    'the terminal receipt must stay an announced live region')
+  assert.match(inspector,
+    /className="muted trace-small trace-reach-status" role="status">\s*\{state === TRACE_SCROLL_LOADING \? TRACE_SCROLL_LOADING_LABEL/,
+    'a read that the operator did not click for must ANNOUNCE itself, or it is invisible to AT')
+  assert.match(inspector, /notice=\{traceWindowNotice\(spanWindow\)\}/)
+  assert.match(inspector, /notice=\{conversationWindowNotice\(convWindow\)\}/)
   assert.match(inspector, /className="notice compact" role="status">\{TRACE_PARTIAL_EMPTY_NOTICE\}/)
   assert.match(await source('traceProjection.js'),
     /export const TRACE_PARTIAL_NOTICE = 'Trace projection is partial\.'/)
