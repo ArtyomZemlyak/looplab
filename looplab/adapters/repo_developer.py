@@ -197,6 +197,30 @@ _REPO_DEV_SYSTEM_BODY = (
     "manifest, so a downstream bug never costs a retrain.\n"
     "Never silently emit a fake/zero metric to hide an error — fail loudly (non-zero exit) so "
     "the failing stage can be repaired.\n"
+    "STAGE CHECKS — every stage must be able to FAIL. Exiting 0 is not evidence a stage worked: a "
+    "stage that produced 1% of what it was supposed to produce exits 0 exactly like one that "
+    "produced 100%, and the next stage then consumes the 1% as if it were complete. This has "
+    "happened: a hard-negative mining stage wrote its output file and exited 0 having mined "
+    "negatives for 9,364 of 764,676 queries — 1.2% — and the training stage was handed "
+    "`--n_hard_negatives 4` as though every query had them. Nothing objected, and the whole node's "
+    "result was meaningless. So:\n"
+    "  • PRINT the numbers that show the stage did its job — counts, coverage, shapes, ratios "
+    "(\"mined hard negatives for 731,203 / 764,676 queries (95.6%)\", \"wrote 512 x 384 embedding "
+    "matrix\"). Print them even when they are fine; an unprinted number cannot be checked by "
+    "anything, including you on the next attempt.\n"
+    "  • ASSERT the ones that must hold, in the stage's own code, and let the assert KILL the stage "
+    "(a bare `assert`, or a check that raises / sys.exit(1)). A stage that manufactures the training "
+    "signal must fail loudly when it manufactures 1% of it. Assert what would make the NEXT stage's "
+    "work meaningless if it were wrong: coverage/row counts against the input size, a non-empty "
+    "output, the expected number of files/shards, a shape or dtype the consumer requires. Do NOT "
+    "assert result QUALITY (a metric being 'good enough') — that is the search's job, not yours; "
+    "assert that the work was DONE.\n"
+    "  • DECLARE the same condition on the stage in `looplab_stages.json` via its `expect` field "
+    "(see the STAGES phase) so the engine holds the stage to it too. The two are not redundant: the "
+    "assert is inside code you may not always be allowed to edit (an operator-PROTECTED script is "
+    "off-limits to you), while `expect` is in the manifest and always yours to declare. When a "
+    "stage's script is protected, `expect` is the ONLY way to state what its success means — "
+    "declare it there.\n"
     "LOGGING: keep the training framework's logger (e.g. PyTorch Lightning's TensorBoardLogger) "
     "ENABLED and log SEVERAL metrics (the target metric AND related ones — loss, other recalls, "
     "lr), not just the objective; point its log dir at a STABLE path under the workdir so the "
@@ -588,15 +612,42 @@ class LLMRepoDeveloper:
         from looplab.tools._base import fn_spec
         return fn_spec("declare_stages",
                         "Declare the ORDERED pipeline stages for this experiment and finish the stages "
-                        "phase. Each stage is {name, command:[argv...], timeout?, check?}; they run IN "
-                        "ORDER in the same workdir so artifacts (a trained checkpoint, prepared data) "
-                        "persist to later stages. Put `%params%` in a command to inject THIS node's "
+                        "phase. Each stage is {name, command:[argv...], timeout?, check?, expect?}; they "
+                        "run IN ORDER in the same workdir so artifacts (a trained checkpoint, prepared "
+                        "data) persist to later stages. Put `%params%` in a command to inject THIS node's "
                         "hyperparameters as `--key value`, or bake the values into the argv yourself. "
-                        "Give a long training stage a GENEROUS timeout (seconds).",
+                        "Give a long training stage a GENEROUS timeout (seconds). Give every stage an "
+                        "`expect` — what it produces and what its success MEANS — because exit code 0 "
+                        "alone does not tell the engine a stage did its job.",
                         {"stages": {"type": "array", "items": {"type": "object", "properties": {
                             "name": {"type": "string"},
                             "command": {"type": "array", "items": {"type": "string"}},
-                            "timeout": {"type": "number"}, "check": {"type": "boolean"}},
+                            "timeout": {"type": "number"}, "check": {"type": "boolean"},
+                            # The per-stage SUCCESS CONTRACT. The schema is the one place a model
+                            # reliably reads the field's shape, so both halves are described HERE as
+                            # well as in the phase prompt — and `assert` says what it is NOT, because
+                            # the near-miss ("the metric should beat 0.85") is a quality judgement the
+                            # search owns and the checker will refuse to enforce.
+                            "expect": {"type": "object", "description":
+                                       "What this stage must have produced for the pipeline to "
+                                       "continue. The engine enforces it after the stage exits 0.",
+                                       "properties": {
+                                           "files": {"type": "array", "items": {"type": "string"},
+                                                     "description":
+                                                     "Workdir-relative paths this stage WRITES (e.g. "
+                                                     "['hard_negs.pkl','ckpt/model.pt']). Each must "
+                                                     "exist, be non-empty, and be written by THIS run "
+                                                     "of the stage — a leftover from a previous "
+                                                     "attempt fails the stage."},
+                                           "assert": {"type": "string", "description":
+                                                      "ONE line stating what this stage's success "
+                                                      "MEANS, checkable against what the stage prints "
+                                                      "— e.g. 'hard negatives mined for at least 90% "
+                                                      "of the training queries' or 'all 30 epochs "
+                                                      "completed and a checkpoint saved'. State the "
+                                                      "WORK, never the result quality: 'the metric "
+                                                      "beats 0.85' is not a stage condition (the "
+                                                      "search ranks results, this does not)."}}}},
                             "required": ["name", "command"]}}},
                         ["stages"])
 
@@ -730,7 +781,26 @@ class LLMRepoDeveloper:
             "stages for data/feature PREPARATION, TRAINING (a fresh model every node — the pipeline must "
             "not point at another experiment's checkpoint), and TESTING; bake this node's "
             "hyperparameters into the `train` command (or use "
-            "`%params%`). Give training a generous timeout. Then call `declare_stages` once. You are NOT "
+            "`%params%`). Give training a generous timeout.\n\n"
+            "GIVE EVERY STAGE AN `expect` — this is what makes a stage's success mean something. A stage "
+            "that exits 0 has proved nothing: a mining stage that covered 1.2% of the queries exits 0 "
+            "exactly like one that covered 100%, and the next stage consumed the 1.2% as if it were "
+            "whole (this happened, and the node's whole result was meaningless). `expect` has two parts "
+            "and you should usually give both:\n"
+            "  • `files`: the workdir-relative paths this stage WRITES. The engine checks after the "
+            "stage that each exists, is non-empty, and was written by THIS run of the stage.\n"
+            "  • `assert`: ONE line stating what this stage's success MEANS, phrased so it can be "
+            "checked against what the stage PRINTS — 'hard negatives mined for at least 90% of the "
+            "training queries', 'all 30 epochs completed and a best-val checkpoint saved', 'embeddings "
+            "written for every document in the corpus'. State the WORK, not the result quality: 'recall "
+            "beats 0.85' is not a stage condition — the search ranks results, this only asks whether the "
+            "stage did its job.\n"
+            "Write the `assert` against a number the stage will actually print; the implement phase then "
+            "has to make the stage print it (and assert it in code). Declare `expect` for EVERY stage "
+            "you can, and especially for any stage whose script you will NOT be able to edit later "
+            "because the operator protected it — there, the manifest is the only place its success "
+            "condition can be stated at all.\n\n"
+            "Then call `declare_stages` once. You are NOT "
             "writing code yet — the plan + implement phases come next.")
 
     def _declare_stages_phase(self, idea: Idea, write, system: str) -> list:

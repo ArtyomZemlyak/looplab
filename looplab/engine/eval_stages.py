@@ -362,18 +362,49 @@ class EvalStagesMixin:
             return None
         return failed_stage
 
+    # The CONTRACT clause, appended to the sanity system prompt ONLY for a stage that DECLARED an
+    # `expect.assert`. Hoisted out of the closure because it is the one place the quality-judgement
+    # ban is deliberately narrowed, and a narrowing of a ban has to be readable on its own.
+    #
+    # Why this is not the thing the base prompt forbids. The ban exists because a checker with no
+    # contract has nothing to judge against except its own taste, and taste produced a measured
+    # incident: it failed the run's BEST model for having a loss around 14.6. A DECLARED condition is
+    # not taste — it is the declarer's own sentence about what this stage was for, and checking a
+    # stage against its own declaration is the opposite of ranking it against other stages' results.
+    # The clause therefore SEPARATES the two rather than relaxing one: the declared condition is
+    # judged, everything not covered by it keeps the ban verbatim.
+    #
+    # A stage's declared condition is the ONLY thing the checker may fail it for beyond the hard
+    # failures — it may not invent a second condition it thinks the stage should also have met.
+    STAGE_CONTRACT_CLAUSE = (
+        " THIS STAGE ALSO DECLARED A SUCCESS CONDITION — the sentence under DECLARED CONDITION "
+        "below, written by whoever declared the pipeline. Check the stage's output against THAT "
+        "sentence and FAIL the stage when the output shows the condition was not met (e.g. it "
+        "declares coverage of at least 90% of the training queries and the log reports 9,364 of "
+        "764,676). This is NOT the quality judgement forbidden above and does not relax it: you are "
+        "not ranking this result against any other run, you are checking whether the stage did the "
+        "job it declared. Judge ONLY the declared condition — do not invent a second one. If the "
+        "output does not say either way, reply OK: an unstated number is not a violation.")
+
     def _stage_check_fn(self, node):
-        """Phase 3 inter-stage verify: a callback (stage_name, log_tail) -> concern|None that asks an LLM
-        whether a `check`-flagged stage physically SUCCEEDED (train actually trained + saved a checkpoint,
-        no silent fallback) BEFORE the next stage runs. This is a SANITY gate, NOT a quality/ranking
-        judgment: it must fail a stage ONLY on a hard, unambiguous failure — never because the metric
-        looks 'not good enough' or 'below the previous best' (that is the search's job downstream). A
-        real incident motivated the tightening: the checker failed the run's BEST model (val recall@100
-        ≈ 0.855, above the champion) by (a) reading loss MAGNITUDE (~14.6) as 'no learning' — loss scale
-        depends on the loss/temperature and is not comparable across configs — and (b) grabbing a
+        """Phase 3 inter-stage verify: a callback (stage_name, log_tail, expect="") -> concern|None that
+        asks an LLM whether a `check`-flagged stage physically SUCCEEDED (train actually trained + saved a
+        checkpoint, no silent fallback) BEFORE the next stage runs. This is a SANITY gate, NOT a
+        quality/ranking judgment: it must fail a stage ONLY on a hard, unambiguous failure — never because
+        the metric looks 'not good enough' or 'below the previous best' (that is the search's job
+        downstream). A real incident motivated the tightening: the checker failed the run's BEST model (val
+        recall@100 ≈ 0.855, above the champion) by (a) reading loss MAGNITUDE (~14.6) as 'no learning' —
+        loss scale depends on the loss/temperature and is not comparable across configs — and (b) grabbing a
         bystander scalar (val recall@50 = 0.79) as 'the metric' and calling it below-best. Returns None
         (checks skipped) when no client is available. Runs inside the eval worker thread, so
-        complete_text blocks there — fine, like the eval."""
+        complete_text blocks there — fine, like the eval.
+
+        `expect` is the stage's own DECLARED success condition
+        (`runtime/command_eval.py::_validate_expect`), passed by `_call_stage_check` when the manifest
+        carries one. It is the ONE thing the checker may fail a stage for beyond a hard failure, and the
+        reason the ban above is not simply wrong: with no contract, "did this work?" and "is this good?"
+        are the same question and the checker answered the wrong one. Empty `expect` reproduces the
+        historical prompt byte-for-byte, so a stage using only `check: true` is unaffected."""
         try:
             client = self._reflect_client()
         except Exception:  # noqa: BLE001
@@ -396,7 +427,7 @@ class EvalStagesMixin:
         # wall time. `engine` is where its eval-path siblings already live (the repair loop reaches it
         # as the fallback lane), and it stays governed by a finite total when the operator sets one.
         @in_llm_lane("engine")
-        def _check(stage_name, tail):
+        def _check(stage_name, tail, expect: str = ""):
             msgs = [{"role": "system", "content":
                      "You are a SANITY checker for ONE stage of an ML eval pipeline, run BEFORE the next "
                      "stage. Decide ONLY whether this stage physically SUCCEEDED and produced a usable "
@@ -409,11 +440,13 @@ class EvalStagesMixin:
                      "depends on the loss function and temperature; a loss around 14 can be perfectly "
                      "healthy). A present, non-trivial validation metric is strong evidence the stage "
                      "SUCCEEDED. Reply EXACTLY 'OK' if the stage succeeded, otherwise a ONE-LINE concern "
-                     "naming the HARD failure."},
+                     "naming the HARD failure."
+                     + (EvalStagesMixin.STAGE_CONTRACT_CLAUSE if expect else "")},
                     {"role": "user", "content":
                      f"The run's objective metric is `{objective}` — ignore other scalars when judging "
                      f"whether the stage worked.\nExperiment: {idea_text[:400]}\n\n"
-                     f"Stage '{stage_name}' output tail:\n{tail}"}]
+                     + (f"DECLARED CONDITION for stage '{stage_name}': {expect}\n\n" if expect else "")
+                     + f"Stage '{stage_name}' output tail:\n{tail}"}]
             try:
                 out = (client.complete_text(msgs) or "").strip()
             except Exception:  # noqa: BLE001 — a checker failure must never fail the eval
