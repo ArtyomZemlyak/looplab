@@ -10,6 +10,13 @@ Every number below was measured against the real store at `/home/jovyan/data/loo
 running the shipped engine. The ten product questions already parked in
 `looplab-open-questions.md` are not repeated here.
 
+Every default quoted is read from a live `Settings()`, not from a doc:
+`embed_model=None`, `memora=True`, `memora_llm=True`, `max_nodes=8`, `n_seeds=3`,
+`concept_retag_every=30`, `concept_tidy=False`, `cross_run_curation=True`,
+`reflection_priors=True`, `comparative_lessons=True`, `lessons_every=4`,
+`skills_dir=None`, `prompt_dir=None` — and `make_embedder(Settings()) is hash_embed` is `True`,
+which is the load-bearing fact under R1.
+
 ---
 
 ## 0. The one-paragraph answer
@@ -250,7 +257,7 @@ loss.
 `auto: false` and `auto_requested: false` on **all 375 rows**. `.curation_invocations/` holds **148
 lock files and 11 receipts**. So the at-most-once paid-curation transaction ran ~375 times, recorded
 `model: unknown` in 363 of them, and produced 8 proposals, none applied. On this corpus it is pure
-finalize latency plus 330 KB of ledger.
+finalize latency plus 226 KB of ledger — 4× the size of the lessons store it was meant to curate.
 
 ### R9 — `evidence_count` claims more corroborating runs than the store has runs. *(fixed, see §4)*
 
