@@ -576,7 +576,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.strategist_every = max(1, strategist_every)
         self.concept_retag_every = max(1, concept_retag_every)
         self.deep_researcher = deep_researcher
-        self.deep_research_every = max(0, deep_research_every)
+        # STORED RAW, deliberately — this was `max(0, deep_research_every)` until 2026-08-07, and
+        # under the new spelling that clamp is exactly backwards: `0` now means "start immediately"
+        # and OFF is NEGATIVE, so it would have converted every spelled-off knob into a paid think at
+        # every node. The whole settling rule is stated once, in
+        # `engine/cadence.py::deep_research_window`, and applied at the two gates that read this
+        # attribute — so `-1` (off), a junk value (off) and `0` (immediate) all mean here exactly
+        # what the operator wrote, and the diagnostics that echo the knob do not lie about it.
+        self.deep_research_every = deep_research_every
         self.concurrent_research = _opt("concurrent_research")
         # Repeated concurrent research (don't idle a multi-day eval): the overlapped think re-runs on
         # an adaptive time cadence for the whole window instead of once. Off in the library default
@@ -3330,11 +3337,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         re-asking, and the run recorded ZERO `research_attempted`/`research_completed` rows. The
         serial `_maybe_deep_research` could not cover it either — it requires no pending nodes, and
         under speculation there always are some. So the one feature built to use the idle reasoning
-        agents during a multi-hour training never ran on the workload it exists for."""
+        agents during a multi-hour training never ran on the workload it exists for.
+
+        That latch was HALF the defect. The other half was the window itself: even asked at every
+        admission, `_due_research_trigger` answered NO until three nodes existed. The shipped default
+        is now `deep_research_every=0` = no window at all (`engine/cadence.py::deep_research_window`),
+        so the FIRST eval admission of the run — `n=1`, the first multi-hour training — is a due
+        trigger and this method starts the think beside it. Nothing about the safety argument above
+        changes: the same `BACKGROUND_APPENDABLE` allow-list, the same capped `deep_research` broker
+        lane (`core/llm_broker.py::BACKGROUND_LANE_PRODUCERS`, one concurrent request), the same
+        swallow-everything containment. It just happens hours earlier."""
         if not self.concurrent_research:
             return False
         # repeat is a continuation of a research episode, not an independent timer.
-        # Requiring a due cadence/strategist trigger here keeps ``deep_research_every=0`` truly
+        # Requiring a due cadence/strategist trigger here keeps a spelled-OFF cadence
+        # (``deep_research_every=-1``; ``0`` has meant "start immediately" since 2026-08-07) truly
         # manual-only and prevents a long eval from silently starting paid research on its own.
         rtrig = self._due_research_trigger(state)
         if rtrig is None:

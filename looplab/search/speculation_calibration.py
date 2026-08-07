@@ -403,6 +403,16 @@ _SPECULATION_CALIBRATION_PROFILE_OVERRIDES: dict[str, object] = {
     "memora_cache": None,
     "literature_search": False,
     "web_search": False,
+    # `0` here is NOT the "off" the neighbours spell — since 2026-08-07 it means "start immediately"
+    # (`engine/cadence.py::deep_research_window`), and off is `-1`. It stays 0 anyway, deliberately,
+    # for two reasons that have to hold TOGETHER. (1) It is inert: the profile pins `backend: "toy"`,
+    # and `cli/__init__.py` builds a `deep_researcher` only for the `llm` backend, so no calibration
+    # run has the stage at all — `_due_research_trigger` returns None on the concurrent path and the
+    # serial cadence now requires the same non-None researcher. (2) Re-spelling it `-1` would change
+    # `SPECULATION_CALIBRATION_PROFILE_DIGEST`, which is a RECEIPT gate: every issued calibration
+    # receipt is revoked and the six paired GPU runs behind it have to be re-earned. Paying that for
+    # a value no calibration run can read is the wrong trade. If the profile ever gains an LLM
+    # backend, this row must become `-1` in the same change.
     "deep_research_every": 0,
     "concurrent_research": False,
     "concurrent_research_repeat": False,

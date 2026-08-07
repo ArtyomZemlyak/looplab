@@ -2141,10 +2141,12 @@ class SpeculationMixin:
                     break
             if not session.research_spawned:
                 # Latch on the SPAWN, never on the ask. `_spawn_research` answers "was research due
-                # AND started?", and a session that asked at n=1 (not due, `deep_research_every`=3)
-                # must keep asking as it admits n=2, n=3, … — see that method's docstring for the
-                # measured cost of latching on the ask instead. Once it does start, the latch still
-                # holds for the rest of the window, so there is never a second overlap loop.
+                # AND started?", and a session that asked at n=1 and got NO (as it did under the
+                # pre-2026-08-07 `deep_research_every`=3, and still does whenever an operator spells
+                # a positive window) must keep asking as it admits n=2, n=3, … — see that method's
+                # docstring for the measured cost of latching on the ask instead. Once it does start,
+                # the latch still holds for the rest of the window, so there is never a second
+                # overlap loop.
                 session.research_spawned = bool(
                     self._spawn_research(session.bg_task_group, current))
             self._register_eval_resource_reservation(

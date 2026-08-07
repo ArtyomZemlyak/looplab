@@ -92,7 +92,11 @@ class EngineOptions:
     ablate_every: int = 0
     strategist_every: int = 3
     concept_retag_every: int = 30   # PART V (F1): concept classifier re-tag cadence, decoupled from strategist_every
-    deep_research_every: int = 0         # run the stage every N created nodes (0 = manual/strategist only)
+    # Run the stage every N created nodes. `-1` = OFF (manual/strategist only) — the bare-library
+    # value, so a direct `Engine(...)` gains no cadence-driven paid think. `0` is NOT off here: since
+    # 2026-08-07 it means "start immediately, then every node" (`engine/cadence.py`), which is the
+    # product default. That inversion is why this row is -1 and not 0.
+    deep_research_every: int = -1
     concurrent_research: bool = False    # overlap a due research "think" with the GPU-bound eval
     concurrent_research_repeat: bool = False   # one-shot overlap (== today); product re-runs on a cadence
     concurrent_research_interval_s: float = 1800.0   # base repeat cadence (s); floors the budget-derived pace

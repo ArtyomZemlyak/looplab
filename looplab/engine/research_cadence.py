@@ -21,6 +21,7 @@ from typing import Optional
 
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import RunState, idea_proposal_ref, normalize_researcher_footprint
+from looplab.engine.cadence import deep_research_window
 from looplab.events.replay import fold
 from looplab.events.types import (EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
                                   EV_REPORT_GENERATED, EV_RESEARCH_ATTEMPTED,
@@ -78,8 +79,23 @@ class ResearchCadenceMixin:
         # `default=0` (no prior research → baseline at the run start, node 0): the first deep-research
         # fires a full `every` nodes in (n >= every), so the opening window is the SAME width as every
         # later one. (`default=-1` would fire it one node early — a narrower first window.)
+        # …and under the shipped default there IS no opening window: `deep_research_window` settles
+        # `deep_research_every=0` to 1, which against `n - last >= every` is due at the first node.
+        #
+        # A CADENCE needs a stage to schedule. `_due_research_trigger` — the concurrent half of this
+        # same decision — has always answered None with no `deep_researcher` wired, and only this
+        # serial half did not: it fell through to `_run_deep_research`, which by contract records a
+        # STUB memo ("deep research unavailable: no model configured") so a MANUAL request's gate can
+        # advance. That is right for a request and wrong for a schedule, and at the old `every=3` it
+        # was merely quiet noise on an offline run (see `tests/data/golden_run_events.jsonl`, stubs at
+        # n=2/5/8). At the shipped `0` it would be two events per node on every toy/offline run,
+        # each claiming a completed think nobody could have run. The manual and Strategist branches
+        # keep the old treatment on purpose: they answer an outstanding REQUEST, whose requester is
+        # waiting on the recorded answer.
         _last_research_n = max(self._cadence_research_marks(state), default=0)
-        if self._cadence_due(n, _last_research_n, self.deep_research_every):
+        if (self.deep_researcher is not None
+                and self._cadence_due(n, _last_research_n,
+                                      deep_research_window(self.deep_research_every))):
             return self._run_deep_research(state, trigger="cadence", manual=False)
         hist = state.strategy_history
         if (hist and hist[-1].get("at_node") == n
@@ -522,7 +538,12 @@ class ResearchCadenceMixin:
         if n == 0 or self._already_researched_at(state, n):
             return None
         _last_research_n = max(self._cadence_research_marks(state), default=0)
-        if self._cadence_due(n, _last_research_n, self.deep_research_every):   # since-last, gap-safe
+        # since-last, gap-safe; `deep_research_window` is where `0` becomes "no window at all" (the
+        # shipped default) and a negative becomes off. THIS is the gate that decides whether the
+        # concurrent think overlaps the very first eval, which on a multi-hour node is the whole
+        # feature — see `deep_research_window`'s comment for what a node-counted window measured.
+        if self._cadence_due(n, _last_research_n,
+                             deep_research_window(self.deep_research_every)):
             return "cadence"
         hist = state.strategy_history
         if (hist and hist[-1].get("at_node") == n
