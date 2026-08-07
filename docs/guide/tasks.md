@@ -71,6 +71,40 @@ phase's `declare_stages` emit), submit (`cmd.stages`) and consume time (the engi
 hand-written `looplab_stages.json`; `score` is reserved in a Developer manifest, and an invalid manifest
 falls back to the single command instead of half-running).
 
+**Each stage may declare what its success MEANS — `expect`.** Exit 0 is not evidence a stage worked: a
+mining stage that produced hard negatives for 1.2% of the queries exits 0 exactly like one that produced
+100%, and the next stage consumes the 1.2% as if it were whole (this happened on a real run, and the
+node's whole result was meaningless). `expect` is checked by the engine after the stage exits 0 and
+before the next stage runs, and has two halves:
+
+```jsonc
+{ "name": "mine", "command": ["python", "mine_hard_negs.py", "%params%"], "timeout": 14400,
+  "expect": {
+    "files": ["hard_negs.pkl"],                    // workdir-relative artifacts this stage WRITES
+    "assert": "hard negatives for at least 90% of the training queries"   // what success MEANS
+  }}
+```
+
+* **`files`** — technical and deterministic, no LLM: each declared path must exist inside the workdir,
+  be non-empty (a directory must be non-empty too), and have been written by **this** run of the stage.
+  The freshness rung is the one that matters on a repaired node: the workdir deliberately persists
+  across repair attempts so a completed `train` can be reused, which is exactly what makes a leftover
+  artifact plausible — a stage that "succeeds" without rewriting its output hands the next stage a
+  previous attempt's file.
+* **`assert`** — one line stating the condition, in the declarer's own words, checked against what the
+  stage **prints** by the inter-stage checker. Declaring it opts that stage's check in (`check: true` is
+  not additionally required) and narrows the checker's quality-judgement ban to exactly this sentence:
+  the checker may fail the stage for not meeting its declared condition, and for nothing else. State the
+  **work**, never the result quality — `"recall beats 0.85"` is the search's judgement, not a stage's,
+  and the checker will not enforce it.
+
+A failed `expect` fails the stage the same way a non-zero exit does (same `failed_stage`, same repair
+path), so nothing new happens mid-loop. `expect` lives in the **manifest**, not in the script, which is
+what makes it usable in both repo-task modes: the scorer is usually authored by the Developer, but when
+an operator `protect`s it the agent cannot add an assert to it at all — and then the manifest is the only
+place that stage's success condition can be stated. (An in-script `assert` is still the recommended belt
+where the agent owns the file; the two are not redundant.)
+
 **What the agent may EDIT is a separate, independent decision** — `edit_surface` (globs the agent may
 edit; default = the whole repo) minus `protect` (exceptions). The engine does **not** auto-protect the
 file `cmd` runs, so: if `cmd` points at an operator-owned scorer the agent must not change (e.g. the
@@ -376,7 +410,7 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `data` / `dataset` | `name → path` map, **read-only symlink-mounted** at `./name` by default; a value may be a [per-source permission object](#per-source-data-permissions). `~`/`$VARS` expand |
 | `references` | Read-only inputs: `[{name, path, mount}]` — `mount: true` exposes the source at `./name` as a **read-only symlink** (and a read-only bind mount under the Docker tiers), **not** a copy (`engine/workspace.py:183-185`, `engine/eval_dispatch.py:151-153`); `false` is context-only. Edits under `./name` therefore reach your source — the read-only mount is what prevents that. |
 | `editables` | Multi-repo workspace: extra editable repos, each mounted at its own `name/` subdir |
-| `eval.stages` | Operator-declared ordered pipeline (`data_prep` → `train` → …). When set, these **are** the canonical stages and the Developer's own `looplab_stages.json` is ignored; the LAST stage's stdout carries the metric. Each stage is `{name, command:[argv], timeout?, check?}` |
+| `eval.stages` | Operator-declared ordered pipeline (`data_prep` → `train` → …). When set, these **are** the canonical stages and the Developer's own `looplab_stages.json` is ignored; the LAST stage's stdout carries the metric. Each stage is `{name, command:[argv], timeout?, check?, expect?}` — `expect` is the stage's success contract (`{files?, assert?}`, see above), and declaring it on an operator stage is how you hold a stage the agent may not edit to a condition |
 | `eval.cwd` | Working directory for the eval, relative to the node eval workdir (default `.`) |
 | `eval.setup_timeout` | Per-node `eval.setup` budget in seconds (default `600`) |
 | `eval.run_setup` | **Run-level** setup: runs ONCE at run start in the editable repo root, not per node — the autonomy default when deps don't change between experiments. A failure aborts the run |
