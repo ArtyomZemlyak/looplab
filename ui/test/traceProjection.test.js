@@ -191,7 +191,11 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   assert.match(inspector, /<TraceReach state=\{scroll\} onReach=\{onLoadMore\}[\s\S]*?notice=\{traceWindowNotice\(spanWindow\)\}/,
     'a surface with nowhere to go still owes the COUNT, never a bare adjective')
   // The operator's own report: the CONVERSATION view is the default, and it had no control at all.
-  assert.match(inspector, /const convWindow = conversationWindow\(conv\.projection, \{ canPage: !!onLoadMore \}\)[\s\S]*?const scroll = traceScrollState\(\{[\s\S]*?view: convWindow,[\s\S]*?pending: spanLimit > read\.window,/,
+  // The `pending` EXPRESSION is matched loosely on purpose. This pin is about the conversation
+  // deriving its OWN scroll state from its OWN window — not about the exact boolean. Pinned
+  // exactly, it went red the moment the same change put a `!reachFailed &&` guard in front of it,
+  // i.e. a stale pin failing on a strictly better implementation. That is the pin's fault.
+  assert.match(inspector, /const convWindow = conversationWindow\(conv\.projection, \{ canPage: !!onLoadMore \}\)[\s\S]*?const scroll = traceScrollState\(\{[\s\S]*?view: convWindow,[\s\S]*?pending: [^,\n]*spanLimit > read\.window,/,
     'the conversation view must derive its own scroll state, not print a dead partial notice')
   assert.doesNotMatch(inspector, /load more spans|load more of this conversation|at its maximum/,
     'the removed pager text must not come back — scrolling is the only control now')
