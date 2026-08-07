@@ -14,7 +14,7 @@
 // ASK, one click at a time, and was then told a number and refused. So the window still climbs — it
 // just climbs because they scrolled toward the older end, and the only thing they are ever told is
 // what genuinely cannot be reached from here.
-import { NODE_TRACE_SPAN_WINDOW_MAX } from './traceProjection.js'
+import { NODE_TRACE_SPAN_WINDOW, NODE_TRACE_SPAN_WINDOW_MAX } from './traceProjection.js'
 
 // What this surface owes the operator right now. One of exactly four, because each demands a
 // different thing of the component: nothing, a sentinel, a live region, or a final receipt.
@@ -58,6 +58,33 @@ export const traceWidenProgressed = (previous, next) => {
   if (!positive(previous.window) || !positive(next.window)) return true
   if (next.window <= previous.window) return true   // not a widen at all (a poll tick, a re-mount)
   return count(next.visible) > count(previous.visible)
+}
+
+// Carry the stall finding across reads. A WIDEN decides it (did the bigger window buy anything?); a
+// same-window read — the 4 s live poll, a re-mount — carries the previous answer rather than
+// clearing it, because a poll tick is not evidence that the server would now answer a wider request
+// differently. Stated here rather than inline in the component so the "who may clear a stall" rule
+// has a truth table instead of living inside a setState updater nothing can call.
+export const traceWidenStalled = (previous, next) => {
+  const widened = positive(previous?.window) && positive(next?.window)
+    && next.window > previous.window
+  if (!widened) return previous?.stalled === true
+  return !traceWidenProgressed(previous, next)
+}
+
+// The client deadline for ONE windowed read. It has to scale with the window, because the server's
+// cost does: measured 2026-08-07 on runs/rubert-dr-0804 node 1, the conversation route answers in
+// 2.2 s at the 512 default, 4.3 s at 1024, 8.7 s at 2048 and 17.3 s at the 4096 ceiling — almost
+// exactly linear, because the dominant term is one random read per span. The Inspector's flat 8 s
+// deadline therefore aborted EVERY read above ~2048, and (before `settleTraceRead` below) an aborted
+// widen replaced the conversation the operator was reading with an "unavailable" receipt: asking for
+// more cost them what they already had. 4x headroom over the measured curve, hard-capped so a
+// pathological node cannot leave a request outstanding indefinitely.
+export const TRACE_READ_DEADLINE_MS = 8000
+export const TRACE_READ_DEADLINE_MAX_MS = 64000
+export const traceReadDeadlineMs = window => {
+  const factor = positive(window) ? Math.max(1, window / NODE_TRACE_SPAN_WINDOW) : 1
+  return Math.min(Math.round(TRACE_READ_DEADLINE_MS * factor), TRACE_READ_DEADLINE_MAX_MS)
 }
 
 // The ONE state rule both trace surfaces read. `view` is a `traceProjection.js` window record

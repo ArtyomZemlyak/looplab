@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   deadlineGet, fetchEventStream, observeRunGeneration, runApiPath,
 } from './api.js'
@@ -20,6 +20,7 @@ import {
 import {
   NODE_TRACE_SPAN_WINDOW, NODE_TRACE_SPAN_WINDOW_MAX, nextNodeSpanWindow,
 } from './traceProjection.js'
+import { armTraceScroll, shouldWidenOnReach } from './traceScrollModel.js'
 
 // Keep responsive behavior in React aligned with the CSS breakpoints.  The workspace uses this to
 // switch persistent desktop panes into temporary drawers on smaller screens; listening to the media
@@ -118,6 +119,72 @@ export function useNodeSpanWindow() {
     limit,
     canPage,
     loadMore: canPage ? () => setLimit(nextNodeSpanWindow) : undefined,
+  }
+}
+
+// The CHOREOGRAPHY half of ./traceScrollModel.js — everything that needs a DOM and nothing that
+// needs a decision. Attaches an IntersectionObserver to the sentinel a trace surface renders at the
+// OLD end of its thread (every cap in these projections keeps the newest tail, so what is missing is
+// always the oldest), and calls `onReach` when the operator scrolls it into view.
+//
+// Three details that are load-bearing and not obvious:
+//  * The observer is attached through a CALLBACK REF, not an effect. The sentinel mounts and
+//    unmounts as the surface's state changes (and the conversation re-renders on a 4 s poll while a
+//    node is live), and an effect with a stable dep list would attach to a node that was not there
+//    yet and never see the one that arrives.
+//  * `latest` holds the current state/callback so the observer never has to be re-created. Rebuilding
+//    it per render would fire IntersectionObserver's initial callback on every poll tick — a widen
+//    per tick instead of per gesture.
+//  * The re-arm listener is on `window` in the CAPTURE phase because `scroll` does not bubble. That
+//    is what lets this hook stay ignorant of which element actually scrolls (`.insp-body` in the
+//    Inspector, the dock body in the chat feed) instead of hunting for a scroll parent.
+// Deliberately NO scroll anchoring after a widen: the operator reached the sentinel by scrolling to
+// the top, so leaving `scrollTop` where it is puts the newly revealed OLDER steps exactly where they
+// were looking. Restoring their old offset instead would push what they just asked for off-screen,
+// and would fight `StageLog`'s live auto-tail for the same scroll container.
+export function useTraceScroll({ state, onReach }) {
+  const observer = useRef(null)
+  const armed = useRef(true)
+  const latest = useRef(null)
+  latest.current = { state, onReach }
+  const reach = () => {
+    const now = latest.current || {}
+    if (!shouldWidenOnReach({ state: now.state, armed: armed.current })) return
+    armed.current = armTraceScroll(armed.current, 'reach')
+    now.onReach?.()
+  }
+  const sentinelRef = useCallback(node => {
+    observer.current?.disconnect()
+    observer.current = null
+    if (!node || typeof IntersectionObserver !== 'function') return
+    observer.current = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) reach()
+    // Start the read a little BEFORE the sentinel is on screen, so the earlier steps are usually
+    // already there by the time the operator scrolls to where they belong.
+    }, { rootMargin: '200px 0px 0px 0px' })
+    observer.current.observe(node)
+  }, [])
+  useEffect(() => {
+    const onScroll = () => { armed.current = armTraceScroll(armed.current, 'scroll') }
+    window.addEventListener('scroll', onScroll, true)
+    return () => {
+      window.removeEventListener('scroll', onScroll, true)
+      observer.current?.disconnect()
+      observer.current = null
+    }
+  }, [])
+  return {
+    sentinelRef,
+    // The keyboard/AT path. Focus REFILLS the budget before spending it, so tabbing to the
+    // affordance always works — a screen-reader user driving a virtual cursor never fires the
+    // scroll listener that refills it for everyone else.
+    onReachFocus: () => {
+      armed.current = armTraceScroll(armed.current, 'focus')
+      reach()
+    },
+    // A widen that failed spends the budget rather than leaving the observer to retry on every
+    // tick against a route that costs seconds per call.
+    notifyReachFailed: () => { armed.current = armTraceScroll(armed.current, 'fail') },
   }
 }
 

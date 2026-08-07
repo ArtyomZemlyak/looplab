@@ -111,24 +111,11 @@ export const conversationWindow = (projection, { canPage = false } = {}) => {
   return { kind: canPage ? 'pageable' : 'capped', ...base }
 }
 
-// What the PAGER names. The two counters move independently — `events/traceview.py::build_conversation`
-// derives `omitted_stages` from the stage cap and `omitted_turns` from the turn cap — so a heavily
-// repaired node whose whole thread lives in a handful of stages yields `{omittedStages: 0,
-// omittedTurns: 144}`: correctly pageable, and the old label interpolated the stage counter anyway
-// and rendered "(0 earlier stages not shown)". Name whichever counter is actually STATED and
-// non-zero, stages first (they are what the collapsed bands show); name nothing when neither is,
-// rather than inventing a count for a control the span receipt alone justified.
-export const conversationPagerLabel = view => {
-  const stages = view?.omittedStages
-  const turns = view?.omittedTurns
-  if (Number.isSafeInteger(stages) && stages > 0) {
-    return `${stages} earlier ${stages === 1 ? 'stage' : 'stages'} not shown`
-  }
-  if (Number.isSafeInteger(turns) && turns > 0) {
-    return `${turns} earlier ${turns === 1 ? 'step' : 'steps'} not shown`
-  }
-  return 'more of this conversation is not shown'
-}
+// (`conversationPagerLabel` lived here until 2026-08-07. It named what a "load more" button offered,
+// and the button is gone — earlier steps now arrive by scrolling, so nothing has an occasion to name
+// a count the operator is about to be given anyway. The rule it existed to hold is not lost: it is
+// the `stated()` treatment in `conversationWindow` above, which is what stopped the label rendering
+// "(0 earlier stages not shown)" from an absent counter.)
 
 // Steps, because "steps" is what the collapsed bands already count for the operator. Never spans:
 // they asked why 50 steps were hidden, and a number about observations does not answer that.
