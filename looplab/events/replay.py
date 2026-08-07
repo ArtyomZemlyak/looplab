@@ -377,6 +377,11 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     _spec_depth = d.get("speculation_depth", 0)
     st.speculation_depth_pinned = (
         _spec_depth if type(_spec_depth) is int and 0 <= _spec_depth <= 64 else 0)
+    # Whether that pin RESOLVED the AUTO sentinel or was SPELLED. `is True` rather than `bool(...)`:
+    # only the literal the writer emits may enable the one-way ratchet, so a truthy string or a 1 in
+    # a hand-edited log cannot turn someone's spelled treatment into a self-narrowing one. Absent
+    # folds to False — see the field's comment in `core/models.py`.
+    st.speculation_depth_auto = d.get("speculation_depth_auto") is True
     _settle_folded_speculation_depth(st)
     # Four sha256-prefixed receipt digests admitted by ONE predicate (doc 25 EV-04); they were four
     # copies of the same six-line conjunction. The assignments stay written out rather than a

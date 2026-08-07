@@ -71,6 +71,19 @@ The one property that idempotency buys and must not be lost: **an operator's und
 append-only ledger, so the next pass matches its `action_id`, replays the old receipt and appends
 nothing. A reversed decision stays reversed without any "do not re-propose" list.
 
+That covered only the decisions THIS STAGE had written, and only in one direction — a hole the
+2026-08-07 review drove. An operator's OWN alias carries her `action_id`, not the ratifier's, so
+clearing it left the idempotency lookup nothing to match and the next pass re-applied it, re-badged
+as `concept-ratifier/v1`. And because a clear row records only `from`, a source-keyed guard would
+still leave the pass free to apply the REVERSE merge — which is not a smaller failure but the
+opposite one: the concept she chose to KEEP canonical becomes the one that disappears, and this
+corpus really carries a mutually-pointing pair. So the withdrawal projection
+(`concept_registry.py::withdrawn_alias_pairs`) is keyed by an UNORDERED PAIR and recovers the target
+from the SET row the clear reversed, and it is read inside the same governance transaction as the
+aliases so a clear cannot land between the two reads. Withdrawing an edge withdraws the JUDGEMENT
+that these two names are one thing, in either direction; a human re-proposing it through
+`concept-alias` still wins, because a person re-deciding is not what this prevents.
+
 WHEN IT RUNS, AND WHY NOT AS A RUN'S PARALLEL TASK.
 
 It is a CROSS-RUN stage with a run-triggered entry point, not a run-scoped background task:
@@ -296,6 +309,16 @@ def _still_applicable(merge: ProposedMerge, snapshot: dict) -> Optional[str]:
         # differently. Both mean "do not write"; only the first is worth calling applied.
         resolved = resolve_slug(merge.source, aliases)
         return "already_applied" if resolved == merge.target else "source_already_governed"
+    # A CLEARED edge is not an ungoverned one. The alias map cannot tell them apart — a cleared
+    # source is simply absent from it, exactly like one nobody ever ruled on — and reading absence as
+    # permission made this pass RE-APPLY a merge the operator had just withdrawn, re-attributed to
+    # the ratifier because the `action_id` guard cannot match a row her clear never carried. On this
+    # corpus's real mutually-pointing pair it is worse than an annoyance: clearing `A -> B` frees the
+    # next pass to merge `B -> A`, so the concept she chose to KEEP canonical is the one that
+    # vanishes. Withdrawal is an act of governance and an automatic pass may not overrule it; a human
+    # re-proposing the same merge still can, through `concept-alias`, which is not what this stops.
+    if frozenset({merge.source, merge.target}) in (snapshot.get("withdrawn") or ()):
+        return "withdrawn_by_operator"
     if resolve_slug(merge.target, aliases) != merge.target:
         return "target_not_canonical"
     return None

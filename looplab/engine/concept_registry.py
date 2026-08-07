@@ -377,6 +377,57 @@ def load_concept_aliases(memory_dir) -> dict:
     return out
 
 
+def withdrawn_alias_pairs(memory_dir) -> set:
+    """Unordered concept PAIRS whose policy edge was deliberately taken back — `{frozenset({a, b})}`.
+
+    The live alias map cannot express a withdrawal: a cleared source is simply absent from it,
+    exactly like a source nobody ever governed. Those two are identical to a READER resolving a slug
+    and opposite to a WRITER deciding whether to act, and reading absence as permission is a real
+    defect — `engine/concept_tidy.py` decided "is this merge already in force?" from that map, so an
+    operator who ran `concept-alias-clear` had her withdrawal RE-APPLIED by the next ratification
+    pass, re-attributed to the ratifier, because the ledger's `action_id` guard cannot match a row
+    her clear never carried.
+
+    PAIRS, NOT SOURCES, and that distinction is the whole point. A clear row records only `from`, so
+    a source-keyed projection stops `A -> B` and leaves the next pass free to apply `B -> A` — which
+    is not a lesser failure but a worse one: the concept the operator chose to KEEP canonical is then
+    the one that disappears. Measured on this corpus, which really carries a mutually-pointing pair.
+    So the target is recovered from the SET row the clear reversed, and the pair is unordered:
+    withdrawing an edge withdraws the JUDGEMENT that these two names are one thing, in either
+    direction.
+
+    A clear is an ACT OF GOVERNANCE, not the absence of one, and an automatic pass may not overrule
+    it. A human still can — `concept-alias` writes over a withdrawal without complaint, because a
+    person re-deciding is not what this prevents.
+    """
+    if not memory_dir:
+        return set()
+    path = Path(memory_dir) / "concept_aliases.jsonl"
+    live: dict = {}          # the alias edge in force at this point of the replay
+    withdrawn: set = set()
+    for r in _read_alias_rows(path):
+        src = normalize_key(r.get("from"))
+        if not src:
+            continue
+        action = str(r.get("action") or "legacy")
+        if action == "clear":
+            # The target comes from whatever edge this clear reversed. A clear with no live edge
+            # withdraws nothing — there was no judgement to take back.
+            target = live.pop(src, "")
+            if target and target != _TOMBSTONE:
+                withdrawn.add(frozenset({src, target}))
+            continue
+        dst = normalize_key(r.get("to"))
+        if action == "purge" or (action == "legacy" and not dst):
+            live[src] = _TOMBSTONE
+        elif dst and len(dst) <= _MAX_CONCEPT:
+            live[src] = dst
+            # LAST row wins, exactly as the alias replay resolves it: re-governing a pair that was
+            # once withdrawn is a NEW decision and clears the withdrawal.
+            withdrawn.discard(frozenset({src, dst}))
+    return withdrawn
+
+
 def resolve_slug(slug: str, aliases: dict) -> Optional[str]:
     """Follow the alias chain to the canonical slug (cycle-safe even on legacy/torn ledgers). Returns None
     for a PURGED concept so callers drop it. A slug with no alias resolves to itself (normalized)."""
@@ -894,7 +945,7 @@ def concept_governance_snapshot(memory_dir) -> dict:
     fails the global CAS instead of silently changing what the approval meant.
     """
     empty = {
-        "aliases": {}, "splits": {}, "alias_revision": 0,
+        "aliases": {}, "splits": {}, "withdrawn": set(), "alias_revision": 0,
         "split_revision": 0, "governance_revision": 0,
     }
     if not memory_dir:
@@ -908,6 +959,10 @@ def concept_governance_snapshot(memory_dir) -> dict:
         return {
             "aliases": load_concept_aliases(memory_dir),
             "splits": load_concept_splits(memory_dir),
+            # Read INSIDE the same governance transaction as the aliases. Fetching it separately
+            # would let an operator's clear land between the two reads, which is precisely the race
+            # this projection exists to lose safely.
+            "withdrawn": withdrawn_alias_pairs(memory_dir),
             "alias_revision": concept_governance_revision(memory_dir, "aliases"),
             "split_revision": concept_governance_revision(memory_dir, "splits"),
             "governance_revision": concept_governance_global_revision(memory_dir),

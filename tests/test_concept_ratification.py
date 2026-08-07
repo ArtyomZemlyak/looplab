@@ -313,9 +313,14 @@ def test_a_cleared_ratification_is_never_re_applied(portfolio):
     assert "model/gradient_boosting" not in load_concept_aliases(portfolio)
     assert len(_alias_rows(portfolio)) == rows_after_clear      # the replay appended nothing
     assert [e["from"] for e in again["applied"]] == []
-    # and the pass says so honestly rather than counting the replayed receipt as a fresh merge
+    # and the pass says so honestly rather than counting the replayed receipt as a fresh merge.
+    # `withdrawn_by_operator`, not `cleared_not_reapplied`: the cheap pre-check now recognises the
+    # withdrawn PAIR from the ledger and declines BEFORE attempting the write, so this case no longer
+    # reaches the post-append re-resolve that used to name it. The property here is unchanged — a
+    # cleared decision is not re-applied and the receipt says so — and deciding it one gate earlier is
+    # what also closes the reverse-direction hole (applying `B -> A` after `A -> B` was cleared).
     assert [e["outcome"] for e in again["skipped"] if e["from"] == "model/gradient_boosting"] == [
-        "cleared_not_reapplied"]
+        "withdrawn_by_operator"]
     # and the reversal really restored the pre-merge view for that concept
     restored = canonicalize_concepts(list(_EXPECTED) + list(_EXPECTED.values()),
                                      aliases=load_concept_aliases(portfolio))
@@ -652,3 +657,45 @@ def test_the_receipt_records_what_landed_and_what_is_left_for_the_operator(tmp_p
     assert applied[0]["action_id"] == _alias_rows(memory_dir)[0]["action_id"]
     assert applied[0]["proposal_key"].startswith("concept:v2:")
     assert receipts[0]["pending"] == {"splits": 0, "purges": 1}
+
+
+def test_a_withdrawal_survives_the_next_pass_in_BOTH_directions(portfolio):
+    """The undo the module documents as total was not: the next pass re-applied what was cleared.
+
+    `_still_applicable` decided "is this in force?" from the live alias map, where a CLEARED source
+    is simply absent — indistinguishable from one nobody ever ruled on. So an operator's
+    `concept-alias-clear` was re-applied on the next pass and re-attributed to the ratifier, because
+    the ledger's `action_id` idempotency guard cannot match a row her clear never carried.
+
+    The pair-keyed check matters more than the source-keyed one, and that is the half worth driving:
+    with a source key, clearing `A -> B` merely frees the next pass to apply `B -> A`, which is not a
+    smaller failure but the opposite one — the concept she chose to KEEP canonical becomes the one
+    that disappears. This corpus really carries such a mutually-pointing pair.
+    """
+    from looplab.engine.concept_registry import (
+        clear_concept_alias, load_concept_aliases, record_concept_alias, withdrawn_alias_pairs,
+    )
+    from looplab.engine.concept_tidy import ratify_concept_merges
+
+    a, b = "concept/alpha", "concept/beta"
+    record_concept_alias(portfolio, from_concept=a, to_concept=b, by="operator", action_id="op-set")
+    assert load_concept_aliases(portfolio).get(a) == b
+    clear_concept_alias(portfolio, from_concept=a, by="operator", action_id="op-clear")
+    assert a not in load_concept_aliases(portfolio), "the clear did not take effect"
+
+    # The projection is by unordered PAIR, recovered from the SET row the clear reversed — a clear
+    # row records only `from`, so a source-keyed set could not have expressed the other direction.
+    assert frozenset({a, b}) in withdrawn_alias_pairs(portfolio)
+
+    ratify_concept_merges(portfolio)
+    aliases = load_concept_aliases(portfolio)
+    assert a not in aliases, "the withdrawn merge was re-applied — the undo is not durable"
+    assert b not in aliases, (
+        "the REVERSE merge was applied, so the concept the operator kept canonical is the one that "
+        "vanished — a source-keyed withdrawal leaves exactly this hole")
+
+    # A human re-deciding is NOT what this prevents: an explicit re-record must still win, and it
+    # must clear the withdrawal so the pair is governed again rather than permanently frozen.
+    record_concept_alias(portfolio, from_concept=a, to_concept=b, by="operator", action_id="op-redo")
+    assert load_concept_aliases(portfolio).get(a) == b
+    assert frozenset({a, b}) not in withdrawn_alias_pairs(portfolio)

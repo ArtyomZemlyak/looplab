@@ -922,6 +922,15 @@ class RunState(BaseModel):
     speculation_depth: int = Field(default=0, ge=0, le=64, exclude=True)
     speculation_depth_pinned: int = Field(default=0, ge=0, le=64, exclude=True)
     speculation_depth_settled: Optional[int] = Field(default=None, ge=0, le=64, exclude=True)
+    # Was the pinned depth RESOLVED from the AUTO sentinel, or SPELLED by the operator? Only an AUTO
+    # run may ratchet itself down, and until 2026-08-07 that question was answered by a PROCESS
+    # attribute (`Engine._speculation_depth_auto`) while the log recorded only the resolved integer.
+    # So `looplab run <existing dir>` under the shipped `-1` AUTO default, on a run whose launch
+    # SPELLED `speculation_depth=1`, took the AUTO branch and landed a durable, irreversible settle
+    # to 0 on someone else's spelled treatment. An absent field folds to False — an old log cannot
+    # say, and an irreversible action that costs the run its prefetch must not be inferred from the
+    # resuming process's default.
+    speculation_depth_auto: bool = Field(default=False, exclude=True)
     # Exact local quality-gate receipt used to admit a positive depth.  Replay keeps the evidence
     # identity separate from the mutable config path; an old positive-depth row without this marker
     # remains readable but is not resumable through the guarded runtime path.

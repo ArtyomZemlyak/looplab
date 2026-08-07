@@ -30,7 +30,7 @@ from tests.factories import make_engine
 
 
 def _log(run_dir, *, depth: int, evals: list[float], builds: list[float],
-         pinned: dict | None = None) -> None:
+         pinned: dict | None = None, auto: bool = True) -> None:
     """Write a run log whose build spans and eval seconds are exactly what this test measures.
 
     The event `ts` is what `_measured_build_seconds` reads, and `EventStore.append` stamps it from
@@ -46,7 +46,12 @@ def _log(run_dir, *, depth: int, evals: list[float], builds: list[float],
     rows = [{"v": 1, "seq": 0, "ts": 0.0, "type": "run_started",
              "data": {"run_id": run_dir.name, "task_id": "toy", "goal": "g", "direction": "min",
                       "card_driven_selection": True, **(pinned or {}),
-                      "speculation_depth": depth}}]
+                      "speculation_depth": depth,
+                      # WHETHER the pin resolved the AUTO sentinel. Durable since 2026-08-07: the
+                      # ratchet reads the LOG, not the resuming process, because the shipped `-1`
+                      # default otherwise let any later `looplab run <dir>` settle a SPELLED depth.
+                      # A test that wants the ratchet must say so in the log it writes.
+                      "speculation_depth_auto": bool(auto)}}]
     seq = 1
     for index, span in enumerate(builds):
         base = 1000.0 + index * 1000.0
@@ -70,7 +75,10 @@ def _log(run_dir, *, depth: int, evals: list[float], builds: list[float],
 def _engine(tmp_path, name, *, auto: bool, depth: int = 1,
             evals: list[float] | None = None, builds: list[float] | None = None):
     run_dir = tmp_path / name
-    _log(run_dir, depth=depth, evals=evals or [], builds=builds or [])
+    # `auto` reaches the LOG as well as the engine. Since 2026-08-07 the ratchet asks the folded
+    # `run_started`, not the process, so a test that only set the attribute would be describing a
+    # launch the log does not record — and would pass for the wrong reason in both directions.
+    _log(run_dir, depth=depth, evals=evals or [], builds=builds or [], auto=auto)
     engine = make_engine(run_dir, card_driven_selection=True, max_nodes=8)
     engine.speculation_depth = depth
     engine._speculation_depth_auto = auto
@@ -412,3 +420,58 @@ def test_the_ratchet_never_fires_while_a_prefetch_is_outstanding(tmp_path):
     assert engine._settle_speculation_depth(closed) is False
     engine._spec_build_inflight.discard(("card-0", 0))
     assert engine._settle_speculation_depth(closed) is True
+
+
+def test_a_resuming_process_cannot_ratchet_a_depth_it_did_not_launch(tmp_path):
+    """The ratchet reads the LOG's launch flag, never the resuming process's own AUTO resolution.
+
+    `_speculation_depth_auto` describes how THIS process resolved ITS config. The shipped default is
+    `-1` (AUTO), so every later `looplab run <existing dir>` sets it True — and on a run whose launch
+    SPELLED `speculation_depth=1` that was enough to land a durable `speculation_depth_settled`,
+    which is a one-way ratchet no flag lifts. The pin alone cannot tell the two launches apart: both
+    record the same resolved integer. So `run_started` now carries the flag and the fold keeps it.
+
+    Driven from the two logs, with the process attribute set the AUTO way in BOTH — which is exactly
+    the resuming process's state, and the reason the old gate could not see the difference.
+    """
+    for launched_auto, expect_settle in ((True, True), (False, False)):
+        engine = _engine(tmp_path, f"launch-{launched_auto}", auto=launched_auto,
+                         evals=[0.1, 0.1, 0.1], builds=[120.0, 130.0, 125.0])
+        # The RESUMING process always thinks it is AUTO — that is the whole defect.
+        engine._speculation_depth_auto = True
+        settled = engine._settle_speculation_depth(_measured(engine))
+        assert settled is expect_settle, (
+            f"a run launched with auto={launched_auto} was ratcheted={settled}; the gate is reading "
+            "the process again instead of the log")
+        rows = [e for e in engine.store.read_all() if e.type == EV_SPECULATION_DEPTH_SETTLED]
+        assert bool(rows) is expect_settle
+        if not expect_settle:
+            assert engine.speculation_depth == 1, "a spelled treatment was narrowed anyway"
+
+
+def test_the_launch_flag_only_binds_on_the_literal_the_writer_emits(tmp_path):
+    """`is True`, not `bool(...)`: a hand-edited or legacy log must not acquire the ratchet.
+
+    The field enables an IRREVERSIBLE narrowing, so a truthy string, a `1`, or an absent key must all
+    read as "this log does not say it was AUTO" — the safe direction, because the cost of guessing
+    wrong is a run silently losing its prefetch with no way back.
+    """
+    from looplab.events.replay import fold
+    from looplab.events.eventstore import EventStore
+
+    for value, expected in ((True, True), (False, False), (1, False), ("true", False),
+                            ("", False), (None, False), (_MISSING := object(), False)):
+        run_dir = tmp_path / f"flag-{str(value)[:12]}-{expected}"
+        _log(run_dir, depth=1, evals=[0.1], builds=[120.0])
+        rows = (run_dir / "events.jsonl").read_text().splitlines()
+        head = json.loads(rows[0])
+        if value is _MISSING:
+            head["data"].pop("speculation_depth_auto", None)
+        else:
+            head["data"]["speculation_depth_auto"] = value
+        (run_dir / "events.jsonl").write_text(
+            "\n".join([json.dumps(head)] + rows[1:]) + "\n")
+        state = fold(EventStore(str(run_dir / "events.jsonl")).read_all())
+        assert state.speculation_depth_auto is expected, (
+            f"{value!r} folded to {state.speculation_depth_auto!r}; only the literal True may enable "
+            "a one-way ratchet")

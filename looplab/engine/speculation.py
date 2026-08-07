@@ -292,7 +292,14 @@ class SpeculationMixin:
         Returns True when a durable settle landed (the caller must re-fold). See the block comment
         above for the rule, the measurement behind it and why it is a one-way ratchet.
         """
-        if not getattr(self, "_speculation_depth_auto", False):
+        # THE LOG'S ANSWER, NOT THE PROCESS'S. This used to read `self._speculation_depth_auto`,
+        # which describes how THIS process resolved its own config — not how the run was launched.
+        # Since the shipped default is `-1` (AUTO), any later `looplab run <existing dir>` set that
+        # attribute True and could ratchet a run whose launch had SPELLED a depth, landing a durable
+        # `speculation_depth_settled` that no flag lifts. The pin alone could not distinguish the two,
+        # which is why `run_started` now records the flag and the fold carries it.
+        # `state` is the folded log this call is deciding about, so it is the right place to ask.
+        if not bool(getattr(state, "speculation_depth_auto", False)):
             return False                          # a SPELLED depth is honoured as spelled
         current = int(getattr(self, "speculation_depth", 0) or 0)
         if current <= 0:

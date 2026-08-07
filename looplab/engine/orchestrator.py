@@ -2358,6 +2358,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # The SETTLED widths, not their AUTO sentinel: re-entry must never
                             # re-derive this run's execution treatment from a different box.
                             **self._run_start_settled_widths(),
+                            # …and WHETHER the pinned depth resolved that sentinel. The pin alone
+                            # cannot say, and only an AUTO run may ratchet itself down, so leaving
+                            # this in the process let a later `looplab run <dir>` under the shipped
+                            # `-1` default settle a SPELLED treatment to 0, irreversibly.
+                            "speculation_depth_auto": bool(
+                                getattr(self, "_speculation_depth_auto", False)),
                             "select_verifier_contract": VERIFIER_SELECTION_CONTRACT,
                         },
                     )
