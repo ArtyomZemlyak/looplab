@@ -162,13 +162,17 @@ class EvalDispatchMixin:
              byte-identical to the run's does nothing at all: no set, no subprocess, no event, no
              lock. That is the overwhelmingly common case (every node inherits the file unchanged),
              so the steady-state cost of this hook is one small read and a sha256. It is deliberately
-             NOT an independent guarantee: rule 2 below reaches the same answer for the same input,
-             which is why deleting this line is behaviour-preserving and no test catches it (checked
-             by mutation, 2026-08-07). It is here for the cost, and the cost is the point.
+             NOT an independent CORRECTNESS bound: rule 2 below reaches the same answer for the same
+             input, which is why deleting the comparison is behaviour-preserving and no test catches
+             it (checked by mutation, 2026-08-07). What it buys is that the common path never
+             contends for `_dep_lock` — a node that did not touch the file must not wait behind
+             another node's multi-minute pip, which is the same reason `crash_repair._prepare_env`
+             parses its candidates before taking that lock.
           2. **A per-run SET of digests already installed**, seeded with the run's own baseline. This
              is the rule; 1 is its shortcut. It additionally covers a node that REVERTS to an earlier
              file, so an agent oscillating between two dependency sets pays once for each rather than
-             once per node.
+             once per node. Checked and extended UNDER `_dep_lock` with 3 and the install: it is a
+             check-then-act over run-global state, and two eval workers reach it concurrently.
           3. **A hard per-run cap** (`_MAX_NODE_DEP_SYNCS`). 1 and 2 bound repetition, not variety:
              an agent that appends a distinct comment line each node produces a new digest every
              time. The cap is what makes that terminate, and the refusal is RECORDED so it reads as
@@ -195,26 +199,31 @@ class EvalDispatchMixin:
         node_decl = deps.find_declaration(self._node_deps_root(workdir))
         if not node_decl.found or node_decl.digest == base.digest:
             return                       # gate 1: unchanged — the common path, and it costs nothing
-        seen = getattr(self, "_deps_synced_digests", None)
-        if seen is None:
-            seen = self._deps_synced_digests = {base.digest} if base.digest else set()
-        if node_decl.digest in seen:
-            return                       # gate 2: this exact file was already installed this run
-        seen.add(node_decl.digest)
-        if len(seen) > _MAX_NODE_DEP_SYNCS:
-            self._record_declared_deps(node_decl, "node_resync_capped", [])
-            return                       # gate 3: variety bound
         argv = deps.declaration_argv(node_decl, python=getattr(self.sandbox, "python", None))
         from looplab.runtime.sandbox import _run_argv
         log = str(Path(self.run_dir) / "run_setup.log")   # same log as run-setup: one install story
         # Watch the UNION of what the run declares and what this node declares: a node that DROPS a
         # pin moves that distribution too, and watching only the node's list would miss it.
         watch = sorted(set(self._declared_watchlist()) | set(node_decl.pins))
-        before = self._env_versions(watch)
+        # Gates 2 and 3 are CHECK-THEN-ACT over run-global state and share `_dep_lock` with the
+        # install, so two eval workers whose nodes both changed the file cannot both pass the cap or
+        # both install. Gate 1 above is what keeps this lock off the common path — a node that did
+        # not touch the file must never wait behind a multi-minute pip, which is the same reason
+        # `crash_repair._prepare_env` parses its candidates before contending for this lock.
         with self._dep_lock:                              # gate 4: serialize with the crash installer
+            seen = self._deps_synced_digests
+            if not seen and base.digest:
+                seen.add(base.digest)     # the run's own baseline is the first of the allowance
+            if node_decl.digest in seen:
+                return                    # gate 2: this exact file was already installed this run
+            seen.add(node_decl.digest)
+            if len(seen) > _MAX_NODE_DEP_SYNCS:
+                self._record_declared_deps(node_decl, "node_resync_capped", [])
+                return                    # gate 3: variety bound
+            before = self._env_versions(watch)
             rc, out, err, timed = _run_argv(argv, node_decl.root, self._dep_install_timeout,
                                             log_path=log)
-        delta = self._env_delta_since(watch, before)
+            delta = self._env_delta_since(watch, before)
         if rc != 0 or timed:
             _LOG.warning("node dependency re-sync failed (exit=%s, timed_out=%s); the node evaluates "
                          "against the unchanged environment — see %s", rc, timed, log)

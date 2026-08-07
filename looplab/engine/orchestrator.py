@@ -650,6 +650,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # the crash-time pin lookup read THIS object, so a run cannot install one set of pins and
         # enforce another.
         self._deps_declaration = None
+        # Declaration digests this run has already installed (the run's own baseline seeds it on
+        # first use). Read and mutated under `_dep_lock` by `_sync_node_deps` — a check-then-act over
+        # run-global state that two eval workers can reach at once — so it is created HERE rather
+        # than lazily, which would itself be the race.
+        self._deps_synced_digests: set[str] = set()
         import threading as _threading
         self._dep_lock = _threading.Lock()
         # Agent governance (Settings.agent_control): per-setting allow-list of which roles may change it
