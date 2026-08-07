@@ -363,8 +363,14 @@ def test_legacy_snapshot_resume_does_not_switch_on_paid_work_the_run_never_did()
                   "unified_agent", "failure_reflection", "reflection_priors",
                   "agent_drives_actions", "concurrent_research", "deep_repair"):
         assert getattr(resumed, field) is False, f"{field} switched on for a legacy run"
-    for field in ("lessons_every", "lessons_refresh_every", "deep_research_every", "report_every"):
+    for field in ("lessons_every", "lessons_refresh_every", "report_every"):
         assert getattr(resumed, field) == 0, f"{field} cadence switched on for a legacy run"
+    # `deep_research_every` spells OFF as -1 since 2026-08-07, because its `0` became "start
+    # immediately" (`engine/cadence.py::deep_research_window`). The entry has to move WITH the
+    # spelling or this map, whose whole job is to keep an old run off today's paid defaults, would
+    # resume every pre-field run into a Deep-Research think at EVERY node.
+    assert resumed.deep_research_every == -1, "deep_research_every cadence switched on for a legacy run"
+    assert Settings().deep_research_every == 0, "the product default is immediate, not off"
     # ...while today's product defaults are the opposite, which is what made this a live gap.
     live = Settings()
     assert live.foresight is True and live.concept_pivot is True and live.lessons_every == 4

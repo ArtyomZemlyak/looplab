@@ -140,8 +140,10 @@ async def _cancel_blocked_paid_task(task, started, release, worker_finished):
 
 
 def test_repeat_mode_does_not_start_without_a_due_trigger():
-    # `deep_research_every=0` is the shipped manual-only contract. Turning repeat on must not turn
-    # that disabled auto cadence into a hidden paid timer for every long-running evaluation.
+    # `deep_research_every=-1` is the manual-only contract (it was spelled `0` until 2026-08-07,
+    # when `0` became "start immediately" — see `engine/cadence.py::deep_research_window`). Turning
+    # repeat on must not turn that disabled auto cadence into a hidden paid timer for every
+    # long-running evaluation.
     class _TaskGroupProbe:
         def __init__(self):
             self.started = []
@@ -154,7 +156,7 @@ def test_repeat_mode_does_not_start_without_a_due_trigger():
         concurrent_research=True,
         _concurrent_research_repeat=True,
         deep_researcher=object(),
-        deep_research_every=0,
+        deep_research_every=-1,
         _already_researched_at=lambda _state, _n: False,
         _cadence_research_marks=lambda _state: set(),
         _cadence_due=Engine._cadence_due,
@@ -519,3 +521,125 @@ def test_card_session_binds_the_research_latch_to_the_spawn_result():
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
                 and node.func.id == "CardSession":
             assert not [kw for kw in node.keywords if kw.arg == "research_spawned"]
+
+
+# ------------------------------------------------------ `0` = START IMMEDIATELY (owner, 2026-08-07)
+
+def test_deep_research_window_truth_table():
+    """The ONE knob whose `0` is not "off", stated as a function so it has a truth table.
+
+    `cadence_due` reads `every <= 0` as disabled and is shared by five other cadences, so the
+    exception cannot live inside it. This is the whole translation; everything else about the
+    Deep-Research gate is unchanged.
+    """
+    from looplab.engine.cadence import DEEP_RESEARCH_OFF, cadence_due, deep_research_window
+
+    assert deep_research_window(0) == 1        # zero-width window -> due at every new node-count
+    assert deep_research_window(1) == 1
+    assert deep_research_window(3) == 3        # a spelled window passes through untouched
+    assert deep_research_window(DEEP_RESEARCH_OFF) == 0        # -1 is the off switch
+    assert deep_research_window(-7) == 0                       # …and so is any other negative
+    # A junk or bool value must settle to OFF, never to "every node": this gate is read from a
+    # resumed snapshot and from partially-built Engines, and `True` is an `int` worth 1 in Python.
+    for junk in (True, False, None, "3", 2.0, [], object()):
+        assert deep_research_window(junk) == 0, junk
+
+    # …and the composition with the shared gate is what the two call sites actually evaluate.
+    assert cadence_due(1, 0, deep_research_window(0)) is True    # first node, shipped default
+    assert cadence_due(1, 0, deep_research_window(3)) is False   # first node, the OLD default
+    assert cadence_due(3, 0, deep_research_window(3)) is True
+    assert cadence_due(1, 0, deep_research_window(DEEP_RESEARCH_OFF)) is False
+    # `0` keeps firing after the first pass, but only at a node-count it has not researched yet.
+    assert cadence_due(2, 1, deep_research_window(0)) is True
+    assert cadence_due(1, 1, deep_research_window(0)) is False
+
+
+def test_concurrent_research_is_due_at_the_very_first_node_under_the_shipped_default():
+    """The measured defect, driven end to end through the real `_due_research_trigger`.
+
+    On `runs/rubert-dr-0804/0805/0807` — 1.5-4 h per node, `deep_research_every=3`,
+    `concurrent_research=true` — the first eval admission sits at node-count 1 and the trigger
+    answered None, so the overlapped think never started and all three runs recorded zero
+    `research_attempted`/`research_completed` rows. Under the shipped default it answers "cadence"
+    at that same admission, which is the entire feature.
+    """
+    def _host(every):
+        return types.SimpleNamespace(
+            deep_researcher=object(),
+            deep_research_every=every,
+            _already_researched_at=lambda _state, _n: False,
+            _cadence_research_marks=lambda _state: set(),
+            _cadence_due=Engine._cadence_due,
+        )
+
+    first_eval = types.SimpleNamespace(nodes={0: object()}, research=[], strategy_history=[])
+
+    shipped = _host(0)
+    assert Engine._due_research_trigger(shipped, first_eval) == "cadence"
+
+    old_default = _host(3)
+    assert Engine._due_research_trigger(old_default, first_eval) is None
+    three_nodes = types.SimpleNamespace(
+        nodes={i: object() for i in range(3)}, research=[], strategy_history=[])
+    assert Engine._due_research_trigger(old_default, three_nodes) == "cadence"
+
+    # OFF still means off — a manual `deep_research` control event and the Strategist's
+    # `request_research` remain the only triggers, exactly as `0` used to behave.
+    assert Engine._due_research_trigger(_host(-1), first_eval) is None
+    assert Engine._due_research_trigger(_host(-1), three_nodes) is None
+
+    # …and a run with no nodes yet has nothing to research: the concurrent seam only fires beside a
+    # RUNNING eval, so "immediately" means "with the first evaluation", not "before the first idea".
+    empty = types.SimpleNamespace(nodes={}, research=[], strategy_history=[])
+    assert Engine._due_research_trigger(shipped, empty) is None
+
+
+def test_serial_cadence_needs_a_wired_researcher_but_a_request_does_not():
+    """A cadence schedules a stage; with no stage there is nothing to schedule.
+
+    `_run_deep_research` records a STUB memo when no model is wired, on purpose, so a MANUAL
+    request's counter gate advances and the loop cannot spin. At the old `every=3` the serial
+    cadence inherited that and wrote two rows per three nodes on an offline run
+    (`tests/data/golden_run_events.jsonl` has them at n=2/5/8). At the shipped `0` that would be two
+    rows per NODE, each claiming a completed think nobody could have run — so the cadence branch now
+    requires the same non-None researcher `_due_research_trigger` has always required, and the
+    request branches deliberately do not.
+    """
+    ran = []
+
+    def _host(*, researcher):
+        return types.SimpleNamespace(
+            deep_researcher=researcher,
+            deep_research_every=0,
+            _already_researched_at=lambda _state, _n: False,
+            _cadence_research_marks=lambda _state: set(),
+            _cadence_due=Engine._cadence_due,
+            _outstanding_manual_research=lambda _state: 0,
+            _run_deep_research=lambda state, *, trigger, manual: (
+                ran.append(trigger) or state),
+        )
+
+    def _state(**over):
+        base = dict(nodes={0: object()}, research=[], strategy_history=[],
+                    research_requests=[], research_served=0, pending_nodes=lambda: [])
+        base.update(over)
+        return types.SimpleNamespace(**base)
+
+    ResearchCadenceMixin._maybe_deep_research(_host(researcher=None), _state())
+    assert ran == [], "an offline run must not record a cadence think it cannot perform"
+
+    ResearchCadenceMixin._maybe_deep_research(_host(researcher=object()), _state())
+    assert ran == ["cadence"]
+
+    # A manual request is answered even with no model wired — that is what advances its gate.
+    ran.clear()
+    ResearchCadenceMixin._maybe_deep_research(
+        _host(researcher=None), _state(research_requests=[{"id": "r1"}]))
+    assert ran == ["manual"]
+
+    # …and so is a Strategist `request_research`, for the same reason.
+    ran.clear()
+    ResearchCadenceMixin._maybe_deep_research(
+        _host(researcher=None),
+        _state(strategy_history=[{"at_node": 1, "strategy": {"request_research": True}}]))
+    assert ran == ["strategist"]

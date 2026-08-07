@@ -29,7 +29,19 @@ EXPECTED = {
     "concurrent_consolidate": (True, False),
     "debug_depth": (2, 1),
     "deep_repair": (True, False),
-    "deep_research_every": (3, 0),
+    # Deep Research (owner decision 2026-08-07): the product surface ships `0`, which for THIS knob
+    # alone means START IMMEDIATELY — the zero-width `cadence_due` window settled by
+    # `engine/cadence.py::deep_research_window`, i.e. due at the first node and every node after.
+    # The bare library ships `-1` = OFF, which is what `0` used to spell here, so a direct
+    # `Engine(...)` still gains no cadence-driven paid think. The divergence therefore INVERTED its
+    # numeric direction (3 > 0 became 0 > -1) while keeping the product-more-aggressive rule the
+    # table exists to enforce; ints, so `test_no_inverted_divergence` cannot check it mechanically.
+    # Why the product default moved at all: the cadence counts NODES while the feature is phrased
+    # around TIME, and on `runs/rubert-dr-0804/0805/0807` (1.5-4 h per node, `deep_research_every=3`
+    # and `concurrent_research=true` in every snapshot) it fired ZERO times — no `research_attempted`
+    # and no `research_completed` row in any of the three, because a first think was 5-12 hours away.
+    # Every run in the corpus where it DID fire has sub-second evals.
+    "deep_research_every": (0, -1),
     "failure_reflection": (True, False),
     "lessons_every": (4, 0),
     "lessons_refresh_every": (4, 0),
