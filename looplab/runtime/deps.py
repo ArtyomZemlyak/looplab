@@ -556,6 +556,64 @@ def declared_requirement(module: str, decl: Optional[Declaration]) -> Optional[s
     return None
 
 
+def installed_versions(dists, *, python: Optional[str] = None,
+                       timeout: float = 60.0) -> dict[str, str]:
+    """`{distribution -> version}` for every name in `dists` the eval interpreter has, in ONE
+    interpreter spawn. Absent distributions are simply missing from the result.
+
+    Plural because the run-setup receipt asks about the WHOLE declaration: the live testbed pins 21
+    distributions, and 21 `installed_version` calls is 21 process spawns for one row. Metadata only
+    (`importlib.metadata`), so asking never imports a heavyweight library.
+
+    Best-effort: any failure yields `{}`. A receipt is an observation of the environment, and an
+    observation that cannot be made must not be the thing that takes down a run."""
+    names = [str(d).strip() for d in (dists or []) if str(d or "").strip()]
+    if not names:
+        return {}
+    probe = ("import json, sys\n"
+             "from importlib.metadata import version\n"
+             "out = {}\n"
+             "for n in json.loads(sys.argv[1]):\n"
+             "    try:\n"
+             "        out[n] = version(n)\n"
+             "    except Exception:\n"
+             "        pass\n"
+             "sys.stdout.write(json.dumps(out))\n")
+    try:
+        import json as _json
+        proc = subprocess.run([python or sys.executable, "-c", probe, _json.dumps(names)],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=timeout, env={k: v for k, v in os.environ.items()
+                                                    if k.upper().startswith("PIP_")
+                                                    or not is_secret_env(k, v)})
+        got = _json.loads(proc.stdout or "{}")
+    except Exception:  # noqa: BLE001 - see the docstring; a receipt never fails a run
+        return {}
+    return {k: str(v) for k, v in got.items()} if isinstance(got, dict) else {}
+
+
+def version_delta(before: dict, after: dict) -> dict[str, dict]:
+    """`{distribution -> {"before", "after", "direction"}}` for every distribution whose version
+    CHANGED, where direction is `added` | `removed` | `changed`.
+
+    This is what makes honouring a pin an EXPLICIT, loggable act rather than an accidental one. The
+    live testbed pins `pytorch_lightning==1.5.1` into a container carrying 2.6.5, so the very first
+    real run of the declarative install DOWNGRADES a package — which is a policy question the
+    operator owns, and one they cannot even be asked if no artifact records that it happened.
+
+    Deliberately NOT a comparison of version ORDER: `packaging` is not a hard dependency here and
+    hand-rolling PEP 440 ordering to label something a "downgrade" would be a new way to be wrong
+    about versions. Reporting both values and letting the reader see `2.6.5 -> 1.5.1` is exact."""
+    out: dict[str, dict] = {}
+    for name in sorted(set(before or {}) | set(after or {})):
+        b, a = (before or {}).get(name), (after or {}).get(name)
+        if b == a:
+            continue
+        out[name] = {"before": b, "after": a,
+                     "direction": "added" if b is None else "removed" if a is None else "changed"}
+    return out
+
+
 def installed_version(dist: str, *, python: Optional[str] = None,
                       timeout: float = 30.0) -> Optional[str]:
     """Version of the DISTRIBUTION `dist` in the eval interpreter, or None if absent/unknowable.

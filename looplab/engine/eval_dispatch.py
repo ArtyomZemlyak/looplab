@@ -128,6 +128,24 @@ class EvalDispatchMixin:
         base = Path(str(workdir))
         return str(base if name in (".", "") else base / str(name).rstrip("/"))
 
+    def _declared_watchlist(self) -> list:
+        """The distributions whose versions a receipt reports on: exactly the ones the repo
+        declares. Not "everything installed" — that is thousands of rows per event and most of it is
+        transitive noise; not the `run_started.env` list either, which is a FIXED 17-package
+        calibration identity that happens to contain none of this repo's pins."""
+        decl = self._declared_deps()
+        return sorted(decl.pins) if decl.found else []
+
+    def _env_versions(self, watch) -> dict:
+        from looplab.runtime import deps
+        return deps.installed_versions(watch, python=getattr(self.sandbox, "python", None)) if watch else {}
+
+    def _env_delta_since(self, watch, before) -> dict:
+        """What moved, measured against `before`. Bounded by construction — one entry per DECLARED
+        distribution at most, and the declaration itself is capped at read time."""
+        from looplab.runtime import deps
+        return deps.version_delta(before, self._env_versions(watch))
+
     def _sync_node_deps(self, workdir) -> None:
         """Install this NODE's dependency declaration when the Developer changed it.
 
@@ -185,9 +203,14 @@ class EvalDispatchMixin:
         argv = deps.declaration_argv(node_decl, python=getattr(self.sandbox, "python", None))
         from looplab.runtime.sandbox import _run_argv
         log = str(Path(self.run_dir) / "run_setup.log")   # same log as run-setup: one install story
+        # Watch the UNION of what the run declares and what this node declares: a node that DROPS a
+        # pin moves that distribution too, and watching only the node's list would miss it.
+        watch = sorted(set(self._declared_watchlist()) | set(node_decl.pins))
+        before = self._env_versions(watch)
         with self._dep_lock:                              # gate 4: serialize with the crash installer
             rc, out, err, timed = _run_argv(argv, node_decl.root, self._dep_install_timeout,
                                             log_path=log)
+        delta = self._env_delta_since(watch, before)
         if rc != 0 or timed:
             _LOG.warning("node dependency re-sync failed (exit=%s, timed_out=%s); the node evaluates "
                          "against the unchanged environment — see %s", rc, timed, log)
@@ -195,7 +218,7 @@ class EvalDispatchMixin:
         # for, not what the repo declares, and adopting it would make the next node's diff read
         # against a sibling's speculative edit rather than against the source tree.
         self._record_declared_deps(node_decl, "node_resync" if (rc == 0 and not timed)
-                                   else "node_resync_failed", argv)
+                                   else "node_resync_failed", argv, delta=delta)
 
     def _declared_deps(self):
         """This run's `runtime.deps.Declaration`, read once and cached.
@@ -263,7 +286,7 @@ class EvalDispatchMixin:
         self._record_declared_deps(decl, action, cmd)
         return cmd
 
-    def _record_declared_deps(self, decl, action: str, cmd: list) -> None:
+    def _record_declared_deps(self, decl, action: str, cmd: list, *, delta=None) -> None:
         """Append the once-per-run `deps_declared` receipt: what the repo asked for, what we did.
 
         This is the row that would have made `runs/rubert-dr-0807` legible. Its log records that
@@ -302,6 +325,9 @@ class EvalDispatchMixin:
             # Declarations we saw and deliberately left alone (pyproject.toml, environment.yml …).
             "observed": list(decl.observed),
             "command": list(cmd),
+            # Only the node-resync path measures a delta here; the run-setup install reports its own
+            # on `run_setup_finished`, which is where its exit code lives — one install, one row.
+            "env_delta": dict(delta or {}),
         }
         try:
             prior = [e for e in self.store.read_all() if e.type == EV_DEPS_DECLARED]
@@ -344,6 +370,14 @@ class EvalDispatchMixin:
         self.store.append(EV_RUN_SETUP_STARTED,
                           {"command": cmd, "cwd": cwd, "after_interrupted_attempt": interrupted})
         log = str(Path(self.run_dir) / "run_setup.log")
+        # What the environment held for the DECLARED distributions before this command ran. The
+        # `-r` install honours the repo's pins, and on the live testbed honouring them DOWNGRADES a
+        # package (`pytorch_lightning==1.5.1` into a container carrying 2.6.5). That is a policy
+        # question the operator owns, and one they cannot even be asked if no artifact records that
+        # it happened — so the delta is measured here rather than inferred later. Measured around
+        # an OPERATOR's command too: their `pip install -r …` moves the same versions.
+        watch = self._declared_watchlist()
+        before = self._env_versions(watch)
         rc, out, err, timed = _run_argv(cmd, cwd, to, log_path=log)
         # Carry the command so the fold can key the exactly-once record on it (arch-review §5 P2).
         # Both output tails go through `self._redact`, like every sibling tail (evaluate.py's
@@ -352,9 +386,14 @@ class EvalDispatchMixin:
         # command's stderr (pip echoing an index URL with an inline token, a git error carrying URL
         # userinfo, a traceback quoting an env var) used to land verbatim and stay there; the
         # RuntimeError below re-leaked the same bytes into the failure message.
+        # `env_delta` is an ADDITIVE data field on a FOLDED event (invariant 5): old logs simply do
+        # not carry it and every reader defaults it, and the fold has never read this payload beyond
+        # `command`/`exit_code`. Empty dict = "nothing the repo declares moved", which is a real and
+        # useful answer (a re-run of an already-satisfied install), distinct from an absent field.
         self.store.append(EV_RUN_SETUP_FINISHED,
                           {"command": cmd, "exit_code": rc, "timed_out": timed,
-                           "stderr_tail": self._redact((err or "")[-2000:])})
+                           "stderr_tail": self._redact((err or "")[-2000:]),
+                           "env_delta": self._env_delta_since(watch, before)})
         if rc != 0 or timed:
             raise RuntimeError(f"run_setup failed (exit={rc}, timed_out={timed}); see {log}\n"
                                + self._redact((err or out or "")[-500:]))
