@@ -1569,9 +1569,12 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
   const scroll = traceScrollState({
     view: convWindow,
     window: spanLimit,
-    // A widen is in flight exactly while the requested window is ahead of the settled one. Derived
-    // rather than latched, so an aborted/failed read cannot leave a spinner running forever.
-    pending: spanLimit > read.window,
+    // A widen is in flight exactly while the requested window is ahead of the settled one AND the
+    // last read did not fail. Both halves are needed: a failed widen leaves the settled window
+    // BEHIND the requested one forever (`settleTraceRead` deliberately does not record a window it
+    // could not reach), so the window comparison alone latches a spinner that never clears — and a
+    // surface stuck in `loading` never re-arms, so the failure would also be unretryable.
+    pending: !reachFailed && spanLimit > read.window,
     stalled: read.stalled === true,
   })
   const reach = <TraceReach state={scroll} onReach={onLoadMore} failed={reachFailed}

@@ -270,7 +270,7 @@ test('at the ceiling the operator gets the COUNT, not another sentinel', async (
 test('the earlier steps stay reachable without a mouse, and a failed widen keeps what is on screen',
   async () => {
     const dom = installDom()
-    installObserver()
+    const observer = installObserver()
     const requests = []
     let failNext = false
     globalThis.fetch = async (url) => {
@@ -327,6 +327,27 @@ test('the earlier steps stay reachable without a mouse, and a failed widen keeps
       const failure = container.querySelector('.trace-reach-failed')
       assert.ok(failure != null, 'the failed widen must be reported, not swallowed')
       assert.match(failure.textContent, /Could not load earlier steps/)
+      // …and it must be RETRYABLE. `settleTraceRead` deliberately does not record a window it could
+      // not reach, so the settled window stays behind the requested one forever; a `pending` derived
+      // from that comparison alone latches "Loading earlier steps…" permanently, and a surface stuck
+      // in `loading` never re-arms — the operator is told to scroll again and scrolling does nothing.
+      assert.ok(container.querySelector('.trace-reach-zone') != null,
+        'the sentinel must survive a failed widen')
+      assert.doesNotMatch(container.textContent, /Loading earlier steps/,
+        'a failed widen must not leave a spinner running forever')
+      failNext = false
+      // Scroll + intersection, NOT another `.focus()`: the affordance already has focus from the
+      // call above, and re-focusing an already-focused element fires no event at all.
+      await act(async () => {
+        dom.window.dispatchEvent(new dom.window.Event('scroll'))
+        observer.reach()
+      })
+      await settle()
+      assert.equal(conversationCalls().length, 3, 'scrolling again must retry')
+      assert.equal(container.querySelectorAll('.trace-reach-failed').length, 0,
+        'a read that succeeds clears the failure it replaces')
+      assert.ok(container.querySelectorAll('.stage-dynamic').length > 64,
+        'the retry must actually widen what is on screen')
 
       await act(async () => { root.unmount() })
     } finally {
