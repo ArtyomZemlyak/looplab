@@ -412,6 +412,110 @@ def test_a_real_verdict_still_drives_the_install(tmp_path, monkeypatch):
     assert fold(evs).nodes[0].status.name == "evaluated"
 
 
+# --------------------------------- a missing SUBMODULE of an INSTALLED distribution is not a lib
+def test_submodule_only_modules_separates_a_reduction_from_a_reading():
+    """`missing_modules` REDUCES a dotted path to the unit pip installs; `submodule_only_modules`
+    reports which of its answers were reductions rather than readings, so the caller can probe only
+    those. Verbatim from `runs/rubert-dr-0807` node 0, whose `utils.py` imports a module Lightning 2.x
+    deleted."""
+    live = ("  File \"/w/nodes/node_0/utils.py\", line 6, in <module>\n"
+            "    from pytorch_lightning.utilities.cloud_io import get_filesystem\n"
+            "ModuleNotFoundError: No module named 'pytorch_lightning.utilities.cloud_io'\n")
+    assert deps.missing_modules(live) == ["pytorch_lightning"]      # the reduction, unchanged
+    assert deps.submodule_only_modules(live) == {"pytorch_lightning"}
+    # A BARE report is direct evidence of absence and outranks the reduction, in either order.
+    assert deps.submodule_only_modules(
+        "No module named 'torch.nn'\nNo module named 'torch'\n") == set()
+    assert deps.submodule_only_modules(
+        "No module named 'torch'\nNo module named 'torch.nn'\n") == set()
+    assert deps.submodule_only_modules("No module named 'catboost'") == set()
+    assert deps.submodule_only_modules("clean run, no import error") == set()
+
+
+class _DottedImportError:
+    """A solution whose crash names a SUBMODULE, the way an installed-but-wrong-version library
+    fails. `repair` returns working code, so a node that reaches the repair path recovers and a node
+    that loops on installs does not."""
+
+    def __init__(self, dotted: str):
+        self.dotted = dotted
+        self.repair_calls = 0
+
+    def implement(self, idea):
+        return ("import sys\n"
+                "sys.stderr.write('Traceback (most recent call last):\\n"
+                "  File \"/w/solution.py\", line 6, in <module>\\n"
+                f"    from {self.dotted} import get_filesystem\\n"
+                f"ModuleNotFoundError: No module named \\'{self.dotted}\\'\\n')\n"
+                "sys.exit(1)\n")
+
+    def repair(self, idea, code, error):
+        self.repair_calls += 1
+        return _GOOD
+
+
+def test_a_missing_submodule_of_an_installed_lib_does_not_pip_install_it(tmp_path, monkeypatch):
+    """THE ROOT CAUSE OF `runs/rubert-dr-0807` node 0's round-1 install, driven end to end.
+
+    `ModuleNotFoundError: No module named 'pytorch_lightning.utilities.cloud_io'` reduced to
+    `pytorch_lightning`, which was installed at 2.6.5 — so `pip install pytorch-lightning` answered
+    "Requirement already satisfied" with returncode 0 in 2.19 s, `InstallResult.ok` was True, and the
+    engine wrote `deps_installed {"packages": ["pytorch-lightning"], "round": 1}` for an install that
+    changed nothing. It then spent one of `_MAX_DEP_ROUNDS` and re-ran the node's whole stage pipeline
+    into the byte-identical traceback, and handed the crash-triage agent a node whose environment had
+    supposedly just been fixed.
+
+    Asserted on the EFFECT (no pip ran, no receipt was written, the node still recovered through the
+    normal repair path), not on the order of the lines that produce it."""
+    monkeypatch.setitem(deps._PIP_NAME, "faketestlib", "faketestlib")
+    # The distribution IS importable — only the submodule the code asked for is gone. This is the one
+    # fact that distinguishes a version mismatch from an absent library, and it is what the traceback
+    # cannot say.
+    monkeypatch.setattr(deps, "is_present", lambda m, **kw: True)
+    installs: list[str] = []
+
+    def recording_install(package, *, python=None, timeout=None):
+        installs.append(package)
+        return InstallResult(package=package, ok=True, returncode=0,
+                             output="Requirement already satisfied: faketestlib")
+
+    dev = _DottedImportError("faketestlib.utilities.cloud_io")
+    eng = _engine(tmp_path / "run", dev, auto_install_deps=True, dep_installer=recording_install,
+                  inline_repair=True, inline_repair_attempts=1)
+    anyio.run(eng.run)
+
+    evs = _events(tmp_path / "run")
+    assert installs == [], f"pip ran for a submodule of an installed distribution: {installs}"
+    assert not [e for e in evs if e.type == "deps_installed"], (
+        "a no-op install was recorded as a successful dependency install")
+    assert dev.repair_calls >= 1                     # it is a code/version problem — repair owns it
+    assert fold(evs).nodes[0].status.name == "evaluated"
+
+
+def test_a_dotted_name_of_an_ABSENT_distribution_still_installs(tmp_path, monkeypatch):
+    """The other direction, and the one the probe must not cost: `No module named 'torch.nn'` on a box
+    with no torch is a genuinely missing distribution, and the reduction to `torch` is exactly right.
+    Same traceback shape as the test above — only `is_present` differs — so what is being measured is
+    the absence probe and nothing else."""
+    monkeypatch.setitem(deps._PIP_NAME, "faketestlib", "faketestlib")
+    monkeypatch.setattr(deps, "is_present", lambda m, **kw: False)   # nothing installed yet
+    installs: list[str] = []
+
+    def recording_install(package, *, python=None, timeout=None):
+        installs.append(package)
+        return InstallResult(package=package, ok=True, returncode=0)
+
+    dev = _DottedImportError("faketestlib.nn")
+    eng = _engine(tmp_path / "run", dev, auto_install_deps=True, dep_installer=recording_install,
+                  inline_repair=True, inline_repair_attempts=1)
+    anyio.run(eng.run)
+
+    evs = _events(tmp_path / "run")
+    assert installs == ["faketestlib"], "the fresh-box path lost its install"
+    dep_events = [e for e in evs if e.type == "deps_installed"]
+    assert len(dep_events) == 1 and dep_events[0].data["packages"] == ["faketestlib"]
+
+
 def test_pip_child_does_not_inherit_the_operator_secrets(monkeypatch):
     """`pip install` of an sdist runs the package's setup.py/build backend — ARBITRARY CODE — so this
     child needs the same scrub every other spawn applies. It used to inherit the full os.environ, so a
