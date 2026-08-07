@@ -77,6 +77,19 @@ file `cmd` runs, so: if `cmd` points at an operator-owned scorer the agent must 
 framework's `test.py`), add that file to `protect`; if the scorer must be *built*, leave it editable (a
 protected file can't be created).
 
+**A `protect`ed file is also always MATERIALIZED into every node workdir**, whatever `seed_mode` says —
+it is copied from the editable source after the tree seed, before the mounts. That is not cosmetic: the
+default `seed_mode: auto` copies git-**tracked** files only, so an operator scorer that was never
+committed (the usual state of a file added to drive LoopLab) used to be simply absent from the workdir
+the protected `score` stage runs in, and the node died with `python: can't open file
+'<workdir>/looplab_eval.py'` *after* paying for the whole train. `protect` governs writes; it now
+governs seeding too, so the two halves of "the operator owns this file" agree. A `protect` entry
+matching nothing in the source is still fine (protecting a file the eval *creates* is legal) — but if
+the eval command then tries to **run** a protected script that is not there, the node fails
+immediately, before the pipeline starts, with a message addressed to you: the agent cannot repair it,
+because a protected path is exactly what the write gate refuses. Commit the file, set `seed_mode:
+"all"`, or drop it from `protect` so the Developer may author it.
+
 ### Per-source data permissions
 
 Each `dataset` (or legacy `data`) value may be a bare path (all defaults) or an object with five
@@ -352,7 +365,7 @@ success is the **repo's own eval command + metric** — never a metric the agent
 |---|---|
 | `editable_path` | Path to the repo; mounted into each eval workdir (a worktree copy). `~`/`$VARS` expand |
 | `edit_surface` | Globs the agent may edit **or create** (reject-not-strip) |
-| `protect` | Files the agent may **never** touch (e.g. the eval entrypoint) |
+| `protect` | Files the agent may **never** touch (e.g. the eval entrypoint). Also copied into every node workdir regardless of `seed_mode` — see the note above |
 | `eval.command` | The command run to evaluate a candidate (**argv list, no shell** — no `&&`) |
 | `eval.setup` | Optional command run **before** each eval to install **dependencies** (e.g. `pip install -r requirements.txt`). **Not for training** — training is a stage the agent declares (see below). |
 | `eval.metric.reader` | How to read the metric: `stdout_json` / `stdout_regex` / `file_json` / `file_regex` / `auto`. Legacy `eval.metric.kind` still works **for the four concrete readers only** — `"auto"` must be spelled `{"reader": "auto"}`, because only that spelling folds to the onboarding path (`adapters/tasks.py:241`); `{"kind": "auto"}` is not a known reader and raises. |
