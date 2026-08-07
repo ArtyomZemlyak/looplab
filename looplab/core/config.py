@@ -1417,12 +1417,20 @@ class Settings(BaseSettings):
     # tool (DuckDuckGo) on top of arXiv to read across results + the web before steering the next
     # batch. Off by default (egress is unreliable on some boxes); fails gracefully when blocked.
     web_search: bool = False
-    # Cadence for the Deep-Research stage: run it automatically every N created nodes. Zero disables
-    # only the cadence; manual `deep_research` and Strategist `request_research` triggers still fire.
-    # Default 3: deep research analyzes the accumulating results and steers the next batch (its
-    # directions become hints + open hypotheses); paired with `concurrent_research` it overlaps the
-    # think with the GPU-bound eval, so the cadence costs LLM tokens but no wall-clock on the search.
-    deep_research_every: int = 3
+    # Cadence for the Deep-Research stage: run it automatically every N created nodes.
+    # **`0` MEANS START IMMEDIATELY, NOT "off"** — this is the one interval knob in `Settings` whose
+    # zero is not the off switch, and the rule is stated once in `engine/cadence.py`
+    # (`deep_research_window`, which settles `0` to a one-node window and anything NEGATIVE to
+    # disabled). Off is spelled `-1` (`cadence.DEEP_RESEARCH_OFF`); there, as at `0` before
+    # 2026-08-07, manual `deep_research` and Strategist `request_research` triggers still fire.
+    # Default 0 (owner decision 2026-08-07): deep research analyzes the accumulating results and
+    # steers the next batch (its directions become hints + open hypotheses), and paired with
+    # `concurrent_research` it overlaps the think with the GPU-bound eval — so on the workload the
+    # feature exists for it costs LLM tokens and no wall clock, and there is nothing for a start
+    # restriction to protect. The old default of 3 was measured to make the stage UNREACHABLE there:
+    # `runs/rubert-dr-0804/0805/0807` (1.5-4 h per node) recorded zero `research_attempted` and zero
+    # `research_completed` rows each, because three nodes is 5-12 hours away.
+    deep_research_every: int = 0
     # Overlap a DUE deep-research "think" with the GPU-bound eval instead of running it in its own
     # serial step (the agent is otherwise idle while a node trains). research() computes from a state
     # snapshot; the joined background task records only allowlisted, order-tolerant
@@ -1688,10 +1696,13 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # admit candidates under a different novelty policy.
     # `setdefault` makes every one of these a no-op for a snapshot that DOES carry the key, so only
     # genuinely older runs are affected. Each value is the behaviour before the field existed: absent
-    # feature = off, absent cadence = 0 (the same "conservative library" value the frozen
-    # Settings-vs-EngineOptions divergence table records for these fields). Each was dated against the
-    # tree before being listed — e.g. `report_every` (2026-06-25) is 0 because the run-report writer
-    # itself did not exist before that commit, so an older run wrote no report to preserve.
+    # feature = off, absent cadence = OFF — which for every cadence here is spelled `0`, and for
+    # `deep_research_every` alone is spelled `-1` since 2026-08-07 (its `0` now means "start
+    # immediately"; see that field and `engine/cadence.py::deep_research_window`). The value is
+    # always the same "conservative library" one the frozen Settings-vs-EngineOptions divergence
+    # table records for the field. Each was dated against the tree before being listed — e.g.
+    # `report_every` (2026-06-25) is 0 because the run-report writer itself did not exist before that
+    # commit, so an older run wrote no report to preserve.
     "foresight": False,
     "foresight_agentic": False,
     "foresight_verify": False,
@@ -1713,7 +1724,10 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "lessons_every": 0,
     "lessons_refresh_every": 0,
     "unified_agent": False,
-    "deep_research_every": 0,
+    # -1, not 0: a pre-field snapshot means "this run never ran the Deep-Research cadence", and since
+    # 2026-08-07 that is spelled `-1`. Writing `0` here would resume every legacy run into a paid
+    # think at EVERY node — the exact "silently add paid calls to an old run" this map exists to stop.
+    "deep_research_every": -1,
     "report_every": 0,
     "failure_reflection": False,
     "reflection_priors": False,

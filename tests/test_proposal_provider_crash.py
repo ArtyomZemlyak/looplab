@@ -164,6 +164,39 @@ def test_the_card_staging_lane_refuses_it_too(tmp_path):
     assert fold(events).paused is True
 
 
+def test_the_batch_staging_lane_refuses_it_too_including_its_audit_rows(tmp_path):
+    """The SECOND door into the same board, opened on 2026-08-07.
+
+    A one-action lane goes through `_prepare_node_idea`'s `_link` funnel; a MULTI-action one goes
+    through `_consume_batch_proposal`, and its rejected proposals are audited as node-less closed
+    Cards. Against a dead provider every one of those "rejected proposals" IS the transport error, so
+    the audit wrote five `card_added` rows carrying it as the hypothesis STATEMENT — after the
+    circuit breaker had already refused the batch and paused the run.
+
+    Unreachable until the prefetch-off staging lane widened from `stageable[:1]` to the whole batch
+    (the seed/population width). Same rule as every other lane here: a degraded fallback is the
+    ABSENCE of a proposal, so it is not a rejected one either.
+    """
+    engine = make_engine(tmp_path / "card-batch-lane", researcher=_DeadProviderResearcher(),
+                         card_driven_selection=True, max_nodes=4, n_seeds=2)
+    engine.store.append("run_started", {"run_id": "r", "task_id": "toy", "goal": "g",
+                                        "direction": "min", "card_driven_selection": True})
+    state = fold(engine.store.read_all())
+
+    assert engine._stage_card_creates([{"kind": "draft"}, {"kind": "draft"}], state) == []
+    events = engine.store.read_all()
+    assert not [event for event in events if event.type == EV_CARD_ADDED], (
+        "the batch lane's dropped-proposal audit put the transport error on the Card board")
+    assert fold(events).paused is True
+
+    # …and a genuinely rejected proposal still gets its audit Card: the guard is on the FALLBACK
+    # sentinel, not on "the batch dropped something".
+    real = Idea(operator="draft", params={"x": 0.5, "y": 0.5}, rationale="a real proposal",
+                hypothesis="x=0.5 improves the objective")
+    engine._record_dropped_batch_cards([{"idea": real, "reason": "duplicate"}])
+    assert [event for event in engine.store.read_all() if event.type == EV_CARD_ADDED]
+
+
 def test_a_card_driven_run_against_a_dead_provider_pauses(tmp_path):
     engine = make_engine(tmp_path / "card-run", researcher=_DeadProviderResearcher(),
                          card_driven_selection=True, max_nodes=4, n_seeds=2)

@@ -488,7 +488,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         ablate_every = _opt("ablate_every")
         strategist_every = _opt("strategist_every")
         concept_retag_every = _opt("concept_retag_every")
-        deep_research_every = _opt("deep_research_every")
         concurrent_research_repeat = _opt("concurrent_research_repeat")
         concurrent_research_interval_s = _opt("concurrent_research_interval_s")
         concurrent_research_max_calls = _opt("concurrent_research_max_calls")
@@ -576,7 +575,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.strategist_every = max(1, strategist_every)
         self.concept_retag_every = max(1, concept_retag_every)
         self.deep_researcher = deep_researcher
-        self.deep_research_every = max(0, deep_research_every)
+        # STORED RAW, deliberately — this was `max(0, deep_research_every)` until 2026-08-07, and
+        # under the new spelling that clamp is exactly backwards: `0` now means "start immediately"
+        # and OFF is NEGATIVE, so it would have converted every spelled-off knob into a paid think at
+        # every node. The whole settling rule is stated once, in
+        # `engine/cadence.py::deep_research_window`, and applied at the two gates that read this
+        # attribute — so `-1` (off), a junk value (off) and `0` (immediate) all mean here exactly
+        # what the operator wrote, and the diagnostics that echo the knob do not lie about it.
+        # (Hence `_opt` inline: with no transform left, the local it used to be resolved into buys
+        # nothing — `tests/test_source_scan_helper.py` is the guard that says so.)
+        self.deep_research_every = _opt("deep_research_every")
         self.concurrent_research = _opt("concurrent_research")
         # Repeated concurrent research (don't idle a multi-day eval): the overlapped think re-runs on
         # an adaptive time cadence for the whole window instead of once. Off in the library default
@@ -1740,7 +1748,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return "continue", state, _no_mint_turns
         self._create_paused = False   # set by _create_node's developer_crash circuit-breaker
         self._pending_create_pause = []   # …and its worker-side request queue (see _request_create_pause)
-        if self._speculation_enabled():
+        # TWO GATES, not one. INVENTORY (minting selection-ready Cards) belongs to
+        # `card_driven_selection`; PREFETCH (electing an isolated producer to build the next Card
+        # ahead of time) belongs to `speculation_depth`. Both halves used to sit under
+        # `_speculation_enabled()`, which made the queue's only writer reachable only through the
+        # prefetch lane — see `_card_inventory_enabled` for what that measured.
+        if self._card_inventory_enabled():
             receipt_owned = [META_CARD_ID in action for action in creates]
             # One turn has one authority. A mixed lane could stage new work while claiming a
             # stale selection snapshot, so retain the serial spine's existing fail-closed rule.
@@ -1751,6 +1764,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # Raw policy actions do not yet name executable work. Author their concrete
                 # Ideas and durable Cards now, but deliberately leave every Node slot unowned;
                 # the next fresh fold must select them before a producer can be requested.
+                # (`speculative_raw_actions` keeps its name: it is the COUNTERFACTUAL raw lane —
+                # "what would the policy do if no durable Card owned this?" — and it is pure
+                # selection over folded state with no dependency on the prefetch lane at all.)
                 stageable = speculative_raw_actions(
                     state,
                     self.policy,
@@ -1761,11 +1777,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     ),
                 )
                 if stageable:
-                    # Author one work item at a time. The live depth is filled by the isolated
-                    # steady-state proposer while eval runs; staging an unreserved wide seed
+                    # WITH PREFETCH: author one work item at a time. The live depth is filled by the
+                    # isolated steady-state proposer while eval runs; staging an unreserved wide seed
                     # batch here only creates stale inventory if the first fast eval moves best.
-                    one = stageable[:1]
-                    if self._stage_card_creates(one, state):
+                    #
+                    # WITHOUT PREFETCH: stage the WHOLE lane. There is no steady-state proposer to
+                    # fill the depth, and the argument against a wide batch does not apply — it needs
+                    # an eval to finish between the staging and the selection, and on this path
+                    # nothing is in flight (`_dispatch_evals` is awaited, and a turn with `creates`
+                    # dispatches nothing). Truncating to one here would instead SERIALIZE every batch
+                    # the run would otherwise have built at once: the rung-0/seed width, and the
+                    # population lane of `evolutionary`/`mcts`/`asha` — none of which ever reached
+                    # this code before, because AUTO settles the depth to 0 for a non-greedy policy
+                    # and a spelled depth is refused there. `_stage_card_creates` already has the
+                    # multi-draft lane (one shared-Researcher diversity pass), `forced_card_actions`
+                    # hands back up to `width` ready drafts, and `_claim_existing_card_builds` claims
+                    # the complete lane in one tail-CAS group — so the batch shape survives the queue
+                    # rather than being flattened by it.
+                    lane = stageable if not self._speculation_enabled() else stageable[:1]
+                    if self._stage_card_creates(lane, state):
                         return "continue", state, _no_mint_turns
                     if self._create_paused:
                         # …but a staging attempt that GATED the run is not a "rejected" one. The
@@ -1778,25 +1808,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # Unsupported/custom scorer semantics retain the exact serial compatibility
                 # path below; a Card it cannot score must never be staged/reused in a loop.
 
-            # A positive depth is useful only with a genuinely isolated role pair. If the
-            # configured factory cannot provide one, fall through to the safe serial Card
-            # claim below. Otherwise request/session is the sole build path: a lost selection
-            # CAS restarts from a fresh fold and never silently converts to serial execution.
-            serial_fallback = any(
-                self._card_requires_serial_fallback(action.get(META_CARD_ID))
-                for action in creates
-            )
-            if (all(receipt_owned)
-                    and self._producer_role_pair() is not None
-                    and not serial_fallback):
-                if self._request_card_build():
-                    await self._run_card_session(
-                        [],
-                        fold(self.store.read_all()),
-                        max_es,
-                        None if max_s is None else start + max_s,
-                    )
-                return "continue", state, _no_mint_turns
+            if self._speculation_enabled():
+                # A positive depth is useful only with a genuinely isolated role pair. If the
+                # configured factory cannot provide one, fall through to the safe serial Card
+                # claim below. Otherwise request/session is the sole build path: a lost selection
+                # CAS restarts from a fresh fold and never silently converts to serial execution.
+                serial_fallback = any(
+                    self._card_requires_serial_fallback(action.get(META_CARD_ID))
+                    for action in creates
+                )
+                if (all(receipt_owned)
+                        and self._producer_role_pair() is not None
+                        and not serial_fallback):
+                    if self._request_card_build():
+                        await self._run_card_session(
+                            [],
+                            fold(self.store.read_all()),
+                            max_es,
+                            None if max_s is None else start + max_s,
+                        )
+                    return "continue", state, _no_mint_turns
+            # With prefetch off, a receipt-owned lane falls through to `_claim_existing_card_builds`
+            # below — the SAME serial Card claim the prefetch path already falls back to whenever the
+            # role factory cannot isolate a pair. So "Cards are minted, selected, then built" is one
+            # code path with or without speculation; only who builds them differs.
         # Variant-1 parallel BUILD: seed/explore DRAFTS are independent, so build (research + code)
         # up to `parallel_build` at once, each on its OWN pooled (researcher, developer) pair + its
         # own pre-reserved id (reserved serially under _id_lock, then fanned out in a task-group of
@@ -3347,11 +3382,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         re-asking, and the run recorded ZERO `research_attempted`/`research_completed` rows. The
         serial `_maybe_deep_research` could not cover it either — it requires no pending nodes, and
         under speculation there always are some. So the one feature built to use the idle reasoning
-        agents during a multi-hour training never ran on the workload it exists for."""
+        agents during a multi-hour training never ran on the workload it exists for.
+
+        That latch was HALF the defect. The other half was the window itself: even asked at every
+        admission, `_due_research_trigger` answered NO until three nodes existed. The shipped default
+        is now `deep_research_every=0` = no window at all (`engine/cadence.py::deep_research_window`),
+        so the FIRST eval admission of the run — `n=1`, the first multi-hour training — is a due
+        trigger and this method starts the think beside it. Nothing about the safety argument above
+        changes: the same `BACKGROUND_APPENDABLE` allow-list, the same capped `deep_research` broker
+        lane (`core/llm_broker.py::BACKGROUND_LANE_PRODUCERS`, one concurrent request), the same
+        swallow-everything containment. It just happens hours earlier."""
         if not self.concurrent_research:
             return False
         # repeat is a continuation of a research episode, not an independent timer.
-        # Requiring a due cadence/strategist trigger here keeps ``deep_research_every=0`` truly
+        # Requiring a due cadence/strategist trigger here keeps a spelled-OFF cadence
+        # (``deep_research_every=-1``; ``0`` has meant "start immediately" since 2026-08-07) truly
         # manual-only and prevents a long eval from silently starting paid research on its own.
         rtrig = self._due_research_trigger(state)
         if rtrig is None:

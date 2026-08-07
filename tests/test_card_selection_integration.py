@@ -521,3 +521,161 @@ def test_a_run_whose_first_node_crashes_finishes_at_every_speculation_depth(tmp_
     # Every discarded prefetch was refunded, so the budget denominator matches the off-run exactly.
     assert card_budget_used(state) == 12, sorted(
         (node.id, node.status.value, node.error_reason) for node in state.nodes.values())
+
+
+# --- Card INVENTORY is not the prefetch lane's to own (2026-08-07) --------------------------------
+
+
+def _splits_a_batch(run_dir, seq: int) -> bool:
+    """Whether folding the log UP TO (not including) `seq` would tear an `append_many` envelope.
+
+    Read from the physical JSONL, because that is the only place the atomicity is recorded: a batch
+    is ONE line carrying `first_seq`/`last_seq`, and the engine can only ever observe the log before
+    that line or after it. Deriving this from event adjacency instead is wrong in the direction that
+    hides the property under test — two SINGLETON appends land adjacent all the time, and the
+    boundary between them is exactly where a staged Card sits alone in inventory.
+    """
+    import json
+
+    for line in (run_dir / "events.jsonl").read_text().splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        data = row.get("data") or {}
+        if data.get("schema") != "looplab.event-batch/v1":
+            continue
+        if data["first_seq"] < seq <= data["last_seq"]:
+            return True
+    return False
+
+
+@pytest.mark.parametrize("depth", [0, 1])
+def test_card_inventory_is_minted_whenever_card_selection_is_on(tmp_path, depth):
+    """`card_driven_selection` alone must produce a Card QUEUE the run then selects from.
+
+    MEASURED before this change, over the shipped corpus by folding every observable prefix
+    boundary: the seven runs with `card_driven_selection=true` and no positive depth produced **0**
+    `selection_ready` cards across 27 nodes, while the four speculation runs produced 24. The cause
+    was structural — `_stage_card_creates`, the only writer of a `card_added` with no `node_building`
+    beside it, was reachable only inside `if self._speculation_enabled():`. With prefetch off every
+    card was minted by `_reserve_node_build` in the same crash-atomic batch as the claim, so it was
+    work-owned the instant it existed and `card_next_actions` fell through to `policy.next_actions`.
+
+    The property is observed the way the corpus was: a Card that is `selection_ready` at some
+    boundary the ENGINE could observe — never inside an `append_many` batch, which is exactly the
+    prefix a run can never fold, and which is read from the PHYSICAL log rather than guessed at from
+    adjacency (two singleton appends can be adjacent and are perfectly observable between).
+    `depth=1` is the control; it is what already worked.
+    """
+    task = ToyTask()
+
+    def _roles():
+        base, _ = ToyTask().build_roles()
+        return (_SpeculationResearcher(base.bounds, seed=base.seed, step=base.step),
+                ToyObjectiveDeveloper(noise=0.0))
+
+    researcher, developer = _roles()
+    engine = Engine(
+        tmp_path / f"inventory-{depth}", task=task, researcher=researcher, developer=developer,
+        sandbox=SubprocessSandbox(),
+        policy=GreedyTree(n_seeds=1, max_nodes=4), policy_name="greedy",
+        role_factory=_roles, card_driven_selection=True, speculation_depth=depth,
+        eval_parallel=1, llm_parallel=1, max_nodes=4, n_seeds=1, inline_repair=False,
+    )
+    assert engine._card_inventory_enabled() is True
+    assert engine._speculation_enabled() is (depth > 0)
+
+    async def _bounded():
+        with anyio.move_on_after(180):
+            await engine.run()
+
+    anyio.run(_bounded)
+
+    events = engine.store.read_all()
+    ready = set()
+    for cut in range(1, len(events) + 1):
+        if cut < len(events) and _splits_a_batch(engine.run_dir, events[cut].seq):
+            continue                       # inside an append_many envelope — never observable
+        ready |= {card.id for card in fold(events[:cut]).cards.values()
+                  if card.selection_ready is True}
+
+    assert ready, (
+        "card_driven_selection produced no selectable Card inventory at any observable boundary "
+        f"(depth={depth})")
+    state = fold(events)
+    assert len(state.nodes) >= 2, "the run has to actually build from that inventory"
+    # …and the queue really is what chose the work: every Node carries the Card it was selected from.
+    assert all(node.idea.card_id for node in state.nodes.values())
+
+
+def _claim_batch_widths(run_dir) -> list[int]:
+    """How many `node_building` rows each atomic `append_many` envelope carried.
+
+    `_claim_existing_card_builds` claims the whole selected lane in ONE tail-CAS group, so this is
+    the lane width the queue actually delivered — readable only from the physical log, since
+    `read_all` expands a batch into its members and the atomicity disappears.
+    """
+    import json
+
+    widths = []
+    for line in (run_dir / "events.jsonl").read_text().splitlines():
+        if not line.strip():
+            continue
+        data = (json.loads(line).get("data") or {})
+        if data.get("schema") != "looplab.event-batch/v1":
+            continue
+        claims = [e for e in data["events"] if e.get("type") == EV_NODE_BUILDING]
+        if claims:
+            widths.append(len(claims))
+    return widths
+
+
+def test_the_prefetch_off_queue_does_not_serialize_a_wide_seed_lane(tmp_path):
+    """A queue that flattens the run's batch width has changed the search, not just the selector.
+
+    With prefetch ON, staging one work item per turn is right: the isolated steady-state proposer
+    fills the depth, and a wide unreserved batch goes stale if the first fast eval moves `best`.
+    With prefetch OFF neither is true — nothing is in flight at the create branch — and truncating
+    would serialize the rung-0/seed width and the population lane of every non-greedy policy, which
+    never reached this code before (AUTO settles the depth to 0 for a non-greedy policy, and a
+    spelled one is refused there). So the whole lane is staged, and `_claim_existing_card_builds`
+    claims it in ONE tail-CAS group.
+    """
+    task = ToyTask()
+
+    def _roles():
+        base, _ = ToyTask().build_roles()
+        return (_SpeculationResearcher(base.bounds, seed=base.seed, step=base.step),
+                ToyObjectiveDeveloper(noise=0.0))
+
+    researcher, developer = _roles()
+    engine = Engine(
+        tmp_path / "wide-seed-lane", task=task, researcher=researcher, developer=developer,
+        sandbox=SubprocessSandbox(),
+        policy=GreedyTree(n_seeds=3, max_nodes=6), policy_name="greedy",
+        role_factory=_roles, card_driven_selection=True, speculation_depth=0,
+        eval_parallel=1, llm_parallel=1, max_nodes=6, n_seeds=3, inline_repair=False,
+    )
+    engine._novelty_mode = "off"
+    assert engine._speculation_enabled() is False
+
+    async def _bounded():
+        with anyio.move_on_after(180):
+            await engine.run()
+
+    anyio.run(_bounded)
+
+    events = engine.store.read_all()
+    added = [event for event in events if event.type == EV_CARD_ADDED]
+    assert len(added) >= 3, "the seed lane never reached durable inventory"
+    # The three seed Cards are staged as INVENTORY — standalone appends, no claim beside them — and
+    # are therefore all selectable at the same observable boundary.
+    widest = max(
+        (len({card.id for card in fold(events[:cut]).cards.values() if card.selection_ready is True})
+         for cut in range(1, len(events) + 1)
+         if cut >= len(events) or not _splits_a_batch(engine.run_dir, events[cut].seq)),
+        default=0)
+    assert widest >= 3, f"the queue was never more than {widest} card(s) deep — the lane was serialized"
+    # …and the run then claimed that whole lane atomically rather than one node per turn.
+    assert max(_claim_batch_widths(engine.run_dir), default=0) >= 3, _claim_batch_widths(
+        engine.run_dir)
