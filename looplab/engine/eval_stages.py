@@ -94,6 +94,67 @@ class EvalStagesMixin:
             return _expand(preceding) + [final]
         return None
 
+    # The refusal `_run_eval` reports when the resolved chain invokes a PROTECTED script the workdir
+    # does not contain. Hoisted so the two audiences it has to serve are visible in one place and can
+    # be pinned: the OPERATOR, who is the only one who can fix it, and the inline-repair loop, which
+    # would otherwise spend every attempt asking the Developer to write a file the write gate refuses.
+    # `{stage}`/`{script}` are the only placeholders.
+    PROTECTED_SCRIPT_MISSING = (
+        "stage {stage!r} cannot run: {script} is PROTECTED (the operator owns it) but was never "
+        "materialized into this node's workdir, so the command has no file to execute. This is NOT a "
+        "repairable code error and the agent must not be asked to fix it — a protected path is exactly "
+        "what the write gate refuses, so no edit can create it. Fix the TASK instead: make the file "
+        "part of what each node is seeded with (commit it to the editable repo, or set seed_mode "
+        "\"all\"), or drop it from `protect` so the Developer may author it.")
+
+    def _unrunnable_protected_scripts(self, chain, workdir, cwd) -> list:
+        """`[(stage, script)]` for every PROTECTED script the resolved chain invokes that is not in the
+        eval cwd — the one eval failure NOTHING downstream can repair, detected BEFORE the first stage
+        runs instead of after a node has paid for a full train.
+
+        The live instance: `protect: ["looplab_eval.py"]` + a `score` stage running
+        `python looplab_eval.py`, on a repo where that file was never committed — so `seed_mode="auto"`
+        (git-tracked files only) left the workdir without it. `seed_protected_files` closes that hole,
+        and this stays as the BACKSTOP for the cases seeding cannot close: a `protect` entry that
+        matches nothing in the source (an operator typo — "one eval command but no file"), a glob that
+        stopped matching, a protected path outside the repo. What makes it worth its own check rather
+        than an ENOENT is the asymmetry: for any OTHER missing script the Developer can write the file,
+        and the repair loop is the right answer; for a protected one it is structurally the wrong one.
+
+        Deliberately narrow. Only a workdir-relative `.py` token is considered a script (the same rule
+        `_stage_reachable_files` uses), and only one whose workspace-relative name is in
+        `protected_names` — so a missing EDITABLE entrypoint keeps its existing behaviour (the eval
+        runs, fails, and the Developer repairs it), and a stage that legitimately GENERATES a later
+        stage's script cannot be pre-empted, because a generated script is never protected."""
+        prot = set((self._repo_spec or {}).get("protected_names") or [])
+        if not prot or not chain:
+            return []
+        wd, cd = Path(workdir).resolve(), Path(cwd).resolve()
+        try:
+            # The protected names are WORKSPACE-relative; the scripts are named relative to the eval
+            # `cwd`. Namespacing by the cwd's own offset is what `RepoTask._eval_protected` does on the
+            # other side of the same join. An eval cwd outside the workdir (an external tool dir the
+            # `sandbox_cwd` remap trusts as given) shares no namespace with `protect` — check nothing.
+            pre = cd.relative_to(wd).as_posix()
+        except ValueError:
+            return []
+        pre = "" if pre in (".", "") else pre + "/"
+        out: list = []
+        for name, argv in chain:
+            for tok in (argv or []):
+                if not isinstance(tok, str) or not tok.endswith(".py") or tok.startswith("-"):
+                    continue
+                rel = tok
+                while rel.startswith("./"):
+                    rel = rel[2:]
+                if os.path.isabs(rel) or ".." in rel.replace("\\", "/").split("/"):
+                    continue                      # an absolute/escaping path is not a protected name
+                key = (pre + rel).replace("\\", "/")
+                row = (str(name), key)
+                if key in prot and not (cd / rel).exists() and row not in out:
+                    out.append(row)
+        return out
+
     def _resolved_stages(self, node, workdir) -> list:
         """Re-resolve the eval pipeline the way `_run_eval` does — used by the inline-repair reuse
         predicate to inspect the stages' COMMANDS (which script each runs). [] for a single-command

@@ -185,6 +185,21 @@ class EvalDispatchMixin:
             check_fn = (self._stage_check_fn(node)            # Phase 3: inter-stage verify (only if any stage asks)
                         if stages and any(s.get("check") for s in stages) else None)
             cwd = self._sandbox_cwd(workdir, es.get("cwd", "."))
+            # PREFLIGHT the resolved chain for a PROTECTED script the workdir doesn't hold, BEFORE any
+            # stage runs. The one failure the repair loop structurally cannot fix (the agent may not
+            # write a protected path) was also the most expensive to discover: the `score` stage is
+            # LAST, so a node paid for its whole train and then died in 0.06s on
+            # `python: can't open file '…/looplab_eval.py'`. Reported as a plain failed RunResult
+            # rather than raised: an exception here escapes the eval worker and leaves the node with
+            # NO terminal event (invariant 2), re-raising on every resume.
+            _unrunnable = self._unrunnable_protected_scripts(
+                [(s.get("name"), s.get("command")) for s in stages] if stages
+                else [("score", cmd)], root, cwd)
+            if _unrunnable:
+                return command_eval.RunResult(
+                    exit_code=2, stdout="", metric=None, timed_out=False,
+                    stderr="\n".join(self.PROTECTED_SCRIPT_MISSING.format(stage=st, script=sc)
+                                     for st, sc in _unrunnable))
             # untrusted tier (Phase 4): sandbox the eval in docker, mounting the workspace
             # root so the cwd subdir + host metric reading line up. Fails loudly w/o docker.
             # Symlink-mounted data/reference sources ride along as same-path binds (the /work

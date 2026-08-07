@@ -167,19 +167,35 @@ class WorkspaceSeeder:
                 mode = (ed.get("seed_mode") or self._e._seed_mode or "auto")
                 n = self._e._seed_repo_tree(ed["path"], dst, ignore, mode)
                 seeded.append(f"{ed['name']}[{mode}]:{'copytree' if n < 0 else str(n)+' tracked'}")
+            _mounts = [m for m in ([r["name"] for r in self._e._repo_spec.get("references", [])
+                                    if r.get("mount")]
+                                   + list(self._e._repo_spec.get("data", {}))) if m]
             _root_ed = next((ed for ed in self._e._repo_spec.get("editables", [])
                              if ed.get("name") in (".", "")), None)
             if _root_ed:
-                _mounts = ([r["name"] for r in self._e._repo_spec.get("references", [])
-                            if r.get("mount")]
-                           + list(self._e._repo_spec.get("data", {})))
-                _clash = next((m for m in _mounts if m and (wd / m).exists()), None)
+                _clash = next((m for m in _mounts if (wd / m).exists()), None)
                 if _clash is not None:
                     raise RuntimeError(
                         f"mount name {_clash!r} collides with a top-level entry of the root repo "
                         f"({_root_ed['path']}): the repo is seeded at the workspace root first, so the "
                         f"mount would be silently shadowed and the eval would read the repo's copy "
                         f"instead of the declared source. Rename the mount or the repo entry.")
+            # The operator's PROTECTED files, materialized whatever the seed mode says (see
+            # `seed_protected_files`). This position between the shadow guard and the mounts IS the
+            # safety argument: BEFORE the guard, a protect entry like `datasets/labels.csv` would
+            # manufacture a top-level `datasets/` and raise a FALSE collision that aborts every node of
+            # a valid task; AFTER the mounts, the same entry would write THROUGH the read-only mount
+            # symlink into the operator's original data. `reserved_top` covers the residue for the ROOT
+            # editable (whose files land at the workspace root, where the mounts also live); a non-root
+            # editable mounts under its own subdir, which `_names_distinct_and_safe` already keeps
+            # disjoint from every mount name.
+            for ed in self._e._repo_spec.get("editables", []):
+                dst = wd if ed["name"] in (".", "") else wd / ed["name"]
+                prot = self.seed_protected_files(
+                    ed["path"], dst, ed.get("protect"),
+                    reserved_top=(set(_mounts) if ed.get("name") in (".", "") else set()))
+                if prot:
+                    seeded.append(f"{ed['name']}:protected[{len(prot)}]:" + ",".join(prot[:5]))
             for ref in self._e._repo_spec.get("references", []):
                 if ref.get("mount"):             # runtime dependency -> symlink read-only input
                     self._e._link_input(ref["path"], wd / ref["name"])
@@ -250,6 +266,76 @@ class WorkspaceSeeder:
             shutil.copy2(s, d)
             n += 1
         return n
+
+    def seed_protected_files(self, src, dst, protect, *, reserved_top=()) -> list[str]:
+        """Materialize the editable's OPERATOR-PROTECTED files into the node workdir, on top of
+        whatever `seed_repo_tree` copied and REGARDLESS of the seed mode.
+
+        Two facts have to compose and did not: `protect` says "this file is the operator's, the agent
+        may never write it", and `_resolve_stages` appends the operator's `cmd` as the final PROTECTED
+        `score` stage that runs IN THIS WORKDIR. Under the default `seed_mode="auto"` the workdir gets
+        the git-TRACKED files, so an operator scorer that was never committed — the normal state of a
+        file added to drive LoopLab — is simply absent, and the score stage dies with
+        `python: can't open file '…/looplab_eval.py'` AFTER the node has already paid for a full train.
+        Nothing caught it because `protect` governs WRITES and nothing made it govern MATERIALIZATION;
+        the agent cannot repair it either, since the one file it would have to create is the one file
+        the write gate refuses. Seeding it here is what makes the workdir's protected file a fact the
+        Developer's prompt is already allowed to assume ("unless the operator PROTECTED an existing
+        scorer, which you must NOT rewrite").
+
+        Deliberately the per-editable `protect` list and NOT `RepoTask._protected_names()`: that one
+        also folds in the read-only DATA MOUNT names (materialized as symlinks by the caller — a copy
+        would shadow the mount) and the eval's metric-FILE reader paths (files the eval WRITES, which
+        do not exist in the source at all). Tree entries (`dir/**`) are skipped for the same reason —
+        the only ones the task builder emits are those data mounts.
+
+        A glob is expanded against the SOURCE; a `protect` entry that matches nothing is silently
+        skipped, because protecting a file the EVAL creates is legal and common. Everything else fails
+        closed: a match that resolves outside the source root (a symlink out of the repo) or whose
+        destination resolves outside the workdir is dropped rather than copied, and a `reserved_top`
+        first segment (a mount name) is refused so this can never shadow a mount. Returns the
+        workdir-relative paths copied, for the `workspace_seeded` record."""
+        import shutil
+        src = Path(src)
+        dst = Path(dst)
+        try:
+            root = src.resolve()
+            base = dst.resolve()
+        except OSError:                              # unreadable source/destination -> nothing to seed
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        for entry in (protect or []):
+            rel = str(entry).replace("\\", "/").strip()
+            while rel.startswith("./"):
+                rel = rel[2:]
+            if not rel or rel in (".", "/") or rel.endswith("/**"):
+                continue
+            # `Path.glob` on a pattern with no magic still works, but it silently yields NOTHING for a
+            # pattern carrying a `..` segment, so a literal name is resolved directly and then checked
+            # against the root — an escape is dropped, not quietly ignored as "no match".
+            matches = sorted(root.glob(rel)) if any(c in rel for c in "*?[") else [root / rel]
+            for m in matches:
+                try:
+                    real = m.resolve()
+                    relp = real.relative_to(root)    # never copy from OUTSIDE the editable source
+                except (OSError, ValueError):
+                    continue
+                if not real.is_file():               # a missing entry / a directory has nothing to copy
+                    continue
+                key = relp.as_posix()
+                if key in seen or relp.parts[0] in tuple(reserved_top):
+                    continue
+                target = dst / relp
+                try:                                 # …and never WRITE outside the node workdir
+                    target.resolve().relative_to(base)
+                except (OSError, ValueError):
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(real, target)
+                seen.add(key)
+                out.append(key)
+        return out
 
     def link_input(self, src, dst) -> None:
         """Mount a large, read-only task input (dataset / reference repo) into the node workdir as a
