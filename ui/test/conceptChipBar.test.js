@@ -1,6 +1,14 @@
 // View 2 ConceptChipBar wiring test. The pure model (chip counts, breadcrumb, matching set) is covered
 // by conceptChips.test.js; here we verify the component wires the model to render + the onHighlight
 // callback. Static markup via react-dom/server; interaction via react-dom/client + act. `node --test`.
+//
+// WHEN THIS FILE DIES WITH SIGKILL AND NO MESSAGE, read this first. A failing
+// `assert.equal(document.querySelector(…), null)` does not report "expected null, got <div>": to build
+// its diff, node:assert serializes the JSDOM Element, which walks `ownerDocument` -> `defaultView` ->
+// the whole window object graph. Measured here: RSS climbed ~2 GB every 12 s to 13.6 GB and the OOM
+// killer took the runner, so a one-line assertion failure presented as a hang. It cost an hour of
+// bisecting a component that was behaving correctly. Assert on something SERIALIZABLE — the count, the
+// textContent, a mapped array — whenever the expected value is "no such element".
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -223,11 +231,20 @@ test('selecting a chip pushes the matching node set to onHighlight; clear resets
     assert.ok([...document.querySelectorAll('button')].some(node => /^clear \(/.test(node.textContent)),
       'the filter stays clearable, so the DAG can never be stranded dimmed')
 
+    // Restoring complete membership RESTORES THE ROW, not the selection — there was never a moment
+    // where the selection was dropped, so there is nothing stale to resurrect. This assertion used to
+    // read `.cb-pill === null`, which was true only while a per-node receipt tore the WHOLE bar down
+    // and took its state with it; withholding the row instead (the change six lines above verifies)
+    // keeps the filter running and its Clear control reachable throughout. The property that has to
+    // survive is the one that mattered: the pill names the selection actually in force, and the node
+    // set widens back to the authoritative membership now that the withheld row is exact again.
     await act(async () => root.render(React.createElement(ConceptChipBar, {
       state: STATE, onHighlight: v => calls.push(v),
     })))
-    assert.equal(document.querySelector('.cb-pill'), null,
-      'restoring complete membership cannot resurrect a stale selection')
+    assert.deepEqual([...document.querySelectorAll('.cb-pill-label')].map(node => node.textContent),
+      ['loss/contrastive'], 'the surviving selection is still the one on screen')
+    assert.deepEqual([...calls.at(-1)].sort((a, b) => a - b), [0, 1],
+      'and the un-withheld row rejoins the highlight it was excluded from')
 
     // A live reset that removes the last concept must clear graph dimming before hiding the bar.
     await act(async () => root.render(React.createElement(ConceptChipBar, {
