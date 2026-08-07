@@ -822,10 +822,30 @@ class EvaluateMixin:
         # the STRIPPED text while keeping the unstripped bytes when there is content leaves
         # every non-blank tail byte-identical.
         _stderr_tail = self._redact(res.stderr[-500:])
-        return (_stderr_tail if _stderr_tail.strip() else "") or (
+        _text = (_stderr_tail if _stderr_tail.strip() else "") or (
             f"metric drift: {res.drift}" if res.drift is not None else
             f"exit={res.exit_code} timed_out={res.timed_out} no_metric{_no_metric_hint}"
         )
+        # WHICH STAGE BROKE, KEPT WHERE THE READER WILL SEE IT. `command_eval._run_stages` writes its
+        # `stage '<name>' failed:` marker at the FRONT of `res.stderr`, and the 500-char TAIL above
+        # cuts it off for every failure whose stderr is longer than that — i.e. for every real
+        # traceback. So the four things this string IS (the repair prompt, `node_repaired.error_in`,
+        # the judge's history rows, the terminal's `error`) stopped naming the failing stage exactly
+        # when the pipeline had more than one thing that could have broken. Measured on
+        # runs/rubert-dr-0807: 9 of 12 `node_repaired` rows carried no stage name at all, including
+        # every `train` failure on a node whose FIRST stage was a Developer-declared `mine`. Nothing
+        # else on the repair path carries it — `Developer.repair` receives this text and nothing more
+        # (the `failed_stage` column exists only on the TERMINAL, which is written after the repair
+        # loop is over), so the model was left to infer the stage from the traceback's filename. That
+        # is not the same fact: two stages can run the same script, a stage can fail before printing
+        # anything, and a pipeline bug (a wrong argv in `looplab_stages.json`) has no filename at all.
+        # Attached AFTER the slice so the tail keeps its whole 500-char budget, and only when the text
+        # does not already name the stage — a short stderr, and every single-command eval (no
+        # `failed_stage`), stay byte-identical to what they were.
+        _failed = str(getattr(res, "failed_stage", "") or "")
+        if _failed and f"stage '{_failed}'" not in _text:
+            _text = f"[failed stage: {_failed}]\n{_text}"
+        return _text
 
     def _repaired_footprint(self, node, new_code, repaired_files, reservation):
         """The repaired artifact's resource declaration, clamped to the devices already held.
@@ -1255,6 +1275,42 @@ class EvaluateMixin:
                             "reason": _kreason, "eval_seconds": total_eval})
                         self._maybe_crash()
                     return
+                # THE PIPELINE RECORD, ONCE PER ATTEMPT — not once per NODE. Multi-stage eval
+                # (Phase 1): each stage's pass/fail lands BEFORE the terminal so the fold + trace show
+                # mine ✓ / train ✗, and a later stage-scoped re-run knows which stages already passed.
+                # Empty on the classic single-command eval, so that path appends nothing, as before.
+                #
+                # This used to be appended ONLY after the attempt loop, from the LAST attempt's `res`,
+                # and that made the log lie about every REPAIRED multi-stage node. Once the reuse
+                # predicate starts skipping a completed earlier stage, every later attempt reports it
+                # as `{"status": "reused", "exit_code": 0, "seconds": 0.0}` — so the ONE record the log
+                # ever received was the zero-work marker, and the fold's own defence against exactly
+                # that (`events/replay.py::_on_stage_finished`: "a reused marker must NOT clobber that
+                # attempt's REAL completion record ... else the node reads as if it trained in 0s") was
+                # VACUOUS, because the real record it protects was never written by anyone.
+                # `tests/test_events_replay.py::test_fold_reused_stage_marker_does_not_clobber_real_record`
+                # drove that guard from hand-built events, so nothing went red.
+                # Measured on runs/rubert-dr-0807: node 2 trained for ~6,900 s and its folded stage
+                # record read `train reused / exit 0 / 0.0 s`; node 0's Developer-declared `mine` stage
+                # ran four times (two crashes, then two successes) and read `mine reused / 0.0 s`.
+                # Replay — the single source of truth — could not tell "this stage succeeded and its
+                # artifacts were reused" from "this stage never ran in this run at all", which is the
+                # difference between a healthy pipeline and a silently skipped one.
+                #
+                # One append per attempt is what the fold was always written to read, and the
+                # de-duplication rule stays THERE (last-wins by name, a real record beats a reused
+                # marker in either arrival order) rather than being re-derived here — a second,
+                # hand-synced copy of that rule in the writer is how the two would drift apart again.
+                # COST, stated because it is a real one: `stage_finished` is FOLDED, so under
+                # `eval_parallel > 1` these rows can move `speculation.py::_proposal_authority_seq` and
+                # discard a concurrently-prepared paid proposal (invariant 1). They could already do
+                # that — the terminal block appended the same rows from the same concurrent evals —
+                # what changes is the RATE, bounded by attempts x stages. Making them diagnostic
+                # instead is not available: the fold reads them.
+                async with self._write_lock:
+                    for _st in (res.stages or []):
+                        self.store.append(EV_STAGE_FINISHED,
+                                          {"node_id": node_id, **_st, "generation": generation})
                 if ok:
                     break
                 reason = _failure_reason(res)
@@ -1611,12 +1667,11 @@ class EvaluateMixin:
                 _curve = extract_resource_curve(
                     res.stdout, _spec.get("metric") if isinstance(_spec, dict) else None)
             async with self._write_lock:
-                # Multi-stage pipeline (Phase 1): record each stage's pass/fail BEFORE the terminal so the
-                # fold + trace show data_prep ✓ / train ✓ / eval ✗, and a later stage-scoped re-run knows
-                # which stages already passed. Empty on the classic single-command eval.
-                for _st in (res.stages or []):
-                    self.store.append(EV_STAGE_FINISHED,
-                                      {"node_id": node_id, **_st, "generation": generation})
+                # (The `stage_finished` rows are NOT written here any more — they are appended inside
+                # the attempt loop, once per attempt, which is the only way a repaired node's log can
+                # carry the stage that really ran rather than the last attempt's `reused` marker. See
+                # the block above `if ok: break`. Every path that reaches this terminal has already
+                # appended THIS attempt's rows, so they still land BEFORE the terminal, as required.)
                 if res.drift is not None:               # Phase 4: uncorroborated metric (audit)
                     self.store.append(EV_SPEC_DRIFT,
                                       {"node_id": node_id, **res.drift, "generation": generation})

@@ -124,10 +124,13 @@ def test_a_log_that_promised_no_eval_start_boundary_is_never_refunded():
     """FAIL CLOSED on a log written before the boundary existed.
 
     Such a log cannot distinguish a build discarded before dispatch from one whose sandbox ran for
-    forty minutes before the process was killed: eval seconds are charged only by a terminal and
-    `stage_finished` rows are appended inside the terminal's own write-lock block, so BOTH look like
-    `eval_seconds=0, stages=[]`. Silence is not evidence, so the slot stays charged — the refund is
-    the thing that gets given up, never the compute accounting.
+    forty minutes before the process was killed: eval seconds are charged only by a terminal, and a
+    single-command eval (or a kill inside the pipeline's FIRST stage) appends no `stage_finished`
+    row either, so BOTH look like `eval_seconds=0, stages=[]`. Silence is not evidence, so the slot
+    stays charged — the refund is the thing that gets given up, never the compute accounting.
+    (Since 2026-08-07 the stage rows are appended once per ATTEMPT rather than inside the terminal's
+    own write-lock block, so a killed MULTI-stage eval past its first stage does now leave evidence.
+    That only ever removes refunds, and it cannot rescue this case, which has no evidence at all.)
     """
 
     unpromised = _spec_node(0, eval_start_boundary=False)
@@ -314,7 +317,11 @@ def _crash_a_speculative_evaluation(tmp_path) -> tuple[Path, int]:
 
     The interrupted node is left exactly as a crash leaves it: `pending`, no terminal, no charged
     eval seconds and no `stage_finished` row — byte-indistinguishable, before this test existed,
-    from a build that was never dispatched at all.  Returns the run dir and the node id.
+    from a build that was never dispatched at all.  (The driver runs the TOY task, whose eval is a
+    single command with no pipeline, so there are no stage rows to leave; a killed MULTI-stage eval
+    past its first stage does leave them since 2026-08-07 — see `engine/evaluate.py`. That is the
+    strictly fail-closed direction and does not weaken this case, which is the one with no evidence
+    at all.)  Returns the run dir and the node id.
     """
 
     run_dir = tmp_path / "crash-run"

@@ -736,8 +736,11 @@ class Node(BaseModel):
     # append a `node_eval_started` row before any sandbox work — so for such a node the ABSENCE of one
     # is evidence, not an assumption. `eval_started` is that row, folded. Together they are what makes
     # "this build never ran" survive a crash: the log used to charge evaluation cost only at the
-    # terminal, and `stage_finished` rows are appended inside the terminal's own write-lock block, so a
-    # process killed mid-training left a node byte-identical to one that was never dispatched. Both are
+    # terminal, and `stage_finished` rows used to be appended inside the terminal's own write-lock block
+    # too (they moved into the attempt loop on 2026-08-07 — see `engine/evaluate.py` — which narrows the
+    # gap but does not close it: a single-command eval and a kill inside the FIRST stage still leave
+    # nothing), so a process killed mid-training left a node byte-identical to one that was never
+    # dispatched. Both are
     # fold-internal (`exclude=True`) and reader-defaulted, so an old log folds byte-identically — and,
     # carrying no boundary promise, is refused a refund rather than granted one on no evidence.
     eval_start_boundary: bool = Field(default=False, exclude=True)
@@ -1549,10 +1552,15 @@ def is_unevaluated_speculative_discard(state: "RunState", node: Node) -> bool:
       narrow refund;
     * the folded execution evidence CORROBORATES it: zero charged eval seconds and no
       ``stage_finished`` row.  Any evidence that the sandbox actually started outvotes the marker.
-      (Kept, though it is now the WEAK half of the proof: a killed evaluation charges no seconds and
-      appends no stage row — ``stage_finished`` is written inside the terminal's own write-lock block
-      and cost is charged only by a terminal — so this pair alone can never see an interrupted eval.
-      It still catches a writer that stamps the marker on a node the log shows really ran.)
+      (Kept, and it got STRONGER on 2026-08-07 without moving: it used to be the WEAK half because
+      ``stage_finished`` was written inside the terminal's own write-lock block and cost is charged
+      only by a terminal, so a killed evaluation left neither and this pair could never see an
+      interrupted eval.  ``engine/evaluate.py`` now appends the stage rows once per ATTEMPT, inside
+      the loop — a process killed mid-pipeline can leave stage rows with no terminal, and those rows
+      now VETO a refund.  Strictly fail-closed: it only ever removes refunds, never grants one, and
+      the load-bearing pair above is untouched — a build discarded before dispatch never enters
+      ``_evaluate`` at all, so it has no stage row under either writer.
+      It still also catches a writer that stamps the marker on a node the log shows really ran.)
 
     Deliberately NOT keyed on ``reason='superseded'`` alone: ordinary build/reset races use the same
     reason and remain charged.  Absence of a node workdir on disk is not evidence at all — replay
