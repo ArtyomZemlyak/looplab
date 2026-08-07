@@ -1289,11 +1289,12 @@ function StageBlock({ s, t0, total, runId }) {
 }
 
 // The ONE affordance every bounded trace surface uses to reveal its earlier steps. It replaces the
-// `↧ load more` button the Inspector and the chat feed each carried, and the sentence that button's
-// absence used to print ("The window is at its maximum") — which was not even true where it appeared
-// most: `loadMore` is null both at the ceiling AND on any surface with no pager wired, so a node
-// whose entire 258-span trace the server had already read was told its window was maximal while
-// eight doublings were still available.
+// `↧` pager button the Inspector and the chat feed each carried, and the sentence that button's
+// ABSENCE used to print — the one claiming the window could go no further. That sentence was not
+// even true where it appeared most: it was keyed on "there is no pager", which is also the state of
+// any surface with no pager wired, so a node whose entire 258-span trace the server had already read
+// was told its window was maximal while eight doublings were still available (measured on
+// runs/rubert-dr-0807 node 2: 256 of 308 steps at the default, all 308 at ONE doubling).
 //
 // What renders, per traceScrollModel state:
 //   settled   → nothing at all
@@ -1574,11 +1575,12 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
   // `allOpen` is owned by the sticky Trace header (so collapse-all lives in the pinned bar). It's folded
   // into each band's key so a collapse/expand-all click remounts them at the new default; a live poll
   // (allOpen unchanged) keeps the key stable, so per-band toggles survive the 4s refresh.
-  // Notice + control go ABOVE the bands, because that is where the gap is: every cap in this
-  // projection keeps the newest TAIL, so the missing stages are the OLDEST and the thread's first
-  // visible band is the truncation boundary. (The Dock's live tail puts "load earlier" at the top for
-  // the same reason.) Directly under the sticky header is also simply where it gets found.
-  return <div className="conv">{windowNotice}{loadMore}
+  // The sentinel goes ABOVE the bands, because that is where the gap is: every cap in this projection
+  // keeps the newest TAIL, so the missing stages are the OLDEST and the thread's first visible band is
+  // the truncation boundary. Scrolling UP is therefore the gesture that means "show me earlier", and
+  // the trigger has to sit where that gesture ends. (The Dock's live tail puts "load earlier" at the
+  // top for the same reason.)
+  return <div className="conv">{reach}
     {stages.map((st, i) => <ConvStage key={`${st.trace_id || ''}:${st.label || ''}:${st.start || i}:${allOpen}`}
                                       st={st} defaultOpen={allOpen} log={logFor(st.label)} live={working} />)}
     {logs.run_setup ? <RunSetupLog text={logs.run_setup} /> : null}

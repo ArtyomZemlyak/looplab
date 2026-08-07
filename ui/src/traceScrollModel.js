@@ -32,11 +32,11 @@ export const TRACE_SCROLL_LOADING_LABEL = 'Loading earlier steps…'
 // container, so removing every focusable path is how infinite scroll makes earlier steps
 // unreachable without a mouse.
 export const TRACE_SCROLL_REACH_LABEL = 'Load earlier steps'
-// Only ever shown for TRACE_SCROLL_BOUNDED, and deliberately WITHOUT the old
-// "The window is at its maximum" sentence. That sentence was printed whenever there was no pager —
-// including at the 512 default, where a node whose whole 258-span trace the server had already read
-// was told its window was maximal and eight doublings were still available (measured on
-// runs/rubert-dr-0807 node 2: 256 of 308 steps at the default, all 308 at one doubling).
+// Only ever shown for TRACE_SCROLL_BOUNDED, and deliberately NOT the old sentence about the window
+// being maximal. That one was printed whenever there was no pager — including at the 512 default,
+// where a node whose whole 258-span trace the server had already read was told its window was
+// maximal while eight doublings were still available (measured on runs/rubert-dr-0807 node 2:
+// 256 of 308 steps at the default, all 308 at ONE doubling).
 export const traceScrollBoundedSuffix = 'No more of it can be loaded here.'
 
 const positive = value => Number.isSafeInteger(value) && value > 0
