@@ -109,9 +109,14 @@ class EvalDispatchMixin:
     def _repo_deps_root(self) -> str:
         """The directory whose dependency declaration governs this run: the first editable repo's
         SOURCE dir. The SAME rule `_do_run_setup` uses for its cwd, and deliberately so — the derived
-        command is `-r <basename>`, which only resolves if it runs where the file was found."""
+        command is `-r <basename>`, which only resolves if it runs where the file was found.
+
+        EMPTY when there is no editable repo, and `find_declaration` answers "nothing" for an empty
+        root. `_do_run_setup` falls back to the run dir instead, because a cwd must exist for an
+        operator's arbitrary command — but a run DIRECTORY is not a repo, and reading a declaration
+        out of one would let a stray `requirements.txt` beside `events.jsonl` govern installs."""
         eds = (self._repo_spec or {}).get("editables", [])
-        return eds[0]["path"] if eds else str(self.run_dir)
+        return eds[0]["path"] if eds else ""
 
     def _node_deps_root(self, workdir) -> str:
         """Where the SAME repo's declaration lives inside a node's workdir — the mirror of
@@ -312,7 +317,10 @@ class EvalDispatchMixin:
     def _do_run_setup(self, cmd: list) -> None:
         from looplab.core.models import run_setup_key
         from looplab.runtime.sandbox import _run_argv
-        cwd = self._repo_deps_root()     # ONE rule, shared with the declaration reader (see it)
+        # ONE root rule, shared with the declaration reader — but an arbitrary operator command
+        # needs a cwd that EXISTS, so a repo-less run falls back to the run dir (see the docstring
+        # there for why the declaration reader must NOT make that fallback).
+        cwd = self._repo_deps_root() or str(self.run_dir)
         to = float((self._eval_spec or {}).get("run_setup_timeout", 1800.0))
         # A prior process appended this command's `run_setup_started` and never appended its finish:
         # its side effects may be complete, partial, or absent and no receipt can say which. The

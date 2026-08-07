@@ -493,7 +493,11 @@ def find_declaration(root) -> Declaration:
     behaviour (the bare-name crash-time installer), never take down a run at setup."""
     import hashlib
     from pathlib import Path
-    base = Path(str(root or "."))
+    if not str(root or "").strip():
+        # An EMPTY root is "there is no repo here", not "look in the process cwd". Defaulting to `.`
+        # would let whatever directory the engine happens to run from govern a run's installs.
+        return Declaration()
+    base = Path(str(root))
     observed = tuple(n for n in OBSERVED_DECLARATION_FILES if (base / n).is_file())
     for name in DECLARATION_FILES:
         p = base / name
