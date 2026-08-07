@@ -426,3 +426,96 @@ def test_a_failed_merge_does_not_consume_the_cadence_window(monkeypatch):
 
     # Baseline untouched, so the very next pass on the same board still runs.
     assert getattr(eng, "_last_hyp_merge_n", -1) == -1
+
+
+# ------------------------------------------------ the Card session latches on the SPAWN, not the ASK
+
+class _StartProbe:
+    """A task group that records what was started without running it."""
+
+    def __init__(self):
+        self.started = []
+
+    def start_soon(self, func, *args):
+        self.started.append((func, args))
+
+
+def _spawn_host(*, on=True, repeat=True, trigger="cadence"):
+    async def loop(_trigger):
+        return None
+
+    return types.SimpleNamespace(
+        concurrent_research=on,
+        _concurrent_research_repeat=repeat,
+        deep_researcher=object(),
+        _due_research_trigger=lambda _state: trigger,
+        _research_overlap_loop=loop,
+        _research_attempt_step=lambda *_a, **_k: None,
+    )
+
+
+def test_spawn_research_reports_whether_it_actually_started_anything():
+    """The return value IS the Card session's latch, so every refusal must be reported as False.
+
+    Latching on the ASK rather than the SPAWN is what made `concurrent_research` a no-op on the
+    workload it exists for: the session asks once, at its first admission (node-count 1), while
+    `deep_research_every` is 3 — measured on `runs/rubert-dr-0807`, zero research rows on a 3-node,
+    hours-per-node GPU run with the feature on.
+    """
+    state = types.SimpleNamespace()
+
+    off = _spawn_host(on=False)
+    tg = _StartProbe()
+    assert Engine._spawn_research(off, tg, state) is False
+    assert tg.started == []                                  # nothing started -> latch must stay open
+
+    not_due = _spawn_host(trigger=None)
+    tg = _StartProbe()
+    assert Engine._spawn_research(not_due, tg, state) is False
+    assert tg.started == []
+
+    repeating = _spawn_host(repeat=True)
+    tg = _StartProbe()
+    assert Engine._spawn_research(repeating, tg, state) is True
+    assert [args for _fn, args in tg.started] == [("cadence",)]
+
+    one_shot = _spawn_host(repeat=False)
+    tg = _StartProbe()
+    assert Engine._spawn_research(one_shot, tg, state) is True
+    assert len(tg.started) == 1
+
+
+def test_card_session_binds_the_research_latch_to_the_spawn_result():
+    """Both `research_spawned` writers must take their value FROM `_spawn_research`.
+
+    Tier-3 (AST, so a comment cannot satisfy it) and deliberately narrow: it is the exact mutation
+    that reintroduces the defect — a constant `True` (or `bool(evals)`) beside a bare call, which
+    closes the window on a NOT-DUE answer.  The behavioural half of the property is the return
+    contract driven above; this half is what stops the caller from ignoring it.
+    """
+    import ast
+    import inspect
+
+    import looplab.engine.speculation as spec
+
+    tree = ast.parse(inspect.getsource(spec))
+    writes = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Attribute) and target.attr == "research_spawned"
+    ]
+    assert len(writes) == 2, "both Card-session research latch sites must be assignments"
+
+    for node in writes:
+        calls = [inner for inner in ast.walk(node.value) if isinstance(inner, ast.Call)]
+        assert any(
+            isinstance(call.func, ast.Attribute) and call.func.attr == "_spawn_research"
+            for call in calls
+        ), "research_spawned must be latched from the _spawn_research result, never from a constant"
+
+    # …and the constructor must not pre-latch it either (the `research_spawned=bool(evals)` shape).
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == "CardSession":
+            assert not [kw for kw in node.keywords if kw.arg == "research_spawned"]

@@ -3303,7 +3303,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return True
         return False
 
-    def _spawn_research(self, tg, state: RunState) -> None:
+    def _spawn_research(self, tg, state: RunState) -> bool:
         """Overlap a DUE deep-research 'think' with the in-flight eval(s), INDEPENDENT of max_parallel.
         The memo is computed on a `state` snapshot in a worker thread, then RECORDED IMMEDIATELY when
         research finishes — NOT coupled to the eval completing — so its directions steer the very next
@@ -3317,15 +3317,28 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         byte-identical). With `concurrent_research_repeat` on, the overlapped think RE-RUNS on an
         adaptive time cadence for the whole eval window (`_research_overlap_loop`) so a multi-day
         training doesn't leave the reasoning agents idle after one memo — the caller cancels the
-        loop when the evals join (see `_dispatch_evals`)."""
+        loop when the evals join (see `_dispatch_evals`).
+
+        RETURNS whether a research task was actually started, because the Card session's
+        `research_spawned` latch is set from it. The latch used to be set unconditionally by the
+        caller, which turned "we already started research for this eval window" into "we already
+        ASKED whether research was due, once". Those differ exactly when the answer was NO — and on a
+        long-eval GPU run that is the normal case: the cadence is counted in NODES, so the first
+        admission of a session sits at `n=1` while `deep_research_every` is 3. Measured on
+        `runs/rubert-dr-0807` (12-node budget, `deep_research_every=3`, `concurrent_research=True`,
+        hours per node): the session asked at n=1, latched, then admitted n=2 and n=3 without ever
+        re-asking, and the run recorded ZERO `research_attempted`/`research_completed` rows. The
+        serial `_maybe_deep_research` could not cover it either — it requires no pending nodes, and
+        under speculation there always are some. So the one feature built to use the idle reasoning
+        agents during a multi-hour training never ran on the workload it exists for."""
         if not self.concurrent_research:
-            return
+            return False
         # repeat is a continuation of a research episode, not an independent timer.
         # Requiring a due cadence/strategist trigger here keeps ``deep_research_every=0`` truly
         # manual-only and prevents a long eval from silently starting paid research on its own.
         rtrig = self._due_research_trigger(state)
         if rtrig is None:
-            return
+            return False
         # Defensive getattr: some tests build a partial Engine (no __init__) — a missing knob means
         # the safe one-shot default (== today), exactly like the train-monitor gates.
         if getattr(self, "_concurrent_research_repeat", False):
@@ -3333,7 +3346,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # so the FIRST pass fires promptly (matching one-shot promptness). `_due_research_trigger`
             # already rejects a missing model, so an unavailable stage cannot spin stub memos either.
             tg.start_soon(self._research_overlap_loop, rtrig)
-            return
+            return True
 
         async def _bg(snap=state, trig=rtrig):
             # Best-effort: an error in the advisory research MUST NOT propagate — it shares the eval's
@@ -3354,6 +3367,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             except Exception:  # noqa: BLE001 — never let deep research disturb the eval
                 pass
         tg.start_soon(_bg)
+        return True
 
     def _research_repeat_cadence(self) -> float:
         """Base interval (seconds) between REPEATED concurrent-research passes. Research is expensive
