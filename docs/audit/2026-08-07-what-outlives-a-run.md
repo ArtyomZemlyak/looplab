@@ -42,7 +42,7 @@ distiller.
 | Concept capsules | `concept_capsules.jsonl` | **3** | — | against 46 runs / 15 tagged |
 | Concept aliases | `concept_aliases.jsonl` | **absent** | — | zero governance ever applied |
 | Auto-skills | `skills/` | **50** | — | see §2.10 |
-| Knowledge | `looplab-knowledge/` | **0 files** | — | `kb_search`'s index is 9 cases and nothing else |
+| Knowledge | `knowledge/` | **0 files** | — | both the default `~/.looplab/knowledge` (absent) and `looplab-knowledge/` (empty); `kb_search`'s index is 9 cases and nothing else |
 
 ### 1.1 Lessons: what the 154 rows are
 
@@ -151,9 +151,12 @@ a batch can fail to land — a `memory_dir` pointing somewhere else, a store rep
 whole tree wiped — is silent, and the run's own log keeps saying `n_lessons: 13` forever. Nothing
 reconciles the two. There is no "N lessons distilled, M rows durable" check anywhere.
 
-This also explains the split in the corpus: 46 runs wrote to `~/.looplab/memory` and 2 to
-`/home/jovyan/data/looplab-memory`. The store the UI reads is a promoted copy, and nothing in the
-product records which store a run wrote to.
+It also makes the corpus hard to reason about at all. Across the 49 local run dirs,
+`config.snapshot.json` names four different `memory_dir`s: 21 runs wrote to `~/.looplab/memory`, 2 to
+`/home/jovyan/data/looplab-memory`, 5 to per-test tmp dirs, 1 to a run-local `mem/`, and 20 recorded
+`None` (no cross-run memory at all). The store the UI reads is a promoted copy of the first. Each run
+*does* pin its own `memory_dir` in its snapshot — but nothing joins the two directions, so "which
+runs contributed to this store" is not answerable from either end.
 
 ### R4 — A crash-only run leaves nothing in two of the three tiers, and nothing at all offline.
 
@@ -405,6 +408,16 @@ passes. `tests/test_phase3_memory.py::test_agentic_merge_dedups_evidence_by_run_
 red on a revert of the production line alone (`assert 2 == 1`).
 
 This closes one contributing path to R9. It does not close R9 — see the note there.
+
+A second, unrelated red test was found on master while running the affected suite and is fixed in
+the same commit: `concept_governance_snapshot` grew a `withdrawn` key (8a0afa43) and
+`tests/test_concept_registry.py::test_governance_snapshot_of_missing_directory_is_empty_and_read_only`
+was not moved with it. Rather than re-pin the literal, the test now also asserts that the
+missing-directory projection and a real one have the same key SET — the function builds those two
+dicts as separate hand-written literals, and since callers pass the revisions back as a CAS approval
+receipt, a key present in only one of them is a silently weaker approval rather than an error.
+Verified non-vacuous by mutating a throwaway copy of the tree: adding a field to the transactional
+branch alone fails the new assertion (`Extra items in the left set: 'new_field'`).
 
 ## 7. If only three things get acted on
 
