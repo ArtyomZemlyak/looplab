@@ -286,8 +286,11 @@ class WorkspaceSeeder:
         Deliberately the per-editable `protect` list and NOT `RepoTask._protected_names()`: that one
         also folds in the read-only DATA MOUNT names (materialized as symlinks by the caller — a copy
         would shadow the mount) and the eval's metric-FILE reader paths (files the eval WRITES, which
-        do not exist in the source at all). Tree entries (`dir/**`) are skipped for the same reason —
-        the only ones the task builder emits are those data mounts.
+        do not exist in the source at all). Tree entries (`dir/**`) are refused BEFORE the glob, and
+        the ordering is the point rather than the result: `is_file()` below already drops what a
+        `**` match yields on a Python where it means directories only (3.13 changed it to yield files
+        too), but the WALK is the cost — `protect: ["checkpoints/**"]` over a heavy untracked
+        directory would otherwise be re-walked once per node, for nothing.
 
         A glob is expanded against the SOURCE; a `protect` entry that matches nothing is silently
         skipped, because protecting a file the EVAL creates is legal and common. Everything else fails

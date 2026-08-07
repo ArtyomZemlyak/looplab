@@ -136,28 +136,59 @@ def test_seeding_protected_files_never_shadows_or_writes_through_a_mount(tmp_pat
     assert not (real / "labels.csv").exists()           # the original dataset was not written into
 
 
-def test_tree_protect_entries_and_out_of_repo_matches_are_skipped(tmp_path):
-    """A `dir/**` entry is a mounted data source (added by `RepoTask._protected_names`), never a file
-    to copy; and a protected name whose match resolves outside the editable source is dropped rather
-    than dragged into the workdir."""
+def test_out_of_repo_and_absent_protect_entries_are_skipped(tmp_path):
+    """A protected name whose match resolves outside the editable source is dropped rather than
+    dragged into the workdir, and an entry matching nothing is silently fine — protecting a file the
+    EVAL creates is legal, so a "missing" protect entry must not be an error here (the preflight
+    below is what makes the one case that matters visible)."""
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret.py").write_text("print('secret')\n", encoding="utf-8")
     repo = _git_repo(tmp_path / "repo", {"train.py": "print('t')\n"})
     (repo / "escape.py").symlink_to(outside / "secret.py")
-    (repo / "tree").mkdir()
-    (repo / "tree" / "a.txt").write_text("a\n", encoding="utf-8")
 
     seeder = _engine(tmp_path, RepoTask(
         id="p", direction="max", editable_path=str(repo),
         eval=EvalSpec(command=[sys.executable, "train.py"], metric=_M))).workspace
     wd = tmp_path / "ws"
     wd.mkdir()
-    copied = seeder.seed_protected_files(repo, wd, ["tree/**", "escape.py", "../outside/secret.py",
-                                                    "absent.py"])
-    assert copied == []
-    assert not (wd / "tree").exists() and not (wd / "escape.py").exists()
-    assert not (wd / "secret.py").exists() and not (tmp_path / "outside" / "secret.py").is_symlink()
+    assert seeder.seed_protected_files(
+        repo, wd, ["escape.py", "../outside/secret.py", "absent.py"]) == []
+    assert not (wd / "escape.py").exists() and not (wd / "secret.py").exists()
+
+
+def test_a_tree_protect_entry_is_skipped_without_walking_the_tree(tmp_path):
+    """`dir/**` is the spelling `RepoTask._protected_names` gives a MOUNTED data source, and an
+    operator may write it for a heavy untracked directory of their own. Its cost is the point: it is
+    refused BEFORE `Path.glob`, so seeding never walks a checkpoint/dataset tree once per node.
+
+    The `is_file()` filter would also drop the matches on a Python where `**` yields directories
+    only — which is why the walk, not the result, is what this observes. (3.13 changed `**` to yield
+    files too, so on that interpreter the result differs as well; this assertion holds on both.)"""
+    repo = _git_repo(tmp_path / "repo", {"train.py": "print('t')\n"})
+    heavy = repo / "ckpt" / "a" / "b"
+    heavy.mkdir(parents=True)
+    (heavy / "w.bin").write_text("w\n", encoding="utf-8")
+
+    walked: list[str] = []
+    real_glob = Path.glob
+
+    def _counting_glob(self, pattern, *a, **kw):
+        walked.append(pattern)
+        return real_glob(self, pattern, *a, **kw)
+
+    seeder = _engine(tmp_path, RepoTask(
+        id="p", direction="max", editable_path=str(repo),
+        eval=EvalSpec(command=[sys.executable, "train.py"], metric=_M))).workspace
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    Path.glob = _counting_glob
+    try:
+        copied = seeder.seed_protected_files(repo, wd, ["ckpt/**"])
+    finally:
+        Path.glob = real_glob
+    assert copied == [] and walked == []
+    assert not (wd / "ckpt").exists()
 
 
 def test_a_glob_protect_entry_seeds_every_match(tmp_path):
@@ -208,13 +239,18 @@ def test_a_missing_EDITABLE_script_still_goes_to_the_eval_and_the_repair_loop(tm
     file the Developer may author — so the old path stands: the pipeline runs, the train stage's work
     is done and kept, and the failure is an ordinary repairable eval error. A preflight that fired
     here would turn every "the agent hasn't written its entrypoint yet" node into an operator
-    refusal, which is the whole normal workflow of a repo task."""
+    refusal, which is the whole normal workflow of a repo task.
+
+    The task protects a DIFFERENT file that really exists, so `protected_names` is non-empty: with an
+    empty list the check short-circuits before it ever consults the list, and this test would pass
+    against a preflight that fired on any missing script at all (measured — that mutation survived)."""
     repo = _git_repo(tmp_path / "repo", {
         "mk.py": _MARKER,
+        "keeper.py": "print('keeper')\n",
         "looplab_stages.json": json.dumps(
             {"stages": [{"name": "train", "command": [sys.executable, "mk.py"]}]}),
     })
-    eng = _engine(tmp_path, _staged_task(repo, []))
+    eng = _engine(tmp_path, _staged_task(repo, ["keeper.py"]))
     anyio.run(eng.run)
 
     errors = _node_errors(tmp_path / "run")
