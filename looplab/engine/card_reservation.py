@@ -806,6 +806,35 @@ class CardReservationMixin:
         # Nothing was staged, so the Card simply does not exist yet; the next proposal turn re-plans it.
         return retry_tail_cas(self.store, _plan, on_exhaust=lambda: None)
 
+    def _card_inventory_enabled(self) -> bool:
+        """Whether this run MAINTAINS a Card queue and selects from it.
+
+        Deliberately NOT `_speculation_enabled()`, and the difference is the whole point.
+        `_stage_card_creates` below is the only writer that puts a Card into durable INVENTORY — a
+        `card_added` with no `node_building` beside it, i.e. the only shape that can ever satisfy
+        `_strictly_selection_ready`. Until 2026-08-07 its one production call site sat inside
+        `if self._speculation_enabled():`, so with prefetch off every `card_added` was minted by
+        `_reserve_node_build` in the same crash-atomic batch as the `node_building` that claimed it:
+        work-owned the instant it existed, never selectable, and `card_next_actions` fell through to
+        `policy.next_actions`. MEASURED over the corpus by folding every observable prefix boundary:
+        the seven runs with `card_driven_selection=true` and no pinned depth produced **0**
+        `selection_ready` cards across 27 nodes, while the four speculation runs produced 24.
+
+        That coupling was invisible because `speculation_depth` ships as `-1` (AUTO) and AUTO usually
+        resolves positive. But AUTO settles ITSELF to 0 in three documented cases — a build whose
+        roles call no LLM, any policy other than `greedy`, and a run directory with no run id — and
+        the one-way ratchet can move it to 0 mid-run. In each of those the run silently changed
+        SELECTOR while `run_started` still pinned `card_driven_selection: true`, with no event saying
+        so. `docs/guide/configuration.md` and `docs/guide/concepts.md` both promise the Card queue
+        owns macro-action selection whenever this flag is true, with no mention of the depth; this
+        predicate is what makes that true.
+
+        The gate is exactly the flag `_select_actions` reads. Nothing else belongs here: minting a
+        Card is main-task work in the capped `build` LLM lane, needs no isolated role pair, no
+        calibration receipt and no second Developer — all of which are prefetch concerns.
+        """
+        return bool(getattr(self, "card_driven_selection", False))
+
     @in_llm_lane("build")
     def _stage_card_creates(self, actions: list[dict], state: RunState) -> list[str]:
         """Turn raw policy creates into durable, selection-ready Card receipts only.
@@ -1186,7 +1215,10 @@ class CardReservationMixin:
                 "(card_build_done:producer_failed), so only the serial Developer can build it")
         if (refusal := getattr(self, "_card_claim_refusal", None)):
             notes.append(f"the serial Card claim refused: {refusal}")
-        if not card_ids and self._speculation_enabled():
+        # `_card_inventory_enabled`, not `_speculation_enabled`: the raw-proposal staging lane runs
+        # for any Card-driven run since 2026-08-07, so a prefetch-off run that stalls there must get
+        # the same named cause instead of an empty reason string.
+        if not card_ids and self._card_inventory_enabled():
             notes.append("the raw-proposal staging lane produced no durable Card")
         return "; ".join(notes)
 

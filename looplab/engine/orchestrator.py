@@ -1730,7 +1730,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return "continue", state, _no_mint_turns
         self._create_paused = False   # set by _create_node's developer_crash circuit-breaker
         self._pending_create_pause = []   # …and its worker-side request queue (see _request_create_pause)
-        if self._speculation_enabled():
+        # TWO GATES, not one. INVENTORY (minting selection-ready Cards) belongs to
+        # `card_driven_selection`; PREFETCH (electing an isolated producer to build the next Card
+        # ahead of time) belongs to `speculation_depth`. Both halves used to sit under
+        # `_speculation_enabled()`, which made the queue's only writer reachable only through the
+        # prefetch lane — see `_card_inventory_enabled` for what that measured.
+        if self._card_inventory_enabled():
             receipt_owned = [META_CARD_ID in action for action in creates]
             # One turn has one authority. A mixed lane could stage new work while claiming a
             # stale selection snapshot, so retain the serial spine's existing fail-closed rule.
@@ -1741,6 +1746,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # Raw policy actions do not yet name executable work. Author their concrete
                 # Ideas and durable Cards now, but deliberately leave every Node slot unowned;
                 # the next fresh fold must select them before a producer can be requested.
+                # (`speculative_raw_actions` keeps its name: it is the COUNTERFACTUAL raw lane —
+                # "what would the policy do if no durable Card owned this?" — and it is pure
+                # selection over folded state with no dependency on the prefetch lane at all.)
                 stageable = speculative_raw_actions(
                     state,
                     self.policy,
@@ -1754,6 +1762,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # Author one work item at a time. The live depth is filled by the isolated
                     # steady-state proposer while eval runs; staging an unreserved wide seed
                     # batch here only creates stale inventory if the first fast eval moves best.
+                    # With prefetch OFF there is no steady-state proposer, and one-at-a-time is
+                    # still right: the next turn selects this Card and builds it serially, so the
+                    # queue is exactly one node deep and no inventory can go stale unbuilt.
                     one = stageable[:1]
                     if self._stage_card_creates(one, state):
                         return "continue", state, _no_mint_turns
@@ -1768,25 +1779,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # Unsupported/custom scorer semantics retain the exact serial compatibility
                 # path below; a Card it cannot score must never be staged/reused in a loop.
 
-            # A positive depth is useful only with a genuinely isolated role pair. If the
-            # configured factory cannot provide one, fall through to the safe serial Card
-            # claim below. Otherwise request/session is the sole build path: a lost selection
-            # CAS restarts from a fresh fold and never silently converts to serial execution.
-            serial_fallback = any(
-                self._card_requires_serial_fallback(action.get(META_CARD_ID))
-                for action in creates
-            )
-            if (all(receipt_owned)
-                    and self._producer_role_pair() is not None
-                    and not serial_fallback):
-                if self._request_card_build():
-                    await self._run_card_session(
-                        [],
-                        fold(self.store.read_all()),
-                        max_es,
-                        None if max_s is None else start + max_s,
-                    )
-                return "continue", state, _no_mint_turns
+            if self._speculation_enabled():
+                # A positive depth is useful only with a genuinely isolated role pair. If the
+                # configured factory cannot provide one, fall through to the safe serial Card
+                # claim below. Otherwise request/session is the sole build path: a lost selection
+                # CAS restarts from a fresh fold and never silently converts to serial execution.
+                serial_fallback = any(
+                    self._card_requires_serial_fallback(action.get(META_CARD_ID))
+                    for action in creates
+                )
+                if (all(receipt_owned)
+                        and self._producer_role_pair() is not None
+                        and not serial_fallback):
+                    if self._request_card_build():
+                        await self._run_card_session(
+                            [],
+                            fold(self.store.read_all()),
+                            max_es,
+                            None if max_s is None else start + max_s,
+                        )
+                    return "continue", state, _no_mint_turns
+            # With prefetch off, a receipt-owned lane falls through to `_claim_existing_card_builds`
+            # below — the SAME serial Card claim the prefetch path already falls back to whenever the
+            # role factory cannot isolate a pair. So "Cards are minted, selected, then built" is one
+            # code path with or without speculation; only who builds them differs.
         # Variant-1 parallel BUILD: seed/explore DRAFTS are independent, so build (research + code)
         # up to `parallel_build` at once, each on its OWN pooled (researcher, developer) pair + its
         # own pre-reserved id (reserved serially under _id_lock, then fanned out in a task-group of
