@@ -1,7 +1,7 @@
 // The DECISIONS behind "reveal earlier steps by scrolling" — the trace surfaces' half of doc 25's
 // pure-model-beside-its-React-half rule. No React, no I/O, no DOM: `node --test` drives every rule
 // here directly, and `hooks.js::useTraceScroll` + `Inspector.jsx` keep only the choreography (the
-// IntersectionObserver, the focus affordance, the scroll anchor, setState ordering).
+// IntersectionObserver, the scroll re-arm listener, the focus affordance, setState ordering).
 //
 // WHY this exists at all. The Inspector used to print a bounded projection's receipt and a
 // `↧ load more` button, and the button climbed a window that stopped at a ceiling — at which point
