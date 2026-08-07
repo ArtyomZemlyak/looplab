@@ -2140,8 +2140,13 @@ class SpeculationMixin:
                         selection_changed = True
                     break
             if not session.research_spawned:
-                self._spawn_research(session.bg_task_group, current)
-                session.research_spawned = True
+                # Latch on the SPAWN, never on the ask. `_spawn_research` answers "was research due
+                # AND started?", and a session that asked at n=1 (not due, `deep_research_every`=3)
+                # must keep asking as it admits n=2, n=3, … — see that method's docstring for the
+                # measured cost of latching on the ask instead. Once it does start, the latch still
+                # holds for the rest of the window, so there is never a second overlap loop.
+                session.research_spawned = bool(
+                    self._spawn_research(session.bg_task_group, current))
             self._register_eval_resource_reservation(
                 chosen.id, chosen.attempt, reservation,
             )
@@ -2332,13 +2337,14 @@ class SpeculationMixin:
             max_eval_seconds=max_es,
             wall_deadline=wall_deadline,
             notify=send,
-            research_spawned=bool(evals),
         )
 
         async with anyio.create_task_group() as bg_tg:
             session.bg_task_group = bg_tg
             if evals:
-                self._spawn_research(bg_tg, state)
+                # Same rule as the admission latch below: a session entered with pending evals gets
+                # its one prompt research ask here, but a NOT-DUE answer must not close the window.
+                session.research_spawned = bool(self._spawn_research(bg_tg, state))
             try:
                 async with send, receive, anyio.create_task_group() as task_group:
                     session.task_group = task_group
