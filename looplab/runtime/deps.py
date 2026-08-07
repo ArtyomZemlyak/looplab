@@ -422,6 +422,27 @@ def _canon_dist(name: str) -> str:
     return re.sub(r"[-_.]+", "-", str(name or "").strip()).lower()
 
 
+def _join_continuations(text: str) -> list[str]:
+    """Physical lines folded into LOGICAL ones (`\\` at end of line joins with the next).
+
+    Shared by the parser and the REDUCER below, and that sharing is the point: the reducer removes a
+    requirement by deciding, line by line, what the parser decided. Two copies of this loop would
+    let a continuation-split requirement be parsed as one line and dropped as two, leaving half a
+    version specifier behind in the file we hand back to pip."""
+    out: list[str] = []
+    pending = ""
+    for raw in (text or "").splitlines():
+        line = pending + raw
+        if line.rstrip().endswith("\\"):
+            pending = line.rstrip()[:-1]
+            continue
+        pending = ""
+        out.append(line)
+    if pending:                       # a trailing continuation with no successor line
+        out.append(pending)
+    return out
+
+
 def parse_requirements(text: str) -> tuple[dict[str, str], list[str]]:
     """`(canonical dist name -> the declared requirement LINE, verbatim)`, and the non-requirement
     directive lines the file also carried.
@@ -436,18 +457,7 @@ def parse_requirements(text: str) -> tuple[dict[str, str], list[str]]:
     version specifier."""
     pins: dict[str, str] = {}
     directives: list[str] = []
-    joined: list[str] = []
-    pending = ""
-    for raw in (text or "").splitlines():
-        line = pending + raw
-        if line.rstrip().endswith("\\"):
-            pending = line.rstrip()[:-1]
-            continue
-        pending = ""
-        joined.append(line)
-    if pending:                       # a trailing continuation with no successor line
-        joined.append(pending)
-    for line in joined:
+    for line in _join_continuations(text):
         # Only a `#` at line start or after whitespace is a comment: `pkg @ https://h/p#egg=pkg`
         # carries a fragment that is part of the URL, and stripping it would corrupt the requirement.
         line = _REQ_COMMENT_RE.sub("", line).strip()
@@ -554,6 +564,96 @@ def declared_requirement(module: str, decl: Optional[Declaration]) -> Optional[s
         if line:
             return line
     return None
+
+
+# --- When ONE declared line cannot be satisfied -------------------------------------------------
+# A real repo's requirements.txt carries lines that no index reachable from this box serves: a
+# private package, a withdrawn release, an internal mirror nobody configured. Live and measured
+# 2026-08-07 — `/home/jovyan/data/vectorizer/dense-retrieval/requirements.txt:24` declares
+# `ecom-mlflow`, `pip download` answers "Could not find a version that satisfies the requirement
+# (from versions: none)", and there is no PIP_INDEX_URL and no pip.conf anywhere on the box.
+#
+# Treating that the same as "the install could not run" stops the lab over one line. They are
+# different failures and only the second is a reason to refuse to start, so the run-setup path
+# retries ONCE without exactly the unsatisfiable lines and records which, per line, verbatim from
+# pip. See `engine/eval_dispatch.py::_do_run_setup` for the policy statement and its limits.
+#
+# pip reports an unresolvable requirement two ways and prints BOTH for the same failure — the
+# resolver's complaint and its conclusion. Scanning both and de-duplicating names it once.
+_UNSATISFIED_RES = (
+    re.compile(r"Could not find a version that satisfies the requirement (\S+)[^\n]*"),
+    re.compile(r"No matching distribution found for (\S+)"),
+)
+# One pip run naming more distinct unresolvable requirements than this is not a stale line, it is a
+# broken index or an offline box — and that is a whole-install failure, which stays fatal.
+UNSATISFIED_CAP = 25
+
+# A directive naming another PATH (`-r base.txt`, `-e .`, `-f ./wheels`) resolves RELATIVE TO THE
+# FILE CONTAINING IT. A reduced copy written anywhere else would resolve those against the wrong
+# directory — silently installing something different, or nothing. So a declaration carrying one is
+# never reduced: it fails whole, which is the only honest outcome for a file we cannot faithfully
+# rewrite. Matched on the first token, so `--extra-index-url` (which starts with `-e`) is not caught
+# by the short-form rule below.
+PATH_BEARING_DIRECTIVES = ("-r", "--requirement", "-c", "--constraint", "-e", "--editable",
+                           "-f", "--find-links")
+_SHORT_PATH_DIRECTIVE_RE = re.compile(r"^-[rcef]")
+
+
+def unsatisfied_requirements(pip_output: str) -> dict[str, str]:
+    """`{canonical dist name -> the verbatim pip sentence}` for every requirement pip said it could
+    not resolve. Empty when pip failed for any other reason — a crash, a dead index, a non-zero exit
+    with no per-requirement complaint — and the caller treats THAT as fatal, unchanged.
+
+    The sentence is pip's own, quoted rather than paraphrased: the receipt has to say why a
+    declaration was dropped in the words of the tool that refused it, or a reader cannot tell a
+    stale line from a network outage."""
+    out: dict[str, str] = {}
+    for rx in _UNSATISFIED_RES:
+        for m in rx.finditer(pip_output or ""):
+            named = _REQ_NAME_RE.match(m.group(1))
+            if not named:
+                continue
+            out.setdefault(_canon_dist(named.group(1)), " ".join(m.group(0).split())[:300])
+            if len(out) >= UNSATISFIED_CAP:
+                return out
+    return out
+
+
+def can_reduce(decl: "Declaration") -> bool:
+    """True iff a reduced copy of `decl` would mean the same thing to pip somewhere else — i.e. the
+    file is self-contained (see `PATH_BEARING_DIRECTIVES`). Position-independent options
+    (`--index-url`, `--pre`, `--no-binary`) travel fine and do not block a reduction."""
+    if not decl.found or not decl.pins:
+        return False
+    for d in decl.directives:
+        tok = re.split(r"[\s=]", str(d).strip(), 1)[0]
+        if tok in PATH_BEARING_DIRECTIVES or _SHORT_PATH_DIRECTIVE_RE.match(tok):
+            return False
+    return True
+
+
+def reduced_requirements(text: str, drop) -> str:
+    """`text` with exactly the DROPped distributions' requirement lines removed.
+
+    Decided line by line with the SAME reader the parser uses (`_join_continuations` + the same
+    comment/name rules), so a requirement the parser saw as one logical line is dropped as one.
+    Directives, comments and blank lines are preserved verbatim — the file we hand pip differs from
+    the operator's in exactly the lines named, and a diff of the two is readable.
+
+    A dropped line is COMMENTED OUT rather than deleted, because `run_setup.log` records the file
+    pip actually read and an operator debugging a missing package should find the line there with
+    the reason next to it, not an absence."""
+    drop = {_canon_dist(d) for d in (drop or [])}
+    out: list[str] = []
+    for line in _join_continuations(text):
+        stripped = _REQ_COMMENT_RE.sub("", line).strip()
+        if stripped and not stripped.startswith("-"):
+            m = _REQ_NAME_RE.match(stripped)
+            if m and _canon_dist(m.group(1)) in drop:
+                out.append(f"# looplab dropped (no distribution found): {line.strip()}")
+                continue
+        out.append(line)
+    return "\n".join(out) + "\n"
 
 
 def installed_versions(dists, *, python: Optional[str] = None,
