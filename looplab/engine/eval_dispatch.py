@@ -158,13 +158,17 @@ class EvalDispatchMixin:
         same ImportError it started with.
 
         WHAT STOPS IT THRASHING THE ENVIRONMENT, in order:
-          1. **A content DIGEST, not a timestamp.** A node whose declaration is byte-identical to
-             the one the run already installed does nothing at all — no subprocess, no event, no
+          1. **A content DIGEST, not a timestamp** — the fast path. A node whose declaration is
+             byte-identical to the run's does nothing at all: no set, no subprocess, no event, no
              lock. That is the overwhelmingly common case (every node inherits the file unchanged),
-             so the steady-state cost of this hook is one small read and a sha256.
-          2. **A per-run SET of digests already installed.** A node that reverts to an earlier
-             file is a no-op too, so an agent oscillating between two dependency sets pays once for
-             each, not once per node.
+             so the steady-state cost of this hook is one small read and a sha256. It is deliberately
+             NOT an independent guarantee: rule 2 below reaches the same answer for the same input,
+             which is why deleting this line is behaviour-preserving and no test catches it (checked
+             by mutation, 2026-08-07). It is here for the cost, and the cost is the point.
+          2. **A per-run SET of digests already installed**, seeded with the run's own baseline. This
+             is the rule; 1 is its shortcut. It additionally covers a node that REVERTS to an earlier
+             file, so an agent oscillating between two dependency sets pays once for each rather than
+             once per node.
           3. **A hard per-run cap** (`_MAX_NODE_DEP_SYNCS`). 1 and 2 bound repetition, not variety:
              an agent that appends a distinct comment line each node produces a new digest every
              time. The cap is what makes that terminate, and the refusal is RECORDED so it reads as
