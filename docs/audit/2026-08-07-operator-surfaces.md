@@ -20,8 +20,8 @@ says so and stays on the part that is a defect rather than a decision.
 
 ### 1. A run whose log has a sequence gap renders as a different, much smaller run — and every surface asserts the small numbers
 
-`rubertlite-dense-retrieval` is the operator's largest completed retrieval run. On the same server,
-in the same second:
+`rubertlite-dense-retrieval` is the operator's largest retrieval run. On the same server, in the
+same second:
 
 | surface | says |
 |---|---|
@@ -29,7 +29,8 @@ in the same second:
 | `GET /api/runs/rubertlite-dense-retrieval/state` | `event_count: 20`, `seq: 19`, `max_seq: 19` |
 | `GET /api/runs/rubertlite-dense-retrieval/lifecycle` | `event_count: 20` |
 | `GET /api/runs/rubertlite-dense-retrieval/cost` | `{"cost":0.0,"calls":0,"priced_calls":0,"total_tokens":0,"recorded":false}` |
-| run-list row | `phase: search`, `nodes: 2`, `best_metric: 0.8077` |
+| run-list row | `phase: search`, `finished: false`, `nodes: 2`, `best_metric: 0.8077` |
+| the log's own `run_finished` (seq 1193) | `{"reason":"aborted","finalization_required":true, …}` — it was finalized |
 | the log's own `budget` event (seq 1195) | `nodes: 81` |
 | the log's own `llm_cost` events (seq 265/276/1229) | 3497 calls, 76,869,684 tokens |
 | the log itself | 230 `llm_usage` rows, 27 `research_completed`, 81 `node_created` |
@@ -42,10 +43,12 @@ of the run.** The lenient reader disagrees and says so — `read_jsonl_lenient_w
 1624 rows with `read_complete: True`, `invalid_lines: 0` — which is why the timeline pager shows the
 operator 1624 events and positively asserts `torn_tail: false` beside a state payload built from 20.
 
-This is the only run in 48 that trips it. The twelve other runs whose seqs look gapped
-(`live-cards-0804`, `rubert-dr-0804`, …) are gapped only because a `__looplab_event_batch_v1__` row
-carries several events under one line; those read to the end. **A single-run defect is exactly the
-shape that never gets noticed**, and this run looks entirely normal in the list.
+**This is the only run in 48 that trips it** — checked by comparing `EventStore.read_all()` against
+`read_jsonl_lenient_with_health()` on every run in the root. The twelve other runs whose seqs look
+gapped (`live-cards-0804`, `rubert-dr-0804`, …) are gapped only because a
+`__looplab_event_batch_v1__` row carries several events under one line; those read to the end.
+**A single-run defect is exactly the shape that never gets noticed**, and this run looks entirely
+normal in the list.
 
 The way out is worse than the state. There is no UI affordance at all, and the CLI's only remedy
 destroys the run:
