@@ -3910,5 +3910,3 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
         if not is_usable_metric(robust) or not is_usable_metric(n.metric):
             continue
         n.generalization_gap = (n.metric - robust) if st.direction == "max" else (robust - n.metric)
-
-

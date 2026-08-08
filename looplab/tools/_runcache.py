@@ -12,6 +12,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.atomicio import file_identity
 from looplab.core.models import RunState
 
 
@@ -54,13 +55,12 @@ class RunStateCache:
     def sig(rd: Path):
         try:
             s = (rd / "events.jsonl").stat()
-            # Nanosecond mtime + file identity (inode/device), NOT `int(st_mtime)`: truncating mtime to
-            # whole seconds made this cache blind to a same-size replacement/rewrite inside one second.
-            # That is not only a freshness issue — these folded states feed default-on SiblingRunTools/
-            # AllRunsTools, so a stale hit lets an agent keep reasoning from an obsolete cross-run evidence
-            # prefix. `st_mtime_ns` catches any in-place rewrite; `st_ino`/`st_dev` catch a same-size,
-            # mtime-restored REPLACEMENT (rm+recreate, or a sync tool that preserves mtime).
-            return (s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_ino, s.st_dev)
+            # The canonical full-strength identity, not `int(st_mtime)`: these folded states feed
+            # default-on SiblingRunTools/AllRunsTools, so a stale hit lets an agent reason from an
+            # obsolete cross-run evidence prefix. Besides nanosecond timestamps and dev/inode, the
+            # shared tuple includes Windows' reparse-point attributes; omitting that last field let
+            # a path switch underneath the cache while still comparing equal.
+            return file_identity(s)
         except OSError:
             return (0, 0)
 

@@ -401,9 +401,9 @@ test('the review route gates a missing token, treats a revoked link as terminal,
 
 test('every converted site reads the shared machine, and none keeps a private copy of it', async () => {
   const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
-  const [panels, runView, inspector, app, hooks] = await Promise.all([
+  const [panels, runView, inspector, app, scopedResource] = await Promise.all([
     source('panels.jsx'), source('RunView.jsx'), source('Inspector.jsx'), source('App.jsx'),
-    source('hooks.js'),
+    source('useScopedResource.js'),
   ])
   for (const [name, text] of [['panels.jsx', panels], ['RunView.jsx', runView],
     ['Inspector.jsx', inspector], ['App.jsx', app]]) {
@@ -426,6 +426,6 @@ test('every converted site reads the shared machine, and none keeps a private co
   assert.doesNotMatch(runView, /retrying: sameResource/,
     'the retrying flag must not come back as a second spelling of pending')
   // The one-flight rule and the supersede escape hatch belong to the hook, not to any call site.
-  assert.match(hooks, /if \(flight\.current\) return false/)
-  assert.match(hooks, /if \(supersede && flight\.current\)/)
+  assert.match(scopedResource, /if \(flight\.current\) return false/)
+  assert.match(scopedResource, /if \(supersede && flight\.current\)/)
 })

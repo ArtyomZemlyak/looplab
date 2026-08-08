@@ -1,8 +1,10 @@
+import { COMMENT_MAX_BYTES } from './commentContract.js'
+
+export { COMMENT_MAX_BYTES } from './commentContract.js'
+
 const RUN_GENERATION_RE = /^[0-9a-f]{64}$/
 const COMMENT_ID_RE = /^[A-Za-z0-9_-]{8,160}$/
 const CONTROL_RE = /[\u0000-\u001f\u007f]/
-
-export const COMMENT_MAX_BYTES = 8 * 1024
 
 const ACTOR_LABELS = Object.freeze({
   deployment_owner: 'Deployment owner',

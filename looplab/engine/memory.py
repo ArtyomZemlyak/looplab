@@ -17,7 +17,6 @@ from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER
 from looplab.events.eventstore import (read_jsonl_lenient, read_jsonl_lenient_with_health,
                                        replace_jsonl_rows_atomic_preserving_quarantine)
 from looplab.tools.vectorstore import Hit, Item, VectorStore, hash_embed
-from looplab.core.receipts import bounded_receipt_count
 
 # Lesson HYGIENE moved to its own module (doc 25 EM-10); re-exported so both spellings name
 # the SAME objects and every existing import / monkeypatch seam keeps working.

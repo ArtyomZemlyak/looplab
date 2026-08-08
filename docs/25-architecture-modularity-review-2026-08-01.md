@@ -4297,14 +4297,19 @@ FROM; its docstring now does.
 
 **The finding undercounted.** It says "six different ways"; an AST sweep for tuples built out of
 `st_*` reads finds ~27 across the tree. Several are legitimately the weak replacement-only tier, so
-converting them all needs per-site judgement rather than a sweep — but at least one carries the same
-defect just fixed above: `tools/_runcache.py:63` spells `file_identity`'s fields reordered and
-without `st_file_attributes`.
+converting them all needs per-site judgement rather than a sweep.
+
+*Follow-up (2026-08-08):* `tools/_runcache.py` was the next behavioural defect found in that ledger.
+Its cross-run state cache spelled `file_identity`'s fields reordered and without
+`st_file_attributes`, so on Windows a path that gained a reparse point could keep serving the old
+folded `RunState`. It now calls the canonical `file_identity`; a driven regression test rewrites the
+log and makes the reparse attribute the only metadata difference, proving the cache re-folds the new
+goal. The measured unconverted-signature ledger falls from 22 to 21.
 
 `tests/test_file_identity_tiers.py` therefore pins the two tiers as BEHAVIOUR (growth keeps
-`same_file_entry`; a same-size in-place rewrite defeats it but not `file_identity`), pins both fixed
-bugs, and turns the remainder into a LEDGER: the count of unconverted hand-rolled signatures cannot
-grow without the test going red, and lowering it is the work. That is a bounded, visible backlog
+`same_file_entry`; a same-size in-place rewrite defeats it but not `file_identity`), pins all three
+fixed bugs, and turns the remainder into a LEDGER: the count of unconverted hand-rolled signatures
+cannot grow without the test going red, and lowering it is the work. That is a bounded, visible backlog
 instead of an unbounded claim of coverage. Teeth-verified against 5 breakages.
 
 The guard is AST-based, not grep: a regex over stat field names flagged thirty INCIDENTAL reads (an
@@ -5461,7 +5466,7 @@ anywhere but at the test.
 
 *Evidence:* _canonical_json (sort_keys, allow_nan=False, compact separators, same except-tuple) is defined identically in speculation_calibration.py:134 and speculation_quality.py:300; serve/launch.py:54 carries a looser sibling under the same name (no allow_nan=False, default=str, never raises). _strict_json_value (calibration :105) and _projection_value (coverage :33) are two strict-JSON normalizers with subtly different tolerances. _finite_metric exists three times under one name with two behaviors: events/replay.py:645 and speculation_quality.py:422 both return float|None, while engine/memory.py:673 returns bool — a reader grepping the name still cannot assume one contract.
 
-*Recommendation:* Move _canonical_json and a finite-float coercer into core (e.g. core/atomicio or a small core/jsonutil) and import them; rename the bool variant in engine/memory to 
+*Recommendation:* Move _canonical_json and a finite-float coercer into core (e.g. core/atomicio or a small core/jsonutil) and import them; rename the bool variant in engine/memory to avoid the name collision.
 
 *Resolution (2026-08-03):* New `core/jsonutil.py::canonical_json(value) -> bytes` replaces the two
 byte-identical STRICT copies (`speculation_calibration`, `speculation_quality`). Every option in it
@@ -5494,7 +5499,7 @@ Two normalizers stay separate on purpose and a test records why:
 fail closed) while `coverage._projection_value` coerces to `str` (an analytics token that must never
 fail a run). Merging them would either brick analytics or weaken a receipt.
 
-Covered by `tests/test_json_and_metric_contracts.py` (30).avoid the name collision.
+Covered by `tests/test_json_and_metric_contracts.py` (30).
 
 #### SE-09 · MEDIUM · under-decomposition · effort: large
 
@@ -8269,6 +8274,24 @@ imports the barrel, that no module outside {api.js, the six} imports a member, a
 `hasOnlyKeys` / `safeIdentityText` / `COMMAND_REQUEST_TIMEOUT_MS` are DEFINED once and re-derived
 nowhere.
 
+*Follow-up (2026-08-08):* the later UI-06 conversion invalidated the “eager graph cannot feel a
+second importer” measurement. `App.jsx` began importing both the `api.js` barrel and aggregate
+`hooks.js` for its review gate, making every command/storage/SSE protocol and every run-state/trace
+helper part of the initial shell. The shell measured 104.7 KiB gzip. It now reaches a two-name
+`reviewRouteApi.js` facade and the extracted `useScopedResource.js`; `hooks.js` re-exports the hook for
+all existing run-workspace consumers. The shell is 78.8 KiB gzip, and `apiBarrel.test.js` permits and
+pins exactly that one narrow facade rather than abandoning the single-surface rule.
+
+The same build review found three static ESM cycles hidden behind manual chunk groups:
+run-support ↔ trace-scroll, the `RunList` group ↔ its emitted facade, and collaboration-support ↔ its
+facade/recovery store. `traceScrollModel` now lives in run-support, the redundant RunList group and
+the grouped collaboration facade are gone, and the eager recovery store takes its byte ceiling from
+the new lower `commentContract.js` instead of the lazy `commentsModel.js`. The manifest is acyclic;
+collaboration is again an 11.4 KiB interaction instead of 20 KiB already present in every run route.
+The pre-window control commit already failed 13 size budgets (447.1 KiB total against 348 KiB), so
+after restoring the lazy boundaries the permanently-red targets were re-derived from the measured
+acyclic graph with narrow headroom. `npm run check:bundle` now enforces a reachable baseline again.
+
 Verified by mutation on a throwaway copy of the tree (each break applied by a script that asserts its
 anchor appears exactly once; the copy's own baseline is 726 pass / 0 fail):
 
@@ -8613,12 +8636,18 @@ and it is genuinely the next target), `forkCurrentSession` / `reconcileFork` / `
 *Resolution (2026-08-05):* Split into a PURE half and a React half, and **five of the seven converted**.
 `ui/src/resourceModel.js` holds the transitions — `resourceBegin` / `resourceSettle` / `resourceCancel`
 / `resourceView` / `resourceGated`, no React and no I/O, so the rules can be stated and driven
-directly. `hooks.js::useScopedResource` is the only thing that decides WHEN a transition happens: one
+directly. `useScopedResource.js` is the only thing that decides WHEN a transition happens: one
 scope-owned in-flight request, abort on scope change and unmount, an optional poll, and `supersede`
 for a retry that must own freshness over a background refresh. Converted:
 `panels.usePanelResource` (now a six-line adapter carrying only the panel dialect — normalize inside
 the deadline, the tuple shape — with its six call sites untouched), `TrustPanel`, `RunView`'s config
 effect, `App.ReviewRoute`, and `Inspector.detailResource`.
+
+*Follow-up (2026-08-08):* the React half moved verbatim out of aggregate `hooks.js`, which re-exports
+it for compatibility. App is the one initial-shell consumer; keeping the hook beside run-state,
+trace and SSE choreography made that whole aggregate eager on the review gate. The source guards now
+read the hook from its own module, while the behavioural tests continue loading it through the
+historical `hooks.js` surface and therefore prove the re-export too.
 
 **Inspector's machine won, and usePanelResource's did not.** The recommendation has this backwards.
 Inspector's start rule is a strict SUPERSET of the panel rule on every state a panel can reach,

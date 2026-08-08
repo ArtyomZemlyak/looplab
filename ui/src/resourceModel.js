@@ -7,7 +7,7 @@
 // never reached the others.
 //
 // This module is the PURE half: the transitions, with no React and no I/O, so the rules can be
-// stated and driven directly by a test. `hooks.js::useScopedResource` is the React half — the
+// stated and driven directly by a test. `useScopedResource.js` is the React half — the
 // scope-fenced flight, the abort, the optional poll — and it is the only thing that decides WHEN a
 // transition happens.
 //

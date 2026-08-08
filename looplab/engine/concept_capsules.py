@@ -27,23 +27,17 @@ imports and monkeypatch seams (`tools/` reaches for `_dedup_valid_capsules`,
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import math
-import os
-import re
-import time
 from pathlib import Path
 from typing import Optional
 
-from looplab.core.atomicio import atomic_write_text
 from looplab.core.fitness import finite_or_absent_metric as _is_finite_metric
-from looplab.core.text import WORD_RE, fingerprint_similarity
+from looplab.core.text import fingerprint_similarity
 from looplab.core.receipts import ReceiptRows, bounded_receipt_count
 from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER
-from looplab.core.jsonlio import (read_jsonl_lenient, read_jsonl_lenient_with_health,
-                                    replace_jsonl_rows_atomic_preserving_quarantine,
-                                    write_jsonl_atomic)
+from looplab.core.jsonlio import (read_jsonl_lenient_with_health,
+                                  replace_jsonl_rows_atomic_preserving_quarantine)
 
 CONCEPT_CAPSULE_VERSION = 2
 

@@ -117,18 +117,10 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
-              name: 'RunList',
-              // Portfolio state is used by the list and its on-demand comparison child. The child is
-              // reachable only from the list, so keeping the small shared model with that parent
-              // removes a request without changing either route's reachable feature set.
-              test: /[/\\]src[/\\](RunList\.jsx|portfolioModel\.js)$/,
-              includeDependenciesRecursively: false,
-            },
-            {
               name: 'collaboration-support',
               // # CODEX AGENT: Both collaboration entrances use the same bounded comment reader.
               // One interaction chunk lets them share vocabulary without making it route-eager.
-              test: /[/\\]src[/\\](CollabPanel|CommentsThread|commentsModel|useComments)\.(js|jsx)$/,
+              test: /[/\\]src[/\\](CommentsThread|commentsModel|useComments)\.(js|jsx)$/,
               includeDependenciesRecursively: false,
             },
             {
@@ -151,7 +143,7 @@ export default defineConfig({
               // These pure API/live/text/timeline helpers are jointly present on every run workspace.
               // One stream gives repeated node/run/evidence vocabulary one gzip dictionary while
               // keeping charts, graph libraries, settings and owner controls independently lazy.
-              test: /[/\\]src[/\\](?:format|urlSafety|util|hooks|runIndex|buildingModel|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight|markdown|dagViewport|dagProjection|grouping|timelineModel|timelineWindow|useTimeline|useRunRouteState|mergeIntent|traceProjection|crossRunPrior)\.(?:js|jsx)$|[/\\]src[/\\]VirtualTimeline\.jsx$/,
+              test: /[/\\]src[/\\](?:format|urlSafety|util|hooks|runIndex|buildingModel|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight|markdown|dagViewport|dagProjection|grouping|timelineModel|timelineWindow|useTimeline|useRunRouteState|mergeIntent|traceProjection|traceScrollModel|crossRunPrior)\.(?:js|jsx)$|[/\\]src[/\\]VirtualTimeline\.jsx$/,
               includeDependenciesRecursively: false,
             },
             {

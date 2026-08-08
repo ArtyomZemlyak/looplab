@@ -14,12 +14,8 @@ and monkeypatch seams (notably `claims_health`'s `_NEGATIVE` / `normalize_statem
 """
 from __future__ import annotations
 
-import math
 import re
-from collections import defaultdict
-from typing import Optional
 
-from looplab.core.text import WORD_RE
 from looplab.tools.vectorstore import Hit
 
 _NEGATIVE = {"tested", "abandoned", "failed", "refuted"}

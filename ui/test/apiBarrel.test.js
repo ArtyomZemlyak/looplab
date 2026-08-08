@@ -10,15 +10,11 @@
 //      one name makes it AMBIGUOUS, which ESM resolves by silently omitting it.
 //   2. A member imports the barrel back. Under the build's native ESM execution ordering a
 //      barrel<->member cycle is a load-time TDZ crash, not a build error.
-//   3. Some other module imports an extracted file directly. This one is NOT a bundling rule here,
-//      and the measurement says so: adding `import { commandRead } from './commandProtocol.js'` to
-//      hooks.js leaves the build byte-identical (38 assets, 35 manifest keys, same totals, same chunk
-//      counts) because api.js is reachable from index.html, so every member of it is already in the
-//      eager graph and no second importer can move it. That is exactly why it needs a test rather
-//      than a note: nothing else in the tree notices. What it protects is that the barrel stays the
-//      ONE place this surface is declared — the property "importers are unchanged" decays the moment
-//      half the tree reaches past it — and that a future attempt to make any of this lazy still has a
-//      single boundary to move.
+//   3. Some other module imports an extracted file directly. The one deliberate exception is the
+//      two-name reviewRouteApi facade: App needs the review credential/read boundary before a run
+//      route exists, and importing the aggregate barrel there made every command/storage/SSE member
+//      eager. All other consumers still go through the barrel, so this is one named route boundary
+//      rather than an invitation to reach through it ad hoc.
 //
 // So the expected export set is DERIVED from the real call sites rather than hand-written here, and
 // the credential check below is behavioural: the whole point of hoisting `_authHeaders` DOWN into
@@ -33,6 +29,7 @@ const TEST = new URL('./', import.meta.url)
 // The modules api.js re-exports. Adding another split module means adding it here.
 const EXTRACTED = ['apiClient.js', 'commandModel.js', 'commandStorage.js', 'commandProtocol.js',
                    'eventStream.js', 'scopeReportActions.js']
+const NARROW_FACADES = ['reviewRouteApi.js']
 
 const readDirSource = async base => {
   const names = (await readdir(base)).filter(name => /\.(js|jsx)$/.test(name))
@@ -167,9 +164,9 @@ test('the extracted modules never import the barrel they are part of', async () 
   }
 })
 
-test('only the barrel and its own members import the extracted modules', async () => {
+test('only the barrel, its members, and the named initial facade import extracted modules', async () => {
   const src = await readDirSource(SRC)
-  const allowed = new Set(['api.js', ...EXTRACTED])
+  const allowed = new Set(['api.js', ...EXTRACTED, ...NARROW_FACADES])
   for (const member of EXTRACTED) {
     const importers = [...src]
       .filter(([file, text]) => file !== member && text.includes(`from './${member}'`))
@@ -178,9 +175,12 @@ test('only the barrel and its own members import the extracted modules', async (
     assert.ok(importers.includes('api.js'), `${member} is not re-exported through api.js`)
     const outside = importers.filter(file => !allowed.has(file))
     assert.deepEqual(outside, [],
-      `${member} must be reachable only through api.js; ${outside.join(', ')} gives the bundler a `
-      + 'second reachability root for code the barrel exists to keep in one chunk')
+      `${member} has undeclared public reachability roots: ${outside.join(', ')}`)
   }
+  assert.match(src.get('App.jsx'), /from '\.\/reviewRouteApi\.js'/)
+  assert.equal(src.get('reviewRouteApi.js').trim().split('\n').at(-1),
+    "export { get, reviewTokenFromLocation } from './apiClient.js'",
+    'the initial facade must not grow beyond the review gate')
 })
 
 test('the shared primitives are defined once, not re-derived per module', async () => {

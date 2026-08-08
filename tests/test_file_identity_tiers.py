@@ -12,12 +12,11 @@ The strengths genuinely differ, so this is NOT full unification. What is unified
   * `file_identity`    — same file AND unchanged. Every way the bytes could have been swapped.
 
 A site needing something between the two says so AGAINST these definitions. This file pins that no
-consumer silently spells a third tuple, and pins the two real bugs the unification fixed.
+consumer silently spells a third tuple, and pins the three real bugs the unification fixed.
 """
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 
 import pytest
@@ -157,6 +156,47 @@ def test_the_run_summary_cache_notices_a_log_that_differs_only_in_st_dev(tmp_pat
         "the run-summary cache served generation A for a log it can only tell apart by st_dev")
 
 
+def test_the_cross_run_cache_notices_a_log_that_gains_a_reparse_point(tmp_path, monkeypatch):
+    """`RunStateCache.sig` repeated the full tuple minus `st_file_attributes`, so a Windows
+    path that gained a reparse point could keep serving the prior path's folded state.
+
+    Drive the reachable outcome: generation B contains a different goal but reports generation A's
+    metadata in every old signature field. The reparse attribute is the only observable change.
+    """
+    from looplab.events.eventstore import EventStore
+    from looplab.tools._runcache import RunStateCache
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    log = rd / "events.jsonl"
+    EventStore(log).append("run_started", {"run_id": "demo", "task_id": "t", "goal": "g",
+                                           "direction": "min"})
+    cache = RunStateCache(tmp_path)
+
+    assert cache.state("demo").goal == "g"
+    generation_a = log.stat()
+
+    text = log.read_text(encoding="utf-8")
+    assert '"goal":"g"' in text
+    log.write_text(text.replace('"goal":"g"', '"goal":"b"', 1), encoding="utf-8")
+
+    class _ReparseGeneration:
+        st_file_attributes = 0x400
+
+        def __getattr__(self, name):
+            return getattr(generation_a, name)
+
+    generation_b = _ReparseGeneration()
+    assert file_identity(generation_b)[:-1] == file_identity(generation_a)[:-1]
+    assert file_identity(generation_b) != file_identity(generation_a)
+    real_stat = Path.stat
+    monkeypatch.setattr(Path, "stat", lambda self, *a, **kw:
+                        generation_b if self == log else real_stat(self, *a, **kw))
+
+    assert cache.state("demo").goal == "b", (
+        "the cross-run cache served generation A for a path that gained a reparse point")
+
+
 # ------------------------------------------------------------------ no third tuple, silently
 
 def _hand_rolled_signature_lines() -> list[str]:
@@ -198,7 +238,7 @@ def _hand_rolled_signature_lines() -> list[str]:
 # The sites SC-11 named are converted. An AST sweep then found the pattern is far more widespread
 # than the finding's "six different ways" — measured below — so the rest is a LEDGER rather than a
 # silent backlog: the number cannot grow without this test going red, and shrinking it is the work.
-UNCONVERTED_SIGNATURE_SITES = 22
+UNCONVERTED_SIGNATURE_SITES = 21
 
 
 def test_the_backlog_of_hand_rolled_signatures_does_not_grow():
@@ -213,9 +253,8 @@ def test_the_backlog_of_hand_rolled_signatures_does_not_grow():
     at coverage. A new hand-rolled signature makes this red; converting one and lowering the number
     is the intended direction of travel.
 
-    At least one of the unconverted sites carries the same defect that was just fixed in the
-    attention feed: `tools/_runcache.py` spells `file_identity`'s fields reordered and WITHOUT
-    `st_file_attributes`, so it cannot see a file that gained a reparse point.
+    The cross-run state cache was the first follow-up conversion: its hand-rolled tuple omitted
+    `st_file_attributes`, so it could not see a file that gained a reparse point.
     """
     offenders = sorted(set(_hand_rolled_signature_lines()))
     undeclared = [o for o in offenders if o.split(":")[0] not in DOCUMENTED_VARIANTS]
@@ -225,8 +264,8 @@ def test_the_backlog_of_hand_rolled_signatures_does_not_grow():
 
 
 def test_the_sites_this_change_converted_stay_converted():
-    """The six SC-11 named. These must not reappear in the hand-rolled sweep."""
-    converted = {"serve/routers/attention.py", "serve/appstate.py"}
+    """The SC-11 conversions and follow-up. These must not reappear in the sweep."""
+    converted = {"serve/routers/attention.py", "serve/appstate.py", "tools/_runcache.py"}
     offenders = {o.split(":")[0] for o in _hand_rolled_signature_lines()}
     assert not (converted & offenders), (
         f"a converted site went back to a hand-rolled signature: {sorted(converted & offenders)}")

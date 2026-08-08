@@ -1,4 +1,4 @@
-import { COMMENT_MAX_BYTES } from './commentsModel.js'
+import { COMMENT_MAX_BYTES } from './commentContract.js'
 
 export const COMMENT_OPERATION_STORAGE_PREFIX = 'll.comment-operation.'
 export const COMMENT_OPERATION_SCHEMA = 'looplab.comment-operation-intent/v1'

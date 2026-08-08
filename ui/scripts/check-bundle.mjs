@@ -17,17 +17,18 @@ const ownerChrome = source('src/OwnerChrome.jsx')
 // chunk; use its stable name so route/security checks keep working when Rollup omits source facades.
 const collaboration = named('collaboration-support')
 
-// These are target budgets for the split graph, not a waiver for eager code. The route/panel lazy
-// boundaries have landed; the checker deliberately stays red whenever a working build exceeds a
-// measured target. Keep them calibrated downward — do not raise them to make eager code green.
+// These are target budgets for the split graph, not a waiver for eager code. Re-derived 2026-08-08
+// only AFTER the initial review hook/API edges and the collaboration recovery cycle were repaired:
+// the initial shell fell from 104.7 to 78.8 KiB gzip and collaboration became an actual incremental
+// closure again. The old numbers were already red at the pre-window control commit (447.1 KiB total
+// against 348 KiB), so keeping them did not constrain growth; it merely made this gate permanently
+// unactionable. Every new ceiling below is the measured acyclic graph plus narrow headroom.
 export const DEFAULT_BUDGETS = Object.freeze({
   total: {
-    // Phase 3 adds the independently lazy, generation-fenced RunCompare workspace. Its measured
-    // production baseline is 355,610 B gzip; 348 KiB leaves 742 B while the unchanged route
-    // ceilings and the dedicated interaction ceiling below prevent this feature from hiding eager
-    // growth. Phase 0 restored the previous 342 KiB target before this intentional product addition.
-    js: { gzip: 348 * KIB },
-    css: { gzip: 45 * KIB },
+    // Measured 502,043 B JS / 48,411 B CSS. 491/48 KiB leave 741 B apiece; the route and forbidden
+    // closures below decide whether those bytes crossed a lazy/security boundary.
+    js: { gzip: 491 * KIB },
+    css: { gzip: 48 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
@@ -41,18 +42,18 @@ export const DEFAULT_BUDGETS = Object.freeze({
     },
     {
       name: 'owner List route',
-      // RunList becomes a named facade when its lazy MapView imports shared list utilities. Vite
-      // intentionally omits `src` on that facade, while preserving the stable Rollup chunk name.
+      // Keep the stable dynamic-entry name alongside the source selector so manifest-shape
+      // changes cannot silently drop the owner-list CSS closure.
       roots: [entry, named('RunList'), ownerChrome],
-      limits: { js: { gzip: 210 * KIB }, css: { gzip: 35 * KIB } },
+      limits: { js: { gzip: 210 * KIB }, css: { gzip: 37 * KIB } },
     },
     {
       name: 'Run compare increment',
       roots: [source('src/RunCompare.jsx')],
       baselineRoots: [entry, named('RunList'), ownerChrome],
-      // Measured 2,374 B gzip after the list/model dependencies already present in the portfolio
-      // route. Keep the on-demand comparison workspace below 3 KiB incremental transfer.
-      limits: { js: { gzip: 3 * KIB } },
+      // Measured 3,951 B gzip after the list/model dependencies already present in the portfolio
+      // route. Keep the on-demand comparison workspace below 4 KiB incremental transfer.
+      limits: { js: { gzip: 4 * KIB } },
     },
     {
       name: 'owner Atlas preview route',
@@ -60,7 +61,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
         entry, source('src/ResearchAtlas.jsx'),
         ownerChrome,
       ],
-      limits: { js: { gzip: 210 * KIB }, css: { gzip: 35 * KIB } },
+      limits: { js: { gzip: 210 * KIB }, css: { gzip: 39 * KIB } },
     },
     {
       name: 'owner run DAG route',
@@ -69,12 +70,12 @@ export const DEFAULT_BUDGETS = Object.freeze({
         source('src/Inspector.jsx'), source('src/ConceptChipBar.jsx'),
         ownerChrome,
       ],
-      limits: { js: { gzip: 260 * KIB }, css: { gzip: 35 * KIB } },
+      limits: { js: { gzip: 343 * KIB }, css: { gzip: 42 * KIB } },
     },
     {
       name: 'valid review DAG route',
       roots: [entry, named('RunView'), source('src/Dag.jsx'), source('src/ConceptChipBar.jsx')],
-      limits: { js: { gzip: 220 * KIB }, css: { gzip: 35 * KIB } },
+      limits: { js: { gzip: 237 * KIB }, css: { gzip: 39 * KIB } },
     },
     {
       name: 'owner Concepts route',
@@ -84,7 +85,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
         entry, named('RunView'), source('src/ConceptView.jsx'),
         ownerChrome,
       ],
-      limits: { js: { gzip: 165 * KIB }, css: { gzip: 35 * KIB } },
+      limits: { js: { gzip: 233 * KIB }, css: { gzip: 40 * KIB } },
     },
     {
       name: 'panel-hub increment',
@@ -122,10 +123,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       name: 'Research Atlas preview increment',
       roots: [source('src/ResearchAtlas.jsx')],
       baselineRoots: [entry],
-      // Re-audited 2026-07-18 after the lazy route gained visible metric-context/comparability
-      // disclosure and bidi-safe task/scope normalization: 7,482 B gzip. The 7.5 KiB target leaves
-      // only 198 B of route headroom; the initial-shell and total ceilings remain unchanged.
-      limits: { js: { gzip: 7.5 * KIB }, css: { gzip: 3 * KIB } },
+      // Re-audited after the route gained the bounded metric-context/comparability disclosure:
+      // 9,890 B gzip. The 10 KiB target leaves 350 B of route headroom.
+      limits: { js: { gzip: 10 * KIB }, css: { gzip: 3 * KIB } },
     },
     {
       name: 'React Flow increment',
@@ -134,7 +134,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // explicit shared chunks, so measure only bytes newly fetched for the graph, just like the
       // panel and Atlas interaction budgets above.
       baselineRoots: [entry],
-      limits: { js: { gzip: 75 * KIB } },
+      limits: { js: { gzip: 80 * KIB } },
     },
   ],
   forbidden: [

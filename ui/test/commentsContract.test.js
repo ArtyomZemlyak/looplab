@@ -693,13 +693,13 @@ test('RunView refreshes comment feeds only from comments_revision, never global 
   assert.match(inspector, /nodeGeneration=\{n\.attempt\}/)
   assert.match(runView, /currentAttempt !== comment\.nodeGeneration/)
   assert.match(runView, /commentAttemptMatches \? routeState\.commentId : null/)
-  // The detail resource is the SHARED machine now (doc 25 UI-06): `hooks.js::useScopedResource` over
+  // The detail resource is the SHARED machine now (doc 25 UI-06): `useScopedResource.js` over
   // `resourceModel.js`. Inspector declares the scope; the fence that hides a previous scope's payload
   // is `resourceModel.js::resourceView`, applied by the hook to every read rather than re-derived at
   // each call site. `test/resourceMachine.test.js` DRIVES both halves — the fence and the settlement
   // ownership — so these stay as the "it is still wired that way" residue.
-  const [hooks, resourceModel] = await Promise.all([
-    readFile(new URL('../src/hooks.js', import.meta.url), 'utf8'),
+  const [scopedResource, resourceModel] = await Promise.all([
+    readFile(new URL('../src/useScopedResource.js', import.meta.url), 'utf8'),
     readFile(new URL('../src/resourceModel.js', import.meta.url), 'utf8'),
   ])
   assert.match(inspector, /scope: detailScope,/)
@@ -712,9 +712,9 @@ test('RunView refreshes comment feeds only from comments_revision, never global 
   assert.match(inspector,
     /if \(valid && detailMatchesGeneration\(value\) && detailMatchesAttempt\(value\)\)/,
     'a reset racing the full-detail response must not relabel another attempt as current')
-  assert.equal((hooks.match(/if \(flight\.current !== request\) return/g) || []).length, 2,
+  assert.equal((scopedResource.match(/if \(flight\.current !== request\) return/g) || []).length, 2,
     'both the success and the failure path must drop a settlement the current request no longer owns')
-  assert.match(hooks, /const settle = \(ok, data, failure\) => \{\s*if \(flight\.current !== request\) return/)
+  assert.match(scopedResource, /const settle = \(ok, data, failure\) => \{\s*if \(flight\.current !== request\) return/)
   assert.match(runView, /const preserveComment = id === current\.nodeId && nextTab === 'Comments'/)
   // The non-preserved arm now takes the caller's requested generation instead of a hard `null`; what
   // must not happen is either field surviving a transition that left the comment's own node or tab.

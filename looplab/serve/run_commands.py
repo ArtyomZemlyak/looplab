@@ -2934,7 +2934,6 @@ class RunCommandService:
                 return
 
             now = time.time()
-            latest_seq = observation.latest_seq
             liveness = self._engine_state(rd)
             alive = liveness is True
             if (alive and record.get("spawned_by_command")

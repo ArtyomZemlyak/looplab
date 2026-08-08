@@ -163,7 +163,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   if (readOnly && historySeq != null) detailQuery.push(`seq=${historySeq}`)
   if (expectedGeneration) detailQuery.push(`expected_generation=${encodeURIComponent(expectedGeneration)}`)
   const at = detailQuery.length ? `?${detailQuery.join('&')}` : ''
-  // This machine is the shared one (doc 25 UI-06) — `hooks.js::useScopedResource` over
+  // This machine is the shared one (doc 25 UI-06) — `useScopedResource.js` over
   // `resourceModel.js`. It was the superset the shared hook had to be designed for, and every part
   // of it survives: the scope fence, `supersede`, `mapLastGood`, `onSettled`, and a status that
   // keeps last-good detail visible-but-stale rather than blanking it. What stays HERE is the part

@@ -452,14 +452,16 @@ def test_the_package_still_imports_without_the_openai_sdk():
 
     A SUBPROCESS, not an in-process meta_path block: the import has to happen with a clean
     `sys.modules`, and poisoning this interpreter's would leak into every later test in the file.
+    The blocker uses the current PEP 451 finder protocol so it keeps simulating a missing SDK on
+    Python 3.12+, where the legacy `find_module`/`load_module` fallback is no longer consulted.
     """
     probe = textwrap.dedent("""
         import sys
         class _Block:
-            def find_module(self, name, path=None):
-                return self if name == "openai" else None
-            def load_module(self, name):
-                raise ModuleNotFoundError("No module named 'openai'")
+            def find_spec(self, name, path=None, target=None):
+                if name == "openai" or name.startswith("openai."):
+                    raise ModuleNotFoundError("No module named 'openai'")
+                return None
         sys.meta_path.insert(0, _Block())
         import looplab.core.config          # the import every CLI command makes
         from looplab.core.llm import OpenAICompatibleClient as C
