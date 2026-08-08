@@ -391,7 +391,7 @@ class ConceptCadenceMixin:
                     })
             if fresh_edges:
                 self.store.append(EV_CONCEPT_EDGE, {"edges": fresh_edges, "mode": mode})
-        except Exception:  # noqa: BLE001 - audit enrichment must not break the cadence
+        except Exception:  # noqa: BLE001 - advisory graph enrichment must not break the cadence
             pass
 
     def _tag_hypothesis_concepts(self, state: RunState, graph, client, parser, mode: str) -> None:
@@ -410,8 +410,9 @@ class ConceptCadenceMixin:
             stale_h = set(stale_tagged_nodes(list(known_h), h_at_vocab,
                                              growth=_RETAG_GROWTH, cap=_RETAG_CAP))
             tagged_this_cadence = 0
-            # 1 card = 1 hypothesis: tag the single Card board. Tag the DISPLAY `statement` (== the
-            # old Hypothesis.statement, including a merged card's consolidated wording). The cache
+            # Tag canonical Card work items. Several cards may share one belief, but each work item keeps
+            # its own cache join/evidence context. Tag the DISPLAY `statement` (the old
+            # Hypothesis.statement surface, including a merged card's consolidated wording). The cache
             # is joined by the card id AND its seed-statement hash (below): a research card without
             # an explicit card_id already has that hash as its id, but a migrated native card-N does
             # not, so an id-only join would orphan its legacy tags.

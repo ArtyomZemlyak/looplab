@@ -1,5 +1,10 @@
 # LoopLab — Comprehensive Code Review
 
+> **Historical review archive.** The embedded review handoffs below record what was found at their named
+> commits; they are not a current open-issue ledger. Use source/tests and
+> [doc 25](25-architecture-modularity-review-2026-08-01.md) for reconciled dispositions. The remaining
+> load-bearing `# CODEX AGENT:` source comments identify current risks at their actual authority boundary.
+
 <!-- CODEX AGENT: 2026-07-24 SECOND INDEPENDENT THIRTY-PASS MEGA-REVIEW.
 The review began at `3c9aa698`, refreshed to the then-current `1cbe616f`, and was applied only after
 rechecking every selected producer/consumer boundary against that fresh master. Thirty independent

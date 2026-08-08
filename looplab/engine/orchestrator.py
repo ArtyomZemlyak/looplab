@@ -1651,7 +1651,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return "continue"
         # HITL gate (I21, ADR-11): pause for human approval of the final best.
         # Approval flows through the event log (a UI/human appends
-        # `approval_granted`); the engine, sole writer of domain events, reads it.
+        # `approval_granted` through the allow-listed control writer); the engine reads and applies it.
         if self.require_approval and not state.approved:
             best = state.best()
             # No real candidate can ever be approved. Do not create an impossible HITL gate;
@@ -3306,8 +3306,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         state = self._maybe_deep_research(state)
 
         # Run report (conclusion-first, agent-authored): regenerate on a node-count cadence so the
-        # Report grows with the search. Audit-only sidecar; no-op when off. Replay-safe (gated on
-        # the report's at_node). The deterministic report renders regardless.
+        # Report grows with the search. Selection-neutral narrative; no-op when off. Replay-safe (gated
+        # on the report receipt's at_node). The deterministic report renders regardless.
         state = self._maybe_refresh_report(state)
 
         # Agentic hypothesis-board consolidation: the exact-hash ledger keeps paraphrases apart, so the

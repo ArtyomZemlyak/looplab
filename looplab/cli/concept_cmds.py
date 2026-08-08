@@ -455,8 +455,9 @@ def board_dedup(
     #   recorded cache covers the board -> use it (tags=None -> dedup_analysis reads hypothesis_concepts);
     #   otherwise + a client -> tag the board LIVE agentically against the agent-built graph;
     #   else                 -> tag_text heuristic.
-    # 1 card = 1 hypothesis: tag the single Card board. Read the DISPLAY `statement` (== the old
-    # Hypothesis.statement, including a merged card's consolidated wording). A plain research card's id IS
+    # Tag canonical Card work items and read the DISPLAY `statement` (the old Hypothesis.statement
+    # surface, including a merged card's consolidated wording). Multiple work items may share a belief;
+    # this command reports them separately. A plain legacy research card's id is
     # its seed-statement hash (the old hypothesis id), but a migrated native card-N is not — so the
     # `hypothesis_concepts` cache is joined by BOTH keys (see `hypothesis_concept_cache_keys` below).
     hyps = list(state.research_cards())

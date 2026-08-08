@@ -2,10 +2,11 @@
 
 `OpenAICompatibleClient` is the LIVE path — an OpenAI-compatible chat client on the
 openai SDK (httpx transport), whose per-read timeout reliably bounds a stalled stream.
-`LiteLLMClient` wraps LiteLLM (lazy import) as the documented production gateway. The
-openai/httpx imports are declared deps but GUARDED, so the offline engine + replay still
-import this module (via `core.config`) without the live LLM stack. `CostAccountant`
-tallies per-call cost with warn/hard-stop thresholds and raises `BudgetExceeded` at 100%.
+`LiteLLMClient` is an optional, lazy-imported compatibility adapter; the shipped Settings
+factory selects `OpenAICompatibleClient`. The openai/httpx imports are declared deps but
+GUARDED, so the offline engine + replay still import this module (via `core.config`) without
+the live LLM stack. `CostAccountant` always meters calls and enforces a hard stop only when
+its caller supplies a finite limit; shipped Settings do not expose a dollar-cap field.
 Secrets are never stored as values here — the client reads the key from config/env.
 
 The retry/error-classification, SSE-stream, and tool-call-parsing helpers live in the flat
@@ -651,8 +652,8 @@ class OpenAICompatibleClient:
     Works against ANY OpenAI-compatible endpoint — Ollama (`/v1`), SGLang, vLLM, or
     the OpenAI API itself — so the serving backend is a base_url change, not code. The
     SDK's per-read httpx timeout is what reliably bounds a stalled mid-stream read (the
-    stdlib-urllib transport this replaced could not interrupt one). LiteLLM remains the
-    documented production gateway (see `LiteLLMClient`)."""
+    stdlib-urllib transport this replaced could not interrupt one). This is the backend
+    selected by the shipped Settings factory; `LiteLLMClient` remains an optional adapter."""
 
     def __init__(self, model: str, base_url: str = "http://localhost:11434/v1",
                  api_key: str = "ollama", temperature: float = 0.7,
@@ -1768,8 +1769,11 @@ class CostAccountant:
 
 
 class LiteLLMClient:
-    """Real backend. Implements the `parse.LLMClient` Protocol. Lazy-imports litellm
-    so the package installs and tests run without it."""
+    """Optional LiteLLM adapter implementing the `parse.LLMClient` Protocol.
+
+    It lazy-imports ``litellm`` so the package installs and tests run without that optional
+    dependency. The shipped Settings factory does not select this adapter automatically.
+    """
 
     def __init__(self, model: str, accountant: Optional[CostAccountant] = None, **kwargs):
         self.model = model

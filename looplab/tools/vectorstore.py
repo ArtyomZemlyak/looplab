@@ -4,8 +4,9 @@ re-embeds on each rebuild). A persistent backend (LanceDB/Qdrant) is a documente
 the deferred-infra notes in the design docs); there is no LanceDB store or store-selection Settings
 field yet, so "swap it in" is not a config change today.
 
-`hash_embed` is a deterministic (hashlib-based) bag-of-words embedder for offline
-tests; production embeddings go through LiteLLM (`ollama/nomic-embed-text`).
+`hash_embed` is a deterministic (hashlib-based) bag-of-words embedder for offline tests;
+`LLMEmbedder` calls an OpenAI-compatible `/embeddings` endpoint directly (for example
+Ollama with `nomic-embed-text`).
 """
 from __future__ import annotations
 

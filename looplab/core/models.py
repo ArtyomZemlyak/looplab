@@ -295,7 +295,8 @@ class Idea(BaseModel):
     eval_timeout: Optional[float] = None
     # Semantic grouping (UI #7): a short, reusable slug the Researcher assigns to cluster related
     # experiments in one search tree (e.g. "loss-fn", "architecture", "regularization"). Optional
-    # and audit-only — never affects search/selection; the UI groups nodes by it. Flows through the
+    # and neutral for direct metric ranking. It still feeds breadth/strategy context as a legacy
+    # fallback when no multi-label `concepts` are available, so it can steer later proposals. Flows through the
     # event log automatically (idea.model_dump → node_created → Idea(**d["idea"]) in replay.fold).
     # DEPRECATED by `concepts` (below) — the multi-label concept graph supersedes the single theme
     # slug; kept only until every theme consumer is migrated off it. No longer authored.
@@ -851,7 +852,10 @@ class CommentState(BaseModel):
 
 
 class RunState(BaseModel):
-    """Pure fold of the event log ([ADR-12]). Never mutated except by `replay.fold`.
+    """Replay-derived snapshot of the event log ([ADR-12]). ``replay.fold`` is its authoritative
+    producer; normal consumers treat the result as immutable. One evaluation recovery path may adjust
+    a private, attempt-local snapshot when an old work directory cannot be reused, so folded instances
+    must never be cached or shared as mutable process-global state.
 
     Field regions (docs/15 §P5.3 — banners, deliberately NOT nested sub-models: readers spell
     `st.<field>` at dozens of sites and the flat shape is additive-safe):
@@ -1119,7 +1123,9 @@ class RunState(BaseModel):
     node_concepts_at_vocab: dict[int, int] = Field(default_factory=dict)
     # PART IV D4 (§21.18 HT): per-hypothesis agentic concept tags (hyp_id -> [concept_id]) recorded once by
     # the LLM tagger, reused by taxonomy dedup instead of the tag_text alias heuristic. Populated only when
-    # `concept_pivot` is on; audit-only. Additive/reader-defaulted: empty on old logs -> byte-identical fold.
+    # `concept_pivot` is on. Advisory rather than pure telemetry: taxonomy dedup and concept cadences reuse
+    # these tags, so they can steer later board consolidation; they never directly re-rank evaluated nodes.
+    # Additive/reader-defaulted: empty on old logs -> byte-identical fold.
     hypothesis_concepts: dict[str, list[str]] = Field(default_factory=dict)
     # PART IV D4 (§21.18 B1-ext): concept-graph vocabulary SIZE when each hypothesis was tagged — a
     # hypothesis tagged against a much smaller vocabulary is STALE and gets re-tagged against the grown one
@@ -1135,8 +1141,9 @@ class RunState(BaseModel):
     # keyed by "src\trel\tdst". Makes hierarchy a swappable projection (project_hierarchy). Folded
     # COMMUTATIVELY from explicit EV_CONCEPT_EDGE assertions (max-confidence-wins per triple ->
     # order-tolerant). Derived ``co_occurs`` rows are intentionally omitted and recomputed from current
-    # memberships by ConceptFrame, so stale counts can decrease/disappear. Audit-only, never touches
-    # selection. Additive/reader-defaulted: empty on old logs -> path projection remains available.
+    # memberships by ConceptFrame, so stale counts can decrease/disappear. Advisory: hierarchy and
+    # coverage views can feed later strategy/proposal cues, but the edges never directly re-rank evaluated
+    # nodes. Additive/reader-defaulted: empty on old logs -> path projection remains available.
     concept_edges: dict[str, dict] = Field(default_factory=dict)
     # RepoTask onboarding (Phase 3, ADR-7): the agent proposes a trusted eval spec + metric
     # adapter; a human ratifies it once; then the loop trusts it.
@@ -1191,10 +1198,10 @@ class RunState(BaseModel):
     holdout_epoch_aware: bool = False
 
     # --- live operator control (UI intervention via the event log) ---
-    # These are folded from appended CONTROL events (intent). The engine remains the sole writer
-    # of DOMAIN events: it reads the intent here and writes the effect (e.g. node_abort -> a
-    # node_failed reason="aborted"). All deterministic under replay; audit-only fields never
-    # change best-selection.
+    # These are folded from authenticated, allow-listed CONTROL events (intent) appended by server/CLI
+    # writers through EventStore serialization. The engine owns their domain effects (e.g. node_abort ->
+    # node_failed reason="aborted"). All deterministic under replay; fields that are only receipts do
+    # not directly change best-selection.
     paused: bool = False                       # `pause`/`resume`: resumable break (not finished)
     pause_node_id: Optional[int] = None         # scoped auto-pause owner (None = explicit operator pause)
     pause_generation: Optional[int] = None
@@ -1266,15 +1273,11 @@ class RunState(BaseModel):
     # A1 ASHA: rung-promotion audit trail {rung, survivors} for the UI (successive-halving view).
     rungs: list[dict] = Field(default_factory=list)
     # --- advisory/control receipts (no direct objective ranking; downstream effects noted per field) ---
-    # advisory-vs-behavior audit (f019358 follow-up): the sidecar FIELD comments in THIS section were
-    # audited against real data flow and reconciled — `novelty_grades` was relabeled from "audit-only"
-    # (it folds to `card.novelty_verdict` and feeds card-driven selection via `_novelty_signal`), while
-    # `agent_decisions` (append + UI only), `cross_run_priors` (UI projection only) and `report`
-    # (narrative + its own regeneration cadence gate) were confirmed accurate — none re-rank the metric
-    # champion. Still open: the same sweep across DOCSTRINGS elsewhere in the tree. Distinguish "never
-    # read by best-selection" (the metric champion — the load-bearing safety claim) from "audit-only"
-    # (pure telemetry): a field can honour the first while feeding card-driven build selection or prompts.
-    # Tracked in docs/03-decisions.md.
+    # Advisory-vs-behavior audit (reconciled 2026-08-08): comments and docstrings now distinguish
+    # "never directly re-ranks the metric champion" from "pure telemetry". A folded receipt may satisfy
+    # the first claim while still feeding prompts, cadence gates, Card selection, or trust enforcement.
+    # `novelty_grades` is behavioral admission/steering; `agent_decisions` and `cross_run_priors` are
+    # observational here; `report` is selection-neutral but its receipt gates regeneration cadence.
     # Unified self-driving agent (audit-only; never read by best-selection): timeline of the agent's
     # macro-action choices {at_node, chosen, legal, recommended, rationale} for the "why this action"
     # view. Additive — old event logs without `agent_decision` events fold to an empty list.
@@ -1319,16 +1322,12 @@ class RunState(BaseModel):
     # keeping them out of the dump preserves the public state contract for old and new logs alike.
     research_attempts: list[dict] = Field(default_factory=list, exclude=True)
     research_attempts_completed: set[str] = Field(default_factory=set, exclude=True)
-    # removing this field is a breaking public-state migration, not a derived-view cleanup:
-    # `/api/runs/{id}/state` no longer contains ``hypotheses`` and external clients cannot distinguish
-    # "known empty" from "schema removed". docs/23 explicitly deferred retirement to a post-L6
-    # deprecation window, but this change shipped without a compatibility projection, API version bump,
-    # or migration notice; the updated golden fixture merely accepts the break. Restore a deprecated
-    # read-only projection for that window or version the state contract before deleting the key.
-    # The former derived hypothesis board (`hypotheses: dict[str, Hypothesis]`) was removed once
-    # `1 card = 1 hypothesis`: every consumer now reads `research_cards()`/`open_research_cards()`, and
-    # `_derive_cards` folds the raw accumulators below directly. The accumulators stay (frozen event
-    # inputs the card fold reads); only the separate derived board + `Hypothesis` class are gone.
+    # The former core hypothesis board (`hypotheses: dict[str, Hypothesis]`) was removed after Card became
+    # the canonical work-item/evidence model. Core consumers now read `research_cards()` and the explicit
+    # belief views; `_derive_cards` folds the raw accumulators below directly. The public server preserves
+    # a deprecated read-only `hypotheses` compatibility projection derived from bounded Card DTOs during
+    # the post-L6 migration window (`serve/appstate.py`). The accumulators stay as frozen event inputs;
+    # only the duplicate core model/class are gone.
     # Explicitly-added hypotheses (human `add_hypothesis` control event or a deep-research direction),
     # kept separately so the derived-from-nodes pass can merge evidence into them. `abandoned` ids are
     # a human/agent override of the derived status.
@@ -1337,9 +1336,9 @@ class RunState(BaseModel):
     # ledger kept separate) into a CANONICAL id, deterministically applied in `_derive_cards`.
     hypotheses_merged: list[dict] = Field(default_factory=list)
     hypotheses_abandoned: list[str] = Field(default_factory=list)
-    # Human-DELETED hypotheses (hypothesis_updated status=deleted): removed from the board entirely,
-    # unlike `abandoned` (which stays visible in its own column). Excluded from `cards` on fold
-    # (`RunState.hypotheses` was removed — card ids == hypothesis ids in Layer 1a).
+    # Human-DELETED legacy/pure-belief rows (`hypothesis_updated status=deleted`) are removed from the
+    # Card projection entirely, unlike `abandoned` (which remains visible). Native work-item Card ids are
+    # separate; this compatibility journal addresses the legacy statement-hash identity lane.
     hypotheses_deleted: list[str] = Field(default_factory=list)
     # FOREAGENT board prioritization. The latest `hypothesis_ranked` event carries
     # {at_node, order:[ids], confidence, reason, ranked:[{id,statement}]}. It never re-ranks evaluated
@@ -1369,9 +1368,9 @@ class RunState(BaseModel):
     card_priority_pins: dict[str, int] = Field(default_factory=dict)
     card_operator_edits: dict[str, dict] = Field(default_factory=dict)
     card_resource_pins: dict[str, dict] = Field(default_factory=dict)
-    # Agent-authored run report (conclusion-first; audit-only sidecar — NEVER read by best-selection).
-    # The latest `report_generated` event's content, regenerated on a cadence + on manual refresh. The
-    # UI renders the deterministic analysis from the node set and layers this narrative on top.
+    # Agent-authored run report (selection-neutral narrative; never read by best-selection).
+    # The latest `report_generated` event's content is also the replay-safe regeneration-cadence receipt.
+    # The UI renders deterministic node analysis and layers this narrative on top.
     report: Optional[dict] = None
     # M6 comparative-lesson replay receipts. They do not directly rank evaluated nodes, but they gate
     # paid cadence work and the shared lesson store subsequently feeds proposal prompts.
@@ -1406,11 +1405,14 @@ class RunState(BaseModel):
         return self.nodes.get(self.best_node_id) if self.best_node_id is not None else None
 
     def research_cards(self) -> list["Card"]:
-        """The single research board: canonical (non-merged-away) cards. `1 card = 1 hypothesis` —
-        each card carries the hypothesis fields (seed_statement == statement, verdict == status,
-        evidence, priority), so this replaces the removed `RunState.hypotheses` board for every consumer.
-        Merged aliases are already collapsed OUT of `self.cards`; this only drops any lingering
-        `merged_into` row for safety."""
+        """Canonical (non-merged-away) Card work items on the research board.
+
+        Cards carry the former hypothesis-facing fields, but work-item identity and belief identity are
+        deliberately separate: multiple cards may share one ``belief_id`` (for example a debug retry).
+        Consumers that need one row per research question use ``open_research_beliefs`` or
+        ``events.belief_projection.grouped_beliefs``. Merged aliases are already collapsed out of
+        ``self.cards``; this only drops any lingering ``merged_into`` row for safety.
+        """
         return [c for c in self.cards.values() if c.merged_into is None]
 
     def open_research_cards(self) -> list["Card"]:

@@ -845,9 +845,10 @@ class NoveltyGateMixin:
             verifier confirms a stable implementation-bound failure. The flat gate has no re-open path.
         Returns None (defer to the flat gate, UNCHANGED behavior) for every other grade: level 0 (novel,
         the flat gate passes it anyway) and levels 1/2/3 (identical / near-dup / prior-run, which the flat
-        gate legitimately dedups). Audit-only: the allow is recorded as a `novelty_graded` event, never a
-        selection change. No-op (returns None) with the flag off, an empty run, or no vocabulary — so the
-        default path is byte-identical.
+        gate legitimately dedups). This is a behavioral admission decision: the allow short-circuits the
+        flat gate and its recorded `novelty_graded` receipt can later steer Card selection. It never
+        directly re-ranks evaluated metrics. No-op (returns None) with the flag off, an empty run, or no
+        vocabulary — so the default path is byte-identical.
 
         AGENTIC-FIRST (§21.4 F2): when independently classified node tags are cached as `node_concepts`,
         the grade uses only entries carrying an exact classifier provenance receipt (reconstructed
@@ -1087,8 +1088,9 @@ class NoveltyGateMixin:
                                 prospective_node_id=None) -> None:
         """SURFACE (never gate) the cross-run prior: which of the idea's OWN concepts were tried before, in
         which runs, with each matched concept's retained outcome and the explicitly run-level best metric —
-        folds into `RunState.cross_run_priors` for the trace/UI. Best-effort; audit-only, so a failure never
-        blocks proposing. Every v2 event carries the source-capsule completeness receipt; legacy event fields
+        folds into `RunState.cross_run_priors` and the Card's observational prior projection for trace/UI.
+        Best-effort and admission-neutral, so a failure never blocks proposing. Every v2 event carries the
+        source-capsule completeness receipt; legacy event fields
         remain additive aliases so historical consumers keep folding.
         `matched` is the idea∩prior overlap already computed by the caller (never the gating grade)."""
         try:
@@ -1188,7 +1190,7 @@ class NoveltyGateMixin:
                 "prior_runs_complete": len(runs) == len(returned_runs),
                 "concept_source": concept_source,
                 "stance": getattr(self, "_novelty_stance", None)})
-        except Exception:  # noqa: BLE001 — audit only, never block proposing
+        except Exception:  # noqa: BLE001 — observational only; never block proposing
             return
 
     @in_llm_lane("novelty_dedup")

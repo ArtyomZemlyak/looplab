@@ -677,9 +677,9 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # P1: surface OPEN board hypotheses (human "+ Add" / deep-research directions) verbatim.
     # Without this the Researcher never sees them, and evidence only links when an experiment's
     # `hypothesis` matches the statement exactly — so board cards would stay "open" forever.
-    # 1 card = 1 hypothesis: read the single Card board directly (open, no evidence yet). Card fields
-    # shadow the old Hypothesis (verdict == status, id/evidence identical); `seed_statement == statement`
-    # only until an operator edit or a merge diverges them.
+    # Read distinct open, untested BELIEFS from the Card work-item board. Card fields retain the old
+    # Hypothesis-facing vocabulary, but multiple work items may share a `belief_id`; the helper below
+    # collapses them before prompting. `seed_statement == statement` only until an operator edit or merge.
     # This feed DELIBERATELY shows the immutable `seed_statement` (not the display `statement`) and asks
     # the model to copy it EXACTLY: evidence links only when the built node's `idea.hypothesis` matches the
     # card's SEED — `_derive_cards` bridges `hypothesis_id(seed)` to the owning card id via

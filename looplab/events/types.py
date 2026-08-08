@@ -41,13 +41,10 @@ How to add an event type:
 """
 from __future__ import annotations
 
-# --- DOMAIN events (folded into RunState by `replay.fold`; the engine is the sole writer,
-#     except a few UI/CLI-writable ratification/config events: `spec_approved`/`approval_granted`
-#     (ratify), `trust_gate_changed` (PUT /config), `run_concepts` (the operator/assistant sets
-#     the run's base concept set — it is allow-listed in BOTH serve/protocol.py CONTROL_EVENTS and
-#     COLLABORATION_EVENTS), and `report_generated` (report_refresh) — all fold-safe
-#     last-write-wins/audit-only. Route any new server append through an allow-listed helper
-#     rather than adding another exception here). ---
+# --- DOMAIN events folded into RunState by `replay.fold`. The engine owns domain reduction and
+#     effects; authenticated server/CLI paths may append explicitly allow-listed control intents or
+#     receipts through EventStore serialization. Route every new non-engine append through the protocol's
+#     allow-list and generation/authorization boundary instead of creating an ad-hoc writer. ---
 EV_RUN_STARTED = "run_started"
 # Emitted at the START of building a node — BEFORE the Researcher/Developer run — so the UI can show the
 # node the instant work begins on it (its live agent-trace streams in) instead of only after the minutes-
@@ -158,8 +155,9 @@ EV_NOVELTY_REJECTED = "novelty_rejected"
 # PART IV D3 (§21.4, Phase 2b): the LIVE novelty gate GRADED a proposal over the concept graph and
 # ALLOWED it despite a concept overlap the flat dedup gate would have rejected — a level-4 "same
 # direction, different implementation" or a level-5 "re-opens a wrongly-abandoned failed direction".
-# Audit-only (records the grade + near-node); recorded only when `graded_novelty` is on. Additive,
-# reader-defaulted; folds into RunState.novelty_grades. See looplab/search/graded_novelty.py.
+# Behavioral admission receipt: the allow short-circuits the flat novelty gate, then folds onto the Card
+# novelty signal and can steer which candidate is built. It never directly re-ranks evaluated metrics.
+# Recorded only when `graded_novelty` is on; additive/reader-defaulted. See search/graded_novelty.py.
 EV_NOVELTY_GRADED = "novelty_graded"
 # PART IV cross-run Step 2 (§21.20): the proposed idea's concept(s) were tried in a SIMILAR earlier run
 # (loaded from the cross-run ConceptCapsuleStore). Audit-only, recorded only when `cross_run_concepts`

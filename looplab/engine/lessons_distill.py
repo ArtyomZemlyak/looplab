@@ -153,8 +153,9 @@ class LessonDistillMixin:
         from looplab.engine.memory import write_auto_skill
         sk_dir = base / "skills"
         skills: list[str] = []
-        # 1 card = 1 hypothesis: distil skills from the single Card board. `verdict` is the research
-        # status (byte-identical to the old Hypothesis.status via `_evidence_verdict`). Use the DISPLAY
+        # Distil skills from canonical Card work items. Several retry cards may share one belief; the
+        # skill store's stable title/path makes a repeated statement an idempotent overwrite. `verdict`
+        # is the research status (compatible with old Hypothesis.status via `_evidence_verdict`). Use the DISPLAY
         # `statement`, not `seed_statement`: for a MERGED card the fold rewrites `statement` to the
         # agent-consolidated text (replay.py `merged_stmt`) exactly as the old Hypothesis.statement did,
         # while `seed_statement` stays the raw first-member seed — so `statement` is the behaviour-equal
@@ -263,11 +264,12 @@ class LessonDistillMixin:
         # ANY fed-node change invalidates the batch (one LLM re-reflection — cheap, correct).
         ev_ids = [n.id for n in ok] + [n.id for n in bad]
         ev_sig = self._evidence_sig_map(final, ev_ids)
-        # The full experimental record — every RESOLVED hypothesis with its outcome + Δ — so the LLM can
+        # The full experimental record — every resolved Card work item with its outcome + Δ — so the LLM can
         # CONSOLIDATE many trials of the SAME theme (e.g. every temperature experiment) into ONE lesson,
         # instead of the old one-verbatim-hypothesis-per-lesson dump that filled the store with near-dupes.
-        # 1 card = 1 hypothesis: consolidate over the single Card board. `verdict` == the old
-        # Hypothesis.status (RESOLVED lanes only); the DISPLAY `statement` is the behaviour-equal belief
+        # Summarize resolved canonical Card work items. Multiple retries can share a belief, preserving
+        # each work item's outcome as evidence for the reflector. `verdict` matches the old
+        # Hypothesis.status vocabulary; the DISPLAY `statement` is the behavior-compatible belief
         # text (it carries a merged card's consolidated wording, matching the old Hypothesis.statement).
         hyps = [f"[{h.verdict}{f' Δ{h.best_delta:+.4g}' if isinstance(h.best_delta, (int, float)) else ''}] "
                 f"{' '.join((h.statement or '').split())[:160]}"
@@ -350,7 +352,7 @@ class LessonDistillMixin:
                         key=lambda n: (n.metric if n.metric is not None else -1e18), default=None)
         if client is None or code_node is None or not code_node.code:
             return base
-        # 1 card = 1 hypothesis: the technique belief is the DISPLAY `statement` (== the skill title the
+        # The technique belief is the DISPLAY `statement` (== the skill title the
         # caller writes, and == the old Hypothesis.statement including the merged-card consolidated text);
         # fall back to `seed_statement` for any legacy caller that passes a bare hypothesis-shaped object.
         belief = getattr(h, "statement", "") or getattr(h, "seed_statement", "")

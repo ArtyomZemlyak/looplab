@@ -296,12 +296,13 @@ class AppState:
         # change publish counts that do not describe the actual mapping in this SSE/state frame.
         card_fragment = public_cards_projection(st.cards, omit_fields=omit_fields).model_dump(mode="json")
         d.update(card_fragment)
-        # DEPRECATED read-only `hypotheses` compat projection (peer review): the derived hypothesis board
-        # was removed from RunState (1 card = 1 hypothesis), but docs/23 deferred the /state CONTRACT
+        # DEPRECATED read-only `hypotheses` compat projection: the duplicate core Hypothesis model was
+        # removed after Card became canonical, but docs/23 deferred the /state CONTRACT
         # retirement to a post-L6 window — without the key an external client can't tell "known empty"
-        # from "schema removed". Re-derive it from the belief board (`research_cards`), reusing the
+        # from "schema removed". Re-derive one compatibility row per canonical Card work item, reusing the
         # ALREADY bounded+redacted Card DTO values so no raw card text leaks past the public boundary, in
-        # the old Hypothesis shape (each Card shadows it 1:1; old `status` == the research `verdict`). It
+        # old Hypothesis shape (`status` == the research `verdict`). Several rows may share one `belief_id`;
+        # clients needing canonical beliefs should migrate to the Card/belief APIs. It
         # is read-only telemetry — never folded, never read by the engine — and clients should migrate to
         # `cards`.
         _card_dtos = card_fragment.get("cards")

@@ -1,5 +1,9 @@
 # LoopLab — Agent-Framework Mega-Review (2026-07-10)
 
+> **Historical review checkpoint.** Findings and line references are pinned to the 2026-07-10 tree.
+> Later fixes are not inferred from old “open” language; current source/tests and the current
+> architecture ledger in doc 25 decide present implementation status.
+
 **Scope.** A deep, agent-focused review of the whole engine, organized around the three axes the
 review was commissioned for: **synergy** between the agents, **corner-case coverage**, and
 **agentic best practices**. Six parallel reviewers each read one subsystem end to end —

@@ -1,9 +1,9 @@
 # UI Phase 3 validation
 
 This document is the acceptance contract for the product-usability phase that adds comfortable
-density, saved portfolio views, and cross-run comparison. Automated tests may prove behavior and
-data-safety contracts; they do **not** count as moderated usability evidence or pixel-level browser
-acceptance.
+density, saved portfolio views, and cross-run comparison. It was reconciled with the production build
+and bundle gate on 2026-08-08. Automated tests may prove behavior and data-safety contracts; they do
+**not** count as moderated usability evidence or pixel-level browser acceptance.
 
 ## Implemented product contract
 
@@ -21,9 +21,10 @@ acceptance.
   snapshot.
 - Configuration differences are owner-only, bounded to 160 rendered rows, and disclose truncation.
   Champion cells deep-link to the exact experiment.
-- The compare implementation is an on-demand chunk with a 3 KiB incremental gzip ceiling. The
-  measured whole-product baseline is 355,610 B gzip under a 348 KiB ceiling; existing route budgets
-  remain unchanged.
+- The compare implementation is an on-demand chunk with a 4 KiB incremental gzip ceiling. The
+  current production build measures 3,951 B gzip for that increment, 502,043 B (490.3 KiB) for total
+  JavaScript, and 80,700 B (78.8 KiB) for the initial shell. The executable budgets live in
+  `ui/scripts/check-bundle.mjs`: 491 KiB total JavaScript and 4 KiB for the compare increment.
 
 ## Automated acceptance
 

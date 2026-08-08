@@ -1,7 +1,7 @@
 [project]
 name = "looplab"
 version = "0.1.0"
-description = "LoopLab — autonomous ML/DS research engine (P0 working-loop slice)"
+description = "LoopLab — autonomous ML/DS research engine"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

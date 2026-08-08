@@ -1,5 +1,9 @@
 # LoopLab — External Works Analysis: MARS, S1-NexusAgent, AgentDS, AgentRxiv, DS-Automation Surveys (2026-07-04)
 
+> **Point-in-time external research.** LoopLab status, defaults, file/line references and gap claims are
+> pinned to the 2026-07-04 review. Recommendations remain research input; current source/tests and the
+> user guide decide what actually ships.
+
 **Method.** Three parallel research passes: (1) a full architecture map of the current engine
 (seams, protocols, ADRs); (2) primary-source research on MARS (arXiv 2602.02660) and S1-NexusAgent
 (arXiv 2602.01550 — note: the circulated ID 2606.06036 is a *different* paper, "Memory is

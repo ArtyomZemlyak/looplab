@@ -15,7 +15,9 @@
 
 - **Derive, don't dual-write.** Writing the same fact to two stores has no cross-system atomicity → silent divergence (the "dual-write problem"). Instead: one atomic write to the canonical file; the UI's SQLite/Parquet/search index is rebuilt from it.
 - **Projections are disposable.** A corrupted index is fixed by `rm -rf _derived/ && rebuild`, never hand-repaired. This sidesteps cache-invalidation (key each projection entry on the **content hash** of its source, à la Docker — not mtime).
-- **The UI may read canonical files and write only into `_derived/`.** It must never mutate canonical files. (Mirrors ADR-1's single-writer rule: the engine is the sole writer of run state; the UI appends intents only.)
+- **The UI may read canonical files and write only into `_derived/`.** It must never mutate canonical files.
+  (Current equivalent: one live engine owns `RunState` reduction; authenticated UI controls append only
+  allow-listed intents through EventStore serialization.)
 
 This directly satisfies your requirement: **humans get plain text everywhere that matters; the UI builds its own formats in a throwaway cache.**
 

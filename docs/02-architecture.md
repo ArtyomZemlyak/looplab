@@ -5,12 +5,16 @@
 
 > This document defines **how LoopLab works**: principles, components, data model, control flow, the search and trust mechanisms, extension points, rules/invariants, and a tech stack. It is a from-scratch design (no fork) that **synthesizes the best ideas** from the surveyed systems — each major decision cites its source.
 
-> **Current runtime authority boundary (2026-07-16).** `events.jsonl` is authoritative for the replayable
+> **Historical target, not an implementation inventory (reconciled 2026-08-08).** `events.jsonl` is authoritative for the replayable
 > `RunState`, not for every byte the product displays. One live engine is fenced by `engine.lock`; the UI
 > server can also append control events through `EventStore`'s cross-process serialization. Task/config
 > snapshots, diagnostic spans, chat, durable command records and cross-run memory are separate sidecars;
-> `replay.fold` deliberately does not reconstruct them. Later sections retain some original design wording,
-> but this shipped boundary takes precedence.
+> `replay.fold` deliberately does not reconstruct them. The Settings factory selects the
+> OpenAI-compatible client, not the optional LiteLLM adapter; no MCP server bus ships; exact-row leakage
+> checking is a task-supplied setup gate rather than the universal per-candidate pipeline designed below;
+> costs are metered without a configured dollar hard stop. Build and eval parallelism are separate
+> bulk-synchronous batches with join barriers, not N continuously adapting research threads. Later
+> sections retain original target wording, but these shipped boundaries take precedence.
 
 ---
 
@@ -23,7 +27,7 @@
 2. **Evaluation rigor is the #1 lever.** Consistent, leakage-proof validation + selecting on a trustworthy validation metric is worth +10–15 points — the largest measured gain in the field. Trust no single noisy run; but spend here on **leakage detection + robust CV**, not on a hardened adversarial evaluator (which only matters when the agent controls its own metric). *(AIRA / AIRA_2; MLE-STAR leakage checker; [ADR-6](03-decisions.md).)*
 2b. **Ensemble the winners.** An LLM-proposed, iteratively-refined merge/ensemble of top solutions is the best-evidenced single lift (MLE-STAR, KompeteAI). It is a first-class operator, not a terminal afterthought. *([ADR-6](03-decisions.md).)*
 3. **Separate roles; route models per role.** A reasoning model proposes ideas (Researcher); a cheaper instruction-follower writes/repairs code (Developer). *(R&D-Agent: o3 Researcher + GPT-4.1 Developer.)*
-4. **Backend-agnostic.** One LLM abstraction over LiteLLM → any API or local model; per-role override. *(R&D-Agent default backend; AIDE's OpenAI-compatible plumbing.)*
+4. **Backend-agnostic.** One LLM abstraction over an OpenAI-compatible `/v1` endpoint; per-role override. An optional LiteLLM adapter exists but is not selected by shipped Settings. *(R&D-Agent default backend; AIDE's OpenAI-compatible plumbing.)*
 5. **Constrained edit surface + commit-per-experiment.** The agent edits a well-defined surface; every accepted change is a git commit → lineage, rollback, reproducibility. *(Karpathy `autoresearch`.)*
 6. **Memory is first-class.** A persistent archive of results/summaries/lineage conditions every new proposal. *(AlphaEvolve archive; R&D-Agent's "context from prior experiments".)*
 7. **Config over code; explicit plugin seams.** Common changes are config; deep changes implement a documented interface. *(AIDE's "swap in heuristics/evaluators/backends".)*
@@ -70,7 +74,7 @@
                                    │ VARIANCE GATE    │
                                    └──────────────────┘
    ┌───────────────┐   ┌─────────────────────┐   ┌──────────────────────────┐
-   │ TASK ADAPTER  │   │ LLM BACKEND (LiteLLM)│   │ SEED-KNOWLEDGE LIBRARY    │
+   │ TASK ADAPTER  │   │ OPENAI-COMPAT LLM    │   │ SEED-KNOWLEDGE LIBRARY    │
    │ MLE-bench /   │   │ per-role routing,    │   │ Muon, modded-nanogpt      │
    │ single-file / │   │ API + local          │   │ tricks, DS heuristics     │
    │ kernel/SOL    │   └─────────────────────┘   └──────────────────────────┘
@@ -172,17 +176,6 @@ Pipeline per candidate:
 > adapter does. There is no `LeakageChecker` class, and `CoEvolvingEvaluator`/`ExploitRule` were never
 > built. Full annotation + the open product question: [01 §5.E](01-product-design.md).
 
-<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — step 2 of this per-candidate pipeline is not what runs.
-`engine/audit.py::_leakage_blocks` is called from exactly ONE site — `self._leakage_blocks()` inside the
-once-per-run setup block of `engine/orchestrator.py::run` — so it is a RUN-SETUP GATE, not a
-per-candidate step, and it returns False immediately unless the task defines `leakage_inputs()`. The only
-adapter that defines it is the synthetic `adapters/mlebench.py::leakage_inputs`, so `trust/leakage.py::target_leakage`
-and `::temporal_leakage` are never reached by a shipped real task. There is no `LeakageChecker` class and
-no `check(solution, run) -> LeakageReport`. `ExploitRule`/`add_exploit_rule`/`CoEvolvingEvaluator` were
-demoted by ADR-6 to open-ended mode only and never built (zero hits).
-Full annotation + the business question: [01 §5.E](01-product-design.md). Do not re-litigate the
-audit-only DEFAULT (`trust_gate="audit"`, `code_leakage_detect=False`) — that was deliberately decided by
-doc 10 (2026-07-02) and doc 16/17 (2026-07-11). -->
 
 A `Verdict` is `{accepted, metric, ci, validity, leakage, reason}`.
 
@@ -234,7 +227,8 @@ Built-ins:
 - Conditions every `Researcher.propose` call (closes the loop). *(AlphaEvolve archive; R&D-Agent prior-experiment context.)*
 
 ### 3.9 LLM Backend Layer
-**Responsibility:** one call surface, routed per role, over LiteLLM.
+**Responsibility:** one call surface, routed per role. Shipped Settings use the OpenAI-compatible
+client; `LiteLLMClient` is an optional manually wired adapter.
 ```python
 class LLM:
     def complete(self, role: Role, messages, **opts) -> Response: ...
@@ -260,14 +254,6 @@ Per-role model assignment is a first-class config concept. Failover + retry + co
 > *client*, wired only into the owner chat assistant, and `mcp` is not a declared dependency. No in-loop
 > role consumes an MCP tool. Full annotation + the open question: [ADR-9](03-decisions.md).
 
-<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — none of the five servers exists. LoopLab ships an MCP *client*
-only (`tools/mcp_tools.py:1-3`, "MCP client tool provider: expose tools from configured Model Context
-Protocol servers"); `FastMCP`, `stdio_server` and `mcp.server` have ZERO hits in `looplab/`, as do all four
-ADR-9 tool names (`query_archive`, `profile_data`, `check_leakage`, `run_code`). The client is wired at
-exactly one site — `serve/assistant.py:1665-1675`, the OWNER CHAT ASSISTANT — and `agents/factory.py` has
-zero MCP references, so "our roles consume them via function-calling" does not happen. `mcp` is not a
-declared dependency in `pyproject.toml`, so on a stock install the provider degrades to contributing no
-tools at all. Full annotation + the business question: [ADR-9](03-decisions.md). -->
 
 
 
@@ -428,22 +414,12 @@ A single good run is *a hypothesis, not a result* — but **p<0.01 on every prom
 
 ## 9. LLM backend abstraction
 
-> **⚠ Not true today (2026-08-04).** LiteLLM is not a dependency and is on no shipped code path;
-> `core/llm.py::make_llm_client` always returns `OpenAICompatibleClient`. The shipped promise is "any
-> OpenAI-compatible `/v1` endpoint", not "100+ providers". Same correction applies to principle 4 (§1),
-> the tech-stack row (§14), the provenance row (§16) and ADR-11's gateway secrets model (§18). Full
-> annotation + the open question: [01 §5.K](01-product-design.md).
+> **Shipped boundary (2026-08-08).** `core/llm.py::make_llm_client` returns
+> `OpenAICompatibleClient`. The promise is “any OpenAI-compatible `/v1` endpoint,” not “100+
+> providers.” The optional LiteLLM adapter is not selected by Settings.
 
-<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — "one layer over LiteLLM -> 100+ providers" is not what ships,
-and no later doc revised it (doc 17:2067 still asserts it as fact; doc 25's line-by-line review of
-core/llm.py never mentions LiteLLM). `litellm` is in neither `dependencies` nor any extra;
-`core/llm.py::make_llm_client` returns `OpenAICompatibleClient` UNCONDITIONALLY;
-`core/llm.py::LiteLLMClient` is constructed only in two tests. What ships is "any
-OpenAI-compatible /v1 endpoint" — the promise the user guide already makes. This also applies to
-principle 4 in §1, the tech-stack row in §14, the provenance row in §16, and ADR-11's LiteLLM-gateway
-secrets model in §18. Full annotation + the business question: [01 §5.K](01-product-design.md). -->
 
-- **One layer over LiteLLM** → 100+ providers incl. local (vLLM/Ollama) and all major APIs.
+- **Shipped layer:** any OpenAI-compatible `/v1` endpoint (including Ollama, vLLM, SGLang and OpenAI). `LiteLLMClient` is an optional, manually wired adapter, not the Settings-factory route.
 - **Per-role routing AND per-role backend** is config, not code ([ADR-7](03-decisions.md)):
   ```yaml
   roles:
@@ -478,7 +454,9 @@ secrets model in §18. Full annotation + the business question: [01 §5.K](01-pr
 3. **The agent may only edit the declared edit-surface** — enforced, not trusted.
 4. **Every accepted node is a git commit** — lineage is always reconstructable.
 5. **All agent code is sandboxed, network-off, resource-capped** — no exceptions for "trusted" ideas.
-6. **Budget is hard** — when tokens/compute hit the cap, the loop stops; no overruns.
+6. **Budget semantics are explicit, not universally atomic.** Node/evaluation/wall bounds stop future
+   admission according to their documented contracts, with bounded in-flight overshoot where noted.
+   Model cost is metered and reported; shipped Settings expose no hard dollar cap.
 7. **Failures are archived, not discarded** — the proposer learns from them (novelty filter).
 8. **Metrics are reported with variance** — never a bare point estimate.
 9. **Config changes can't bypass safety** — sandbox/budget/evaluator are not user-disableable in normal mode.
@@ -521,40 +499,19 @@ secrets model in §18. Full annotation + the business question: [01 §5.K](01-pr
 >   documented in [guide/concepts.md:54-57](guide/concepts.md). See
 >   [04-file-layout.md §6](04-file-layout.md) rule 5 for the same correction.
 
-> **⚠ Rule 6 does not hold today (2026-08-04).** There is no dollar-budget field in `Settings` at all, so
-> the 80%-warn / `BudgetExceeded` machinery in `core/llm.py::CostAccountant` is unreachable on every
-> shipped path, and `max_eval_seconds` is not atomic under parallel evals. Cost is metered and reported
-> (`engine/costs.py`), not enforced. A product decision is pending — see the annotation in this file's
-> source immediately below.
+> **Current cost boundary (2026-08-08).** `CostAccountant` can enforce a limit supplied directly by a
+> caller, but every shipped Settings path uses no limit. `engine/costs.py` meters and reports usage;
+> `max_eval_seconds` is an admission/elapsed-work bound with documented parallel overshoot, not a dollar cap.
 
-<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — rule 6, "Budget is hard".
-WHAT THIS DOC PROMISES: "when tokens/compute hit the cap, the loop stops; no overruns", plus ADR-11 §9 /
-§18 "accountant gates at 80%, hard-kills at 100%" and the per-role `limits: {usd: 4.0}` in §9/§3.4b.
-WHAT THE CODE DOES: the machinery exists but is unreachable. `core/llm.py::CostAccountant.__init__`
-takes `limit: Optional[float] = None`; inside `::CostAccountant.add` both the 80%-warn branch and the
-`raise BudgetExceeded` are guarded on `self.limit is not None`. There is NO dollar-budget field anywhere
-in `Settings` (`core/config.py`), and all three `CostAccountant(...)` construction sites in `core/llm.py`
-pass no limit — so both branches are dead code on every shipped path. `max_eval_seconds` is a separate, non-atomic ceiling that
-[16-architecture-code-review-2026-07-11.md:362-378](16-architecture-code-review-2026-07-11.md) already
-proved is not hard under `max_parallel>1` ("`max_parallel=4`, cap `.05` launched four evaluations and
-spent `.20`"), and [doc 17:108](17-project-review-and-directions-2026-07-11.md) records "hard budget
-reservation … remains missing". No later doc retired the invariant; it is an open, unowned blocker.
-NEEDS A BUSINESS DECISION: do we add a run-level dollar budget to `Settings` and thread it into every
-`CostAccountant` (making rule 6 and ADR-11 §9's 80%/100% gates real), or do we withdraw "budget is hard"
-and restate the product promise as "cost is METERED and reported, and only node/eval-seconds counts are
-enforced"? Note the UI already exposes no configured run-dollar limit
-([18-ui-ux-review-2026-07-11.md:1716](18-ui-ux-review-2026-07-11.md)), so today's answer is the second one
-in practice but the first one in every design doc. -->
 
 ---
 
 ## 12. Concurrency, persistence, reproducibility
 
-<!-- CODEX AGENT: current parallel_build and eval dispatch are separate bulk-synchronous batches with
-join barriers. A freed worker cannot immediately select/propose from a fast sibling's result while a
-slow sibling continues, so this N-complete-adaptive-thread contract is not yet implemented. Either move
-to a completion-fed central scheduler or narrow this architecture claim to batched phase parallelism. -->
-- **Concurrency:** N research threads (config), each a select→propose→implement→run→evaluate chain, sharing one archive + one budget manager. Cap by available GPUs/CPU.
+- **Concurrency:** separate build and evaluation batches run concurrently within their configured
+  widths, then join at bulk-synchronous barriers. A fast worker does not continuously select a new action
+  from sibling evidence while a slower sibling remains in flight. GPU/CPU admission bounds evaluation;
+  the shared LLM broker bounds configured provider lanes.
 - **Persistence:** canonical inputs are **human-readable files** (`events.jsonl` for replayable run state plus task/config and original sidecars) + a git repo (solutions/lineage); MLflow is an optional export. SQLite/Parquet under `_derived/` is a **rebuildable projection**, never authority. Resume additionally honors the task/config snapshots and the documented command/finalization recovery records; it is not a claim that every external side effect can be recreated from the event log. *([04-file-layout.md](04-file-layout.md))*
 - **Reproducibility:** any reported result ships with `{git_ref, seeds, deps_lock, mlflow_run, exact_command}` so a third party can rerun it (this is also our #2 success metric).
 
@@ -586,8 +543,8 @@ Everything is wired by dependency injection from `Config`; the core loop knows o
 ## 14. Recommended tech stack
 
 - **Language:** Python 3.11+.
-- **LLM backend:** **LiteLLM** (matches R&D-Agent; gives local + API + cost hooks).
-- **Role backends ([ADR-7](03-decisions.md)):** raw LLM (LiteLLM) **or** external coding-agent CLI — **OpenHands** (MIT, best fit; `--headless --json` / SDK), **Aider** (Apache-2.0, simplest; git-diff artifact), **SWE-agent/mini-swe-agent** (MIT; clean `.patch`), optionally **Claude Code** (proprietary, API-shaped only). Wrapped via worktree + diff-reject + sandboxed process + event-fold.
+- **LLM backend:** OpenAI-compatible SDK/httpx client; optional manually wired LiteLLM adapter.
+- **Role backends ([ADR-7](03-decisions.md)):** in-house OpenAI-compatible LLM roles **or** an external coding-agent CLI. Wrapped via worktree + surface gate + sandboxed process + event-fold.
 - **Sandbox ([ADR-13](05-build-decisions.md)):** Docker + **docker-py** + NVIDIA Container Toolkit (prod); **gVisor/runsc** escalation for untrusted single-script runs; **Sysbox** when a full agent backend spawns its own Docker. GPU caps via `CUDA_VISIBLE_DEVICES`+CDI (MIG for untrusted sub-GPU packing); resource/timeout via cgroups + a **psutil** watchdog; network-off via `--network none`. **Windows dev = Docker Desktop + WSL2** (primary); native **Job-Object** subprocess (`pywin32`) for trusted dev only.
 - **Storage ([04-file-layout.md](04-file-layout.md)):** human-readable canonical files (Markdown+frontmatter docs, YAML config, JSON summaries, CSV/JSONL metrics, JSONL event/command/log streams) + a content-addressed `store/` for big binaries (safetensors weights, datasets) referenced by sha256 + git repo for solution lineage + `_derived/` rebuildable UI projections (SQLite/Parquet/index, gitignored) + a vector index (**LanceDB** — embedded, Windows-friendly, vectors + native FTS) for novelty/similarity. Atomic writes (temp→rename) throughout. **Concrete library choices for every component are pinned in [05-build-decisions.md](05-build-decisions.md).**
 - **Tracking/reproducibility:** **MLflow as an optional headless exporter** over the event log, `sqlite:///mlflow.db` backend (`MlflowClient`, autolog, git capture, registry) — no MLflow server/UI; swappable, off the hot path ([ADR-4](03-decisions.md)/[ADR-6](03-decisions.md)).
@@ -595,9 +552,11 @@ Everything is wired by dependency injection from `Config`; the core loop knows o
 - **Capability layer ([ADR-9](03-decisions.md)):** **MCP** servers (`archive`/`ml-tools`/`sandbox`/`web`) as the tool bus; **Anthropic Agent Skills** (`SKILL.md`) for ML recipes; per-role tool allow-lists.
 - **Prompts ([ADR-8](03-decisions.md)):** Markdown + YAML frontmatter in git (`prompts/<role>/<op>.md`), hot-reloaded; optional **Langfuse** (MIT) for UI editing/versioning; **BAML** for structured-output prompts; `dspy.GEPA` for later optimization; **AGENTS.md** generated per-run for agent backends.
 - **Knowledge/memory ([ADR-10](03-decisions.md)):** Markdown+frontmatter notes (canonical) + a derived vector index behind a **pluggable `VectorStore`** (**LanceDB** default — vectors + FTS hybrid in one embedded store; Qdrant/FAISS/Chroma are config-swappable plugins) + optional **[[wikilinks]]→networkx** graph (GraphRAG deferred, [ADR-16](05-build-decisions.md)); role/goal-conditioned router; cross-run case library + lessons.
-- **Secrets/config/observability ([ADR-11](03-decisions.md)):** **LiteLLM gateway** (per-role tokens, budgets) + secret manager; **`pydantic-settings`** typed config (layered: YAML < `.env` < env < CLI; `SecretStr`) with a secret-masked resolved snapshot; **OpenTelemetry GenAI** event conventions.
+- **Secrets/config/observability ([ADR-11](03-decisions.md)):** direct provider key references (masked in snapshots), typed `pydantic-settings`, durable JSONL spans and optional OpenTelemetry export. The designed short-lived gateway-token/budget service did not ship.
 - **Orchestration/concurrency ([ADR-12](05-build-decisions.md)):** **`anyio`** (asyncio backend) + `CapacityLimiter` for bounded fan-out; **hand-rolled crash-resume by event-replay** (no Temporal/Prefect — would conflict with files-as-truth); **`git` CLI via subprocess** for commits/worktrees (not GitPython/pygit2); per-run/`thread` isolation via git worktrees + sandbox containers.
-- **Structured LLM outputs ([ADR-14](05-build-decisions.md)):** **standard tool calling** by default (via LiteLLM→pydantic — the *same channel* as MCP/agent tools), with **BAML (SAP)** as the secondary fallback for weak local models + the Evaluator `Verdict`, and **outlines** as the self-hosted-vLLM guarantee tier — a per-role `parser` strategy with auto-fallback; patches as **unified-diff** applied via `git apply` with a **unidiff** allow-list gate.
+- **Structured LLM outputs ([ADR-14](05-build-decisions.md)):** standard tool calling through the
+  OpenAI-compatible client with text/JSON extraction fallback. Patch and whole-file paths use the
+  shared edit-surface/path gates; BAML/outlines are design references, not shipped dependencies.
 - **Trust layer ([ADR-15](05-build-decisions.md)):** **scikit-learn** splitters + custom consistent-eval harness + custom purged/embargoed walk-forward; **cleanlab** (label/dup/outlier) + **custom** temporal/target/contamination leakage; **scipy.stats.bootstrap** + numpy for the >1-SE gate; custom JSON data profiler.
 - **Plumbing ([ADR-17](05-build-decisions.md)):** **orjson** JSONL + rebuildable **SQLite** read-model; hand-rolled **`os.replace`+fsync** atomic writes; **watchfiles**; **jsonschema** (+ pydantic-emitted schemas, upcast-on-read); **structlog**; **opentelemetry-sdk** + custom JSONL SpanExporter; **Typer** CLI; **Jinja2** reports; **psutil** budget-watchdog/tree-kill.
 - **UI:** files-first ([ADR-1](03-decisions.md)) — **Textual** TUI now (`Tree`/`DataTable`), `textual-serve` for browser, **React Flow + ELK** web UI later; `watchfiles` for live tailing. (Not Streamlit-in-process — that couples UI to the engine.)
@@ -636,7 +595,7 @@ Everything is wired by dependency injection from `Config`; the core loop knows o
 |-----------|--------|
 | Tree search over code (node = solution, patch = child) | **AIDE** |
 | Dual roles + per-role model routing (reasoning vs coder) | **R&D-Agent** |
-| LiteLLM backend (local + API) | **R&D-Agent** (+ AIDE OpenAI-compat) |
+| OpenAI-compatible backend (local + API); optional LiteLLM adapter | **R&D-Agent** (+ AIDE OpenAI-compat) |
 | Single mutable edit-surface + git-commit-per-experiment | **Karpathy `autoresearch`** |
 | Co-evolving evaluator + anti-reward-hack | **Recursive** |
 | Multi-seed variance gating (tiered; idea from p<0.01 gates) | **Recursive** / NanoGPT speedrun; tiered per [ADR-6](03-decisions.md) |
@@ -661,7 +620,7 @@ Everything is wired by dependency injection from `Config`; the core loop knows o
 
 ## 17. Phased build (maps to product roadmap; re-ordered by [ADR-6](03-decisions.md) — operators/eval-rigor/ensembling first, infra later)
 
-- **P0 — Working loop:** Orchestrator + `SingleFileAdapter` + per-role Researcher/Developer + Sandbox + `GreedyTree` + LiteLLM + git commits + **`events.jsonl`** + a **static HTML lineage tree**. *(Karpathy/AIDE-class, backend-flexible, observable — minimal infra.)*
+- **P0 — Working loop:** Orchestrator + adapter + per-role Researcher/Developer + Sandbox + `GreedyTree` + OpenAI-compatible client + **`events.jsonl`** + a static HTML lineage tree. Canonical node lineage is event-based; external-agent worktrees are an execution mechanism, not one commit per node.
 - **P1 — The levers that move results:** **rich operators** (`draft`/`debug`(depth-bounded)/`improve`/`ablate`→`refine_block`) + **leakage checker** (train/test+temporal+target) + **consistent-evaluation protocol** + robust-CV selection + **`RoleBackend` seam with a `CliAgentBackend(openhands|aider)` Developer** (worktree + diff-reject + sandbox + event-fold). *(AIRA + MLE-STAR + [ADR-7](03-decisions.md); this is where medal-rate is won.)*
 - **P2 — Ensembling + frontier rigor:** first-class **`ensemble`/merge operator** (iteratively refined) + **top-k multi-seed confirmation** at the promotion frontier + DAG data model (`parent_ids`). *(MLE-STAR/KompeteAI; best-evidenced lift.)*
 - **P3 — Scale + reproducibility:** **parallel/throughput test-time scaling** + cheap proxy evals (subset/reduced-epoch) + **MLflow optional exporter** + Textual TUI. *(AIRA_2 throughput; reproducibility.)*
@@ -675,7 +634,7 @@ Everything is wired by dependency injection from `Config`; the core loop knows o
 ## 18. Cross-cutting hardening ([ADR-11](03-decisions.md))
 
 One decision per concern (detail + sources in [ADR-11](03-decisions.md)):
-- **Secrets:** front providers with a **LiteLLM gateway**; roles/sandbox get short-lived tokens, never provider keys; redaction + `gitleaks` over the event log.
+- **Secrets:** the original LiteLLM-gateway/token target did not ship. Current roles read configured provider-key references; persisted/model-facing boundaries apply masking/redaction, and candidate sandboxes should not receive operator credentials.
 - **Config:** **`pydantic-settings`** typed `BaseSettings`, layered sources (YAML < `.env` < env < CLI), `SecretStr` for secrets; secret-masked **resolved-config snapshot** per run = the reproduction key.
 - **Observability:** events follow **OpenTelemetry GenAI** conventions (model/tokens/latency/cost/finish-reason); domain events as child spans; cost/token/latency first-class.
 - **Human-in-the-loop:** **approvals are command events** (reuse [ADR-1](03-decisions.md)) — `pending_approval` → human appends decision → resume. Default gates: plan, egress, budget-threshold, winner-promotion.
@@ -683,6 +642,6 @@ One decision per concern (detail + sources in [ADR-11](03-decisions.md)):
 - **Determinism:** target **reproduce-with-variance**; full repro manifest; report mean ± std over N seeds (§8).
 - **Engine self-testing:** mocked-LLM smoke test in CI + **golden-task** regression suite + nightly **canary** + adversarial fixtures for the evaluator/gate.
 - **Agent-code security:** deny-by-default egress; cgroup/ulimit caps; install only from pinned lockfile; treat ingested/web content as **untrusted data, not instructions** (injection defense).
-- **Cost governance:** **gateway-enforced hierarchical budgets**; accountant gates at 80%, kills at 100%; cost attributed per run/thread/role/operator.
+- **Cost governance:** cost is attributed and reported per run/role/model/operator. No gateway-enforced hierarchical dollar budget or Settings-level 80%/100% stop ships.
 - **Isolation:** one `run_id` namespace = run dir + per-thread **git worktree** + per-thread sandbox + scoped token + one MLflow run; `run_id`+`thread_id` required on every event/path.
 - **Also:** data/artifact **retention/GC** policy; **provenance-for-publishable-results** (config snapshot + seeds + data hashes + model snapshot + event-log id travels with every "winner").

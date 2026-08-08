@@ -17,10 +17,11 @@ Benchmark numbers below are **[SR]** (self-reported, with published traces) unle
 with what we have; or is it simply better and worth replacing our core with — plus, per the
 request: how hard is each borrow and exactly where does it land.
 
-> **Authority.** Analysis/hypothesis ledger in the doc-13 line (external-works analysis). Doc 16
-> owns correctness findings, doc 25 owns structural debt, and **doc 17 owns release ordering and
-> the R0–R5 gates ([§6.3](17-project-review-and-directions-2026-07-11.md), §6.5, §6.6, §7.1)** —
-> nothing here outranks R0–R4 or flips a default. §5 reconciles every recommendation against
+> **Historical authority note (reconciled 2026-08-08).** This is an external-work analysis/hypothesis
+> ledger in the doc-13 line. Its original dependency on doc 17's R0–R5 release ordering is no longer a
+> current gate: that sequence was not how the project shipped. Source/tests and
+> [doc 00](00-INDEX.md) own current status; doc 25 remains the reconciled structural-debt ledger. Nothing
+> in this analysis flips a default. §5 reconciles every recommendation against
 > those authorities item-by-item. Because both this doc (§4.2) and doc 17 (§27) carry
 > bare-integer recommendation tables, cross-references are always qualified as
 > **"doc 26 §4.2 #N"** vs **"doc 17 §27 #N"**.
@@ -163,9 +164,9 @@ The two systems are **duals of each other around the same thesis** (harness > mo
 Three structural rhymes worth naming, because they mean the *patterns* port cleanly even though the
 *code* doesn't:
 
-- Their "parent is the sole committer; children return sha256-bound patches" **is** our engine
-  invariant #1 ("the engine is the sole writer of domain events; workers append own-node events
-  only") rediscovered independently in git-space instead of event-space.
+- Their "parent is the sole committer; children return sha256-bound patches" rhymes with our engine's
+  ownership of domain reduction/effects. LoopLab additionally permits authenticated, allow-listed control
+  writers through EventStore serialization; workers remain restricted to their owned event boundaries.
 - Their "restart verification is the absorption boundary" **is** our "every side effect gated on a
   domain event so resume-by-replay is idempotent" (invariant #3) — an effect isn't real until the
   durable record proves it.

@@ -2,15 +2,16 @@
 
 LoopLab is an autonomous ML/DS research engine: a Researcher proposes ideas, a Developer writes
 code, a sandbox runs it, an evaluator scores it, and the loop refines/merges the best candidates.
-**The append-only event log (`events.jsonl`) is the single source of truth**; all state is rebuilt
-by replaying it. Design docs live in `docs/` (see `docs/02-architecture.md`, ADRs in
+The append-only event log (`events.jsonl`) is authoritative for replayable `RunState`; task/config
+snapshots, traces, chat and cross-run stores are explicit sidecars and are not rebuilt by replay.
+Design docs live in `docs/` (see `docs/02-architecture.md`, ADRs in
 `docs/03-decisions.md`).
 
 ## Commands
 
 ```bash
 pip install -e ".[dev,ui]"        # dev deps; [ui] needed for server/assistant/TUI tests (fastapi)
-python -m pytest                  # full suite (5k+ collected tests, a few minutes; addopts already has -q)
+python -m pytest                  # full suite (8,900+ collected tests, a few minutes; addopts already has -q)
 python -m pytest tests/test_events_replay.py           # targeted run — always do this first
 python -m pytest -o addopts="" -q ...                  # if you need to override the default -q
 python -m pytest -m "not docker"  # skip Docker-daemon tests

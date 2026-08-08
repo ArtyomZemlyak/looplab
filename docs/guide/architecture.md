@@ -26,7 +26,8 @@ authoritative for replayable `RunState`, not for every value shown in the produc
 A boxes-and-arrows flowchart of one turn of the engine and its main adjacent systems. Read the top row
 left→right: **Propose → Novelty stage → Implement → Evaluate → Score · Trust → Refine**, then loop.
 Under each stage sit its detail boxes (the memory funnel under Propose, the trust/confirm stack under
-Score, …); the **Card lifecycle board** (1 card = 1 hypothesis), **cross-run memory**
+Score, …); the **Card lifecycle board** (one Card per work item, with `belief_id` grouping retries or
+other work items that test the same hypothesis), **cross-run memory**
 (write → hygiene → the five tiers) and the
 **event spine** hang below. Colour = which agent acts.
 
@@ -43,7 +44,8 @@ Score, …); the **Card lifecycle board** (1 card = 1 hypothesis), **cross-run m
     **Solid teal arrows** are the main loop; **thin dashed arrows** are feedback / memory reads &
     writes. Two edges break the circle: a **repair ↺** loop (a crash/timeout is fed back with its
     stderr, fixed in place) and a **merge** branch (two strong lineages fused into one multi-parent
-    child). The **research board** (cards; 1 card = 1 hypothesis) is *derived on every fold* — beliefs
+    child). The **research board** (Card work items plus an explicit belief grouping) is *derived on every
+    fold* — beliefs
     are deduped (exact hash + an agentic paraphrase merge), prioritized (foresight), and tracked to a
     verdict. The base
     cross-run memory paths and reflection priors are **on by default** (`~/.looplab/memory` +

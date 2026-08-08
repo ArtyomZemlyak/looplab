@@ -102,7 +102,7 @@ It is a CROSS-RUN stage with a run-triggered entry point, not a run-scoped backg
 
 Hence: called from `engine/finalize.py` on the MAIN task immediately after the concept steward
 (so the proposal it may ratify is at most one step old), gated on `Settings.concept_tidy`, default
-OFF; and exposed to the operator as `looplab governance concept-ratify` for on-demand use and dry
+OFF; and exposed to the operator as `looplab concept-ratify` for on-demand use and dry
 runs. One function, two entry points — unlike the paid protocols, there is no crash-window asymmetry
 between the two to justify two writers.
 

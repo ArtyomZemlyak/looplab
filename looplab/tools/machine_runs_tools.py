@@ -978,8 +978,8 @@ class RunControlTools:
     command service; only the deliberately separate destructive delete implementations edit storage
     here. Every verb first goes through `decide(mode, ...)` + the injected `approver` (a UI
     confirm-card), so it's denied in read-only `plan` mode, asks in default/acceptEdits, and runs inline
-    only in `auto`. Destructive edits (delete node/run) additionally REFUSE while the engine is live —
-    the engine is the sole writer of events.jsonl, so rewriting it under a live one would corrupt it."""
+    only in `auto`. Destructive edits (delete node/run) additionally REFUSE while the run is live: all
+    appenders serialize through EventStore, but a physical rewrite cannot safely race those appends."""
 
     def __init__(self, run_root, alive_fn: Optional[Callable[[Path], bool]] = None,
                  mode: str = "plan", approver: Optional[Callable] = None, *,
@@ -1158,7 +1158,7 @@ class RunControlTools:
         """Is a run's engine actively writing its log? The flock probe is primary, but on FUSE / NFS / S3
         mounts flock can wrongly report "not live" — so ALSO trip on a fresh-write backstop: a run that
         is neither paused nor finished AND whose events.jsonl was appended in the last 30s is treated as
-        live (a running engine is the sole writer and appends constantly). This gates the destructive
+        live (the engine and serialized control writers keep the log fresh). This gates the destructive
         delete_node/delete_run so they can't rewrite the log out from under a live engine even when flock
         lies. Conservative: a genuinely crashed run (stale mtime) still deletes."""
         try:
@@ -1508,7 +1508,7 @@ class RunControlTools:
             return "(delete_node needs an integer node_id)"
         purge = bool(args.get("purge"))
         if self._live(rd):
-            return f"(run {rid} is LIVE — stop it first; the engine is the sole writer of its log)"
+            return f"(run {rid} is LIVE — stop it before physically rewriting its event log)"
         evp = rd / "events.jsonl"
         store = EventStore(evp)
         events = store.read_all()
@@ -1532,7 +1532,7 @@ class RunControlTools:
         with self._commands.destructive_guard(
                 rd, "delete node", expected_generation=generation) as canonical:
             if self._live(canonical):
-                return f"(run {rid} is LIVE — stop it first; the engine is the sole writer of its log)"
+                return f"(run {rid} is LIVE — stop it before physically rewriting its event log)"
             return self._commit_delete_node_snapshot(
                 rid, canonical, nid, subtree, expected_tail, purge=purge)
 

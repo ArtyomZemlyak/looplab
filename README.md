@@ -3,7 +3,7 @@
 > An autonomous ML/DS research engine. Give it a goal; it **invents → implements → tests → improves** candidate solutions in a loop and returns the best *verified* result.
 
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-5000%2B-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-8.9k-brightgreen.svg)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](#license)
 [![Docs](https://img.shields.io/badge/docs-mkdocs--material-0f9c8c.svg)](https://artyomzemlyak.github.io/looplab/)
 
@@ -75,7 +75,7 @@ looplab replay  runs/demo          # rebuild full state from the event log
 looplab run examples/regression_task.json --out runs/reg --max-nodes 14
 ```
 
-### Three ways to configure a run
+### Four ways to configure a run
 
 You don't have to hand-write JSON. Pick whichever fits:
 
@@ -225,7 +225,7 @@ Design records (the *why* behind the architecture) are in [`docs/00-INDEX.md`](d
 ## Testing
 
 ```bash
-python -m pytest -q          # 5k+ collected tests, fully offline, a few minutes
+python -m pytest -q          # 8,900+ collected tests, fully offline, a few minutes
 ```
 
 Live-LLM and external-agent tests auto-skip when no endpoint/agent is configured, so the suite runs

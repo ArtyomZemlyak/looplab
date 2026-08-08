@@ -1,5 +1,9 @@
 # Full functionality review — historical branch origin and current `master` checkpoint (2026-07-13–18)
 
+> **Historical integration chronology.** Every round is authoritative only for its named checkpoint.
+> Current source/tests and maintained user docs decide present behavior; this ledger must not be read as
+> proof that a later regression is absent or that an old open item remains open.
+
 Historical initial scope: everything the original feature branch added on top of its then-`origin/master`
 (merge-base `edf06f7`): **10 commits,
 144 files, ~32.7k insertions**. This is a large UI/UX overhaul plus substantial backend work — a

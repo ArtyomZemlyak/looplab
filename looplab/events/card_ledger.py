@@ -2268,9 +2268,10 @@ def _publish_visible_cards(
         st: RunState, ledger: _CardLedger, control_ids: dict[str, set[str]]) -> None:
     cards = ledger.cards
 
-    # A hypothesis DELETED by the operator (hypothesis_updated status=deleted) is removed from the board
-    # entirely; the shadow card must vanish with it (mirrors `_derive_hypotheses`' final filter). Until a
-    # card-native delete exists, reuse `hypotheses_deleted`; card ids == hypothesis ids in Layer 1a.
+    # A legacy/pure-belief row DELETED by the operator (`hypothesis_updated status=deleted`) is removed
+    # entirely; every Card shadow resolved through that compatibility identity must vanish with it. Until
+    # a card-native delete exists, reuse `hypotheses_deleted`; `control_ids` maps native work-item ids back
+    # to any statement-hash control identities instead of assuming Card id == hypothesis id.
     st.cards = {
         cid: card for cid, card in cards.items()
         if not any(control_id in st.hypotheses_deleted

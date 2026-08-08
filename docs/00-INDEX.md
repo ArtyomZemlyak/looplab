@@ -2,73 +2,63 @@
 
 **Project:** LoopLab — an open, backend-flexible **autonomous ML/DS research engine** (an LLM agent that invents → implements → tests → improves ML solutions in a loop, returning the best *verified* result).
 **Status:** current documentation authority map · **Created:** 2026-06-20 ·
-**Validated/consistency-checked:** 2026-07-18 · **Runtime authority:** current `master` source and tests
+**Validated/consistency-checked:** 2026-08-08 · **Runtime authority:** current `master` source and tests
 
-> 📖 **Looking for how to *use* LoopLab?** This index covers the *design* (the why). For practical,
-> task-oriented documentation — install, quickstart, CLI, configuration, tasks — see the
-> **[User Guide](guide/index.md)** and the [README](https://github.com/ArtyomZemlyak/looplab/blob/master/README.md).
+> 📖 **Looking for how to *use* LoopLab?** This index covers the design and historical review record.
+> For practical install, quickstart, CLI, configuration and task documentation, use the
+> **[User Guide](guide/index.md)** and [README](https://github.com/ArtyomZemlyak/looplab/blob/master/README.md).
 
-> **Current implementation authority (2026-07-18):** current `master` source and tests decide runtime truth;
-> [doc 16](16-architecture-code-review-2026-07-11.md)
-> is the finding/reproduction ledger; [doc 17](17-project-review-and-directions-2026-07-11.md) is the
-> canonical priority, dependency, and release-gate plan; [doc 18](18-ui-ux-review-2026-07-11.md) is
-> authoritative for UI/UX observations and UI-specific acceptance criteria. Doc 18 is subordinate to
-> doc 17's overall ordering; it explicitly distinguishes landed, narrowed, open and still-unvalidated
-> findings rather than implying that the whole audit is fixed. [Doc 19](19-ide-integration-and-remote-development-2026-07-12.md)
-> is authoritative for IDE-integration and secure remote-workspace option criteria; it is likewise
-> subordinate to doc 17 and does not claim that an IDE or remote-access path is implemented.
-> [Doc 20](20-looplab-unified-ds-workspace-and-distributed-execution-2026-07-12.md) is the
-> multi-user workspace and distributed-execution specialization: it evaluates one
-> OIDC-authenticated LoopLab with JupyterHub, experiment-linked IDE sessions, sealed workspace
-> revisions, shared/dedicated GPU entitlements, autonomous batch fill, both managed and externally
-> operated LLMs, Kubernetes/dedicated-server backends, and multiple execution domains without
-> bypassing doc 17's prerequisite gates. [Doc 21](21-full-functionality-review-2026-07-13.md) is the
-> detailed implementation/review chronology and latest post-fix validation ledger. **Round 25** is the dated
-> `4d1218c` checkpoint; use the **post-Round-25 integration ledger** for explicitly newer deltas. For
-> Part-IV/V integration ordering use **doc 17 §22.11**; for current UI semantics and acceptance use
-> **doc 18 §37**. Earlier rounds/sections remain dated evidence, not competing current authorities.
+> **Authority rule (2026-08-08).** Current source and tests decide runtime behavior; README and
+> `docs/guide/` are the maintained user contract. [Doc 24](24-ui-phase3-validation.md) is the current
+> Phase-3 UI acceptance contract, while [doc 25](25-architecture-modularity-review-2026-08-01.md) is a
+> dated 188-finding architecture baseline whose per-finding status was reconciled against current
+> `master`. All other numbered documents are point-in-time designs, research, audits or chronology
+> unless a section explicitly says otherwise. A historical “current,” “canonical,” checkmark or open
+> item never outranks newer code/tests or prove that work still has the same status.
 
 ---
 
 ## Read in this order
 
-<!-- CODEX AGENT: this authority map is missing the two design docs added this window —
-22-agent-parallelism-2026-07-19.md and 23-hypothesis-card-kanban-2026-07-20.md (the self-declared
-current implementation truth for the Card re-architecture, referenced by CLAUDE.md and
-core/config.py). Doc 22 has ZERO inbound links anywhere (index-absent + mkdocs not_in_nav = fully
-orphaned); doc 23 is reachable only via a ROADMAP banner. Add rows above doc 21 and refresh the
-"Validated/consistency-checked" header date. -->
-
-| # | Doc | What it answers |
-|---|-----|-----------------|
-| 26 | **[26-ouroboros-airi-analysis-2026-08-02.md](26-ouroboros-airi-analysis-2026-08-02.md)** | **External-works analysis: Ouroboros, the AIRI self-evolving agent (2026-08-02).** Habr launch write-up + clone-level repo inspection (v6.87.5) mapped point-by-point onto LoopLab seams: the reviewed self-evolution mechanism as a staged assistant-side program (inside doc 17 §22.4's boundary), the benchmark anti-reward-hack methodology imports for `trust/`, an `ouroboros` CLI Developer-backend preset as the one direct code integration, a parity ledger, and a §5 cross-doc reconciliation binding every recommendation to doc 17's R0–R5 gates/§6.5 lanes, doc 16 blockers, and doc 25 collisions. Doc-13 lineage; **doc 17 still owns release ordering** — nothing in it outranks R0–R4 or flips a default. |
-| 25 | **[25-architecture-modularity-review-2026-08-01.md](25-architecture-modularity-review-2026-08-01.md)** | **Current structural-debt ledger (2026-08-01, baseline `756ad13`).** Whole-tree architecture/modularity/duplication review: 188 findings (27 high) across every package plus `ui/` — god-modules, N-copy invariant-critical protocols, mergeable parallel entities, unguarded cross-package seams, dead-code inventory, and a prioritized extraction plan. Every finding was re-verified by an adversarial fact-checking pass (§0.1); §5 is the **live remediation ledger** (per-finding `*Resolution:*` paragraphs and status marks live in §4; §5.4 holds the running totals — 43 resolved / 13 partial / 132 open as of 2026-08-02), and §6 proposes the validated target designs — shared safety kernel, append-protocol layer, Card-subsystem extraction, serve paid-work service, knowledge-subsystem split, seam guards, UI consolidation, and anti-re-accretion guardrails — much of which the 2026-08-02 remediation sprint has already executed. Complements doc 16 (correctness ledger); doc 17 still owns release ordering. |
-| 21 | **[21-full-functionality-review-2026-07-13.md](21-full-functionality-review-2026-07-13.md#post-round-25-integration-ledger-pending-final-commit-2026-07-18)** | **Current implementation and validation chronology.** Successive integration/review rounds, applied fixes, superseded findings and exact checkpoint evidence. Round 25 is pinned to `4d1218c`; the post-Round-25 certificate records the validated/published `f956685` source/UI package and the exact remaining browser/provider boundaries. |
-| 20 | **[20-looplab-unified-ds-workspace-and-distributed-execution-2026-07-12.md](20-looplab-unified-ds-workspace-and-distributed-execution-2026-07-12.md)** | **Current multi-user workspace and distributed-execution analysis.** One logical LoopLab entry point with JupyterHub/SSO, experiment-linked IDE and immutable snapshot flow, tenant entitlements/priorities, autonomous GPU fill, managed or external LLMs, Kubernetes/dedicated-server/multi-domain execution, failure semantics, and gated rollout. |
-| 19 | **[19-ide-integration-and-remote-development-2026-07-12.md](19-ide-integration-and-remote-development-2026-07-12.md)** | **Current IDE and remote-development analysis.** Code-grounded explanation of JupyterLab/web-VS-Code lag, embedded CodeMirror/Monaco architecture, full-functionality SSH/WSS/Teleport/Coder options, strict-no-SSH Kubernetes Attach, security boundaries, benchmark plan, and go/no-go gates. |
-| 18 | **[18-ui-ux-review-2026-07-11.md](18-ui-ux-review-2026-07-11.md#37-post-checkpoint-ui-integration-reconciliation-2026-07-18)** | **Current UI/UX audit.** §36 preserves the dated `4d1218c` checkpoint; §37 records the validated/published Concepts/Atlas integration, corrected paid/CAS boundaries and remaining product gaps. The companion **[desktop Concepts review](18-desktop-concepts-ui-ux-review-2026-07-16.md)** contains the focused graph/table concept and gap analysis. |
-| 17 | **[17-project-review-and-directions-2026-07-11.md](17-project-review-and-directions-2026-07-11.md#2211-post-checkpoint-integration-release-reconciliation-2026-07-18)** | **Current canonical delivery plan.** §22.11 starts from the bounded per-run concept surface plus explicit post-checkpoint lifecycle/tool deltas, then orders final integration and Research Space graduation in parallel with the unchanged Atlas G0–G6 truth gates. Start here for “what next.” **Part III-C** (2026-07-19, §§23–28) adds an agentic-OS & evolutionary autoresearch cohort synergy analysis — SCION, NVIDIA NeMo autoresearch, CORAL, GigaEvo. |
-| 16 | **[16-architecture-code-review-2026-07-11.md](16-architecture-code-review-2026-07-11.md)** | **Current finding ledger.** Reproductions and evidence for the P0/P1 blockers that determine doc 17's order. Read this for issue-level detail. |
-| 0 | **[autoresearch-systems-exploration.md](autoresearch-systems-exploration.md)** | *Research basis.* Survey + ranking of existing OSS systems (R&D-Agent, AIDE, SELA, AI-Scientist-v2, Karpathy `autoresearch`, Recursive, …) and the recommendation. Every design choice traces back here. |
-| 1 | **[01-product-design.md](01-product-design.md)** | *What we're building.* Vision, goals/non-goals, users, feature groups, functional + non-functional requirements, success metrics, phased delivery. |
-| 2 | **[02-architecture.md](02-architecture.md)** | *How it works.* Principles, components + interfaces, data model, control loop, search/trust mechanisms, extension points, tech stack, failure modes, provenance. |
-| 3 | **[03-decisions.md](03-decisions.md)** | *Why (the hard calls).* ADR-1…5 (UI, pluggable algorithm, ingestion, tracking, graph-vs-tree); **ADR-6 — 2026 SOTA re-review** (re-prioritizes everything: operators/eval-rigor/ensembling over search machinery); **ADR-7** pluggable role backends (external coding agents); **ADR-8** prompts + AGENTS.md; **ADR-9** MCP tools + Agent Skills; **ADR-10** knowledge/memory architecture; **ADR-11** cross-cutting hardening. **Read ADR-6 first if short on time.** |
-| 4 | **[04-file-layout.md](04-file-layout.md)** | *Historical on-disk design.* Data-class → format decisions, canonical-vs-derived rule, proposed run/project layout, content-addressed artifact store, and atomic-write rules. Its opening banner points to the smaller shipped contract. |
-| 5 | **[05-build-decisions.md](05-build-decisions.md)** | *Historical build choices.* Per-component scorecard + **ADR-12** (orchestration/concurrency/durability/git), **ADR-13** (sandbox/isolation), **ADR-14** (structured outputs/patches), **ADR-15** (trust layer), **ADR-16** (knowledge/RAG/MCP), **ADR-17** (files/obs/plumbing), and **ADR-18** (core runtime shape). It is not a current dependency inventory. |
-| 7 | **[07-architecture-review.md](07-architecture-review.md)** | *Audit (2026-06-22).* Design↔code consistency (ADR alignment), intentional deviations, the 7 bugs found & fixed, the I10 gate-semantics correction, and residual risks/recommendations. Read after 06 to see what was verified and hardened. |
-| 6 | **[06-implementation-plan.md](06-implementation-plan.md)** | *Historical implementation ledger.* The 22 iterations (I0–I22) remain useful for shipped-module traceability, but its live-status and next-step claims are superseded by docs 16–18 where they conflict. Running code is in `looplab/` (see [README.md](https://github.com/ArtyomZemlyak/looplab/blob/master/README.md)). |
-| 10 | **[10-autoresearch-improvement-research.md](10-autoresearch-improvement-research.md)** | *Improvement research (2026-07-02).* Code-verified status + engine/planning/memory/UI gaps + the 2025–26 MLE-bench SOTA sweep, prioritized (T/P/M/U series; many items since shipped). |
-| 11 | **[11-agent-systems-research.md](11-agent-systems-research.md)** | *Historical deep research (2026-07-02).* A useful research input for D1–D14; doc 17 now governs feature prerequisites and promotion criteria. |
-| 12 | **[12-phased-plan-2026-07.md](12-phased-plan-2026-07.md)** | *Historical phased plan (2026-07-02).* Its six-phase ordering is superseded by doc 17's R0–R5 dependency graph where they conflict. |
+| # | Doc | Authority and scope |
+|---|-----|---------------------|
+| 26 | **[26-ouroboros-airi-analysis-2026-08-02.md](26-ouroboros-airi-analysis-2026-08-02.md)** | Dated external-works analysis of Ouroboros/AIRI. Research input; it does not flip defaults or prove integration. |
+| 25 | **[25-architecture-modularity-review-2026-08-01.md](25-architecture-modularity-review-2026-08-01.md)** | 188-finding structural-debt baseline at `756ad13`, with per-finding dispositions reconciled through current `master` on 2026-08-08: **147 resolved, 37 partial, 2 deferred, 2 open**. The baseline evidence remains historical; the explicit status on each finding is current. |
+| 24 | **[24-ui-phase3-validation.md](24-ui-phase3-validation.md)** | Current Phase-3 UI product and automated-acceptance contract, including 2026-08-08 bundle measurements. Browser-matrix and moderated-usability gates remain separately unevidenced until artifacts exist. |
+| 23 | **[23-hypothesis-card-kanban-2026-07-20.md](23-hypothesis-card-kanban-2026-07-20.md)** | Historical Card/Kanban design and implementation ledger, with visible later corrections for current selector reachability and the public compatibility projection. |
+| 22 | **[22-agent-parallelism-2026-07-19.md](22-agent-parallelism-2026-07-19.md)** | Implemented/historical parallel-build plan. The shipped shape is bulk-synchronous build fan-out; Phase-4 two-wide golden verification remains partial. |
+| 21 | **[21-full-functionality-review-2026-07-13.md](21-full-functionality-review-2026-07-13.md)** | Historical branch/integration chronology. Each round speaks only for its named checkpoint. |
+| 20 | **[20-looplab-unified-ds-workspace-and-distributed-execution-2026-07-12.md](20-looplab-unified-ds-workspace-and-distributed-execution-2026-07-12.md)** | Dated multi-user workspace/distributed-execution options analysis; not a claim that the proposed platform ships. |
+| 19 | **[19-ide-integration-and-remote-development-2026-07-12.md](19-ide-integration-and-remote-development-2026-07-12.md)** | Dated IDE/remote-development options and security criteria; not an implementation inventory. |
+| 18A | **[18-ui-ux-review-2026-07-11.md](18-ui-ux-review-2026-07-11.md)** | Historical UI/UX audit and acceptance record through its named 2026-07 checkpoints. Current UI source/tests, guide and doc 24 win on status. |
+| 18B | **[18-desktop-concepts-ui-ux-review-2026-07-16.md](18-desktop-concepts-ui-ux-review-2026-07-16.md)** | Focused, dated desktop Concepts graph/table review; companion to 18A. The duplicate number is retained to preserve existing links. |
+| 17 | **[17-project-review-and-directions-2026-07-11.md](17-project-review-and-directions-2026-07-11.md)** | Historical canonical delivery plan at its checkpoint, not current runtime authority. Its dependency/gate rationale remains useful. |
+| 16 | **[16-architecture-code-review-2026-07-11.md](16-architecture-code-review-2026-07-11.md)** | Dated finding/reproduction ledger. Reproduce an item against current code before treating it as open. |
+| 15 | **[15-mega-refactor-review-2026-07-10.md](15-mega-refactor-review-2026-07-10.md)** | Historical mega-refactor plan and baseline; later code/doc 25 supersede present-tense status. |
+| 14 | **[14-agent-framework-mega-review-2026-07-10.md](14-agent-framework-mega-review-2026-07-10.md)** | Historical agent-framework review; findings are pinned to its tree. |
+| 13 | **[13-external-works-analysis-2026-07.md](13-external-works-analysis-2026-07.md)** | Point-in-time external-works research and recommendations, not a live feature ledger. |
+| 12 | **[12-phased-plan-2026-07.md](12-phased-plan-2026-07.md)** | Historical feature-branch plan; its implementation/default claims do not describe current `master`. |
+| 11 | **[11-agent-systems-research.md](11-agent-systems-research.md)** | Historical deep-research input for D1–D14. |
+| 10 | **[10-autoresearch-improvement-research.md](10-autoresearch-improvement-research.md)** | Historical improvement research and gap inventory, pinned to 2026-07-02. |
+| 09 | — | No document was allocated this number; the gap is intentional and retained for stable numbering. |
+| 08 | **[08-tracing-architecture.md](08-tracing-architecture.md)** | Accepted tracing ADR. Current `core/tracing.py`, tests and deployment guide decide exact exporter behavior. |
+| 07 | **[07-architecture-review.md](07-architecture-review.md)** | Point-in-time 2026-06-22 architecture audit. |
+| 06 | **[06-implementation-plan.md](06-implementation-plan.md)** | Historical I0–I22 implementation ledger with a 2026-08-08 reconciliation of the formerly missing major surfaces. |
+| 05 | **[05-build-decisions.md](05-build-decisions.md)** | Historical build choices/ADRs 12–18; not a current dependency inventory. |
+| 04 | **[04-file-layout.md](04-file-layout.md)** | Historical on-disk design; its opening correction describes the smaller shipped authority contract. |
+| 03 | **[03-decisions.md](03-decisions.md)** | Historical ADRs 1–11 plus visible current-runtime corrections. |
+| 02 | **[02-architecture.md](02-architecture.md)** | Original target architecture, not a byte-accurate implementation inventory; its reconciliation banner wins over target prose. |
+| 01 | **[01-product-design.md](01-product-design.md)** | Original product/design target, with a current shipped-boundary banner. |
+| 00 | **[autoresearch-systems-exploration.md](autoresearch-systems-exploration.md)** | Research basis and survey that informed the original design. |
 
 ---
 
 ## The system in five sentences *(post-[ADR-6](03-decisions.md))*
 
-1. A **Researcher** (reasoning model) proposes ideas; a **Developer** implements them — each role is a **pluggable backend**: a raw LLM call *or* a complete external coding agent (OpenHands/Aider/SWE-agent/Claude Code), over **LiteLLM** (API *or* local). *(R&D-Agent per-role routing + [ADR-7](03-decisions.md) — reuse best-in-class agents, don't reimplement)*
+1. A **Researcher** proposes ideas and a **Developer** implements them. Shipped in-house roles use an OpenAI-compatible `/v1` client; the Developer can instead use an external coding-agent CLI. `LiteLLMClient` is optional and not selected by Settings. *(R&D-Agent per-role routing + [ADR-7](03-decisions.md))*
 2. The win comes from **rich operators**: draft · depth-bounded **debug** · improve · **ablation-driven targeted refinement** · **ensemble/merge** — operators beat search policy, so the default is a **greedy tree** with a multi-parent merge. *(AIRA, MLE-STAR, KompeteAI)*
-3. The trust layer is **leakage-first**: train/test+temporal+target **leakage detection** + **consistent evaluation** + tiered variance gating (robust CV everywhere, multi-seed only at the frontier) — the +9–15 pt lever. *(AIRA, MLE-STAR)*
-4. Given prior artifacts, a **lightweight grounding pre-phase** (retrieve-and-seed + data profiling) sets up the loop against an immutable goal anchor. *([ADR-3](03-decisions.md))*
+3. The trust layer combines adapter-owned evaluation, optional audit/gate/block signals, holdout and confirmation paths. Exact train/test-row leakage is checked at setup only for adapters that expose `leakage_inputs()`; temporal/target detector utilities are not yet wired through a real adapter. *(AIRA, MLE-STAR)*
+4. Genesis/task snapshots, data profiling and bounded memory/knowledge retrieval ground the loop before and during proposals; their exact availability is task- and setting-dependent. *([ADR-3](03-decisions.md))*
 5. State lives in **human-readable files**: `events.jsonl` is authoritative for replayable `RunState`, while task/config, tracing, chat and cross-run stores keep explicit sidecar contracts. One live engine is fenced by `engine.lock`; server control events use the event store's serialized append path. The UI reads these projections and submits durable control intents; **MLflow is an optional exporter**, not the core. *([ADR-1](03-decisions.md), [ADR-4](03-decisions.md)/[ADR-6](03-decisions.md), [04](04-file-layout.md))*
 
 ## Top recommendation (from the research)
@@ -84,12 +74,7 @@ To **learn the loop**, read **Karpathy `autoresearch`** then fork **AIDE**; **R&
 - File-class labels (doc 04): **[HC]** human-canonical · **[MA]** machine-append-only · **[BIN]** large-binary-artifact · **[DUI]** derived-UI-projection (regenerable).
 - All benchmark numbers are **time-sensitive and vendor-reported** unless tagged [IND] — see the exploration doc's caveats.
 
-> **Note:** docs 01–05 are the original *design* documents. For current implementation risk and
-> sequencing, use [doc 16](16-architecture-code-review-2026-07-11.md) and
-> [doc 17](17-project-review-and-directions-2026-07-11.md); for UI/UX findings and acceptance criteria,
-> use [doc 18](18-ui-ux-review-2026-07-11.md); for IDE integration, JupyterHub performance constraints,
-> and secure remote-workspace choices, use
-> [doc 19](19-ide-integration-and-remote-development-2026-07-12.md). Current code is the runtime source of truth;
-> `docs/guide/` describes intended use, while verified discrepancies in docs 16–21 take precedence. Use only
-> the latest explicitly superseding ledger in doc 21 for current status: the post-Round-25 integration ledger,
-> paired with doc 17 §22.11 and doc 18 §37. Round 25 remains the dated `4d1218c` checkpoint.
+> **Reading rule:** design, research and review documents preserve why and historical evidence. They do
+> not become current merely because they say “current” internally. For shipped behavior use current source,
+> tests, README and `docs/guide/`; for Phase-3 UI acceptance use doc 24; for the reconciled architecture
+> finding ledger use the explicit per-finding statuses in doc 25.

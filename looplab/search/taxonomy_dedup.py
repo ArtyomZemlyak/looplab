@@ -1,7 +1,7 @@
 """Taxonomy-aware hypothesis-board dedup analysis (PART IV D4, §21.5/§21.12 — Phase 1d, offline analytic).
 
-**Why this exists.** The research board (`RunState.research_cards()`, the single Card board — 1 card =
-1 hypothesis) mirrors the node narrowing: measured on
+**Why this exists.** The canonical Card work-item board (`RunState.research_cards()`; multiple work
+items may share one `belief_id`) mirrors the node narrowing: measured on
 the `rubertlite` run, **63 of 107 hypotheses touch `loss/decoupled-contrastive`** and 39 touch temperature
 (§21.12). Blind board consolidation (`hybrid_merge`) is either too lax (redundant siblings survive) or,
 tuned stricter, risks collapsing legitimate cross-branch variants. The right control is NOT a single
@@ -48,10 +48,10 @@ def dedup_analysis(state: RunState, graph: ConceptGraph, *,
       false_merge_risks- [{a, b, similarity}] lexically/vector-similar but concept-DISJOINT pairs (keep-distinct)
       false_merge_count- len(false_merge_risks)
     """
-    # 1 card = 1 hypothesis: analyse the single Card board. Read the DISPLAY `statement` (== the old
-    # Hypothesis.statement, including a merged card's consolidated wording); card.id == the old hypothesis
-    # id for a research card, so the `hypothesis_concepts` cache keyed by that id still joins. Native
-    # work-item cards (no hypothesis twin) now analyse too.
+    # Analyse canonical Card work items and read the DISPLAY `statement` (the old Hypothesis.statement
+    # surface, including a merged card's consolidated wording). Legacy research-card ids still join the
+    # `hypothesis_concepts` cache directly; native work items use both their id and seed-statement key.
+    # Separate work items with one `belief_id` remain separate rows in this work-item-level analytic.
     hyps = list(state.research_cards())
     n = len(hyps)
     if n == 0:

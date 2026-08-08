@@ -1,7 +1,9 @@
 # Hypothesis-Card Kanban re-architecture — design and implementation ledger (2026-07-20)
 
-Status: **Layers 1–6 are implemented and validated in implementation commit `8d9952a1`, which is
-pushed to `master`. ~~Card-driven selection remains a default-off, run-start-pinned opt-in.~~
+Status: **Historical design and implementation ledger.** Layers 1–6 landed initially in `8d9952a1`;
+the descriptions below preserve that checkpoint and later corrections. Current source, tests and the
+user guide are runtime authority. Card-driven selection is now a default-on, run-start-pinned setting.
+(It was originally described here as a default-off opt-in.)
 (**Correction 2026-08-04 — operator decision: `card_driven_selection` now defaults to `True`,
 `core/config.py:1080`. It is still run-start-pinned.**) ~~Positive-
 depth speculation is admitted only by the current scope-bound receipt for the exact measured Greedy /
@@ -17,46 +19,12 @@ attestation: the node-budget refund makes a discarded prediction cost no experim
 `budget` finalization receipt carries a `speculation` block whose `charged_discards` reports whatever harm
 remains. See `docs/guide/configuration.md` → "Speculation and the `budget` receipt".**)
 
-> **⚠ "Layers 1–6 implemented and validated" overstates what is reachable (noted 2026-08-04).** Verified
-> reachable today: Layer 1's durable Card capture, a read-only board, and five operator controls.
-> **Layer 3's Card scorer never sees a candidate** — Cards are minted after the Idea in the same atomic
-> batch as the `node_building` claim that consumes them, so they instantly carry an owner and can never
-> satisfy `_strictly_selection_ready`; `card_ranked` is structurally unreachable from both ends. Confirmed
-> on a real 12-node run with `card_driven_selection=true`: 18 cards, `selection_ready=0`,
-> `eligible_cards()==0`, every `policy_decision` plain Greedy. A product decision is pending; the full
-> annotation with the open question is in this file's source immediately below.
-
-<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — "Layers 1-6 implemented and validated" overstates what a reader
-can reach. No later document revises this ledger, so this is a live divergence, not stale text.
-REACHABLE TODAY: Layer 1's durable Card capture, a READ-ONLY board, and five operator controls.
-NOT REACHABLE: Layer 3's Card scorer never sees a candidate, and `card_ranked` is structurally
-unreachable from BOTH ends.
-WHY (mechanism, not opinion). (1) Cards are minted AFTER the Idea and in the SAME atomic batch as the
-`node_building` claim that consumes them: `engine/orchestrator.py::_reserve_node_build` documents
-this as its contract — "The final Idea must already exist … A new `card_added` and its
-`node_building{card_id}` claim are one bounded EventStore batch, so another process can land before or
-after them, never between." The mint path runs through `engine/orchestrator.py::_plan_native_card` and its
-`_CardReservationPlan` reservation helper. A Card therefore exists only in a state
-where it ALREADY carries an owner (and, once the node terminates, evidence). (2)
-`search/card_selection.py::_strictly_selection_ready` requires simultaneously
-`provenance.owner_state == "none"`, `not card.evidence`, `status == "proposed"` and
-`verdict == "open"` — conditions the mint path can never leave a Card in. `search/card_selection.py::eligible_cards`
-filters on exactly that predicate, so it returns []. (3) The ONLY
-path that mints a Card WITHOUT a simultaneous node claim is
-`engine/orchestrator.py::_stage_card_creates`, whose single call site in the run spine sits under
-`if self._speculation_enabled():` — i.e. it is reachable only under speculation, which the status line
-above keeps scope-bound and default-off.
-MEASURED: a real 12-node run with `card_driven_selection=true` produced 18 cards, `selection_ready=0`,
-`eligible_cards() == 0`, and all 9 `policy_decision` rows plain Greedy ("exploit best" / "merge top-2").
-The Card selector is on by default now and has never chosen a node.
-NEEDS A BUSINESS DECISION: is Card-driven selection meant to be a real selector — in which case Cards
-must be mintable BEFORE (and independently of) the node claim that consumes them, which is a change to
-the Layer 1 mint contract quoted above, not a bug fix — or is the Card board a durable AUDIT/steering
-surface whose ranking terms are advisory only, in which case Layer 3, `card_ranked`,
-`card_driven_selection` and the "Selection / UX" row of §0.0.1 must be restated as such and the default-on
-switch reconsidered? -->
-<!-- CLAUDE REVIEW 2026-08-04: the two "Complete"-label CODEX annotations below were written against
-`60e9a5f3`; this Layer-3 finding is independent of them and is NOT one of their sixteen blockers. -->
+> **Current reachability correction (2026-08-08).** The 2026-08-04 claim that Layer 3 was
+> structurally unreachable is superseded. Commits `7ecbdf0` and `4e7152d` mint Card inventory before
+> ownership and stage the whole lane when prefetch is off. Integration tests in
+> `tests/test_card_selection_integration.py` observe `selection_ready` cards and selection on the
+> default no-prefetch path. The optional UI-only `speculating` and `built-awaiting-commit` lanes remain
+> reserved rather than folded runtime states.
 
 Grounded in four exhaustive code maps (idea-pipeline ·
 strategist/policy · execution/GPU · replay/UI) and an 18-agent per-layer mega-review consolidated in
@@ -67,120 +35,15 @@ truth and wins wherever the original target text differs from shipped behavior.
 
 | Area | Landed now | Remaining |
 |---|---|---|
-| Direction board | `Card` is the bounded lifecycle Kanban; empty/pre-Card runs retain the `Hypothesis` research-direction workflow as a graceful fallback | none |
+| Direction board | `Card` is the authoritative bounded lifecycle Kanban. Core `RunState.hypotheses` was removed; the server exposes a deprecated, read-only `hypotheses` compatibility projection derived from Cards for older clients | no byte-identical public-schema compatibility claim; new consumers use `cards` |
 | Card read model | native monotonic Card mint/link under a process-local `_id_lock` and log-tail CAS; a fresh Card mint + build claim is one crash-atomic batch, while reuse is one CAS append; ownership receipts; exact `node_building.card_id`; lifecycle-aware draft/rerun/inject/ablation writers; bounded per-event input and public projection; durable request/done queue | The folded `cards_enriched` replay journal is not yet capped |
 | Enrichment | structured steering snapshots; memo/claim/lesson refs; Researcher proposal + Developer-finalized footprint; final operator edit/priority/resource overlays; schema seams for novelty/cross-run/concept projection | proposal-time selectable Cards do not yet carry trusted novelty/coverage memberships, so those ranking terms are zero until a linked Node supplies later evidence |
 | Identity / readiness | receipt-bound `Card.identity`, bounded provenance/blockers, fail-closed `selection_ready`; dropped/merged/gated/superseded work is excluded; exact existing-Card claim and counterfactual speculative freshness are tail/generation fenced | none |
 | Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, Docker enforcement for known positive pins and explicit CPU isolation, fail-closed zero-device admission, confirm admission, isolated Card producer/consumer; local Engine processes sharing one OS-user filesystem namespace hold a crash-released pool-wide lease, so separate Runs cannot double-allocate the same GPU | The deliberately conservative lease serializes GPU-owning Runs; cross-user/container/host scheduling remains the external execution backend's responsibility |
-| Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, durable exact ASHA receipts, bounded public lifecycle projection, optimistic edit/priority/resource/drop controls, and run+generation-scoped optimistic UI state | ~~broader rollout scopes remain deferred/default-off;~~ (2026-08-04: the Card selector defaults ON and positive-depth speculation is admitted on any workload without a receipt) `coded` remains a reserved lane — the log now HAS a durable eval-start boundary (`node_eval_started`) but the projection collapses every pending node to `running`; a speculative pre-build is not a lane of its own, it rides the same six |
+| Selection / UX | default-on Card selector with exact forced prefix, policy-faithful lanes, durable exact ASHA receipts, bounded public lifecycle projection, optimistic edit/priority/resource/drop/abandon controls, and run+generation-scoped optimistic UI state | Positive-depth speculation is admitted on any workload without a receipt. `speculating` and `built-awaiting-commit` remain optional UI vocabulary with no current folded producer |
 
-<!-- CODEX AGENT: the Direction-board row remains stale on current master: RunState no longer exposes
-a Hypothesis projection, so the empty/pre-Card surface is an add form over an absent
-`state.hypotheses` map, not the retained compatibility workflow claimed here. The public-state
-deletion still bypassed the post-L6 deprecation/version window promised in §12. -->
-
-<!-- CODEX AGENT: the "Complete" layer labels above describe the validated happy path, not the current
-adversarial concurrency boundary. Review at origin/master 60e9a5f3 still finds sixteen release blockers:
-(1) confirm GPU refusal hot-spins without backoff/cap; (2) opening the host GPU lease can escape admission
-and abort every resume; (3) reset between admission and _evaluate can miss the generation-keyed reservation
-and launch unpinned; (4) producer-failed Card exclusions differ between election and three freshness rechecks;
-(5) one alive-but-stale speculative sibling can collapse the healthy population lane; (6) a legacy-only
-parallel_build source promotes llm_parallel and enables the finite shared broker despite the documented
-compatibility contract; (7) cards-only removed the public hypotheses key without the promised
-deprecation/version boundary; (8) prompt/foresight consume immutable seed text while audit/UI claim current
-edited text; (9) ranking id resolution can cross-wire a direct native id onto an unrelated legacy-hash Card;
-(10) every public Node/SSE frame carries the internal 32-point ASHA curve; (11) that curve is mined only from
-the capped final-stage stdout rather than the full training stream; (12) uniform curve downsampling has
-been replaced with first-31-plus-endpoint retention, but exact matching still makes every mid/late
-coordinate incomparable and resets the live kill streak; (13) the new grouped-belief projection has no
-production consumer and its tested>testing roll-up hides an active experiment unlike `_evidence_verdict`;
-(14) that grouping uses the collision-prone short `hypothesis_id`, despite replay's full-digest collision
-fixture, and can merge unrelated beliefs/evidence; (15) the worker-ranking fix uses Python main-thread
-identity as a proxy for pooled concurrency, so a serial Engine embedded in any worker loses deterministic
-ranking telemetry; and (16) the authoritative Card board exposes `+ Add` but not the documented abandon
-control, which remains trapped in an unreachable legacy fallback. Keep positive-depth speculation, trusted
-parallel-GPU promotion, cards-only compatibility, and the ASHA live-kill claim blocked until those sites and
-adversarial tests close. -->
-
-<!-- BLOCKER RESOLUTION LOG (append-only; the snapshot above is pinned to 60e9a5f3 and left verbatim).
-(6) RESOLVED 2026-07-23 — a legacy-only parallel_build source no longer enables the finite shared LLM
-broker. `canonicalize_parallelism_source` now defaults `promote_build_to_llm_parallel=False`, so config/
-startup loads (config.py source customization + appconfig sub-layers) no longer promote a legacy-only
-`parallel_build` (e.g. LOOPLAB_PARALLEL_BUILD=1) into canonical `llm_parallel` — which the orchestrator
-reads as the broker opt-in switch. Broker opt-in stays tied to an explicitly-spelled canonical
-`llm_parallel`; the orchestrator's own width fallback (`llm_parallel if not None else parallel_build`)
-still carries the legacy build width, and the true-alias `max_parallel → eval_parallel` promotion is
-unaffected. The live Strategist path (`canonicalize_strategy_parallelism`) opts back into the promotion,
-where `parallel_build` is a deliberate full alias (strategy.py `_apply_strategy` already reconfigures the
-broker only for the `llm_parallel` spelling). The stale configuration.md CODEX annotation documenting the
-violation is removed. Teeth-tested in
-`tests/test_config.py::test_canonicalize_parallelism_source_keeps_broker_optin_off_by_default`,
-`::test_env_legacy_parallel_build_does_not_enable_the_shared_llm_broker`, and
-`tests/test_llm_broker.py::test_env_legacy_parallel_build_does_not_enable_shared_broker_end_to_end`.
-This closes the six concurrency/GPU/config release blockers (1)-(6) from the pinned snapshot; the later
-cards-compatibility/ASHA/belief blockers (7)-(16) were addressed in the preceding commit series.
-(3) RESOLVED 2026-07-23 — a node_reset landing between the dispatcher's admission and an eval worker's
-fold can no longer launch the eval unpinned. The dispatcher registers the reservation under the OLD
-admission generation; `_evaluate` reads the NEW `node.attempt` (eval-reset: attempt+1, still pending,
-rerun_from None) so the current-generation lookup misses and `_resource_eval_env(None)` would yield an
-unpinned full-host env that sees every sibling's GPU. New `_eval_reservation_under_other_generation`
-detects the stale-key signature (a reservation for this node under a different generation), and
-`_evaluate` now fails closed (returns without a terminal) so the dispatcher re-admits and re-pins the
-reset lifecycle. The gate keys on that stale RESERVATION, not the live mutable `_eval_parallel` (loop
-mega-review hardening): a Strategist/operator lowering eval_parallel to 1 mid-batch while pinned siblings
-are still draining must not flip this into an unpinned launch. The ONLY exemption is a never-admitted
-recovery/test call, which holds no stale key (a serial re-admit of a whole-pool-unpinned node is harmless
-— it just re-runs unpinned). This is complementary to the existing `superseded` mechanism, which only
-catches a reset landing DURING the eval. Teeth-tested in
-`tests/test_gpu_resources.py::test_parallel_eval_fails_closed_when_reset_superseded_the_reserved_generation`,
-`::test_parallel_eval_launches_normally_when_the_reservation_matches_the_generation`,
-`::test_stale_reservation_fails_closed_even_when_eval_parallel_is_lowered_to_one`,
-`::test_never_admitted_node_is_exempt_from_the_stale_generation_fail_closed`, and
-`::test_eval_reservation_under_other_generation_detects_only_a_stale_generation_key`.
-(2) RESOLVED 2026-07-23 — opening the host GPU-pool lease can no longer escape admission and abort the
-run. `_try_acquire_gpu_host_lease` RAISES GpuPinUnenforceable when the lease cannot even be OPENED
-(EACCES on a squatted/stale lock, ELOOP, read-only fs); no admission caller handled that raw exception,
-so it aborted the run mid task-group with no terminal and re-crashed on every resume. `_try_reserve_node_resources`
-now catches it at the admission boundary and returns a durable `admission_unpinnable` reservation marker
-(not None, so no forever-wait). `_resource_eval_env` re-raises the exact cause at the launch boundary
-BEFORE its unpinned-fallback branch — so a populated-pool marker (required_unavailable stays False) can
-never leak an unpinned full-host launch — routing into each caller's existing GpuPinUnenforceable →
-node-terminal / retry contract. The marker key is excluded from `_node_resource_reservation_is_current`
-so it does not trip a release/retry loop. Teeth-tested in
-`tests/test_gpu_resources.py::test_host_lease_open_failure_fails_closed_at_admission_not_engine_abort`
-and `::test_host_lease_open_failure_fails_closed_for_unspecified_serial_whole_pool`.
-(5) RESOLVED 2026-07-23 — an alive-but-STALE speculative sibling no longer collapses a healthy lane.
-`_counterfactual_owned_selection_state` now skips a sibling whose card would restore cleanly EXCEPT for
-its own staleness (blockers exactly {freshness_stale, work_in_flight}, owner in_flight, evidence==[node],
-status coded/running, not dropped/merged) — exactly like the administratively-dead case, since the
-freshness gate terminalizes it on its OWN turn. Previously it entered `pairs`, `_counterfactual_owned_card_state`
-rejected any blocker set beyond {work_in_flight}, nulled the whole counterfactual, and
-`speculative_card_is_fresh` reported the healthy subject not-fresh (at depth>=2 one stale member superseded
-every fresh member). The skip is narrow: any OTHER unproven shape (e.g. a stale sibling that also has an
-incomplete action receipt) still enters `pairs` and fails the counterfactual closed. Teeth-tested in
-`tests/test_card_speculative_selection.py::test_alive_but_stale_speculative_sibling_does_not_collapse_the_healthy_lane`
-and `::test_stale_sibling_with_an_extra_blocker_still_fails_the_counterfactual_closed`.
-(1) RESOLVED 2026-07-23 — a confirm GPU-pin refusal no longer hot-spins. `_run_confirm_seed` dedupes the
-gpu_unavailable/gpu_unpinnable `confirm_eval` audit row per (node, generation, seed, reason) so re-entry
-cannot grow events.jsonl, and both re-entering callers (`_confirm_phase` empty-actions re-entry and the
-`_confirm_node`/`_serve_forced_requests` forced-confirm re-entry) now `_pace_confirm_refusal`: exponential
-backoff between consecutive refusals and, past a consecutive-refusal cap, a durable auto-pause so run()'s
-paused branch breaks the loop for operator repair. The streak is in-memory on purpose (a fresh process /
-resume after a repair retries the seeds) and resets whenever a seed actually runs. Teeth-tested in
-`tests/test_confirm_integration.py::test_confirm_refusal_audit_row_is_deduped_across_reentries`,
-`::test_confirm_persistent_refusal_auto_pauses_after_cap`, and
-`::test_confirm_refusal_streak_resets_when_a_seed_actually_runs`.
-(4) RESOLVED 2026-07-23 — producer-failed Card ids are now unioned into every counterfactual-election
-exclusion set that previously omitted them: `_claim_requested_card_build` (union then discard the exact
-claimed id), `_drop_stale_speculation`, and the pre-GPU freshness recheck in `_card_phase_admit_evals`
-(`_run_card_session`'s admission phase until doc 25 EC-02 split the turn body), matching
-`_request_card_build`'s election set. The raw-proposal lane (`speculative_raw_actions`) deliberately still
-keeps producer-failed ids IN — such a card owns that counterfactual and must fall through to the serial
-builder, not restage as an unbuildable raw action. Teeth-tested in
-`tests/test_card_speculation_engine.py::test_drop_stale_speculation_excludes_producer_failed_from_freshness_set`,
-`::test_claim_requested_card_build_excludes_producer_failed_but_keeps_the_claimed_card`, and
-`::test_run_card_session_pre_gpu_recheck_unions_producer_failed_but_raw_lane_does_not`. -->
-
+> The long 16-item blocker snapshot that used to live here was pinned to `60e9a5f3` and is
+> superseded by its subsequent fixes. It is preserved in Git history, not presented as current work.
 ### Stage progress ledger (validated implementation, 2026-07-22)
 
 `Complete` means the acceptance behavior is present in `8d9952a1` and covered by the current validation
@@ -200,15 +63,6 @@ and hardware receipts below. Deferred broader rollout scopes are not unfinished 
 | **6** | **Complete** | `0ff29fed`, `bb176cb9`, `8d9952a1` | current receipt | none |
 
 ### Validation and rollout receipt (evidence for commit `8d9952a1`)
-
-<!-- CODEX AGENT: this receipt is correctly point-in-time and is NOT valid for current master. The current
-implementation digest already differs, and the review annotations added under looplab/**/*.py change it
-again by design. A positive speculation_depth deployment must regenerate the real-GPU evidence/receipt after
-the review blockers are fixed; copying the historical digest or treating comments as digest-neutral would
-defeat the fail-closed admission contract. -->
-<!-- CLAUDE 2026-08-04: the annotation above is superseded — a positive-depth DEPLOYMENT needs no receipt at
-all now (product lane). What it correctly describes is the CALIBRATION lane: a receipt-carrying replay of the
-quadratic Toy workload still pins this digest and still fails closed. See the visible correction below. -->
 
 > **Correction 2026-08-04.** Nothing below has to be regenerated to DEPLOY positive `speculation_depth` any
 > more: off the quadratic-Toy calibration lane a receipt neither authorizes nor pins, so the whole-source
@@ -316,11 +170,9 @@ Receipt identity is exact: self digest
   replay, command observation, scope/report capture, SSE, timeline paging, run caches and maintenance tools
   expand the bounded storage envelope consistently; generic non-event JSONL readers remain format-agnostic.
   New envelopes carry a guarded non-string type so pre-batch binaries stop at their corruption fence;
-  current readers also accept the initial string marker, reject duplicate/backward logical sequences,
-  preserve monotonic repaired-log gaps, and require dense members inside each atomic batch.
-  <!-- CODEX AGENT: stale after 827e8a0f. event_sequence_continues now requires a dense prefix for every
-  logical record; no legitimate repair path preserves forward seq gaps. Leaving "preserve monotonic
-  repaired-log gaps" here contradicts the runtime and the restored fail-closed regression contract. -->
+  current readers also accept the initial string marker and require a dense prefix for every logical
+  record plus dense members inside each atomic batch; duplicate, backward, and forward-gap sequences
+  fail closed.
 - Coverage scoring consumes only complete authorized current memberships and canonicalizes Card aliases,
   case and spacing through the same concept-identity projection.
 
@@ -458,12 +310,11 @@ foresight's). Land or explicitly defer each.
    or the `_derive_cards` post-pass.
 2. Every new `EV_*` lands in **exactly one** bucket — `replay._HANDLERS` (folded) or `DIAGNOSTIC_EVENTS`
    (ignored) — or `tests/test_event_types.py` fails.
-3. Sole-writer of folded events; a card event that a background task writes must pass the
-   `BACKGROUND_APPENDABLE` splice test (`tests/test_background_appendable.py`).
-4. Additive-only schema; old logs fold **byte-identically** (golden-replay gate `tests/test_golden_replay.py`).
-   <!-- CODEX AGENT: old event logs may still fold, but their public model dump is no longer byte-identical:
-   `hypotheses` was deleted from RunState and from the golden fixture. That is an API/schema break and must not
-   be presented as satisfying this invariant without an explicit versioned migration. -->
+3. Domain effects remain engine-owned; every allow-listed background/server writer must pass the
+   `BACKGROUND_APPENDABLE`/protocol splice contracts (`tests/test_background_appendable.py`).
+4. Old event semantics remain foldable and are covered by the golden replay gate. The core model is not
+   byte-identical to the original public dump: `RunState.hypotheses` was removed. The server now derives a
+   deprecated read-only `hypotheses` compatibility projection from Cards; new consumers use `cards`.
 5. `FoldCursor.snapshot()` deep-copies before finalize — the `_derive_cards` post-pass must be
    destructive-safe on the copy and never leak into the next suffix.
 
@@ -1282,11 +1133,9 @@ operator-modified trajectory is one of the six clean calibration trajectories.
   lands behind a knob whose **default preserves today's unbounded `_spawn_research` overlap** (each lane's
   AUTO = "unbounded" for research until the Strategist/operator sets a finite split). Built as an
   extension of L2 (the lane structure) + the Strategist mixin (the periodic re-allocation).
-- **Retiring `HypothesisBoard`/`state.hypotheses`** from the public dump — deferred to a post-L6
-  deprecation window; the cards+hypotheses dump duplication is accepted through L1–L6.
-  <!-- CODEX AGENT: current master already removed `state.hypotheses`, its model, and its serialized key
-  without this deprecation window. Either restore the compatibility view or mark this contract superseded by
-  a versioned breaking-change ADR; silently updating tests does not migrate API consumers. -->
+- ~~**Retiring `HypothesisBoard`/`state.hypotheses`** from the core model~~ — **DONE as a breaking core
+  model change, without the planned post-L6 deprecation window.** The server retains a derived read-only
+  compatibility projection for older API consumers; it is not folded state.
 - ~~**Adaptive speculation depth** (keep the ready buffer ≈ `eval_parallel` dynamically) — ship the static
   `speculation_depth` const first.~~ **SHIPPED (2026-08-04) as `speculation_depth = -1` (AUTO)**: the ready
   buffer is sized to the settled `eval_parallel` (one prefetch per concurrent evaluation lane, clamped
@@ -1351,15 +1200,3 @@ the stage scopes.
    new canonical fields (set-legacy → writes new; unset → new wins); nothing new is built on them, the
    Strategist never emits them, and docs/UI present only the new names. Removing them entirely is a
    separate post-migration deprecation window.
-<!-- CODEX AGENT: POST-RESOLUTION REVIEW 2026-07-24 (`da0c9457`). Merged-away producer recovery now
-uses the canonical alias receipt, but the sibling dropped branch still tests `dropped_reason` rather
-than lifecycle `status`. Replay explicitly permits a reason-less `card_dropped` and folds it as
-`status="dropped", dropped_reason=None`; selection has a regression for that shape, while
-`test_recovery_dropped_head_with_no_result_closes_stale_instead_of_wedging` supplies a non-empty
-reason. After a crash loses the in-memory producer, the reason-less durable head therefore never
-closes and keeps the session polling. Reuse the shared administratively-dead semantics and test this
-exact shape. This post-resolution finding does not rewrite the pinned `60e9a5f3` blocker snapshot or
-its historical resolution receipts. -->
-<!-- CODEX AGENT: DOCUMENTATION CORRECTION (`d29586c`). The preceding reason-less dropped-head
-finding is resolved: recovery now keys on folded `status=="dropped"`, and its regression covers the
-durable head after the in-memory producer is lost. The pinned historical snapshot remains unchanged. -->

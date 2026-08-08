@@ -3,7 +3,8 @@ on parse/validation failure it auto-falls back to a text+JSON-extraction path
 (the BAML "Schema-Aligned Parsing" role). Callers are parser-agnostic.
 
 `LLMClient` is the seam: any object with `complete_tool` + `complete_text` works,
-so the real LiteLLM client and the test fake are interchangeable.
+so the shipped OpenAI-compatible client, the optional LiteLLM adapter and test fakes are
+interchangeable.
 """
 from __future__ import annotations
 

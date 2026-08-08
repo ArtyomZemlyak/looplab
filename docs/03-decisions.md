@@ -3,14 +3,16 @@
 **Version:** 0.1 · **Date:** 2026-06-20
 **Companion docs:** [01-product-design.md](01-product-design.md) · [02-architecture.md](02-architecture.md) · [04-file-layout.md](04-file-layout.md) · [05-build-decisions.md](05-build-decisions.md) · research basis: [autoresearch-systems-exploration.md](autoresearch-systems-exploration.md)
 
-> **Historical ADR record; current runtime correction (2026-07-16).** ADR-1 below records the original
+> **Historical ADR record; current runtime correction (reconciled 2026-08-08).** ADR-1 below records the original
 > control-plane design, not a byte-accurate inventory of the shipped tree. The current product has no
 > `commands.jsonl`/`desired_state.json` reducer: one live engine owns `RunState` reduction under `engine.lock`,
 > while authenticated UI-server control operations append versioned control events through the same
 > cross-process event-store serialization. `events.jsonl` is the replay authority for `RunState`, not for task
 > and config snapshots, spans, chat, command records, cross-run stores, or external effects. Use
 > [the current concepts guide](guide/concepts.md) and current source/tests when this record conflicts with the
-> implementation.
+> implementation. In particular, the shipped factory uses an OpenAI-compatible client rather than the
+> optional LiteLLM adapter; the designed MCP server bus never shipped (only an optional outbound owner-
+> Assistant client did); and costs are durably metered without a Settings-level hard dollar cap.
 >
 > This document records the five new requirements you added, the options researched for each, and the **evidence-backed decision**. Each decision is then folded into the architecture doc. Evidence tags: **[IND]** independent, **[SR]** self-reported, **[BENCH]** standardized benchmark.
 
@@ -216,15 +218,9 @@ All five are folded into [02-architecture.md](02-architecture.md) (data model, c
 1. **Ensemble/Merge operator** — LLM-proposed, iteratively-refined fusion of top solutions (in-loop, not terminal voting). *Best-evidenced lift in the field.*
 2. **Ablation-driven targeted refinement** — generate an ablation to find the highest-impact code block, then deeply optimize *that* block (MLE-STAR's signature; an AIRA-class "strong operator").
 3. **Depth-bounded Debug operator** — explicit, capped iterative repair as a first-class operator (every strong system has one).
-4. **Leakage checker** — train/test **+ temporal + target** leakage auto-detection (our genuine differentiation opportunity; only MLE-STAR ships even a partial one).
-   <!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — the train/test half runs; the temporal + target half has no
-   live caller. `engine/audit.py::_leakage_blocks` only runs the detectors when the task defines
-   `leakage_inputs()`, and the sole adapter that does is the SYNTHETIC `adapters/mlebench.py`, so
-   `trust/leakage.py::target_leakage`/`::temporal_leakage` are unreachable from any shipped real task.
-   [doc 17:147-149](17-project-review-and-directions-2026-07-11.md) recorded this on 2026-07-11 ("the
-   claimed moat needs one adapter that exercises it end-to-end") and no adapter has arrived, yet the
-   newest doc in the tree ([26:35](26-ouroboros-airi-analysis-2026-08-02.md), 2026-08-02) still sells it.
-   Full annotation + the business question: [01 §5.E](01-product-design.md). -->
+4. **Leakage checker target** — train/test **+ temporal + target** leakage auto-detection. Current
+   implementation performs setup-time exact-row checking only for adapters with `leakage_inputs()`;
+   temporal/target utilities have no real-adapter caller.
 5. **Consistent, leakage-proof evaluation + throughput-based parallel test-time scaling** — the highest-ROI levers per AIRA (+10–15 pts), plus cheap proxy evals (subset/reduced-epoch) to multiply iterations.
 
 ### The one-line strategy correction
@@ -323,40 +319,6 @@ roles:
 > but the capability-bus invariant itself was never retired. A product decision is pending; the full
 > annotation with the open question is in this file's source immediately below.
 
-<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — ADR-9's capability bus was never built and was never formally
-retired. It is still on the books as an invariant while nothing implements it.
-WHAT THIS ADR PROMISES: five MCP SERVERS (`knowledge-mcp`, `archive-mcp`, `ml-tools-mcp`, `sandbox-mcp`,
-`web-mcp`) exposing `query_archive` / `profile_data` / `check_leakage` / `run_code`, "consumed identically
-by our own roles (via function-calling, `async_mcp_tool(...)`) and by external agent backends (via MCP
-config URL)", so "the leakage-checker exists in exactly ONE place".
-WHAT THE CODE DOES: `tools/mcp_tools.py:1-3` is an MCP *CLIENT* provider — it consumes tools FROM
-externally-configured servers, the exact inverse of the ADR. `FastMCP`, `stdio_server` and `mcp.server`
-have ZERO hits in `looplab/`; so do all four tool names above; there is no server module of any kind (doc
-25's exhaustive `tools/` inventory finds only this client). It is wired at ONE site,
-`serve/assistant.py:1665-1675` — the owner chat assistant — and `agents/factory.py` has zero MCP
-references, so no in-loop role ever sees an MCP tool. `mcp` is NOT a declared dependency in
-`pyproject.toml`; the provider is written to degrade silently ("no config, no `mcp` SDK, or a server that
-won't connect -> that server simply contributes no tools"), so on a stock install this whole path is a
-silent no-op. There is also no MCP setting in `guide/configuration.md`, i.e. no supported way for a user
-to configure a server.
-ALREADY DECIDED, DO NOT RE-LITIGATE: (a) the SERVER bus was deferred as an infra seam on 2026-06-22 —
-[06-implementation-plan.md:111,179](06-implementation-plan.md) lists "🧱 LanceDB/FastMCP backends" under
-"Infra-seams (need external infra, deferred)"; (b) restricting the CLIENT to the assistant, off by
-default, is a deliberate SECURITY decision —
-[17-project-review-and-directions-2026-07-11.md:445-447,2057,2076](17-project-review-and-directions-2026-07-11.md)
-("keep web/literature and MCP off by default"; "MCP is assistant-only today … do not reach it from the
-autonomous loop"; "never auto-promote retrieved external instructions into tool authority"). Neither
-decision retires the capability-bus invariant, and nothing has re-affirmed building the servers since
-2026-06-22.
-NEEDS A BUSINESS DECISION: is the MCP capability bus still a product commitment — in which case it needs
-an owner, `mcp` as a declared dependency, and a plan reconciling it with doc 17's "off by default,
-assistant-only" security decision — or is it retired, in which case ADR-9's one-capability-one-place
-invariant, [01 §5.L](01-product-design.md), [02 §3.14](02-architecture.md) and the §13 extension-point row
-must be rewritten around what actually ships: an optional outbound MCP client for the owner's assistant?
-Second, smaller question: should `mcp` be declared as an extra so the assistant's MCP path fails loudly
-rather than silently contributing nothing?
-(Operator instruction 2026-08-04: MCP stays AS IT IS in code for now; this is a docs/positioning
-decision, not a code change.) -->
 
 ---
 
@@ -387,13 +349,10 @@ knowledge/
 
 **Requirement.** Clear the remaining un-specified nuances. One decision each:
 
-1. **Secrets / API keys** → front all providers with a **local LLM gateway (LiteLLM Proxy)**; roles/sandbox get short-lived **gateway tokens, never provider keys**; real keys in a secret manager (dev: gitignored `.env`; prod: Vault), referenced not inlined; **redaction filter + `gitleaks`** over the event log. Keys never enter sandbox, prompt, or log.
-   <!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — the gateway half of this decision rests on LiteLLM, which is
-   not a dependency and is on no shipped code path (`core/llm.py::make_llm_client` always returns
-   `OpenAICompatibleClient`). There are no short-lived gateway tokens: the client reads a provider key
-   from config/env directly (`core/llm.py::make_llm_client`'s `api_key` / `settings.llm_api_key`). The redaction filter
-   DID ship (`engine/audit.py:269::_redact`, applied to persisted stdout tails). Full annotation + the
-   business question: [01 §5.K](01-product-design.md). -->
+1. **Secrets / API keys — original decision, partially shipped.** The LiteLLM Proxy and short-lived
+   gateway tokens did not ship; current clients read provider-key references from config/env. Masked
+   snapshots and redaction at persisted/model-facing boundaries did ship. Candidate sandboxes must not
+   receive operator credentials.
 2. **Configuration** → **`pydantic-settings`** (typed `BaseSettings`) as the single config model, loading layered sources in precedence **defaults < `config.yaml` < `.env` < env vars < CLI** (via `settings_customise_sources` / a YAML source). Typed validation + coercion fail-fast at startup; **nested env override** (`LOOPLAB__ROLES__DEVELOPER__MODEL=...`) for per-field tweaks and profiles. Secrets are **env/`SecretStr` references, never values**, and are excluded from dumps. Write the fully-resolved, **secret-masked** snapshot to `runs/<id>/config.resolved.yaml` + git SHA + `uv.lock` hash — the reproduction key. *(Chose pydantic-settings over Hydra: native env/`.env`/secret handling and one typed model matter more here than Hydra's multirun/sweep composition; layered YAML profiles cover the composition we need.)*
 3. **Observability / event taxonomy** → align events to the **OpenTelemetry GenAI semantic conventions** (`gen_ai.*` spans: model, input/output tokens, latency, finish reason, cost) as the canonical trace; domain events (operator-applied, eval-run, gate-decision) as child spans; files-as-truth event log is the durable backing store. Cost/token/latency are first-class on every model/tool event.
 4. **Human-in-the-loop** → **approvals are command events** (reuse [ADR-1](03-decisions.md)): engine writes `pending_approval` and halts the thread; human appends `approval_granted|rejected|amended`; engine resumes from the log (identical to crash-resume). Default gates: plan approval (toggle), network egress, budget-threshold, winner-promotion.
@@ -401,13 +360,9 @@ knowledge/
 6. **Determinism** → target **reproduce-with-variance** (LLM sampling and GPU FP are not bitwise-reproducible). Record a full reproduction manifest (seeds, `torch.use_deterministic_algorithms`, CUDA/lib versions, dataset hashes, model snapshot + sampling params); report **mean ± std over N seeds** (this is why the variance gate exists, [§8](02-architecture.md)).
 7. **Engine self-testing** → **mocked-LLM smoke test** in CI (record/replay) + a versioned **golden-task** regression suite + nightly **canary** on live models + **adversarial fixtures** (planted leakage, known variance) that unit-test the evaluator/gate. Dashboard "engine quality over time" (solve rate, regret vs baseline, $/solved).
 8. **Security of agent code** → beyond the sandbox: **deny-by-default egress**; **cgroup/ulimit** CPU/mem/disk/time caps + wall-clock kill; install only from a **pinned lockfile / allowlisted index** (no arbitrary runtime installs); treat all ingested/web content as **untrusted data, not instructions** (delimit + injection-scan + approval gate before any egress/install). Prompt injection from ingested artifacts is a real vector ([ADR-3](03-decisions.md)).
-9. **Cost governance** → **hierarchical, gateway-enforced budgets**: run-level cap subdivided per role/thread; in-engine accountant trips an approval gate at 80%, hard-kills at 100%; cost attributed per `(run_id, thread_id, role, model, operator)`; report $/result.
-   <!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — the 80%/100% machinery exists but is dead. `CostAccountant`
-   (`core/llm.py::CostAccountant`) takes `limit=None`, and inside `::CostAccountant.add` both the warn
-   branch and the `raise BudgetExceeded` are guarded on `self.limit is not None`; no dollar-budget field
-   exists anywhere in `Settings`, and all three `CostAccountant(...)` construction sites pass no limit.
-   Cost ATTRIBUTION did ship — the durable per-run ledger is `engine/costs.py` (`llm_usage`/`llm_cost` +
-   `.llm-usage-outbox`). Full annotation + the business question: [02 §11](02-architecture.md). -->
+9. **Cost governance — original target, partially shipped.** Cost attribution/reporting ships, but the
+   gateway hierarchy and Settings-level dollar cap do not. `CostAccountant` enforces only when a caller
+   explicitly supplies a finite limit; normal Settings construction does not.
 10. **Multi-tenancy / isolation** → **one run = one `run_id` namespace**: dedicated run dir + per-thread **git worktree** + per-thread sandbox container + scoped gateway token + one MLflow run; `run_id`+`thread_id` are required fields on every event and the prefix of every path.
 - **Also added (not previously listed):** **data/artifact lifecycle & retention** (GC of old run dirs, large-artifact storage policy, PII in ingested data) and **provenance-for-publishable-results** (a "winner" must carry config snapshot + seeds + data hashes + model snapshot + event-log id so it's defensible/reproducible).
 
@@ -424,19 +379,19 @@ knowledge/
 
 ---
 
+## Reconciled 2026-08-08
+
+- **Advisory-vs-behavior classification of RunState sidecars — completed.** Field comments and
+  docstrings now distinguish direct metric ranking, behavioral admission/steering, replay/cadence gates,
+  and pure telemetry. In particular, graded novelty is behavioral (it bypasses the flat admission gate
+  and feeds Card novelty selection), concept tags/edges can steer taxonomy or proposal cues, and reports
+  are selection-neutral while their receipts gate refresh cadence. `agent_decisions`, proxy-score receipts,
+  and cross-run-prior receipts remain observational; their separately recorded effects are what change
+  behavior. The classification is summarized beside `RunState`'s advisory/control fields.
+
 ## Open (needs investigation, not yet decided)
 
-<!-- CODEX AGENT: this is an active architecture blocker, not wording-only debt. Global board rankings are
-currently emitted by parallel worker completion order and become Card selection priority; watchdog/research/
-foresight sidecars can steer later prompts; trust sidecars can gate candidates. The audit must classify the
-actual consumer and replay/concurrency contract of every field before Part IV/V promotion evidence can claim
-that audit/advisory state is behaviorally neutral. -->
-
-- **Advisory-vs-behavior classification of RunState sidecars.** Commit `f019358` relabeled several
-  sidecars (`hypotheses`, `research`, `foresight_selected`, `reward_hacks`, …) from "audit-only" to
-  "advisory — feeds prompts/priorities". That pass was NOT exhaustive: some field comments and
-  docstrings still assert "audit-only; never read by best-selection" while the code now consumes them
-  (e.g. the Card-priority fallback, proposal cues, trust gating). **TODO:** audit the real data flow of
-  every sidecar against the business requirement (what SHOULD steer selection vs. stay pure telemetry),
-  then reconcile every inline comment + doc to match. Marker in `looplab/core/models.py` at the
-  "advisory/control receipts" section. Do this before trusting any single field's stated role.
+- **Parallel sidecar ordering.** Global board rankings can still be emitted in worker-completion order and
+  become Card priority; watchdog/research/foresight state may steer later prompts, and trust state may gate
+  candidates. Any move from the current bulk-synchronous batches to independent adaptive lanes must define
+  one durable ordering/authority contract rather than treating these records as behaviorally neutral.

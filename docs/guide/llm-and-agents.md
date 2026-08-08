@@ -532,8 +532,9 @@ tool-using Researcher drops in behind the same protocol.
 
 See [Configuration](configuration.md) for every related setting and [Concepts](concepts.md) for how
 the roles fit into the loop.
-<!-- CODEX AGENT: the separate Part IV/V `CrossRunTools` provider has a second scope ambiguity:
-unbound is intentionally portfolio-wide for CLI/human inspection, but the same constructor is used for
-model-facing roles, so a forgotten/failed `bind_state` silently inherits that broad audience. Require an
-explicit audience at construction and make an unbound agent audience return no rows. Its bounded retrieval
-also still computes an O(all evidence) corpus digest outside `max_corpus`. -->
+
+`CrossRunTools` declares its audience explicitly at construction. A model-facing `audience="run"`
+provider returns no rows until it is bound to a run; it never falls back to portfolio-wide access after
+a missing or failed bind. The unbound `audience="portfolio"` mode is reserved for intentional owner/CLI
+inspection (and pre-task Genesis). Applicability scoping is still not a multi-user authorization layer,
+and the exact tool result is not yet durably joined to the consuming model turn.

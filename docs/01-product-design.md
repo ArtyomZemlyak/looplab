@@ -5,11 +5,17 @@
 
 > **What this is.** A from-scratch (non-fork) design for an open, backend-flexible **autonomous ML/DS research engine**: you give it a task and a way to measure success; it *invents → implements → tests → improves* solutions in a loop and returns the best **verified** solution plus a full log of what worked and why.
 
-> **Current runtime authority (2026-07-16).** Where this original design says “engine-only writer” or
+> **Historical target, not an implementation inventory (reconciled 2026-08-08).** Where this original
+> design says “engine-only writer” or
 > “files as truth”, read the narrower shipped contract: `events.jsonl` is authoritative for replayable
 > `RunState`; one live engine is fenced by `engine.lock`, and the control server may append serialized
 > control events through `EventStore`. Task/config snapshots, tracing, chat, command records and cross-run
-> memory are separate sidecars and are not reconstructed by `replay.fold`.
+> memory are separate sidecars and are not reconstructed by `replay.fold`. The shipped live model path is
+> an OpenAI-compatible `/v1` endpoint; `LiteLLMClient` is optional and is not selected by Settings. The
+> project ships an optional outbound MCP client for the owner Assistant, not the MCP server bus designed
+> below. Setup-time exact train/test leakage checking runs only for adapters that provide
+> `leakage_inputs()`; temporal/target detectors still have no real-adapter caller. Costs are metered and
+> reported, but Settings expose no hard dollar cap. Later target-language does not override those facts.
 
 ---
 
@@ -80,34 +86,12 @@ The differentiator vs everything surveyed: existing OSS systems each hold *one* 
 - Run candidate code in a **sandbox**: enforce timeout, compute budget, resource caps, optional no-network; capture metric, logs, stdout/stderr, artifacts.
 
 ### E. Evaluation — *leakage-first trust layer* ([ADR-6](03-decisions.md))
-- **Leakage checker (primary)**: train/test **+ temporal + target** leakage auto-detect/correct (our genuine differentiator).
+- **Original target:** train/test **+ temporal + target** leakage auto-detect/correct.
 
-> **⚠ Not true today (2026-08-04).** The **temporal and target** detectors have no shipped caller — only
-> the synthetic MLE-bench adapter defines `leakage_inputs()`, and the check is a once-per-run setup gate,
-> not a per-candidate step. A product decision is pending; the full annotation with the open question is
-> in this file's source next to this line.
+> **Shipped boundary (2026-08-08).** The **temporal and target** detectors have no real-adapter caller.
+> Tasks that implement `leakage_inputs()` receive a once-per-run setup check; the synthetic MLE-bench
+> adapter is the current shipped producer. This is not a universal per-candidate differentiator.
 
-<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — "our genuine differentiator" is still the stated product edge
-(reasserted as recently as `docs/26-ouroboros-airi-analysis-2026-08-02.md:35`), but the temporal/target half
-has no shipped caller.
-WHAT THE CODE DOES: `engine/audit.py::_leakage_blocks` (:283) short-circuits unless the task defines `leakage_inputs()`,
-and the ONLY adapter that defines it is the SYNTHETIC `adapters/mlebench.py::leakage_inputs` (:229) — so
-`trust/leakage.py::target_leakage` and `::temporal_leakage` are never invoked by any shipped real task. It is also a ONCE-PER-RUN setup gate — a single `self._leakage_blocks()` call site inside the
-once-per-run setup block of `engine/orchestrator.py::run` — not the per-candidate pipeline step
-[02 §3.6](02-architecture.md) describes.
-ALREADY DECIDED, DO NOT RE-LITIGATE: the audit-only posture is deliberate — `trust_gate` defaults to
-`"audit"` and `code_leakage_detect` to `False` (`core/config.py:729,732`) per
-[doc 10 §trust_gate](10-autoresearch-improvement-research.md) (2026-07-02) and
-[doc 16 P1-7](16-architecture-code-review-2026-07-11.md) / [doc 17 §1](17-project-review-and-directions-2026-07-11.md)
-(2026-07-11: "do not enable hard gating by default until a labelled calibration corpus establishes
-precision"). The `thorough` profile turns the bundle on in one word.
-STILL OPEN: [doc 17:147-149](17-project-review-and-directions-2026-07-11.md) already recorded "the
-temporal/target-leakage differentiator (ADR-6's stated edge) has no live caller … the claimed moat needs
-one adapter that exercises it end-to-end", and three weeks later no adapter has arrived.
-NEEDS A BUSINESS DECISION: do we fund a real split-bearing adapter that calls `leakage_inputs()` end-to-end
-(making temporal/target leakage a genuine, demonstrable differentiator), or do we stop marketing
-temporal/target leakage detection as a differentiator and describe it as an unwired capability until one
-exists? -->
 - **Consistent evaluation**: fixed splits/seeds across candidates; select on a trustworthy validation metric, not test (the +9–15 pt lever).
 - **Variance gating, tiered**: robust CV everywhere; multi-seed confirmation only at the top-k promotion frontier (not p<0.01 on every node).
 - *Optional (open-ended mode):* co-evolving anti-reward-hack evaluator — only when the agent defines its own metric.
@@ -147,51 +131,19 @@ exists? -->
 > [doc 17:195](17-project-review-and-directions-2026-07-11.md)).
 
 ### K. Configuration & backends
-- One **LiteLLM** layer; per-role model config; local/API switch without code changes.
+- One OpenAI-compatible `/v1` layer; per-role model config; local/API switch without code changes.
+  `LiteLLMClient` remains an optional manually wired adapter and is not a declared dependency or the
+  Settings-factory route. See [LLM & coding agents](guide/llm-and-agents.md).
 
-> **⚠ Not true today (2026-08-04).** LoopLab does **not** ship LiteLLM — `litellm` is not a dependency and
-> no production path constructs `LiteLLMClient`. What ships is one layer over **any OpenAI-compatible
-> `/v1` endpoint** (Ollama, vLLM, SGLang, OpenAI). See [LLM & coding agents](guide/llm-and-agents.md).
-> A positioning decision is pending; the full annotation is in this file's source next to this line.
-
-<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — "one LiteLLM layer" (here, and §3 goal 3 above, and the
-"Backend flexibility" NFR in §7) is still the stated architecture and competitive edge, and NO later
-document ever revised it: as recently as the canonical plan
-[doc 17:2067](17-project-review-and-directions-2026-07-11.md) (2026-07-11) the claim is restated as fact
-("LoopLab routes every role through LiteLLM and ships no model"), and doc 25 (2026-08-01) reviews
-`core/llm.py` line by line without mentioning LiteLLM once.
-WHAT THE CODE DOES: `litellm` is in NEITHER `pyproject.toml` `dependencies` NOR any optional extra, so it
-is never installed. `core/llm.py::make_llm_client` — the one Settings->client factory used by the CLI,
-server, adapters and the agent loop — has a single `return OpenAICompatibleClient(...)`, i.e. it returns
-the OpenAI-SDK-over-httpx client UNCONDITIONALLY. `core/llm.py::LiteLLMClient` exists but is constructed
-only in two tests (`tests/test_llm_broker.py`, `tests/test_openai_client.py`); no production path reaches
-it. The module docstring and the `OpenAICompatibleClient` docstring still call LiteLLM "the documented
-production gateway", which is what these docs document — a circular citation, not evidence.
-CONSEQUENCE FOR THE CLAIM: "100+ providers" ([02 §9](02-architecture.md)) is not what ships. What ships is
-"any OpenAI-compatible `/v1` endpoint" (Ollama, vLLM, SGLang, OpenAI itself) — genuinely broad, but a
-different and smaller promise, and it is the promise the user guide already makes
-(`guide/llm-and-agents.md`, `guide/quickstart.md`). The ADR-11 §1 secrets design (gateway tokens, never
-provider keys) rests on the LiteLLM Proxy and therefore does not ship either.
-NEEDS A BUSINESS DECISION: is LiteLLM still the intended backend — in which case declare it as a
-dependency, route `make_llm_client` through it, and keep the 100+-provider claim — or is
-"OpenAI-compatible endpoint only" the actual product, in which case the LiteLLM claim must be struck from
-01/02/03 and from the marketing position, and ADR-11's gateway-token secrets model needs a replacement?
-(Operator instruction 2026-08-04: LiteLLM stays AS IT IS in code for now; this is a docs/positioning
-decision, not a code change.) -->
 - **Pluggable research algorithm** ([ADR-2](03-decisions.md)): the search strategy is a config-selected plugin (`GreedyTree`/`Evolutionary`/`MCTS` or your own) — overridable without forking.
 - **Pluggable role backends** ([ADR-7](03-decisions.md)): each role is `backend: llm` or `backend: cli_agent` (OpenHands/Aider/SWE-agent/Claude Code) — config-selected, no fork.
 - Everything common is config-driven; deep changes go through documented plugin interfaces.
 
 ### L. Capability layer — tools & skills ([ADR-9](03-decisions.md))
-- **MCP capability bus**: engine capabilities (`query_archive`, `profile_data`, `check_leakage`, `run_code`) exposed as MCP servers, consumed identically by our roles **and** external agent backends — one capability, one place, identical results.
-> **⚠ Not true today (2026-08-04).** No MCP **server** was ever built. LoopLab ships an optional MCP
-> *client* used by the owner chat assistant only, and `mcp` is not a declared dependency. A product
-> decision is pending; the full annotation is on [ADR-9](03-decisions.md).
+- **Original MCP target (not shipped):** expose engine capabilities as MCP servers for in-house roles
+  and external agents. Current code has only an optional outbound MCP *client* used by the owner chat
+  Assistant; `mcp` is not a declared dependency and no server bus ships.
 
-<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — see the full annotation on [ADR-9](03-decisions.md). In short:
-LoopLab ships an MCP *client* (`tools/mcp_tools.py`), never a server; `FastMCP`/`stdio_server`/`mcp.server`
-have zero hits in `looplab/`; none of the four tool names above exists anywhere in the code; and `mcp` is
-not a declared dependency, so on a stock install the path degrades to contributing no tools at all. -->
 
 - **Agent Skills** (`SKILL.md`): ML recipes (K-fold CV, Muon, leakage checks) with progressive disclosure; the old seed-knowledge library migrates here. Per-role tool allow-lists as a security boundary.
 
@@ -204,7 +156,10 @@ not a declared dependency, so on a stock install the path degrades to contributi
 - **AGENTS.md** generated per-run to instruct external coding-agent backends (conventions in AGENTS.md, task in prompt, hard limits in CLI flags).
 
 ### O. Hardening ([ADR-11](03-decisions.md))
-- Secrets via LiteLLM gateway (tokens, not keys); **`pydantic-settings`** typed config with resolved snapshot; OpenTelemetry-GenAI event taxonomy; human-in-the-loop **approvals as command events**; idempotent crash-resume; gateway-enforced hierarchical budgets; per-run isolation (worktree + sandbox + namespace).
+- **Original hardening target:** gateway tokens and hierarchical dollar budgets. **Shipped:** direct
+  provider key references, typed `pydantic-settings` with masked snapshots, OpenTelemetry export,
+  event-backed approvals, idempotent resume, cost metering, and run/worktree/sandbox isolation. No
+  short-lived gateway-token service or Settings-level dollar hard stop exists.
 
 > **New requirements (2026-06-20)** — decoupled UI, pluggable algorithm, artifact ingestion, reproducibility/tracking, graph-vs-tree — in **[03-decisions.md](03-decisions.md)** (ADR-1…5). **2026-06-21 additions** — external-agent role backends (ADR-7), prompts/AGENTS.md (ADR-8), MCP+Skills (ADR-9), knowledge/memory (ADR-10), hardening (ADR-11) — plus the SOTA re-prioritization (ADR-6). All reflected across this doc and the architecture.
 
@@ -257,7 +212,7 @@ Concrete capabilities the system must expose (interfaces detailed in the archite
 - `BudgetManager` — track/enforce token + compute budgets, allocate to threads.
 
 **Backend layer**
-- `LLM.complete(role, messages) -> Response` — routed per role via LiteLLM.
+- `LLM.complete(role, messages) -> Response` — routed per role through the shipped OpenAI-compatible client (or an explicitly wired compatible adapter).
 
 **Observability**
 - `Journal.log(event)` (appends to `events.jsonl`), `LineageView.render()` (DAG), `Report.build() -> ResearchReport`.
@@ -282,7 +237,7 @@ Concrete capabilities the system must expose (interfaces detailed in the archite
 | **Safety** | All agent-written code runs sandboxed (container/subprocess), resource-limited, network-off by default; agent edits a constrained surface only. |
 | **Reproducibility** | Pinned deps, controlled seeds, git commit per node, full lineage from any result back to root. |
 | **Reliability** | No result promoted without validity + variance checks; reward-hack regression suite always runs. |
-| **Backend flexibility** | Works with any LiteLLM-supported provider; per-role override; graceful degradation if a model is unavailable. |
+| **Backend flexibility** | Works with an OpenAI-compatible `/v1` endpoint; per-role override; graceful refusal/fallback behavior when a model is unavailable. Optional adapters are manual. |
 | **Observability** | Every experiment logged with inputs, diff, metric, cost, verdict; lineage DAG viewable. |
 | **Extensibility** | New task adapter / search policy / evaluator check addable without forking core. |
 
@@ -317,12 +272,12 @@ Concrete capabilities the system must expose (interfaces detailed in the archite
 
 | Phase | Scope | Looks like |
 |-------|-------|-----------|
-| **P0 — Working loop** | Single-file adapter, per-role Researcher/Developer, sandbox, `GreedyTree`, LiteLLM, git commits, **`events.jsonl` + static HTML lineage tree**. | Karpathy/AIDE-class, backend-flexible, observable — minimal infra. |
+| **P0 — Working loop** | Single-file adapter, per-role Researcher/Developer, sandbox, `GreedyTree`, OpenAI-compatible LLM client, **`events.jsonl` + static HTML lineage tree**. Canonical node lineage is event-based rather than one git commit per experiment. | Karpathy/AIDE-class, backend-flexible, observable — minimal infra. |
 | **P1 — The levers that move results** | **Rich operators** (draft/depth-bounded debug/improve/ablation-refine) + **leakage checker** (train/test+temporal+target) + **consistent evaluation** + robust-CV selection. | Where medal-rate is actually won (AIRA+MLE-STAR). |
 | **P2 — Ensembling + frontier rigor** | First-class **ensemble/merge operator** (iteratively refined) + **top-k multi-seed confirmation** + DAG data model (`parent_ids`). | Best-evidenced lift (MLE-STAR/KompeteAI). |
 | **P3 — Scale + reproducibility** | **Parallel/throughput test-time scaling** + cheap proxy evals + **MLflow optional exporter** + Textual TUI. | Throughput (AIRA_2) + reproducibility. |
 | **P3.5 — Grounding** | **Lightweight** retrieve-and-seed (≈4 candidates) + data profiling; heavier ingestion (Docling/web) behind a flag. | MLE-STAR-style, kept light. |
-| **P3.6 — Knowledge & capability** | **MCP capability bus** + **Agent Skills** (migrate seed-knowledge) + **prompt store** + **AGENTS.md** generation. | [ADR-8](03-decisions.md)/[ADR-9](03-decisions.md). |
+| **P3.6 — Knowledge & capability** | Agent Skills + prompt store + AGENTS.md generation shipped; the designed **MCP server capability bus did not** (only an optional owner-Assistant client exists). | [ADR-8](03-decisions.md)/[ADR-9](03-decisions.md). |
 | **P3.7 — Cross-run memory** | Episodic **case library** + distilled **lessons** with retain-on-improvement + confidence gates. | [ADR-10](03-decisions.md) — top-system differentiator. |
 | **P4 — Breadth + hardening + opt-in machinery** | `MLEBenchAdapter` + `KernelSOLAdapter` + **React Flow web UI** + hardening pass ([ADR-11](03-decisions.md)); opt-in: `Evolutionary`/`MCTS`, diversity archive, co-evolving evaluator. | Production breadth; demoted bets become measurable experiments. |
 

@@ -10,7 +10,8 @@
 > deliberately complementary to [doc 16](16-architecture-code-review-2026-07-11.md) (the
 > correctness/bug finding ledger) and [doc 17](17-project-review-and-directions-2026-07-11.md)
 > (the delivery plan): findings here are about **maintenance cost and drift risk**, not (except
-> where explicitly noted) about currently-wrong behavior. Doc 17 still owns release ordering.
+> where explicitly noted) about currently-wrong behavior. Doc 17 preserves the dated release-ordering
+> rationale; current source/tests decide current implementation truth.
 
 ## 0. Scope and method
 
@@ -71,17 +72,34 @@ misquoted comments, misattributed locations — that are folded into the text be
 4 refutations were the post-baseline `c92b89f` fixes above. No finding was refuted at the
 baseline.
 
-### 0.2 Second reconciliation (2026-08-02, HEAD `41813bd`)
+### 0.2 Second reconciliation (2026-08-02, HEAD `41813bd`) — historical snapshot
 
 `master` has since advanced by further commits (mobile/UI hardening, settings, attention and
 assistant features, a test re-pointing sweep — and `a077d86`, the first structural commit acting
 on this document). A dedicated per-finding status pass over the new HEAD produced the
-remediation ledger in **§5** (running total as of `2d96bed`, §5.4: 43 resolved, 13 partial, 132 open — and
+historical remediation ledger in **§5** (running total as of `2d96bed`, §5.4: 43 resolved, 13 partial, 132 open — and
 several flagged god-modules grew substantially in the same window, §5.3). **§6** adds the
 target-design proposals for resolving the finding clusters; §6 was itself adversarially
 validated against HEAD `a077d86` by nine design reviewers, whose corrections (naming collisions
 with existing modules, seam-preservation blockers, split-mechanics fixes) are folded in. Line
 numbers below still reference the baseline.
+
+### 0.3 Current reconciliation (2026-08-08, HEAD `90ba3a2`)
+
+Every one of the 188 finding headings in §4 now carries an explicit disposition, reconciled against
+current source, tests and the resolution evidence already recorded under that finding.
+
+- **RESOLVED** means the diagnosed structural defect was removed, consolidated, guarded, or
+  evidence-backed analysis showed the proposed change was not a valid defect fix. It does not imply
+  that every optional follow-up in the original recommendation was implemented.
+- **PARTIALLY RESOLVED** means a meaningful arm landed but a named structural arm remains.
+- **DEFERRED** means the issue is accepted but the safe next change is deliberately postponed (for
+  example because it changes a receipt format or would introduce shared mutable folded state).
+- **OPEN** means no adequate resolution is present on current `master`.
+
+**Status totals: 147 resolved, 37 partially resolved, 2 deferred, 2 open (188 total).** The heading
+status plus its adjacent resolution narrative is the current authority; §5.1–§5.4 remain historical
+roll-ups for their named commits.
 
 ### Severity model
 
@@ -487,7 +505,7 @@ Scope: `looplab/engine/`: orchestrator.py, node_build.py, eval_dispatch.py, eval
 - The single _emit_node_created emitter with the _OMIT sentinel (node_build.py:194-225) collapses four historical payload shapes into one function while provably preserving byte-identical event data per call site.
 - Concurrency seams are typed and registry-guarded rather than ad hoc: BACKGROUND_APPENDABLE / SETUP_THREAD_APPENDABLE membership asserted at append sites (eval_dispatch.py:118-119) and the worker-side pause queue (_request_create_pause/_drain_create_pause, orchestrator.py:2519-2541) keeps run-global folded events on the main task.
 
-#### ES-01 · HIGH · under-decomposition · effort: large
+#### ES-01 · HIGH · under-decomposition · effort: large — **RESOLVED (2026-08-08)**
 
 **orchestrator.py is still a god-module: three large separable subsystems remain inline after the 17-file mixin split**
 
@@ -565,7 +583,7 @@ pinned. Verified to have teeth by making the inject path keep two emits and drop
 
 *Recommendation:* Extract a shared `_commit_built_node(reservation, code, files, ..., pause_via_queue: bool)` helper covering parent-refetch guard, node_created emission, landed-check, developer-error sentinel handling and telemetry consumption; keep the three callers responsible only for how they obtained idea/code. This makes the next cross-cutting fix a one-site change.
 
-#### ES-03 · MEDIUM · under-decomposition · effort: large
+#### ES-03 · MEDIUM · under-decomposition · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
 **_evaluate is a single ~700-line method mixing ten concerns in one attempt loop**
 
@@ -634,7 +652,7 @@ reservation, proxy, eval-start boundary) and the terminal-emission block are coh
 dozen loop-locals each with no round-trip to hide a defect in — a lower-yield, larger-diff lift than
 this one, and best taken on its own.
 
-#### ES-04 · MEDIUM · excessive-logic · effort: medium
+#### ES-04 · MEDIUM · excessive-logic · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
 **Engine.__init__ is ~770 lines: 110 knob resolutions copied into locals then re-assigned to attributes, plus embedded calibration validation**
 
@@ -667,7 +685,7 @@ without being flagged.
 Not done: the calibration-envelope closures. Those are a separate lift with their own context to
 thread, and this change was kept to the part whose safety is provable from the AST.
 
-#### ES-05 · MEDIUM · under-decomposition · effort: medium
+#### ES-05 · MEDIUM · under-decomposition · effort: medium — **RESOLVED (2026-08-08)**
 
 **run() loop's `creates` branch inlines ~230 lines of parallel-build chunking, card-lane claiming and batch-drop bookkeeping**
 
@@ -721,7 +739,7 @@ the helper, so they are re-pointed in the same change. Re-pointed rather than de
 is "whichever method owns the chunk goes through the shared consume", and it follows the code instead
 of naming a location that has now moved once.
 
-#### ES-06 · MEDIUM · duplication · effort: medium
+#### ES-06 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-08)**
 
 **Serial and parallel eval-dispatch branches triplicate the admission fence (terminal-gate + lifecycle_current + reservation release)**
 
@@ -766,7 +784,7 @@ created/closed/lost) are now stated rather than divergent. Pinned by three tests
 
 *Recommendation:* Add one helper, e.g. `retry_tail_cas(store, plan: Callable[[events], Optional[AppendPlan]], attempts=64)` returning the appended event / None / raising per an explicit exhaustion policy, and port the eight loops. Behavior differences that survive review become explicit arguments instead of divergent copies.
 
-#### ES-08 · MEDIUM · duplication · effort: small
+#### ES-08 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **Batch-proposal scaffolding duplicated between run()'s parallel-build chunk and _stage_card_creates**
 
@@ -807,7 +825,7 @@ given" across 57 tests, and only that loudly because that helper is called every
 neighbour would have failed on one path. `test_the_staticmethods_around_the_new_helpers_are_still_staticmethods`
 now checks the decorators directly.
 
-#### ES-09 · LOW · duplication · effort: small
+#### ES-09 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **_apply_control_overrides contains two copy-pasted parallelism-override loops**
 
@@ -846,7 +864,7 @@ to be all-or-nothing; `tests/test_width_settling.py` pins that as a decision, no
 The ops sub-dict block EC-11 also mentions, and the `_apply_strategy` if-chain's remaining
 governance-sensitive sections, are left explicit as the finding itself recommends.
 
-#### ES-10 · LOW · inconsistency · effort: medium
+#### ES-10 · LOW · inconsistency · effort: medium — **RESOLVED (2026-08-08)**
 
 **Four GPU-probe implementations with two different nvidia-smi parsers**
 
@@ -894,7 +912,7 @@ reverse direction too — a module that DROPS the import has stopped participati
 
 *Recommendation:* Define DEVELOPER_ERROR_PREFIX plus a predicate in a shared module (core/models or agents/roles, where the producer contract lives), use it at the producer and all six consumers, and add a registry-style test in the spirit of the existing seam guards.
 
-#### ES-12 · LOW · other · effort: medium
+#### ES-12 · LOW · other · effort: medium — **DEFERRED (2026-08-08)**
 
 **Redundant full-log folds within a single stable decision iteration**
 
@@ -937,7 +955,7 @@ If revisited: loop-local tail gate only, never a shared memo; re-point those thr
 re-pin event (the production invariant); and cover the sibling wait loop in `engine/confirm_phase.py`
 in the same change.
 
-#### ES-13 · LOW · excessive-logic · effort: medium
+#### ES-13 · LOW · excessive-logic · effort: medium — **RESOLVED (2026-08-08)**
 
 **Delegator/seam boilerplate has drifted into four coexisting styles (~50 forwarding members in orchestrator.py)**
 
@@ -984,7 +1002,7 @@ CLASS's function — so unlike every table entry they do NOT route through `self
 re-pointing that instance would not intercept them. Listing either shape in the table would claim a
 routing guarantee it does not have, so two tests assert they stay out.
 
-#### ES-14 · LOW · layering · effort: small
+#### ES-14 · LOW · layering · effort: small — **RESOLVED (2026-08-08)**
 
 **Mixin-boundary misplacements: governance and generic helpers live in unrelated clusters**
 
@@ -1330,7 +1348,7 @@ worker-seam case.
 
 *Recommendation:* Extract one `_developer_crash_records(node_id, generation, code, reason_text)` builder (or a full `_append_developer_crash(...)` helper with the tail-CAS retry) used by all five sites. Reason wording can stay a parameter; the event pair, ordering, and CAS discipline become single-sourced.
 
-#### EC-04 · MEDIUM · mergeable-entities · effort: medium
+#### EC-04 · MEDIUM · mergeable-entities · effort: medium — **RESOLVED (2026-08-08)**
 
 **train_monitor and asha_monitor duplicate the resume-history scan and per-tick loop scaffold**
 
@@ -1412,7 +1430,7 @@ the llm gate's `reason`). The digest-guard break was SILENT on the first draft �
 digest to `None` on both sides, where a plain `!=` still answers `kept`; it now drives the one-sided
 degradations that actually distinguish the two rules.
 
-#### EC-06 · MEDIUM · duplication · effort: medium
+#### EC-06 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-08)**
 
 **_ablate and _ablate_code share a verbatim ~55-line refine_block child-construction tail**
 
@@ -1490,7 +1508,7 @@ the next decision point retries rather than waiting for the next multiple. That 
 treatment the deep-research cadence gives an unrecorded attempt, and for the concept path the
 paid-retry exposure is the KNOWN GAP already documented on `_maybe_snapshot_concept_coverage`.
 
-#### EC-08 · MEDIUM · flat-code · effort: medium
+#### EC-08 · MEDIUM · flat-code · effort: medium — **RESOLVED (2026-08-08)**
 
 **_set_complexity_hint is a 255-line linear cue assembler**
 
@@ -1530,7 +1548,7 @@ when gated off. The order test uses a real steering `kind`, because `normalize_s
 enforces a closed vocabulary and drops the whole snapshot on an unknown one — invented kinds would
 have compared an empty list to an empty list and proved nothing.
 
-#### EC-09 · MEDIUM · under-decomposition · effort: medium
+#### EC-09 · MEDIUM · under-decomposition · effort: medium — **RESOLVED (2026-08-08)**
 
 **strategy.py mixes four loosely-related subsystems; _concept_coverage_snapshot alone is ~240 lines**
 
@@ -1633,7 +1651,7 @@ pre-existing `test_authored_concepts` cases.
 No diagram change: the split moves no cadence, threshold, default or event type, and the process
 diagram's `concept` block already describes the subsystem by behaviour rather than by file.
 
-#### EC-10 · MEDIUM · duplication · effort: medium
+#### EC-10 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-08)**
 
 **Durable-usage append/verify/acknowledge protocol implemented three times in costs.py**
 
@@ -1683,7 +1701,7 @@ values, a commit that never landed returns the append's own exception object, an
 never acknowledges, and durable-but-unacknowledged stays distinguishable from a clean success.
 Teeth-tested against 6 breaks, all biting.
 
-#### EC-11 · LOW · flat-code · effort: small
+#### EC-11 · LOW · flat-code · effort: small — **RESOLVED (2026-08-08)**
 
 **Twin ~18-line parallelism validation loops and a 200-line knob if-chain in _apply_strategy**
 
@@ -1722,7 +1740,7 @@ to be all-or-nothing; `tests/test_width_settling.py` pins that as a decision, no
 The ops sub-dict block EC-11 also mentions, and the `_apply_strategy` if-chain's remaining
 governance-sensitive sections, are left explicit as the finding itself recommends.
 
-#### EC-12 · LOW · mergeable-entities · effort: small
+#### EC-12 · LOW · mergeable-entities · effort: small — **PARTIALLY RESOLVED (2026-08-08)**
 
 **Mirrored producer pipelines: SpecBuildResult vs SpecRawStageResult async wrappers duplicate scaffolding**
 
@@ -1752,7 +1770,7 @@ duplication it removes. The `SpecRawStageResult.failure(...)` classmethod is lik
 two payload sites differ in which optional fields they carry, and a classmethod defaulting the rest would
 hide that. Recorded as a deliberate partial rather than dropped.
 
-#### EC-13 · LOW · duplication · effort: small
+#### EC-13 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **Parser-resolution wrapper-chain walk duplicated outside its canonical helper**
 
@@ -1785,7 +1803,7 @@ Covered by `tests/test_role_chain_resolution.py` (23 tests), including that a wr
 parser of its own is walked THROUGH — the failure mode the finding names, and one that reports
 nothing downstream because the fallback is a valid default rather than an error.
 
-#### EC-14 · LOW · dead-code · effort: small
+#### EC-14 · LOW · dead-code · effort: small — **RESOLVED (2026-08-08)**
 
 **_acquire_gpu/_release_gpu are production-dead, kept only for tests**
 
@@ -1963,7 +1981,7 @@ campaign keeps finding:
 
 `tests/test_finalize_steward_driver.py` — 35 tests; all five deliberate breaks now fail loudly.
 
-#### EM-03 · MEDIUM · mergeable-entities · effort: large
+#### EM-03 · MEDIUM · mergeable-entities · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
 **Two parallel at-most-once paid-curation protocols; the validator must understand four schema generations**
 
@@ -2080,7 +2098,7 @@ from the identity, coercing an absent `finish_seq` to zero (which makes "never f
 "finished at seq 0" the same source), and letting an empty task id mint a shared facets key — which
 would serve one task's paid overlay to another.
 
-#### EM-05 · MEDIUM · inconsistency · effort: medium
+#### EM-05 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
 **Two parallel governance-append implementations; the shared one is homed in the wrong module**
 
@@ -2122,7 +2140,7 @@ rather than a shared one. `_ledger_revision`'s dispatch stays for the same reaso
 `concept_governance_revision(memory_dir, kind)`, which legitimately knows the two ledgers, and it now
 carries the fail-closed guarantee that the deleted branches used to duplicate.
 
-#### EM-06 · MEDIUM · inconsistency · effort: large
+#### EM-06 · MEDIUM · inconsistency · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
 **Three coexisting claim-identity systems, each with its own decision-overlay resolution logic**
 
@@ -2152,7 +2170,7 @@ The guard checks the TABLE, not the function text. Its first draft grepped
 BODY, so deleting a table row left it green. It now counts the three comment rows; removing one
 fails it.
 
-#### EM-07 · MEDIUM · duplication · effort: small
+#### EM-07 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **Lesson/research evidence-ingestion loops duplicated between structured and lean assessment paths**
 
@@ -2226,7 +2244,7 @@ Worth noting for the next collapse in this area: dropping `_filter_claim_source_
 `claims.py`'s import list broke 37 tests, because `claims.py` RE-EXPORTS it as a guarded post-split
 import contract (`tests/test_claims.py` asserts the re-export set). The import is back, now labelled.
 
-#### EM-09 · MEDIUM · mergeable-entities · effort: medium
+#### EM-09 · MEDIUM · mergeable-entities · effort: medium — **RESOLVED (2026-08-08)**
 
 **Three parallel 'list subclass carrying a receipt' types with per-type copy/filter helpers and dynamic attribute stashing**
 
@@ -2324,7 +2342,7 @@ decision-validator test plus six pre-existing `test_claim_decide_scope_parity` t
 `_filter_capsule_rows` narrows with a comprehension → `test_scoping_capsule_rows_keeps_the_quarantine`
 fails with the quarantine counters zeroed.
 
-#### EM-10 · MEDIUM · under-decomposition · effort: medium
+#### EM-10 · MEDIUM · under-decomposition · effort: medium — **RESOLVED (2026-08-08)**
 
 **memory.py mixes five unrelated subsystems in 1600 lines**
 
@@ -2413,7 +2431,7 @@ and cross-run recall is silently off. A first attempt at the "someone wired it i
 assigning the class is not constructing it, and the scan looks for calls. The break was sharpened to
 a real construction.
 
-#### EM-12 · MEDIUM · excessive-logic · effort: medium
+#### EM-12 · MEDIUM · excessive-logic · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
 **Ad-hoc hand-written receipt validators repeated ~8 times with no shared schema helper**
 
@@ -2460,7 +2478,7 @@ really about. Nothing yet forces a receipt's WRITER and its READER to agree on t
 a registry problem (the shape CLAUDE.md's other duck-typed seams solve) rather than a helper problem,
 and it is not addressed here.
 
-#### EM-13 · LOW · duplication · effort: small
+#### EM-13 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **_valid_node_source and _node_ids duplicate the same numeric-string node-id parsing rules**
 
@@ -2483,7 +2501,7 @@ the fail-closed direction, and unreachable in practice since these rows come fro
 Covered by `tests/test_shared_identity_rules.py`, whose central test asserts the invariant directly:
 over a mixed corpus, `_valid_node_source([v])` is true exactly when `_node_ids([v])` keeps `v`.
 
-#### EM-14 · LOW · dead-code · effort: small
+#### EM-14 · LOW · dead-code · effort: small — **RESOLVED (2026-08-08)**
 
 **apply_concept_curation retained with zero production callers**
 
@@ -2504,7 +2522,7 @@ merges/splits/purges land (with an empty target meaning PURGE, not a merge into 
 cycle-closing merge is rejected at record time while the store stays usable. The third pinned the
 batch applier's own conflicting-source rule and went with it — batch semantics no caller had.
 
-#### EM-15 · LOW · inconsistency · effort: small
+#### EM-15 · LOW · inconsistency · effort: small — **RESOLVED (2026-08-08)**
 
 **The unicode word-token regex and NFKC+casefold normalization re-declared in five places**
 
@@ -2548,7 +2566,7 @@ Scope: `looplab/events/`: eventstore.py, replay.py, types.py, projections, span_
 - eventstore.py's corruption model is precise and layered: torn final line (healable) vs mid-file complete-record divergence (fail-closed with `repair-log` recovery), dense-seq fencing, crash-atomic batch envelopes that pre-batch readers reject wholesale, and an incremental read cache whose consistency proof (full-prefix sha256) is explicit.
 - Why-comments are genuinely load-bearing throughout: nearly every defensive guard cites the concrete crash/exploit it closes, often with the pinning test named (e.g. replay.py:1550-1556, 5185-5196), which makes the replay-safety invariants auditable line by line.
 
-#### EV-01 · HIGH · under-decomposition · effort: large
+#### EV-01 · HIGH · under-decomposition · effort: large — **RESOLVED (2026-08-08)**
 
 **_derive_cards is an ~820-line god-function and the Card subsystem consumes ~40% of replay.py**
 
@@ -2639,7 +2657,7 @@ overlay and ranking calls (2 tests), reverting the merge-alias `min()` (1), a fu
 _apply_card_actionable(ledger)` — the comment-carrying mutation CLAUDE.md warns about — which fails
 both the order pin and the orphan check.
 
-#### EV-02 · MEDIUM · duplication · effort: medium
+#### EV-02 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-08)**
 
 **Card action bounding is implemented twice: fold-admit (_bounded_card_action) and derive-time (_card_added_snapshot) re-validate the same fields with copy-pasted blocks**
 
@@ -2709,7 +2727,7 @@ new-candidate site: each fails exactly its own case with `assert 2 == 1`.
 
 *Recommendation:* Extract `_invalidate_completion_certificates(st, ctx)` (and possibly a smaller `_clear_approval(st)`) and call it from all five handlers. This is a pure mechanical refactor of identical statements; the existing tests pin behavior.
 
-#### EV-04 · MEDIUM · inconsistency · effort: medium
+#### EV-04 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
 **Event-data admission is implemented three different ways; hex-digest validation alone is copy-pasted 4x within one handler and ~20x repo-wide**
 
@@ -2816,7 +2834,7 @@ directory-entry publish, uncertain-sync fence) against BOTH appenders.
 
 *Status (post-baseline):* Fixed on `master` by commit `c92b89f` (2026-08-01, immediately after this review's baseline): `read_all` now validates external growth with bounded head/tail windows on every poll and re-runs the full-prefix sha256 proof only on first external observation and each time the prefix doubles — amortized O(1) per appended byte; the review marker was replaced by a why-comment describing the shipped design. The finding is retained as accurate at the baseline.
 
-#### EV-08 · MEDIUM · under-decomposition · effort: medium
+#### EV-08 · MEDIUM · under-decomposition · effort: medium — **RESOLVED (2026-08-08)**
 
 **_on_node_created is a 226-line handler mixing node construction with ~100 lines of concept-envelope policy**
 
@@ -2858,7 +2876,7 @@ reads `st.nodes`, so this is a pure reordering, and a guard asserts it stays tru
 read `st.nodes` it would see the already-rebound node and the hoist would stop being safe, the same
 aliasing that makes re-deriving `current` wrong.
 
-#### EV-09 · LOW · mergeable-entities · effort: small
+#### EV-09 · LOW · mergeable-entities · effort: small — **RESOLVED (2026-08-08)**
 
 **Twin handlers and quadruplicated request-queue purges for the force_confirm/force_ablate/fork intent family**
 
@@ -2886,7 +2904,7 @@ generation) rather than an id/generation pair, so it shares the shape but not th
 Covered by `tests/test_replay_queue_and_producer_seams.py` (20), including the generation CAS, the
 legacy queued-before-create arm, and a source guard that the purge exists in exactly one place.
 
-#### EV-10 · LOW · duplication · effort: medium
+#### EV-10 · LOW · duplication · effort: medium — **RESOLVED (2026-08-08)**
 
 **Span-to-node attribution rule implemented three times across traceview and span_index, kept equivalent only by comments**
 
@@ -3007,7 +3025,7 @@ before and after over the 40 real run dirs the index will load, 676 projections,
 change is behaviour-preserving on every log on disk, which is the same statement as "latent" from the
 other side.
 
-#### EV-11 · LOW · duplication · effort: small
+#### EV-11 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **Authoritative-provenance set spelled inline twice in _materialize_concept_deltas and again as a module constant**
 
@@ -3035,7 +3053,7 @@ dropped.
 Covered by `tests/test_shared_identity_rules.py` (first four tests), including a source guard that
 BOTH passes still read the constant and that no inline set literal came back.
 
-#### EV-12 · LOW · layering · effort: medium
+#### EV-12 · LOW · layering · effort: medium — **RESOLVED (2026-08-08)**
 
 **events/ package hosts non-event concerns: kNN/similarity math in digest.py and generic mutable-store JSONL utilities in eventstore.py**
 
@@ -3068,7 +3086,7 @@ The distinction worth protecting through a move like this is `iter_jsonl` STOPS 
 SKIPS and continues (a store rewritten in place must not let one damaged line hide the rest). A driven
 test now pins both behaviours rather than trusting the docstrings that describe them.
 
-#### EV-13 · LOW · mergeable-entities · effort: medium
+#### EV-13 · LOW · mergeable-entities · effort: medium — **RESOLVED (2026-08-08)**
 
 **Parallel legacy hypothesis board duplicates the Card event family end to end**
 
@@ -3128,7 +3146,7 @@ Scope: `looplab/core/`: models.py, config.py, llm.py + siblings, tracing, parsin
 - Untrusted-input handling is uniformly fail-closed at durable boundaries: redact.py/redact_persisted_text, advisory_payloads' receipt validators, comparison.py's refuse-to-invent contract, and the bounded tolerant readers in models.py all share the same posture of degrading rather than crashing replay.
 - LLM transport resilience is unusually complete and each mechanism cites the live incident it fixes: keepalive-aware idle watchdogs, stream-stall degrade ratchets, reasoning/stream_options capability probing, empty-200 billing, saturating cost accounting, and the lane-fair concurrency broker.
 
-#### CO-01 · MEDIUM · duplication · effort: medium
+#### CO-01 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-08)**
 
 **run_reset.py and run_deletion.py are near-duplicate fence modules**
 
@@ -3165,7 +3183,7 @@ only "it raised" would stay green with the pre-read guard deleted, because the p
 catches it — after doing the very read the first guard exists to prevent), and the two fences keep
 distinct error types. Teeth-verified against 13 separate breakages.
 
-#### CO-02 · HIGH · under-decomposition · effort: large
+#### CO-02 · HIGH · under-decomposition · effort: large — **RESOLVED (2026-08-08)**
 
 **models.py is a god-module: card/idea identity-digest machinery (~800 lines) buried among domain models**
 
@@ -3251,7 +3269,7 @@ Two existing assertions had to move with the code rather than be left green:
 after the move `models` contains no minter at all, so both would have kept passing while nothing
 checked the module that now owns one. `cards` is added to each.
 
-#### CO-03 · MEDIUM · dead-code · effort: medium
+#### CO-03 · MEDIUM · dead-code · effort: medium — **RESOLVED (2026-08-08)**
 
 **Production-dead urllib-era streaming stack (~185 lines) kept alive only by tests**
 
@@ -3304,7 +3322,7 @@ clock reset by keepalives the generator never ends, and an in-line `list(...)` w
 suite instead of reporting a failure. Teeth-verified — flipping `_chunk_has_content` to always-true
 now fails in ~5s with "the keepalive stall was never detected; the stream ran forever".
 
-#### CO-04 · MEDIUM · duplication · effort: medium
+#### CO-04 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-08)**
 
 **Three parallel stream-reassembly loops in one client; fallback block triplicated**
 
@@ -3345,7 +3363,7 @@ behavioural test therefore passes with the clause deleted, and would keep passin
 someone adds the site that needs it — so `tests/test_llm_stream_setup.py` pins the INVARIANT the
 guard rests on (every delegation site is under `not pieces`) and says why. All 9 teeth bite.
 
-#### CO-05 · MEDIUM · under-decomposition · effort: medium
+#### CO-05 · MEDIUM · under-decomposition · effort: medium — **RESOLVED (2026-08-08)**
 
 **OpenAICompatibleClient._post is a ~200-line multi-concern method inside an ~890-line class**
 
@@ -3424,7 +3442,7 @@ ONE concern (bounded creation with pool teardown under concurrent siblings), so 
 scatter the lock choreography rather than separate concerns. `__init__` (123 lines) is likewise
 config normalization only, and is not named by the finding.
 
-#### CO-06 · MEDIUM · duplication · effort: small
+#### CO-06 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **Two near-identical bounded redacting JSON-tree sanitizers (tracing vs advisory_payloads)**
 
@@ -3488,7 +3506,7 @@ the same upward import from different angles. `core/config.py::DEVELOPER_BACKEND
 `tests/test_developer_backend_registry.py` checks both directions plus the layering rule for the
 whole `core/` package. Nothing further to do here; see XP-04 for the reasoning and the teeth tests.
 
-#### CO-08 · LOW · inconsistency · effort: small
+#### CO-08 · LOW · inconsistency · effort: small — **RESOLVED (2026-08-08)**
 
 **Six bespoke canonical-JSON→SHA-256 digest minters with no shared core**
 
@@ -3529,7 +3547,7 @@ from a collision that makes their OWN setup be skipped. `vectorstore.hash_embed`
 token→bucket function that must be stable across processes, which Python's salted `hash()` is not.
 Each now says so in place.
 
-#### CO-09 · LOW · inconsistency · effort: small
+#### CO-09 · LOW · inconsistency · effort: small — **RESOLVED (2026-08-08)**
 
 **Eight subtly different 'usable finite number' predicates across core**
 
@@ -3564,7 +3582,7 @@ accepts `"3.5"`, or a comparison claim that trusts a subclass which overrides `_
 `tests/test_digest_and_number_contracts.py` drives those two disagreements rather than asserting the
 prose.
 
-#### CO-10 · LOW · over-engineering · effort: small
+#### CO-10 · LOW · over-engineering · effort: small — **RESOLVED (2026-08-08)**
 
 **llm.py re-export shim freezes ~32 private helper names and its monkeypatch claim is subtly wrong**
 
@@ -3591,7 +3609,7 @@ rather than safety. `tests/test_core_contracts.py` pins that: the read-identity 
 shared name, the affected set really is non-empty (`_stream_raw_socket` is in it), and a test that
 ever starts patching through the barrel fails immediately. claim (patch the sibling module for intra-module call sites). Alternatively add a small source-scan test asserting every re-exported name is referenced somewhere outside core/, so the list can shrink safely over time.
 
-#### CO-11 · LOW · dead-code · effort: small
+#### CO-11 · LOW · dead-code · effort: small — **RESOLVED (2026-08-08)**
 
 **Speculative/no-consumer projections retained in hot models: grouped_beliefs and selection_key**
 
@@ -3616,7 +3634,7 @@ metric-first leader that `rank_promotion` sorts by and that `ci_tie_set`/`best_c
 the stale note invited exactly the deletion that would break them. A test asserts the live caller
 count so the note cannot go stale silently again.
 
-#### CO-12 · LOW · other · effort: small
+#### CO-12 · LOW · other · effort: small — **RESOLVED (2026-08-08)**
 
 **Stale load-bearing REVIEW comment in atomicio: 'zero production callers' is now false**
 
@@ -3642,7 +3660,7 @@ orphaned `.{name}.{rand}.tmp` directory are real, Windows-only, and unreachable 
 POSIX CI. A test asserts both the promoted contract and that the retained gaps were not lost with
 the deleted point.int (3)'s Windows temp-dir leak.
 
-#### CO-13 · LOW · flat-code · effort: small
+#### CO-13 · LOW · flat-code · effort: small — **RESOLVED (2026-08-08)**
 
 **_check_trust_gate is a misnamed grab-bag validator for nine unrelated enum fields**
 
@@ -3858,7 +3876,7 @@ six full `validate_run_child`-shaped validators, which carry per-caller HTTP err
 
 *Recommendation:* Create core/pathsafe.py with _is_reparse, WINDOWS_RESERVED, filesystem_identity(), and one parameterized validate_run_child(root, run_id, *, require_events, error_style) used by all seven call sites; keep the per-caller HTTP error mapping at the edges.
 
-#### SC-04 · MEDIUM · duplication · effort: medium
+#### SC-04 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-08)**
 
 **_PathLocks class is byte-identical (docstring included) in command_observation.py and log_pages.py; both files are parallel incremental log indexes**
 
@@ -3960,7 +3978,7 @@ Side effect worth recording: this RETIRES a cross-package private seam.
 to assemble the primitive themselves, and now call one public function. The registry entry was
 dropped; the declared private-seam surface is one name smaller.
 
-#### SC-06 · MEDIUM · mergeable-entities · effort: large
+#### SC-06 · MEDIUM · mergeable-entities · effort: large — **RESOLVED (2026-08-08)**
 
 **Reset and deletion form two parallel durable-transaction frameworks with duplicated receipt/fence machinery**
 
@@ -4044,7 +4062,7 @@ with all three live HTTP refusals. Teeth-tested against 26 breaks, all biting; o
 fixture rather than an assertion, because flattening reset onto a monotonic rule makes a REAL Replay
 answer 503 and never produce a receipt at all.
 
-#### SC-07 · MEDIUM · under-decomposition · effort: medium
+#### SC-07 · MEDIUM · under-decomposition · effort: medium — **RESOLVED (2026-08-08)**
 
 **_execute is a ~460-line worker state machine with an internally duplicated spawn-then-poll block**
 
@@ -4172,7 +4190,7 @@ mask exactly this regression end-to-end. Teeth harness 14 → 21 breaks, all bit
 `self._observe(rd).latest_seq`. Nothing left to do — recorded here so the finding is counted closed
 rather than sitting open behind a status note.
 
-#### SC-09 · MEDIUM · mergeable-entities · effort: medium
+#### SC-09 · MEDIUM · mergeable-entities · effort: medium — **RESOLVED (2026-08-08)**
 
 **public_cards.py keeps three parallel per-field dispatch chains that must be edited in lockstep**
 
@@ -4216,7 +4234,7 @@ fifth (dropping `len(raw) <= _MAX_ITEMS` from a list verifier) turned out to be 
 already slices to the bound, so `_refs(raw) == list(raw)` fails on a long list anyway and the guard
 is redundant in the original expression, which is preserved verbatim.
 
-#### SC-10 · MEDIUM · inconsistency · effort: medium
+#### SC-10 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
 **ShareStore duplicates ReviewStore's capability-link concept with weaker, inconsistent hardening**
 
@@ -4264,7 +4282,7 @@ The duplication remains; the divergence in guarantees does not. Remaining differ
 takes the extraction: `ReviewStore` also has `O_EXCL` id reservation, abandoned-reservation healing,
 and a recovery/replay contract that `ShareStore` has no analogue for.
 
-#### SC-11 · MEDIUM · inconsistency · effort: medium
+#### SC-11 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
 **Event-log rewrite/race detection implemented six different ways across serve/**
 
@@ -4322,7 +4340,7 @@ time in this campaign (CT-10's grep guard was the first). Two occurrences is a p
 the reflex when writing a tree-wide guard is to reach for `rglob`, and the shared helper exists
 because at least one tracked file carries a UTF-8 BOM that a fresh walk decodes differently.
 
-#### SC-12 · LOW · duplication · effort: small
+#### SC-12 · LOW · duplication · effort: small — **PARTIALLY RESOLVED (2026-08-08)**
 
 **Duplicated liveness/identity probe pairs and operator escape-hatch scaffolding inside run_commands**
 
@@ -4358,7 +4376,7 @@ Still open: the second half — `resolve_active_claims` / `resolve_spawn_claim` 
 escape-hatch scaffold (confirmation phrase, `minimum_age` window, revalidate-then-unlink, structured
 409s). That is a separate extraction and has not been done.
 
-#### SC-13 · LOW · duplication · effort: small
+#### SC-13 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **Five near-identical cmd_*.json directory scanners in RunCommandService**
 
@@ -4390,7 +4408,7 @@ Covered by `tests/test_command_record_scan.py` (14), including both policies end
 that the refusal message appears in exactly the two places that should own it (the walk, and `_path`
 for a single named record).
 
-#### SC-14 · MEDIUM · under-decomposition · effort: medium
+#### SC-14 · MEDIUM · under-decomposition · effort: medium — **RESOLVED (2026-08-08)**
 
 **_reset_blocking is a ~410-line function nesting six lock scopes and all recovery branches inline**
 
@@ -4467,7 +4485,7 @@ run-path identity ladder) is untouched — it is HTTP argument validation, not t
 holds no locks. `reset_route` still imports `errno` without using it; that predates this change
 (pyflakes reports it identically before and after) and removing it is a different diff.
 
-#### SC-15 · LOW · under-decomposition · effort: medium
+#### SC-15 · LOW · under-decomposition · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
 **tui.py Tui class mixes rendering, wizards, chat persistence, and a client-side command-recovery state machine; _reconcile_pending interleaves two protocols**
 
@@ -4518,7 +4536,7 @@ raw `inspect.getsource` scan matches its own explanation.
 
 Not done: moving rendering helpers to `tui_format`, and the ~880-line class itself.
 
-#### SC-16 · LOW · over-engineering · effort: small
+#### SC-16 · LOW · over-engineering · effort: small — **RESOLVED (2026-08-08)**
 
 **Micro over-engineering in deletion_service and run_commands helper wrappers**
 
@@ -4558,7 +4576,7 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 - Bounded caches done right: attention projection cache, concept core/replay LRUs, summary cache, and scope revision caches all have explicit size ceilings, stat-identity invalidation, and documented race handling instead of unbounded dicts.
 - The build_router(srv) convention with documented registration-order constraints (misc.py's catch-all ordering, __init__.py) keeps the app composition explicit and testable.
 
-#### SR-01 · HIGH · inconsistency · effort: large
+#### SR-01 · HIGH · inconsistency · effort: large — **OPEN (2026-08-08)**
 
 **Five parallel hand-rolled durable paid-work idempotency protocols across routers**
 
@@ -4568,7 +4586,7 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 
 *Recommendation:* Extract two shared services in looplab/serve/: an event-ledger paid-action protocol (claim event, terminal event, fsync-confirm, generation fence — parameterized by event types) covering report_refresh and concept-lens, and keep the file-ledger machinery of scope actions as its own module. Each new hand-rolled variant is a fresh set of crash-window bugs to re-find; the near-identical helper pairs prove the abstraction already exists implicitly.
 
-#### SR-02 · HIGH · under-decomposition · effort: large — **LARGELY RESOLVED (2026-08-05)**
+#### SR-02 · HIGH · under-decomposition · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
 **reports.py is a god-module: a distributed-storage subsystem inside a router file**
 
@@ -4794,7 +4812,7 @@ instead. `test_event_types.py::test_server_reexports_and_cli_stay_friendly_witho
 on it. The 400 is now built in a `_bad_request` helper that imports fastapi lazily on the failure
 path, the same reason `serve/engine_proc.py` imports it inside its functions.
 
-#### SR-06 · MEDIUM · duplication · effort: medium
+#### SR-06 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-08)**
 
 **Five implementations of bounded/redacted projection of untrusted JSON**
 
@@ -4970,7 +4988,7 @@ surfaced as `test_genesis_prior_reports_are_redacted_untrusted_user_json` failin
 that checks an untrusted prior report cannot reach a system prompt. A refactor that silently
 disconnects the injection tests from the loops they guard is worse than the duplication it removes.
 
-#### SR-12 · MEDIUM · layering · effort: medium
+#### SR-12 · MEDIUM · layering · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
 **Router-to-router imports and side-effect late-binding seams couple the route modules**
 
@@ -5090,7 +5108,7 @@ The `legacy_envelope` factory half is NOT done: the two legacy models differ in 
 revision regex (`misc` excludes the reserved `settings` key through `json_schema_extra`), and
 folding them would have meant inventing a parameterization neither caller asked for.
 
-#### SR-15 · LOW · duplication · effort: small — **PARTIALLY RESOLVED (2026-08-02)**
+#### SR-15 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **Boss LLM endpoints repeat an identical prologue/epilogue quartet**
 
@@ -5135,7 +5153,7 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 - Constant/registry discipline (KIND_*/META_* action vocabulary, the policy _REGISTRY, MAX_MATERIALIZED_CONCEPTS shared with replay) prevents the silent-typo no-op failure mode the event log is prone to, and comments like the META_RUNG note in card_selection show it being applied deliberately.
 - Comments carry measured evidence (§21.x citations, 'verified:' claims, review provenance) that let a reader audit why each threshold, tie-break and lifecycle filter exists — rare and valuable in code this dense.
 
-#### SE-01 · HIGH · over-engineering · effort: large
+#### SE-01 · HIGH · over-engineering · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
 **Speculation-gate stack (~3,450 lines) is a byte-level mirror of the engine writer with a whole-repo source hash that revokes its own receipts**
 
@@ -5252,7 +5270,7 @@ left standing: since 2026-08-04 a receipt no longer gates ordinary runs at all (
 replaced it), so the stack is a benchmark plus a calibrated-replay lane, and shrinking it is a
 scope-of-the-benchmark question rather than a modularity one.
 
-#### SE-02 · MEDIUM · mergeable-entities · effort: medium
+#### SE-02 · MEDIUM · mergeable-entities · effort: medium — **RESOLVED (2026-08-08)**
 
 **Three researcher-wrapper classes solve the same delegation problem three different ways, each with its own history of forwarding bugs**
 
@@ -5313,7 +5331,7 @@ Teeth-tested by re-inlining the Card lane's copy, by collapsing the live/failed 
 PENDING child counts as a failure, and by dropping the multi-parent fan-out so a failed merge is
 charged to only its first parent.
 
-#### SE-04 · MEDIUM · excessive-logic · effort: small
+#### SE-04 · MEDIUM · excessive-logic · effort: small — **PARTIALLY RESOLVED (2026-08-08)**
 
 **card_score rebuilds the full concept projection per candidate; the code's own review comment says to hoist it but it never was**
 
@@ -5383,7 +5401,7 @@ failure into a softer story the reader will believe.
 
 Teeth-tested by re-admitting the bare reason string and by restoring the try/except lattice.
 
-#### SE-06 · LOW · duplication · effort: small
+#### SE-06 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **merged-alias-id resolution fragment duplicated verbatim twice inside card_selection.py**
 
@@ -5410,7 +5428,7 @@ sites consume the set differently (one tests sibling ids inside a loop that must
 unproven ids to `pairs`, the other tests excluded ids while counting reservations), so a combined
 predicate would have to return more than a bool to serve both.
 
-#### SE-07 · MEDIUM · layering · effort: small
+#### SE-07 · MEDIUM · layering · effort: small — **RESOLVED (2026-08-08)**
 
 **Hidden lazy circular dependency: search.speculation_quality ↔ engine, contradicting speculation_calibration's stated purpose**
 
@@ -5437,17 +5455,12 @@ re-export identity, profile coverage vs the variant fields, canonical snapshot J
 derivation still ignores the launcher's environment (a `BaseSettings()` read would make a
 source-OWNED profile depend on whose machine built it).
 
-**The last `search` → `engine` edge is still there and is named rather than glossed:**
-`speculation_quality` imports `engine.finalize.incomplete_finalize_scope`. That is a different move —
-a cluster of event-log helpers (`_adjacent_claim`, `_scope_has_step`, `finalize_scope_quiescent`)
-with five `serve` consumers — and `finalize.py` imports `engine.costs` at module scope, so relocating
-it into `events/` needs its own change. One test asserts the edge count is exactly one and points at
-that file, so when it goes the layer is provably clean.
-
-Teeth-tested by changing the digest's schema string, by pointing the quality reader back at the
-orchestrator, and by making the orchestrator re-derive the digest itself. A fourth attempt — leaking
-a variant field into the profile — never reached the tests: the module's own coverage self-check
-raises at import, which is a stronger guard than a test and worth recording as such.
+**Follow-up resolution (reconciled 2026-08-08):** the last edge is gone.
+`incomplete_finalize_scope` and its pure event-log helpers moved to `events/finalize_scope.py`;
+`speculation_quality` imports downward from `events`, while the engine keeps compatibility imports.
+`tests/test_calibration_profile_home.py::test_the_search_to_engine_edge_is_gone` and the package-level
+speculation-quality guard both assert zero `search` → `engine` imports. The earlier digest/profile
+teeth tests remain in place.
 
 One lesson from the verification, not the change. The first version of the environment-independence
 test used `importlib.reload(speculation_calibration)`. It passed alone and in pairs, and reddened SIX
@@ -5458,7 +5471,7 @@ under a poisoned environment, one function call away and with no shared state to
 plainly: a test that mutates module state mid-suite can cost a whole run, and the failure will point
 anywhere but at the test.
 
-#### SE-08 · LOW · duplication · effort: small
+#### SE-08 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **Three near-identical bespoke JSON/finite-number helpers re-implemented across the package (and repo)**
 
@@ -5501,7 +5514,7 @@ fail a run). Merging them would either brick analytics or weaken a receipt.
 
 Covered by `tests/test_json_and_metric_contracts.py` (30).
 
-#### SE-09 · MEDIUM · under-decomposition · effort: large
+#### SE-09 · MEDIUM · under-decomposition · effort: large — **RESOLVED (2026-08-08)**
 
 **concept_graph.py is a god-module: data structure + two taggers + analytics + UI view projections + LLM consolidation in one 1,680-line file**
 
@@ -5586,7 +5599,7 @@ function-local `concept_map` import back into `concept_graph`, and growing a two
 facade. The first break is the one worth recording: 220 existing concept/endpoint/tool tests stayed
 GREEN through it, and only the driven guard failed.
 
-#### SE-10 · MEDIUM · inconsistency · effort: medium
+#### SE-10 · MEDIUM · inconsistency · effort: medium — **RESOLVED (2026-08-08)**
 
 **Concept/synonym merging implemented three different ways; per-run LLM consolidation bypasses the shared agent_merge core**
 
@@ -5623,7 +5636,7 @@ first draft: I claimed a stray `$` would rewrite the text, and the break proved 
 is a DOUBLED `$$`, which collapses to `$`. The docstring and the teeth-test now describe the real
 failure.
 
-#### SE-11 · MEDIUM · other · effort: medium
+#### SE-11 · MEDIUM · other · effort: medium — **RESOLVED (2026-08-08)**
 
 **Selection-bearing card_score signals are self-reported by the competing proposer — acknowledged in shipped review comments but still live**
 
@@ -5689,7 +5702,7 @@ tests stayed green. Verified by three breaks on a scratch copy — removing the 
 into a replacement, and restoring `confidence_weight = 0.65` as the default — each failing only its
 own assertions.
 
-#### SE-12 · LOW · over-engineering · effort: medium
+#### SE-12 · LOW · over-engineering · effort: medium — **DEFERRED (2026-08-08)**
 
 **scorer_fidelity.py ships a 15-case unit-test suite (with its own fixture factories) as production code, re-executed on every gate and receipt revalidation**
 
@@ -5731,7 +5744,7 @@ evaluation, not as part of a modularity sweep.
 
 *Recommendation:* Delete it (or use it as the hoisted scoring-context accessor when fixing the per-candidate projection rebuild).
 
-#### SE-14 · LOW · flat-code · effort: small
+#### SE-14 · LOW · flat-code · effort: small — **RESOLVED (2026-08-08)**
 
 **The speculative-selection API threads 8-10 identical keyword parameters through five sibling entry points**
 
@@ -5769,7 +5782,7 @@ out from under that guard, and the test catches that even where a behavioural pr
 would not. Teeth-verified against five separate breakages (re-declared session field, unfrozen
 context, subject migrated into the session, election reading the field, freshness losing it).
 
-#### SE-15 · LOW · inconsistency · effort: small
+#### SE-15 · LOW · inconsistency · effort: small — **RESOLVED (2026-08-08)**
 
 **Duplicate k-NN prediction shims and colliding helper names across sibling modules**
 
@@ -5818,7 +5831,7 @@ Scope: `looplab/agents/`: roles.py, tool_loop.py, agent.py, cli_agent.py, unifie
 - Failure-containment discipline is uniform: every LLM-facing path degrades to a safe deterministic default (bounds-filled Idea, rule strategist, policy recommendation, minimal memo) while BudgetExceeded uniformly propagates as a hard stop — the same contract at every layer.
 - cli_agent.py shows careful security/robustness engineering with load-bearing why-comments: untrusted prompt text moved out of the cmd.exe-reparsed argv path (_prompt_delivery), whole-process-tree kill on timeout/exception, reject-not-strip patch gating with an explicit 'git seed unavailable' audit marker.
 
-#### AG-01 · HIGH · under-decomposition · effort: large
+#### AG-01 · HIGH · under-decomposition · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
 **drive_tool_loop is a 370-line, 26-parameter god-function fed by stringly-typed loop_opts dicts whose merge logic is duplicated and has already caused a real bug**
 
@@ -5925,7 +5938,7 @@ seam with 15+ call sites and several hundred tests speaking it; replacing the ke
 already closed by the partition rule above. `LoopOptions` is what a caller CONFIGURES with; the
 signature stays what the loop is CALLED with.
 
-#### AG-02 · MEDIUM · flat-code · effort: medium
+#### AG-02 · MEDIUM · flat-code · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
 **roles.py is a 1058-line god-module; the 137-line CUDA-probe calibration blob in its middle belongs to the speculation subsystem, not to role backends**
 
@@ -6010,7 +6023,7 @@ cases agreed with it, and a caller that simply stops passing `bind_state` still 
 is None but binding is still requested) and drive `triage_crash` itself. All three breaks fail
 loudly.
 
-#### AG-05 · LOW · mergeable-entities · effort: medium
+#### AG-05 · LOW · mergeable-entities · effort: medium — **RESOLVED (2026-08-08)**
 
 **Four near-identical implementations of the 'append an emit-now nudge, parse_structured, degrade to default' salvage path**
 
@@ -6109,7 +6122,7 @@ The alternative — moving `concept_projection` down to `events/` — is not tak
 folded state, so the move is defensible, but it is a relocation of a prompt-facing projector and
 belongs with the events-layer read-model work rather than with a layering guard.
 
-#### AG-08 · LOW · inconsistency · effort: small
+#### AG-08 · LOW · inconsistency · effort: small — **RESOLVED (2026-08-08)**
 
 **Two unrelated functions named run_phase in the same package**
 
@@ -6127,7 +6140,7 @@ The back-compat alias the recommendation offers is deliberately NOT added: it wo
 the collision the rename exists to remove — a grep for `run_phase` would still return both. A
 repo-wide grep confirms no other consumer, and a test asserts the alias stays absent.
 
-#### AG-09 · LOW · over-engineering · effort: small
+#### AG-09 · LOW · over-engineering · effort: small — **RESOLVED (2026-08-08)**
 
 **agent.py facade re-exports six private tool_loop names that nothing imports through it**
 
@@ -6152,7 +6165,7 @@ that runs.
 Note CO-10 went the other way for `llm.py`, and both are right: that barrel's re-exports have
 documented consumers and a test that patches THROUGH it, so the list is load-bearing there.
 
-#### AG-10 · LOW · duplication · effort: small
+#### AG-10 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **The 4-cue tuple for prompt cues is duplicated as a literal in both researchers and is not covered by the registry scan**
 
@@ -6191,7 +6204,7 @@ Scope: `looplab/tools/`: ~25 ToolProviders.
 - patch.SurfacePolicy is a good example of merging three previously independent write gates into one value object while explicitly documenting (not erasing) the per-site semantic differences as constructor parameters — the opposite of a lossy 'simplification'.
 - Truncation honesty as a design principle: nearly every tool distinguishes 'absent' from 'not searched/cut' ('this is NOT evidence of absence', resume markers with exact continuation lines, capped-at receipts), which directly targets the model-facing failure mode of treating a partial read as a completed negative search.
 
-#### TO-01 · HIGH · under-decomposition · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
+#### TO-01 · HIGH · under-decomposition · effort: medium — **RESOLVED (2026-08-08)**
 
 **cross_run_tools._execute is a single ~856-line dispatch function containing eight tool implementations**
 
@@ -6252,9 +6265,6 @@ guards in `tests/test_cross_run_tools.py` pin one definition, the two-ratio max 
 PATHS, so a bare technique name shares no prefix with its full slug), and the empty-query guard —
 without which the empty string is a substring of every slug and a blank query resolves to an
 arbitrary card at 0.9. All three deliberate breaks fail loudly.
-
-*Still open:* the 856-line `if name == ...` chain itself, and the ~10 hand-rolled partial-source /
-partial-scope warning sequences.
 
 #### TO-02 · HIGH · over-engineering · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
@@ -6352,7 +6362,7 @@ permission, the generation captured after the approval, and one provider re-inli
 
 *Original recommendation:* Add `perm_modes.authorize(mode, approver, action, *, deny_msg=None) -> Optional[str]` (None = proceed, else the refusal string) and have all six sites delegate, keeping per-site wording via the parameter. Removes ~60 duplicated lines and guarantees future policy changes (e.g. remembered grants) apply everywhere at once.
 
-#### TO-05 · MEDIUM · mergeable-entities · effort: medium
+#### TO-05 · MEDIUM · mergeable-entities · effort: medium — **RESOLVED (2026-08-08)**
 
 **Three near-identical foreign-run reader wrappers: SiblingRunTools, AllRunsTools, and MachineRunsTools' read half**
 
@@ -6390,7 +6400,7 @@ deliberately applying none, the scope hook running before any content is read, a
 that no provider re-spells the bind-and-receipt dance or re-declares its own cache. Teeth-tested
 against 13 breaks, all biting.
 
-#### TO-06 · MEDIUM · mergeable-entities · effort: medium
+#### TO-06 · MEDIUM · mergeable-entities · effort: medium — **RESOLVED (2026-08-08)**
 
 **Two parallel read-only repo-browsing providers: RepoTools (knowledge_tools) vs RepoScoutTools**
 
@@ -6453,7 +6463,7 @@ mount must not swallow another's complete answer), the `.git` refusal, escape re
 page-marker contract. The seven pre-existing `test_repo_tools.py` tests are unchanged and still pass.
 Teeth-tested against 12 breaks, all biting.
 
-#### TO-07 · MEDIUM · inconsistency · effort: medium
+#### TO-07 · MEDIUM · inconsistency · effort: medium — **RESOLVED (2026-08-08)**
 
 **MemoryTools and CrossRunTools expose the same lessons.jsonl with contradictory scoping policy and two different tokenizers**
 
@@ -6504,7 +6514,7 @@ capsule rule in both directions, and one tokenizer across both modules — asser
 because both modules now describe the old ASCII pattern in their comments and a substring scan
 matches its own explanation. Teeth-tested against 15 breaks, all biting.
 
-#### TO-08 · MEDIUM · duplication · effort: medium
+#### TO-08 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-08)**
 
 **Seven-plus independent implementations of 'fit a tool result under RESULT_CAP with an honest marker'**
 
@@ -6582,7 +6592,7 @@ public. Promoting the capsule/claim read-model to public names is still the reco
 `_interprocess_lock` — imported by four packages outside `events` — is still a private name doing
 a public job.
 
-#### TO-10 · LOW · dead-code · effort: small
+#### TO-10 · LOW · dead-code · effort: small — **RESOLVED (2026-08-08)**
 
 **Dead/unused surface: perm_modes.decide() has no production caller; VectorStore.delete/rebuild are never called; RunTools.parent is stored but never read**
 
@@ -6615,7 +6625,7 @@ one. `InMemoryVectorStore` keeps both as its own API.
 so this is accept-and-ignore, as MachineRunsTools already does. Storing a value nobody reads implied
 a back-reference these read-only tools do not have.
 
-#### TO-11 · LOW · excessive-logic · effort: small
+#### TO-11 · LOW · excessive-logic · effort: small — **RESOLVED (2026-08-08)**
 
 **concept_card/find_concept_slugs re-run full-portfolio canonicalization per call inside an already-huge module (excessive per-call work + duplicated governance plumbing)**
 
@@ -6660,7 +6670,7 @@ Scope: `looplab/runtime/` and `looplab/adapters/`.
 - TASK_OPTIONAL_HOOKS (adapters/tasks.py:77) with its two-way source-scan test makes the duck-typed adapter seam rename-safe in both directions; probes I checked (onboard_command in repo_developer.py:597, host_grader in engine/orchestrator.py:1206) all resolve.
 - Load-bearing why-comments throughout: nearly every defensive branch cites the concrete incident or review item that motivated it (e.g. the _covered_by empty-string trap in repo_write_tools.py:58-67), which materially lowers the cost of maintaining the defensive code.
 
-#### RA-01 · HIGH · mergeable-entities · effort: medium
+#### RA-01 · HIGH · mergeable-entities · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
 **adapters/tasks.py is two modules fused: task schema/registry + the entire agent composition root**
 
@@ -6710,7 +6720,7 @@ rather than a green-making edit:
 * `tests/test_task_adapter_contract.py` — the `params` hook's consumer probe moved with the
   composition root, so the hook read as orphaned. `agents/factory.py` added to the consumer scan.
 
-#### RA-02 · HIGH · under-decomposition · effort: medium
+#### RA-02 · HIGH · under-decomposition · effort: medium — **RESOLVED (2026-08-08)**
 
 **run_command_eval is a ~265-line god-function with 23 parameters (19 keyword) and two hand-mirrored eval branches**
 
@@ -6892,7 +6902,7 @@ the five copy-paste skeletons, which the finding itself rates lower priority.
 
 *Recommendation:* At minimum, hoist a shared direction validator (a mixin or Annotated Literal["min","max"] type in core) onto every task model — small change, real correctness payoff. Optionally extract a SyntheticTaskBase (common fields + columns/build_roles conventions) and a parameterized PerturbResearcher to collapse the five skeletons; these are stable demo tasks so this half is lower priority.
 
-#### RA-07 · MEDIUM · under-decomposition · effort: medium
+#### RA-07 · MEDIUM · under-decomposition · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
 **LLMRepoDeveloper._run is a 185-line orchestration block with three spellings of the pipeline note and duplicated epilogue**
 
@@ -6923,7 +6933,7 @@ string, and `_run`'s exception trap plus the `last_files`/`last_footprint` bookk
 the per-step error collection — that wants its own contract derivation, not the tail of a
 prompt-extraction change.
 
-#### RA-08 · LOW · layering · effort: small
+#### RA-08 · LOW · layering · effort: small — **RESOLVED (2026-08-08)**
 
 **runtime/ is a grab-bag: three of eight modules are not runtime-execution code**
 
@@ -6956,7 +6966,7 @@ Two things worth naming because they fail silently rather than loudly:
 `tests/test_package_contracts.py` pins the runtime membership, the no-imports-above-core rule, the
 `_LAYOUT` entries and the entry point.
 
-#### RA-09 · LOW · flat-code · effort: medium
+#### RA-09 · LOW · flat-code · effort: medium — **RESOLVED (2026-08-08)**
 
 **bg_tasks task records are raw dicts with a hand-rolled lock protocol re-explained at five call sites**
 
@@ -6989,7 +6999,7 @@ Test-side: 13 tests constructed or read these records as dicts and were re-point
 (the CLAUDE.md contract-change rule), including two that build a synthetic task to drive
 `_enforce_deadline` directly — those now build a real `_BgTask`, so they exercise the shipped shape.
 
-#### RA-10 · LOW · duplication · effort: small
+#### RA-10 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **mle-bench registry/data-dir resolution and is_prepared are triplicated across the three mlebench modules**
 
@@ -7029,7 +7039,7 @@ Scope: `looplab/cli/`, `looplab/trust/`, `looplab/__init__.py`, bench.py, sweep.
 - run()'s maintainer note freezes the typed-flag surface and routes all new knobs through -s/--set Settings parity — an unusually explicit guard against CLI flag proliferation and settings drift.
 - sweep.py and bench.py are small, dependency-light, and document their determinism/replay contracts (sorted-grid enumeration, seed derivation, the load-bearing json default=) precisely where generated code depends on them.
 
-#### CT-01 · HIGH · under-decomposition · effort: medium
+#### CT-01 · HIGH · under-decomposition · effort: medium — **RESOLVED (2026-08-08)**
 
 **inspect_cmds.py is a 1701-line god-module whose header lies about its contents**
 
@@ -7074,7 +7084,7 @@ keeps its mutation contract, and that no group is a god-module again. The `NameE
 comprehension scopes or closure cells — so the guard covers the whole class, not the two known
 sites. Teeth-verified: restoring either underscore turns three assertions red.
 
-#### CT-02 · HIGH · under-decomposition · effort: medium
+#### CT-02 · HIGH · under-decomposition · effort: medium — **RESOLVED (2026-08-08)**
 
 **run() is a 347-line command function doing at least seven distinct jobs**
 
@@ -7109,7 +7119,7 @@ cannot hide behind the option surface), asserts `run` calls each helper rather t
 pins the two behaviours that a tidy-up would quietly drop: the envelope reports every violation at
 once, and an unwritable task snapshot does not lose the config snapshot that already landed.
 
-#### CT-03 · MEDIUM · duplication · effort: medium
+#### CT-03 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-08)**
 
 **Prior-run lifecycle triage duplicated across run / resume / finalize**
 
@@ -7139,7 +7149,7 @@ shared notice each turns exactly the matching assertion red. The notice guard jo
 implicit adjacent-literal concatenation first, so a re-spelled copy cannot hide by being wrapped
 across two lines.
 
-#### CT-04 · MEDIUM · mergeable-entities · effort: small
+#### CT-04 · MEDIUM · mergeable-entities · effort: small — **RESOLVED (2026-08-08)**
 
 **Three paid-steward commands are ~70% copy-paste of each other**
 
@@ -7175,7 +7185,7 @@ path, the thunk, the redact-vs-echo split, an unexpected exception NOT being swa
 guards that every call site goes through the shared helpers and that the
 `(GovernanceLedgerUnavailable, EventStoreLockError)` pair appears in exactly two places.
 
-#### CT-05 · MEDIUM · duplication · effort: small
+#### CT-05 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **Memory-dir stat-resolution + governed-snapshot boilerplate duplicated (plus a simpler third variant)**
 
@@ -7315,7 +7325,7 @@ legitimately still name `config.snapshot.json` to write it, to check it exists, 
 verbatim. Teeth-tested by making strict degrade silently and by flipping one lifecycle call to
 lenient.
 
-#### CT-09 · MEDIUM · mergeable-entities · effort: medium
+#### CT-09 · MEDIUM · mergeable-entities · effort: medium — **RESOLVED (2026-08-08)**
 
 **trust/verify.py vs trust/verifier.py: two near-namesake verifier modules with overlapping machinery**
 
@@ -7375,7 +7385,7 @@ restamping hazard the flat aliases already guard, which silently no-ops `importl
 no-stale-path source scan. Teeth-tested against 5 breaks — the star-import shim, each alias dropped,
 the `_RENAMED` hook removed, and an alias pointed at the wrong module — all biting.
 
-#### CT-10 · LOW · inconsistency · effort: medium
+#### CT-10 · LOW · inconsistency · effort: medium — **RESOLVED (2026-08-08)**
 
 **Three finding-dict vocabularies for the same 'trust flag' concept, adapted inline at the consumer**
 
@@ -7410,7 +7420,7 @@ One fixture had to be corrected: `metric = 0.99` does not trip `critic:hardcoded
 requires a QUOTED literal (`{"metric": 0.99}`) with nothing computing it — so the first version of
 the gating test asserted against an empty signal set and would have proved nothing.
 
-#### CT-11 · LOW · dead-code · effort: small
+#### CT-11 · LOW · dead-code · effort: small — **RESOLVED (2026-08-08)**
 
 **Dead `state` parameter in _persist_node_concepts**
 
@@ -7426,7 +7436,7 @@ anyway, so a caller-supplied state could only ever be the stale one. The caller'
 `_retro_tag_finished` consumes it — and all 15 test call sites were re-pointed rather than left
 passing a value into a signature that no longer has a slot for it.
 
-#### CT-12 · LOW · over-engineering · effort: small
+#### CT-12 · LOW · over-engineering · effort: small — **RESOLVED (2026-08-08)**
 
 **Trust-package library surfaces with no production consumer across multiple review cycles**
 
@@ -7461,7 +7471,7 @@ conditional ("IF calibrate_detector is the operator's harness"), which nothing i
 adding a command nobody asked for is a worse outcome than an unwired function that says why it is
 unwired.
 
-#### CT-13 · LOW · duplication · effort: small
+#### CT-13 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **Run-dir existence check re-implemented inline four times despite _require_run_dir**
 
@@ -7492,7 +7502,7 @@ Two things stay deliberately outside the flag:
 `tests/test_cli_shared_prologues.py` covers it, including driven cases (a real corrupted log is
 refused with `healthy=True` and repaired without it) rather than source assertions alone.
 
-#### CT-14 · LOW · duplication · effort: small
+#### CT-14 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **Optional-LLM-client construction pattern repeated across six diagnostics**
 
@@ -7512,7 +7522,7 @@ its fallback wording.
 folding it in would turn "I could not check this" into "checked, nothing found", which is the one
 answer a guard must never give. A test pins the exclusion so it reads as a decision.
 
-#### CT-15 · LOW · under-decomposition · effort: medium
+#### CT-15 · LOW · under-decomposition · effort: medium — **RESOLVED (2026-08-08)**
 
 **_engine builder: 191 lines with duplicated ForesightPanelResearcher wiring in two branches**
 
@@ -7629,7 +7639,7 @@ A third test asserts the layering rule for the WHOLE `core/` package rather than
 that broke it. Verified to have teeth against all three: an unlisted preset, a preset-less set
 entry, and a fresh upward import from `core/parse.py`.
 
-#### XP-05 · MEDIUM · under-decomposition · effort: large
+#### XP-05 · MEDIUM · under-decomposition · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
 **13 closure-based build_router(srv) factories, three exceeding 1300 lines, with hand-rolled DI via late-bound srv.*_fn attributes**
 
@@ -7751,7 +7761,7 @@ comment-satisfiable (`pass  # srv.list_tasks_fn = list_tasks`, the same for the 
 commented-out `mount_routers(app, srv)` beside a hand include loop), which the AST checks ignore as
 they should.
 
-#### XP-06 · MEDIUM · under-decomposition · effort: large
+#### XP-06 · MEDIUM · under-decomposition · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
 **The largest module in each package still contains one 500-800-line function**
 
@@ -7822,7 +7832,7 @@ ES-01 recorded for `card_reservation.py::_fold`). `tests/test_orchestrator_inter
 seam directly for both, and resolves the signal vocabulary from real `ast.Return` constants — a
 typo'd `"brake"` reads as "not break" and turns a stop into another loop turn.
 
-#### XP-07 · MEDIUM · layering · effort: medium
+#### XP-07 · MEDIUM · layering · effort: medium — **RESOLVED (2026-08-08)**
 
 **search/speculation_quality.py reaches up into engine and binds calibration receipts to a hash of every .py file in the package**
 
@@ -7877,7 +7887,7 @@ helper whose every field derives from the same bytes, and the guard asserts on t
 
 *Recommendation:* Delete the seven functions; if locked_claim_evidence_snapshot documents an intended future locking protocol, move that intent to docs/an ADR rather than shipping dead lock machinery.
 
-#### XP-09 · LOW · inconsistency · effort: small
+#### XP-09 · LOW · inconsistency · effort: small — **RESOLVED (2026-08-08)**
 
 **Metric formatting implemented three ways with divergent output semantics**
 
@@ -7910,7 +7920,7 @@ result (`1e+06` vs `1000000`, `1.00e-07` vs `1.00e-7`). It predates the extracti
 is display-only, so it is documented instead of "fixed" — changing either would move numbers an
 operator is already used to reading.
 
-#### XP-10 · LOW · duplication · effort: small
+#### XP-10 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **Registry sprawl verdict: the 9 registries should stay separate, but their 6 guard tests copy-paste the source-scan skeleton**
 
@@ -7943,7 +7953,7 @@ Two of the finding's six were miscounted and are deliberately left alone:
 reads a handful of NAMED files — a different, correct shape, since its point is that one specific
 wiring line exists in one specific file. A test pins that exclusion so it reads as a decision.
 
-#### XP-11 · MEDIUM · duplication · effort: medium
+#### XP-11 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-08)**
 
 **Test suite mass-duplicates Engine construction and role stubs; conftest is only 30 lines**
 
@@ -7973,7 +7983,7 @@ The scripted-role stubs the finding also mentions are NOT included. The 12 `_*De
 `_*Researcher` classes differ in what they script — that is the content of the test, not boilerplate —
 and a shared stub would either grow a flag per caller or quietly change what a test asserts.
 
-#### XP-12 · LOW · layering · effort: small
+#### XP-12 · LOW · layering · effort: small — **RESOLVED (2026-08-08)**
 
 **Generic KNN/IDW numeric estimator lives in the events package and drags runtime/search into depending on it**
 
@@ -8012,7 +8022,7 @@ Scope: `ui/src/` + `ui/test/`.
 - Client/server API surface is consistent: every path the UI constructs (commands, jobs, deletions, concepts/lens recovery, scope-report actions, report_refresh, reviews, comments) has a matching route in looplab/serve/routers/* — no orphaned endpoints found; review-mode read-only enforcement is centralized in api.js (assertNotReviewMutation + reviewReadPath + _authHeaders) rather than scattered per component.
 - Comments are load-bearing and honest, frequently citing prior arch-review findings and explaining replay/idempotency rationale inline — matching the repo-wide convention and making the dense recovery code auditable.
 
-#### UI-01 · HIGH · duplication · effort: large
+#### UI-01 · HIGH · duplication · effort: large — **RESOLVED (2026-08-08)**
 
 **Durable run-command lifecycle state machine implemented twice (Dock vs AssistantBar)**
 
@@ -8155,7 +8165,7 @@ was already there under a different chunk pair — with byte deltas only: total 
 473,457 B (+258 B), owner run DAG route 357,643 → 357,890 B (+247 B). Dock.jsx lost 40 net lines,
 AssistantBar.jsx 30.
 
-#### UI-02 · HIGH · over-engineering · effort: large
+#### UI-02 · HIGH · over-engineering · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
 **api.js re-accreted into a 2,216-line god-module of 8 distinct concerns**
 
@@ -8326,7 +8336,7 @@ api.js:62-167 today) is a ninth concern neither the finding nor this change name
 thing left to a coherent extraction, and it would want a sibling of scopeReportActions.js rather than a
 seventh top-level module.
 
-#### UI-03 · HIGH · mergeable-entities · effort: large
+#### UI-03 · HIGH · mergeable-entities · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
 **RunView.jsx is a 2,000-line god-component; start-over recovery saga and repeated page-shell markup should be extracted**
 
@@ -8465,7 +8475,7 @@ mergeable entity and is a better candidate than merge intent, but it feeds the n
 guard, the Start-over preflight and the fence screen's notices, so it wants its own finding. The
 `workspaceFocusOwnerRef` switchyard (922, 1120-1150) is untouched.
 
-#### UI-04 · MEDIUM · under-decomposition · effort: medium
+#### UI-04 · MEDIUM · under-decomposition · effort: medium — **RESOLVED (2026-08-08)**
 
 **panels.jsx: 19 panels in one 2,351-line module; ConfigPanel (~490 lines) and the Card kanban (~700 lines) are components-within-a-module needing their own files**
 
@@ -8560,7 +8570,7 @@ anchor appears exactly once):
 (162 vs 158 fields), both failing identically before this change and unrelated to it. `npm run build`
 exits 0.
 
-#### UI-05 · MEDIUM · under-decomposition · effort: large
+#### UI-05 · MEDIUM · under-decomposition · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
 **AssistantBar.jsx: 2,031-line component mixing 3 view layouts, session lifecycle, stream+recovery, share management, and the duplicated command machine**
 
@@ -8623,7 +8633,7 @@ Left undone: `runLLM` (still ~350 lines with two concurrent fallback poll loops 
 and it is genuinely the next target), `forkCurrentSession` / `reconcileFork` / `settleForkReconciliation`
 (a second recovery saga, untouched), and a real mount harness for the component. ui suite 741 -> 768.
 
-#### UI-06 · MEDIUM · inconsistency · effort: large
+#### UI-06 · MEDIUM · inconsistency · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
 **At least seven independent implementations of the load/last-good/stale/retry resource pattern**
 
@@ -8745,7 +8755,7 @@ two-outcome ownership check on `hooks.js`), `uiSemantics.test.js` (the identity 
 Each property was re-verified where it now lives, and the two that matter most are additionally
 driven behaviourally by the new guard.
 
-#### UI-07 · MEDIUM · duplication · effort: small
+#### UI-07 · MEDIUM · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **~15 copy-pasted 'CONTROL.x → commandFeedback(labels) → onToast' blocks across panels/RunView/Inspector**
 
@@ -8780,7 +8790,7 @@ Covered by `ui/test/submitCommand.test.js` (14 tests): one toast per outcome inc
 transport arm never reporting success, `labels.transport` honoured on a throw and ignored when the
 server answered, no rethrow out of an event handler, plus source guards that the call sites use it.
 
-#### UI-08 · MEDIUM · flat-code · effort: medium
+#### UI-08 · MEDIUM · flat-code · effort: medium — **RESOLVED (2026-08-08)**
 
 **Dock.jsx carries ~300 lines of pure narration data as two hand-synced parallel registries (NARR + NARR_VALID)**
 
@@ -8865,7 +8875,7 @@ pre-existing and unrelated — `dockNarration.test.js:70` (an `asha_verdict` row
 its own validator rejects) and `settingsSchemaResource.test.js:16` (162 !== 158) fail identically on a
 `git archive HEAD` copy of the tree, which scores 684 tests / 682 pass / 2 fail.
 
-#### UI-09 · MEDIUM · under-decomposition · effort: large
+#### UI-09 · MEDIUM · under-decomposition · effort: large — **RESOLVED (2026-08-08)**
 
 **useRunState: one 330-line useEffect interleaving three connection state machines; Inspector.Trace is a ~510-line function**
 
@@ -8914,7 +8924,7 @@ Two source pins in `timelineSemantics.test.js` / `uiSemantics.test.js` matched t
 and were re-pointed onto the join that is still the hook's own (dedupe before commit), with the
 identity's truth table now driven rather than matched.
 
-#### UI-10 · LOW · dead-code · effort: small
+#### UI-10 · LOW · dead-code · effort: small — **RESOLVED (2026-08-08)**
 
 **Dead component: Inspector.Agent is never rendered**
 
@@ -8928,7 +8938,7 @@ identity's truth table now driven rather than matched.
 is untouched; the removal is verified against the whole of `ui/src` and `ui/test` rather than by
 reading `TABS`, because a JSX reference can live anywhere.
 
-#### UI-11 · LOW · inconsistency · effort: small
+#### UI-11 · LOW · inconsistency · effort: small — **RESOLVED (2026-08-08)**
 
 **runApiPath is documented as 'one constructor for every owner-style per-run endpoint' but ~15 endpoints in the same file bypass it**
 
@@ -8952,7 +8962,7 @@ the request path and a literal `%2F` decodes into a second segment that reaches 
 Every converted site already encoded correctly, so nothing was broken; the point is that the next
 author copies whichever neighbour they land on.
 
-#### UI-12 · LOW · duplication · effort: small
+#### UI-12 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **Four coexisting request-timeout wrappers**
 
@@ -8982,7 +8992,7 @@ submission where the body read is part of the operation, and its timeout must su
 `COMMAND_REQUEST_TIMEOUT` the command lifecycle can classify; collapsing it would turn a submission
 timeout into a generic `TimeoutError` the retry path cannot act on.
 
-#### UI-13 · LOW · duplication · effort: small
+#### UI-13 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **Three independent toast implementations**
 
@@ -9014,7 +9024,7 @@ missing, because the early-retire path and the unmount teardown each call `clear
 
 UI-12's request-timeout wrappers are a separate finding and remain open.
 
-#### UI-14 · LOW · over-engineering · effort: small
+#### UI-14 · LOW · over-engineering · effort: small — **OPEN (2026-08-08)**
 
 **Speculative Card kanban lanes acknowledged unreachable by their own comment**
 
@@ -9144,6 +9154,16 @@ import). Two new themes were added by the executing sessions: **T8** (non-determ
 full-suite failures diagnosed as GIL starvation — a live defect class, §2) and **T9** (the UI
 suite's source-regex idiom had silently retired 30 assertions — found, restored, and closed the
 same day, §2).
+
+### 5.5 Current roll-up (2026-08-08, HEAD `90ba3a2`)
+
+The later per-finding reconciliation in §0.3 supersedes the §5.1–§5.4 totals:
+**147 resolved, 37 partially resolved, 2 deferred and 2 open (188 total)**. All 188 §4 headings
+carry one of those four states. The remaining open findings are **SR-01** (unified durable paid-work
+protocol across routers) and **UI-14** (optional speculative Kanban lanes with no folded producer).
+The deferred findings are **ES-12** (the proposed shared fold memo is unsafe; a loop-local alternative
+was not justified) and **SE-12** (shrinking the runtime fidelity matrix requires an explicit receipt
+schema/version migration).
 
 ## 6. Architectural resolution proposals
 

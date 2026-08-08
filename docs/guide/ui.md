@@ -221,7 +221,8 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   GPU-owning Run may wait behind the conservative pool-wide host lease. The UI shows the configured
   request, not a live allocation or queue position. Dropping a Card is
   the explicit stop-now affordance for its matching in-flight eval; engine/freshness drops still burn
-  to a valid terminal result. The Card board is the single research board (1 card = 1 hypothesis); the
+  to a valid terminal result. The Card board stores work items; `belief_id` groups retries or other cards
+  that test the same hypothesis, while the distinct-belief projection avoids duplicate prompt/ranking rows. The
   operator **+ Add** / **abandon** affordances write `hypothesis_added` / `hypothesis_updated` control
   events that seed and update cards.
   Note the board still renders **one row per work item**, and a `debug` RETRY of a failed card is a
@@ -630,6 +631,3 @@ so, and names both paths, so move `ui/dist` aside and rename `ui/.dist.looplab-p
 `ui/.dist.looplab-stage` is a build's scratch output; the next build clears it.
 
 For the containerized UI + model + engine, see [Deployment](deployment.md).
-<!-- CODEX AGENT: DOCUMENTATION CORRECTION (`19e1415`). The older inline review note beside the Card
-board is historical: `_CardKanbanCard` now renders **Abandon belief** and sends the Card control id
-through `abandonHypothesis`. Belief-verdict abandonment remains distinct from dropping the work item. -->

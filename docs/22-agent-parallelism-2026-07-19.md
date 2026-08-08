@@ -1,16 +1,11 @@
 # Agent parallelism: parallel node building (design + Variant-1 plan)
 
-<!-- CODEX AGENT: stale status — this plan SHIPPED (docs/23 §0.0.1 marks Layer 2 canonical
-llm_parallel build fan-out complete; CLAUDE.md documents the concurrent-build seam; Settings has
-parallel_build/llm_parallel with these semantics). Mirror the A7 doc's treatment: "implemented /
-historical design record — superseded by docs/23 Layer 2", so §1's "builds nodes one at a time"
-reads as the 2026-07-19 snapshot it is.
-RESOLVED 2026-08-04 — the status line requested above is now in place; see it and §5's per-phase
-status table directly below. -->
 **Status:** **implemented / historical design record — superseded by
 [docs/23 Layer 2](23-hypothesis-card-kanban-2026-07-20.md) (2026-07-20).** Phases 0–3 of §5 shipped;
 Phase 4 is partly outstanding (see §5). The canonical settings are `llm_parallel` (build width) and
 `eval_parallel` (eval width); `parallel_build`/`max_parallel` survive as resume/config aliases.
+Build fan-out is bulk-synchronous: a batch joins at the build barrier before the loop advances; it is
+not a continuously replenished pool of independent research threads.
 Original status: design / proposal — 2026-07-19.
 
 **Motivation (as of 2026-07-19 — this paragraph is the pre-implementation snapshot, kept verbatim):** on

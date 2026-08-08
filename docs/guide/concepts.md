@@ -815,7 +815,8 @@ result of each run is retained as a **case** (retain-on-improvement); at run end
 **lessons** (good *and* bad, with a verdict + evidence count), and reusable **skills** — all stamped
 with a task fingerprint and matched into the next similar run's proposal prompt. Duplicate lessons
 are merged (exact-hash **plus** a hybrid-retrieval → agentic paraphrase-merge pass); the in-run
-**research board** (cards; 1 card = 1 hypothesis) is deduped the same way and prioritized by foresight. See
+**research board** stores Card work items and groups them by `belief_id`; the distinct-belief view is
+deduped the same way and prioritized by foresight. See
 **[Memory & knowledge](memory.md)** for the full tier-by-tier breakdown.
 
 This shipped lesson/case memory should not be confused with the complete **portfolio research index**.
@@ -977,6 +978,3 @@ Where each concept lives in the code:
 | Static HTML lineage tree | `events/htmlview.py` |
 | Task adapters + loader | `adapters/tasks.py`, `adapters/toytask.py`, `adapters/regression.py`, `adapters/classification.py`, `adapters/timeseries.py`, `adapters/mlebench*.py`, `adapters/repo_task.py` |
 | Strategist / Deep-Research / report | `agents/strategist.py`, `agents/deep_research.py`, `serve/report.py` |
-<!-- CODEX AGENT: DOCUMENTATION CORRECTION (`fb9c5c4`). The older inline editor warning is resolved:
-the component is keyed by `${runId}:${n.id}:${n.attempt}`, and `canEdit` requires a complete projection
-plus an evaluated/failed lifecycle. Keep both regressions during Inspector refactors. -->

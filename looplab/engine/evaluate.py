@@ -1342,7 +1342,7 @@ class EvaluateMixin:
                 # Measured on runs/rubert-dr-0807: node 2 trained for ~6,900 s and its folded stage
                 # record read `train reused / exit 0 / 0.0 s`; node 0's Developer-declared `mine` stage
                 # ran four times (two crashes, then two successes) and read `mine reused / 0.0 s`.
-                # Replay — the single source of truth — could not tell "this stage succeeded and its
+                # The replayable stage-state authority could not tell "this stage succeeded and its
                 # artifacts were reused" from "this stage never ran in this run at all", which is the
                 # difference between a healthy pipeline and a silently skipped one.
                 #

@@ -1,5 +1,9 @@
 # LoopLab — Deep Research: Agentic Systems, Deep-Research Systems & AI R&D (2026-07-02)
 
+> **Historical research snapshot.** “Current,” default, missing-feature and line-number claims below are
+> pinned to 2026-07-02. Use current source/tests plus the README and user guide for shipped behavior; this
+> document remains evidence and design input, not a live status board.
+
 **Method.** Three inputs, cross-checked against everything already shipped or planned so nothing
 below re-proposes known work: (1) a fresh 106-agent web deep-research pass over three streams —
 *deep-research system architectures*, *agentic best practices 2025–26*, *AI-R&D frontier 2026 Q1–Q2*

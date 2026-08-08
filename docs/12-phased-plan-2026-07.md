@@ -1,5 +1,10 @@
 # LoopLab — Phased Implementation Plan (2026-07-02)
 
+> **Historical branch plan.** The implementation/default claims below describe
+> `claude/agent-systems-research-uhnl6d` on 2026-07-03, not current `master`. Several mechanisms later
+> changed defaults, names, reachability or evidence boundaries. Current source/tests plus the README and
+> user guide are authoritative; treat phase checkmarks as branch chronology only.
+
 > **Implementation status (2026-07-03).** Phases 1–5 are **implemented, config-first, and
 > test-covered** on branch `claude/agent-systems-research-uhnl6d`. Every "best new" mechanism ships
 > **ON by default** (holdout-gated promotion, ensemble-by-default merge, disjoint confirm seeds,

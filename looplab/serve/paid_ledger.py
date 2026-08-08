@@ -44,9 +44,8 @@ from looplab.events.types import (
     EV_REPORT_GENERATED, EV_REPORT_REFRESH_FAILED, EV_REPORT_REFRESH_STARTED,
 )
 
-# Engine invariant #1 — "the engine is the sole writer of domain events" — has serve-side exceptions,
-# and a GENERIC serve-side append helper is exactly the unguarded path around it: every future paid
-# route would reach the log through one function that asks no questions. So the parameterized claim
+# Domain ownership still requires explicit serve-side writer boundaries: a GENERIC append helper would
+# let every future paid route reach the log through one function that asks no questions. So the parameterized claim
 # and terminal types are allow-listed here and asserted at BOTH append sites, mirroring
 # `events/types.py::BACKGROUND_APPENDABLE`.
 #

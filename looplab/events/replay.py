@@ -523,8 +523,8 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         return
     # Defensive like the per-trial / unknown-node tolerance below: a malformed or incomplete
     # node_created (missing key, non-coercible idea param in a hand-edited / bring-your-own-script
-    # log) must not crash the WHOLE fold — skip the bad event instead (the engine, sole writer,
-    # always round-trips a validated Idea, so this only fires on a corrupt log).
+    # log) must not crash the WHOLE fold — skip the bad event instead (normal engine/control writers
+    # round-trip validated payloads, so this only fires on a corrupt or manually spliced log).
     if not _parent_generation_map_matches(st, d):
         _clear_build_marker(st, d, nid)
         return
@@ -2302,7 +2302,9 @@ def _on_concept_tag_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
 def _on_hypothesis_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV D4 (§21.18 HT): the LLM tagger's concept ids for one hypothesis, recorded once so taxonomy
     # dedup reuses them. Hypothesis-scoped (str id); LAST write wins (a merge may re-derive the survivor's
-    # tags). Audit-only — NEVER selection. Order-tolerant + idempotent + malformed-safe.
+    # tags). Advisory: taxonomy dedup/cadence consumers can use the folded tags to steer later board
+    # consolidation, but they never directly re-rank evaluated nodes. Order-tolerant + idempotent +
+    # malformed-safe.
     hid = d.get("hyp_id")
     if not hid:
         return
@@ -2344,7 +2346,8 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV concept-edge substrate: fold typed edges (src, rel, dst) COMMUTATIVELY — max-confidence-wins
     # keyed on the triple, ties by provenance-rank then lexicographic provenance — so replaying the same
     # edge's events in ANY order yields the same map (invariant 5 order-tolerance), unlike last-write.
-    # Audit-only; NEVER touches selection. Accepts a batch (`edges: [...]`) or one inline edge; a
+    # Advisory: hierarchy/coverage projections can feed later strategy and proposal cues, but the edges
+    # never directly re-rank evaluated nodes. Accepts a batch (`edges: [...]`) or one inline edge; a
     # malformed row is skipped, never crashes the fold.
     raw = d.get("edges")
     rows = raw if isinstance(raw, list) else ([d] if all(k in d for k in ("src", "rel", "dst")) else [])
@@ -3553,8 +3556,8 @@ def _on_lessons_refreshed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     st.lessons_refreshed.append(d)   # M6 shared-store re-read cadence/replay gate
 
 def _on_report_generated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Agent-authored run report (audit-only sidecar; NEVER touches nodes/best). Latest wins —
-    # the cadence and manual-refresh paths both append this; the freshest narrative stands.
+    # Agent-authored run report (selection-neutral; NEVER touches nodes/best). Latest wins; the cadence
+    # and manual-refresh paths both append this, and the receipt also gates future regeneration.
     from looplab.core.advisory_payloads import sanitize_report_payload
     content = sanitize_report_payload(d.get("content") or d)
     # The event envelope is the publication authority. Model/provider content must not forge which

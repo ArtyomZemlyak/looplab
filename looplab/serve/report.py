@@ -3,8 +3,9 @@ proceeds. Mirrors the Deep-Research stage (`deep_research.py`) but is a pure syn
 external tools): it reads the whole `RunState` — champion, improvement story, trust caveats, themes,
 the latest research memo — and emits a structured, conclusion-first report.
 
-Recorded as an audit-only `report_generated` event (folded into `RunState.report`, latest wins),
-NEVER into the search DAG, so best-selection/policies are untouched. Degrades gracefully: any
+Recorded as a selection-neutral `report_generated` event (folded into `RunState.report`, latest wins).
+It never enters the search DAG or changes best-selection/policies, although the durable receipt gates
+the report's own refresh cadence. Degrades gracefully: any
 transport/parse failure (or no model) yields a minimal report rather than crashing the run. The UI
 always renders the deterministic analysis from the node set; this narrative layers on top.
 """

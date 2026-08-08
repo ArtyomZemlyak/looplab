@@ -3,19 +3,34 @@
 **Version:** 0.2 (status tracker) · **Updated:** 2026-06-22
 **Companion docs:** [00-INDEX.md](00-INDEX.md) · [01-product-design.md](01-product-design.md) · [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) · [04-file-layout.md](04-file-layout.md) · [05-build-decisions.md](05-build-decisions.md) · code: [README.md](https://github.com/ArtyomZemlyak/looplab/blob/master/README.md)
 
-> This was the iteration plan; it is now the **living status board**. Each item shows what's built, where it lives, and what remains. The running code is in `looplab/`, split into the planned subpackage tree (`core/ events/ runtime/ tools/ agents/ search/ trust/ engine/ adapters/ serve/` — see `looplab/__init__.py` for the map; legacy flat imports keep working via the compat alias layer).
+> **Historical iteration snapshot.** Checkbox states and counts below describe 2026-06-22 and are kept
+> for implementation traceability; they are not a living status board. Current source/tests, README and
+> user guide decide shipped behavior.
+
+### Current reconciliation (2026-08-08)
+
+| Originally listed as missing | Current status |
+|---|---|
+| Test suite | **8,936 tests collected** by current `pytest --collect-only` |
+| React web UI | **Shipped:** FastAPI serves the Vite/React control plane and `uibuild.py` validates/atomically publishes builds |
+| `DockerSandbox` | **Shipped** for the `untrusted` network-disabled tier; the `hostile` tier still requires an installed gVisor-compatible runtime |
+| OpenTelemetry / MLflow | **Shipped as optional exporters:** `[otel]` provides OTLP; `looplab export-mlflow` requires the separately installed `mlflow` package |
+| Real MLE-bench/Kaggle | **Shipped as `mlebench_real`**, with the optional `mlebench` package, prepared competition data and Kaggle access still external prerequisites |
+| LanceDB / FastMCP server bus | **Not shipped:** in-memory/vector HTTP embeddings ship; MCP is an optional outbound owner-Assistant client, not a server bus |
+| Co-evolving evaluator | **Not shipped** |
+| Per-node git lineage | External-agent worktrees and patch gates ship, but canonical solution lineage remains `events.jsonl`/`parent_ids`, not one git commit per node |
 
 **Legend:** ✅ done · 🟡 partial (note says what's missing) · ⬜ todo · 🧱 infra-seam (Protocol/stub exists; body needs external infra — daemon/lib/service)
 
 ---
 
-## Snapshot
+## Historical snapshot (2026-06-22)
 
 - **Tests:** 105 passing + 1 skipped (offline + 4 live-LLM that auto-skip without Ollama; the live OpenCode test is opt-in). Python 3.14, Windows, no Docker.
 - **Reviewed 2026-06-22** ([07-architecture-review.md](07-architecture-review.md)): design↔code consistent; 7 bugs found & fixed; I10 gate semantics clarified. **Post-review:** policy-agnostic self-repair; **I7 ablation**, **I18 skills/prompts/AGENTS.md**, **I22 diversity archive**, **I21 HITL**, **I4 patch surface-gate** shipped; **I15 TUI cut**.
-- **The planned offline-buildable scope is complete.** What's left needs external infra/data (Docker daemon, LanceDB/FastMCP, OTel/MLflow, MLEBench/Kaggle, React UI) or a consumer (a diff-emitting agent backend), or is a stretch goal.
+- **The planned offline-buildable scope was complete at this checkpoint.** The then-missing list below is superseded by the current reconciliation above.
 - **The loop is real and live:** invent (with optional knowledge-base + cross-run-memory tools) → write code → run in sandbox → self-repair on error → cross-validate + multi-seed confirm (variance-gated) → pick best. Leakage-first guard + wall-clock budget + span tracing. Driven offline by a toy optimizer or live by **Qwen3-8B (Ollama)**.
-- **Roughly:** core loop + result-moving levers + trust gates + live LLM (Researcher, Developer, agentic retrieval, cross-run memory) are **done and wired**. Remaining: git/patch path, ablation operator, UI, remote adapters, and infra-seams (Docker, LanceDB/FastMCP, OTel/MLflow).
+- **At this checkpoint:** core loop + result-moving levers + trust gates + live LLM (Researcher, Developer, agentic retrieval, cross-run memory) were **done and wired**. The contemporaneous remaining list is historical.
 
 | Phase | Status |
 |---|---|
@@ -42,12 +57,12 @@
   - [x] Replay-determinism + durability tests — `test_events_replay.py`
 - [x] **I2 — LLM layer + structured outputs** ✅ (also live, see below)
   - [x] tool_call default → BAML/text fallback, `<think>`-aware — `parse.py`
-  - [x] `OpenAICompatibleClient` (stdlib) + `LiteLLMClient` + `CostAccountant` — `llm.py`
+  - [x] `OpenAICompatibleClient` (OpenAI SDK/httpx) + optional `LiteLLMClient` + `CostAccountant` — `llm.py`; shipped Settings select the OpenAI-compatible client
   - [x] Auto-fallback + cost tests; mock-HTTP client test — `test_parse_llm.py`, `test_openai_client.py`
-- [x] **I3 — Sandbox (trust-mode tiered)** ✅ / 🧱 Docker body
+- [x] **I3 — Sandbox (trust-mode tiered)** ✅
   - [x] `SubprocessSandbox` (timeout, tree-kill, output caps, cwd jail) — `sandbox.py`
   - [x] `make_sandbox(trust_mode)`; `trusted_local` default — `sandbox.py`
-  - [ ] 🧱 `DockerSandbox` body (docker-py, `--network none`, gVisor) — stub raises; only needed for `untrusted` tier
+  - [x] `DockerSandbox` (`docker run`, `--network none`, resource bounds); gVisor remains an operator-supplied runtime for `hostile`
 - [x] **I4 — Unified-diff patch path + surface gate** ✅ (lineage-via-git still a deliberate deviation)
   - [x] `patch.py` — `changed_paths` parse, **out-of-surface gate (reject, not strip)**: allow-list globs + escape rules (`..`, leading `/`, drive letter), then `git apply --check` → apply — tested `test_patch.py` (incl. path-traversal/absolute rejection)
   - Note: solutions are still **whole-file** by default (no diff-emitting backend yet); lineage stays in the event log (`parent_ids`), not git commits — a deliberate deviation that works. The gate is ready for a diff-emitting external coding-agent backend.
@@ -122,7 +137,10 @@
 
 ## P4 — Breadth, hardening, opt-in machinery 🟡
 
-- [🟡] **I20 — MLEBench / Kaggle adapters** — ✅ **MLEBench-*shape* adapter done** (`mlebench.py`, `kind="mlebench"`): a held-out-graded binary-classification competition. `assets()` materializes `train.json` (X+y), `test.json` (X only — labels withheld) and a private `grader.py` (answer key + leaderboard accuracy); the solution trains a classifier, predicts, and calls `grader.score(preds)` — the loop optimizes the *true held-out* metric, not a self-reported one. Tunes `k` (model complexity). `columns()` (profiling) + `leakage_inputs()` (train/test disjointness, I9) wired. Offline templated k-NN fallback (`backend=toy`) → live run reaches 1.0 held-out accuracy; LLM/agent Developer via `llm_roles`. Tested `test_mlebench.py`. **Integrity:** the agent cannot overwrite the grader (asset-name protection in `_write_node_files` + assets written last) — enforced by construction; reading the key remains a `trusted_local` caveat (close via out-of-process grading or the `untrusted` tier). **Caveat:** the I9 `train_test_contamination` check is exact-row-match only (rounded floats never collide by chance), so it proves the synthetic split is disjoint but isn't a near-duplicate detector. 🧱 Remaining: real Kaggle/MLEBench *download* (needs datasets/APIs/network) — the adapter is ready to wrap them.
+- [x] **I20 — MLEBench / Kaggle adapters** — the synthetic held-out `mlebench` task and real
+  `mlebench_real` competition adapter both ship. Real runs still require the optional `mlebench`
+  dependency, prepared competition data and Kaggle credentials/access. The synthetic adapter's setup
+  leakage check is exact-row matching, not near-duplicate/temporal/target coverage.
 - [🟡] **I21 — Hardening** 🟡
   - [x] secret-leak scan gate + secret-masked config — `test_security.py`, `config.py`
   - [x] trust-mode sandbox tiering — `sandbox.py`
@@ -132,12 +150,7 @@
   - [x] `EvolutionaryPolicy` + **`MCTSPolicy` (UCB1)** + `make_policy` (config-selectable: greedy/evolutionary/mcts) — `policy.py`; tested `test_tracing_altpolicy.py`
   - [x] **diversity archive** (quality-diversity niching, best-per-niche, summary recorded at run end) — `archive.py`, `orchestrator.py`; tested `test_archive_hitl.py`
   - [ ] ⬜ co-evolving evaluator
-  <!-- CODEX AGENT: this status and the two "Remaining"/"Infra-seams" entries below are stale.
-  FastAPI already serves the SPA/assets and `uibuild.py` validates/auto-builds the Vite/React source
-  checkout. Mark the React web UI implemented and remove it from deferred lists; retain the separate,
-  narrower wheel-package gap recorded in CODE_REVIEW/pyproject because installed wheels still omit
-  the prebuilt bundle. -->
-  - [ ] 🧱 React Flow web UI (FastAPI reads files)
+  - [x] React web UI (FastAPI + Vite; auto-build/validated atomic publication through `uibuild.py`)
 
 ---
 
@@ -171,9 +184,6 @@ Remaining offline-buildable features, roughly by value:
   - **Output validation (NEW):** `validate.py` + `roles.ValidatingDeveloper` audit each agent output (launched / not-timed-out / produced / modified-seed / parses / emits-metric), retry the agent with the failure as feedback (`agent_max_retries`), then fall back to the in-house LLM Developer (known-good). Per-node `agent_validated` event → `node.agent_report` → surfaced in the SQLite read-model (`agent_ok`/`agent_fell_back`) and the HTML node table. Audit only; never affects selection. Config `validate_agent` (default on).
   - **Edit-surface gate (ADR-7 Rule 3) — ✅ DONE (multi-file, patch-gated):** with `agent_patch_gate` (default on) the agent runs in a **git worktree** (seed committed); afterward `git diff --cached <seed>` is gated by `patch.gate(agent_surface)` (default `["*.py"]`, reject-not-strip out-of-surface/`..`/absolute). Accepted in-surface files (solution.py + helper modules) are captured into `Node.files` (files-as-truth → resumable) and materialized into the eval/confirm workdirs by `Engine._write_node_files`; the validator adds an `edit_in_surface` check. Robust to agents that self-commit (diffs vs the seed SHA) and degrades to whole-file readback if git is missing. Verified live with OpenCode (clean in-surface single + multi-file via stub). Config `agent_patch_gate` / `agent_surface`.
 
-Remaining (all need external infra/data — out of the pure-offline scope):
-1. 🧱 **MLEBench / Kaggle adapters** — real benchmark; needs datasets/APIs.
-2. 🧱 **DockerSandbox body** (untrusted tier), **LanceDB/FastMCP** backends, **OTel-SDK + MLflow** export, **React web UI**.
-3. ⬜ **Stretch:** co-evolving evaluator, short-lived gateway tokens.
-
-Infra-seams (need external infra, deferred): 🧱 DockerSandbox body · 🧱 LanceDB/FastMCP backends · 🧱 OTel-SDK + MLflow · 🧱 MLEBench/Kaggle adapters · 🧱 React web UI.
+Current remaining seams from this original list: **LanceDB**, an MCP server bus, a co-evolving
+evaluator, and short-lived gateway tokens. Real MLE-bench data/access, an OTLP collector, MLflow and
+gVisor remain optional external infrastructure for already-shipped adapters.

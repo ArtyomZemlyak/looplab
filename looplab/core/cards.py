@@ -641,10 +641,10 @@ def hypothesis_concept_cache_keys(card) -> tuple[str, ...]:
     return tuple(keys)
 
 
-# The `Hypothesis` class was removed once `1 card = 1 hypothesis`: the single research board is now
-# `Card` (see below), which carries the former hypothesis fields — `seed_statement` (== the old
-# `statement`), `verdict` (== the old `status`, byte-identical via `_evidence_verdict`), `evidence`,
-# `priority`, `best_delta`. The frozen `hypothesis_*` events still feed `_derive_cards` for old-log replay.
+# The duplicate `Hypothesis` class was removed once Card became the canonical research-board model.
+# `Card` carries the former hypothesis-facing fields (`seed_statement`, `verdict`, `evidence`, priority,
+# best_delta), while `belief_id` keeps research-question identity distinct from work-item identity.
+# Frozen `hypothesis_*` events still feed `_derive_cards` for old-log replay.
 
 
 class CardConceptSource(BaseModel):
@@ -762,9 +762,10 @@ class CardSelectionProvenance(BaseModel):
 class Card(BaseModel):
     """One stable-identity proposal/work item in the target Card queue (docs/23).
 
-    The Card IS the research-direction aggregate now (1 card = 1 hypothesis): it carries the former
-    Hypothesis fields — ``seed_statement`` (the old statement / hash join key), ``verdict`` (the old
-    status), ``evidence``, ``priority``, ``best_delta``. The projection also
+    Card is the canonical work-item/evidence row and carries the former Hypothesis-facing fields —
+    ``seed_statement`` (the old statement/hash join key), ``verdict`` (the old status), ``evidence``,
+    ``priority``, and ``best_delta``. It is not itself a unique belief: multiple work items can share
+    one ``belief_id`` (for example a debug retry). The projection also
     materializes legacy/hash/synthesized Card shadows so old logs retain a useful board, but those rows
     are advisory and never selection-ready. Only a unique receipt-bound ``card_added`` establishes
     native work-item identity. Current Card selection consumes ``selection_ready`` and never infers

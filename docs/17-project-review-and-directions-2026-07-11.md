@@ -1,6 +1,6 @@
 # LoopLab — Project Review, Architecture & Development Directions (2026-07-11, reconciled through 2026-07-18)
 
-> Strategic synthesis pinned to historical executable revision
+> **Historical strategic plan, not current runtime authority.** This synthesis is pinned to executable revision
 > `369d6a6c6fe0ccf0f921051ffba71c742879bfdb`, with the Part-IV/consumer/UI addendum reconciled through the
 > post-checkpoint integration ledger. [Doc 16](16-architecture-code-review-2026-07-11.md) (`41f9345`) remains the original
 > finding/reproduction ledger. This revision adds the implementation disposition of the subsequent
@@ -8,16 +8,16 @@
 
 | Metadata | Value |
 |---|---|
-| **Status** | current / canonical plan |
+| **Status** | historical canonical plan at its checkpoint; no longer current runtime authority |
 | **As of executable commit** | `369d6a6c6fe0ccf0f921051ffba71c742879bfdb` |
 | **Post-audit increment** | `931c28b` (P0-2 open→partial; census 66/12; see §14.6). Quantitative figures are pinned per statement; unpinned counts are as of `369d6a6`. |
 | **Documentation reconciliation** | `89af408` (doc 18 and post-fix UI disposition) |
 | **Part-IV reviewed range** | Dated `master` checkpoint `4d1218c` in §22.10/doc 18 §36/doc 21 Round 25; post-checkpoint integration in §22.11/doc 18 §37/doc 21's post-Round-25 ledger. No final publication commit is invented. Historical core counts remain pinned to the commits named beside them. |
-| **Normative for** | priority, dependencies, release gates, feature promotion criteria |
+| **Normative for** | its dated priority/dependency/release-gate rationale; current source/tests and maintained user docs win on shipped behavior |
 | **Finding/reproduction authority** | [doc 16](16-architecture-code-review-2026-07-11.md) |
 | **Current implementation disposition** | §6.3 and §14.2 for the core; §22.11 for post-checkpoint Part-IV/V cross-run/UI integration status |
 | **Supersedes** | doc-17 verdict in `32dc6c0`; current-order claims in docs 06/10/11/12, ROADMAP, BACKLOG where they conflict |
-| **Superseded by** | — |
+| **Superseded by** | current source/tests for implementation truth; doc 25 for the later structural-debt ledger |
 | **Part III-B addendum** | 2026-07-14 — DS & deep-research agent cohort (§§15–20) |
 | **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7); **Phase 0 implemented** (§21.14: concept graph, D1 asset brief, §12 verifier); **Phase 1 implemented** (§21.15: D7 lock-in, D6 lesson guard, D3 graded novelty, D4 dedup, D2 research targeting — offline analytics); **Phase 2 implemented** (§21.16: 2a Strategist concept-pivot, 2b D3 graded-novelty gate + D7 capability-expansion directive, 2c calibrated foresight verifier — live steering, opt-in) |
 | **Part III-C addendum** | 2026-07-19 — agentic-OS & evolutionary autoresearch cohort: SCION (2607.03863), NVIDIA NeMo autoresearch, CORAL (2604.01658), GigaEvo (2511.17592) (§§23–28) |
@@ -580,33 +580,10 @@ Documentation-only work, offline corpora, and benchmark harness design may run i
 that writes domain state, launches processes, calls the network, changes promotion, or consumes hidden data
 must pass through the prerequisite gates above.
 
-> **⚠ This ordering does not describe how the project actually shipped (noted 2026-08-04).** The R1/R2/R3
-> identity contracts (`RunManifest`, `BudgetLedger`, `ProcessSupervisor`, `EvaluationRef`) have **zero**
-> hits in the code, yet the doc-25 decomposition is already landing on master, and the two largest
-> programs of the window — doc 22 (parallelism) and doc 23 (Card kanban) — appear nowhere in §7. Doc 25
-> does not supersede this: its header states "Doc 17 still owns release ordering". A decision is pending;
-> the full annotation with the open question is in this file's source immediately below.
-
-<!-- CLAUDE REVIEW 2026-08-04: DIVERGENT — this critical path is not the order the project actually
-shipped, and no later document changed the decision.
-WHAT THIS DOC PROMISES: R0 -> R1 -> R2/R3 -> R4 -> R5, with §6.6:539 ("decompose only after the identity
-contracts exist") gating decomposition behind R1/R2.
-WHAT ACTUALLY HAPPENED: the R1/R2/R3 identity contracts named in §6.3:459-460 do not exist in code —
-`RunManifest`, `BudgetLedger`, `ProcessSupervisor` and `EvaluationRef` each have ZERO hits across
-`looplab/`, `tests/`, `ui/` and `tools/`; they appear only in docs 16/17/20/26. Meanwhile the doc-25
-modularity decomposition (`docs/25-architecture-modularity-review-2026-08-01.md` §2:397-422) is already
-landing on master (`9cebd0df` TO-05, `83598e47` TO-06, 2026-08-04) — i.e. R4-shaped work running ahead of
-R1/R2. Doc 25 does NOT supersede this ordering: its own header (`docs/25:13`) says "Doc 17 still owns
-release ordering", and it contains no `R0`/`identity contract`/`RunManifest` reference and no rationale
-for decomposing first. The constraint was bypassed, not revised.
-ALSO ABSENT: the two largest delivery programs of this window — doc 22 (agent parallelism, 2026-07-19) and
-doc 23 (Hypothesis-Card kanban, 2026-07-20, ~220 commits between them) — appear NOWHERE in §7's ordering
-(`kanban` has 0 occurrences in this file; every `Card` mention sits in Part III/IV/V, none in §7). So the
-release ordering has never described the actual critical path since 2026-07-19.
-NEEDS A BUSINESS DECISION: is the R0->R5 identity-contract critical path still the release gate — in which
-case doc-25 decomposition and the doc-22/23 programs must be re-sequenced behind R1/R2 and the four
-identity contracts actually built — or is it retired, in which case §6.3/§7.1 must be rewritten around the
-order the project is really shipping in and §6.6:539's sequencing rule withdrawn? -->
+> **⚠ Historical ordering, not a current release gate (reconciled 2026-08-08).** The project did not ship
+> in this R0→R5 order: the named `RunManifest`, `BudgetLedger`, `ProcessSupervisor`, and `EvaluationRef`
+> contracts were not implemented, while docs 22/23 and the doc-25 decomposition landed first. Preserve the
+> sequence below as the 2026-07 proposal; use source/tests plus [doc 00](00-INDEX.md) for current authority.
 
 #### 7.2 Delivery horizons
 
@@ -3088,16 +3065,14 @@ verifier contract are pinned at run start.
   unchosen candidates, so "did foresight rank the eventual winner highest" is unmeasurable without a
   controlled all-candidates experiment. The E2 honest-negative (weak at absolute-outcome prediction) stands.
 
-**Current authority:** the full target architecture is §21.20, lean implementation status is §21.20.13, and
-the current post-fix safety/promotion correction is §22.8. The **LLM proposes semantics**; deterministic code must own
+**Historical authority at this checkpoint:** the target architecture was §21.20, implementation status was
+§21.20.13, and the then-current safety/promotion correction was §22.8. Those sections are no longer current
+shipped-state authority; use §22.11 plus source/tests and [doc 00](00-INDEX.md). Product Settings enable the
+cross-run cluster by default while bare `EngineOptions` remain off, so every default claim must name its
+construction surface. The **LLM proposes semantics**; deterministic code must own
 identity, scope, provenance, versioning, invalidation, ranking inputs and replay. The global review confirms
 that several of those ownership contracts are still targets, not current facts. Every derived answer must
 ultimately drill to immutable attempt/measurement/event atoms plus an explicit projection receipt.
-<!-- CODEX AGENT: CURRENT-AUTHORITY CORRECTION (`7446fab2`). Sections 21.20.13/22.8 are historical;
-22.11 plus current source/tests own shipped truth. Product Settings enable the cross-run cluster by
-default while bare EngineOptions remain off, so any "off by default" claim must name its construction
-surface. -->
-
 <a id="cross-run-research-architecture"></a>
 
 #### 21.20 Cross-run research memory — faceted scope + concept graph + incremental summaries (design, 2026-07-15)
@@ -3162,14 +3137,12 @@ ASCII-oriented (non-Latin goal cues such as Russian can disappear); a case omits
 provenance; active `search_lessons` is weaker than passive routing (full lexical scan without the same
 fingerprint/role/contradiction/trust contract); concept coverage can look complete when tagging is partial;
 and the current outcome signature omits claim-relevant confirmed/holdout/trust/env fields. Scope-report input
-is an unbounded concatenation of per-run reports and its fallback can order incompatible raw metrics. In the
+is now bounded by run count, prompt/output size, and per-run/aggregate source bytes; Genesis receives a
+bounded untrusted-prior projection. Provenance and metric-comparability limits remain, and the fallback can
+still order incompatible raw metrics. In the
 UI, the visible RunList can combine folder+task+super-task+query filters while Report chooses only one scope
 axis, so “report what I see” is not guaranteed. Those uncited/stale report headlines are also automatically
 fed to Genesis today; treat that as **legacy unsafe influence** until CR2 receipts/eligibility replace it.
-<!-- CODEX AGENT: SHIPPED-BOUNDARY CORRECTION (`7446fab2`). Scope reports now cap runs, prompt/output
-size and per-run/aggregate source bytes; Genesis receives a bounded untrusted-prior projection. The
-provenance/comparison limitations remain, but current input is no longer an unbounded concatenation. -->
-
 The new index therefore sits **beside** the engine and fold as a read/projection subsystem. It consumes run
 events and operator metadata; the engine may read a bounded context snapshot but never imports the
 portfolio index into replay. The first implementation should reuse the existing traversal guards, outcome
@@ -3186,15 +3159,9 @@ portfolio into every prompt. It does not make an LLM-authored report canonical.
 
 - **Evidence before synthesis.** A claim with no resolvable evidence refs is an ungrounded note, never a
   trusted lesson or novelty signal.
-  <!-- CODEX AGENT: (partially RESOLVED 2026-07-27 by `af618c51`; annotation narrowed 2026-08-04.) The
-  RunStateCache half of this finding is CLOSED: `tools/_runcache.py:83-122` now records a per-run
-  `log_divergence` receipt outside the LRU and `source_note()` renders an explicit `[PARTIAL SOURCE]`
-  banner, which `tools/run_tools.py:684,702` and `tools/machine_runs_tools.py:791,818` emit — so a
-  truncated sibling/all-run read can no longer pass as a whole run. (`ec11165e`, 2026-07-31, only
-  LRU-bounded the same cache; it deliberately kept the receipt outside eviction.)
-  STILL OPEN: research_claims refresh replaces only current v3 rows while the reader continues indexing
-  same-run legacy v1/v2 claims, so a role can still synthesize from a superseded claim as though it were
-  current evidence. -->
+  **Current reconciliation:** truncated sibling/all-run reads carry a durable `log_divergence` receipt and
+  render `[PARTIAL SOURCE]`, so they cannot pass as whole-run evidence. The legacy-claim freshness seam is
+  still open: a refresh replaces current v3 rows while readers can retain same-run v1/v2 rows.
 - **Abstention before false transfer.** Unknown applicability produces “possibly related / inspect,” not
   “tried before” and never an automatic rejection.
 - **Scope is explicit and multi-valued.** Exact-task, application, domain, modality/language, dataset family,
@@ -4138,13 +4105,9 @@ opinion must never rewrite portfolio truth. Therefore:
   in-loop agent's reasoning produces that persists cross-run is a *machine-proposed* lesson/D8 claim, written
   by the ENGINE at finalize through the existing role-routed lessons path — never a direct mutation of the
   shared claim/concept store.
-  <!-- CODEX AGENT: (partially RESOLVED 2026-07-27 by `af618c51`; annotation narrowed 2026-08-04.) The
-  write-capability boundary is intact, and the completeness half is now closed: default sibling/all-run
-  providers no longer receive a health-less truncated prefix — `tools/_runcache.py:100-122` carries the
-  divergence receipt and `run_tools.py:684,702` / `machine_runs_tools.py:791,818` render the
-  `[PARTIAL SOURCE]` note. STILL OPEN: the research-claim projection can retain superseded legacy rows
-  after re-finalization, so the freshness receipt + abstention semantics this paragraph needs to support
-  "no poisoning" end-to-end are not yet in place on that source. -->
+  **Current reconciliation:** the write-capability boundary and truncated-source completeness receipt are
+  shipped. End-to-end “no poisoning” remains partial because re-finalization can leave superseded legacy
+  research-claim rows visible without a freshness/abstention receipt.
 - **This is about the in-loop agents, NOT the owner's ASSISTANT.** The assistant acts on the operator's
   behalf, behind a permission-mode confirm card, and IS a full editor: it merges/splits/purges the cross-run
   taxonomy (Phase 2a `ConceptGovernanceTools`) and — PART V (D) — re-tags a run's node concepts
@@ -4659,13 +4622,10 @@ new-to-us ideas and several that only *reinforce* already-flagged lanes:
   **no new mechanism, an observability/naming gain.**
 - **REP is the one first-class artifact we lack (recommendation).** `_TaskPlan` is a *one-shot* genesis emission
   ("just the inline task … Genesis only decides *what* to solve", `engine/genesis.py:111-116`), not a living
-  staged plan with checkpoints and fallback conditions governing the whole run; the hypothesis board
-  (`RunState.hypotheses`, consolidated in `engine/research_cadence.py:200`) and proposal cues are per-step, not a
-  compiled campaign plan. A persistent REP-style plan object gated on a domain event is a **recommendation** that
+  staged plan with checkpoints and fallback conditions governing the whole run; the Card/belief board
+  (`RunState.research_cards()`, consolidated in `engine/research_cadence.py`) and proposal cues are per-step,
+  not a compiled campaign plan. A persistent REP-style plan object gated on a domain event is a **recommendation** that
   composes with the §21 taxonomy and §13 composition rather than standing alone.
-  <!-- CODEX AGENT: current master removed `RunState.hypotheses`; the replacement is the Card board and
-  cadence now consolidates Cards. Keep this comparison source-accurate, and do not imply the breaking
-  public-state deletion had a deprecation window. -->
 - **Profile-driven kernel generalizes ADR-7 + `skills.py` + memory profiles (recommendation, refactor-shaped).**
   We already have pluggable role backends (ADR-7; `agents/roles.py`, `agents/cli_agent.py`), a skill library
   (`tools/skills.py`) and cross-run memory (`engine/memory.py`); SCION's `P_a = ⟨tool, skill, memory, policy⟩`
@@ -4750,11 +4710,10 @@ evaluations. Works with Claude Code / Codex / Cursor.
   `search/best_of_n.py::rank`) — exactly CORAL's "validate locally, evaluate only when confident," and it is
   calibrated (§21.16 2c foresight verifier). Parity/ahead on this axis.
 - **Shared persistent "skills library" ≈ `tools/skills.py` + `engine/memory.py` (M4 episodic→procedural) +
-  `SiblingRunTools` live cross-run reads (doc 13 §7) + the hypothesis board (`RunState.hypotheses`).** CORAL's
+  `SiblingRunTools` live cross-run reads (doc 13 §7) + the Card/belief board
+  (`RunState.research_cards()` plus its explicit belief projections).** CORAL's
   "agent decides what to read" also matches `search/hybrid_merge.py` (grep+BM25+vector RRF + **agent-decided
   merge**).
-  <!-- CODEX AGENT: this symbol no longer exists on current master. The relevant surface is
-  `RunState.research_cards()` over `cards`, with the unresolved work-item/belief identity caveat. -->
 - **Async multi-agent ≈ `parallel_build` (Variant-1) + the concurrent-research task
   (`events/types.py::BACKGROUND_APPENDABLE`).** Ours is deliberately more constrained (single-writer/replay,
   engine invariant #1); CORAL trades that for looser async coordination — a model we would *not* import wholesale
