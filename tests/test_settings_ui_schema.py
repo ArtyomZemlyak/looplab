@@ -99,13 +99,12 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 163
-    # 194 -> 193 on 2026-08-05: `inline_repair_stuck_repeat` was removed. 193 -> 194 on
-    # 2026-08-06: `concept_tidy` was added, and it is a CATALOGUED row (162 -> 163) because it is
-    # the switch that lets an agent's recorded merge become cross-run policy unattended. The
-    # literal is a review tripwire, not a gate (the gate is the two-way reconciliation) — it
-    # fired both times, both changes are real, and docs/guide/configuration.md moved with them.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 194
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 164
+    # 194 -> 195 Settings and 163 -> 164 catalogued rows when `task_facets_finalize` split the
+    # paid-but-behaviorally-inert task-facet call from the concept/claim curation umbrella. The
+    # literal is a review tripwire, not a gate (the gate is the two-way reconciliation), and the
+    # separate default-off warning row is part of this same contract.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 195
     assert hashlib.sha256("\0".join(sorted(keys)).encode()).hexdigest() == SETTINGS_UI_SCHEMA_KEYSET_REVISION
     assert set(keys) <= set(Settings.model_fields)
     by_key = {field["key"]: field for field in fields}
@@ -146,7 +145,19 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     assert "model/tool-loop turns" in by_key["cross_run_read_tools"]["help"]
     assert "delay finalization" in by_key["cross_run_curation"]["help"]
     assert "paid model cost" in by_key["cross_run_curation"]["warning"]
+    assert by_key["task_facets_finalize"]["default"] is False
+    assert "no current retrieval" in by_key["task_facets_finalize"]["help"]
+    assert "no behavioral consumer" in by_key["task_facets_finalize"]["warningTitle"]
+    assert "synchronous paid" in by_key["task_facets_finalize"]["warning"]
+    assert "manual task-facets" in by_key["task_facets_finalize"]["help"]
     assert "never applies" in by_key["cross_run_curation_auto"]["warning"]
+    assert "configured run root" in by_key["all_runs_tools"]["help"]
+    assert "not machine-wide" in by_key["all_runs_tools"]["help"]
+    assert "richer run-root tools" in by_key["all_runs_tools"]["help"]
+    assert "over that same root" in by_key["all_runs_tools"]["help"]
+    assert "EVERY run on this machine" not in by_key["all_runs_tools"]["help"]
+    assert "task's original in-process Developer" in by_key["validate_agent"]["help"]
+    assert "LLM developer" not in by_key["validate_agent"]["help"]
     # CODEX AGENT: placeholders/default copy are executable UI behavior, not decoration; pin the two
     # defaults that previously instructed operators to configure the opposite of the product policy.
     assert Settings.model_fields["concurrent_research"].default is True

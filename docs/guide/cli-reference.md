@@ -114,9 +114,13 @@ looplab run --kind dataset --goal "..." -s backend=llm        # pin the kind, Ge
 A config file may be **unified** (top-level `task:` / `settings:` / `out:` keys) or a **bare task**
 (the legacy format — the whole file is the task). YAML and JSON are both accepted.
 
-**Genesis (author the task from a plain goal).** Pass `--goal` and the LLM authors the task — the
-headless counterpart of the Web UI's "New run" planner. It announces its choice (`Genesis -> kind=…`)
-before launching, and:
+**Genesis (author the task from a plain goal).** Pass `--goal` and the LLM authors the task. This is
+the CLI planning surface; the Web **New run** flow uses the owner Assistant's `propose_run` tool and
+the TUI uses `/api/genesis`. They share task-adapter validation and backend-default authority, but
+not one planner/schema. Web additionally submits a reviewed `/api/start/preflight` token; TUI posts
+to `/api/start`, whose server validates before spawn but issues no reviewed receipt; CLI validates
+directly. The CLI announces its choice
+(`Genesis -> kind=…`) before launching, and:
 
 - picks the `kind` from your words — *or* stays within the kind you **pin** with `--kind` (it doesn't
   skip Genesis, it constrains it; what the run does within a kind depends on the model);
@@ -129,14 +133,15 @@ before launching, and:
   always wins.)
 
 Genesis needs a reachable model (it reasons about your goal). Add `--no-genesis` to build the task
-from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.
+from the task flags (`--kind`, `--goal`, `--direction`, and `--data`) without a model, or run a
+complete file with no `--goal`. `--set` only changes engine settings.
 
 | Option | Default | Description |
 |---|---|---|
 | `[CONFIG\|TASK]` | *(optional)* | Config or task file (YAML/JSON). Omit it and build the task from the flags below. |
 | `--goal TEXT` | — | Task goal in plain words (build a task with no file) |
 | `--kind NAME` | — | Task kind (`quadratic`, `dataset`, `repo`, … — see [Tasks](tasks.md)). With `--goal` it **pins** the kind for Genesis; omit it to let Genesis pick. |
-| `--genesis / --no-genesis` | on | With `--goal`, let the LLM author the task (pinning to `--kind` if given, and reading data locations from your words). `--no-genesis` builds it from `--kind`/`--set` alone. |
+| `--genesis / --no-genesis` | on | With `--goal`, let the LLM author the task (pinning to `--kind` if given, and reading data locations from your words). `--no-genesis` builds it from the explicit task flags (`--kind`, `--goal`, `--direction`, `--data`); `--set` remains an engine-settings override. |
 | `--direction min\|max` | — | Optimization direction |
 | `--data PATH` | — | Shortcut for a **dataset**'s data path or a **repo**'s path (rejected for other kinds); under Genesis you can instead name the location(s) in `--goal` |
 | `-s, --set KEY=VALUE` | — | Override an engine setting (repeatable); same keys as `settings:` / `LOOPLAB_*`. **Not quite "any"**: the credential fields `llm_api_key` / `llm_api_key_base_url` are refused, so a secret never lands in shell history or the resolved snapshot — set them via `LOOPLAB_*` env or the secret store. Because of that split, `-s llm_base_url=…` moves the endpoint but **cannot** move the key with it: set `LOOPLAB_LLM_API_KEY` + `LOOPLAB_LLM_API_KEY_BASE_URL` to match, or the run refuses (see [moving a run to a different endpoint](llm-and-agents.md#moving-a-run-to-a-different-endpoint)) |
@@ -146,7 +151,7 @@ from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.
 | `--model ID` | `qwen3:8b` | LLM model id (when `--backend llm`) |
 | `--developer-backend NAME` | `default` | Delegate the Developer to `opencode` / `aider` / `goose` / `continue` |
 | `--agent-cmd PATH` | — | Override the external agent's launcher/path |
-| `--validate-agent / --no-validate-agent` | on | Validate external-agent output, retry with feedback, fall back to the in-house Developer |
+| `--validate-agent / --no-validate-agent` | on | Validate external-agent output, retry with feedback, then fall back to the task's original in-process Developer (LLM writer, deterministic/template Developer, or repo baseline) |
 | `--agent-patch-gate / --no-agent-patch-gate` | on | Run the agent in a git worktree and surface-gate its diff |
 | `--agent-surface GLOBS` | `*.py` | Comma-separated edit-surface allow-list for the agent |
 | `--knowledge-dir DIR` | `~/.looplab/knowledge` | Notes directory for agentic retrieval (grep/kb_search/read tools). The flag overrides the Settings/env default. |
@@ -173,7 +178,7 @@ directory itself is created first, to take `engine.lock` — but the refusal lan
 looplab init && looplab run looplab.yaml                  # scaffold a config, edit, run
 looplab run --no-genesis --kind quadratic --goal "minimize x^2+y^2" --direction min --backend toy   # no file, no LLM
 looplab run examples/toy_task.json --out runs/demo --max-nodes 14 --backend toy
-looplab run examples/toy_task.json -s policy=asha -s n_seeds=5 --backend toy   # --set any setting
+looplab run examples/toy_task.json -s policy=asha -s n_seeds=5 --backend toy   # --set non-secret settings
 looplab run examples/code_regression_task.json --backend llm --max-nodes 6
 looplab run examples/regression_task.json --backend llm \
     --knowledge-dir examples/knowledge --max-nodes 6
@@ -1358,7 +1363,8 @@ one dashboard you can:
 
 - see every run at a glance (status · nodes · best metric · age), **auto-refreshing live** so changes
   show up the instant they happen,
-- **describe a goal** and the boss plans + launches a run (the genesis flow), and
+- **describe a goal**, review/tweak the boss's proposed spec, and explicitly launch it (the genesis
+  flow), and
 - open a run to see its **live** status and **chat with the boss to steer it** — free text becomes a
   plan the run applies (the same action-router the web Dock uses). Action plans and destructive
   controls ask for **confirmation** first: apply all, pick a subset (e.g. `1,3`), or cancel.

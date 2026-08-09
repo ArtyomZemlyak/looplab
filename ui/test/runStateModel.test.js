@@ -252,6 +252,15 @@ async function withRunState(body, options = { pollOnly: true, pollMs: 5 }) {
         await Promise.resolve()
       })
     }
+    // Error responses cross several async adapters (`get`/`_throw`, the deadline wrapper, then the
+    // effect). Let assertions wait on the observable state they need instead of assuming React has
+    // committed it after one particular number of promise turns. This does not advance poll timers.
+    const until = async (predicate, message) => {
+      for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+        await React.act(async () => { await Promise.resolve() })
+      }
+      assert.ok(predicate(), message)
+    }
     // The poll re-arms on a timer; wait for the NEXT request to be queued rather than for a delay.
     const nextRequest = async () => {
       for (let attempt = 0; attempt < 200 && !queue.length; attempt += 1) {
@@ -259,7 +268,7 @@ async function withRunState(body, options = { pollOnly: true, pollMs: 5 }) {
       }
       assert.ok(queue.length, 'the poll did not re-arm')
     }
-    await body({ answer, nextRequest, published, current: () => latest, queue })
+    await body({ answer, nextRequest, until, published, current: () => latest, queue })
   } finally {
     if (root) await React.act(async () => { root.unmount() })
     dom.window.close()
@@ -331,8 +340,9 @@ test('a revoked review link is terminal while a proxy blip keeps re-probing', as
     assert.equal(current().status, 'gone')
     assert.match(current().error, /expired, was revoked, or is invalid/)
   })
-  await withRunState(async ({ answer, nextRequest, current }) => {
+  await withRunState(async ({ answer, nextRequest, until, current }) => {
     await answer(null, 504)
+    await until(() => current().status === 'error', 'the transient probe must publish its error state')
     assert.equal(current().status, 'error')
     // The whole point of 'transient': something is still scheduled. A `gone`/`not_found` screen with
     // nothing left to retry is the stranded workspace UI-2 was about.

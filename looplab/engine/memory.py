@@ -5,6 +5,7 @@ top-system differentiator — solved tasks make later similar tasks easier.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -289,49 +290,150 @@ def parse_credit_lessons(text: str, n_pairs: int, limit: Optional[int] = None) -
 # --------------------------------------------------------------------------- #
 
 def skill_slug(statement: str) -> str:
+    """Legacy human-readable auto-skill slug (kept for stored-file compatibility)."""
     norm = re.sub(r"[^a-z0-9]+", "-", normalize_statement(statement)).strip("-")[:48]
     return norm or "skill"
+
+
+def _canonical_auto_skill_claim(statement: str) -> str:
+    """Uncapped claim identity; presentation helpers intentionally truncate and cannot be keys."""
+    return " ".join(str(statement or "").split()).lower()
+
+
+def _auto_skill_identity(statement: str) -> tuple[str, str, str]:
+    """Return normalized claim, full digest and collision-resistant readable storage id."""
+    canonical = _canonical_auto_skill_claim(statement)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    # Readability is presentation only and may be capped/collide; the complete digest is the key.
+    readable = re.sub(
+        r"[^a-z0-9]+", "-", normalize_statement(statement)).strip("-")[:40] or "skill"
+    return canonical, digest, f"{readable}-{digest}"
+
+
+def _legacy_auto_skill_claim_matches(text: str, canonical: str) -> bool:
+    """Prove an old slug-only file was written for this exact normalized statement.
+
+    Pre-digest files did not persist a claim id.  Their writer did persist the statement as the
+    leading Markdown heading; reuse historical fingerprints only when that complete heading block
+    normalizes exactly. Ambiguous/malformed legacy content starts a new candidate instead.
+    """
+    match = re.match(r"\A---\r?\n.*?\r?\n---\r?\n?(.*)\Z", text, re.DOTALL)
+    if not match:
+        return False
+    heading = re.split(r"\r?\n\r?\n", match.group(1), maxsplit=1)[0].strip()
+    return (heading.startswith("# ")
+            and _canonical_auto_skill_claim(heading[2:]) == canonical)
+
+
+def _stored_skill_fingerprints(raw: str) -> list[list[str]]:
+    """Parse the bounded shape written in auto-skill frontmatter, failing closed on drift.
+
+    This is trust-bearing lifecycle evidence, not generic JSON.  Accepting a dict/string here makes
+    iteration look superficially valid and can falsely satisfy the cross-task promotion test.
+    Six histories is the writer's existing retention cap; the generous inner bounds prevent a
+    hand-edited file from turning this best-effort path into unbounded work without rejecting normal
+    task fingerprints.
+    """
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(value, list) or len(value) > 6:
+        return []
+    for fingerprint in value:
+        if (not isinstance(fingerprint, list) or len(fingerprint) > 512
+                or any(not isinstance(token, str) or len(token) > 1024
+                       for token in fingerprint)):
+            return []
+    return value
 
 
 def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                      fingerprint: list[str], task_id: str) -> Optional[Path]:
     """Draft/refresh an auto-distilled skill. New claim -> status: candidate. If a candidate
-    with the same slug already exists from a DIFFERENT task fingerprint (Jaccard < 0.6), the
-    technique generalized -> status: promoted. Never raises (best-effort memory)."""
+    with the same full normalized-claim identity exists from a DIFFERENT task fingerprint
+    (Jaccard < 0.6), the technique generalized -> status: promoted. Never raises (best-effort
+    memory). A readable prefix is not lifecycle identity: the filename/name also carry the full
+    SHA-256 so two long claims with the same prefix cannot share promotion evidence."""
     try:
         d = Path(skills_dir)
         d.mkdir(parents=True, exist_ok=True)
-        p = d / f"auto-{skill_slug(statement)}.md"
+        canonical_claim, claim_digest, storage_id = _auto_skill_identity(statement)
+        digest_path = d / f"auto-{storage_id}.md"
+        legacy_path = d / f"auto-{skill_slug(statement)}.md"
+        from contextlib import ExitStack
         from looplab.events.eventstore import _interprocess_lock
-        # Under the same required interprocess lock every other mutable cross-run store here uses
-        # (JsonlCaseLibrary.add, ConceptCapsuleStore.add, the governance ledgers). This is a
-        # read-modify-write over a file in a SHARED memory dir, so two runs distilling the same slug
-        # at once lost each other's fingerprint to the last atomic write — dropping evidence AND
-        # perturbing the accumulated list the candidate -> promoted transition is decided from. The
-        # read happens INSIDE the lock so a stale read cannot overwrite a concurrent write.
+        # One directory-level identity lock makes legacy-path selection and the read-modify-write
+        # atomic together. Per-file locks cannot protect two different full claims that alias the
+        # same old 48-character slug while one process is deciding whether the legacy evidence is
+        # reusable. Auto-skill writes happen only at reflection/finalize, so this bounded
+        # serialization does not sit on the experiment hot path.
         # A filesystem that cannot provide the lock leaves the draft unwritten (the outer except
         # returns None): skipping one best-effort skill beats clobbering another run's evidence.
-        with _interprocess_lock(Path(str(p) + ".lock"), required=True):
+        with ExitStack() as locks:
+            locks.enter_context(_interprocess_lock(d / ".auto-skills.lock", required=True))
+            p = digest_path
+            if not digest_path.exists() and legacy_path.exists():
+                legacy_text = legacy_path.read_text(encoding="utf-8")
+                from looplab.tools.skills import parse_skill_frontmatter
+                legacy_metadata = parse_skill_frontmatter(legacy_text)
+                if (legacy_metadata.get("provenance", "").strip().lower() == "auto"
+                        and (legacy_metadata.get("claim_sha256") == claim_digest
+                             or (not legacy_metadata.get("claim_sha256")
+                                 and _legacy_auto_skill_claim_matches(
+                                     legacy_text, canonical_claim)))):
+                    # Keep the old path so promoted/candidate history remains continuous. The
+                    # rewritten frontmatter gains the exact digest and collision-resistant tool
+                    # name; a different same-prefix claim cannot enter this branch.
+                    p = legacy_path
+            # Retain the historical per-identity lock as an observable concurrency contract for
+            # existing cooperating writers, nested after the directory identity-selection lock.
+            locks.enter_context(_interprocess_lock(Path(str(p) + ".lock"), required=True))
             status, fps = "candidate", [fingerprint]
             if p.exists():
                 head = p.read_text(encoding="utf-8")
-                m = re.search(r"fingerprints:\s*(\[.*?\])\s*$", head, re.M | re.S)
-                if m:
-                    try:
-                        fps = json.loads(m.group(1))
-                    except json.JSONDecodeError:
-                        fps = []
-                prior_status = "promoted" if "status: promoted" in head else "candidate"
-                different = any(fingerprint_similarity(fingerprint, old) < 0.6 for old in fps if old)
-                status = "promoted" if (different or prior_status == "promoted") else "candidate"
-                if fingerprint not in fps:
-                    fps = (fps + [fingerprint])[-6:]
+                # Read lifecycle state only from the real leading frontmatter.  The skill body is
+                # model-authored Markdown and may legitimately discuss a line such as
+                # ``status: promoted``; treating that substring as authority promoted a one-task
+                # candidate on its next same-task refresh.  Share the reader's fence parser so the
+                # writer and production visibility gate agree on the trust boundary.
+                from looplab.tools.skills import parse_skill_frontmatter
+                metadata = parse_skill_frontmatter(head)
+                exact_claim = (
+                    metadata.get("provenance", "").strip().lower() == "auto"
+                    and (metadata.get("claim_sha256") == claim_digest
+                         or (p == legacy_path and not metadata.get("claim_sha256")
+                             and _legacy_auto_skill_claim_matches(head, canonical_claim)))
+                )
+                if exact_claim:
+                    raw_fingerprints = metadata.get("fingerprints")
+                    if raw_fingerprints is not None:
+                        fps = _stored_skill_fingerprints(raw_fingerprints)
+                    prior_status = metadata.get("status", "").strip().lower()
+                    different = any(
+                        fingerprint_similarity(fingerprint, old) < 0.6 for old in fps if old)
+                    status = (
+                        "promoted" if different or prior_status == "promoted" else "candidate")
+                    if fingerprint not in fps:
+                        fps = (fps + [fingerprint])[-6:]
+            source_task = json.dumps(str(task_id), ensure_ascii=False)
+            # json.dumps escapes CR/LF and ASCII controls, but deliberately leaves these three
+            # Unicode line separators intact under ensure_ascii=False.  Escape them explicitly so
+            # the audit scalar is one logical AND physical line for non-Python frontmatter readers.
+            for separator, escape in (("\u0085", r"\u0085"), ("\u2028", r"\u2028"),
+                                      ("\u2029", r"\u2029")):
+                source_task = source_task.replace(separator, escape)
             text = ("---\n"
-                    f"name: auto-{skill_slug(statement)}\n"
+                    f"name: auto-{storage_id}\n"
                     f"description: {normalize_statement(statement)[:120]}\n"
                     "provenance: auto\n"
                     f"status: {status}\n"
-                    f"source_task: {task_id}\n"
+                    f"claim_sha256: {claim_digest}\n"
+                    # ``task_id`` is operator-authored.  A raw newline here could inject a later
+                    # ``status``/``provenance`` field into the trust-bearing frontmatter (whose
+                    # duplicate-key compatibility rule is last-one-wins).  JSON keeps it on one
+                    # physical line while retaining the full Unicode identifier for audit.
+                    f"source_task: {source_task}\n"
                     f"fingerprints: {json.dumps(fps)}\n"
                     "---\n\n"
                     f"# {statement.strip()}\n\n{body.strip()}\n")

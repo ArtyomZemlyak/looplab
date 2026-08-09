@@ -755,11 +755,14 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         # reflection must precede claim curation so this run's durable lessons are visible;
         # every steward still precedes llm_cost so its provider usage enters the terminal roll-up.
         if getattr(engine, "_cross_run_curation", False):
-            # Three INDEPENDENT stewards, so they get three failure boundaries. They used to share
-            # one: a concept-ledger exception skipped claim AND task-facet governance outright while
-            # the run still published complete, letting one subsystem silently disable the others'
-            # Part-IV/V outputs. Each now runs on its own and leaves a receipt, so "this task has no
-            # facets" can be told apart from "faceting never ran because curation raised first".
+            # The INDEPENDENT stewards each get their own failure boundary. Concept and claim curation
+            # are the baseline pair. Task faceting is a third, explicitly scheduled call because its
+            # proposal currently has no live behavior consumer; old/custom Engine shims lack the new
+            # attribute, so getattr(..., True) preserves their historical all-three treatment.
+            # These calls used to share one boundary: a concept-ledger exception skipped every later
+            # governance output while the run still published complete. Each scheduled steward now
+            # leaves a receipt, so "this task has no facets" can be told apart from "faceting never
+            # ran because curation raised first" when the facet steward is enabled.
             #
             # Deliberately NOT gated on `_finalize_step_done`: idempotency lives in the stores
             # (append-only aliases, per-task facets) and re-running a steward on resume IS the
@@ -778,13 +781,16 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
             try:
                 final = fold(engine.store.read_all())
             except Exception as exc:  # noqa: BLE001 - a fold failure disables every steward at once,
-                _steward_receipt(      # so it is recorded once rather than three times
+                _steward_receipt(      # so it is recorded once rather than once per scheduled steward
                     "stewards", outcome="unavailable", error=str(exc)[:300])
             if final is not None:
-                for step, steward in (
-                        ("concept_curation", engine._store_concept_curation),
-                        ("claim_curation", engine._store_claim_curation),  # ratify/reject/pin
-                        ("task_facets", engine._store_task_facets)):       # once per task
+                stewards = [
+                    ("concept_curation", engine._store_concept_curation),
+                    ("claim_curation", engine._store_claim_curation),  # ratify/reject/pin
+                ]
+                if getattr(engine, "_task_facets_finalize", True):
+                    stewards.append(("task_facets", engine._store_task_facets))  # once per task
+                for step, steward in stewards:
                     try:
                         outcome = steward(final)
                     except Exception as exc:  # noqa: BLE001 — steward failure must not prevent

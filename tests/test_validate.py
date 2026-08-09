@@ -88,10 +88,24 @@ class _FakeAgent:
 class _FakeFallback:
     def __init__(self):
         self.called = False
+        self.prompts = None
 
     def implement(self, idea: Idea) -> str:
         self.called = True
         return _GOOD
+
+
+def test_prompt_store_reaches_the_validation_fallback():
+    """The recovery leaf must receive the same operator prompt bundle as the external wrapper."""
+    agent = _FakeAgent([_SEED])
+    fallback = _FakeFallback()
+    dev = ValidatingDeveloper(agent, fallback=fallback, max_retries=0)
+    prompts = object()
+
+    dev.prompts = prompts
+
+    assert agent.prompts is prompts
+    assert fallback.prompts is prompts
 
 
 def test_validator_forwards_patch_and_multifile_from_inner():

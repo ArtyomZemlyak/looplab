@@ -41,7 +41,7 @@ def test_index_mentions_every_numbered_document():
     index = (DOCS / "00-INDEX.md").read_text(encoding="utf-8")
     numbered = sorted(path for path in DOCS.glob("[0-9][0-9]-*.md")
                       if path.name != "00-INDEX.md")
-    assert len(numbered) == 26, "the derived numbered-document inventory changed"
+    assert len(numbered) == 27, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
@@ -121,6 +121,7 @@ def test_current_user_docs_have_no_hidden_review_handoffs():
         DOCS / "22-agent-parallelism-2026-07-19.md",
         DOCS / "23-hypothesis-card-kanban-2026-07-20.md",
         DOCS / "24-ui-phase3-validation.md",
+        DOCS / "27-agent-system-mega-review-2026-08-09.md",
         *sorted((DOCS / "guide").glob("*.md")),
     ]
     stale = []
@@ -131,6 +132,19 @@ def test_current_user_docs_have_no_hidden_review_handoffs():
     assert not stale, f"hidden review handoff(s) remain in current docs: {stale}"
     maintained = "\n".join(path.read_text(encoding="utf-8-sig") for path in current)
     assert "looplab governance" not in maintained
+    stale_agent_copy = [
+        "fall back to the LLM developer",
+        "fall back to the in-house LLM Developer",
+        "one LLM identity",
+        "one identity across stages",
+        "from `--kind`/`--set` alone",
+        "boss plans + launches",
+        "boss launches a run",
+    ]
+    assert not [claim for claim in stale_agent_copy if claim in maintained]
+    assert "unified control facade" in maintained
+    assert "boss proposes → operator launches" in maintained
+    assert "`--set` only changes engine settings" in maintained
 
 
 def test_load_bearing_source_comments_match_current_identity_and_replay_contracts():
@@ -144,6 +158,12 @@ def test_load_bearing_source_comments_match_current_identity_and_replay_contract
         "the engine is the sole writer of events.jsonl",
         "Replay — the single source of truth",
         "Audit-only: the allow is recorded",
+        "back to the in-house LLM Developer",
+        "typically the in-house",
+        "fallback is LLM anyway",
+        "One identity, replay",
+        "--kind/--set",
+        "boss launches a run",
     ]
     assert not [claim for claim in stale_claims if claim in source]
     novelty = (ROOT / "looplab/engine/novelty.py").read_text(encoding="utf-8")

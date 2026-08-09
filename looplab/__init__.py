@@ -217,6 +217,7 @@ _LAYOUT = {
     # keep the bounded Card DTO boundary canonical; an unregistered serve module fails
     # the package-layout audit and also breaks the supported ``looplab.public_cards`` legacy alias.
     "public_cards": "serve",
+    "reachability": "agents",  # task-aware inventory of reachable LLM consumers at run start
     "readmodel": "events",
     "receipts": "core",         # the one bounded-receipt-count rule (doc 25 EM-12)
     "redact": "core",

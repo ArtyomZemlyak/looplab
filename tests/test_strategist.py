@@ -518,6 +518,87 @@ def test_strategist_records_and_applies(tmp_path):
     assert len(decisions) == 1   # act-only-on-change: no duplicate re-records
 
 
+def test_refused_developer_switch_records_actual_backend_and_resume_does_not_retry(tmp_path):
+    """A refused live swap is an applied-treatment receipt, not merely a model intention.
+
+    Before the fix the event recorded ``llm`` while the live engine kept ``opencode``. A resume
+    could then retry that event under changed credentials and silently switch the same run's
+    Developer halfway through its history.
+    """
+    run_dir = tmp_path / "developer-refusal"
+    attempts: list[str] = []
+
+    def refuse(name):
+        attempts.append(name)
+        raise RuntimeError("dedicated credential is unavailable")
+
+    eng = _engine(
+        run_dir, developer_factory=refuse, developer_name="opencode",
+    )
+    original = eng.developer
+    eng.store.append("run_started", {
+        "run_id": run_dir.name, "task_id": "toy", "goal": "g", "direction": "min",
+    })
+    eng._record_strategy(
+        {"developer": "llm", "source": "operator", "rationale": "use in-process"},
+        fold(eng.store.read_all()),
+    )
+
+    state = fold(eng.store.read_all())
+    event = next(e for e in eng.store.read_all() if e.type == "strategy_decision")
+    assert attempts == ["llm"]
+    assert eng.developer is original and eng._developer_name == "opencode"
+    assert state.active_strategy["developer"] == "opencode"
+    assert event.data["developer_application"] == {
+        "status": "refused",
+        "requested_backend": "llm",
+        "applied_backend": "opencode",
+        "reason_code": "RuntimeError",
+        "reason": "dedicated credential is unavailable",
+    }
+    assert state.strategy_history[-1]["developer_application"] \
+        == event.data["developer_application"]
+
+    retried: list[str] = []
+    resumed = _engine(
+        run_dir,
+        developer_factory=lambda name: retried.append(name) or object(),
+        developer_name="opencode",
+    )
+    resumed_original = resumed.developer
+    resumed._reentry_repin()
+    assert retried == []
+    assert resumed.developer is resumed_original
+    assert resumed._developer_name == state.active_strategy["developer"] == "opencode"
+
+
+def test_resume_refuses_when_a_recorded_developer_backend_cannot_be_rebuilt(tmp_path):
+    """A successfully recorded backend is mandatory treatment on re-entry, never a fallback hint."""
+    import pytest
+
+    run_dir = tmp_path / "developer-reentry-refusal"
+    eng = _engine(
+        run_dir, developer_factory=lambda _name: object(), developer_name="opencode",
+    )
+    eng.store.append("run_started", {
+        "run_id": run_dir.name, "task_id": "toy", "goal": "g", "direction": "min",
+    })
+    eng._record_strategy(
+        {"developer": "llm", "source": "operator", "rationale": "use in-process"},
+        fold(eng.store.read_all()),
+    )
+    assert fold(eng.store.read_all()).active_strategy["developer"] == "llm"
+
+    resumed = _engine(
+        run_dir,
+        developer_factory=lambda _name: (_ for _ in ()).throw(
+            RuntimeError("credential revoked before resume")),
+        developer_name="opencode",
+    )
+    with pytest.raises(RuntimeError, match="credential revoked before resume"):
+        resumed._reentry_repin()
+
+
 class _TwoPhaseStrategist:
     """consult #1 switches policy->mcts; every later consult emits a PARTIAL decision that nudges
     only novelty_stance (no policy). The accumulated live machinery (policy=mcts) must survive in

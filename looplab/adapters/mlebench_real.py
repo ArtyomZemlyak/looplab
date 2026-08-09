@@ -226,6 +226,9 @@ class MLEBenchRealTask(BaseModel):
                               bounds={"p": (1e-3, float(self.max_param))}, parser=parser),
                 LLMDeveloper(client, brief=brief))
 
+    def external_fallback_uses_llm(self) -> bool:
+        return True  # output validation retains the submission-writing LLMDeveloper
+
 
 # --------------------------------------------------------------------------------------------------
 # Offline roles: a baseline per competition family, pure numpy + stdlib, writing submission.csv.

@@ -352,3 +352,6 @@ class DatasetTask(BaseModel):
                 "Leave params empty; the Developer writes the code from your rationale.")
         return (LLMResearcher(client, space_hint=hint, bounds=None, parser=parser),
                 LLMDeveloper(client, brief=self._brief(runtime_caps)))
+
+    def external_fallback_uses_llm(self) -> bool:
+        return True  # output validation retains the script-writing LLMDeveloper

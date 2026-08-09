@@ -6,9 +6,9 @@ pieces inside an allow-listed surface, your own command scores it). This page co
 and the JSON behind each.
 
 The fastest way to set any of this up is **[Genesis](#preferred-let-genesis-author-it)** — the
-"New run" chat in the Web UI. It authors the whole spec for you (and, for a repo, *reads your code
-first*), so reach for it before hand-writing JSON. Every case below shows both the Genesis path and
-the equivalent task file.
+"New run" chat in the Web UI. It authors the whole spec and, for a repo, has read-only scout tools
+plus instructions to inspect your code; tool use is model-directed, so verify the card. Every case
+below shows both the Genesis path and the equivalent task file.
 
 > **New composable schema.** A task no longer needs a `kind` — describe what you HAVE (`repo`,
 > `dataset`, `cmd`, `kaggle`, `benchmark`) and the engine infers the rest (see [Tasks → the composable schema](tasks.md#the-composable-schema-recommended)). The legacy `kind`/`editable_path`/`eval`/`onboard`/`metric.kind`
@@ -65,15 +65,23 @@ the equivalent task file.
 
 ## Preferred: let Genesis author it
 
-**Genesis** is the main-menu **"New run"** chat in the [Web UI](ui.md). You describe the goal in
-plain text; it returns an **editable run card** — a name, the task spec, the key settings (model,
+The main-menu **"New run"** chat in the [Web UI](ui.md) is the owner Assistant's planning surface.
+You describe the goal in plain text; its `propose_run` tool returns an **editable run card** — a name,
+the task spec, the key settings (model,
 node budget, seeds, policy), and, for a repo, an **adaptation checklist** of what to do to make the
-project LoopLab-ready. Nothing launches until you confirm, so refining is free.
+project LoopLab-ready. Nothing launches until you confirm; refinement may still consume Assistant
+model calls even though it has not started a scientific run.
 
-For a repo it is a real **agent**: before authoring anything it *reads your repo on disk* through
-read-only scout tools (`list_dir` / `read_file` / `find_files`) — your README, the entry/eval
-script, `requirements.txt`, results files — so the run command, metric key, and edit surface are
-**grounded in your actual code**, not guessed.
+The CLI keeps the historical **Genesis** task author, and the TUI calls the server's `/api/genesis`
+planner. These three surfaces share task-adapter validation and backend-default authority, but they
+do not share one planner/schema. Web additionally submits a reviewed `/api/start/preflight` token;
+TUI posts to `/api/start`, whose server validates before spawn but issues no reviewed receipt; CLI
+validates directly. Refine a proposal in the surface that created it.
+
+For a repo it is a real **agent** with read-only scout tools (`list_dir` / `read_file` /
+`find_files`) and is instructed to inspect your README, entry/eval script, requirements and result
+files before authoring. Tool use is model-directed rather than a hard gate, so verify the editable
+card's command, metric key and edit surface before launch.
 
 ### What Genesis writes vs what the run writes
 
@@ -81,9 +89,9 @@ Genesis writes the **plan, not the experiment code**. Keep these two roles separ
 
 - **Genesis plays the *operator*** (you, automated for the planning step): it authors the run **spec**
   — the `eval.command`, `edit_surface`, the metric reader, settings, and the adaptation checklist. So
-  yes, *it writes the commands itself*, the way you would. It will **not invent paths/commands you
-  didn't give** (a grounding rule) — for an empty repo it proposes a sensible convention or asks one
-  clarifying question.
+  yes, *it writes the commands itself*, the way you would. It is instructed not to invent filesystem
+  paths; commands remain proposals, so verify them. For an empty repo it may propose a convention or
+  ask a clarifying question.
 - **The run's agent writes the *code***. The actual `train.py` / `run.py` / `config.yaml` are written
   by the Developer **during the run**, inside `edit_surface`.
 
@@ -107,13 +115,14 @@ sets `onboard: true` (the agent proposes a metric adapter, you ratify it) or bak
 2. Describe the goal and, for your own project, **give the repo path** and say **how it's run and how
    it's scored** — e.g. *"Optimize the model in `~/proj/ranker`; run it with `python train.py`, it
    prints a final line `{"metric": <ndcg>}`, maximize that."*
-3. Genesis inspects the repo and fills the card: `editable_path`, `edit_surface`, `eval.command`,
-   the metric reader, `setup`, plus the checklist. **Tweak any field**, then **Launch**.
-4. To refine, keep chatting — it edits the same draft in place.
+3. Review/edit the surfaced card fields, choose **Validate**, inspect the effective preview and
+   warnings, then choose **Start** when the validated card is enabled.
+4. Edit surfaced fields directly on the card. For a change the card does not surface, ask the
+   Assistant for a revised proposal; it appears as a new card rather than mutating the old one.
 
 **Tell it the specifics it can't guess** — copy paths/commands/metric keys verbatim in your message;
-Genesis copies them rather than inventing (it will never fabricate a path you didn't give). State
-these explicitly and it handles the rest:
+the Assistant is instructed to preserve them rather than invent filesystem paths. State these
+explicitly, then verify the proposal:
 
 - **Where your data lives** — say *"the data is at `~/proj/data`, mount it as `dataset`"* and Genesis
   authors the `data` mount; omit it and there's nothing to mount. See
@@ -188,8 +197,8 @@ scored*, separate from *what may be edited* — so if the agent must not change 
 }
 ```
 
-*Genesis:* point it at the repo and state the run/score command — it authors exactly this and grounds
-the fields in your README/entry script.
+*Genesis:* point it at the repo and state the run/score command. It has scout tools and instructions
+to ground the proposal in your README/entry script; verify the editable card before validation.
 
 ### I have a test but no train → the agent writes it
 
@@ -338,7 +347,9 @@ of them:
   still appends `key=value` Hydra-style tokens.)
 - **`profiles`** — named override sets the engine picks per phase, e.g. a cheap `smoke` during search
   and a `full` on confirmation. Each profile's `overrides` are appended to `command` (and the profile
-  timeout applies even in stage mode).
+  timeout applies even in stage mode). Profile names must be non-empty, and each profile may contain
+  only `overrides` (a list of argv strings) and `timeout` (a finite number greater than zero). The
+  effective runtime timeout is capped at 24 hours.
 
 So if the **agent's train stage and the scorer `cmd` need different arguments**, pick the pattern that fits:
 

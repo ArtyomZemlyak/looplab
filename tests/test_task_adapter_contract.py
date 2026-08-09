@@ -27,6 +27,9 @@ _CONSUMER_FILES = [
     # The agent/role composition root split out of `adapters/tasks.py` (doc 25 RA-01) and took the
     # `params` probe with it; the hooks it consumes are the same hooks, in a new file.
     _PKG / "agents" / "factory.py",
+    # Pure startup plan: decides whether an external Developer's validation fallback is an
+    # in-process LLM consumer before the factory is allowed to build either roles or clients.
+    _PKG / "agents" / "reachability.py",
     _PKG / "adapters" / "repo_task.py",
     _PKG / "adapters" / "repo_developer.py",
     _PKG / "adapters" / "repo_write_tools.py",
@@ -155,3 +158,43 @@ def test_every_snapshot_reload_is_grandfathered():
         f"snapshot reload(s) at {ungrandfathered} load a run's own task WITHOUT existing_run=True — "
         "a validation rule added since that run started will refuse it, and the run can then "
         "neither resume nor finish.")
+
+
+def test_fresh_load_preserves_single_argument_validator_injection(tmp_path, monkeypatch):
+    """Fresh materialization reloads keep LaunchPreflight's historical validator DI seam.
+
+    `/api/start` deliberately reloads its canonical `task.input.json` before the credential gate,
+    so the parent authorizes the exact task the child will consume.  A fresh load is still the
+    strict path and must not force the newer snapshot-only keyword onto injected validators.
+    """
+    from looplab.adapters import tasks
+
+    task_file = tmp_path / "task.input.json"
+    task_file.write_text('{"task":{"kind":"injected"}}', encoding="utf-8")
+    seen = []
+
+    def injected_validator(task):
+        seen.append(task)
+        return task
+
+    monkeypatch.setattr(tasks, "validate_task", injected_validator)
+
+    assert tasks.load_task(task_file) == {"kind": "injected"}
+    assert seen == [{"kind": "injected"}]
+
+
+def test_snapshot_load_still_forwards_existing_run_context(tmp_path, monkeypatch):
+    from looplab.adapters import tasks
+
+    task_file = tmp_path / "task.snapshot.json"
+    task_file.write_text('{"kind":"injected"}', encoding="utf-8")
+    seen = []
+
+    def injected_validator(task, *, existing_run=False):
+        seen.append((task, existing_run))
+        return task
+
+    monkeypatch.setattr(tasks, "validate_task", injected_validator)
+
+    assert tasks.load_task(task_file, existing_run=True) == {"kind": "injected"}
+    assert seen == [({"kind": "injected"}, True)]

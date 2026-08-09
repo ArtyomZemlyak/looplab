@@ -26,7 +26,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   removed. The Python side of this tripwire moved with it and this one did not, so the fixture
   //   (which reads the REAL `looplab/serve/settings_ui_schema.json`) reported 163 against a literal
   //   still pinned at 162 — see `tests/test_settings_ui_schema.py`, which pins the same growth.
-  assert.equal(Object.keys(schema.fieldByKey).length, 163)
+  //   163 -> 164 (2026-08-09): `task_facets_finalize` split the paid-but-unconsumed facet steward
+  //   from the useful concept/claim curation umbrella. Fresh configurations now keep it off unless
+  //   explicitly requested; the paired Python key-set guard proves this is the only added row.
+  assert.equal(Object.keys(schema.fieldByKey).length, 164)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')
   assert.equal(schema.fieldByKey.speculation_depth.minimum, 0)
   assert.equal(schema.fieldByKey.speculation_depth.maximum, 64)

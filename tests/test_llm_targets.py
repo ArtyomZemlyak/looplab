@@ -16,8 +16,8 @@ from _source_scan import iter_sources
 import pytest
 
 from looplab.core.config import Settings
-from looplab.core.llm import (LLM_ROLE_KEYS, LlmTarget, make_llm_client_for, resolve_llm_target,
-                              validate_bound_profiles)
+from looplab.core.llm import (AGENT_STAGE_KEYS, LLM_ROLE_KEYS, LlmTarget, make_llm_client_for,
+                              resolve_llm_target, validate_bound_profiles)
 
 ROOT = Path(__file__).resolve().parents[1]
 _PROFILES = {
@@ -251,8 +251,9 @@ def test_no_reader_resolves_a_role_the_registry_does_not_know():
     the registry — the first version filtered candidates through a literal set identical to
     LLM_ROLE_KEYS, so the subtraction was empty by construction and a new unregistered reader could
     never trip it."""
-    known_settings_roles = {"researcher", "developer", "strategist", "compressor", "embed",
-                            "propose", "implement", "repair", "strategy", "pilot"}
+    known_settings_roles = {
+        "researcher", "developer", "strategist", "compressor", "embed",
+    } | set(AGENT_STAGE_KEYS)
     assert known_settings_roles == set(LLM_ROLE_KEYS)      # the doc'd list and the registry agree
     # Any `role=` literal that names a Settings-ish role must be registered. Unrelated `role=` kwargs
     # elsewhere in the tree (tool providers, ARIA attributes) are excluded by the field-name test.

@@ -609,6 +609,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             wrap_up_only: bool = False) -> Engine:
     from looplab.core.llm import validate_bound_profiles
     from looplab.core.tracing import set_llm_capture
+    from looplab.agents.reachability import llm_consumer_plan
     from looplab.agents.preflight import (credential_free_wrap_up_settings,
                                           preflight_role_endpoints, wrap_up_credential_warning,
                                           wrap_up_endpoint_warning)
@@ -628,8 +629,12 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # warn, and swap in a credential-free copy for the roles: an unusable credential fails at client
     # CONSTRUCTION, not at request time, so the warning alone would just move the same `LLMError` a
     # few lines down into `make_roles` (measured: `finalize` still exited 1 with zero artifacts).
+    _credential_plan = llm_consumer_plan(task, settings)
     if wrap_up_only:
-        _credential_warning = wrap_up_credential_warning(settings)
+        _credential_warning = wrap_up_credential_warning(
+            settings, consumer_roles=_credential_plan.roles,
+            external_fallback_roles=_credential_plan.external_fallback_roles,
+            trusted_in_process_roles=_credential_plan.trusted_in_process_roles)
         if _credential_warning:
             typer.echo(_credential_warning, err=True)
             _degradations.append(_credential_warning)
@@ -643,7 +648,10 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             # never wrap-up-only.
             settings = credential_free_wrap_up_settings(settings)
     else:
-        validate_bound_profiles(settings)
+        validate_bound_profiles(
+            settings, consumer_roles=_credential_plan.roles,
+            external_fallback_roles=_credential_plan.external_fallback_roles,
+            trusted_in_process_roles=_credential_plan.trusted_in_process_roles)
     # The calibrated lane is the toy benchmark and its replays ONLY. A receipt supplied alongside a
     # real Dataset/Repo/Command workload used to drag the whole run into the offline measurement
     # profile (backend="toy", every optional subsystem off) — a run that could not do the operator's
@@ -699,14 +707,16 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # handoff wait — a wait whose whole purpose is to let the previous owner finish the wrap-up,
     # i.e. to produce exactly the transition that invalidates it — and then lifted on a re-fold
     # taken after. Both now happen under the singleton lock, from one fold (`cli/run_cmds.py`).
+    _endpoint_plan = llm_consumer_plan(task, settings)
     if not wrap_up_only:
-        preflight_role_endpoints(settings)
+        preflight_role_endpoints(settings, consumer_roles=_endpoint_plan.roles)
     elif not _degradations:
         # `not _degradations`: the credential gate has already answered "this wrap-up has no model".
         # A probe now would necessarily run credential-free (that is what the roles below will use),
         # so it would measure a configuration this run never had and could only repeat the one
         # warning the operator has already been given.
-        _endpoint_warning = wrap_up_endpoint_warning(settings)
+        _endpoint_warning = wrap_up_endpoint_warning(
+            settings, consumer_roles=_endpoint_plan.roles)
         if _endpoint_warning:
             typer.echo(_endpoint_warning, err=True)
             _degradations.append(_endpoint_warning)
@@ -768,9 +778,10 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     from looplab.adapters.tasks import make_developer_factory
     from looplab.core.llm import make_llm_client_for
     if _unified:
-        # The unified agent IS the strategist: its `.decide()` delegates to the strategy-stage
-        # backend it built internally (None when strategist_backend="off"). One identity, replay
-        # path unchanged (the engine still records/replays `strategy_decision`).
+        # The unified control facade IS the strategist handle: its `.decide()` delegates to the
+        # strategy-stage backend it built internally (None when strategist_backend="off"). It is
+        # one engine-facing object over stage-local clients/contexts; replay stays unchanged (the
+        # engine still records/replays `strategy_decision`).
         strategist = researcher
     else:
         # Resolved for the `strategist` role: until `strategist_model`/`strategist_base_url`
@@ -797,7 +808,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # Deep-Research is researcher-flavored (breadth-seeking ideation), so it honors researcher_temperature.
     deep_researcher = (make_deep_researcher(
         settings, client=make_llm_client_for(
-            settings, role="researcher", factory=make_llm_client), task=task)
+            settings, role="researcher", factory=make_llm_client), task=task, run_dir=run_dir)
                        if settings.backend == "llm" else None)
     # Agent-authored run report (Workstream A): reachable only with an LLM backend; reuses the run's
     # LLM client. None in toy mode -> the UI shows the deterministic report only.
@@ -841,6 +852,8 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         deep_researcher=deep_researcher,
         report_writer=report_writer,
         developer_factory=dev_factory,
+        developer_name=(getattr(dev_factory, "initial_backend", "default")
+                        if dev_factory is not None else "default"),
         # a fresh wired pair per concurrent build prevents mutable role state from being
         # shared when the settled build width is >1 (canonical llm_parallel; legacy parallel_build).
         # This is LLM/build isolation, not proof of the later evaluation's CPU/GPU allocation.

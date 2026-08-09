@@ -247,7 +247,8 @@ export const CONTROL = {
   // treatment (never legacy aliases).
   // {policy?, policy_params?, fidelity?, eval_parallel?, llm_parallel?, llm_lane_limits?, card_scoring?}.
   setStrategy: (rid, strategy) => runCommand(rid, 'set_strategy', { strategy }),
-  // P2: ask the engine to run the Deep-Research stage now (read all results + the web, write a memo).
+  // P2: ask the engine to run Deep Research now (read its disclosed bounded result sample + the web,
+  // then write a memo; the compact evidence brief never claims omitted middle results were read).
   deepResearch: (rid) => runCommand(rid, 'deep_research', {}),
   // P1: register an open hypothesis on the board (a question the search should resolve), or drop one.
   addHypothesis: (rid, statement) => runCommand(rid, 'hypothesis_added', { statement, source: 'human' }),

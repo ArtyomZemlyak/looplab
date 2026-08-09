@@ -181,6 +181,13 @@ def _run_tools_for(state):
     return readonly_run_tools(state)
 
 
+def _prompt_store_for(settings):
+    """The configured hot-reloadable prompt store, or ``None`` for shipped defaults."""
+    from looplab.core.prompts import PromptStore
+    prompt_dir = getattr(settings, "prompt_dir", None)
+    return PromptStore(prompt_dir) if prompt_dir else None
+
+
 def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None, run_dir=None):
     """Shared PART IV D5 build — AGENTIC by default (the LLM agent grows the graph, tags, derives the
     per-task importance; `build_concept_map`), the deterministic alias heuristic only as the `--offline`
@@ -215,7 +222,8 @@ def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None, ru
                     typer.echo(f"(asset-brief grounding skipped: {e})")
             cmap = build_concept_map(state, task_goal=getattr(state, "goal", "") or "", client=client,
                                      tools=_run_tools_for(state), seed_graph=seed, asset_brief=brief,
-                                     parser=settings.llm_parser)
+                                     parser=settings.llm_parser,
+                                     prompts=_prompt_store_for(settings))
             cmap["brief"] = brief
             return cmap
     graph = seed or skeleton_for(resolved_type)
@@ -363,7 +371,8 @@ def concept_coverage(
             typer.echo(f"(asset-brief grounding skipped: {e})")
     cmap = build_concept_map(state, task_goal=state.goal or "", client=client,
                              tools=_run_tools_for(state), seed_graph=seed, asset_brief=brief_text,
-                             parser=settings.llm_parser, max_workers=jobs)
+                             parser=settings.llm_parser, max_workers=jobs,
+                             prompts=_prompt_store_for(settings))
     typer.echo(concept_report(state, cmap["graph"], cmap["tags"]))
     typer.echo(f"\n  (built by the LLM agent — mode={cmap['mode']}, "
                f"{len(cmap['graph'].concepts())} concepts grown)")

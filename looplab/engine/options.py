@@ -187,6 +187,7 @@ class EngineOptions:
     cross_run_advisory: bool = False     # PART IV CR Step 5: fold the cross-run context pack into the prompt
     cross_run_structured_claims: bool = False  # PART IV CR §21.20.13: scope+polarity-safe structured claim key
     cross_run_curation: bool = False     # PART IV §22.4: agentic taxonomy steward proposes merge/split/purge
+    task_facets_finalize: bool = False   # opt-in paid facet steward; no live behavior consumer yet
     cross_run_curation_auto: bool = False  # deprecated/inert: old snapshots validate; proposals never auto-apply
     concept_tidy: bool = False           # PART IV §22.4: RATIFY the steward's proposed merges at finalize
     cross_run_read_tools: bool = False   # PART V §22: reasoning roles get the cross_run_* READ tools; the engine

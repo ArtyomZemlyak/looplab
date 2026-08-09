@@ -107,6 +107,28 @@ def test_legacy_snapshot_migration_is_copy_only_and_preserves_historical_effects
     assert settings.eval_parallel is None and settings.llm_parallel is None
 
 
+def test_task_facet_finalize_snapshot_default_preserves_the_recorded_treatment():
+    """Missing means the snapshot predates the separate facet scheduling switch.
+
+    At that time ``cross_run_curation=True`` always scheduled all three stewards, so both a
+    versioned snapshot from that period and a pre-versioning one must resume with faceting enabled.
+    A newly written explicit false is treatment evidence and must never be overwritten.
+    """
+    current = Settings(
+        cross_run_curation=True,
+        task_facets_finalize=False,
+    ).masked_snapshot()
+    assert settings_from_snapshot(current).task_facets_finalize is False
+
+    missing = dict(current)
+    missing.pop("task_facets_finalize")
+    assert settings_from_snapshot(missing).task_facets_finalize is True
+
+    missing.pop("config_snapshot_schema")
+    assert settings_from_snapshot(missing).task_facets_finalize is True
+    assert LEGACY_CONFIG_SNAPSHOT_DEFAULTS["task_facets_finalize"] is True
+
+
 def test_canonicalize_parallelism_source_keeps_broker_optin_off_by_default():
     """`max_parallel`/`eval_parallel` are true aliases and always promote. `parallel_build`/`llm_parallel`
     are NOT — a positive `llm_parallel` also flips on the shared broker — so a config/startup load must
@@ -279,6 +301,27 @@ def test_a_snapshot_from_a_newer_build_is_refused_rather_than_silently_downgrade
     for bad in ("1", -1, True, 1.5):
         with pytest.raises(ConfigSnapshotVersionError, match="malformed"):
             settings_from_snapshot({**snap, CONFIG_SNAPSHOT_SCHEMA_KEY: bad})
+
+
+def test_snapshot_v2_pins_the_task_facet_paid_treatment_and_v1_keeps_history():
+    """The v2 bump prevents an older binary silently re-enabling the default-off paid call."""
+    from looplab.core.config import (CONFIG_SNAPSHOT_SCHEMA, CONFIG_SNAPSHOT_SCHEMA_KEY,
+                                     Settings, settings_from_snapshot)
+
+    assert CONFIG_SNAPSHOT_SCHEMA == 2
+    current = Settings(cross_run_curation=True, task_facets_finalize=False).masked_snapshot()
+    assert current[CONFIG_SNAPSHOT_SCHEMA_KEY] == 2
+    assert current["task_facets_finalize"] is False
+    assert settings_from_snapshot(current).task_facets_finalize is False
+
+    # A genuine v1/pre-v2 run had no separate switch: under the curation umbrella it scheduled all
+    # three stewards. The current reader must preserve that recorded historical treatment.
+    v1 = dict(current)
+    v1[CONFIG_SNAPSHOT_SCHEMA_KEY] = 1
+    v1.pop("task_facets_finalize")
+    restored_v1 = settings_from_snapshot(v1)
+    assert restored_v1.cross_run_curation is True
+    assert restored_v1.task_facets_finalize is True
 
 
 def test_a_pre_versioning_snapshot_still_resumes_unchanged():

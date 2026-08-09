@@ -3891,6 +3891,85 @@ def test_author_routes_are_bounded_and_name_restricted(tmp_path, monkeypatch):
     assert entry["truncated"] is True
 
 
+def test_skills_authoring_lists_nested_packages_read_only_and_rejects_nested_writes(
+        tmp_path, monkeypatch):
+    """Authoring reviews runtime-visible packages without turning relative ids into write paths."""
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (skills / "root.md").write_text("# writable root\n", encoding="utf-8")
+    package = skills / "package"
+    package.mkdir()
+    nested = package / "SKILL.md"
+    nested.write_text("# packaged\n", encoding="utf-8")
+    (package / "notes.md").write_text("not a package entry", encoding="utf-8")
+    deep = skills / "deep" / "child"
+    deep.mkdir(parents=True)
+    (deep / "SKILL.md").write_text("# deep package\n", encoding="utf-8")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("HOST SECRET", encoding="utf-8")
+    (skills / "escape").symlink_to(outside, target_is_directory=True)
+    linked = skills / "linked"
+    linked.mkdir()
+    (linked / "SKILL.md").symlink_to(outside / "SKILL.md")
+    (skills / "linked-root.md").symlink_to(outside / "SKILL.md")
+
+    monkeypatch.setenv("LOOPLAB_SKILLS_DIR", str(skills))
+    client = TestClient(make_app(tmp_path))
+    response = client.get("/api/skills")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["inventory_incomplete"] is False
+    assert payload["truncated_files"] == 0
+    by_name = {row["name"]: row for row in payload["files"]}
+    assert set(by_name) == {"root.md", "package/SKILL.md", "deep/child/SKILL.md"}
+    assert by_name["root.md"]["read_only"] is False
+    assert by_name["package/SKILL.md"]["read_only"] is True
+    assert by_name["deep/child/SKILL.md"]["read_only"] is True
+    assert all(row["revision"].startswith("sha256:") for row in by_name.values())
+    assert "HOST SECRET" not in response.text
+    assert "notes.md" not in by_name
+
+    # Both compatibility and receipt-backed writes remain basename-only. Percent-encoding cannot
+    # smuggle the display id through route decoding; regardless of whether the router answers 400
+    # or 404, no nested file is touched and no recovery identity is created for it.
+    before = nested.read_bytes()
+    nested_url = "/api/skills/package%2FSKILL.md"
+    assert client.put(nested_url, content=b"overwrite").status_code in (400, 404, 405)
+    operation_id = "12345678-1234-4234-9234-123456789abc"
+    operation = client.put(
+        f"{nested_url}/operations/{operation_id}",
+        json={
+            "text": "overwrite",
+            "expected_revision": by_name["package/SKILL.md"]["revision"],
+            "expected_target_root_id": payload["target_root_id"],
+        },
+    )
+    assert operation.status_code in (400, 404, 405)
+    assert nested.read_bytes() == before
+    assert client.put("/api/skills/root.md", content=b"# changed root\n").status_code == 200
+
+    # The recursive inventory is bounded independently of content reads. Known overflow is a lower
+    # bound; a separate incompleteness flag covers the case where a scan/depth cap makes the unknown
+    # suffix uncountable. Either signal prevents the UI treating absence as a proven deletion.
+    import looplab.serve.routers.misc as misc
+    original_max_files = misc._AUTHOR_MAX_FILES
+    monkeypatch.setattr(misc, "_AUTHOR_MAX_FILES", 2)
+    bounded = client.get("/api/skills").json()
+    assert len(bounded["files"]) == 2
+    assert bounded["truncated_files"] >= 1
+    assert bounded["inventory_incomplete"] is True
+    assert bounded["files"][0]["name"] == "root.md"  # flat writable inventory keeps priority
+
+    monkeypatch.setattr(misc, "_AUTHOR_MAX_FILES", original_max_files)
+    monkeypatch.setattr(misc, "_AUTHOR_SKILL_MAX_DEPTH", 0)
+    depth_capped = client.get("/api/skills").json()
+    assert [row["name"] for row in depth_capped["files"]] == ["root.md"]
+    assert depth_capped["truncated_files"] == 0
+    assert depth_capped["inventory_incomplete"] is True
+
+
 def test_cross_run_import_origin_names_the_source_attempt(tmp_path):
     """A cross-run import receipt must name the source ATTEMPT, not just `(run_id, node_id)`.
 
@@ -4117,16 +4196,17 @@ def test_authoring_writes_are_bounded_and_utf8_and_a_vanished_file_is_skipped(tm
     # (3) A file that vanishes between the glob and the open (the agent deleting its own note) must
     # skip that entry, not 500 the whole listing.
     (kdir / "ghost.md").write_text("gone soon", encoding="utf-8")
-    real_open = builtins.open
+    import looplab.serve.routers.misc as misc
+    real_safe_read = misc._read_author_file_safely
 
-    def vanishing_open(file, *args, **kwargs):
-        if str(file).endswith("ghost.md"):
-            raise FileNotFoundError(str(file))
-        return real_open(file, *args, **kwargs)
+    def vanishing_read(root, path):
+        if path.name == "ghost.md":
+            return None
+        return real_safe_read(root, path)
 
-    monkeypatch.setattr(builtins, "open", vanishing_open)
+    monkeypatch.setattr(misc, "_read_author_file_safely", vanishing_read)
     listing = client.get("/api/knowledge")
-    monkeypatch.setattr(builtins, "open", real_open)
+    monkeypatch.setattr(misc, "_read_author_file_safely", real_safe_read)
     assert listing.status_code == 200
     assert [f["name"] for f in listing.json()["files"]] == ["good.md"]
 

@@ -1281,10 +1281,17 @@ def build_router(srv) -> APIRouter:
                 terminal = terminals.get(job_identity)
                 if terminal is not None:
                     if not confirm_terminal_receipt(store.path):
-                        return _concept_lens_uncertain(
-                            base_frame, current_generation, job_identity,
-                            "The saved lens terminal is visible but its durable receipt is unconfirmed. "
-                            "Resume only with this same request identity.")
+                        return {
+                            **_concept_lens_uncertain(
+                                base_frame, current_generation, job_identity,
+                                "The saved lens terminal is visible but its durable receipt is "
+                                "unconfirmed. Resume only with this same request identity."),
+                            # The terminal remains non-authoritative (ok=False, ambiguous=True), but
+                            # its bounded event position is already visible in the exact ledger fold.
+                            # Preserve that receipt coordinate just as malformed-terminal replay does;
+                            # omitting it made the response shape depend on transient fsync contention.
+                            "seq": terminal.seq,
+                        }
                     return _concept_lens_terminal_response(
                         terminal, core, lens_pack, job_identity)
                 if unresolved:

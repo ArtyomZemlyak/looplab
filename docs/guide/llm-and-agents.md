@@ -70,7 +70,7 @@ What the check actually does (`looplab/agents/preflight.py`):
 | **Cost** | One four-token completion per **distinct** target, not one per role. The ordinary single-model run pays exactly one; roles that differ only in credential are still probed separately |
 | **Bounds** | A 60 s wall guard **per attempt** (headers + body), 2 retries through the client's own retry policy, and at most 15 s of waiting **between** attempts — so the whole gate is bounded, not just each request. A refused connection, bad DNS, 401, or a hard 403/404 is not retried at all, so the common failure is instant; the retries forgive a transient 429/5xx, and each wait is announced (below) |
 | **Shape** | The same probe (no stream, no cache, no reasoning) that the Web UI's `/api/llm/health` card issues, so a green card and a startable run mean the same thing |
-| **Skipped for** | `--backend toy` — bypassed **entirely**, no probe of any kind. Also the Developer roles when `--developer-backend` is external (those authenticate from the coding tool's own credential store), and any client supplied through the `make_llm_client` seam that has no `probe` method (a test double or a custom transport is not evidence of a failed endpoint) |
+| **Skipped for** | `--backend toy` — bypassed **entirely**, no probe of any kind. An external coding CLI authenticates from its own store and is never probed with a LoopLab key; however, when `validate_agent=true` and that task's validation fallback is an in-process LLM Developer, the fallback's exact `developer` or `implement`/`repair` targets **are** credential-checked and probed. Repo-baseline and deterministic-template fallbacks build no Developer client and add no probe. A merely potential custom/historical Strategy switch from the external CLI to the in-process Developer is not a startup consumer; if requested, its target is credential-checked and probed immediately before the replacement is built. A client supplied through the `make_llm_client` seam with no `probe` method is also skipped (a test double or custom transport is not evidence of a failed endpoint) |
 
 A failure lists **every** failing role/target, not just the first, so one restart can fix a
 multi-provider setup. Run `looplab smoke` first if you want the same answer without launching anything.
@@ -220,9 +220,11 @@ export LOOPLAB_DEVELOPER_MODEL=qwen3-coder:30b
 export LOOPLAB_DEVELOPER_BASE_URL=http://coder-host:8000/v1
 ```
 
-Blank values fall back to the shared `llm_model` / `llm_base_url`. With the **unified agent** (one
-identity across stages, on by default), use `agent_stage_models` / `agent_stage_base_urls` to
-override per stage — recognized keys are `propose`, `implement`, `repair`, `strategy`, `pilot`:
+Blank values fall back to the shared `llm_model` / `llm_base_url`. With the **unified control
+facade** (one engine-facing object over stage-specific clients and local contexts, on by default),
+use `agent_stage_models` / `agent_stage_base_urls` to override per stage — recognized keys are
+`propose`, `implement`, `repair`, `strategy`, `pilot`. This is not one shared cross-stage
+conversation identity:
 
 ```bash
 export LOOPLAB_AGENT_STAGE_MODELS='{"implement":"qwen3-coder:30b","repair":"qwen3-coder:30b"}'
@@ -278,12 +280,23 @@ this robust (all on by default):
   model registry on startup.
 - **Output validation** (`validate_agent`, `agent_max_retries`). Every agent output is checked
   (launched / not-timed-out / produced / modified-seed / parses / in-surface). On failure it
-  re-prompts the agent with the reason, then falls back to the in-house LLM Developer. Each node
-  logs an `agent_validated` event.
+  re-prompts the agent with the reason, then falls back to the task's original in-process Developer:
+  the LLM code writer for script-generating tasks, the unchanged baseline for repo tasks, or the
+  deterministic template for closed synthetic tasks. Only the reachable LLM fallback receives its
+  LoopLab-managed role target/key; the nested external CLI still gets a secret-scrubbed environment.
+  Each node logs an `agent_validated` event.
 - **Patch-gated, multi-file** (`agent_patch_gate`, `agent_surface`). The agent runs in a git
   worktree; its diff is gated by an edit-surface allow-list (default `*.py`, reject-not-strip).
   Accepted files become `Node.files` (files-as-truth, resumable) and are materialized into the eval
   workdir.
+
+A dedicated `developer` profile may therefore describe the external tool's model/remote endpoint,
+but an external-only role must omit `api_key_env`: promising a LoopLab-managed key is rejected because
+the secret-scrubbed CLI can never receive it. A trusted in-process validation fallback or active Repo
+onboarder may use that key. The shipped LLM Strategist schema and operator `set_strategy` surface do
+not expose Developer switching. A custom or historical split-mode Strategy can still request `llm`;
+LoopLab then validates and probes that in-process target lazily. If either check fails, the engine
+keeps the current external Developer. Unified mode never performs this live facade-breaking swap.
 
 | Setting | Default | Purpose |
 |---|---|---|
@@ -504,6 +517,13 @@ Give the agentic Researcher extra context and tools:
 | `literature_search` | An arXiv search tool (network-optional) |
 | `web_search` | Web search/fetch for the Deep-Research stage (network-optional) |
 
+When `memory_dir` is configured, the same skill tool also reads auto-distilled Markdown under
+`<memory_dir>/skills`. A new one-run `status: candidate` remains on disk for later cross-task
+promotion but is excluded from the production agent surface. Only `status: promoted` auto-skills
+are listed/loaded, and their bodies carry an `UNTRUSTED_MEMORY_AUTO_SKILL` provenance label. The
+library constructor's explicit `include_auto_candidates=True` seam is for review and tests; it is
+not a runtime setting. Hand-written and legacy skills keep their previous visibility and body.
+
 ### Prompt override keys (`prompt_dir`)
 
 Every built-in system prompt below can be replaced by dropping a `<key>.md` file into `prompt_dir`.
@@ -518,6 +538,7 @@ stripped). A missing file falls back to the built-in default.
 | `developer_repair_prefix` | Short prefix prepended to `developer_system` on repair calls |
 | `repo_developer_system_intro` | The in-house repo-editing Developer (`LLMRepoDeveloper`): the intro of its system prompt |
 | `repo_developer_system_body` | The in-house repo-editing Developer (`LLMRepoDeveloper`): the body of its system prompt |
+| `repo_onboarder_system` | The run-start, pre-search repo onboarding stage that authors a ratifiable `read_metric(workdir)` adapter |
 | `tool_researcher_system` | The tool-using Researcher — the default agentic Researcher |
 | `strategist_system` | The plain LLM Strategist (meta-control decisions) |
 | `tool_strategist_system` | The agent (tool-using) Strategist |
@@ -526,6 +547,7 @@ stripped). A missing file falls back to the built-in default.
 | `foresight_system` | The foresight ranker (predict-before-execute idea/hypothesis prioritization) |
 | `bestofn_judge_system` | The best-of-N judge (picks the best of N candidate implementations) |
 | `merge_system` | The hybrid-merge adjudicator (lesson & hypothesis-board consolidation); `$kind` and `$detail` vars |
+| `concept_consolidate_system` | The live concept-map and `concept-coverage` vocabulary consolidator (merges synonymous `axis/slug` ids without collapsing distinct techniques) |
 | `deep_research_system` | The Deep-Research stage agent |
 
 Migration note: a `researcher_system.md` override copied from the old full default should drop the

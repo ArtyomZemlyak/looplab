@@ -6,8 +6,8 @@ the built React app, and submits interactive controls through the server-owned d
 lifecycle. It never changes the engine in-process and is never imported by it (ADR-18).
 
 > **No browser? Use the terminal.** `looplab tui` is a chat-first **terminal control plane** over the
-> same server — a run dashboard, the "describe a goal → the boss launches it" genesis flow, and a
-> per-run boss chat that steers the live run. It auto-launches an API-only server when none is found,
+> same server — a run dashboard, the "describe a goal → boss proposes → operator launches" genesis
+> flow, and a per-run boss chat that steers the live run. It auto-launches an API-only server when none is found,
 > so `looplab tui` works on its own. See the [CLI reference](cli-reference.md#tui). It's the *control*
 > slice; come back to this web UI to explore the search DAG, traces and per-node detail.
 
@@ -91,20 +91,23 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   Reopening a finished run still
   streams (runs are self-describing via `task.snapshot.json`).
 - **Create a run by describing it** — the main-menu chat ("New run") turns a plain-text goal into a
-  proposed run spec: the boss invents a name, picks or authors the task, and sets the knobs (model,
+  proposed run spec: the owner Assistant invents a name, picks or authors the task, and sets the
+  knobs (model,
   node budget, seeds, policy). It also authors **repo runs** — point it at a repo to optimize and it
   fills the repo path, the run/eval command, the metric key, and the edit surface, plus an
   **adaptation checklist** (how to make the repo LoopLab-ready: expose a JSON metric, pin deps, choose
-  the edit surface, protect the grader). For a repo it's a real **agent**: it first *reads your repo
-  on disk* (README, the eval/entry script, requirements, results files) through read-only scout tools
-  so the command, metric, and steps are grounded in your actual code — not guessed. When the task
+  the edit surface, protect the grader). For a repo it is a real **agent** with read-only scout tools
+  and instructions to inspect the README, eval/entry script, requirements and result files. Tool use
+  is model-directed rather than a hard gate, so verify the proposed command, metric and paths. When the task
   needs a code-writing agent (repo / dataset / Kaggle — the generative kinds), the **launch itself**
   defaults `backend=llm` — the rule lives in `/api/start`, the funnel every launch goes through
   (genesis cards, assistant-proposed runs, direct API calls), matching `looplab run --goal` — so a
-  UI-launched run never silently falls back to the offline toy developer; the genesis card shows the
-  inferred backend up front for review. The current card is not an inline editor: ask the Assistant
-  for a revised proposal before starting if a field is wrong. A backend set explicitly in Settings or
-  `LOOPLAB_BACKEND` still wins. See **[Generating train & test code](generating-code.md)** for the full
+  UI-launched run never silently falls back to the offline toy developer; after **Validate**, the
+  authoritative preview shows the effective backend before Start. The launch card is an inline editor for its surfaced run,
+  task, budget, seed, policy, and backend fields. Editing invalidates the prior validation receipt;
+  validate the revised card before Start is enabled. Ask the Assistant for a new proposal when the
+  needed field is not surfaced by the card. A backend set explicitly in Settings or `LOOPLAB_BACKEND`
+  still wins. See **[Generating train & test code](generating-code.md)** for the full
   Genesis flow
   and every "let the agent write the code" case (from-scratch, repo edit, test-without-train,
   onboarding) plus how to point at your data.
@@ -279,7 +282,7 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   Read/compare/merge/write is covered by its own equivalent local/interprocess locking contract (separate from
   global Settings), and a stale editor receives a
   structured `run_config_revision_conflict` instead of overwriting a newer snapshot.
-- **Settings page** — a versioned, server-owned editor catalogue with 163 of the 194 direct
+- **Settings page** — a versioned, server-owned editor catalogue with 164 of the 195 direct
   `Settings` fields in 10 groups (the live counts are
   `serve/settings_ui_schema.py::SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT` /
   `…_SETTINGS_FIELD_COUNT`; note the docs↔code parity test `tests/test_config_docs_sync.py` pins
@@ -381,7 +384,7 @@ is about. Each panel now says so in its own header; the full per-kind reference 
 
 | Surface | Holds | Written by | Editable there |
 |---|---|---|---|
-| **Lab → Authoring** | `prompts` (role system-prompt overrides), `skills` (techniques the Researcher can load), `knowledge` (free-form notes) | **you** — plus the assistant's `remember` tool for `knowledge` | yes, with a CAS/receipt protocol |
+| **Lab → Authoring** | `prompts` (role system-prompt overrides), `skills` (techniques the Researcher can load), `knowledge` (free-form notes) | **you** — plus the assistant's `remember` tool for `knowledge` | root Markdown uses a CAS/receipt editor; nested skill packages are review-only |
 | **Lab → Memory** | Lessons, Cases, Notes, and a read-only view of the same `knowledge` notes | the **runs**, at run end | no |
 | **Runs → Atlas preview** | Concepts and claims across every run in the shared memory dir | derived at read time from what the runs wrote, plus your governance decisions | no — governance is CLI/HTTP only |
 
@@ -394,9 +397,13 @@ Consequences that have repeatedly been reported as bugs and are not:
   directory, one set of files.
 - **An Atlas claim will not appear in the Memory panel under that name.** Claims are a projection over
   the same `lessons.jsonl` rows plus the deep-research memo claims, not a fourth store.
-- **The Authoring `skills` list shows root-level `*.md` only.** A packaged `<name>/SKILL.md` is
-  loadable by the Researcher and invisible in the editor, and run-distilled skills under
-  `<memory_dir>/skills/` appear in neither panel.
+- **Configured skill packages are visible without becoming writable paths.** Root `*.md` skills keep
+  the flat CAS/receipt editor. Nested `**/SKILL.md` packages appear under safe relative display names
+  and are read-only; bounded traversal skips symlinks and path escapes, and a capped scan is disclosed
+  separately from the known lower bound of omitted files. Save and recovery identities remain flat
+  basenames and cannot contain `/`. Run-distilled skills under `<memory_dir>/skills/` are a different,
+  memory-owned store outside configured Authoring: candidates are hidden from production agents until
+  cross-task promotion, and neither panel yet provides a first-party candidate review workflow.
 
 Old run links may still contain a `focus` query from the retired Direction surface. The router does not
 silently apply it: the value is ignored and the UI announces **“Legacy Direction focus is no longer

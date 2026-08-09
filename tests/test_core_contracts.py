@@ -193,5 +193,6 @@ def test_the_two_lazy_vocabularies_resolve_against_their_real_registries():
 def test_the_if_chain_is_gone():
     source = (CORE / "config.py").read_text(encoding="utf-8")
     assert "_check_trust_gate" not in source, "the misnamed grab-bag validator came back"
-    assert source.count('raise ValueError(f"{field} must be') == 1, (
+    enum_refusal = 'raise ValueError(f"{field} must be {\'|\'.join(allowed)}, got {value!r}")'
+    assert source.count(enum_refusal) == 1, (
         "the per-field refusal is written more than once again")

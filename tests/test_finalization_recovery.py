@@ -138,6 +138,42 @@ def test_finalize_reflects_before_stewards_and_counts_stewards_before_cost(tmp_p
     assert order == ["reflection", "concept", "claim", "facets", "llm_cost"]
 
 
+@pytest.mark.parametrize(
+    ("facets_enabled", "expected"),
+    [
+        (False, ["concept", "claim"]),
+        (True, ["concept", "claim", "facets"]),
+    ],
+)
+def test_task_facet_finalize_gate_only_schedules_the_third_paid_steward(
+        tmp_path, monkeypatch, facets_enabled, expected):
+    """The fresh default saves the inert call; explicit opt-in restores all three stewards."""
+    import looplab.engine.finalize as finalize_module
+
+    run_dir = tmp_path / f"facet-gate-{facets_enabled}"
+    _terminal_store(run_dir)
+    eng = _EngineStub(run_dir)
+    eng._cross_run_curation = True
+    eng._task_facets_finalize = facets_enabled
+    ran: list[str] = []
+    eng._store_concept_curation = lambda _state: ran.append("concept")
+    eng._store_claim_curation = lambda _state: ran.append("claim")
+    eng._store_task_facets = lambda _state: ran.append("facets")
+
+    monkeypatch.setattr(finalize_module, "emit_llm_cost", lambda *_a, **_k: True)
+    final = finalize_module.finalize_run(eng, entry_finished=True, start_time=0.0)
+
+    assert not final.finalization_pending()
+    assert ran == expected
+    receipt_steps = {
+        event.data.get("step")
+        for event in eng.store.read_all()
+        if event.type == "finalize_step"
+    }
+    assert {"concept_curation", "claim_curation"} <= receipt_steps
+    assert ("task_facets" in receipt_steps) is facets_enabled
+
+
 def test_upgrade_refreshes_old_cost_rollup_after_new_steward_usage(tmp_path):
     """A pre-steward cost marker must not hide usage appended by upgraded finalization."""
     from looplab.engine.finalize import finalize_run

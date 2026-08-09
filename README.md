@@ -96,13 +96,20 @@ looplab run --kind dataset --goal "predict target, data in data.csv" -s max_node
 looplab run examples/toy_task.json --max-nodes 14 --backend toy
 ```
 
-When you pass `--goal`, **Genesis** (the same "New run" planner the Web UI uses) authors the task for
-you: it picks the `kind` — `dataset`, `repo`, `mlebench_real`, … — and reads your words for where the
+When you pass `--goal`, the CLI's **Genesis** planner authors the task for you: it picks the `kind` —
+`dataset`, `repo`, `mlebench_real`, … — and reads your words for where the
 data lives (one path or several, a file or a folder), so you don't pre-format anything. `--kind`
 **pins** the kind and lets Genesis fill the rest within it; `--data` is an optional shortcut for the
-path. Add `--no-genesis` to build the task from `--kind`/`--set` alone (offline, no model).
+path. The Web **New run** flow reaches the same editable-launch outcome through the owner Assistant's
+`propose_run` tool, while the TUI uses the server's `/api/genesis` planner; these are compatible
+planning surfaces, not one shared planner implementation. All three use the same task-adapter
+validation and backend-default authority. Web additionally submits a reviewed `/api/start/preflight`
+token; TUI posts to `/api/start`, whose server validates before spawn but issues no reviewed receipt;
+CLI validates directly. Add `--no-genesis` to build the task from the task flags (`--kind`,
+`--goal`, `--direction`, and `--data`) without a model. `--set` only changes engine settings.
 
-`-s/--set key=value` overrides **any** engine setting (full parity with the `settings:` block and the
+`-s/--set key=value` overrides any **non-credential** engine setting (credential fields are refused
+to keep secrets out of shell history; otherwise it has parity with the `settings:` block and the
 `LOOPLAB_*` env vars). A unified `looplab.yaml` looks like:
 
 ```yaml

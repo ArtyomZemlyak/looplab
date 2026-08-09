@@ -20,7 +20,7 @@ import stat
 import threading
 import time
 import unicodedata
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
 
@@ -29,8 +29,8 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from looplab.core.atomicio import (
-    _ensure_strict_parent, atomic_write_text, strict_atomic_write_bytes,
-    strict_atomic_write_text, strict_fsync_parent,
+    _ensure_strict_parent, atomic_write_text, file_identity, same_file_entry,
+    strict_atomic_write_bytes, strict_atomic_write_text, strict_fsync_parent,
 )
 from looplab.core.config import Settings
 from looplab.core.pathsafe import is_reparse
@@ -55,6 +55,12 @@ _MEMORY_SOURCE_ROWS = 1000
 # name guard keeps `PUT /api/{kind}/{name}` to the authored-markdown surface `list_author` can show.
 _AUTHOR_MAX_FILES = 500
 _AUTHOR_MAX_BYTES = 256 * 1024
+# Recursive skill packages are a display surface, not permission to walk an operator-controlled
+# tree without end. These bounds cap both directory work and relative-path complexity independently
+# of the response/file caps above.
+_AUTHOR_SKILL_SCAN_ENTRIES = 5000
+_AUTHOR_SKILL_MAX_DEPTH = 16
+_AUTHOR_SKILL_DISPLAY_MAX_BYTES = 4096
 _AUTHOR_OPERATION_RE = re.compile(
     r"\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _LLM_HEALTH_OPERATION_MAX = 256
@@ -92,6 +98,166 @@ def _valid_author_name(value: object) -> bool:
             and "/" not in value and "\\" not in value
             and Path(value).name == value
             and not any(unicodedata.category(ch).startswith("C") for ch in value))
+
+
+def _valid_skill_display_name(value: object) -> bool:
+    """A safe POSIX-style relative display id for a nested ``*/SKILL.md`` package.
+
+    This is deliberately NOT a write name. ``_valid_author_name`` remains the only write/recovery
+    identity and rejects every slash; the relative id exists only so Authoring can inspect the same
+    packaged skills the runtime discovers.
+    """
+    if not isinstance(value, str) or "\\" in value:
+        return False
+    try:
+        if len(value.encode("utf-8")) > _AUTHOR_SKILL_DISPLAY_MAX_BYTES:
+            return False
+    except UnicodeEncodeError:
+        return False
+    parts = value.split("/")
+    return (2 <= len(parts) <= _AUTHOR_SKILL_MAX_DEPTH + 1
+            and parts[-1] == "SKILL.md"
+            and all(part not in ("", ".", "..") and len(part) <= 255
+                    and not any(unicodedata.category(ch).startswith("C") for ch in part)
+                    for part in parts))
+
+
+def _author_parent_chain_is_safe(root: Path, relative: Path) -> bool:
+    """Re-check every nested parent without following a symlink/reparse point."""
+    current = root
+    try:
+        root_entry = root.lstat()
+        if is_reparse(root_entry) or not stat.S_ISDIR(root_entry.st_mode):
+            return False
+        for part in relative.parts[:-1]:
+            current = current / part
+            entry = current.lstat()
+            if is_reparse(entry) or not stat.S_ISDIR(entry.st_mode):
+                return False
+    except (OSError, RuntimeError):
+        return False
+    return True
+
+
+def _read_author_file_safely(root: Path, path: Path) -> bytes | None:
+    """Read one bounded stable regular file and discard any link/path replacement race."""
+    try:
+        relative = path.relative_to(root)
+    except (ValueError, RuntimeError):
+        return None
+    if not _author_parent_chain_is_safe(root, relative):
+        return None
+    try:
+        before = path.lstat()
+    except OSError:
+        return None
+    if is_reparse(before) or not stat.S_ISREG(before.st_mode):
+        return None
+    flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0)
+             | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+    descriptor = None
+    try:
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if (is_reparse(opened) or not stat.S_ISREG(opened.st_mode)
+                or same_file_entry(opened) != same_file_entry(before)):
+            return None
+        chunks: list[bytes] = []
+        remaining = _AUTHOR_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after_read = os.fstat(descriptor)
+    except OSError:
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    try:
+        after = path.lstat()
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if (is_reparse(after) or not stat.S_ISREG(after.st_mode)
+            # Compare like stat interfaces so Windows' lstat/fstat ctime representation cannot
+            # reject every healthy file. The weak tier binds the descriptor to the path entry;
+            # the full tier then proves both the path and the open descriptor stayed unchanged.
+            or same_file_entry(opened) != same_file_entry(after)
+            or file_identity(before) != file_identity(after)
+            or file_identity(opened) != file_identity(after_read)
+            or not _author_parent_chain_is_safe(root, relative)
+            or (resolved != root and root not in resolved.parents)):
+        return None
+    return b"".join(chunks)
+
+
+def _skill_author_candidates(root: Path) -> tuple[list[tuple[str, Path, bool]], int, bool]:
+    """Return bounded safe root Markdown + nested package candidates.
+
+    The integer is a lower bound on candidates already observed beyond the response cap. The boolean
+    separately records that a directory/entry/depth cap prevented a complete inventory; it must not
+    be represented as an invented omitted-file count because the unscanned directories may be empty.
+    """
+    candidates: list[tuple[str, Path, bool]] = []
+    pending = deque([(root, (), 0)])
+    scanned = 0
+    incomplete = False
+    max_candidates = _AUTHOR_MAX_FILES + 1
+    while pending and len(candidates) < max_candidates:
+        if scanned >= _AUTHOR_SKILL_SCAN_ENTRIES:
+            incomplete = True
+            break
+        directory, relative_parts, depth = pending.popleft()
+        try:
+            directory_entry = directory.lstat()
+            if is_reparse(directory_entry) or not stat.S_ISDIR(directory_entry.st_mode):
+                continue
+            entries = []
+            with os.scandir(directory) as stream:
+                for entry in stream:
+                    if scanned >= _AUTHOR_SKILL_SCAN_ENTRIES:
+                        incomplete = True
+                        break
+                    scanned += 1
+                    entries.append(entry)
+        except OSError:
+            continue
+        entries.sort(key=lambda entry: entry.name)
+        for entry in entries:
+            name = entry.name
+            if (name in ("", ".", "..") or "/" in name or "\\" in name or len(name) > 255
+                    or any(unicodedata.category(ch).startswith("C") for ch in name)):
+                continue
+            try:
+                observed = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if is_reparse(observed):
+                continue
+            candidate = directory / name
+            if stat.S_ISREG(observed.st_mode):
+                if not relative_parts and _valid_author_name(name):
+                    candidates.append((name, candidate, False))
+                elif relative_parts and name == "SKILL.md":
+                    display_name = "/".join((*relative_parts, name))
+                    if _valid_skill_display_name(display_name):
+                        candidates.append((display_name, candidate, True))
+            elif stat.S_ISDIR(observed.st_mode):
+                if depth >= _AUTHOR_SKILL_MAX_DEPTH:
+                    incomplete = True
+                else:
+                    pending.append((candidate, (*relative_parts, name), depth + 1))
+            if len(candidates) >= max_candidates:
+                incomplete = True
+                break
+    # Preserve the historical flat editor under the shared response cap: writable root files sort
+    # before the additive read-only package inventory, then each class is deterministic by name.
+    candidates.sort(key=lambda item: (item[2], item[0]))
+    omitted = max(0, len(candidates) - _AUTHOR_MAX_FILES)
+    return candidates[:_AUTHOR_MAX_FILES], omitted, incomplete
 
 
 class SettingsUIField(BaseModel):
@@ -1860,14 +2026,16 @@ def build_router(srv) -> APIRouter:
         response.headers["Cache-Control"] = "private, no-store"
         d = _author_dir(kind)
         if d is None:
-            return {"dir": None, "target_root_id": None, "files": []}
+            return {"dir": None, "target_root_id": None, "files": [],
+                    "truncated_files": 0, "inventory_incomplete": False}
         try:
             root = _configured_author_root(d, kind)
         except _AuthoringFailure as exc:
             raise _authoring_http_failure(exc) from exc
         target_root_id = _author_target_root_id(root)
         if not root.exists():
-            return {"dir": str(d), "target_root_id": target_root_id, "files": []}
+            return {"dir": str(d), "target_root_id": target_root_id, "files": [],
+                    "truncated_files": 0, "inventory_incomplete": False}
         if not root.is_dir():
             raise HTTPException(409, f"configured {kind} path is not a directory")
         # Bounded: `knowledge_dir` is AGENT-WRITABLE (KnowledgeWriteTools.remember), so an unbounded
@@ -1875,27 +2043,38 @@ def build_router(srv) -> APIRouter:
         # Cap the file count and each file's bytes, and disclose truncation instead of silently lying
         # about completeness. A symlinked entry is skipped for the same reason /log refuses one.
         files = []
-        names = sorted(root.glob("*.md"))
-        for p in names[:_AUTHOR_MAX_FILES]:
-            if not _valid_author_name(p.name) or p.is_symlink() or not p.is_file():
+        if kind == "skills":
+            candidates, truncated_files, inventory_incomplete = _skill_author_candidates(root)
+        else:
+            names = sorted(root.glob("*.md"))
+            candidates = [(p.name, p, False) for p in names[:_AUTHOR_MAX_FILES]]
+            truncated_files = max(0, len(names) - len(candidates))
+            inventory_incomplete = False
+        for display_name, p, read_only in candidates:
+            if ((read_only and not _valid_skill_display_name(display_name))
+                    or (not read_only and not _valid_author_name(display_name))):
+                truncated_files += 1
                 continue
             # knowledge_dir is AGENT-WRITABLE (see above), so a file can be deleted or renamed
             # between the glob and this open. Skip the one that vanished rather than 500-ing the
             # whole listing over a race that is normal here.
-            try:
-                with open(p, "rb") as fh:
-                    head = fh.read(_AUTHOR_MAX_BYTES + 1)
-            except OSError:
+            head = _read_author_file_safely(root, p)
+            if head is None:
+                truncated_files += 1
                 continue
             text = head[:_AUTHOR_MAX_BYTES].decode("utf-8", errors="replace")
             truncated = len(head) > _AUTHOR_MAX_BYTES
-            files.append({"name": p.name, "text": text, "truncated": truncated,
+            files.append({"name": display_name, "text": text, "truncated": truncated,
+                          "read_only": read_only,
                           # A truncated prefix cannot safely authorize replacement of bytes the
                           # editor never displayed. Such rows intentionally have no writable CAS
                           # token; operation PUTs reject every invented token against "oversized".
                           "revision": None if truncated else _author_revision(head)})
         return {"dir": str(d), "target_root_id": target_root_id, "files": files,
-                "truncated_files": max(0, len(names) - len(files))}
+                # `truncated_files` counts observed candidates omitted/failed; the separate flag is
+                # required when traversal caps mean the number of unseen package files is unknown.
+                "truncated_files": truncated_files,
+                "inventory_incomplete": inventory_incomplete}
 
     @router.get(
         "/api/{kind}/{name}/operations/{operation_id}",

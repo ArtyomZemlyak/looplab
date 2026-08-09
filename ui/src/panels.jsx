@@ -68,23 +68,38 @@ const AUTHORING_OPERATION_KEYS = new Set([
 ])
 const authoringDigestQuarantine = new Map()
 
-function authoringPayload(value) {
+const validReadOnlySkillDisplayName = value => {
+  if (typeof value !== 'string' || /[\\\p{C}]/u.test(value)) return false
+  const parts = value.split('/')
+  return authoringUtf8Bytes(value) <= 4096 && parts.length >= 2 && parts.length <= 17
+    && parts.at(-1) === 'SKILL.md'
+    && parts.every(part => part && part !== '.' && part !== '..' && [...part].length <= 255)
+}
+
+function authoringPayload(value, kind) {
   if (!isRecord(value) || !nullableText(value.dir) || !Array.isArray(value.files)) invalidPanelPayload()
   const targetRootId = value.target_root_id == null ? null : value.target_root_id
   const truncatedFiles = value.truncated_files == null ? 0 : value.truncated_files
+  const inventoryIncomplete = value.inventory_incomplete ?? false
   if (!Number.isSafeInteger(truncatedFiles) || truncatedFiles < 0) invalidPanelPayload()
-  if ((value.dir == null && (targetRootId !== null || value.files.length > 0 || truncatedFiles > 0))
+  if (typeof inventoryIncomplete !== 'boolean'
+      || (value.dir == null && (targetRootId !== null || value.files.length > 0
+        || truncatedFiles > 0 || inventoryIncomplete))
       || (value.dir != null && !validAuthoringTargetRootId(targetRootId))) invalidPanelPayload()
   const files = value.files.map(file => {
-    if (!isRecord(file) || !validAuthoringName(file.name) || typeof file.text !== 'string'
-        || typeof file.truncated !== 'boolean') invalidPanelPayload()
+    const readOnly = file?.read_only === true
+    if (!isRecord(file) || typeof file.text !== 'string' || typeof file.truncated !== 'boolean'
+        || (file.read_only != null && typeof file.read_only !== 'boolean')
+        || (readOnly
+          ? kind !== 'skills' || !validReadOnlySkillDisplayName(file.name)
+          : !validAuthoringName(file.name))) invalidPanelPayload()
     const truncated = file.truncated
     const revision = typeof file.revision === 'string' && AUTHORING_REVISION_RE.test(file.revision)
       ? file.revision : null
     if ((truncated && file.revision !== null) || (!truncated && revision == null)) invalidPanelPayload()
-    return { name: file.name, text: file.text, revision, truncated }
+    return { name: file.name, text: file.text, revision, truncated, readOnly }
   })
-  return { dir: value.dir, targetRootId, files, truncatedFiles }
+  return { dir: value.dir, targetRootId, files, truncatedFiles, inventoryIncomplete }
 }
 
 const authoringScope = (kind, name) => `${String(kind || '')}\u0000${String(name || '')}`
@@ -192,25 +207,20 @@ function saveAuthoringOperationIntent(intent) {
   } catch { return null }
 }
 
-function clearAuthoringOperationIntent(intent) {
+function clearAuthoringRecord(key, raw) {
   const storage = authoringStorage()
-  if (!storage || !intent?.storageKey || typeof intent.storageRaw !== 'string') return false
+  if (!storage || !key || typeof raw !== 'string') return false
   try {
-    if (storage.getItem(intent.storageKey) !== intent.storageRaw) return false
-    storage.removeItem(intent.storageKey)
-    return storage.getItem(intent.storageKey) == null
+    if (storage.getItem(key) !== raw) return false
+    storage.removeItem(key)
+    return storage.getItem(key) == null
   } catch { return false }
 }
 
-function clearDamagedAuthoringOperation(recovery) {
-  const storage = authoringStorage()
-  if (!storage || !recovery?.key || typeof recovery.raw !== 'string') return false
-  try {
-    if (storage.getItem(recovery.key) !== recovery.raw) return false
-    storage.removeItem(recovery.key)
-    return storage.getItem(recovery.key) == null
-  } catch { return false }
-}
+const clearAuthoringOperationIntent = intent => clearAuthoringRecord(
+  intent?.storageKey, intent?.storageRaw)
+const clearDamagedAuthoringOperation = recovery => clearAuthoringRecord(
+  recovery?.key, recovery?.raw)
 
 async function authoringTextRevision(text) {
   if (!authoringTextWellFormed(text)) {
@@ -802,13 +812,12 @@ const AUTHORING_KIND_PURPOSE = {
       keeps running, silently. The key list is <code>looplab/core/prompts.py::PROMPT_KEYS</code>.</>,
   },
   skills: {
-    what: <><b>Reusable techniques</b> the Researcher can <code>list_skills</code> /{' '}
-      <code>use_skill</code> mid-run — a named recipe plus the code that implemented it.</>,
-    disclosure: <>Two things the engine reads that this editor does not list: skills packaged as{' '}
-      <code>&lt;folder&gt;/SKILL.md</code> (only root-level <code>*.md</code> is shown), and the ones a
-      run distils for ITSELF into <code>&lt;memory dir&gt;/skills/</code> from a card it supported with
-      a positive Δ. Those carry a <code>candidate</code>/<code>promoted</code> status that no reader
-      parses, so a candidate is offered to the model exactly like a promoted one.</>,
+    what: <><b>Researcher techniques</b>: <code>list_skills</code> / <code>use_skill</code> loads
+      recipes and code mid-run.</>,
+    disclosure: <>Root <code>*.md</code>: writable. Nested{' '}
+      <code>&lt;package&gt;/SKILL.md</code>: read-only; edit its package path. Flat Save/recovery API rejects
+      slash paths. Auto-distilled <code>&lt;memory dir&gt;/skills/</code> candidates need cross-task
+      promotion for production; not reviewed here.</>,
   },
   knowledge: {
     what: <><b>Free-form notes</b> for the agents to retrieve with <code>kb_search</code> — anything
@@ -848,7 +857,7 @@ export function AuthoringPanel({
       Object.entries(initialRecoveryRef.current.valid).map(([scope, recovery]) => [scope, {
         ...recovery, phase: 'unknown', inspectedMissing: false,
         releaseAllowed: false, releaseInspected: false,
-        message: `A saved operation for ${recovery.name} may still be pending. Check its exact durable receipt.`,
+        message: `Saved operation for ${recovery.name} may be pending; check its durable receipt.`,
       }]),
     )
   }
@@ -874,7 +883,8 @@ export function AuthoringPanel({
   }
   const saveRef = useRef(null)
   const activeRef = useRef(true)
-  const [source, retry] = usePanelResource(signal => get(`/api/${kind}`, { signal }), authoringPayload, kind)
+  const [source, retry] = usePanelResource(
+    signal => get(`/api/${kind}`, { signal }), value => authoringPayload(value, kind), kind)
   const data = source.data || { dir: null, targetRootId: null, files: [], truncatedFiles: 0 }
   const scopeFor = authoringScope
   useEffect(() => {
@@ -902,12 +912,32 @@ export function AuthoringPanel({
       for (const file of data.files || []) {
         const scope = scopeFor(kind, file.name)
         const previous = current[scope]
-        if (!previous) {
+        if (file.readOnly) {
+          // A package row is an observation, never an editable/recoverable document. This also
+          // scrubs stale shared-panel state if a forged/older draft used the same display scope:
+          // the flat recovery protocol cannot legitimately create an identity containing `/`.
+          const authoritative = {
+            ...(previous || {}),
+            kind, name: file.name, savedText: file.text, draftText: file.text,
+            savedRevision: file.revision, observedText: file.text, observedRevision: file.revision,
+            savedTargetRootId: data.targetRootId, observedTargetRootId: data.targetRootId,
+            truncated: file.truncated, readOnly: true,
+            conflict: false, rootConflict: false,
+            observationIncomplete: false, error: '',
+            recoveryOperationId: null, recoveryStorageRaw: null,
+          }
+          if (!previous || Object.keys(authoritative)
+            .some(key => authoritative[key] !== previous[key])) {
+            next[scope] = authoritative
+            changed = true
+          }
+        } else if (!previous || previous.readOnly) {
           next[scope] = {
             kind, name: file.name, savedText: file.text, draftText: file.text,
             savedRevision: file.revision, observedText: file.text, observedRevision: file.revision,
             savedTargetRootId: data.targetRootId, observedTargetRootId: data.targetRootId,
-            truncated: file.truncated, conflict: false, rootConflict: false,
+            truncated: file.truncated, readOnly: file.readOnly,
+            conflict: false, rootConflict: false,
             observationIncomplete: false, error: '',
             recoveryOperationId: null, recoveryStorageRaw: null,
           }
@@ -915,6 +945,7 @@ export function AuthoringPanel({
         } else if (previous.draftText === previous.savedText && !uncertainSaves[scope]) {
           if (previous.savedText !== file.text || previous.observedText !== file.text
               || previous.savedRevision !== file.revision || previous.truncated !== file.truncated
+              || previous.readOnly !== file.readOnly
               || previous.savedTargetRootId !== data.targetRootId
               || previous.observedTargetRootId !== data.targetRootId
               || previous.conflict || previous.rootConflict
@@ -922,13 +953,15 @@ export function AuthoringPanel({
             next[scope] = { ...previous, savedText: file.text, draftText: file.text,
               savedRevision: file.revision, observedText: file.text, observedRevision: file.revision,
               savedTargetRootId: data.targetRootId, observedTargetRootId: data.targetRootId,
-              truncated: file.truncated, conflict: false, rootConflict: false,
+              truncated: file.truncated, readOnly: file.readOnly,
+              conflict: false, rootConflict: false,
               observationIncomplete: false, error: '' }
             changed = true
           }
         } else if (previous.observedText !== file.text
             || previous.observedRevision !== file.revision
             || previous.observedTargetRootId !== data.targetRootId
+            || previous.readOnly !== file.readOnly
             || previous.observationIncomplete
             || previous.conflict !== (previous.savedRevision !== file.revision
               || previous.savedTargetRootId !== data.targetRootId)) {
@@ -938,13 +971,14 @@ export function AuthoringPanel({
           next[scope] = { ...previous,
             observedText: file.text, observedRevision: file.revision,
             observedTargetRootId: data.targetRootId, truncated: file.truncated,
+            readOnly: file.readOnly,
             rootConflict, observationIncomplete: false,
             conflict: rootConflict || previous.savedRevision !== file.revision }
           changed = true
         }
       }
       const visibleNames = new Set((data.files || []).map(file => file.name))
-      const listComplete = data.truncatedFiles === 0
+      const listComplete = data.truncatedFiles === 0 && !data.inventoryIncomplete
       for (const [scope, previous] of Object.entries(current)) {
         if (previous.kind !== kind || visibleNames.has(previous.name)
             || uncertainSaves[scope]) continue
@@ -957,20 +991,27 @@ export function AuthoringPanel({
         const observationIncomplete = validAuthoringTargetRootId(data.targetRootId) && !listComplete
         const conflict = rootConflict || observationIncomplete
           || previous.savedRevision !== observedRevision
-        if (previous.observedText !== null || previous.observedRevision !== observedRevision
+        const safeDraftText = previous.readOnly ? previous.savedText : previous.draftText
+        if (previous.draftText !== safeDraftText
+            || previous.observedText !== null || previous.observedRevision !== observedRevision
             || previous.observedTargetRootId !== data.targetRootId
             || previous.rootConflict !== rootConflict || previous.conflict !== conflict
-            || previous.observationIncomplete !== observationIncomplete) {
+            || previous.observationIncomplete !== observationIncomplete
+            || (previous.readOnly
+              && (previous.error || previous.recoveryOperationId || previous.recoveryStorageRaw))) {
           next[scope] = {
-            ...previous, observedText: null, observedRevision,
+            ...previous, draftText: safeDraftText, observedText: null, observedRevision,
             observedTargetRootId: data.targetRootId, rootConflict, conflict,
             observationIncomplete,
+            ...(previous.readOnly ? {
+              error: '', recoveryOperationId: null, recoveryStorageRaw: null,
+            } : {}),
           }
           changed = true
         }
       }
       for (const recovery of Object.values(uncertainSaves)) {
-        if (recovery.kind !== kind) continue
+        if (recovery.kind !== kind || !validAuthoringName(recovery.name)) continue
         const scope = recovery.scope
         const previous = next[scope]
         const sameRoot = data.targetRootId === recovery.expectedTargetRootId
@@ -990,7 +1031,7 @@ export function AuthoringPanel({
           observedText: file?.text ?? null, observedRevision,
           savedTargetRootId: recovery.expectedTargetRootId,
           observedTargetRootId: data.targetRootId,
-          truncated: file?.truncated === true, rootConflict: !sameRoot,
+          truncated: file?.truncated === true, readOnly: false, rootConflict: !sameRoot,
           observationIncomplete,
           conflict: !sameRoot || observationIncomplete
             || (observedRevision !== recovery.expectedRevision
@@ -1011,7 +1052,8 @@ export function AuthoringPanel({
     }
   }, [kind, source.status, source.data, uncertainSaves])
   const selected = selectedScope ? documents[selectedScope] || null : null
-  const sourceReconciled = source.status === 'ready'
+  const sourceReady = source.status === 'ready'
+  const sourceReconciled = sourceReady
     && reconciledSource?.kind === kind && reconciledSource?.data === source.data
   const selectedSourceReconciled = sourceReconciled && selected?.kind === kind
   const selectedUncertainSave = selectedScope ? uncertainSaves[selectedScope] || null : null
@@ -1021,18 +1063,18 @@ export function AuthoringPanel({
   const uncertainSaveCount = Object.keys(uncertainSaves).length
   const damagedRecoveryCount = damagedRows.length
   const dirtyCount = Object.values(documents)
-    .filter(document => document.draftText !== document.savedText).length
+    .filter(document => !document.readOnly && document.draftText !== document.savedText).length
   const mutationBusy = !!saveState
   const navigationUnsafe = dirtyCount > 0 || mutationBusy
     || uncertainSaveCount > 0 || damagedRecoveryCount > 0
   const authoringNavigationSummary = [
     dirtyCount > 0
       ? `${dirtyCount} unsaved Authoring draft${dirtyCount === 1 ? '' : 's'} will be discarded.` : '',
-    mutationBusy ? 'A file save is still in progress; its immediate outcome may no longer be visible here.' : '',
+    mutationBusy ? 'A save is in progress; its outcome may not remain visible.' : '',
     uncertainSaveCount > 0
-      ? `${uncertainSaveCount} file save outcome${uncertainSaveCount === 1 ? '' : 's'} may still be unknown; retained recovery must be reviewed before any retry.` : '',
+      ? `${uncertainSaveCount} save outcome${uncertainSaveCount === 1 ? '' : 's'} may be unknown; review retained recovery before retrying.` : '',
     damagedRecoveryCount > 0
-      ? `${damagedRecoveryCount} damaged Authoring recovery record${damagedRecoveryCount === 1 ? ' remains' : 's remain'} quarantined in this browser tab.` : '',
+      ? `${damagedRecoveryCount} damaged recovery record${damagedRecoveryCount === 1 ? ' remains' : 's remain'} quarantined in this tab.` : '',
   ].filter(Boolean).join(' ')
   const authoringCloseMessage = `${authoringNavigationSummary} Close Authoring anyway?`
   const navigationUnsafeRef = useRef(navigationUnsafe)
@@ -1060,12 +1102,12 @@ export function AuthoringPanel({
       allowRef: allowNavigationRef,
       guardedHash: location.hash,
       message: () => uncertainSaveCount > 0
-        ? `${uncertainSaveCount} file save outcome${uncertainSaveCount === 1 ? '' : 's'} may still be unknown. Leave Authoring anyway?`
+        ? `${uncertainSaveCount} save outcome${uncertainSaveCount === 1 ? '' : 's'} may be unknown. Leave Authoring?`
         : damagedRecoveryCount > 0
-          ? `${damagedRecoveryCount} damaged Authoring recovery record${damagedRecoveryCount === 1 ? '' : 's'} remain quarantined. Leave Authoring anyway?`
+          ? `${damagedRecoveryCount} damaged recovery record${damagedRecoveryCount === 1 ? '' : 's'} remain quarantined. Leave Authoring?`
         : mutationBusy
-          ? 'A file save is still in progress. Leave Authoring anyway?'
-          : `${dirtyCount} unsaved Authoring draft${dirtyCount === 1 ? '' : 's'} will be lost. Leave anyway?`,
+          ? 'A save is in progress. Leave Authoring?'
+          : `${dirtyCount} unsaved draft${dirtyCount === 1 ? '' : 's'} will be lost. Leave?`,
       onAllow: () => draftStore.clear(AUTHORING_PANEL_DRAFT_SCOPE),
     })
   }, [navigationGuardOwner, draftStore, navigationUnsafe, mutationBusy, uncertainSaveCount,
@@ -1075,7 +1117,7 @@ export function AuthoringPanel({
     const hasUnsafeStoredDocument = retained && typeof retained === 'object'
       && !Array.isArray(retained) && Object.values(retained).some(document => document
         && typeof document === 'object' && !Array.isArray(document)
-        && (document.draftText !== document.savedText
+        && (!document.readOnly && document.draftText !== document.savedText
           || document.recoveryOperationId || document.recoveryStorageRaw))
     const hasUnsafeStoredRecovery = ['uncertainSaves', 'damagedRecoveries'].some(field => {
       const records = draftStore.readField(AUTHORING_PANEL_DRAFT_SCOPE, field, {})
@@ -1089,8 +1131,8 @@ export function AuthoringPanel({
     }
   }, [draftStore])
   const retainNotice = destination => {
-    if (!selected || selected.draftText === selected.savedText) return
-    onToast?.(`Unsaved draft for ${selected.name} is preserved while you ${destination}.`)
+    if (!selected || selected.readOnly || selected.draftText === selected.savedText) return
+    onToast?.(`${selected.name} draft remains while you ${destination}.`)
   }
   const chooseKind = nextKind => {
     if (nextKind === kind) return
@@ -1107,14 +1149,15 @@ export function AuthoringPanel({
       [scope]: { kind, name: file.name, savedText: file.text, draftText: file.text,
         savedRevision: file.revision, observedText: file.text, observedRevision: file.revision,
         savedTargetRootId: data.targetRootId, observedTargetRootId: data.targetRootId,
-        truncated: file.truncated, conflict: false, rootConflict: false,
+        truncated: file.truncated, readOnly: file.readOnly,
+        conflict: false, rootConflict: false,
         observationIncomplete: false, error: '',
         recoveryOperationId: null, recoveryStorageRaw: null },
     })
     setSelectedScope(scope)
   }
   const editSelected = value => {
-    if (!selectedScope) return
+    if (!selectedScope || selected?.readOnly) return
     setDocuments(current => current[selectedScope] ? {
       ...current, [selectedScope]: { ...current[selectedScope], draftText: value, error: '' },
     } : current)
@@ -1125,6 +1168,9 @@ export function AuthoringPanel({
         || exact.storageRaw !== token.storageRaw) return current
     return { ...current, [token.scope]: { ...exact, ...patch } }
   })
+  const setDocumentError = (scope, error) => setDocuments(current => current[scope] ? {
+    ...current, [scope]: { ...current[scope], error },
+  } : current)
   const removeRecovery = token => setUncertainSaves(current => {
     const exact = current[token.scope]
     if (!exact || exact.operationId !== token.operationId
@@ -1160,7 +1206,7 @@ export function AuthoringPanel({
         draftText: recovery.submittedText, savedRevision: recovery.expectedRevision,
         observedText: null, observedRevision: recovery.expectedRevision,
         savedTargetRootId: recovery.expectedTargetRootId, observedTargetRootId: null,
-        truncated: false, conflict: false, rootConflict: false,
+        truncated: false, readOnly: false, conflict: false, rootConflict: false,
         observationIncomplete: false,
       }
       return { ...current, [recovery.scope]: {
@@ -1179,7 +1225,7 @@ export function AuthoringPanel({
     try {
       actualRevision = await authoringTextRevision(exact.submittedText)
     } catch (error) {
-      const message = `Could not verify the retained contents for ${exact.name}: ${error?.message || error}. No request was sent.`
+      const message = `Could not verify ${exact.name} retained contents: ${error?.message || error}. No request was sent.`
       updateRecovery(exact, {
         phase: 'unknown', releaseAllowed: false, releaseInspected: false, message,
       })
@@ -1191,7 +1237,7 @@ export function AuthoringPanel({
     let storedRaw = null
     try { storedRaw = storage?.getItem(exact.storageKey) ?? null } catch {
       setStorageAvailable(false)
-      const message = `Browser recovery storage became unavailable while verifying ${exact.name}. No request was sent.`
+      const message = `Recovery storage became unavailable while verifying ${exact.name}. No request was sent.`
       updateRecovery(exact, {
         phase: 'unknown', releaseAllowed: false, releaseInspected: false, message,
       })
@@ -1202,12 +1248,12 @@ export function AuthoringPanel({
         || !latest || latest.operationId !== exact.operationId
         || latest.storageRaw !== exact.storageRaw) {
       refreshRecoveryStore()
-      onToast?.('The Authoring recovery record changed while it was being verified. Inspect the refreshed exact record.')
+      onToast?.('Recovery record changed during verification; inspect the refreshed exact record.')
       return null
     }
     if (actualRevision !== exact.desiredRevision) {
       quarantineAuthoringRecovery(exact,
-        `The retained operation for ${exact.name} has an invalid content digest. It was quarantined without contacting the server.`)
+        `${exact.name} retained operation has an invalid digest; quarantined without server contact.`)
       return null
     }
     return latest
@@ -1252,7 +1298,7 @@ export function AuthoringPanel({
             message: previous.message }
           : { ...record, phase: 'unknown', inspectedMissing: false,
             releaseAllowed: false, releaseInspected: false,
-            message: `A saved operation for ${record.name} may still be pending. Check its exact durable receipt.` }]
+            message: `Saved operation for ${record.name} may be pending; check its durable receipt.` }]
       }))
       const damagedSnapshots = new Set(Object.values(inspected.damaged)
         .map(record => `${record.key}\u0000${record.raw}`))
@@ -1261,7 +1307,7 @@ export function AuthoringPanel({
         next[scope] = {
           ...previous, phase: 'storage-missing', inspectedMissing: false,
           releaseAllowed: false, releaseInspected: false,
-          message: `The browser recovery record for ${previous.name} disappeared or changed before a terminal receipt was proved. This tab keeps the exact draft quarantined; no new save will be sent.`,
+          message: `Recovery record for ${previous.name} changed or disappeared before a terminal receipt. Its exact draft remains quarantined; no save will be sent.`,
         }
       }
       uncertainSavesRef.current = next
@@ -1283,7 +1329,7 @@ export function AuthoringPanel({
     refreshRecoveryStore()
     updateRecovery(token, {
       phase: 'unknown', releaseAllowed: true, releaseInspected: false,
-      message: `The server settled ${token.name}, but its browser recovery record changed or could not be released. Inspect the exact record before another save.`,
+      message: `${token.name} settled, but its recovery record could not be released. Inspect it before another save.`,
     })
     return false
   }
@@ -1295,14 +1341,12 @@ export function AuthoringPanel({
       throw error
     }
     if (receipt.status === 'prepared') {
-      const message = `The exact operation for ${token.name} is durably prepared but not complete. Resume the same save identity.`
+      const message = `${token.name} is durably prepared, not complete. Resume the same save identity.`
       updateRecovery(token, {
         phase: 'prepared', inspectedMissing: false,
         releaseAllowed: false, releaseInspected: false, message,
       })
-      setDocuments(current => current[token.scope] ? {
-        ...current, [token.scope]: { ...current[token.scope], error: message },
-      } : current)
+      setDocumentError(token.scope, message)
       return 'prepared'
     }
     if (receipt.status === 'succeeded') {
@@ -1324,8 +1368,8 @@ export function AuthoringPanel({
       return 'succeeded'
     }
     const message = receipt.code === 'authoring_intervening_write'
-      ? `${token.name} changed after this exact save was prepared. Your draft is retained; inspect the current server copy before saving again.`
-      : `${token.name} changed before this save began. Your retained draft was not written.`
+      ? `${token.name} changed after this save was prepared. Draft retained; inspect the server copy before saving.`
+      : `${token.name} changed before saving. Draft retained; nothing was written.`
     const released = releaseTerminalRecovery(token)
     setDocuments(current => {
       const exact = current[token.scope]
@@ -1334,7 +1378,7 @@ export function AuthoringPanel({
         draftText: token.submittedText, savedRevision: token.expectedRevision,
         savedTargetRootId: token.expectedTargetRootId,
         observedTargetRootId: token.expectedTargetRootId,
-        truncated: false, rootConflict: false,
+        truncated: false, readOnly: false, rootConflict: false,
       }
       return { ...current, [token.scope]: {
         ...retained, observedText: null, observedRevision: receipt.result_revision,
@@ -1355,7 +1399,7 @@ export function AuthoringPanel({
     updateRecovery(token, {
       phase: 'submitting', inspectedMissing: false,
       releaseAllowed: false, releaseInspected: false,
-      message: `Submitting the exact saved operation for ${token.name}…`,
+      message: `Submitting exact save for ${token.name}…`,
     })
     setDocuments(current => current[token.scope] ? {
       ...current, [token.scope]: {
@@ -1377,16 +1421,14 @@ export function AuthoringPanel({
       applyAuthoringReceipt(token, receipt)
     } catch (error) {
       if (saveRef.current !== token || !activeRef.current) return
-      const message = `Save outcome for ${token.name} is not confirmed. Its exact operation and draft remain durable in this tab; check the receipt before retrying.`
+      const message = `${token.name} save outcome is unconfirmed. Its exact operation and draft remain in this tab; check the receipt before retrying.`
       updateRecovery(token, {
         phase: 'unknown', inspectedMissing: false,
         // A failed client request cannot prove that the exact PUT is no longer waiting on the
         // server-side lock or fsync. Keep it quarantined until a validated terminal receipt exists.
         releaseAllowed: false, releaseInspected: false, message,
       })
-      setDocuments(current => current[token.scope] ? {
-        ...current, [token.scope]: { ...current[token.scope], error: message },
-      } : current)
+      setDocumentError(token.scope, message)
       onToast?.(message)
     } finally {
       if (saveRef.current === token) {
@@ -1397,30 +1439,27 @@ export function AuthoringPanel({
   }
   const saveSelected = async () => {
     const document = selectedScope ? documents[selectedScope] : null
-    if (!document || document.draftText === document.savedText || saveRef.current
+    if (!document || document.readOnly || saveRef.current
         || selectedUncertainSave || selectedDamagedRecovery) return
+    if (document.draftText === document.savedText) return
     if (!selectedSourceReconciled) {
-      onToast?.(`Load and reconcile the current ${kind} source before saving ${document.name}.`)
+      onToast?.(`Load and reconcile current ${kind} before saving ${document.name}.`)
       return
     }
     if (document.rootConflict || !validAuthoringTargetRootId(document.observedTargetRootId)) {
-      const message = `${document.name} belongs to a different or unavailable Authoring directory. Its retained draft was not written; refresh the configured directory before saving.`
-      setDocuments(current => current[selectedScope] ? {
-        ...current, [selectedScope]: { ...current[selectedScope], error: message },
-      } : current)
+      const message = `${document.name} belongs to another or unavailable Authoring directory. Draft not written; refresh the directory.`
+      setDocumentError(selectedScope, message)
       onToast?.(message)
       return
     }
     if (document.truncated || !AUTHORING_REVISION_RE.test(document.observedRevision || '')) {
-      const message = `${document.name} has no complete writable revision. Refresh or edit the file outside this truncated view.`
-      setDocuments(current => current[selectedScope] ? {
-        ...current, [selectedScope]: { ...current[selectedScope], error: message },
-      } : current)
+      const message = `${document.name} lacks a complete writable revision. Refresh, or edit outside this truncated view.`
+      setDocumentError(selectedScope, message)
       onToast?.(message)
       return
     }
     if (document.conflict && !window.confirm(
-      `${document.name} changed on the server while this draft was open. Save this retained draft over the newer server copy?`,
+      `${document.name} changed on the server. Overwrite its newer copy with this retained draft?`,
     )) return
     try {
       const desiredRevision = await authoringTextRevision(document.draftText)
@@ -1432,10 +1471,8 @@ export function AuthoringPanel({
           || latestDocument.savedTargetRootId !== document.savedTargetRootId
           || latestDocument.observedTargetRootId !== document.observedTargetRootId
           || latestDocument.conflict !== document.conflict || latestDocument.rootConflict) {
-        const message = `${document.name} changed while the save identity was being prepared. Review the retained draft and current server copy; no request was sent.`
-        setDocuments(current => current[selectedScope] ? {
-          ...current, [selectedScope]: { ...current[selectedScope], error: message },
-        } : current)
+        const message = `${document.name} changed while preparing the save identity. Review draft and server copy; no request was sent.`
+        setDocumentError(selectedScope, message)
         onToast?.(message)
         return
       }
@@ -1450,10 +1487,8 @@ export function AuthoringPanel({
       }
       const stored = saveAuthoringOperationIntent(intent)
       if (!stored) {
-        const message = `Save was not sent because the exact operation for ${document.name} could not be retained in browser recovery storage.`
-        setDocuments(current => current[selectedScope] ? {
-          ...current, [selectedScope]: { ...current[selectedScope], error: message },
-        } : current)
+        const message = `No save sent: recovery storage could not retain ${document.name}'s exact operation.`
+        setDocumentError(selectedScope, message)
         refreshRecoveryStore()
         onToast?.(message)
         return
@@ -1461,15 +1496,13 @@ export function AuthoringPanel({
       const recovery = {
         ...stored, phase: 'submitting', inspectedMissing: false,
         releaseAllowed: false, releaseInspected: false,
-        message: `Submitting the exact saved operation for ${stored.name}…`,
+        message: `Submitting exact save for ${stored.name}…`,
       }
       setUncertainSaves(current => ({ ...current, [stored.scope]: recovery }))
       await submitAuthoringSave(recovery)
     } catch (error) {
       const message = `Could not prepare ${document.name} for saving: ${error?.message || error}`
-      setDocuments(current => current[selectedScope] ? {
-        ...current, [selectedScope]: { ...current[selectedScope], error: message },
-      } : current)
+      setDocumentError(selectedScope, message)
       onToast?.(message)
     }
   }
@@ -1501,8 +1534,8 @@ export function AuthoringPanel({
         const missing = Number(error?.status) === 404
           && error?.code === 'authoring_operation_not_found'
         const message = missing
-          ? `No durable receipt exists yet for ${recovery.name}. Resume the same operation identity; it cannot overwrite a newer revision.`
-          : `Could not check ${recovery.name}: ${error?.message || error}. Its exact draft and operation identity remain retained.`
+          ? `No durable receipt yet for ${recovery.name}. Resume the same identity; it cannot overwrite a newer revision.`
+          : `Could not check ${recovery.name}: ${error?.message || error}. Its exact draft and identity remain retained.`
         updateRecovery(recovery, {
           phase: missing ? 'missing' : 'unknown', inspectedMissing: missing,
           // Even a 404 can race a still-running timed-out PUT before its prepared receipt is
@@ -1510,9 +1543,7 @@ export function AuthoringPanel({
           releaseAllowed: false,
           releaseInspected: false, message,
         })
-        setDocuments(current => current[recovery.scope] ? {
-          ...current, [recovery.scope]: { ...current[recovery.scope], error: message },
-        } : current)
+        setDocumentError(recovery.scope, message)
         onToast?.(message)
       }
     } finally {
@@ -1531,7 +1562,7 @@ export function AuthoringPanel({
     if (!verifiedRecovery || saveRef.current || !activeRef.current
         || !['prepared', 'missing'].includes(verifiedRecovery.phase)) return
     if (!window.confirm(
-      `Resume the exact retained save for ${recovery.name}?\n\nThis reuses the same durable operation identity, expected revision, and file contents. It cannot overwrite an intervening newer version.`,
+      `Resume exact save for ${recovery.name}?\n\nThe same identity, revision, and contents cannot overwrite a newer version.`,
     )) return
     submitAuthoringSave(verifiedRecovery)
   }
@@ -1540,7 +1571,7 @@ export function AuthoringPanel({
         || document.observedText == null
         || !/^sha256:[0-9a-f]{64}$/.test(document.observedRevision || '') || saveRef.current) return
     if (!window.confirm(
-      `Use the current server copy of ${document.name}?\n\nThis discards the retained local draft for that file.`,
+      `Use current server copy of ${document.name}?\n\nThis discards its retained draft.`,
     )) return
     const scope = scopeFor(document.kind, document.name)
     setDocuments(current => current[scope] ? {
@@ -1553,22 +1584,22 @@ export function AuthoringPanel({
         conflict: false, rootConflict: false, observationIncomplete: false, error: '',
       },
     } : current)
-    onToast?.(`Using the current server copy of ${document.name}.`)
+    onToast?.(`Using current server copy of ${document.name}.`)
   }
   const releaseAuthoringRecovery = recovery => {
     const exact = uncertainSaves[recovery?.scope]
     if (!exact || !exact.releaseAllowed || !exact.releaseInspected
         || exact.operationId !== recovery.operationId) return
     if (!window.confirm(
-      `Release the exact saved operation for ${recovery.name}?\n\nThis sends no write. The retained draft stays open here, but closing the panel will discard it.`,
+      `Release exact saved operation for ${recovery.name}?\n\nNo write is sent. Its draft remains until this panel closes.`,
     )) return
     if (!clearAuthoringOperationIntent(exact)) {
       updateRecovery(exact, {
         releaseAllowed: false, releaseInspected: false,
-        message: 'The browser recovery record changed or could not be released. It remains protected.',
+        message: 'Recovery record changed or could not be released; it remains protected.',
       })
       refreshRecoveryStore()
-      onToast?.('The exact Authoring recovery record changed or could not be released.')
+      onToast?.('Exact recovery record changed or could not be released.')
       return
     }
     removeRecovery(exact)
@@ -1577,15 +1608,15 @@ export function AuthoringPanel({
       [exact.scope]: {
         ...current[exact.scope], recoveryOperationId: null,
         recoveryStorageRaw: null,
-        error: 'The old operation recovery was released. Review the retained draft and current server version before saving again.',
+        error: 'Old operation recovery released. Review draft and server version before saving.',
       },
     } : current)
-    onToast?.('The exact Authoring recovery identity was released. No save was sent.')
+    onToast?.('Exact recovery identity released. No save was sent.')
   }
   const releaseDamagedRecovery = recovery => {
     if (!recovery?.inspected) return
     if (!window.confirm(
-      'Release this exact unreadable Authoring recovery record?\n\nOnly continue after confirming that no retained save operation still needs recovery.',
+      'Release this unreadable recovery record?\n\nContinue only if no retained save still needs recovery.',
     )) return
     const storedRecordReleased = clearDamagedAuthoringOperation(recovery)
     if (!storedRecordReleased) {
@@ -1597,7 +1628,7 @@ export function AuthoringPanel({
         }
       }
       if (!exactSnapshotIsGone) {
-        onToast?.('The recovery record changed or could not be released. It remains protected.')
+        onToast?.('Recovery record changed or could not be released; it remains protected.')
         refreshRecoveryStore()
         return
       }
@@ -1615,14 +1646,14 @@ export function AuthoringPanel({
         [recovery.identity.scope]: {
           ...current[recovery.identity.scope],
           recoveryOperationId: null, recoveryStorageRaw: null,
-          error: 'The old recovery record was released. Review the retained draft and current server version before saving again.',
+          error: 'Old recovery record released. Review draft and server version before saving.',
         },
       } : current)
     }
     if (!storedRecordReleased) refreshRecoveryStore()
     onToast?.(storedRecordReleased
-      ? 'The exact damaged Authoring recovery record was released. No save was sent.'
-      : 'The retained snapshot of the missing recovery record was released. No stored record was changed.')
+      ? 'Damaged recovery record released. No save was sent.'
+      : 'Missing recovery snapshot released. No stored record changed.')
   }
   const requestClose = () => {
     if (navigationGuardOwner === 'run') {
@@ -1635,23 +1666,25 @@ export function AuthoringPanel({
       return
     }
     const warning = uncertainSaveCount > 0
-      ? `${uncertainSaveCount} file save outcome${uncertainSaveCount === 1 ? '' : 's'} may still be unknown, and the exact draft${uncertainSaveCount === 1 ? ' is' : 's are'} retained here.`
+      ? `${uncertainSaveCount} save outcome${uncertainSaveCount === 1 ? '' : 's'} may be unknown; exact draft${uncertainSaveCount === 1 ? '' : 's'} retained here.`
       : damagedRecoveryCount > 0
-        ? `${damagedRecoveryCount} damaged Authoring recovery record${damagedRecoveryCount === 1 ? '' : 's'} remain quarantined in this tab.`
-      : mutationBusy ? 'A file save is still in progress.'
+        ? `${damagedRecoveryCount} damaged recovery record${damagedRecoveryCount === 1 ? ' remains' : 's remain'} quarantined here.`
+      : mutationBusy ? 'A save is in progress.'
         : `${dirtyCount} unsaved draft${dirtyCount === 1 ? '' : 's'} will be lost.`
-    if (!window.confirm(`${warning} Close Authoring anyway?`)) return
+    if (!window.confirm(`${warning} Close Authoring?`)) return
     allowNavigationRef.current = true
     draftStore.clear(AUTHORING_PANEL_DRAFT_SCOPE)
     onClose?.()
   }
   const dirtyByKind = documentKind => Object.values(documents)
-    .filter(document => document.kind === documentKind && document.draftText !== document.savedText).length
+    .filter(document => document.kind === documentKind && !document.readOnly
+      && document.draftText !== document.savedText).length
   const fileRows = [...(data.files || [])]
   for (const recovery of Object.values(uncertainSaves)) {
-    if (recovery.kind === kind && !fileRows.some(file => file.name === recovery.name)) {
+    if (recovery.kind === kind && validAuthoringName(recovery.name)
+        && !fileRows.some(file => file.name === recovery.name)) {
       fileRows.push({ name: recovery.name, text: recovery.submittedText,
-        revision: null, truncated: false, recovered: true })
+        revision: null, truncated: false, readOnly: false, recovered: true })
     }
   }
   for (const document of Object.values(documents)) {
@@ -1660,9 +1693,9 @@ export function AuthoringPanel({
           || scopeFor(document.kind, document.name) === selectedScope)
         && !fileRows.some(file => file.name === document.name)) {
       fileRows.push({
-        name: document.name, text: document.draftText,
+        name: document.name, text: document.readOnly ? document.savedText : document.draftText,
         revision: document.observedRevision || null,
-        truncated: document.truncated === true, recovered: true,
+        truncated: document.truncated === true, readOnly: document.readOnly === true, recovered: true,
       })
     }
   }
@@ -1673,50 +1706,48 @@ export function AuthoringPanel({
       <div className="toolbar" style={{ marginBottom: 10 }}>
         {['prompts', 'skills', 'knowledge'].map(k => <button key={k} className={'btn sm' + (k === kind ? ' primary' : '')}
           onClick={() => chooseKind(k)}>{k}{dirtyByKind(k) ? ` (${dirtyByKind(k)} unsaved)` : ''}</button>)}
-        {source.status === 'ready' && <span className="muted">{data.dir || `no ${kind} dir configured (set ${AUTHORING_KIND_ENV[kind]}, or the ${kind === 'prompts' ? 'Prompt' : kind === 'skills' ? 'Skills' : 'Knowledge'} dir in Settings)`}</span>}
-        {source.status === 'ready' && data.truncatedFiles > 0
-          && <span className="muted">{data.truncatedFiles} more file{data.truncatedFiles === 1 ? '' : 's'} omitted</span>}
+        {sourceReady && <span className="muted">{data.dir || `no ${kind} dir configured (set ${AUTHORING_KIND_ENV[kind]}, or the ${kind === 'prompts' ? 'Prompt' : kind === 'skills' ? 'Skills' : 'Knowledge'} dir in Settings)`}</span>}
+        {sourceReady && data.truncatedFiles > 0
+          && <span className="muted">{data.truncatedFiles}+ files omitted (cap)</span>}
+        {sourceReady && data.inventoryIncomplete
+          && <span className="muted">Package scan capped; omissions possible</span>}
       </div>
       {/* The Authoring / Memory boundary is DIRECTION, not subject matter: both hold durable
           knowledge, this one is the half a human writes. Saying so on both panels is the whole
           answer to "what is the difference between authoring and memory". */}
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
-        Written <b>by you</b>, read by the agents during a run. What the <b>runs</b> write back —
-        lessons, cases, meta-notes — is Lab → <b>Memory</b>. Each kind below is one directory of
-        Markdown, and <b>prompts</b> and <b>skills</b> have no default location: until you point them
-        somewhere those tabs read “no dir configured”, which is not the same as the feature missing.
+        <b>You</b> write these Markdown files; agents read them during runs. Run-written lessons,
+        cases and meta-notes live in <b>Memory</b>. <b>Prompts</b> and <b>skills</b> have no default
+        directory—configure one in Settings.
       </div>
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
         {AUTHORING_KIND_PURPOSE[kind]?.what}{' '}{AUTHORING_KIND_PURPOSE[kind]?.disclosure}
       </div>
       <PanelResourceNotice resource={source} label={`${kind} files`} onRetry={retry} />
       {dirtyCount > 0 && <div className="notice" role="status" style={{ marginBottom: 10 }}>
-        {dirtyCount} unsaved draft{dirtyCount === 1 ? '' : 's'} retained in this panel. Switching files or sections is safe; closing is not.
+        {dirtyCount} draft{dirtyCount === 1 ? '' : 's'} retained. Switching is safe; closing loses them.
       </div>}
       {selected && !selectedSourceReconciled && <div className="notice" role="status"
         style={{ marginBottom: 10 }}>
-        Saving and server-copy actions stay disabled until the current {kind} source is loaded and
-        reconciled with this retained draft.
+        Save and server-copy stay disabled until current {kind} reconciles with this draft.
       </div>}
       {!storageAvailable && <div className="report-inline-state error" role="alert" style={{ marginBottom: 10 }}>
-        <OpIcon name="alert" size={14} /><span>Browser recovery storage is unavailable. Authoring saves stay disabled so an ambiguous write cannot lose its exact identity.</span>
+        <OpIcon name="alert" size={14} /><span>Recovery storage unavailable; saves are disabled to preserve ambiguous-write identity.</span>
       </div>}
       {damagedRows.map(recovery => <div key={recovery.scope}
         className="report-inline-state error" role="alert" style={{ marginBottom: 10 }}>
         <OpIcon name="alert" size={14} />
         <span>{recovery.storageMissing
-          ? `A previously seen unreadable Authoring recovery record${recovery.identity
-            ? ` for ${recovery.identity.name}` : ''} disappeared or was replaced in browser storage. Its exact snapshot remains quarantined in this tab.`
-          : recovery.reason || `An unreadable Authoring recovery record exists${recovery.identity
-          ? ` for ${recovery.identity.name}` : ''}. Saves for that scope remain locked.`}</span>
+          ? `Unreadable recovery${recovery.identity ? ` for ${recovery.identity.name}` : ''} changed or disappeared in storage; its exact snapshot is quarantined here.`
+          : recovery.reason || `Unreadable recovery exists${recovery.identity
+          ? ` for ${recovery.identity.name}` : ''}; saves for that scope are locked.`}</span>
         {!recovery.inspected
           ? <button className="btn sm" onClick={() => setDamagedRecoveries(current => ({
             ...current, [recovery.scope]: { ...current[recovery.scope], inspected: true },
           }))}>Inspect recovery</button>
           : <>
             <span className="muted">Stored record {recovery.raw.length} bytes; {recovery.reason
-              ? 'its retained contents fail the integrity check.'
-              : 'its operation identity cannot be verified.'}</span>
+              ? 'integrity check failed.' : 'operation identity unverified.'}</span>
             <button className="btn sm danger" onClick={() => releaseDamagedRecovery(recovery)}>Release exact record</button>
           </>}
       </div>)}
@@ -1741,24 +1772,28 @@ export function AuthoringPanel({
           {fileRows.map(f => <button type="button" key={f.name}
             className={'run-card authoring-file' + (selectedScope === scopeFor(kind, f.name) ? ' sel' : '')}
             onClick={() => chooseFile(f)}>{f.name}
-            {documents[scopeFor(kind, f.name)]?.draftText !== documents[scopeFor(kind, f.name)]?.savedText
+            {f.readOnly ? ' • read-only package' : ''}
+            {!documents[scopeFor(kind, f.name)]?.readOnly
+              && documents[scopeFor(kind, f.name)]?.draftText !== documents[scopeFor(kind, f.name)]?.savedText
               ? ' • unsaved' : ''}{uncertainSaves[scopeFor(kind, f.name)] ? ' • recovery' : ''}</button>)}
-          {source.status === 'ready' && fileRows.length === 0 && <div className="muted">no files</div>}
+          {sourceReady && fileRows.length === 0 && <div className="muted">no files</div>}
         </div>
         <div className="authoring-editor">
           {selected ? <>
-            <textarea className="text" aria-label={`Edit ${selected.name}`} value={selected.draftText}
-              disabled={selected.truncated} onChange={e => editSelected(e.target.value)} />
+            <textarea className="text"
+              aria-label={`${selected.readOnly ? 'View' : 'Edit'} ${selected.name}`}
+              value={selected.draftText} disabled={selected.truncated || selected.readOnly}
+              onChange={e => editSelected(e.target.value)} />
             {selected.truncated && <div className="report-inline-state error" role="alert">
-              <OpIcon name="alert" size={14} /><span>This file is larger than the safe editor limit. Only a prefix is shown, so saving is disabled.</span>
+              <OpIcon name="alert" size={14} /><span>File exceeds the editor limit; only a prefix is shown, so Save is disabled.</span>
             </div>}
             {selected.conflict && <div className="report-inline-state error" role="alert">
               <OpIcon name="alert" size={14} /><span>{selected.rootConflict
-                ? 'The configured Authoring directory changed while this draft was retained. The draft stays bound to its original directory and cannot be written into the new one.'
+                ? 'Authoring directory changed. Draft remains bound to the old directory and cannot write to the new one.'
                 : selected.observationIncomplete
-                  ? 'The server returned an incomplete file list, so this file\'s current version could not be verified. Saving stays disabled until a complete refresh can prove its revision.'
-                : 'The server copy changed while this draft was retained. Your text was not replaced.'}</span>
-              {!selected.truncated && selected.observedText != null
+                  ? 'File list is incomplete, so its revision is unverified. Save stays disabled until a complete refresh.'
+                : 'Server copy changed. Draft retained.'}</span>
+              {!selected.truncated && !selected.readOnly && selected.observedText != null
                 && /^sha256:[0-9a-f]{64}$/.test(selected.observedRevision || '')
                 && !selectedUncertainSave && selectedSourceReconciled && <button className="btn sm"
                 onClick={() => adoptObservedServerCopy(selected)}>Use server copy</button>}
@@ -1769,13 +1804,14 @@ export function AuthoringPanel({
             <button className="btn sm primary" style={{ marginTop: 8 }} onClick={saveSelected}
               disabled={mutationBusy || !storageAvailable || !!selectedUncertainSave
                 || !!selectedDamagedRecovery || selected.truncated
+                || selected.readOnly
                 || !selectedSourceReconciled
                 || selected.rootConflict
                 || !validAuthoringTargetRootId(selected.observedTargetRootId)
                 || !AUTHORING_REVISION_RE.test(selected.observedRevision || '')
                 || selected.draftText === selected.savedText}>
               {saveState && !saveState.reconcile ? `Saving ${saveState.name}…` : 'Save'}</button>
-          </> : source.status === 'ready' && <div className="muted">select a file to edit</div>}
+          </> : sourceReady && <div className="muted">select a file to edit</div>}
         </div>
       </div>
     </Panel>

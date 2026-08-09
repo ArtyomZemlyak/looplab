@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from looplab.serve import engine_proc as _engine_proc
 from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
 from looplab.core.config import Settings
+from looplab.core.errors import LLMError
 from looplab.events.eventstore import (
     MAX_EVENT_BATCH_BYTES, EventStore, EventStoreConcurrencyError, EventStoreLockError,
     decode_event_record)
@@ -896,10 +897,15 @@ def build_router(srv) -> APIRouter:
                 assert expected_settings_revision is not None
                 # No run sequencer or settings-file lock crosses Popen. launch_env retains only the
                 # dedicated publication fence, so a completed clear/rotation cannot be overtaken by
-                # a child carrying the prior credential.
+                # a child carrying the prior credential. Re-load the exact materialized task so the
+                # parent applies the same task-aware consumer plan as the child before accepting a
+                # detached process that would only die during its own startup gate.
+                from looplab.adapters.tasks import load_task
+                launch_task = load_task(task_file)
                 with srv.settings.launch_env(
                         launch_settings,
-                        expected_settings_revision=expected_settings_revision) as env:
+                        expected_settings_revision=expected_settings_revision,
+                        task=launch_task) as env:
                     # From this assignment onward, an exception cannot prove whether the helper failed
                     # before or after the OS accepted Popen. Retain the claim and report uncertainty.
                     popen_boundary_entered = True
@@ -925,6 +931,13 @@ def build_router(srv) -> APIRouter:
                         "expected_settings_revision": exc.expected,
                         "current_settings_revision": exc.current,
                         "remediation": "Run preflight again and review the updated launch preview.",
+                        })
+                elif isinstance(exc, LLMError) and not popen_boundary_entered:
+                    exposed_exc = HTTPException(409, {
+                        "code": "launch_credentials_invalid",
+                        "message": "Current credentials cannot authorize this task's LLM consumers.",
+                        "field_errors": {"settings": str(exc)},
+                        "remediation": "Fix the bound credential/profile, then run preflight again.",
                     })
                 elif isinstance(exc, EventStoreLockError):
                     exposed_exc = HTTPException(503, {

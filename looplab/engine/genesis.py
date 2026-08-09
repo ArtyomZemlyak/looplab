@@ -1,11 +1,11 @@
 """Genesis on the CLI: turn a plain-text goal into a runnable task — the LLM picks the task `kind`
 and authors the inline spec, so the user never has to name a task type.
 
-This is the headless counterpart of the Web UI's "New run" Genesis chat
-(`serve/routers/genesis.py /api/genesis`): same idea — a model reads your words (and any data/repo
-path you mention) and decides *what kind of task this is* — exposed for `looplab run --goal "..."`
-with no `--kind`. Both paths share `default_backend` (over `GENERATIVE_KINDS`) below to default
-`backend=llm` when the authored task needs a code-writing agent and no backend was chosen explicitly.
+This is the CLI's historical Genesis planner. The TUI calls
+`serve/routers/genesis.py` (`/api/genesis`), while Web New run uses the owner Assistant's
+`RunLauncherTools.propose_run`; they are separate planners/schemas. They share task-adapter and
+`default_backend` authority (over `GENERATIVE_KINDS`) so an authored task that needs a code-writing
+agent defaults to `backend=llm` when the operator did not choose one explicitly.
 
 On `kind` itself: it is **not** removed. It is the dispatch key that selects one of nine
 ``TaskAdapter`` semantics (each a different eval / grader / trust / data model — e.g. a self-reported
@@ -27,7 +27,7 @@ from looplab.core.parse import parse_structured
 from looplab.core.task_kinds import GENERATIVE_KINDS, default_backend
 
 # Canonical, CLI-focused guide to choosing a task kind from a plain goal. Kept compact and in one
-# place (the richer, repo-scouting variant the Web UI uses lives in server.py's genesis endpoint).
+# place (the TUI's richer planner lives in the server genesis endpoint; Web uses owner Assistant).
 TASK_KIND_GUIDE = (
     "Choose the task KIND that fits the user's goal and author an inline `task` object for it:\n"
     "- dataset — they point at a data file and want a prediction; the agent writes the WHOLE solution "
@@ -188,8 +188,8 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
     # AGENTIC grounding: when the user named a real on-disk path (a --data location or a --repo), give
     # the model a read-only filesystem scout so it authors the task from what's REALLY there (the
     # README/entry-script/eval for a repo, the data file's header/schema for a dataset) instead of a
-    # promise — the same repo-scouting the Web UI's Genesis chat does. With no named path it stays
-    # None (pure goal→plan) and `agentic_struct` degrades to the single-shot parse_structured.
+    # promise — analogous to the scout tools available to the Web owner Assistant. With no named
+    # path it stays None (pure goal→plan) and `agentic_struct` degrades to the single-shot parse.
     tools = _scout_tools(data, repo)
     has_filesystem_scout = tools is not None
     # PART V §22 — give Genesis the read-only CROSS-RUN knowledge (portfolio-wide, unbound): so it can plan
@@ -200,7 +200,7 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
         from looplab.tools.cross_run_tools import CrossRunTools
         crt = CrossRunTools(memory_dir, role="researcher", audience="run")
         # No task passport exists yet. Bind the provider to the operator's goal/direction; an empty or vague
-        # scope fails closed rather than exposing the machine-wide portfolio to an agent prompt.
+        # scope fails closed rather than exposing the whole configured portfolio to an agent prompt.
         crt.bind_state(SimpleNamespace(task_id="", goal=goal, direction=direction or ""))
         tools = CompositeTools([tools, crt]) if tools is not None else crt
         sys_prompt += (

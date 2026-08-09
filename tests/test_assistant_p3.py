@@ -205,8 +205,14 @@ def test_shell_background_tool(tmp_path):
     r = s.execute("run_command", {"command": [sys.executable, "-c", "print('hi')"], "background": True})
     assert "background task" in r
     tid = r.split("task ")[1].split(" ")[0]
-    time.sleep(0.3)
-    out = s.execute("read_output", {"task_id": tid})
+    # `read_output` is deliberately non-blocking: under a loaded full suite the child may not have
+    # been scheduled within an arbitrary fixed sleep. Poll the public cursor contract with a bound.
+    out = ""
+    for _ in range(200):
+        out = s.execute("read_output", {"task_id": tid})
+        if "hi" in out:
+            break
+        time.sleep(0.01)
     assert "hi" in out
     assert tid in s.execute("list_background", {})
 

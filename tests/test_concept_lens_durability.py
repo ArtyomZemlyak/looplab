@@ -543,6 +543,7 @@ def test_a_visible_terminal_whose_receipt_cannot_be_confirmed_replays_as_uncerta
         "a terminal whose fsync could not be confirmed was disclosed as authoritative")
     assert payload["ambiguous"] is True
     assert payload["request_id"] == identity
+    assert payload["seq"] == terminal.seq
     assert "unconfirmed" in payload["error"]
 
     # ...and once storage can sync again, the SAME key replays the already-paid terminal.

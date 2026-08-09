@@ -40,17 +40,17 @@ Each type is deliberately different — they are **not** interchangeable:
 | **Cases** (`cases.jsonl`) | *The list of the best* — the winning config per task, verbatim, retain-on-improvement. Exactly one row per `task_id`: a leaderboard, not a history. | `{task_id, goal, direction, params, metric, rationale}` | cross-run | run-end | **`kb_search` only** — a case is never injected into a prompt (see [What are cases for?](#what-are-cases-for)) |
 | **Meta-notes** (`meta_notes.jsonl`) | *Why it may have won* — a short, LLM-distilled explanatory hypothesis over the observed run (not the raw config — that's the case, and not causal proof). | `{task_id, note}` (model-authored explanatory prose) | cross-run (per task) | run-end (LLM; falls back to a stats line) | exact warm-start, `recall_notes` |
 | **Lessons** (`lessons.jsonl`) | *Generalizable good **and** bad findings* — higher-level claims ("larger batch tends to help") with a verdict and a count of agreeing recorded observations, not independent verification. **Split by `role`** (see below). | `{statement, outcome: supported/tested/abandoned/failed/refuted/noted (action guidance; noted is neutral), claim_stance: support/oppose/neutral (relation of evidence to the literal statement on new rows), delta, confidence, evidence, evidence_sig (each evidence node's outcome signature at write time — the reconciliation provenance), evidence_count, fingerprint, role: researcher/developer (absent = shared)}` | cross-run (task-fingerprint matched) | run-end — **LLM-authored only**: the reflection consolidates the run (worked/failed nodes + resolved hypotheses + failure themes) into one lesson per theme, plus M6 comparative code-fix pairs (offline/toy path: a deterministic winner record); also **re-derived when a re-eval flips a cited node** | prompt injection (role-routed, fingerprint-matched), `search_lessons` |
-| **Skills** — hand-written (`skills_dir`) | *Best practices **with the script*** — a reusable technique + the code that implemented it, offered to the Researcher as a tool. | markdown: `name`, `description` frontmatter + the technique in the body | cross-run | **by you**, in Lab → Authoring → skills | `list_skills`, `use_skill` |
-| **Skills** — auto-distilled (`<memory_dir>/skills/auto-*.md`) | The same tool surface, filled by the run itself from a card that was supported with Δ>0. | as above, plus `status (candidate/promoted)`, `provenance`, `source_task`, `fingerprints` — **none of which any reader parses** (`tools/skills.py::_parse_skill` reads `name`/`description` only) | cross-run | run-end (supported hypothesis, Δ>0) | `list_skills`, `use_skill` — a *candidate* is offered exactly like a *promoted* one |
+| **Skills** — hand-written (`skills_dir`) | *Best practices **with the script*** — a reusable technique + the code that implemented it, offered to the Researcher as a tool. | markdown: `name`, `description` frontmatter + the technique in the body | cross-run | **by you**; root Markdown is editable and nested `**/SKILL.md` packages are review-only in Lab → Authoring → skills | `list_skills`, `use_skill` |
+| **Skills** — auto-distilled (`<memory_dir>/skills/auto-*.md`) | The same tool surface, filled by the run itself from a card that was supported with Δ>0. | as above, plus `status (candidate/promoted)`, `provenance`, `claim_sha256`, `source_task`, `fingerprints`; the skill reader parses the trust fields | cross-run | run-end (supported hypothesis, Δ>0) | A one-run *candidate* stays on disk but is hidden from the production `list_skills` / `use_skill` surface. Promotion evidence is keyed by the full normalized-claim SHA-256 (the readable prefix is not identity); a later sufficiently different task fingerprint (Jaccard similarity `< 0.6` to stored evidence) promotes it. A subsequently constructed toolset lists/loads it with `UNTRUSTED_MEMORY_AUTO_SKILL` provenance |
 | **Knowledge base** (`knowledge/*.md`) | *Anything worth keeping* — free-form notes, hand- or agent-authored (the assistant's `remember` tool). The one kind **both** you and the agents write. | markdown notes | cross-run | assistant `remember`, or Lab → Authoring → knowledge | `kb_search`, `list_notes`, `read_note` |
-| **Prompts** (`<prompt_dir>/<key>.md`) | *What the roles are told* — an override that REPLACES a built-in role system prompt, re-read on every call. Not learned and never written by a run: operator configuration that happens to live on disk. | one Markdown body per key in `core/prompts.py::PROMPT_KEYS` | global (a flat `Settings` field) | **by you**, in Lab → Authoring → prompts | every LLM call for that role, via `render(prompts, key, default)` |
+| **Prompts** (`<prompt_dir>/<key>.md`) | *What registered prompt consumers are told* — an override that REPLACES a matching built-in system prompt and is re-read when that call site renders it. Not learned and never written by a run: operator configuration that happens to live on disk. | one Markdown body per key in `core/prompts.py::PROMPT_KEYS` | global (a flat `Settings` field) | **by you**, in Lab → Authoring → prompts | registered `render(prompts, key, default)` call sites only; several assistant/report/monitor families still have separate prompt governance |
 | **Cards** (work-item + belief board, in-run; one belief may have several cards) | *What's worth testing* — accepted work items with a live **verdict** (open → testing → supported/tested/abandoned) and accumulating evidence. `belief_id` is the full normalized `seed_statement` digest; the Researcher and foresight collapse open, untested cards by that identity so duplicate work items do not become duplicate beliefs. Agentic paraphrase merges (`hypothesis_merged`) remain a separate, durable relation. | `{id, belief_id, seed_statement, statement, verdict, evidence, best_delta, source, retry_of}` per card | one run (derived from the event log) | Researcher (`idea.hypothesis`) + `hypothesis_added` | one representative per open, untested belief is injected into the proposal prompt |
-| **Research memo** (deep-research) | *Breadth of scope* — a hard-thinking pass over a bounded, lifecycle-aware coverage sample plus enabled sources. The prompt prioritizes the leader, early seeds, eligible top metrics, representative genuine failures and recent active work. Tombstoned/aborted rows and durable pre-dispatch discards are excluded from experimental evidence and separately counted; constraint/trust-ineligible rows selected by a non-top bucket are labelled. The prompt reports exactly how many active experimental rows were omitted; its `recommended_directions` can **become belief cards**. | `{summary, reasoning, findings, claims:[{statement, node_ids, urls}], sources:[{title,url,snippet}], recommended_directions, proposed_ideas, at_node, trigger, verification}` (`reasoning` is debug-only; `verification` is the persisted D8 verdict payload when available) | one run | on cadence / manual / strategist | folded into `RunState.research`, verified by the D8 verifier |
+| **Research memo** (deep-research) | *Breadth of scope* — a hard-thinking pass over a bounded, lifecycle-aware stratified coverage sample plus enabled sources. The prompt reserves the leader/champion, then covers early seeds, eligible top metrics, representative genuine failures, recent active work and deterministic middle experiments. Tombstoned/aborted rows and durable pre-dispatch discards are excluded from experimental evidence and separately counted; constraint/trust-ineligible rows selected by a non-top bucket are labelled. The prompt reports exactly how many active experimental rows were omitted. The shared provider assembly exposes Run/Data, Sibling/AllRuns, CrossRun, Knowledge/Memory/Skills and gated Literature/Web tools; its `recommended_directions` can **become belief cards**. | `{summary, reasoning, findings, claims:[{statement, node_ids, urls}], sources:[{title,url,snippet}], recommended_directions, proposed_ideas, at_node, trigger, verification}` (`reasoning` is debug-only; `verification` is the persisted D8 verdict payload when available) | one run | on cadence / manual / strategist | folded into `RunState.research`, verified by the D8 verifier |
 | **Exploits** (`exploits.jsonl`) | *Defensive memory* — patterns of cheating/leakage the trust layer scans for (co-evolved hacker-fixer). | `{name, pattern, kind}` | cross-run | `looplab harden` (CLI only — no UI) | reward-hack scan at eval. **The only cross-run store that can change a node's fate**, via `trust_gate` |
 | **Concept capsules** (`concept_capsules.jsonl`) | *What this run tried, as concept slugs* — one capsule per run, with a per-concept outcome sign relative to that run's own field. The unit the Atlas aggregates. | v2 record: `{v, run_id, task_id, fingerprint, direction, concepts, concept_outcomes, concept_signs, best_metric}` + source-completeness receipts | cross-run | run-end, gated on `cross_run_concepts` | Atlas, the Researcher context pack, the Strategist note, seven `cross_run_*` tools, and `grade_novelty(prior_concepts=…)` — **surfaced, never a rejection** |
 | **Research claims** (`research_claims.jsonl`) | *What a deep-research memo asserted, with its citations* — the counter-evidence half of a claim: the only source that can make a claim **contested**. | v3 record: `{v, record_kind, run_id, task_id, direction, statement, metric, node_ids, urls, verification, source_receipt}` | cross-run (exact task) | run-end, from the D8 memo ledger | claim/atlas projections → context pack, Strategist note, `cross_run_claims`/`atlas`/`search`, `/api/cross-run/claims` |
 | **Governance policy** (`claim_decisions.jsonl`, `concept_aliases.jsonl`, `concept_splits.jsonl`) | *Your* corrections to the portfolio — ratify/reject/pin a claim; merge, purge or split a concept slug. Applied at READ time, so nothing is destroyed. | one action row each, with `action_id` + revision CAS | cross-run | **you** — `looplab claim-decide` / `concept-merge` / `concept-split`, or the `/api/cross-run/*` routes — plus, for concept MERGES only and only when `concept_tidy` is on, the ratification stage applying what the steward already proposed (`by=concept-ratifier/v1`, undone by the same `concept-alias-clear` you would use on your own row) | overlays every claim and concept projection an agent sees |
-| **Steward proposals** (`*_curation_log.jsonl`) | *What a paid steward suggested* — a review queue plus the idempotency ledger that stops the same paid call being charged twice. | `{v:2, curation_key, input_digest, model, outcome, proposals, …}` | cross-run | run-end stewards (`cross_run_curation`) or the CLI/HTTP steward commands | **nothing reads these into a prompt or a decision.** They are an audit trail and a human queue: a proposal changes nothing until you issue the governance write above |
+| **Steward proposals** (`*_curation_log.jsonl`) | *What a paid steward suggested* — a review queue plus the idempotency ledger that stops the same paid call being charged twice. | `{v:2, curation_key, input_digest, model, outcome, proposals, …}` | cross-run | run-end concept/claim stewards (`cross_run_curation`), optional run-end facet steward (`task_facets_finalize`), or the CLI/HTTP steward commands | **nothing reads these into a prompt or a decision.** They are an audit trail and a human queue: a proposal changes nothing until you issue the governance write above |
 | **Task facets** (`task_facets.jsonl`) | *What KIND of problem this task is* (domain / language / modality / interaction / objective), classified by an LLM. | `{task_id, facets:{axis: value}, by, at}` | cross-run (per task) | `looplab task-facets-set` (CLI only) | **nothing that changes behaviour** — `scope_profile` accepts them but the deterministic index path never passes them, so they neither grant visibility nor change ordering (`engine/task_facets.py` says so itself) |
 
 In-run **working memory** (rebuilt from the event log each turn, never persisted separately): the
@@ -146,30 +146,36 @@ Two things blur it, and both are real:
 
 * **`knowledge` is on both panels** — writable in Authoring, read-only in Memory — because it is the
   one directory both parties write. That is not a bug, but nothing in the product said so.
-* **Auto-distilled skills break the rule.** `write_auto_skill` puts run-authored skills in
+* **Auto-distilled skills cross the human/run boundary.** `write_auto_skill` puts run-authored skills in
   `<memory_dir>/skills/`, and `SkillTools` reads them alongside the hand-written ones. So there is
-  machine-written content on the Authoring side of the line — and it is visible in **neither** panel:
+  machine-written content on the reusable-skill side of the line — and it is visible in **neither** panel:
   the Memory endpoint only serves `cases`/`lessons`/`meta_notes`, and `GET /api/skills` resolves
   `settings.skills_dir`, which is a different directory (and `None` by default).
 
 ### Skills and prompts
 
 Both are real durable kinds and both are already in the product — on the **Authoring** panel, because
-a human writes them. Three concrete gaps sit behind "why aren't they there":
+a human writes them. Three concrete facts sit behind "why aren't they there":
 
 1. **`skills_dir` and `prompt_dir` default to `None`.** Out of the box both Authoring tabs render
    `no skills dir configured` / `no prompts dir configured` — indistinguishable, to a new operator,
    from "this feature does not exist". `memory_dir` and `knowledge_dir` default to `~/.looplab/…`;
    these two do not.
-2. **The Authoring list only globs root-level `*.md`.** `SkillTools` discovers `**/SKILL.md` *and*
-   `*.md`; `GET /api/{kind}` lists `root.glob("*.md")`. A packaged `my-skill/SKILL.md` is therefore
-   loadable by the Researcher and invisible in the editor — while the `skills_dir` settings help
-   explicitly advertises "Recursive `*/SKILL.md` packages".
-3. **Auto-distilled skills have no surface at all** (see above), and their promotion metadata is
-   inert: `write_auto_skill` takes an interprocess lock to maintain `status: candidate|promoted` from
-   accumulated task fingerprints, and `tools/skills.py::_parse_skill` reads only `name` and
-   `description`. A candidate is offered to the model exactly like a promoted one, so today the
-   candidate→promoted machinery buys nothing but the lock.
+2. **Configured recursive packages now have a bounded review surface.** `SkillTools` discovers
+   `**/SKILL.md` and root `*.md`; Authoring mirrors that inventory, while preserving the authority
+   boundary: root Markdown is writable through flat CAS/recovery identities, but nested packages use
+   safe relative display names and are read-only. Symlinks/path escapes are skipped. A directory,
+   entry or depth cap is disclosed independently from the known lower bound of omitted files, so a
+   partial inventory is never treated as proof that a retained file was deleted.
+3. **Auto-distilled skills have no first-party review surface** (see above). Their read path does
+   enforce the promotion lifecycle: `write_auto_skill` keeps a candidate on disk and accumulates
+   task fingerprints under an interprocess lock; production `SkillTools` hides that candidate until
+   a later fingerprint with Jaccard similarity `< 0.6` to stored evidence promotes the same file.
+   Visibility changes when a new `SkillLibrary`/toolset is constructed; existing toolsets do not
+   hot-reload. `SkillLibrary(...,
+   include_auto_candidates=True)` is an explicit inspection/test seam, not a runtime setting. Every
+   loaded auto-skill is labelled `UNTRUSTED_MEMORY_AUTO_SKILL`; hand-written skills retain their
+   legacy body and visibility semantics.
 
 ### Kinds nothing reads back
 
@@ -177,17 +183,22 @@ Written durably, at cost, and consumed by no prompt and no decision:
 
 * **Task facets** — an LLM classification per task. The module's own docstring says they "do not
   currently change retrieval order"; the only reader of the content is the writer's own
-  once-per-task dedup.
+  once-per-task dedup. Fresh configurations therefore do not schedule this paid run-end call;
+  `task_facets_finalize` explicitly opts in without removing the manual/on-demand APIs.
 * **Steward curation logs** — by design: the stewards are proposal-only, and the log is the human
   review queue plus the paid-call idempotency ledger. Worth knowing it is not memory the agents read.
-* **Auto-skill `status`/`provenance`/`fingerprints`/`source_task`** — see above.
+* **Auto-skill lifecycle metadata** — `claim_sha256` binds evidence to the complete normalized
+  technique, and `fingerprints` drive the cross-task promotion decision; `source_task` is audit
+  provenance only. None is returned to a reasoning role; `status` gates visibility and
+  `provenance` labels the skill read path as described above.
 
 ## Current cross-run boundary and the Research Atlas target
 
 The shipped memory above is useful, but it is not yet a complete scientific index over a large portfolio.
 LoopLab also ships an **experimental Part-IV slice enabled by default in product `Settings`** (the
 bare-library `EngineOptions` defaults remain off): rebuildable run passports/facts, per-run
-concept capsules with alias/split overlays, v3 persisted D8 claims, task-facet overlays, bounded hybrid
+concept capsules with alias/split overlays, v3 persisted D8 claims, task-facet overlays (manual or
+explicitly scheduled with the default-off `task_facets_finalize`), bounded hybrid
 cross-run retrieval, and backend Atlas/claims projections. Bound pull tools apply role and compatible direction;
 capsule upsert identity is currently the display `run_id` alone. Because the default store is global,
 two independent run roots that reuse a local run id can replace each other's capsule; there is not yet a
@@ -389,8 +400,9 @@ ledger/provider setup; initialize the directory, refresh all slices, and form a 
 replacement identity. This storage fence is not a frozen corpus watermark or atomic evidence snapshot.
 
 The run-end dependency order is: case/research claims/concept capsule → reflection → concept steward →
-claim steward → task facets → final `llm_cost` → completion. Thus the claim steward sees the current
-run-end reflection, and all steward inference is included in the final cost delta. The same frozen snapshot
+claim steward → optional task facets (`task_facets_finalize`) → final `llm_cost` → completion. Thus the
+claim steward sees the current run-end reflection, and every scheduled steward's inference is included in
+the final cost delta. The same frozen snapshot
 that produced the digest is passed to the proposal call, preventing a memory reread from changing paid input
 after the durable claim.
 

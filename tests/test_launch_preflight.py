@@ -266,6 +266,38 @@ def test_start_spawns_frozen_canonical_unified_copy_and_preserves_source(tmp_pat
     assert (run_dir / "chat.jsonl").exists()
 
 
+def test_start_missing_task_required_key_refuses_before_popen_and_releases_namespace(
+        tmp_path, monkeypatch):
+    key = "START_RESEARCH_KEY"
+    endpoint = "https://research.invalid/v1"
+    monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv(f"{key}_BASE_URL", raising=False)
+    spawned = []
+    monkeypatch.setattr(
+        "looplab.serve.routers.control._spawn_engine",
+        lambda *args, **kwargs: spawned.append((args, kwargs)))
+    client = TestClient(make_app(tmp_path))
+    request = {
+        "run_id": "missing-role-key",
+        "task": _toy(),
+        "settings": {
+            "backend": "llm",
+            "llm_profiles": {"research": {
+                "model": "research", "base_url": endpoint, "api_key_env": key,
+            }},
+            "role_profiles": {"researcher": "research"},
+        },
+    }
+    assert client.post("/api/start/preflight", json=request).status_code == 200
+
+    response = client.post("/api/start", json=request)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "launch_credentials_invalid"
+    assert spawned == []
+    assert not (tmp_path / "missing-role-key").exists()
+
+
 def test_task_file_settings_reject_secret_and_unknown_fields(tmp_path):
     for index, settings in enumerate(({"llm_api_key": "secret"}, {"max_nodez": 4})):
         source = tmp_path / f"bad-settings-{index}.json"

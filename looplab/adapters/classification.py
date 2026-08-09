@@ -259,6 +259,9 @@ class ClassificationTask(BaseModel):
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
                 ClassificationDeveloper(X, Y, k=self.cv_k, max_degree=self.max_degree))
 
+    def external_fallback_uses_llm(self) -> bool:
+        return False  # the fallback fills a deterministic local template
+
     def gpu_capable(self) -> bool:
         """Both role pairs end in `ClassificationDeveloper`, a fixed pure-Python logistic-regression
         template — the roles only pick `degree`/`lr`/`l2`/`iters`, never code. Keeps this task out of

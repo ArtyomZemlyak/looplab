@@ -185,6 +185,9 @@ class RegressionTask(BaseModel):
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
                 RegressionDeveloper(X, Y, k=self.cv_k))
 
+    def external_fallback_uses_llm(self) -> bool:
+        return False  # the fallback fills a deterministic local template
+
     def gpu_capable(self) -> bool:
         """Both role pairs end in `RegressionDeveloper`, a fixed numpy template — the roles only pick
         `degree`/`lam`, never code. Keeps this task out of the host GPU pool lease (see
@@ -255,6 +258,9 @@ class CodeRegressionTask(BaseModel):
         )
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
                 LLMDeveloper(client, brief=brief))
+
+    def external_fallback_uses_llm(self) -> bool:
+        return True  # output validation retains the script-writing LLMDeveloper
 
     def gpu_capable(self) -> bool:
         """The LLM writes the code here, but the brief above pins it to "ONLY numpy and the Python

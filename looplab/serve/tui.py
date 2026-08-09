@@ -1,8 +1,8 @@
 """A terminal control plane for LoopLab — a chat-first TUI that mirrors the most-used slice of the
 React web UI (ADR-1's "Textual TUI" lane, finally filled) WITHOUT re-implementing the whole graph
 explorer. The web UI is the place to dig into the DAG, traces and per-node detail; this is the place
-to *drive*: describe a goal and the boss launches a run, glance at what's running, and chat with the
-boss to steer it — all from a terminal, over SSH, no browser.
+to *drive*: describe a goal, review the boss's proposed spec and explicitly launch it, glance at
+what's running, and chat with the boss to steer it — all from a terminal, over SSH, no browser.
 
 Design (deliberately small):
   * It is a thin HTTP CLIENT of the SAME server `looplab ui` serves (ADR-18: the read/control plane).
@@ -17,7 +17,8 @@ Design (deliberately small):
 Three surfaces, reached from one dashboard:
   1. Dashboard   — a live table of runs (status · nodes · best metric · age); pick one, or just type a
                    goal to start a new run.
-  2. Genesis     — chat the boss into a run spec, tweak it, launch it (POST /api/genesis → /api/start).
+  2. Genesis     — chat the boss into a run spec, review/tweak it, then explicitly launch it
+                   (POST /api/genesis → operator `launch` → /api/start).
   3. Run view    — a compact status panel + a boss chat that APPLIES actions (POST .../command), exactly
                    like the web Dock: free text becomes a plan the engine runs.
 """

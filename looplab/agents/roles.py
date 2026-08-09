@@ -1027,9 +1027,10 @@ class ValidatingDeveloper(WrapsDeveloper):
 
     On an invalid result it re-prompts the *inner* developer with the failure folded
     into the Idea's rationale (a cheap correction loop), up to `max_retries` times. If it
-    still can't produce valid code it falls back to `fallback` (typically the in-house
-    `LLMDeveloper`, the known-good path) — so a flaky external agent degrades to a
-    working developer instead of poisoning the search with a no-op/broken node.
+    still can't produce valid code it falls back to the task's original in-process Developer:
+    an LLM writer, deterministic/template Developer, or repo baseline. A flaky external agent
+    therefore degrades to the adapter-owned known-good path instead of poisoning the search with a
+    no-op/broken node.
 
     `last_report` holds the `AgentReport` for the most recent call; the orchestrator logs
     it as an `agent_validated` event, giving a per-node audit trail of the agent.
@@ -1064,8 +1065,8 @@ class ValidatingDeveloper(WrapsDeveloper):
         self.last_deleted: list[str] = []      # accepted in-surface deletions of the shipped attempt
         self.last_footprint: Optional[dict] = None  # resource estimate of the attempt that shipped
 
-    # T8/A0b: code-generation capability follows the INNER developer (the fallback is LLM anyway)
-    # — kept local: unlike the mixin's forwarder, the fallback's capability counts too.
+    # T8/A0b: code-generation capability combines the inner and task-owned fallback Developers —
+    # kept local because, unlike the mixin's forwarder, both capabilities count here.
     @property
     def is_code_generating(self) -> bool:
         return bool(getattr(self.inner, "is_code_generating", False)
@@ -1081,6 +1082,11 @@ class ValidatingDeveloper(WrapsDeveloper):
     @prompts.setter
     def prompts(self, value) -> None:
         self.inner.prompts = value
+        # An invalid external result eventually crosses this wrapper into the in-process fallback.
+        # Prompt governance must follow that reachable leaf just like client rebinding does;
+        # otherwise a developer_system/repair override disappears only on the recovery path.
+        if self.fallback is not None and hasattr(self.fallback, "prompts"):
+            self.fallback.prompts = value
 
     def _report(self, code: str, *, agent: bool) -> AgentReport:
         """Validate `code`. `agent=True` pulls the inner agent's process signal + seed
@@ -1102,8 +1108,8 @@ class ValidatingDeveloper(WrapsDeveloper):
         self.last_attempts = attempts
         self.last_fell_back = fell_back
         self.last_shipped_ok = shipped_ok
-        # Multi-file output only when the agent itself shipped; the LLM fallback is
-        # single-file (its code goes to solution.py via node.code).
+        # Multi-file output only when the external agent itself shipped. A task-owned fallback
+        # returns node.code (LLM/template) or the unchanged repo baseline, never that agent's patch.
         self.last_files = ({} if fell_back
                            else dict(getattr(self.inner, "last_files", {}) or {}))
         self.last_deleted = ([] if fell_back
@@ -1137,7 +1143,9 @@ class ValidatingDeveloper(WrapsDeveloper):
             # In repo mode the fallback is the baseline (no-op) developer — running the
             # unmodified repo is always a valid shippable result.
             fb_ok = True if self.repo_mode else self._report(fb, agent=False).ok
-            # last_report still describes the AGENT (it failed); shipped code is the LLM's
+            # last_report still describes the external AGENT (it failed); the shipped result came
+            # from the task-owned fallback (LLM writer, deterministic/template Developer, or repo
+            # baseline according to the adapter).
             self._record(report, attempts=attempts, fell_back=True, shipped_ok=fb_ok)
             return fb
         self._record(report, attempts=attempts, fell_back=False, shipped_ok=report.ok)
@@ -1145,8 +1153,8 @@ class ValidatingDeveloper(WrapsDeveloper):
 
     def audit_extra(self) -> dict:
         """Wrapper-specific audit fields merged into the `agent_validated` event so the
-        log shows whether the agent succeeded, how many tries it took, and whether we had
-        to fall back to the LLM developer."""
+        log shows whether the agent succeeded, how many tries it took, and whether the task's
+        original Developer fallback ran."""
         return {"attempts": self.last_attempts, "fell_back": self.last_fell_back,
                 "shipped_ok": self.last_shipped_ok}
 

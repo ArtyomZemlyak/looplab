@@ -56,7 +56,7 @@ class PromptStore:
 PROMPT_KEYS: tuple[str, ...] = (
     "researcher_system", "tool_researcher_system",
     "developer_system", "developer_repair_prefix",
-    "repo_developer_system_intro", "repo_developer_system_body",
+    "repo_developer_system_intro", "repo_developer_system_body", "repo_onboarder_system",
     "strategist_system", "tool_strategist_system",
     "pilot_system", "triage_system",
     "deep_research_system", "foresight_system", "merge_system", "bestofn_judge_system",
@@ -65,9 +65,6 @@ PROMPT_KEYS: tuple[str, ...] = (
     # item merge, and collapsing the two would have changed the shipped text for a paid agent.
     "concept_consolidate_system",
 )
-# NOT registered (documented exclusion): the LLMOnboarder's system prompt
-# (adapters/repo_developer.py::_SYS) — the onboarder is built pre-run via task.make_onboarder()
-# with no PromptStore handle wired; route it through render() when that wiring exists.
 
 
 def render(store: Optional[PromptStore], name: str, default: str, /, **vars) -> str:

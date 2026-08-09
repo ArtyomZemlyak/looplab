@@ -38,18 +38,24 @@ test('every module under src/ still parses', async () => {
     root: fileURLToPath(new URL('..', import.meta.url)),
     configFile: false, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
   })
-  const broken = []
   try {
-    for (const url of modules) {
-      try {
-        const result = await vite.transformRequest(url, { ssr: true })
-        if (result === null) broken.push(`${url}: vite resolved nothing for this module`)
-      } catch (error) {
-        broken.push(`${url}: ${error?.message ?? error}`)
-      }
+    // Transform bounded batches concurrently. The old fully-serial sweep took ~22s in isolation and
+    // crossed the suite's 30s deadline under ordinary parallel test load; that made a parse guard
+    // flaky without finding a parse defect. Sixteen keeps pressure bounded while preserving coverage.
+    const broken = []
+    for (let offset = 0; offset < modules.length; offset += 16) {
+      const batch = await Promise.all(modules.slice(offset, offset + 16).map(async url => {
+        try {
+          const result = await vite.transformRequest(url, { ssr: true })
+          return result === null ? `${url}: vite resolved nothing for this module` : null
+        } catch (error) {
+          return `${url}: ${error?.message ?? error}`
+        }
+      }))
+      broken.push(...batch.filter(Boolean))
     }
+    assert.deepEqual(broken, [], `modules that do not parse:\n${broken.join('\n\n')}`)
   } finally {
     await vite.close()
   }
-  assert.deepEqual(broken, [], `modules that do not parse:\n${broken.join('\n\n')}`)
 })

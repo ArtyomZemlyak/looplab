@@ -251,12 +251,21 @@ class SettingsStore:
         return self._resolve_bundle(overrides)[1]
 
     @staticmethod
-    def _runtime_credential_env(settings: Settings) -> dict[str, str]:
-        """Authorize only credentials whose companion binding matches a resolved paid target."""
+    def _runtime_credential_env(
+            settings: Settings, *,
+            consumer_roles: Optional[set[str | None] | frozenset[str | None]] = None,
+            shared_active: Optional[bool] = None) -> dict[str, str]:
+        """Authorize credentials whose binding matches this launch's resolved consumers.
+
+        With no explicit consumer set this preserves the historical Settings-only superset used by
+        public compatibility callers.  Task-aware spawn boundaries pass the exact plan: otherwise a
+        custom task-owned consumer (for example an onboarding ``pilot`` while the ordinary pilot is
+        inactive) can pass parent-side validation but lose its dedicated key when the scrubbed child
+        environment is assembled.
+        """
         from looplab.core.llm import (
             bound_api_key_for, client_kwargs_for, llm_credential_consumers,
             llm_optional_credential_consumers, resolve_llm_target, role_profile,
-            validate_bound_profiles,
         )
 
         shared_key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else ""
@@ -265,26 +274,29 @@ class SettingsStore:
             _SECRET_ENV["llm_api_key"]: "",
             _SECRET_ENV["llm_api_key_base_url"]: "",
         }
-        shared_active, role_keys = llm_credential_consumers(settings)
-        if shared_active or role_keys:
-            # This is a pure preflight: it resolves/checks credentials but creates no transport.
-            validate_bound_profiles(settings)
-            # Process env was scrubbed at the Popen boundary. Re-add only profile pairs which a
-            # resolved role can actually request and whose owner-supplied companion binding matches.
-            for role in role_keys:
-                target = resolve_llm_target(settings, role=role)
-                if target.credential_mode == "shared":
-                    shared_active = True
-                if not target.api_key_env:
-                    continue
-                kwargs = client_kwargs_for(target, role=role)
-                env[target.api_key_env] = kwargs["api_key"]
-                env[f"{target.api_key_env}_BASE_URL"] = kwargs["api_key_base_url"]
-
-        # Optional clients keep their documented local fallback. Export a valid pair when available,
-        # but never turn a bad embedding/Memora/compressor credential into a run-level preflight error.
-        for role in sorted(llm_optional_credential_consumers(settings),
-                           key=lambda item: item or ""):
+        configured_shared_active, configured_role_keys = llm_credential_consumers(settings)
+        if consumer_roles is None:
+            role_keys = set(configured_role_keys)
+            effective_shared_active = configured_shared_active
+        else:
+            role_keys = set(consumer_roles)
+            effective_shared_active = bool(shared_active)
+        # Requiredness is supplied by the caller: production spawn boundaries pass the exact
+        # task-aware `llm_consumer_plan`, while the public no-task compatibility path passes the
+        # conservative Settings-derived set. This exporter adds only valid bound pairs from that
+        # required set plus the documented optional/latent candidates below. Invalid/missing pairs
+        # are omitted here only after the matching preflight boundary has decided whether they are
+        # required and, when required, rejected them before Popen.
+        #
+        # `developer` is a potential role even in unified settings: RepoTask.make_onboarder resolves
+        # it, and a custom/historical split Strategy may later request the in-process default. That
+        # late target is NOT required or probed at startup; make_developer_factory gates it only if
+        # requested. Best-effort export lets that child gate consume a valid configured pair while
+        # CliAgentDeveloper still strips every secret-looking variable from its own subprocess.
+        candidate_roles = set(role_keys) | set(llm_optional_credential_consumers(settings))
+        if getattr(settings, "backend", "toy") == "llm":
+            candidate_roles.add("developer")
+        for role in sorted(candidate_roles, key=lambda item: item or ""):
             try:
                 target = resolve_llm_target(settings, role=role)
                 configured_profile_env = role_profile(settings, role).get("api_key_env")
@@ -292,23 +304,51 @@ class SettingsStore:
                     continue
                 if target.credential_mode == "shared":
                     bound_api_key_for(settings, target.base_url)
-                    shared_active = True
+                    effective_shared_active = True
                     continue
                 if not target.api_key_env:
                     continue
                 kwargs = client_kwargs_for(target, role=role)
                 env[target.api_key_env] = kwargs["api_key"]
                 env[f"{target.api_key_env}_BASE_URL"] = kwargs["api_key_base_url"]
-            except Exception:  # noqa: BLE001 - the optional client will select its local fallback
+            except Exception:  # noqa: BLE001 - caller-side preflight owns requiredness/diagnosis
                 continue
 
-        if shared_active and shared_key:
-            # Required shared targets were checked by preflight; optional-only targets reach here only
-            # after the non-raising validation above.
-            bound_api_key_for(settings, settings.llm_base_url)
-            env[_SECRET_ENV["llm_api_key"]] = shared_key
-            env[_SECRET_ENV["llm_api_key_base_url"]] = shared_binding
+        if effective_shared_active and shared_key:
+            try:
+                bound_api_key_for(settings, settings.llm_base_url)
+            except Exception:  # caller-side preflight rejects when its plan really needs this pair
+                pass
+            else:
+                env[_SECRET_ENV["llm_api_key"]] = shared_key
+                env[_SECRET_ENV["llm_api_key_base_url"]] = shared_binding
         return env
+
+    @staticmethod
+    def _validate_task_consumers(settings: Settings, task):
+        """Validate and return the child's exact task-aware plan before a parent-side Popen."""
+        from looplab.agents.reachability import llm_consumer_plan
+        from looplab.core.llm import validate_bound_profiles
+
+        plan = llm_consumer_plan(task, settings)
+        validate_bound_profiles(
+            settings, consumer_roles=plan.roles,
+            external_fallback_roles=plan.external_fallback_roles,
+            trusted_in_process_roles=plan.trusted_in_process_roles)
+        return plan
+
+    def validate_launch_consumers(self, settings: Settings, task) -> None:
+        """Validate current credentials for frozen ordinary settings before a destructive phase.
+
+        This is a snapshot check, not the Popen fence. Reset uses it before archiving, then
+        ``launch_env(..., task=...)`` repeats the same check under the credential publication fence
+        immediately before process creation so a later rotation/revocation cannot slip through.
+        """
+        with self.ui_settings_transaction(), self.secret_transaction():
+            with _SECRET_ENV_LOCK:
+                values, _source, _stored = self._effective_secret_values()
+                resolved = self._with_secret_pair(settings, values)
+            self._validate_task_consumers(resolved, task)
 
     def refresh_env_secrets(self, rd: Optional[Path] = None) -> dict[str, str]:
         """Return a per-spawn pair overlay; never mutate process-global ``os.environ``.
@@ -342,6 +382,8 @@ class SettingsStore:
         that exact endpoint/profile snapshot to credential authorization and is retained, together
         with the credential publication fence, through Popen.
         """
+        from looplab.adapters.tasks import load_task
+        from looplab.serve.engine_proc import _resolve_task_file
         from looplab.serve.run_files import run_config_write_lock
         from looplab.core.config import settings_from_snapshot
 
@@ -361,10 +403,14 @@ class SettingsStore:
                 overrides = payload
                 resolved_snapshot = settings_from_snapshot(payload)
                 found_snapshot = True
+            task_file = _resolve_task_file(rd) if found_snapshot else None
+            if found_snapshot and not task_file:
+                raise ValueError("run snapshot has no loadable task for launch credential validation")
+            task = load_task(task_file, existing_run=True) if task_file else None
             with self.launch_env(
                 overrides, include_ordinary=False,
                 authorize_credentials=found_snapshot,
-                resolved_settings=resolved_snapshot) as env:
+                resolved_settings=resolved_snapshot, task=task) as env:
                 yield env
 
     def prime_env(self) -> None:
@@ -446,7 +492,7 @@ class SettingsStore:
     def launch_env(
             self, settings: dict, *, expected_settings_revision: Optional[str] = None,
             include_ordinary: bool = True, authorize_credentials: bool = True,
-            resolved_settings: Optional[Settings] = None):
+            resolved_settings: Optional[Settings] = None, task=None):
         """Yield a just-in-time child environment while its publication fence remains held.
 
         Acquire in the same UI -> secret -> launch order as writers. Once the environment is built,
@@ -476,7 +522,20 @@ class SettingsStore:
                         with _SECRET_ENV_LOCK:
                             values, _source, _stored = self._effective_secret_values()
                             resolved = self._with_secret_pair(resolved_settings, values)
-                    env.update(self._runtime_credential_env(resolved))
+                    consumer_plan = None
+                    if task is not None:
+                        consumer_plan = self._validate_task_consumers(resolved, task)
+                    else:
+                        # Public no-task callers predate task-aware reachability. Preserve their
+                        # conservative settings-level gate; production spawn boundaries now pass
+                        # a TaskAdapter and therefore use the exact consumer plan above.
+                        from looplab.core.llm import validate_bound_profiles
+                        validate_bound_profiles(resolved)
+                    env.update(self._runtime_credential_env(
+                        resolved,
+                        consumer_roles=(consumer_plan.roles if consumer_plan is not None else None),
+                        shared_active=(consumer_plan.shared_active
+                                       if consumer_plan is not None else None)))
                 else:
                     env.update({env_name: "" for env_name in _SECRET_ENV.values()})
             yield env

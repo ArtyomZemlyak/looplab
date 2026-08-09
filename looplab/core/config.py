@@ -7,16 +7,20 @@ reproducibility. (No real secrets in P0, but the masking discipline is in place.
 """
 from __future__ import annotations
 
+import logging
 import re
 import types
 import typing
+from collections.abc import Mapping
 from pathlib import Path
 
 from pydantic import Field, PrivateAttr, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Single source of the LLM first-byte (response-headers) default — see core/llm.py.
-from looplab.core.llm import DEFAULT_HEADER_TIMEOUT_S
+# Single sources shared with the LLM resolver — see core/llm.py.
+from looplab.core.llm import AGENT_STAGE_KEYS, DEFAULT_HEADER_TIMEOUT_S
+
+_LOG = logging.getLogger(__name__)
 
 # Default home for cross-run memory + the knowledge base (shared across every run). Both are ON by
 # default now (a user asked for it) so a fresh install accumulates + consults knowledge with no setup;
@@ -973,15 +977,22 @@ class Settings(BaseSettings):
     # Affects the `cross_run_advisory` context pack only; ON by default in the product Settings (ce4a379);
     # the bare-library EngineOptions default stays off (engine/options.py). See engine/claims.py.
     cross_run_structured_claims: bool = True
-    # PART IV cross-run §22.4 (AGENTIC taxonomy steward). At finalize, when an LLM client is available, let
-    # the concept steward (engine/concept_steward.py) review the freshly-updated portfolio concept graph and
-    # PROPOSE a curation — merge duplicate slugs / split conflated ones / purge noise. Proposals are LOGGED to
-    # `concept_curation_log.jsonl` for operator ratification (via the serve/CLI governance surface); the LLM
-    # never mutates fold state. The calls run synchronously during finalize, so they add latency and may add
-    # paid inference; a caught steward failure does not prevent terminal completion or trigger a retry.
+    # PART IV cross-run §22.4 (AGENTIC portfolio stewards). At finalize, when an LLM client is available,
+    # let the concept and claim stewards review the freshly-updated portfolio and PROPOSE curation. Proposals
+    # are LOGGED for operator ratification (via the serve/CLI governance surface); the LLM never mutates fold
+    # state. The calls run synchronously during finalize, so they add latency and may add paid inference; a
+    # caught steward failure does not prevent terminal completion or trigger a retry.
     # ON by explicit experimental product choice when `memory_dir` + an LLM backend are present; the
     # bare-library EngineOptions default stays off (engine/options.py). See engine/lessons.py.
     cross_run_curation: bool = True
+    # Task faceting is a third, independent proposal-only steward. Its ledger and manual CLI/API
+    # surfaces remain useful, but no live retrieval, ranking, authorization or UI consumer reads the
+    # generated facets today. Do not buy that synchronous finalize-time model call by default. An
+    # explicit opt-in preserves the old automatic schedule, and snapshot migration below maps a
+    # missing field to True so an already-running treatment does not silently lose work on resume.
+    # This flag is latent unless `cross_run_curation` is also enabled. The bare-library
+    # EngineOptions default is likewise off.
+    task_facets_finalize: bool = False
     # Deprecated compatibility flag. Steward output is untrusted and finalize is proposal-only regardless
     # of this value; retained so old snapshots still validate and logs can disclose that auto was requested.
     cross_run_curation_auto: bool = False
@@ -1085,9 +1096,10 @@ class Settings(BaseSettings):
     # re-propose must vary). Off by default (most role calls run at temperature>0 anyway).
     llm_cache: bool = False
     agent_cmd: str | None = None  # override the agent's launcher (path / wrapper)
-    # External-agent validation (ADR-7): wrap a CLI-agent Developer with a validator that
-    # audits each output (no-op/syntax/crash/timeout), retries with feedback, and falls
-    # back to the in-house LLM Developer. Off -> use the raw agent output unchecked.
+    # External-agent validation (ADR-7): wrap a CLI-agent Developer with a validator that audits
+    # each output (no-op/syntax/crash/timeout), retries with feedback, and falls back to the task's
+    # original in-process Developer (LLM writer, deterministic/template, or repo baseline). Off ->
+    # use the raw agent output unchecked.
     validate_agent: bool = True
     agent_max_retries: int = 1    # re-prompts of the agent on an invalid result
     # Patch-gated multi-file agent (ADR-7 Rule 3): run the CLI agent in a git worktree and
@@ -1145,9 +1157,10 @@ class Settings(BaseSettings):
     llm_profiles: dict[str, dict] = Field(default_factory=dict)
     llm_profile: str | None = None
     role_profiles: dict[str, str] = Field(default_factory=dict)
-    # Unified self-driving agent: one LLM identity that plays Researcher + Developer (+ Strategist)
-    # across pipeline stages, choosing its own model/toolset per stage. ON by default — the agent
-    # drives the loop (incl. crash triage: repair/abandon/reject_idea) and, via
+    # Unified control facade: one engine-facing object implements Researcher + Developer
+    # (+ Strategist/pilot) by composing stage-specific clients, backends and local contexts. This is
+    # not one shared conversation identity. ON by default — the facade drives the loop (incl. crash
+    # triage: repair/abandon/reject_idea) and, via
     # `agent_drives_actions`, picks the next macro action within a pure legal-action gate. Set both
     # to False for the legacy byte-identical split-role behavior. (No-op unless backend="llm".)
     unified_agent: bool = True
@@ -1222,10 +1235,11 @@ class Settings(BaseSettings):
     # receipt IS supplied the Engine still revalidates it against the current scorer, implementation,
     # environment, GPU inventory and raw paired-run evidence, and refuses a stale or forged one.
     speculation_gate_receipt: str | None = Field(default=None, max_length=4096)
-    # Per-stage model/endpoint overrides for the unified agent. Recognized keys (see
-    # tasks.build_unified_agent): `propose` (researcher), `implement`/`repair` (developer),
-    # `strategy`, `pilot`. Unlisted keys are ignored. Empty = the per-role researcher_*/developer_*
-    # models, then the shared llm_model. Explicit map wins. No-op unless `unified_agent` is true.
+    # Per-stage model/endpoint overrides for the unified agent. Exact keys are exported as
+    # `core.llm.AGENT_STAGE_KEYS`: `propose` (researcher), `implement`/`repair` (developer),
+    # `strategy`, `pilot`. Unknown/mis-cased keys fail at every fresh config boundary. Empty = the
+    # per-role researcher_*/developer_* models, then the shared llm_model. Explicit map wins. No-op
+    # unless `unified_agent` is true.
     agent_stage_models: dict = {}
     agent_stage_base_urls: dict = {}
     llm_parser: str = "tool_call"
@@ -1359,11 +1373,13 @@ class Settings(BaseSettings):
     # learned instead of rediscovering it. Advisory; never changes best-selection. Needs the run's
     # own dir wired through (no-op for unit-built roles). Off = the legacy single-run view only.
     cross_run_tools: bool = True
-    # Read-only access to EVERY run on this machine ACROSS ALL TASKS (not just same-task siblings):
-    # the Developer/Researcher get list_all_runs + read_run_code + read_run_experiment so they can read
-    # the code + result of ANY past experiment anywhere and reuse an approach. Broader than
+    # Read-only access to every run under this configured run-root ACROSS ALL TASKS (not just
+    # same-task siblings):
+    # enabled reasoning roles get list_all_runs + read_run_code + read_run_experiment so they can read
+    # the code + result of any past experiment in that workspace and reuse an approach. Broader than
     # `cross_run_tools` (same-task only); the agent decides when a foreign run is relevant. Advisory;
-    # never changes best-selection. Needs the run's own dir wired through (no-op for unit-built roles).
+    # never changes best-selection. It is not machine-wide; needs the run's own dir wired through
+    # (no-op for unit-built roles).
     all_runs_tools: bool = True
     # PART V §22 — read-only CROSS-RUN KNOWLEDGE tool for the reasoning roles (Researcher, Strategist,
     # deep-research, and a Developer-scoped variant). Adds `cross_run_prior_attempts` / `cross_run_claims`
@@ -1502,6 +1518,40 @@ class Settings(BaseSettings):
                     getattr(cls.model_fields.get(key), "annotation", None)):
                 raise ValueError(f"{key} must be a number, not a boolean (got {val!r})")
         return data
+
+    @field_validator("agent_stage_models", "agent_stage_base_urls", mode="before")
+    @classmethod
+    def _check_agent_stage_map(cls, value, info):
+        """Reject stage-map typos at the common Settings boundary.
+
+        A list of pairs is not a map, keys are exact strings rather than values Pydantic may coerce,
+        and overrides are nonblank strings.  The resolver uses truthiness for map precedence and
+        ``LlmTarget`` values as cache keys, so accepting a blank, mapping or numeric value here would
+        otherwise become either a silent fallback or a late unhashable/transport error.
+        """
+        field = info.field_name
+        if not isinstance(value, Mapping):
+            raise ValueError(f"{field} must be a mapping of agent stage key -> override")
+        non_string = sorted(repr(key) for key in value if not isinstance(key, str))
+        if non_string:
+            raise ValueError(
+                f"{field} keys must be exact strings from AGENT_STAGE_KEYS; invalid key(s): "
+                + ", ".join(non_string))
+        unknown = sorted(key for key in value if key not in AGENT_STAGE_KEYS)
+        if unknown:
+            allowed = ", ".join(sorted(AGENT_STAGE_KEYS))
+            raise ValueError(
+                f"{field} contains unknown agent stage key(s): "
+                f"{', '.join(repr(key) for key in unknown)}; allowed: {allowed}")
+        invalid_values = sorted(
+            repr(key) for key, override in value.items()
+            if not isinstance(override, str) or not override.strip()
+        )
+        if invalid_values:
+            raise ValueError(
+                f"{field} values must be nonblank strings; invalid stage key(s): "
+                + ", ".join(invalid_values))
+        return dict(value)
 
     @model_validator(mode="before")
     @classmethod
@@ -1650,9 +1700,11 @@ class Settings(BaseSettings):
 # defaulting it would resume the same event history under different semantics. `Settings` is
 # `extra="ignore"`, so without this an older binary drops what it does not recognize and resumes
 # anyway, with no diagnostic; a version it does not know is now a loud refusal instead.
-# Version 1 is the first VERSIONED format. An absent key means a pre-versioning snapshot, which stays
-# readable through `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` — that historical contract is unchanged.
-CONFIG_SNAPSHOT_SCHEMA = 1
+# Version 1 was the first VERSIONED format. Version 2 adds the explicit
+# `task_facets_finalize` treatment bit: an older binary would otherwise ignore that new field and
+# resume a fresh default-off run with the historical paid facet call enabled. An absent key still
+# means a pre-versioning snapshot and remains readable through `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`.
+CONFIG_SNAPSHOT_SCHEMA = 2
 CONFIG_SNAPSHOT_SCHEMA_KEY = "config_snapshot_schema"
 
 
@@ -1712,6 +1764,11 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "cross_run_advisory": False,
     "cross_run_structured_claims": False,
     "cross_run_curation": False,
+    # Before task faceting gained its own scheduling switch, `cross_run_curation=True` always ran
+    # the facet steward. A snapshot that lacks this field must resume that same treatment. This is
+    # still latent when the umbrella curation switch above is false, so genuinely older runs do not
+    # acquire paid work they never had.
+    "task_facets_finalize": True,
     # A run whose snapshot predates the ratification stage never consented to an agent changing the
     # cross-run taxonomy; resuming it must not start doing so. (Same as the live default today, but
     # this map is the place that keeps it true if the default ever flips.)
@@ -1783,6 +1840,51 @@ def migrate_config_snapshot(data: dict) -> dict:
     return migrated
 
 
+_AGENT_STAGE_MAP_FIELDS = ("agent_stage_models", "agent_stage_base_urls")
+
+
+def _filter_unknown_snapshot_agent_stages(data: dict) -> dict:
+    """Filter obsolete stage keys/values from an effective resume copy, warning in stable order.
+
+    Fresh inputs are strict, but a historical snapshot may contain a stage name a later binary no
+    longer knows. Refusing that run would break re-entry; accepting the key silently would recreate
+    the original typo drift.  The same compatibility rule applies to values accepted by the old
+    unconstrained ``dict`` fields: blank values already meant "fall back", while non-string values
+    had no valid provider meaning and could crash only when the stage was reached. Filter only this
+    narrow nested vocabulary from a copy and leave the snapshot dict/file untouched as evidence.
+    Non-mapping values remain errors at the Settings boundary rather than being repaired here.
+    """
+    effective = dict(data)
+    for field in _AGENT_STAGE_MAP_FIELDS:
+        raw = effective.get(field)
+        if not isinstance(raw, Mapping):
+            continue
+        unknown = sorted(repr(key) for key in raw if key not in AGENT_STAGE_KEYS)
+        known = {key: value for key, value in raw.items() if key in AGENT_STAGE_KEYS}
+        invalid_values = sorted(
+            repr(key) for key, value in known.items()
+            if not isinstance(value, str) or not value.strip()
+        )
+        if unknown or invalid_values:
+            effective[field] = {
+                key: value for key, value in known.items()
+                if isinstance(value, str) and value.strip()
+            }
+        if unknown:
+            _LOG.warning(
+                f"config snapshot {field} contains unknown agent stage key(s): "
+                f"{', '.join(unknown)}; ignoring them for resume compatibility; "
+                "snapshot evidence was not rewritten"
+            )
+        if invalid_values:
+            _LOG.warning(
+                f"config snapshot {field} contains non-string/blank override value(s) for stage "
+                f"key(s): {', '.join(invalid_values)}; ignoring them for resume compatibility; "
+                "snapshot evidence was not rewritten"
+            )
+    return effective
+
+
 def config_snapshot_schema(data: dict) -> int:
     """The snapshot's declared format version. 0 = pre-versioning (the key did not exist yet).
 
@@ -1802,14 +1904,17 @@ def settings_from_snapshot(data: dict) -> Settings:
     snapshot would otherwise load with every unrecognized control silently dropped — the run would
     resume on the same event history under different paid/concurrency/selection semantics, with
     nothing to show why. Refusing is the only honest answer: this binary cannot know what it is
-    dropping. Older and pre-versioning snapshots keep loading exactly as before."""
+    dropping. Older and pre-versioning snapshots keep loading exactly as before, with one narrow
+    compatibility exception: obsolete unified-agent stage keys and historically accepted
+    non-string/blank override values are warned and removed from the effective copy while the
+    snapshot evidence remains untouched."""
     found = config_snapshot_schema(data)
     if found > CONFIG_SNAPSHOT_SCHEMA:
         raise ConfigSnapshotVersionError(
             f"this run's config.snapshot.json declares format v{found}, but this build understands "
             f"at most v{CONFIG_SNAPSHOT_SCHEMA}. It was written by a newer LoopLab; resuming here "
             "would silently drop settings this build does not know. Upgrade LoopLab to resume it.")
-    migrated = migrate_config_snapshot(data)
+    migrated = _filter_unknown_snapshot_agent_stages(migrate_config_snapshot(data))
     migrated.pop("llm_api_key", None)
     migrated.pop("llm_api_key_base_url", None)
     migrated.pop(CONFIG_SNAPSHOT_SCHEMA_KEY, None)   # a document marker, never a Settings field

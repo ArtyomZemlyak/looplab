@@ -1,10 +1,11 @@
 """Cross-run introspection tools for the assistant (ADR-7 tool protocol).
 
 Where `RunTools` reads the ONE live run bound to it and `SiblingRunTools` reads other runs of the
-SAME task, `MachineRunsTools` gives the general-purpose assistant a view over EVERY run on this machine —
-so it can reference an existing run, report which ones are live, and read one in detail before
-steering or fixing it. Same `.specs()`/`.execute()` shape as the other providers; every `execute`
-returns a string and soft-fails (a junk tool call must never crash the loop).
+SAME task, `MachineRunsTools` gives the general-purpose assistant a richer view over every run under
+its configured run root — so it can reference an existing run, report which ones are live, and read
+logs/traces before steering or fixing it. It is not a host-wide filesystem scanner. Same
+`.specs()`/`.execute()` shape as the other providers; every `execute` returns a string and soft-fails
+(a junk tool call must never crash the loop).
 
 Runs are folded from disk on demand and cached by each event log's (size, mtime) fingerprint, so
 repeated turns don't re-fold unchanged runs. Liveness (`engine_running`) is injected as a callable
@@ -712,10 +713,10 @@ class MachineRunsTools(ForeignRunReader):
                 {"run_id": {"type": "string"}, "node_id": {"type": "integer"}},
                 ["run_id", "node_id"]),
             fn_spec("read_run_trace",
-                "Read one experiment's AGENT TRACE as a linear, de-duplicated conversation: the "
-                "system+user request once per sub-loop, then each LLM generation's reasoning + output "
-                "and the tools it called, interleaved with tool results. This is the full train of "
-                "thought that produced the node. Use run_id + node_id from read_run.",
+                "Read one experiment's bounded CAPTURED AGENT TRACE as a linear, de-duplicated "
+                "conversation: recorded requests, model output/reasoning fields, tool calls and tool "
+                "results. Capture may be disabled, redacted or truncated; this is not proof of the "
+                "model's complete internal reasoning. Use run_id + node_id from read_run.",
                 {"run_id": {"type": "string"}, "node_id": {"type": "integer"},
                  "stage": {"type": "string", "description": "optional: only the stage whose label "
                                                             "contains this text (e.g. 'repair')"}},
@@ -877,8 +878,9 @@ class RunLauncherTools:
                 "Propose a NEW LoopLab run for the user to launch (a run name + a task + optional "
                 "settings). The user reviews an editable card and starts it — you do not launch it. "
                 "Give EITHER an inline `task` object OR a `task_file` from the catalogue. Put "
-                "model/max_nodes/etc. in `settings`. The task is VALIDATED before it becomes a card — an "
-                "invalid one is bounced back to you to fix.\n"
+                "model/max_nodes/etc. in `settings`. Inline tasks are VALIDATED before card creation "
+                "and an invalid one is bounced back to you; task-file cards are resolved and validated "
+                "by launch-card preflight.\n"
                 "A task is COMPOSABLE — there is NO `kind`. You describe what you HAVE and the engine "
                 "infers the task. Always give `goal` and `direction` (EXACTLY \"max\" or \"min\"), then "
                 "add the capability fields that apply:\n"

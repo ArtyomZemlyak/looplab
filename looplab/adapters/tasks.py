@@ -41,7 +41,7 @@ class TaskAdapter(Protocol):
     - `llm_roles(client, *, parser=..., runtime_caps=...) -> (Researcher, Developer)` — LLM-backed
       roles; called by `make_roles` (this module) when backend="llm". `core/hardware.py`
       (`task_runtime_caps`) inspects its signature: accepting `runtime_caps` opts the task into
-      the torch/GPU capability brief.
+      the torch/GPU capability brief; `external_fallback_uses_llm()` declares its fallback consumer.
     - `assets() -> dict[str, str]` — {filename: content} staged into each eval workdir; consumed by
       `engine/orchestrator.py` (staging + protected from edits). (Every implementation returns a dict
       and the engine indexes it as one — the contract of record is the dict, not the old `list[str]`.)
@@ -59,7 +59,8 @@ class TaskAdapter(Protocol):
       module) and `adapters/repo_task.py` (`LLMRepoDeveloper`).
     - `eval_spec() -> dict` — the operator's trusted eval command/metric; consumed by
       `engine/orchestrator.py` (via `runtime/command_eval.py`).
-    - `make_onboarder(settings)` — RepoTask Phase 3 onboarding proposer; consumed by `cli.py`.
+    - `make_onboarder(settings)` — Repo onboarding; pure companion `onboarder_llm_roles(settings)`
+      declares its strict in-process targets without constructing it; both are consumed at run start.
     - `params` (attribute) — CLI-override param space; read by `make_roles` (this module,
       the param-search guard) and `runtime/command_eval.py` (params_style="cli_overrides").
     - `comparison_contract` (attribute) — optional typed scientific comparability identity;
@@ -90,8 +91,8 @@ class TaskAdapter(Protocol):
 # the historical "the run silently stages/scores nothing" failure — is now a test failure.
 TASK_OPTIONAL_HOOKS: tuple[str, ...] = (
     "llm_roles", "assets", "columns", "leakage_inputs", "host_grader", "data_samples",
-    "repo_spec", "agent_brief", "eval_spec", "make_onboarder", "params",
-    "comparison_contract",
+    "repo_spec", "agent_brief", "eval_spec", "make_onboarder", "onboarder_llm_roles", "params",
+    "comparison_contract", "external_fallback_uses_llm",
     # Scheduler-facing capability declaration probed by engine/resources.py — registered so an
     # adapter that renames it goes red instead of silently re-acquiring the host GPU pool lease.
     "gpu_capable",
@@ -379,7 +380,7 @@ def load_task(path: str | Path, *, existing_run: bool = False) -> TaskAdapter:
     # `task.snapshot.json`, so re-entering an existing run can't be refused by a rule added later.
     from looplab.core.appconfig import load_document
     task, _settings, _out = load_document(Path(path))
-    return validate_task(task, existing_run=existing_run)
+    return validate_task(task, existing_run=True) if existing_run else validate_task(task)
 
 
 # Re-export: the factory moved to its dependency-true home (core/llm.py — it only ever needed

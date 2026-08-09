@@ -88,30 +88,39 @@ def _set_role_client(obj, client) -> None:
 
 
 def make_developer_factory(task: TaskAdapter, settings):
-    """A7 Strategist support: a callable `factory(backend) -> Developer` that rebuilds just the
-    Developer under a different `developer_backend` (e.g. swap in-house LLM <-> agentic coding agent
-    live). Reuses `make_roles` so all the validation/patch-gate wiring is identical; returns only the
-    developer. Used when the Strategist (or an operator) picks a Developer mode per phase/node."""
+    """Return backend-switching Developer factory; lazily gate in-process targets before build."""
     def factory(backend: str):
         b = "default" if backend == "llm" else backend
         s = settings.model_copy(update={"developer_backend": b})
+        if b == "default" and settings.developer_backend != "default":
+            from looplab.agents.preflight import preflight_in_process_developer_replacement
+            preflight_in_process_developer_replacement(task, s)
         _researcher, developer = make_roles(task, s)
         return developer
+    from looplab.agents.cli_agent import PRESETS
+    _param_search = bool(getattr(task, "params", None)) and callable(
+        getattr(task, "repo_spec", None))
+    # Composition provenance for Engine: an external preset is inactive in the repo param-search
+    # mode, where ideas change argv overrides and the task's baseline Developer remains in force.
+    factory.initial_backend = (
+        settings.developer_backend
+        if settings.developer_backend in PRESETS and not _param_search else "default")
     return factory
 
 
 def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: bool = False,
                       cross_run: bool = True, role: str = "researcher"):
-    """The provider list shared by the Researcher, the agentic Strategist, and the unified agent's
-    pilot stage (one assembly instead of three near-identical copies). Ordered exactly as the
+    """The provider list shared by Researcher, Deep Research, agentic Strategist and unified pilot
+    (one assembly instead of four near-identical copies). Ordered exactly as the
     call sites historically built it; each site appends its own extras (RepoTools / WebTools) after.
 
     - Run-introspection (default on): read the run's OWN experiments + the task data mid-loop.
     - Cross-run: read-only access to SIBLING runs of the same task. Needs the run's own dir;
       off without it (parity).
     - `core_only=True` (the pilot stage) stops there; otherwise the memory/knowledge stack follows:
-      knowledge base + past cases, lessons/meta-notes, skills (hand-written + M4 auto-distilled
-      under <memory_dir>/skills), and arXiv literature (network-optional)."""
+      knowledge base + past cases, lessons/meta-notes, skills (hand-written + promoted M4
+      auto-distilled skills under <memory_dir>/skills; candidates stay off the production surface),
+      and arXiv literature (network-optional)."""
     providers = []
     if getattr(settings, "researcher_tools", True):
         from looplab.tools.run_tools import DataTools, RunTools
@@ -149,9 +158,11 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
     if getattr(settings, "memory_dir", None):              # agentic pull of lessons + meta-notes (else injection-only)
         from looplab.tools.memory_tools import MemoryTools
         providers.append(MemoryTools(settings.memory_dir))
-    # Skills: hand-written (skills_dir) + M4 auto-distilled (<memory_dir>/skills) in ONE SkillTools
-    # over BOTH dirs — two separate providers would each register list_skills/use_skill and the second
-    # shadows the first (the hand-written library becomes unreachable). Hand-written wins a name clash.
+    # Skills: hand-written (skills_dir) + promoted M4 auto-distilled (<memory_dir>/skills) in ONE
+    # SkillTools over BOTH dirs. Candidate auto-skills remain on disk for later promotion but the
+    # library's production default hides them. Two separate providers would each register
+    # list_skills/use_skill and the second shadows the first (the hand-written library becomes
+    # unreachable). Hand-written wins a name clash.
     _skill_dirs: list[str] = []
     if getattr(settings, "skills_dir", None):
         _skill_dirs.append(str(settings.skills_dir))
@@ -222,7 +233,9 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
                 settings, role=role, factory=make_llm_client)
         return cache[target]
 
-    # A stage keeps the client `make_roles` already gave its role unless it resolves somewhere else.
+    # The propose stage keeps the client `make_roles` gave the Researcher unless it resolves
+    # somewhere else. Implement/repair are already passed into `make_roles` as `_developer_role`,
+    # so rebinding them here would construct a second client and immediately orphan the first.
     # (The ambient target itself is not needed: every comparison below is stage-vs-ROLE, so the
     # `shared = resolve_llm_target(settings)` that used to sit here was a dead store — surfaced by
     # the doc 25 RA-01 split, and pre-existing.)
@@ -231,8 +244,6 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     t_repair = resolve_llm_target(settings, role="repair")
     if researcher is not None and t_propose != resolve_llm_target(settings, role="researcher"):
         _set_role_client(researcher, client_for(role="propose"))
-    if developer is not None and t_implement != resolve_llm_target(settings, role="developer"):
-        _set_role_client(developer, client_for(role="implement"))
     # The repair stage gets its OWN Developer exactly when it resolves somewhere else than implement.
     # Both stages used to share one mutable object, so the second `_set_role_client` overwrote the
     # first: setting both stages ran BOTH on the repair model, and setting only `repair` dragged the
@@ -243,7 +254,6 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     if t_repair != t_implement:
         repair_developer = make_roles(
             task, split, run_dir, _developer_role="repair")[1]
-        _set_role_client(repair_developer, client_for(role="repair"))
 
     # Strategy stage: mirror cli._engine's strategist wiring exactly (off => None => no strategy
     # events => byte-parity with split mode when agent_drives_actions is also off) — INCLUDING
@@ -291,8 +301,9 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     those paths get the legacy single-run view (byte-parity)."""
     if settings.backend != "llm":
         return task.build_roles()
-    # Unified self-driving agent: one object plays both roles. Built from the split roles (flag
-    # off) so the rest of this function's wiring is reused, then composed behind one identity.
+    # Unified self-driving control facade: one engine-facing object implements both role interfaces.
+    # It is built from the split roles (flag off) so the rest of this function's wiring is reused;
+    # stage clients and their local contexts remain separate behind the facade.
     if getattr(settings, "unified_agent", False):
         agent = build_unified_agent(task, settings, run_dir)
         return agent, agent
@@ -374,7 +385,9 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
         surface = repo_spec["edit_surface"] if repo_spec else settings.agent_surface
         # Phase 4: seed all editable repos into the agent's worktree (each at its subdir).
         seed_dirs = repo_spec["editables"] if repo_spec else None
-        llm_developer = developer  # in-house Developer (LLM, or baseline for repo): fallback
+        # Preserve the task-owned original Developer as validation fallback: it may be an LLM
+        # writer, a deterministic/template implementation, or the repo baseline.
+        original_developer = developer
         agent_developer = CliAgentDeveloper(
             model=agent_model,
             base_url=dev_base_url, brief=brief,
@@ -389,7 +402,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
         if settings.validate_agent:
             from looplab.agents.roles import ValidatingDeveloper
             developer = ValidatingDeveloper(
-                agent_developer, fallback=llm_developer,
+                agent_developer, fallback=original_developer,
                 max_retries=settings.agent_max_retries, repo_mode=bool(repo_spec))
         else:
             developer = agent_developer
@@ -482,9 +495,10 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # credential. The baseline is the resolved default target: `llm_profile` moves ordinary calls as
     # one connection, while an explicit per-role profile/field still causes the corresponding rebind.
     base = resolve_llm_target(settings)
+    from looplab.agents.reachability import role_has_client_leaf
     for _role, _obj in (("researcher", researcher), (_developer_role, developer)):
         _target = resolve_llm_target(settings, role=_role)
-        if _target != base:
+        if _target != base and role_has_client_leaf(_obj):
             # Built through THIS module's `make_llm_client` — a documented monkeypatch seam that a
             # helper calling core's own binding would route straight past.
             _set_role_client(_obj, make_llm_client_for(

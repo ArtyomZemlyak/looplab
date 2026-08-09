@@ -616,9 +616,10 @@ untrusted tier.
   `node_failed(reason=superseded)` with zero eval seconds — and its node-budget slot is refunded when
   it can prove it never ran. See
   [what blocked speculation from being the default](configuration.md#what-blocked-speculation-from-being-the-default-fixed-2026-08-05).
-- **Unified agent** (`unified_agent`, on by default) — one LLM identity plays Researcher +
-  Developer (+ Strategist) across stages, choosing its model/toolset per stage and driving the next
-  macro action within a *pure legal-action gate* that keeps pipeline discipline. Set
+- **Unified control facade** (`unified_agent`, on by default) — one engine-facing object implements
+  Researcher + Developer (+ Strategist/pilot) over stage-specific clients, tools and local contexts;
+  it is not one shared cross-stage conversation identity. It can drive the next macro action within
+  a *pure legal-action gate* that keeps pipeline discipline. Set
   `unified_agent=false` and `agent_drives_actions=false` for the legacy split-role behavior.
 
 What an agent may change at runtime is governed by `agent_control` (a per-setting allow-list of

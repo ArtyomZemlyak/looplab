@@ -139,6 +139,7 @@ ATTR_BY_FIELD = {
     "cross_run_advisory": "_cross_run_advisory",
     "cross_run_structured_claims": "_cross_run_structured_claims",
     "cross_run_curation": "_cross_run_curation",
+    "task_facets_finalize": "_task_facets_finalize",
     "cross_run_curation_auto": "_cross_run_curation_auto",
     "concept_tidy": "_concept_tidy",
     "cross_run_read_tools": "_cross_run_read_tools",
@@ -151,6 +152,14 @@ def test_every_engine_options_field_is_covered():
     """The attribute map + digest_char_cap must cover EngineOptions exactly, so a new field can't
     silently dodge the differential comparison below."""
     assert set(ATTR_BY_FIELD) | {"digest_char_cap"} == set(EngineOptions.__dataclass_fields__)
+
+
+def test_task_facets_finalize_is_fresh_default_off_and_maps_explicit_opt_in():
+    assert Settings().task_facets_finalize is False
+    assert EngineOptions().task_facets_finalize is False
+    assert EngineOptions.from_settings(
+        Settings(task_facets_finalize=True)
+    ).task_facets_finalize is True
 
 
 def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
@@ -192,6 +201,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # exercised by the dedicated runtime-gate suite, not by the EngineOptions differential.
         card_driven_selection=False,
         speculation_depth=4,
+        task_facets_finalize=True,
     )
 
     # (a) the OLD explicit-kwarg style: the literal Settings->Engine mapping cli.py::_engine used
@@ -279,6 +289,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         concept_run_base=settings.concept_run_base,
         cross_run_structured_claims=settings.cross_run_structured_claims,
         cross_run_curation=settings.cross_run_curation,
+        task_facets_finalize=settings.task_facets_finalize,
         cross_run_advisory=settings.cross_run_advisory,
         cross_run_read_tools=settings.cross_run_read_tools,
         fingerprint_universal=settings.fingerprint_universal,
@@ -319,6 +330,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
     assert new.lessons_every == 7 and new._novelty_epsilon == 0.2
     assert new.card_driven_selection is False
     assert new.speculation_depth == 4
+    assert new._task_facets_finalize is True
 
 
 def test_explicit_kwarg_beats_options_field(tmp_path):

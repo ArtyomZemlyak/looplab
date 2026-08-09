@@ -560,11 +560,13 @@ def run(
     genesis: bool = typer.Option(
         True, "--genesis/--no-genesis",
         help="With --goal, let the LLM author the task (--kind pins the kind, Genesis fills the rest, "
-             "including data locations you mention). --no-genesis builds it from --kind/--set as written."),
+             "including data locations you mention). --no-genesis builds it from the "
+             "--kind/--goal/--direction/--data flags as written."),
     set_: list[str] = typer.Option(
         [], "--set", "-s", metavar="KEY=VALUE",
-        help="Override ANY engine setting, repeatable (e.g. -s max_nodes=20 -s policy=asha). "
-             "Same keys as the settings: block / LOOPLAB_* env."),
+        help="Override any non-credential engine setting, repeatable "
+             "(e.g. -s max_nodes=20 -s policy=asha). Same non-secret keys as the settings: "
+             "block / LOOPLAB_* env; runtime credential fields are refused."),
     out: Optional[Path] = typer.Option(None, help="Run directory (default: the file's out: or runs/run_local)."),
     max_nodes: Optional[int] = typer.Option(None, help="Override node budget."),
     backend: Optional[str] = typer.Option(None, help="Role backend: toy | llm."),
@@ -573,7 +575,8 @@ def run(
     agent_cmd: Optional[str] = typer.Option(
         None, help="Path/launcher override for the external coding agent."),
     validate_agent: Optional[bool] = typer.Option(
-        None, help="Validate external-agent output (retry+fallback). Default on."),
+        None, help="Validate external-agent output; retry, then use the task's original in-process "
+                   "Developer fallback. Default on."),
     agent_patch_gate: Optional[bool] = typer.Option(
         None, help="Run the agent in a git worktree and surface-gate its diff. Default on."),
     agent_surface: Optional[str] = typer.Option(
@@ -603,14 +606,15 @@ def run(
       - looplab run task.json --max-nodes 20   # a bare task file + flags (legacy)
       - looplab run --kind dataset --goal "predict target" --data data.csv -s backend=llm
 
-    Any engine setting can be overridden with `-s/--set key=value` (full parity with the settings:
-    block and LOOPLAB_* env). Run `looplab init` to scaffold a documented config file.
+    Any non-credential engine setting can be overridden with `-s/--set key=value` (parity with the
+    non-secret settings block and LOOPLAB_* env fields). Runtime credentials are refused so they do
+    not enter shell history. Run `looplab init` to scaffold a documented config file.
 
     Maintainer note: the typed `--flag` surface below is FROZEN. `-s/--set` already reaches every
-    `Settings` field with full parity, so a NEW engine knob needs only a `Settings` field — do NOT
-    add a new typer.Option here (each one also has to be threaded into the settings dict at the
-    `# 3. Merge engine settings` block below, doubling the edit and the drift risk). The existing
-    flags stay for back-compat and ergonomics."""
+    non-credential `Settings` field, so a NEW ordinary engine knob needs only a `Settings` field — do
+    NOT add a new typer.Option here (each one also has to be threaded into the settings dict at the
+    `# 3. Merge engine settings` block below, doubling the edit and the drift risk). Credentials keep
+    their dedicated environment/UI boundary. The existing flags stay for back-compat and ergonomics."""
     if backend is not None:
         _choice(backend, _BACKENDS, "--backend")
     if developer_backend is not None:
@@ -675,11 +679,9 @@ def run(
         apply_llm_model_override(settings, str(effective_model_override))
     _pin_offline_speculation_profile(settings, calibration=speculation_gate_calibration,
                                      genesis=genesis, goal=goal, task_kind=task_dict.get("kind"))
-    # 3b. Genesis: you described the goal in words — let the LLM author the task (the headless
-    # counterpart of the UI's "New run"). Fires on an explicit --goal (so no file-based / legacy flow
-    # is affected). --kind does NOT skip it: it PINS the kind and Genesis fills the rest within it;
-    # describe data locations in the goal and Genesis authors the mounts (no --data needed). Opt out
-    # with --no-genesis (then --kind + flags are used as written), or run a complete file with no --goal.
+    # 3b. CLI Genesis: this is the historical CLI task author, separate from Web New run's owner
+    # Assistant and the TUI's server /api/genesis planner. An explicit --goal fires it; --kind pins
+    # the kind while Genesis fills the rest. Opt out with --no-genesis, or use a complete file.
     backend_chosen = (backend is not None or "backend" in file_settings or "backend" in sets
                       or "LOOPLAB_BACKEND" in os.environ
                       # also covers a backend set via the .env file (env vars alone miss it), so
@@ -694,7 +696,8 @@ def run(
         except Exception as e:  # noqa: BLE001 - no endpoint configured/reachable
             raise typer.BadParameter(
                 f"Genesis needs an LLM to author the task ({e}). Point LOOPLAB_LLM_BASE_URL/--model "
-                f"at a reachable model, or use --no-genesis to build the task from --kind/--set alone.")
+                "at a reachable model, or use --no-genesis to build the task from the explicit "
+                "--kind/--goal/--direction/--data flags.")
         # Pass the file's task: block (if any) as a draft so --goal refines it instead of discarding it.
         result = _genesis.author_task(goal, client=client, kinds=_TASK_KINDS, kind=kind, data=data,
                                       direction=direction, draft=(file_task or None),
@@ -704,7 +707,8 @@ def run(
         if result.error:    # transport/endpoint failure -> NOT a vague goal; say so plainly
             raise typer.BadParameter(
                 f"Genesis couldn't reach the model to author the task ({result.error}). Check "
-                f"LOOPLAB_LLM_BASE_URL/--model, or use --no-genesis to build it from --kind/--set.")
+                "LOOPLAB_LLM_BASE_URL/--model, or use --no-genesis to build it from the explicit "
+                "--kind/--goal/--direction/--data flags.")
         if not result.kind:
             typer.echo("Genesis couldn't author a task from that goal. "
                        + (result.reply or "Add detail (e.g. where the data is), or pass --kind."))

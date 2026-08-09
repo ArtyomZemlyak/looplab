@@ -17,6 +17,7 @@ import contextvars
 import hashlib
 import itertools
 import json
+import logging
 import re
 import time
 from typing import Optional
@@ -41,13 +42,14 @@ from looplab.agents.stuck import _canonical
 # (no compressor configured -> use the loop client) while selecting deterministic truncation for
 # an explicitly configured-but-unavailable compressor.
 _SUMMARY_LOCAL_ONLY = object()
+_LOG = logging.getLogger(__name__)
 
 
 class CompositeTools:
     """Merge several tool providers (each with .specs()/.execute()) into one toolset,
     so the Researcher can use knowledge + skills + memory tools together."""
 
-    def __init__(self, providers: list):
+    def __init__(self, providers: list, *, strict_collisions: bool = False):
         self.providers = providers
         self._route: dict[str, object] = {}
         # De-dup by function name (FIRST provider wins): two providers registering the same tool name
@@ -55,10 +57,24 @@ class CompositeTools:
         # that — and (b) routed execute() last-wins, silently shadowing the first provider. Dedup makes
         # the toolset well-formed and the shadowing deterministic (and surfaceable).
         self._specs: list[dict] = []
+        self.collisions: list[tuple[str, str, str]] = []
         for p in providers:
             for spec in p.specs():
                 fname = (spec.get("function") or {}).get("name")
-                if not fname or fname in self._route:
+                if not fname:
+                    continue
+                if fname in self._route:
+                    first = type(self._route[fname]).__name__
+                    shadowed = type(p).__name__
+                    collision = (fname, first, shadowed)
+                    self.collisions.append(collision)
+                    message = (
+                        f"duplicate tool name {fname!r}: keeping first provider {first}, "
+                        f"shadowing {shadowed}"
+                    )
+                    if strict_collisions:
+                        raise ValueError(message)
+                    _LOG.warning(message)
                     continue
                 self._route[fname] = p
                 self._specs.append(spec)
@@ -195,6 +211,40 @@ def _plan_spec() -> dict:
                           "status": {"type": "string",
                                      "enum": ["pending", "in_progress", "done"]}},
                           "required": ["item"]}}}}}}
+
+
+def _compose_loop_tool_specs(tools, emit_spec: dict, *, self_plan: bool) -> list[dict]:
+    """Compose provider and loop-owned tools without duplicate or unreachable schemas.
+
+    The emit function and optional ``update_plan`` are control-plane names: dispatch intercepts
+    them before provider execution.  A provider using either name was therefore already shadowed,
+    while the endpoint still received duplicate schemas.  Preserve the effective internal-wins
+    behavior, make it visible, and send one unambiguous schema per name.
+    """
+    emit_name = (emit_spec.get("function") or {}).get("name")
+    reserved = {emit_name}
+    if self_plan:
+        reserved.add(_PLAN_TOOL_NAME)
+    specs: list[dict] = []
+    for spec in tools.specs() if tools is not None else []:
+        name = (spec.get("function") or {}).get("name")
+        if name and name in reserved:
+            _LOG.warning(
+                "provider tool name %r collides with loop-owned control tool; "
+                "keeping the loop-owned tool and shadowing the provider schema",
+                name,
+            )
+            continue
+        specs.append(spec)
+    specs.append(emit_spec)
+    if self_plan and emit_name != _PLAN_TOOL_NAME:
+        specs.append(_plan_spec())
+    elif self_plan:
+        _LOG.warning(
+            "emit tool name %r collides with the self-plan control tool; keeping emit semantics",
+            emit_name,
+        )
+    return specs
 
 
 def _render_plan(args: dict) -> str:
@@ -405,9 +455,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     # is kept (not a hash): it is already capped at RESULT_CAP, and byte-identity must be exact —
     # no collision caveat. `_run_tool_call` owns the ledger's updates.
     repeat_state: dict[str, tuple[str, int]] = {}
-    tool_specs = ((tools.specs() if tools is not None else []) + [emit_spec])
-    if self_plan:
-        tool_specs = tool_specs + [_plan_spec()]
+    tool_specs = _compose_loop_tool_specs(tools, emit_spec, self_plan=self_plan)
     current_plan = ""
     started = time.monotonic()
     # D11: history compression runs on the dedicated cheap compressor when configured, else the

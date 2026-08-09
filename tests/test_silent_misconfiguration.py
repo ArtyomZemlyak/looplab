@@ -279,7 +279,7 @@ def test_a_client_without_a_probe_is_not_read_as_an_unreachable_endpoint(monkeyp
         Settings(backend="llm", llm_model="m", llm_base_url="http://a/v1"))
 
 
-def test_an_external_developer_backend_is_not_probed_for_a_key_it_never_gets(monkeypatch):
+def test_an_unvalidated_external_developer_backend_is_not_probed_for_a_key_it_never_gets(monkeypatch):
     """External coding agents are launched with every secret stripped and authenticate from their
     own store — `validate_bound_profiles` already special-cases them for exactly this reason, so
     probing that role here would test a credential the run never uses."""
@@ -297,7 +297,8 @@ def test_an_external_developer_backend_is_not_probed_for_a_key_it_never_gets(mon
     monkeypatch.setattr(factory, "make_llm_client", _factory)
     preflight.preflight_role_endpoints(
         Settings(backend="llm", llm_model="m", llm_base_url="http://a/v1",
-                 developer_backend="opencode", developer_base_url="http://dev/v1"))
+                 developer_backend="opencode", validate_agent=False,
+                 developer_base_url="http://dev/v1"))
     assert "http://dev/v1" not in roles
 
 
@@ -349,8 +350,8 @@ def test_the_degraded_agentic_proposal_records_why(monkeypatch):
 # ------------------------- 3b. …and an endpoint that IS there, refusing for four different reasons
 # `_probe_role_endpoints` measured all four the same way and reported all four with one sentence —
 # "start the endpoint, or point LOOPLAB_LLM_BASE_URL / --model at one" — which is unfollowable for
-# every case below except a dead port. Measured: it blocked two live launches against an endpoint
-# that was merely rate-limiting (HTTP 429, `Current limit: 50`, `Retry-After: 60`), and it sat
+# every case below except a dead port. A sustained rate limit (HTTP 429, `Current limit: 50`,
+# `Retry-After: 60`) used to follow that wrong path, and the preflight sat
 # SILENT for 121.4 s first because the client clamped that directive to its own 120 s ceiling and
 # slept it twice, inside a preflight advertising a 60 s bound.
 #
@@ -359,16 +360,15 @@ def test_the_degraded_agentic_proposal_records_why(monkeypatch):
 # what `Retry-After` does, and which status the classifier reads. A double asserts our own beliefs
 # about all four back to us.
 _REAL_BODIES = {
-    # The team endpoint's genuine 429 (LiteLLM), captured live by bursting past `Current limit: 50`.
-    429: ({"error": {"message": "Rate limit exceeded for api_key: 8f0b7974a871. Limit type: "
-                                "requests. Current limit: 50, Remaining: 0. Limit resets at: "
-                                "2026-08-05 13:36:39 UTC", "type": "throttling_error",
+    # Production-shaped but fully synthetic: identifiers and timestamps are deliberately absent.
+    429: ({"error": {"message": "Rate limit exceeded. Limit type: requests. Current limit: 50, "
+                                "Remaining: 0. Retry window: 60 seconds",
+                     "type": "throttling_error",
                      "code": "429"}}, {"retry-after": "60"}),
-    # …and its genuine 403 for a model outside the team allow-list — the shape a `:max` / `:high`
-    # tier suffix produces, which is why it must read as a MODEL problem and not a credential one.
+    # A synthetic 403 for a model outside an allow-list — the shape a `:max` / `:high` tier suffix
+    # produces, which is why it must read as a MODEL problem and not a credential one.
     403: ({"error": {"message": "team not allowed to access model. This team can only access "
-                                "models=['qwen3.5-122b', 'qwen3.6-35b', 'qwen3-emb-4b', "
-                                "'deepseek-v4-flash']. Tried to access qwen3.5-122b:max",
+                                "models=['model-a', 'model-b']. Tried to access model-a:max",
                      "type": "team_model_access_denied", "param": "model", "code": "403"}}, {}),
     401: ({"error": {"message": "Authentication Error, Invalid proxy server token passed.",
                      "type": "token_not_found_in_db", "code": "401"}}, {}),
@@ -376,11 +376,10 @@ _REAL_BODIES = {
                      "type": "server_error"}}, {}),
     # The OTHER non-throttle 403: the gateway refused the CALLER, not the request. Unlike the
     # `team_model_access_denied` body above, nothing here names a model — because the model was never
-    # the problem. This is not a hypothetical bucket: a hosted gateway we ran against allow-listed
-    # caller IPs and refused this host's egress address, and the `[model]` remedy's advice ("fix the
-    # model id") sends the operator through every id they have while none of them can work. It is
-    # keyed separately from 403 because `_REAL_BODIES` is keyed by status and both are 403s. Shape is
-    # representative rather than a verbatim capture; what is under test is the ABSENCE of a model.
+    # the problem. A caller/origin policy can produce this shape, while the `[model]` remedy's advice
+    # ("fix the model id") sends the operator through every id they have. It is keyed separately from
+    # 403 because `_REAL_BODIES` is keyed by status and both are 403s. What is under test is the
+    # ABSENCE of a model, not any provider-specific response.
     "403-origin": ({"error": {"message": "Forbidden: source address not permitted for this key.",
                               "type": "access_denied", "code": "403"}}, {}),
 }
@@ -421,14 +420,14 @@ def _stub_endpoint(status: int, body_key=None):
     return f"http://127.0.0.1:{server.server_address[1]}/v1", attempts, server
 
 
-def _refusal_for(status: int, monkeypatch, model="deepseek-v4-flash", body_key=None):
-    """The operator-facing refusal a live endpoint answering `status` produces, end to end."""
+def _refusal_for(status: int, monkeypatch, model="model-a", body_key=None):
+    """The operator-facing refusal a loopback endpoint answering `status` produces, end to end."""
     from looplab.agents import preflight
     base_url, attempts, server = _stub_endpoint(status, body_key)
     monkeypatch.setenv("NO_PROXY", "*")                 # a corp proxy must not answer for the stub
     monkeypatch.setenv("no_proxy", "*")
     settings = Settings(backend="llm", llm_model=model, llm_base_url=base_url,
-                        llm_api_key="sk-stub", llm_api_key_base_url=base_url)
+                        llm_api_key="test-only-placeholder", llm_api_key_base_url=base_url)
     settings._llm_credential_pair_trusted = True
     started = time.monotonic()
     try:
@@ -449,7 +448,7 @@ def test_a_throttled_endpoint_is_refused_for_being_throttled_not_for_being_absen
     message, attempts, elapsed = _refusal_for(429, monkeypatch)
 
     assert "[throttled]" in message
-    assert "Current limit: 50" in message                  # the endpoint's own words, verbatim
+    assert "Current limit: 50" in message                  # bounded detail from the synthetic body
     assert "is UP and answering" in message
     # The remedies that can actually reach a rate limit.
     assert "eval_parallel=1" in message and "llm_parallel=1" in message
@@ -469,9 +468,9 @@ def test_each_live_refusal_names_its_own_cause_and_offers_only_its_own_remedy(mo
     A wrong model name reaches us as a 403 from this endpoint (`team_model_access_denied`), NOT a
     404, so "the credential is bad" and "the endpoint is down" would both be wrong answers to it.
     """
-    model_msg, _, _ = _refusal_for(403, monkeypatch, model="qwen3.5-122b:max")
+    model_msg, _, _ = _refusal_for(403, monkeypatch, model="model-a:max")
     assert "[model]" in model_msg
-    assert "qwen3.5-122b" in model_msg and "tier suffix" in model_msg
+    assert "model-a" in model_msg and "tier suffix" in model_msg
     assert "start the endpoint" not in model_msg and "LOOPLAB_LLM_API_KEY" not in model_msg
 
     cred_msg, _, _ = _refusal_for(401, monkeypatch)
@@ -506,7 +505,7 @@ def test_the_model_bucket_also_covers_refusals_no_model_id_can_fix(monkeypatch):
     origin_msg, _, _ = _refusal_for(403, monkeypatch, body_key="403-origin")
 
     assert "[model]" in origin_msg
-    assert "source address not permitted" in origin_msg      # the endpoint's own words, verbatim
+    assert "source address not permitted" in origin_msg      # bounded synthetic diagnostic detail
     # The escape hatch for a body that names no model — the assertion the old remedy fails.
     assert "If the quoted body never mentions a model, suspect these first." in origin_msg
     assert "refusing your ORIGIN rather than" in origin_msg
@@ -518,10 +517,10 @@ def test_the_model_bucket_also_covers_refusals_no_model_id_can_fix(monkeypatch):
 
     # The allow-list 403 keeps leading with the model id, and now also says to read the body — the
     # endpoint enumerates the permitted models there, which is the only current list of them.
-    allow_msg, _, _ = _refusal_for(403, monkeypatch, model="qwen3.5-122b:max")
+    allow_msg, _, _ = _refusal_for(403, monkeypatch, model="model-a:max")
     assert "team_model_access_denied" in allow_msg           # quoted, so the body IS in front of them
     assert "READ THE QUOTED BODY" in allow_msg
-    assert "models=['qwen3.5-122b', 'qwen3.6-35b', 'qwen3-emb-4b', 'deepseek-v4-flash']" in allow_msg
+    assert "models=['model-a', 'model-b']" in allow_msg
     # Both 403s render the SAME paragraph — that is the point of putting it in `_REMEDIES` rather
     # than branching on the body, and it is why the origin case cannot be served by a narrower fix.
     assert "tier suffix" in origin_msg and "tier suffix" in allow_msg
@@ -567,8 +566,8 @@ def test_a_transient_throttle_that_clears_inside_the_retries_is_forgiven(monkeyp
     base_url = f"http://127.0.0.1:{server.server_address[1]}/v1"
     monkeypatch.setenv("NO_PROXY", "*")
     monkeypatch.setenv("no_proxy", "*")
-    settings = Settings(backend="llm", llm_model="deepseek-v4-flash", llm_base_url=base_url,
-                        llm_api_key="sk-stub", llm_api_key_base_url=base_url)
+    settings = Settings(backend="llm", llm_model="model-a", llm_base_url=base_url,
+                        llm_api_key="test-only-placeholder", llm_api_key_base_url=base_url)
     settings._llm_credential_pair_trusted = True
     try:
         preflight.preflight_role_endpoints(settings)     # must NOT raise

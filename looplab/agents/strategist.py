@@ -427,8 +427,8 @@ class RuleStrategist:
         # finding, first probe operators (bump ablation); if MCTS is available, switch to explore.
         if ctx.improves_since_best >= self.stall_window:
             # A hard stall is exactly when stepping back to "think hard" pays off: ask the engine to
-            # run the Deep-Research stage (read across all results + the literature/web) alongside the
-            # machinery switch, so the next batch is informed by more than local hill-climbing.
+            # run the Deep-Research stage (read a stratified run view + the literature/web) alongside
+            # the machinery switch, so the next batch is informed by more than local hill-climbing.
             deep = ctx.improves_since_best >= 2 * self.stall_window
             if "mcts" in avail:
                 strat: Strategy = {"policy": "mcts", "policy_params": {"c": 1.4},
@@ -642,7 +642,8 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         "optional ablate_every, merge_mode mean|ensemble, complexity_cue, prefer_sweep — set "
         "prefer_sweep=true to bias the researcher toward an in-process hyperparameter sweep when "
         "evals are costly and the space is numeric; set request_research=true when the run is "
-        "stalled or confused and would benefit from a deep-research step over all results + the "
+        "stalled or confused and would benefit from a deep-research step over a stratified run "
+        "summary + the "
         "web before continuing; optional timeout (>0), eval_parallel (0..1024), and llm_parallel "
         "(0..64 total provider calls), plus llm_lane_limits over build/deep_research/novelty_dedup/"
         "enrichment/engine (each 0..64). Use only those canonical parallel names. These are live deltas: "

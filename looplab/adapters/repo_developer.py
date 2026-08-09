@@ -1134,13 +1134,14 @@ class LLMOnboarder:
             "training run produced. Output ONLY one ```python``` block defining "
             "`read_metric(workdir: str) -> float`.")
 
-    def __init__(self, client, repo_path, goal, direction, command, timeout):
+    def __init__(self, client, repo_path, goal, direction, command, timeout, prompts=None):
         self.client = client
         self.repo_path = repo_path
         self.goal = goal
         self.direction = direction
         self.command = command
         self.timeout = timeout
+        self.prompts = prompts
 
     def _context(self) -> tuple[str, str]:
         """Repo listing + the contents of a few small text files (the entrypoint, configs)
@@ -1191,8 +1192,11 @@ class LLMOnboarder:
                 "(tensorboard/mlflow), import it INSIDE a try/except and fall back. Return a "
                 "float; on any problem return a clearly-bad value so the run is not rewarded.")
         try:
+            from looplab.core.prompts import render
             code = extract_code(self.client.complete_text(
-                [{"role": "system", "content": self._SYS}, {"role": "user", "content": user}]))
+                [{"role": "system", "content": render(
+                    self.prompts, "repo_onboarder_system", self._SYS)},
+                 {"role": "user", "content": user}]))
         except Exception as e:  # noqa: BLE001 — propose a stub; human will reject/fix
             code = f"def read_metric(workdir):\n    raise RuntimeError({str(e)!r})\n"
         return {

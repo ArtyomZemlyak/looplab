@@ -126,8 +126,9 @@ def tui(server: Optional[str] = typer.Option(
     """Drive LoopLab from the terminal: a chat-first TUI to start runs, watch what's running, and steer
     the boss — the most-used slice of the web UI, no browser needed.
 
-    Describe a goal and the boss plans + launches a run; pick a running experiment to see its status at a
-    glance and chat with the boss to change course (its actions apply to the live run). It is a thin
+    Describe a goal, review the boss's proposed run spec, then explicitly launch it; pick a running
+    experiment to see its status at a glance and chat with the boss to change course (its actions
+    apply to the live run). It is a thin
     client of the same control plane `looplab ui` serves, so a server is auto-started when none is found
     (API only — no React build); point it at a remote one with --server."""
     from looplab.serve.tui import main as tui_main

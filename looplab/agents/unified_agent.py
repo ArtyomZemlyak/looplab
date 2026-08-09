@@ -29,14 +29,15 @@ from looplab.core.prompts import render
 
 
 class UnifiedAgent(WrapsDeveloper):
-    """Facade composing per-stage role backends behind one identity.
+    """Facade composing per-stage role backends behind one engine-facing control object.
 
     `researcher` drives `propose` (an Idea), `developer` drives `implement` (and `repair`, unless
     `repair_developer` is given), `strategist` drives `decide` (a Strategy at meta-cadence).
     `pilot_client`/`pilot_tools` drive `choose_action` (the next macro action). Each backend is
     already bound to its own per-stage client (H3), so `propose` and `implement` can run on
     different models — and `repair` gets its own Developer object rather than sharing (and
-    overwriting) the implement one when the two stages are pointed at different models.
+    overwriting) the implement one when the two stages are pointed at different models. Their local
+    model contexts remain separate; the facade is not a shared cross-stage conversation identity.
 
     Developer-facing forwarding (brief/is_code_generating/client/last_report/audit_extra and
     per-call files/deletions/footprint)

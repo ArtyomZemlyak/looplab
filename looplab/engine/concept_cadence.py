@@ -299,15 +299,23 @@ class ConceptCadenceMixin:
         yields no snapshot (unlike the two enrichment steps below, which swallow their own failures)."""
         import contextlib
 
+        from looplab.agents.roles import resolve_role_prompts
         from looplab.search.concept_map import build_concept_map
         known, known_renames = self._reusable_node_tags(state)
+        # The concept consolidator is an agent prompt consumer just like lesson reconciliation.
+        # Its PromptStore lives on whichever researcher/developer wrapper factory.py wired, so walk
+        # the shared role chain rather than assuming one concrete role shape. Without this handle
+        # the registered `concept_consolidate_system.md` override existed but every live cadence
+        # silently rendered the inline default.
+        prompts = resolve_role_prompts(
+            getattr(self, "researcher", None), getattr(self, "developer", None))
         # Span-scope the concept-map LLM generations (tagging + consolidation + importance) so they
         # file under a `concept_coverage` op, not the ambient/next-node trace. nullcontext if spanless.
         _span = getattr(self, "_op_span", None)
         with (_span("concept_coverage") if callable(_span) else contextlib.nullcontext()):
             cmap = build_concept_map(state, task_goal=state.goal or "", client=client, tools=None,
                                      seed_graph=seed, parser=parser, known_tags=known,
-                                     known_renames=known_renames)
+                                     known_renames=known_renames, prompts=prompts)
         # B3 (§21.18): record only the NEW consolidation decisions so later cadences keep them FIXED
         # (stable vocabulary, no flapping). Accumulated in the fold; emit-only-if-new -> no churn.
         new_renames = {k: v for k, v in (cmap.get("consolidated") or {}).items()

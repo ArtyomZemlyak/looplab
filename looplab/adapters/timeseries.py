@@ -136,6 +136,9 @@ class TimeSeriesTask(BaseModel):
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
                 TimeSeriesDeveloper(self._series(), h=self.backtest_h))
 
+    def external_fallback_uses_llm(self) -> bool:
+        return False  # the fallback fills a deterministic local template
+
     def gpu_capable(self) -> bool:
         """Both role pairs end in `TimeSeriesDeveloper`, a fixed seasonal-naive numpy template — the
         roles only pick `alpha`/`period`, never code. Keeps this task out of the host GPU pool lease

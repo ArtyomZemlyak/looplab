@@ -2460,6 +2460,75 @@ def test_reset_active_guard_and_external_spawn_lease_prevent_second_popen(monkey
     assert _terminal(client, command)["status"] == "succeeded"
 
 
+def test_reset_missing_required_key_refuses_before_archive_and_is_stably_retryable(
+        monkeypatch, tmp_path):
+    key = "RESET_RESEARCH_KEY"
+    endpoint = "https://research.invalid/v1"
+    monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv(f"{key}_BASE_URL", raising=False)
+    rd = _seed(tmp_path, finished=True)
+    (rd / "config.snapshot.json").write_text(json.dumps({
+        "backend": "llm",
+        "llm_profiles": {"research": {
+            "model": "research", "base_url": endpoint, "api_key_env": key,
+        }},
+        "role_profiles": {"researcher": "research"},
+    }), encoding="utf-8")
+    before = (rd / "events.jsonl").read_bytes()
+    client, _srv = _client(tmp_path, _Driver())
+    from looplab.serve.routers import control as control_router
+
+    spawns = []
+    monkeypatch.setattr(
+        control_router, "_spawn_engine",
+        lambda *args, **kwargs: spawns.append((args, kwargs)))
+
+    first = client.post("/api/runs/demo/reset")
+    second = client.post("/api/runs/demo/reset")
+
+    for response in (first, second):
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["code"] == "reset_prelaunch_credentials_changed"
+        assert detail["phase"] == "prepared" and detail["status"] == "pending"
+    assert first.json()["detail"]["operation_id"] == second.json()["detail"]["operation_id"]
+    assert spawns == []
+    assert (rd / "events.jsonl").read_bytes() == before
+    assert not list(rd.glob("events.jsonl.reset-*"))
+
+
+def test_reset_under_fence_credential_failure_keeps_archived_retry_phase(
+        monkeypatch, tmp_path):
+    from contextlib import contextmanager
+
+    from looplab.core.errors import LLMError
+    from looplab.serve.routers import control as control_router
+
+    rd = _seed(tmp_path, finished=True)
+    before = (rd / "events.jsonl").read_bytes()
+    client, srv = _client(tmp_path, _Driver())
+    spawns = []
+    monkeypatch.setattr(
+        control_router, "_spawn_engine",
+        lambda *args, **kwargs: spawns.append((args, kwargs)))
+
+    @contextmanager
+    def _revoked_before_yield(*_args, **_kwargs):
+        raise LLMError("credential revoked under launch fence")
+        yield {}  # pragma: no cover - contextmanager shape only
+
+    monkeypatch.setattr(srv.settings, "launch_env", _revoked_before_yield)
+    response = client.post("/api/runs/demo/reset")
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "reset_prelaunch_credentials_changed"
+    assert detail["phase"] == "archived" and detail["status"] == "pending"
+    assert spawns == [] and not (rd / "events.jsonl").exists()
+    archives = list(rd.glob("events.jsonl.reset-*"))
+    assert len(archives) == 1 and archives[0].read_bytes() == before
+
+
 def test_reset_rejects_delayed_first_post_but_same_key_replays_old_terminal_record(
         monkeypatch, tmp_path):
     rd = _seed(tmp_path, finished=True)

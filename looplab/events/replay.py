@@ -2481,8 +2481,11 @@ def _on_strategy_decision(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     # A7 Strategist behavioral replay state: rebuild the chosen Strategy without re-calling the LLM;
     # engine re-entry applies active_strategy before the next decision/evaluation boundary.
     st.active_strategy = d.get("strategy")
-    st.strategy_history.append({"strategy": d.get("strategy"), "at_node": d.get("at_node"),
-                                "ctx": d.get("ctx")})
+    history = {"strategy": d.get("strategy"), "at_node": d.get("at_node"),
+               "ctx": d.get("ctx")}
+    if d.get("developer_application") is not None:
+        history["developer_application"] = d["developer_application"]
+    st.strategy_history.append(history)
 
 def _on_hypothesis_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # FOREAGENT board prioritization: latest wins. The order does not re-rank evaluated nodes; the sole

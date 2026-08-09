@@ -13,6 +13,8 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from looplab.core.atomicio import atomic_write_text  # noqa: E402
+from looplab.core.config import Settings  # noqa: E402
+from looplab.core.errors import LLMError  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
 from looplab.serve.settings_store import SettingsStore, _REVISION_KEY  # noqa: E402
 
@@ -280,3 +282,126 @@ def test_stored_secret_reaches_disk_before_the_rename_publishes_it(tmp_path, _re
 
     assert order == ["sync", "replace"], order
     assert store.load_secrets()["llm_api_key"] == "sk-durable"
+
+
+def test_task_aware_launch_env_rejects_script_fallback_but_allows_external_repo(
+        tmp_path, monkeypatch):
+    class _ScriptFallback:
+        @staticmethod
+        def external_fallback_uses_llm():
+            return True
+
+    class _RepoLike:
+        @staticmethod
+        def repo_spec():
+            return {"editables": []}
+
+    monkeypatch.delenv("SPAWN_CODER_KEY", raising=False)
+    monkeypatch.delenv("SPAWN_CODER_KEY_BASE_URL", raising=False)
+    store = SettingsStore(tmp_path)
+    script = Settings(
+        backend="llm", unified_agent=False,
+        developer_backend="opencode", validate_agent=True,
+        llm_profiles={"coder": {
+            "model": "coder", "base_url": "https://coder.invalid/v1",
+            "api_key_env": "SPAWN_CODER_KEY",
+        }},
+        role_profiles={"developer": "coder"},
+    )
+    entered = False
+    with pytest.raises(LLMError, match="SPAWN_CODER_KEY"):
+        with store.launch_env(script.model_dump(mode="json"), task=_ScriptFallback()):
+            entered = True
+    assert entered is False
+
+    repo = Settings(
+        backend="llm", unified_agent=False,
+        developer_backend="opencode", validate_agent=False,
+        llm_profiles={"external": {
+            "model": "external", "base_url": "https://external.invalid/v1",
+        }},
+        role_profiles={"developer": "external"},
+    )
+    with store.launch_env(repo.model_dump(mode="json"), task=_RepoLike()) as env:
+        assert "SPAWN_CODER_KEY" not in env
+
+
+def test_task_aware_launch_env_exports_exact_custom_onboarder_role(tmp_path, monkeypatch):
+    """A task-only role validated before Popen must receive the same dedicated pair afterward."""
+    key = "CUSTOM_PILOT_KEY"
+    endpoint = "https://pilot.invalid/v1"
+    monkeypatch.setenv(key, "secret-for-test")
+    monkeypatch.setenv(f"{key}_BASE_URL", endpoint)
+
+    class _PilotOnboarder:
+        @staticmethod
+        def onboarder_llm_roles(_settings):
+            return {"pilot"}
+
+    settings = Settings(
+        backend="llm", unified_agent=False, strategist_backend="off",
+        llm_profiles={"pilot-onboarder": {
+            "model": "pilot", "base_url": endpoint, "api_key_env": key,
+        }},
+        role_profiles={"pilot": "pilot-onboarder"},
+    )
+    store = SettingsStore(tmp_path)
+
+    # The inactive pilot is absent from the legacy Settings-only launch superset.
+    with store.launch_env(settings.model_dump(mode="json")) as legacy_env:
+        assert key not in legacy_env and f"{key}_BASE_URL" not in legacy_env
+
+    # The task hook makes it an exact run-start consumer; validation and export must agree.
+    with store.launch_env(
+            settings.model_dump(mode="json"), task=_PilotOnboarder()) as task_env:
+        assert task_env[key] == "secret-for-test"
+        assert task_env[f"{key}_BASE_URL"] == endpoint
+
+
+def test_no_task_launch_env_preserves_legacy_required_profile_validation(tmp_path, monkeypatch):
+    key = "LEGACY_RESEARCH_KEY"
+    monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv(f"{key}_BASE_URL", raising=False)
+    settings = Settings(
+        backend="llm",
+        llm_profiles={"research": {
+            "model": "research", "base_url": "https://research.invalid/v1",
+            "api_key_env": key,
+        }},
+        role_profiles={"researcher": "research"},
+    )
+    entered = False
+    with pytest.raises(LLMError, match=key):
+        with SettingsStore(tmp_path).launch_env(settings.model_dump(mode="json")):
+            entered = True
+    assert entered is False
+
+
+def test_launch_env_for_run_loads_task_plan_before_yield(tmp_path, monkeypatch):
+    key = "RESUME_RESEARCH_KEY"
+    endpoint = "https://research.invalid/v1"
+    monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv(f"{key}_BASE_URL", raising=False)
+    rd = tmp_path / "resume-task-aware"
+    rd.mkdir()
+    (rd / "task.snapshot.json").write_text(
+        '{"kind":"quadratic","goal":"g","direction":"min"}', encoding="utf-8")
+    (rd / "config.snapshot.json").write_text(json.dumps({
+        "backend": "llm",
+        "llm_profiles": {"research": {
+            "model": "research", "base_url": endpoint, "api_key_env": key,
+        }},
+        "role_profiles": {"researcher": "research"},
+    }), encoding="utf-8")
+    store = SettingsStore(tmp_path)
+    entered = False
+    with pytest.raises(LLMError, match=key):
+        with store.launch_env_for_run(rd):
+            entered = True
+    assert entered is False
+
+    monkeypatch.setenv(key, "secret-for-test")
+    monkeypatch.setenv(f"{key}_BASE_URL", endpoint)
+    with store.launch_env_for_run(rd) as env:
+        assert env[key] == "secret-for-test"
+        assert env[f"{key}_BASE_URL"] == endpoint

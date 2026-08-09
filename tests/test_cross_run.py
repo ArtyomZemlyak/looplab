@@ -108,7 +108,14 @@ def test_all_runs_tools_span_all_tasks(tmp_path):
     tools = AllRunsTools(tmp_path, "runB")
     tools.bind_state(RunState(run_id="runB", task_id=task_id))
 
+    descriptions = "\n".join(spec["function"]["description"] for spec in tools.specs())
+    assert "configured run root" in descriptions
+    assert "machine-wide" in descriptions
+    assert "EVERY run on this machine" not in descriptions
+
     listing = tools.execute("list_all_runs", {})
+    assert "under this configured run root" in listing
+    assert "on this machine" not in listing
     assert "runA" in listing            # same-task run surfaced
     assert "runC" in listing            # DIFFERENT-task run ALSO surfaced (the whole point)
     assert "runB" not in listing        # self excluded
@@ -122,6 +129,13 @@ def test_all_runs_tools_span_all_tasks(tmp_path):
     # Traversal guard + unknown run soft-fail to a string, never raise.
     assert "no such run" in tools.execute("read_run_code", {"run_id": "../runA", "node_id": 0})
     assert "no such run" in tools.execute("read_run_experiment", {"run_id": "nope", "node_id": 0})
+
+
+def test_all_runs_empty_listing_states_its_real_scope(tmp_path):
+    from looplab.tools.run_tools import AllRunsTools
+
+    listing = AllRunsTools(tmp_path, "self").execute("list_all_runs", {})
+    assert listing == "(no other runs under this configured run root)"
 
 
 def test_sibling_find_analogous_across_runs(tmp_path):

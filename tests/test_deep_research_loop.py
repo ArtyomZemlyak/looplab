@@ -45,6 +45,70 @@ class _FakeTools:
         return self.result
 
 
+def test_long_run_brief_is_stratified_and_discloses_omissions():
+    state = RunState(goal="long", direction="min")
+    for index in range(100):
+        status = NodeStatus.failed if index in {37, 63} else NodeStatus.evaluated
+        metric = (None if status is NodeStatus.failed
+                  else -1_000.0 if index == 52 else float(100 - index))
+        state.nodes[index] = Node(
+            id=index, operator=f"op-{index}", idea=Idea(operator=f"op-{index}"),
+            status=status, metric=metric,
+            error_reason="boom" if status is NodeStatus.failed else "")
+
+    brief = state_brief(state, max_nodes=20)
+
+    assert "detailed stratified sample=20/100, omitted=80" in brief
+    assert "#52" in brief                         # metric-only best in the omitted middle
+    assert "#99" in brief                         # recent evidence
+    assert "#37" in brief and "#63" in brief     # failures from the omitted middle
+    assert "#0" in brief                          # seed/head evidence
+    rendered_ids = [line for line in brief.splitlines() if line.startswith("  #")]
+    assert len(rendered_ids) == 20
+
+
+def test_long_run_brief_keeps_the_durable_champion_when_metric_leaders_differ():
+    state = RunState(goal="confirmed champion", direction="min")
+    for index in range(100):
+        state.nodes[index] = Node(
+            id=index, operator=f"op-{index}", idea=Idea(operator=f"op-{index}"),
+            status=NodeStatus.evaluated, metric=float(index),
+        )
+    # The confirmed/operator-promoted champion is deliberately neither a raw-metric leader nor an
+    # edge/recent row and would be absent from the old stratified sample.
+    state.best_node_id = 52
+
+    brief = state_brief(state, max_nodes=8)
+
+    assert "current best: #52" in brief
+    assert any(line.startswith("  #52 ") for line in brief.splitlines())
+
+
+def test_deep_research_factory_uses_shared_provider_assembly(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from looplab.agents import factory
+    from looplab.agents.deep_research import make_deep_researcher
+
+    provider = _FakeTools()
+    seen = {}
+
+    def _shared(task, settings, run_dir, **kwargs):
+        seen.update(task=task, settings=settings, run_dir=run_dir, kwargs=kwargs)
+        return [provider]
+
+    monkeypatch.setattr(factory, "_shared_providers", _shared)
+    settings = SimpleNamespace(web_search=False, prompt_dir=None, llm_parser="tool_call")
+    task = object()
+
+    researcher = make_deep_researcher(
+        settings, client=_FakeChatClient([]), task=task, run_dir=tmp_path / "run")
+
+    assert researcher.tools is provider
+    assert seen == {"task": task, "settings": settings, "run_dir": tmp_path / "run",
+                    "kwargs": {"role": "researcher"}}
+
+
 class _FakeChatClient:
     """Scripts assistant messages; records the messages and tool specs it received each turn.
     Deliberately has NO `complete_tool`, so `_force_emit` fails over to the nudge path — the

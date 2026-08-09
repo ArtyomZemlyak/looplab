@@ -168,12 +168,12 @@ def finite_timeout(value, default: float = 600.0) -> float:
     The fail-OPEN case is the only one that must be rewritten: a NaN/±inf deadline is NEVER reached,
     so `monotonic() >= start + timeout` stays False and a runaway never times out (arch-review §3
     P0-7 / §4 P1-5). NaN/inf/unparseable therefore fall back to `default`. Finite values are clamped
-    to `[0, MAX_TIMEOUT_S]`: a negative deadline is already fail-SAFE (it fires immediately), and 0 is
-    a deliberately-honored sentinel elsewhere (a profile can set timeout:0), so both stay non-fatal
-    rather than being rewritten. Every subprocess deadline flows through `run_argv`, which applies
-    this; the eval/stage builders apply it too so the bounded value is what gets traced. Note the
-    stricter authoring gate in `validate_stages` still REJECTS a non-finite/non-positive stage timeout
-    outright — this is the defensive back-stop for every other caller."""
+    to `[0, MAX_TIMEOUT_S]`: a negative deadline is already fail-SAFE (it fires immediately), and 0
+    remains a deliberately-honored sentinel for lower-level callers, so both stay non-fatal rather
+    than being rewritten. Every subprocess deadline flows through `run_argv`, which applies this; the
+    eval/stage builders apply it too so the bounded value is what gets traced. Note the stricter task
+    authoring gates in `EvalSpec`/`validate_stages` REJECT non-finite/non-positive profile/stage
+    timeouts outright — this is the defensive back-stop for every other caller."""
     import math
     try:
         v = float(value)

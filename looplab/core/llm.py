@@ -1918,18 +1918,22 @@ class LlmTarget(NamedTuple):
     credential_mode: str = "shared"
 
 
+# The unified agent's exact stage vocabulary. This exported registry is shared by resolution,
+# Settings validation, docs and tests: a stage rename or typo must have one authoritative answer,
+# rather than one map accepting a key that another component silently ignores. Historical snapshots
+# get a deliberately narrower compatibility path in `core.config.settings_from_snapshot`.
+AGENT_STAGE_KEYS = frozenset({"propose", "implement", "repair", "strategy", "pilot"})
+
 # The role names `Settings.role_profiles` accepts. REGISTRY-GUARDED, like the project's other
 # duck-typed seams: `tests/test_llm_targets.py` scans the source both ways, so a name here without a
 # reader (or a reader without a name here) is a red test rather than a setting that silently does
-# nothing. `agent_stage_models`' own keys are deliberately NOT validated against this — an old run
-# resuming with a stage name we later renamed must still resume.
+# nothing.
 #
-# The first five double as the unified agent's stage names, which is why they are resolved with
-# `role=` rather than a separate `stage=` argument: a stage IS a role here, and giving them their own
-# parameter is what let `role_profiles` bindings on them validate and then never be read.
-LLM_ROLE_KEYS = frozenset({
-    # unified-agent stages
-    "propose", "implement", "repair", "strategy", "pilot",
+# Unified stages double as roles, which is why they are resolved with `role=` rather than a separate
+# `stage=` argument: a stage IS a role here, and giving them their own parameter is what let
+# `role_profiles` bindings on them validate and then never be read. Compose the role registry from
+# `AGENT_STAGE_KEYS` so these two public contracts cannot drift apart.
+LLM_ROLE_KEYS = AGENT_STAGE_KEYS | frozenset({
     # split roles + the standalone helpers that build their own client
     "researcher", "developer", "strategist", "compressor", "embed",
 })
@@ -1991,10 +1995,12 @@ def resolve_llm_target(settings, *, role: str | None = None) -> LlmTarget:
                          getattr(settings, "llm_temperature", None), None, "shared")
     stage_models = getattr(settings, "agent_stage_models", None) or {}
     stage_urls = getattr(settings, "agent_stage_base_urls", None) or {}
+    role_key = role or ""
+    stage_key = role_key if role_key in AGENT_STAGE_KEYS else ""
     profile = role_profile(settings, role)
 
     role_model = role_url = role_temp = None
-    fields = _ROLE_FIELDS.get(role or "")
+    fields = _ROLE_FIELDS.get(role_key)
     if fields:
         m_field, u_field, t_field = fields
         role_model = getattr(settings, m_field, None)
@@ -2003,7 +2009,7 @@ def resolve_llm_target(settings, *, role: str | None = None) -> LlmTarget:
 
     # The endpoint this profile stands for; anything that overrides it also drops its credential.
     profile_url = profile.get("base_url") or settings.llm_base_url
-    base_url = stage_urls.get(role or "") or role_url or profile_url
+    base_url = stage_urls.get(stage_key) or role_url or profile_url
 
     temperature = role_temp
     if temperature is None:
@@ -2020,7 +2026,7 @@ def resolve_llm_target(settings, *, role: str | None = None) -> LlmTarget:
     credential_mode = ("profile" if profile_key_travels else
                        "none" if profile_env or not shared_endpoint else "shared")
     return LlmTarget(
-        model=(stage_models.get(role or "") or role_model or profile.get("model")
+        model=(stage_models.get(stage_key) or role_model or profile.get("model")
                or settings.llm_model),
         base_url=base_url,
         temperature=temperature,
@@ -2191,15 +2197,33 @@ def render_credential_failures(causes: dict[str, list[str]]) -> str:
     return "\n".join(lines)
 
 
-def validate_bound_profiles(settings) -> None:
+def validate_bound_profiles(
+    settings, *,
+    consumer_roles: set[str | None] | frozenset[str | None] | None = None,
+    external_fallback_roles: set[str] | frozenset[str] | None = None,
+    trusted_in_process_roles: set[str] | frozenset[str] | None = None,
+) -> None:
     """Fail before engine construction when an active credential target is unusable.
 
     Collects by ROOT CAUSE rather than by role (`core/errors.py::LLMCredentialError.cause_detail`),
     so one wrong variable produces one diagnosis naming every role it breaks — see
-    `render_credential_failures` for the counting rule and what it replaced.
+    `render_credential_failures` for the counting rule and what it replaced. Keyword-only role
+    overrides let the task-aware agent composition plan narrow the settings-level superset without
+    changing the historical public call: omitted overrides preserve the old settings-only policy.
+    `external_fallback_roles` is the compatibility spelling for validation fallbacks;
+    `trusted_in_process_roles` also covers task-owned consumers such as Repo onboarding. Excluding
+    an external-only role removes requiredness, not the contradiction check on an explicit key that
+    the secret-scrubbed subprocess cannot consume.
     """
     shared_active, checked = llm_credential_consumers(settings)
-    if not shared_active and not checked:
+    if consumer_roles is not None:
+        checked = set(consumer_roles)
+    else:
+        checked = set(checked)
+    trusted_roles = set(external_fallback_roles or ()) | set(trusted_in_process_roles or ())
+    # A live external-only scoped plan can legitimately have no checked Developer roles, but its
+    # explicit dedicated-key contradiction still has to be audited below. Toy mode has no client.
+    if not shared_active and not checked and getattr(settings, "backend", "toy") != "llm":
         return
     # Insertion-ordered {role-neutral cause -> the role labels it breaks}.
     failures: dict[str, list[str]] = {}
@@ -2216,6 +2240,13 @@ def validate_bound_profiles(settings) -> None:
                           if getattr(settings, "unified_agent", False)
                           else {"developer"})
         for role in sorted(external_roles):
+            # This role is consumed by a trusted IN-PROCESS fallback/onboarder, not by the nested
+            # coding-agent process. The latter still receives cli_agent.py's scrubbed environment.
+            if role in trusted_roles:
+                continue
+            # A task-scoped plan may remove a genuinely external-only role from REQUIRED consumers,
+            # so its key need not exist and its endpoint is not probed. An explicit dedicated key is
+            # still a contradictory promise: the scrubbed coding subprocess can never receive it.
             target = resolve_llm_target(settings, role=role)
             # A dedicated role-profile key is an explicit promise that LoopLab will supply that
             # exact variable to this consumer, which the external-process isolation contract

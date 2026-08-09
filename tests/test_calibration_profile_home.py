@@ -42,11 +42,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #   2026-08-04  + asha_live_kill_confidence  (ASHA live-kill LLM judge)
 #   2026-08-05  - inline_repair_stuck_repeat (see the second history block below)
 #   2026-08-06  + concept_tidy               (cross-run concept ratification; see below)
+#   2026-08-09  + task_facets_finalize       (separate paid facet-steward schedule; see below)
 # A LITERAL, measured on the tree. Both halves must stay literals: an earlier attempt at this guard
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:f5c768a14dd8e74776a7320214a2ecb55df95886ed9fd36e867863b74b4a8248"
+_EXPECTED_DIGEST = "sha256:bc8c15f18fe2aaea4e2f9b415c079b87afee71069ffc8c07a2cc1292b0210353"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -63,7 +64,13 @@ _EXPECTED_DIGEST = "sha256:f5c768a14dd8e74776a7320214a2ecb55df95886ed9fd36e86786
 #               profile pins to None. The envelope is still a different envelope — the profile is a
 #               COMPLETE settings map, so a new field changes it whatever its value — and the guard
 #               is deliberately not clever enough to exempt an inert knob. Both pins re-set.
-_EXPECTED_FIELD_COUNT = 191
+#   2026-08-09  + task_facets_finalize       (the fresh default stops a paid finalize-time steward;
+#               missing-field snapshots preserve the old all-three schedule). The calibration
+#               profile pins it false alongside `cross_run_curation=false`, so it is inert for the
+#               toy calibration run, just like `concept_tidy` above. It is nevertheless a real
+#               Settings/snapshot treatment field, and this digest intentionally binds the complete
+#               non-variant envelope. Both pins re-set rather than exempting one control ad hoc.
+_EXPECTED_FIELD_COUNT = 192
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

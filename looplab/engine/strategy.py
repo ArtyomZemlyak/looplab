@@ -48,6 +48,9 @@ from looplab.trust.cross_run import (cross_run_text, same_live_direction,
                                      sanitize_cross_run_projection, valid_live_direction)
 
 
+_NO_PREPARED_DEVELOPER = object()
+
+
 class StrategyCadenceMixin:
     """The engine's strategist-cadence cluster. See the module docstring for the mixin convention
     (`self` is the Engine; `_op_span` stays on the Engine)."""
@@ -341,21 +344,92 @@ class StrategyCadenceMixin:
         # (`_maybe_snapshot_coverage`) — `_cadence_due` guards `every <= 0` for that case.
         return cadence_due(n, cadence_marks(marks), self.strategist_every)
 
+    def _strategy_may(self, strat: dict, key: str) -> bool:
+        """One governance verdict shared by Developer preparation and live strategy application."""
+        pinned = set(strat.get("_pinned") or [])
+        if any(alias in pinned for alias in parallelism_aliases(key)):
+            return True
+        if key == "card_scoring":
+            controls = self._agent_control if isinstance(self._agent_control, dict) else {}
+            if self.card_driven_selection and key not in controls:
+                return True
+        return self._agent_may("strategist", key)
+
+    def _prepare_strategy_developer(self, strat: dict) -> tuple[dict, object, Optional[dict]]:
+        """Resolve a Developer transition before its Strategy becomes durable.
+
+        A factory can refuse a live external -> in-process switch because its credential or endpoint
+        is unavailable.  Recording the requested backend first made the fold claim the switch had
+        happened while the live engine kept its previous Developer; a later resume could then apply
+        the same event under different credentials and change treatment halfway through one run.
+        Prepare the replacement without mutating the engine, and on refusal record the backend that
+        actually remains active plus a bounded, redacted application receipt.
+        """
+        requested = strat.get("developer")
+        current = str(getattr(self, "_developer_name", "default") or "default")
+        if not isinstance(requested, str) or not requested or requested == current:
+            return strat, _NO_PREPARED_DEVELOPER, None
+
+        reason_code = ""
+        reason = ""
+        replacement = _NO_PREPARED_DEVELOPER
+        if not self._strategy_may(strat, "developer"):
+            reason_code, reason = "governance_locked", "Strategist control of developer is locked"
+        elif self.developer_factory is None:
+            reason_code, reason = "factory_unavailable", "no Developer replacement factory is wired"
+        elif self.unified_agent:
+            reason_code, reason = (
+                "unified_facade_locked",
+                "the unified facade cannot replace only its Developer without breaking its "
+                "composed stage contract",
+            )
+        else:
+            try:
+                replacement = self.developer_factory(requested)
+            except Exception as exc:  # noqa: BLE001 - refusal is durable; the current role remains live
+                from looplab.core.redact import redact_persisted_text
+                reason_code = type(exc).__name__
+                reason = redact_persisted_text(
+                    str(exc) or reason_code, max_chars=1_000, single_line=True)
+
+        if replacement is _NO_PREPARED_DEVELOPER:
+            effective = {**strat, "developer": current}
+            return effective, replacement, {
+                "status": "refused",
+                "requested_backend": requested,
+                "applied_backend": current,
+                "reason_code": reason_code,
+                "reason": reason,
+            }
+        return strat, replacement, {
+            "status": "applied",
+            "requested_backend": requested,
+            "applied_backend": requested,
+        }
+
     def _record_strategy(self, strat: dict, state: RunState,
                          ctx: Optional[StrategyContext] = None) -> None:
         # every newly recorded decision has one canonical spelling per concurrency
         # axis. Legacy records remain replayable, but stale aliases cannot survive into the next merge.
         strat = canonicalize_strategy_parallelism(strat)
+        strat, prepared_developer, developer_application = self._prepare_strategy_developer(strat)
         ctx_fields = {"phase", "eval_budget_remaining", "failure_rate", "cross_run_receipt"}
         if ctx is not None and ctx.card_driven_selection:
             ctx_fields.add("card_scoring")
-        self.store.append(EV_STRATEGY_DECISION, {
+        payload = {
             "strategy": strat,
             "at_node": len(state.nodes),
             "ctx": (ctx.model_dump(include=ctx_fields)
                     if ctx is not None else None),
-        })
-        self._apply_strategy(strat)
+        }
+        if developer_application is not None:
+            payload["developer_application"] = developer_application
+        self.store.append(EV_STRATEGY_DECISION, payload)
+        # The expensive/fallible factory work happened before the append. From here a prepared
+        # transition must either install or stop this owner; continuing after the durable event with
+        # the old Developer would recreate the fold/live split this receipt exists to prevent.
+        self._apply_strategy(
+            strat, _prepared_developer=prepared_developer, _strict_developer=True)
 
     def _ensure_surrogate(self) -> None:
         """Wrap the Researcher in a SurrogateResearcher if it isn't already (idempotent). Used when a
@@ -392,7 +466,9 @@ class StrategyCadenceMixin:
             self.researcher = SurrogateResearcher(bounds, fallback=self.researcher,
                                                   explore=self._surrogate_explore)
 
-    def _apply_strategy(self, strat: dict) -> None:
+    def _apply_strategy(
+            self, strat: dict, *, _prepared_developer=_NO_PREPARED_DEVELOPER,
+            _strict_developer: bool = False) -> None:
         """Rebuild the live search machinery from a Strategy (pure wiring, no events). Policies share
         the action vocabulary and are pure, so swapping between loop iterations is safe; the Developer
         is swapped only between sequential _create_node calls.
@@ -419,20 +495,8 @@ class StrategyCadenceMixin:
         # operator-pinned field's provenance (reverting it on resume), and an operator pin of one field
         # blanket-exempted strategist-decided fields the matrix had locked (mega-review). `_pinned` is
         # not in _strategy_core, so it never affects change-detection; it survives fold as plain data.
-        pinned = set(strat.get("_pinned") or [])
-
         def may(k):
-            if any(alias in pinned for alias in parallelism_aliases(k)):
-                return True
-            if k == "card_scoring":
-                # Keep the shipped agent_control snapshot byte-identical while Card mode is off.
-                # Enabling the run-start-pinned selector grants its dedicated treatment to the
-                # Strategist implicitly, unless the operator explicitly supplies a card_scoring
-                # entry (including [] as a revocation). A `_pinned` human value already won above.
-                controls = self._agent_control if isinstance(self._agent_control, dict) else {}
-                if self.card_driven_selection and k not in controls:
-                    return True
-            return self._agent_may("strategist", k)
+            return self._strategy_may(strat, k)
         if may("novelty_stance") and strat.get("novelty_stance") in NOVELTY_STANCES:
             self._novelty_stance = strat["novelty_stance"]   # Strategist's novelty dial (slice 2)
         card_scoring = validate_card_scoring(strat.get("card_scoring"))
@@ -560,7 +624,10 @@ class StrategyCadenceMixin:
         if dev and may("developer") and self.developer_factory is not None \
                 and dev != self._developer_name and not self.unified_agent:
             try:
-                self.developer = self.developer_factory(dev)
+                replacement = (_prepared_developer
+                               if _prepared_developer is not _NO_PREPARED_DEVELOPER
+                               else self.developer_factory(dev))
+                self.developer = replacement
                 # cached parallel workers otherwise keep sending implementation calls
                 # through the previous backend after the primary Developer has visibly switched.
                 self._role_pool = None
@@ -572,8 +639,9 @@ class StrategyCadenceMixin:
                 # Bind the replacement between calls, before its first implementation request.
                 bind_cost_accountants(self)
                 self._developer_name = dev
-            except Exception:  # noqa: BLE001 — a bad backend swap must never abort the run
-                pass
+            except Exception:  # noqa: BLE001 — live decisions refuse safely; re-entry must be loud
+                if _strict_developer:
+                    raise
 
     @staticmethod
     def _autonomous_strategy_already_recorded_at(state: RunState, n: int) -> bool:

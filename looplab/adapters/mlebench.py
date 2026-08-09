@@ -288,6 +288,9 @@ class MLEBenchTask(BaseModel):
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
                 LLMDeveloper(client, brief=brief))
 
+    def external_fallback_uses_llm(self) -> bool:
+        return True  # output validation retains the script-writing LLMDeveloper
+
     def gpu_capable(self) -> bool:
         """The OFFLINE synthetic MLE-bench tutorial task: every brief above pins the solution to "ONLY
         numpy and the Python standard library", and `core/hardware.py::task_runtime_caps` names this

@@ -1,9 +1,10 @@
 """The pre-run LLM gates: is the role's credential usable, and is its endpoint actually there?
 
-Two gates, deliberately neighbours at the same call site (`cli/__init__.py::_engine`):
+Two startup gates, deliberately neighbours at the same call site (`cli/__init__.py::_engine`):
 `core/llm.py::validate_bound_profiles` fails before transport when a role's CREDENTIAL is unusable,
 `preflight_role_endpoints` fails before the loop when the role's endpoint is simply not THERE. This
-module owns the second gate outright and owns the WRAP-UP POLICY of both.
+module owns the second gate outright and owns the WRAP-UP POLICY of both. It also composes the same
+two checks for an in-process Developer target activated lazily by a live backend replacement.
 
 EACH GATE HAS TWO POLICIES, because the same missing model means different things at different
 entry points. `preflight_role_endpoints` / `validate_bound_profiles` REFUSE a run that is about to
@@ -76,7 +77,10 @@ class _ProbeFailure(NamedTuple):
     detail: str                                 # operator-facing "<role> (<model> at <url>): <err>"
 
 
-def _probe_role_endpoints(settings, *, timeout_s: float) -> list[_ProbeFailure]:
+def _probe_role_endpoints(
+    settings, *, timeout_s: float,
+    consumer_roles: set[str | None] | frozenset[str | None] | None = None,
+) -> list[_ProbeFailure]:
     """Probe every distinct role target once; return one classified failure per unusable target.
 
     The shared body of the two policies below. Both need exactly the same measurement — what differs
@@ -93,14 +97,16 @@ def _probe_role_endpoints(settings, *, timeout_s: float) -> list[_ProbeFailure]:
     # seam that silently diverges from the one the run actually uses.
     from looplab.agents.factory import make_llm_client
 
-    _shared_active, roles = llm_credential_consumers(settings)
+    _shared_active, configured_roles = llm_credential_consumers(settings)
+    roles = set(configured_roles if consumer_roles is None else consumer_roles)
     if not roles:
         return []                               # backend != "llm": no role talks to a provider
     # Roles served by an EXTERNAL coding-agent process are excluded for the same reason
     # `validate_bound_profiles` special-cases them: that process authenticates from its own
     # credential store and is launched with every secret-looking variable stripped, so a probe from
     # HERE would test a credential the run never uses and could fail an endpoint that works.
-    if getattr(settings, "developer_backend", "default") != "default":
+    if (consumer_roles is None
+            and getattr(settings, "developer_backend", "default") != "default"):
         roles -= ({"implement", "repair"} if getattr(settings, "unified_agent", False)
                   else {"developer"})
 
@@ -226,7 +232,10 @@ assert set(_REMEDIES) == set(LLM_FAILURE_CAUSES), (
     "every LLM_FAILURE_CAUSES member needs a remedy paragraph in preflight._REMEDIES")
 
 
-def preflight_role_endpoints(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S) -> None:
+def preflight_role_endpoints(
+    settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S,
+    consumer_roles: set[str | None] | frozenset[str | None] | None = None,
+) -> None:
     """Fail before the run starts when a role's provider cannot be reached.
 
     Why this has to be loud. Every LLM role degrades on purpose, and each of those degradations is
@@ -254,7 +263,8 @@ def preflight_role_endpoints(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S
     limit that is still refusing on the last attempt gets here. What was wrong was never the
     refusal — it was telling that operator to start an endpoint that is already running.
     """
-    failures = _probe_role_endpoints(settings, timeout_s=timeout_s)
+    failures = _probe_role_endpoints(
+        settings, timeout_s=timeout_s, consumer_roles=consumer_roles)
     if failures:
         raise LLMError(
             "LLM endpoint preflight failed: "
@@ -265,6 +275,27 @@ def preflight_role_endpoints(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S
               "roles would degrade to empty fallback proposals and the run would report success on "
               "a flat, meaningless result. (Wrapping up a run that is already over is not refused — "
               "`looplab finalize` warns and names the artifacts a missing model degrades.)")
+
+
+def preflight_in_process_developer_replacement(
+    task, settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S,
+) -> None:
+    """Validate and probe only Developer targets activated by an external -> in-process swap.
+
+    Potential custom/historical Strategy decisions are not startup consumers: requiring their
+    dedicated key would reject a valid external-only launch, and probing that remote endpoint with
+    a LoopLab credential would violate the external CLI's authentication boundary. Once a swap is
+    actually requested, its updated Settings describe a real paid consumer, so check it immediately
+    before role construction. The Engine already keeps the current Developer when this raises.
+    """
+    from looplab.agents.reachability import external_developer_stage_roles, llm_consumer_plan
+
+    plan = llm_consumer_plan(task, settings)
+    roles = frozenset(set(plan.roles) & set(external_developer_stage_roles(settings)))
+    validate_bound_profiles(
+        settings, consumer_roles=roles,
+        trusted_in_process_roles=plan.trusted_in_process_roles & roles)
+    preflight_role_endpoints(settings, timeout_s=timeout_s, consumer_roles=roles)
 
 
 # The one tail both wrap-up policies end with. A missing model costs the same two artifacts whether
@@ -286,7 +317,10 @@ _COSTS = (
     "endpoint back, and\n  re-run this command.")
 
 
-def wrap_up_endpoint_warning(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S) -> str | None:
+def wrap_up_endpoint_warning(
+    settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S,
+    consumer_roles: set[str | None] | frozenset[str | None] | None = None,
+) -> str | None:
     """The same probe, for an entry point that can only COMPLETE a run's wrap-up. Never refuses.
 
     `preflight_role_endpoints` exists because roles that silently degrade to fallback proposals let a
@@ -307,7 +341,8 @@ def wrap_up_endpoint_warning(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S
 
     Returns the operator-facing warning, or None when every required endpoint answers.
     """
-    failures = _probe_role_endpoints(settings, timeout_s=timeout_s)
+    failures = _probe_role_endpoints(
+        settings, timeout_s=timeout_s, consumer_roles=consumer_roles)
     if not failures:
         return None
     # "unusable", not "unreachable": this header used to assert a cause it had not measured, and it
@@ -317,7 +352,12 @@ def wrap_up_endpoint_warning(settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S
             + "; ".join(f"[{failure.cause}] {failure.detail}" for failure in failures) + _COSTS)
 
 
-def wrap_up_credential_warning(settings) -> str | None:
+def wrap_up_credential_warning(
+    settings, *,
+    consumer_roles: set[str | None] | frozenset[str | None] | None = None,
+    external_fallback_roles: set[str] | frozenset[str] | None = None,
+    trusted_in_process_roles: set[str] | frozenset[str] | None = None,
+) -> str | None:
     """`validate_bound_profiles`'s wrap-up policy: the same split, one gate earlier. Never refuses.
 
     `7b11e7ad` softened the endpoint probe for a run that is already over and left its NEIGHBOUR
@@ -338,7 +378,10 @@ def wrap_up_credential_warning(settings) -> str | None:
     Returns the operator-facing warning, or None when every required credential is usable.
     """
     try:
-        validate_bound_profiles(settings)
+        validate_bound_profiles(
+            settings, consumer_roles=consumer_roles,
+            external_fallback_roles=external_fallback_roles,
+            trusted_in_process_roles=trusted_in_process_roles)
     except LLMError as exc:
         detail = str(exc)
         prefix = "LLM credential preflight failed: "

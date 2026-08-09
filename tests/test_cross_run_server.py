@@ -535,8 +535,16 @@ def test_claim_decision_clear_can_remove_policy_after_evidence_is_retired(tmp_pa
     assert response.status_code == 200 and response.json()["revision"] == 2
 
 
-def test_scoped_row_cannot_silently_clear_inherited_global_decision(tmp_path):
+def test_scoped_row_cannot_silently_clear_inherited_global_decision(tmp_path, monkeypatch):
+    import looplab.core.atomicio as atomicio_module
     from looplab.engine.claims import record_claim_decision
+
+    # This test owns the claim-target contract, not the process-wide bounded-fsync fault domain.
+    # The latter deliberately fails closed while an earlier sync worker is stalled and can therefore
+    # turn an otherwise valid clear into a transient 503 when the whole suite is run under host
+    # pressure. Keep the write genuinely durable, but use the real synchronous syscall for this local
+    # tmpfs portfolio so an unrelated global worker cannot make the target-resolution assertion flaky.
+    monkeypatch.setattr(atomicio_module, "strict_fsync", os.fsync)
 
     md = _seed_memory()
     record_claim_decision(md, statement="hard-neg helps", decision="rejected",

@@ -1,10 +1,11 @@
-"""Deep-Research stage (Phase 2): a bounded agentic step that reads a coverage-aware run summary +
+"""Deep-Research stage (Phase 2): a bounded agentic step that reads a stratified run summary +
 the literature/web, then writes a strategic `ResearchMemo` to steer the next batch of experiments.
 
 This is the "go think hard" stage the search loop otherwise lacks: the ordinary Researcher proposes
-one local Idea per node, whereas the DeepResearcher takes a coverage-aware run-wide view and grounds
-it in external sources (arXiv via `LiteratureTools`, the web via `WebTools`,
-local notes via `KnowledgeTools`). It reuses the same multi-turn tool-calling shape as
+one local Idea per node, whereas the DeepResearcher receives a bounded, coverage-aware run-wide view
+(durable champion, eligible leaders, failure classes, recent, seed and middle evidence) and grounds
+it in external sources (arXiv via `LiteratureTools`, the web via `WebTools`, local notes via
+`KnowledgeTools`). It reuses the same multi-turn tool-calling shape as
 `agent.ToolUsingResearcher`: the model MAY call tools, then calls `emit` once with the memo.
 
 `research_completed` is selection-neutral for the current run's node/champion ranking and is NEVER
@@ -63,10 +64,11 @@ class _MemoOut(BaseModel):
 
 _SYSTEM = (
     "You are a senior ML researcher doing a DEEP-RESEARCH review of an ongoing automated experiment "
-    "run. You receive a bounded coverage summary: it always prioritizes the current leader and "
-    "representative early, eligible top-performing, failed, and recent active experiments, and "
-    "explicitly states when rows were omitted. Pre-dispatch discards are audit-only, not experimental "
-    "failures; any constraint- or trust-ineligible row included by another coverage bucket is labelled. "
+    "run. You receive a bounded coverage-aware stratified sample: it always prioritizes the durable "
+    "champion and representative early, eligible top-performing, failed, recent and middle active "
+    "experiments, and explicitly states when rows were omitted. Pre-dispatch discards are audit-only, "
+    "not experimental failures; any constraint- or trust-ineligible row included by another coverage "
+    "bucket is labelled. "
     # 4.5: explicit sub-question planning — one-shot review misses dependent questions (the
     # deep-research surveys' tree-decomposition finding, prompt-level form).
     "FIRST create a 2-4 item working plan of concrete sub-questions (e.g. 'why do X nodes fail', "
@@ -215,6 +217,22 @@ def state_brief(state: RunState, max_nodes: int = 40) -> str:
         node for node in reversed(failures) if node.id not in representative_ids)
     add(representative_failures, max(3, limit // 5))
 
+    # Reserve recent evidence before spending the remainder on a uniform chronology sample.  The
+    # old head+tail view hid decisive middle-run evidence; the first four buckets retain semantic
+    # priority while this stratum makes the remaining context representative rather than another
+    # contiguous edge slice.  A final recent fill below spends any slots returned by deduplication.
+    add(reversed(active), max(1, limit // 4))
+    remaining = [node for node in active if node.id not in selected]
+    slots = limit - len(selected)
+    if slots >= len(remaining):
+        add(remaining, slots)
+    elif slots == 1:
+        add([remaining[len(remaining) // 2]], 1)
+    elif slots > 1:
+        indices = [round(i * (len(remaining) - 1) / (slots - 1)) for i in range(slots)]
+        add((remaining[index] for index in indices), slots)
+        # `round` can duplicate an index for tiny inputs; deterministically spend spare capacity.
+        add(remaining)
     add(reversed(active))
     goal = brief_text(state.goal, _STATE_BRIEF_GOAL_CHARS) or "(unknown)"
     prefix_lines = [f"goal: {goal}  direction: {state.direction}"]
@@ -275,9 +293,14 @@ def state_brief(state: RunState, max_nodes: int = 40) -> str:
             return (
                 f"context coverage: showing {shown} of {len(active)} active experiments "
                 f"(leader, top metrics, failure classes, early seeds, recent); {omitted} omitted. "
-                "Omitted rows remain available through run tools when configured."
+                "Omitted rows remain available through run tools when configured.\n"
+                f"detailed stratified sample={shown}/{len(active)}, omitted={omitted}; "
+                "includes uniform middle evidence when capacity remains."
             )
-        return f"context coverage: all {shown} active experiments shown."
+        return (
+            f"context coverage: all {shown} active experiments shown.\n"
+            f"detailed stratified sample={shown}/{len(active)}."
+        )
 
     def render(rows) -> str:
         ordered = sorted(rows, key=lambda item: item[0].id)
@@ -455,26 +478,18 @@ def _arg_source(args: dict) -> tuple[str, str]:
     return redact_persisted_text(raw, max_chars=1_600, single_line=True), ""
 
 
-def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepResearcher]:
+def make_deep_researcher(settings, *, client=None, task=None, run_dir=None) -> Optional[DeepResearcher]:
     """Build a DeepResearcher when the stage is reachable: needs a client and at least one trigger
     enabled (web_search / literature_search / a cadence / manual use). Returns None when no client
     is wired (toy/offline mode) — the engine then simply never runs the stage."""
     if client is None:
         return None
-    providers = []
-    if getattr(settings, "researcher_tools", True):   # run-introspection (own experiments + data)
-        from looplab.tools.run_tools import DataTools, RunTools
-        providers.append(RunTools())
-        providers.append(DataTools(task))
-    if getattr(settings, "knowledge_dir", None):
-        from looplab.tools.knowledge_tools import KnowledgeTools
-        providers.append(KnowledgeTools(settings.knowledge_dir))
-    if getattr(settings, "memory_dir", None) and getattr(settings, "cross_run_read_tools", False):
-        from looplab.tools.cross_run_tools import CrossRunTools   # PART V §22 — portfolio unknowns/contradictions
-        providers.append(CrossRunTools(settings.memory_dir, role="researcher", audience="run"))
-    if getattr(settings, "literature_search", False):
-        from looplab.tools.literature import LiteratureTools
-        providers.append(LiteratureTools(enabled=True))
+    # Use the same capability assembly as the Researcher/Strategist instead of hand-building a
+    # smaller, subtly different graph.  `run_dir` unlocks the same sibling/all-run-root readers;
+    # knowledge gets the configured embedder/Memora/case layer, and memory/skills/literature follow
+    # the same gates.  Deep Research still owns only its WebTools addition below.
+    from looplab.agents.factory import _shared_providers
+    providers = _shared_providers(task, settings, run_dir, role="researcher")
     if getattr(settings, "web_search", False):
         from looplab.tools.web import WebTools
         providers.append(WebTools(enabled=True))

@@ -408,6 +408,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         deep_researcher=None,       # Optional[DeepResearcher]; None => Deep-Research stage off
         report_writer=None,         # Optional[ReportWriter]; None => agent report off (deterministic only)
         developer_factory=None,     # Optional[Callable[[str], Developer]] for live backend swap
+        developer_name="default",   # backend actually represented by the initial Developer object
         role_factory=None,          # Variant-1: Optional[Callable[[], (Researcher, Developer)]] building a
         #                             FRESH wired role pair for a parallel build worker (None => no pool =>
         #                             parallel_build clamps to 1). Typically `lambda: make_roles(task, settings)`.
@@ -478,6 +479,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         cross_run_advisory = _opt("cross_run_advisory")
         cross_run_structured_claims = _opt("cross_run_structured_claims")
         cross_run_curation = _opt("cross_run_curation")
+        task_facets_finalize = _opt("task_facets_finalize")
         cross_run_curation_auto = _opt("cross_run_curation_auto")
         concept_tidy = _opt("concept_tidy")
         cross_run_read_tools = _opt("cross_run_read_tools")
@@ -600,7 +602,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.report_writer = report_writer
         self.report_every = max(0, report_every)
         self.developer_factory = developer_factory
-        self._developer_name = "default"
+        self._developer_name = str(developer_name or "default")
         # Variant-1 parallel BUILD: a pool of fresh (researcher, developer) pairs so N drafts research +
         # code CONCURRENTLY without clobbering each other's role state (developer.last_files, researcher
         # hints). The settled canonical LLM width is the fan-out; the pool is built lazily on
@@ -727,6 +729,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._cross_run_advisory = bool(cross_run_advisory)
         self._cross_run_structured_claims = bool(cross_run_structured_claims)
         self._cross_run_curation = bool(cross_run_curation)
+        self._task_facets_finalize = bool(task_facets_finalize)
         self._cross_run_curation_auto = bool(cross_run_curation_auto)
         self._concept_tidy = bool(concept_tidy)
         self._cross_run_read_tools = bool(cross_run_read_tools)
@@ -2420,8 +2423,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             "select_verifier_contract": VERIFIER_SELECTION_CONTRACT,
                         },
                     )
-                # AGENTS.md (I18): task/contract context for coding-agent backends. Runtime line is
-                # honest about libs/hardware — capable tasks get the auto-install capability sentence,
+                # AGENTS.md (I18): run-level task-contract provenance. Repo backends receive their
+                # task-specific brief directly and retain a seed repo's own AGENTS.md; this manifest
+                # mirrors that contract without being copied over repository-owned instructions.
+                # Runtime lines remain honest: capable tasks get the auto-install capability sentence,
                 # offline/synthetic tasks stay numpy+stdlib (task_runtime_caps returns None for those).
                 from looplab.core.hardware import detect_gpu, task_runtime_caps
                 _md_caps = task_runtime_caps(self.task, auto_install=self._auto_install_deps,
@@ -2840,7 +2845,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # A7 Strategist: re-apply the last-decided strategy on (re)entry so a resumed run continues
         # with it WITHOUT re-consulting the Strategist (the decision lives in the event log).
         if _entry.active_strategy:
-            self._apply_strategy(_entry.active_strategy)
+            # A recorded Developer backend is part of this run's treatment. If today's credential or
+            # endpoint cannot reconstruct it, refuse re-entry instead of silently continuing on the
+            # constructor's backend and making fold/live disagree.
+            self._apply_strategy(_entry.active_strategy, _strict_developer=True)
         # R1-c resume-safety (invariant #6): the fold applies the RECORDED tie-break rule
         # (`st.select_verifier_tiebreak`, folded from run_started); re-pin the engine's live-verify gate
         # to match so `_maybe_verify_ties` produces atomic group scores consistently with what the fold
@@ -3301,7 +3309,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # the policy proposes the next actions. No-op when strategist is off (== today).
         state = self._maybe_consult_strategist(state)
 
-        # Deep-Research stage (Phase 2): a "go think hard" step over all results + the web that
+        # Deep-Research stage (Phase 2): a "go think hard" step over a bounded stratified run
+        # summary + the web that
         # writes a memo to steer the next batch. Fires on a manual request, a cadence, or a
         # Strategist `request_research`. No-op when the stage is off. Replay-safe (gated).
         state = self._maybe_deep_research(state)

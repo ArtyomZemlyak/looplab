@@ -99,8 +99,8 @@ def test_mcp_reply_truncation_is_never_silent():
 
 
 def test_gated_mcp_enforces_permission_policy():
-    """arch-review §3 P0-6: MCP dispatch must pass the permission policy — ask in default, deny in
-    plan, inline only in auto."""
+    """MCP dispatch passes permission policy: unknown effects ask in default and auto modes,
+    while deny/plan modes refuse them."""
     from looplab.tools.mcp_tools import GatedMcpTools
     inner = McpTools([_FakeServer()])
     # default mode: the call is handed to the approver

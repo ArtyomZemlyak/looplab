@@ -34,14 +34,14 @@ def test_research_claim_one_pager_names_current_receipts_and_defaults():
 
 def test_finalize_diagram_keeps_paid_stewards_before_the_cost_boundary():
     text = DIAGRAM.read_text(encoding="utf-8")
-    # CODEX AGENT: all three paid stewards must precede llm_cost or their usage disappears from the
+    # CODEX AGENT: every scheduled paid steward must precede llm_cost or its usage disappears from the
     # terminal roll-up; the diagram is an operator-facing architecture contract, not decorative copy.
     # The RATIFICATION step (`Settings.concept_tidy`) joined the tail on 2026-08-06, between task
     # facets and llm_cost, which split the old third token. The tokens are now the three boundaries
     # that carry the rule rather than one line of prose, so the same property survives a later
-    # wording change: every paid steward first, then ratification (which spends nothing but must see
+    # wording change: the always-on pair and optional facet steward first, then ratification (which spends nothing but must see
     # the proposal the concept steward just bought), then the cost roll-up that reports the spend.
-    ordered = ["→ reflection", "→ concept steward → claim steward", "→ task facets",
+    ordered = ["→ reflection", "→ concept steward → claim steward", "→ task facets (opt-in; OFF)",
                "concept RATIFY", "→ llm_cost → completion"]
     positions = [text.index(token) for token in ordered]
     assert positions == sorted(positions)

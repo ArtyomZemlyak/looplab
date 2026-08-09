@@ -1,6 +1,7 @@
 """MCP client tool provider: expose tools from configured Model Context Protocol servers to the
-assistant as ordinary OpenAI functions (named ``mcp__<server>__<tool>``), so the shared tool loop can
-call them with no special-casing — provider-neutral by construction.
+assistant as ordinary OpenAI functions (ordinary names retain ``mcp__<server>__<tool>``; ambiguous,
+unsafe or long origin pairs get a deterministic hashed spelling), so the shared tool loop can call
+them with no special-casing — provider-neutral by construction.
 
 Config (first found wins): env ``LOOPLAB_MCP_CONFIG`` (path to JSON), env ``LOOPLAB_MCP_SERVERS``
 (inline JSON), or ``<repo>/.mcp.json``. Shape mirrors the common ``.mcp.json``::
@@ -14,9 +15,12 @@ from the live transport so they are unit-testable with a fake server handle.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import logging
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Optional
@@ -25,10 +29,71 @@ from typing import Optional
 # lives. Computed locally instead of importing `looplab.serve.assistant.REPO_ROOT` (same value):
 # the tools layer must not depend on the serve layer.
 REPO_ROOT = Path(__file__).resolve().parents[2]
+_LOG = logging.getLogger(__name__)
+
+
+_FUNCTION_NAME_RE = re.compile(r"\A[A-Za-z0-9_-]+\Z")
+_FUNCTION_NAME_MAX = 64
+_MCP_SCHEMA_MAX_BYTES = 64 * 1024
 
 
 def _prefixed(server: str, tool: str) -> str:
-    return f"mcp__{server}__{tool}"
+    """Map one MCP origin pair to a provider-safe, collision-resistant function name.
+
+    Preserve the established readable spelling for ordinary unambiguous ASCII components. The
+    ``__`` delimiter is not injective when either component itself contains ``__``; unsafe/long or
+    ambiguous pairs therefore use a short readable label plus the complete SHA-256 encoded in
+    URL-safe base64 (43 chars). The result always fits the common OpenAI 64-character contract.
+    """
+    if not isinstance(server, str) or not server or not isinstance(tool, str) or not tool:
+        raise ValueError("MCP server and tool names must be non-empty strings")
+    readable = f"mcp__{server}__{tool}"
+    if (len(readable) <= _FUNCTION_NAME_MAX
+            and _FUNCTION_NAME_RE.fullmatch(server)
+            and _FUNCTION_NAME_RE.fullmatch(tool)
+            and "__" not in server and "__" not in tool):
+        return readable
+    material = json.dumps([server, tool], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    digest = base64.urlsafe_b64encode(hashlib.sha256(material).digest()).decode("ascii").rstrip("=")
+    label = re.sub(r"[^A-Za-z0-9_-]+", "-", tool).strip("-_")[:8] or "tool"
+    encoded = f"mcp__{label}__{digest}"
+    assert len(encoded) <= _FUNCTION_NAME_MAX and _FUNCTION_NAME_RE.fullmatch(encoded)
+    return encoded
+
+
+def _advertised_mcp_spec(server, tool: object) -> tuple[str, str, dict]:
+    """Validate one untrusted MCP declaration before either route index is mutated."""
+    if not isinstance(tool, dict):
+        raise ValueError("tool declaration is not an object")
+    original_name = tool.get("name")
+    full = _prefixed(getattr(server, "name", None), original_name)
+    description = tool.get("description", "")
+    if not isinstance(description, str):
+        raise ValueError("tool description is not a string")
+    schema = tool.get("input_schema")
+    if schema is None:
+        parameters = {"type": "object", "properties": {}}
+    else:
+        if not isinstance(schema, dict):
+            raise ValueError("tool input_schema is not a JSON Schema object")
+        parameters = dict(schema)
+        parameters.setdefault("type", "object")
+        if parameters.get("type") != "object":
+            raise ValueError("tool input_schema must describe an object")
+        parameters.setdefault("properties", {})
+        if not isinstance(parameters.get("properties"), dict):
+            raise ValueError("tool input_schema properties must be an object")
+    try:
+        encoded_schema = json.dumps(
+            parameters, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("tool input_schema is not finite JSON") from exc
+    if len(encoded_schema) > _MCP_SCHEMA_MAX_BYTES:
+        raise ValueError("tool input_schema exceeds the bounded schema budget")
+    advertised = {"type": "function", "function": {
+        "name": full, "description": description[:400], "parameters": parameters,
+    }}
+    return full, original_name, advertised
 
 
 # Honest truncation, the ToolProvider convention (env_inspect._clamp, reposcout._paginate). `{n}` =
@@ -85,16 +150,64 @@ class McpTools:
         self.servers = servers or []
         self._route: dict = {}       # prefixed tool name -> (server, tool_name)
         self._specs: list[dict] = []
+        self.collisions: list[tuple[str, str, str]] = []
+        self.rejections: list[tuple[str, str]] = []
         for s in self.servers:
             try:
-                for t in s.tools():
-                    full = _prefixed(s.name, t["name"])
-                    self._route[full] = (s, t["name"])
-                    self._specs.append({"type": "function", "function": {
-                        "name": full, "description": t.get("description", "")[:400],
-                        "parameters": t.get("input_schema") or {"type": "object", "properties": {}}}})
+                declarations = s.tools()
             except Exception:  # noqa: BLE001 - a flaky server contributes no tools
                 continue
+            try:
+                iterator = iter(declarations)
+            except TypeError:
+                self.rejections.append(
+                    (repr(getattr(s, "name", None)), "tools result is not iterable"))
+                _LOG.warning(
+                    "MCP server %r returned a non-iterable tool inventory",
+                    getattr(s, "name", None),
+                )
+                continue
+            while True:
+                try:
+                    t = next(iterator)
+                except StopIteration:
+                    break
+                except Exception as exc:  # noqa: BLE001 - one broken inventory stops only its server
+                    origin = repr(getattr(s, "name", None))
+                    reason = str(exc) or type(exc).__name__
+                    self.rejections.append((origin, reason))
+                    _LOG.warning("MCP server %s tool inventory failed: %s", origin, reason)
+                    break
+                try:
+                    full, original_name, advertised = _advertised_mcp_spec(s, t)
+                except Exception as exc:  # noqa: BLE001 - reject one malformed declaration only
+                    tool_name = getattr(t, "get", lambda *_: None)("name")
+                    origin = f"{getattr(s, 'name', None)!r}:{tool_name!r}"
+                    reason = str(exc) or type(exc).__name__
+                    self.rejections.append((origin, reason))
+                    _LOG.warning("rejecting malformed MCP tool %s: %s", origin, reason)
+                    continue
+                try:
+                    if full in self._route:
+                        first_server, first_tool = self._route[full]
+                        first = f"{first_server.name}:{first_tool}"
+                        shadowed = f"{s.name}:{original_name}"
+                        self.collisions.append((full, first, shadowed))
+                        _LOG.warning(
+                            "duplicate MCP tool name %r: keeping first target %r, shadowing %r",
+                            full, first, shadowed,
+                        )
+                        # Route and advertised schema are one contract.  Keeping the first schema
+                        # while overwriting its route would let an approval for one server/tool
+                        # execute a different effect whose prefixed spelling happens to collide.
+                        continue
+                    self._route[full] = (s, original_name)
+                    self._specs.append(advertised)
+                except Exception as exc:  # noqa: BLE001 - keep malformed origin data isolated
+                    origin = f"{getattr(s, 'name', None)!r}:{original_name!r}"
+                    reason = str(exc) or type(exc).__name__
+                    self.rejections.append((origin, reason))
+                    _LOG.warning("rejecting malformed MCP tool %s: %s", origin, reason)
 
     def bind_state(self, state=None, parent=None) -> None:
         return None
@@ -153,10 +266,11 @@ class GatedMcpTools:
     """Wrap `McpTools` so every MCP call passes the assistant's permission policy. An MCP tool is an
     arbitrary EXTERNAL side effect, so CompositeTools dispatching it with NO gate was a bypass
     (arch-review §3 P0-6): a `default`-mode session could fire an MCP mutation with no confirm-card.
-    Here each call is treated as a mutating `shell`-class effect — ASK in `default`/`acceptEdits`,
-    run inline only in `auto` (the user opted in). Read tools (specs) pass through unchanged; plan
-    mode never even builds this wrapper (build_tools drops MCP there, so no stdio server is started
-    in a read-only session)."""
+    Here each call is treated as an UNKNOWN external effect — ASK in
+    `default`/`acceptEdits`/**and `auto`** because MCP metadata is not yet trusted or typed well enough
+    to prove a call read-only. Read tool definitions (specs) pass through unchanged; plan mode never
+    even builds this wrapper (build_tools drops MCP there, so no stdio server is started in a
+    read-only session)."""
 
     def __init__(self, inner: "McpTools", mode: str, approver=None):
         self._inner = inner

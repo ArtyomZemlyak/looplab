@@ -465,8 +465,14 @@ def test_loop_records_recovery_transition_after_underperformance(tmp_path, monke
 
     monkeypatch.setattr("looplab.engine.train_monitor.read_training_tail_raw", _tail)
     stub = _AshaStub(kill=False, quantile=0.5, min_siblings=3)
+
+    def _recovered(current):
+        flags = [data["underperforming"] for event_type, data in current.store.events
+                 if event_type == EV_ASHA_RANK]
+        return flags[:2] == [True, False]
+
     _run_loop(stub, wd, {"kind": "stdout_json", "key": "recall"}, "max", {}, monkeypatch,
-              finals=[0.80, 0.70, 0.60], window=0.08)
+              finals=[0.80, 0.70, 0.60], until=_recovered)
     transitions = [d["underperforming"] for (t, d) in stub.store.events if t == EV_ASHA_RANK]
     assert transitions[:2] == [True, False]
 

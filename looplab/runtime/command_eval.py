@@ -941,7 +941,8 @@ def build_command(eval_spec: dict, params: Optional[dict] = None,
     # run the smoke eval. profile=None means "search default" -> the conventional "smoke".
     prof = profiles.get(profile) if profile else profiles.get("smoke")
     overrides = list((prof or {}).get("overrides", []))
-    # Explicit presence check (not `or`) so a configured timeout of 0 isn't read as missing.
+    # Explicit presence check (not `or`) keeps this defensive dict-level function deterministic for
+    # snapshots/callers that bypass task admission. New EvalSpec profiles require timeout > 0.
     timeout = prof["timeout"] if (prof and "timeout" in prof) else eval_spec.get("timeout", 600.0)
     if eval_spec.get("params_style") == "cli_overrides" and not _had_token:  # legacy Hydra append …
         overrides += [f"{k}={_fmt(v)}" for k, v in (params or {}).items()]   # … skip if %params% already injected
@@ -1516,5 +1517,4 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     return RunResult(exit_code=rc, stdout=out, stderr=err, metric=m, timed_out=to, drift=drift,
                      extra_metrics=extra, violations=(viol or None), trials=trials,
                      stages=stage_results, stalled=_salvageable_stall(_sig))
-
 

@@ -134,6 +134,29 @@ def test_make_roles_onboard_task_does_not_crash():
     assert dev is not None
 
 
+def test_production_onboarder_uses_the_configured_prompt_store(tmp_path, monkeypatch):
+    sentinel = "CUSTOM REPO ONBOARDER SYSTEM"
+    (tmp_path / "repo_onboarder_system.md").write_text(sentinel, encoding="utf-8")
+
+    class _Client:
+        def __init__(self):
+            self.messages = None
+
+        def complete_text(self, messages):
+            self.messages = messages
+            return "```python\ndef read_metric(workdir):\n    return 0.0\n```"
+
+    client = _Client()
+    monkeypatch.setattr("looplab.adapters.tasks.make_llm_client",
+                        lambda _settings, **_kwargs: client)
+    task = _task(onboard_command=[sys.executable, "ttrain.py"])
+    onboarder = task.make_onboarder(Settings(backend="llm", prompt_dir=str(tmp_path)))
+    proposal = onboarder()
+
+    assert client.messages[0] == {"role": "system", "content": sentinel}
+    assert "read_metric" in proposal["adapter_files"]["LOOPLAB_adapter.py"]
+
+
 # #2 — a repo task with no eval AND no onboarder must fail loudly, not silently no-op
 def test_engine_raises_without_eval_or_onboarder(tmp_path):
     t = RepoTask(id="o", editable_path=str(FIXTURE), onboard=True, eval=None)

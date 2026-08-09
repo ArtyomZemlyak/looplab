@@ -750,11 +750,12 @@ def _publish_and_archive(
         operation_id: str, expected_generation: str, launch_evidence: Optional[str],
         retry_exact_launch: bool) -> tuple[
             Optional[dict[str, Any]], Optional[dict[str, Any]],
-            Optional[list[str]], Optional[dict[str, str]], Optional[dict[str, Any]]]:
+            Optional[list[str]], Optional[dict[str, str]], Optional[dict[str, Any]],
+            Optional[Any], Optional[Any]]:
     """Publish ownership, freeze the launch, roll the archive forward, and pre-claim the spawn.
 
-    Returns `(finished, receipt, spawn_args, spawn_env, launch_settings)`. A non-None `finished` is
-    this request's entire answer and the driver returns it unchanged.
+    Returns launch material plus its already-validated task/Settings objects. A non-None `finished`
+    is this request's entire answer and the driver returns it unchanged.
 
     Lock precondition: ALL SIX held — `srv.commands.sequence(rd)`, `run_lifecycle_lock_http(rd)`,
     `engine_write_lock_http(rd)`, and the run-config / event-log / span-index writer locks. Every
@@ -831,7 +832,7 @@ def _publish_and_archive(
                     "message": "Replay replacement evidence is unavailable.",
                 }) from exc
             if completed:
-                return receipt_result(receipt), receipt, None, None, None
+                return receipt_result(receipt), receipt, None, None, None, None, None
             _pending(
                 receipt,
                 "Replay acquired new generation evidence that is not safely "
@@ -851,6 +852,25 @@ def _publish_and_archive(
 
     spawn_args, spawn_env, launch_settings = _frozen_launch(
         srv, rd, receipt, operation_id=operation_id)
+    # Resolve exact JIT inputs in every phase. Only a pristine `prepared` receipt may STOP before
+    # the first move: once `archiving` is durable, roll-forward must finish the manifest and let the
+    # existing launch-fence retry path report any later credential failure against that archive.
+    launch_task = load_task(rd / receipt["task_stage"])
+    resolved_settings = settings_from_snapshot(receipt["effective_config"])
+    if receipt["phase"] == "prepared":
+        try:
+            srv.settings.validate_launch_consumers(resolved_settings, launch_task)
+        except Exception as exc:  # this refusal is known to precede every archive move
+            unavailable = isinstance(exc, EventStoreLockError)
+            raise HTTPException(503 if unavailable else 409, {
+                **receipt_result(receipt),
+                "code": ("reset_launch_fence_unavailable" if unavailable
+                         else "reset_prelaunch_credentials_changed"),
+                "message": (
+                    "Replay could not authorize its task-aware launch credentials; the prior "
+                    "generation was not archived."),
+                "remediation": "Fix Settings if needed, then retry this exact Replay operation.",
+            }) from exc
     receipt = _archive_forward(
         rd, receipt_path, receipt, operation_id=operation_id)
     if receipt["phase"] != "archived":
@@ -878,12 +898,14 @@ def _publish_and_archive(
         "phase": "popen_pending",
         "updated_at": time.time(),
     }, operation_id=operation_id)
-    return None, receipt, spawn_args, spawn_env, launch_settings
+    return (None, receipt, spawn_args, spawn_env, launch_settings,
+            launch_task, resolved_settings)
 
 
 def _launch_replacement_engine(
         srv, rd: Path, receipt_path: Path, receipt: dict[str, Any], *, operation_id: str,
         spawn_args: list[str], spawn_env: dict[str, str], launch_settings: dict[str, Any],
+        launch_task, resolved_settings,
         spawn_engine: Callable[..., Optional[int]]) -> dict[str, Any]:
     """Cross the process-launch boundary, recording "cannot tell" as its own durable phase.
 
@@ -892,7 +914,9 @@ def _launch_replacement_engine(
     """
     popen_boundary_entered = False
     try:
-        with srv.settings.launch_env(launch_settings) as current_env:
+        with srv.settings.launch_env(
+                launch_settings, resolved_settings=resolved_settings,
+                task=launch_task) as current_env:
             env = {**current_env, **spawn_env}
             # From this assignment onward, failure cannot prove whether the OS accepted Popen.
             popen_boundary_entered = True
@@ -1001,6 +1025,7 @@ def _reset_blocking(
     spawn_args: Optional[list[str]] = None
     spawn_env: Optional[dict[str, str]] = None
     launch_settings: Optional[dict[str, Any]] = None
+    launch_task = resolved_settings = None
     with srv.commands.sequence(rd):
         receipt, marker = _resolve_reset_ownership(
             srv, rd, receipt_path, operation_id=operation_id,
@@ -1029,8 +1054,8 @@ def _reset_blocking(
                           _interprocess_lock(
                               Path(str(rd / "events.jsonl") + ".lock"), required=True),
                           span_index_write_guard(rd / "spans.jsonl", required=True)):
-                        (finished, receipt, spawn_args, spawn_env,
-                         launch_settings) = _publish_and_archive(
+                        (finished, receipt, spawn_args, spawn_env, launch_settings,
+                         launch_task, resolved_settings) = _publish_and_archive(
                              srv, rd, receipt_path, receipt, operation_id=operation_id,
                              expected_generation=expected_generation,
                              launch_evidence=launch_evidence,
@@ -1060,10 +1085,12 @@ def _reset_blocking(
     # lifecycle, engine, config, event and span locks are all released. launch_env then snapshots the
     # current credential pair and holds only its publication fence across Popen.
     assert (spawn_args is not None and spawn_env is not None
-            and launch_settings is not None and receipt is not None)
+            and launch_settings is not None and receipt is not None
+            and launch_task is not None and resolved_settings is not None)
     receipt = _launch_replacement_engine(
         srv, rd, receipt_path, receipt, operation_id=operation_id, spawn_args=spawn_args,
-        spawn_env=spawn_env, launch_settings=launch_settings, spawn_engine=spawn_engine)
+        spawn_env=spawn_env, launch_settings=launch_settings, launch_task=launch_task,
+        resolved_settings=resolved_settings, spawn_engine=spawn_engine)
     return _await_replacement_generation(
         srv, rd, receipt_path, receipt, operation_id=operation_id)
 

@@ -258,7 +258,7 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
 def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tools=None,
                       seed_graph: Optional[ConceptGraph] = None, asset_brief: str = "",
                       parser: str = "tool_call", known_tags=None, known_renames=None,
-                      max_workers: int = 8) -> dict:
+                      max_workers: int = 8, prompts=None) -> dict:
     """THE primary D5 primitive: an LLM agent BUILDS the concept map for a run end-to-end — it GROWS the
     concept vocabulary from the actual experiments (`tag_nodes_llm`, agentic when read-only run `tools` are
     passed, so it reads each node's real code/logs), computes the pure coverage, and DERIVES the
@@ -290,8 +290,9 @@ def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tool
                                         max_workers=max_workers, producer_modes=raw_tag_modes)
     # CONSOLIDATE the freely-grown vocabulary before measuring, so synonym fragmentation
     # (`augmentation` vs `data-augmentation`) doesn't split the concentration signal (§21.11 follow-up).
-    graph, tags, renamed = consolidate_concepts(graph, dict(raw), client=client, parser=parser,
-                                                known_renames=known_renames)
+    graph, tags, renamed = consolidate_concepts(
+        graph, dict(raw), client=client, parser=parser,
+        known_renames=known_renames, prompts=prompts)
     cov = concept_analytics.concept_coverage(state, graph, tags)
     important = derive_reference_concepts(task_goal or getattr(state, "goal", "") or "", cov,
                                           client=client, asset_brief=asset_brief, parser=parser)

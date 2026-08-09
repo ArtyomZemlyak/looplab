@@ -51,6 +51,9 @@ class ToyTask(BaseModel):
         return (LLMResearcher(client, space_hint=hint, bounds=self.bounds, parser=parser),
                 ToyObjectiveDeveloper(noise=self.noise))
 
+    def external_fallback_uses_llm(self) -> bool:
+        return False  # the fallback is the closed-form local Developer above
+
     def gpu_capable(self) -> bool:
         """No candidate of this task can touch a GPU: both Developers evaluate a closed-form 2-D
         objective in pure arithmetic, and the roles only ever choose `x`/`y`. Declaring it keeps a

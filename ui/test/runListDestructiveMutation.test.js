@@ -83,7 +83,12 @@ test('destructive and drag/drop writes stay authoritative, bounded, and recovera
     'the drawer controls themselves leave the interaction and accessibility trees while pending')
 })
 
-test('the list mutation guard bounds hung writes and reconciliation without late overwrite', async () => {
+// This is a real Vite/React/JSDOM integration test: loading the large RunList module competes with
+// every other Vite worker in the full suite before the guard's own 25ms deadlines even start. Keep
+// those behavioural deadlines deliberately tight, but give the integration harness enough wall
+// clock budget on loaded CI hosts (and when the Python suite is running alongside it).
+test('the list mutation guard bounds hung writes and reconciliation without late overwrite',
+  { timeout: 90_000 }, async () => {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
     url: 'https://looplab.test/', pretendToBeVisual: true,
   })

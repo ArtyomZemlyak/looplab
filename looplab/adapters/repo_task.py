@@ -12,6 +12,8 @@ See the architecture study (plans/) for the full workspace/eval model and phases
 """
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
+import json
 import os
 import random
 from typing import Optional
@@ -187,7 +189,9 @@ class EvalSpec(BaseModel):
     # Eval profiles (Phase 2): named override+timeout sets the Researcher selects per node,
     # e.g. {"smoke": {"overrides": ["max_steps=20"], "timeout": 60},
     #       "full":  {"overrides": ["max_steps=2000"], "timeout": 1800}}.
-    # Search uses a cheap profile; the confirm phase forces "full".
+    # The boundary below deliberately keeps the values as dicts for public/back-compat access, but
+    # gives them a closed schema: only argv-string overrides and a finite positive timeout. Search
+    # uses a declared cheap profile; the confirm phase requests "full" (base eval when absent).
     profiles: dict[str, dict] = Field(default_factory=dict)
     # Drift cross-check (Phase 4, eval_trust_mode="ratify_freeze_drift"): an INDEPENDENT
     # built-in reader (stdout_json/regex | file_json/regex — never `adapter`) that re-reads
@@ -206,6 +210,66 @@ class EvalSpec(BaseModel):
     # "optimize the metric subject to latency_ms <= 100". Operator-owned (trust boundary).
     metrics: dict[str, dict] = Field(default_factory=dict)
     constraints: list[dict] = Field(default_factory=list)
+
+    @field_validator("profiles", mode="before")
+    @classmethod
+    def _valid_profiles(cls, value, info: ValidationInfo):
+        """Reject new profile shapes that the dispatcher would reinterpret or crash on.
+
+        ``build_command`` intentionally accepts a plain mapping because it also consumes durable
+        dict snapshots, so the operator-authored task boundary is where the stronger contract must
+        live. Existing runs are different: before this validator, ``dict[str, dict]`` accepted extra
+        profile metadata, tuple/string ``overrides`` and non-positive/unparseable ``timeout`` values.
+        Their snapshots must keep reaching the same defensive runtime normalization they used when
+        recorded; rejecting or cleaning them now would make a run unresumable or change its treatment.
+        ``_grandfathered`` therefore preserves the raw nested values only on the explicit reload path.
+
+        Keep the field's historical ``dict[str, dict]`` API rather than replacing values with nested
+        model instances; valid callers that index ``eval.profiles[name]["timeout"]`` keep working.
+        """
+        import math
+
+        if _grandfathered(info):
+            return value
+
+        if not isinstance(value, Mapping):
+            raise ValueError("eval.profiles must be an object keyed by profile name")
+
+        clean: dict[str, dict] = {}
+        allowed = frozenset({"overrides", "timeout"})
+        for name, raw_profile in value.items():
+            # Validate before pydantic's dict[str, ...] coercion so 1 never quietly becomes "1".
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("eval profile names must be non-empty strings")
+            if not isinstance(raw_profile, Mapping):
+                raise ValueError(f"eval profile {name!r} must be an object")
+
+            unknown = [key for key in raw_profile if key not in allowed]
+            if unknown:
+                rendered = ", ".join(sorted((repr(key) for key in unknown)))
+                raise ValueError(
+                    f"eval profile {name!r} has unsupported keys: {rendered}; "
+                    "allowed keys are 'overrides' and 'timeout'")
+
+            profile = dict(raw_profile)
+            if "overrides" in profile:
+                overrides = profile["overrides"]
+                if (not isinstance(overrides, list)
+                        or any(not isinstance(token, str) for token in overrides)):
+                    raise ValueError(
+                        f"eval profile {name!r} overrides must be a list of strings")
+            if "timeout" in profile:
+                timeout = profile["timeout"]
+                numeric = not isinstance(timeout, bool) and isinstance(timeout, (int, float))
+                try:
+                    seconds = float(timeout) if numeric else float("nan")
+                except (TypeError, ValueError, OverflowError):
+                    seconds = float("nan")
+                if not math.isfinite(seconds) or seconds <= 0:
+                    raise ValueError(
+                        f"eval profile {name!r} timeout must be a finite positive number")
+            clean[name] = profile
+        return clean
 
     @field_validator("drift_tolerance")
     @classmethod
@@ -363,26 +427,31 @@ class RepoResearcher:
 
 class RepoParamResearcher:
     """Hyperparameter proposer for the cli_overrides framework mode (Phase 2): random
-    within bounds, then Gaussian hill-climb around the best. Tags each Idea with the cheap
-    `smoke` eval profile for search (the confirm phase upgrades the leaders to `full`)."""
+    within bounds, then Gaussian hill-climb around the best. It selects the conventional cheap
+    `smoke` profile only when the composed task declares one (the confirm phase still requests
+    `full`, which resolves to the base eval when absent)."""
 
-    def __init__(self, bounds: dict, seed: int = 0, step: float = 0.3):
+    def __init__(self, bounds: dict, seed: int = 0, step: float = 0.3,
+                 eval_profiles: Collection[str] | None = None):
         self.bounds = bounds
         self.rng = random.Random(seed)
         self.step = step
+        # ``None`` preserves the historical direct-construction behavior. Product composition passes
+        # the task's exact profile keys, including an explicit empty view when it declares none.
+        self.eval_profile = "smoke" if eval_profiles is None or "smoke" in eval_profiles else None
 
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
         keys = list(self.bounds)
         if parent is None:
             params = {k: round(self.rng.uniform(*self.bounds[k]), 6) for k in keys}
             return Idea(operator="draft", params=params, rationale="random hyperparameters",
-                        eval_profile="smoke")
+                        eval_profile=self.eval_profile)
         params = {}
         for k in keys:
             lo, hi = self.bounds[k]
             v = parent.idea.params.get(k, (lo + hi) / 2) + self.rng.gauss(0.0, (hi - lo) * self.step)
             params[k] = round(max(lo, min(hi, v)), 6)
-        return Idea(operator="improve", params=params, eval_profile="smoke",
+        return Idea(operator="improve", params=params, eval_profile=self.eval_profile,
                     rationale=f"perturb node {parent.id} (params={parent.idea.params})")
 
 
@@ -522,6 +591,12 @@ class RepoTask(BaseModel):
     def eval_spec(self) -> dict:
         return self.eval.model_dump() if self.eval else {}
 
+    def onboarder_llm_roles(self, settings) -> frozenset[str]:
+        """Pure consumer declaration matching `make_onboarder`'s activation gate exactly."""
+        return (frozenset({"developer"})
+                if self.onboard and getattr(settings, "backend", "toy") == "llm"
+                else frozenset())
+
     def make_onboarder(self, settings):
         """Build the onboarder (Phase 3) when `onboard` is set and a live LLM is available;
         otherwise None (offline runs inject one in tests, or use an explicit eval)."""
@@ -529,10 +604,13 @@ class RepoTask(BaseModel):
             return None
         from looplab.adapters.tasks import make_llm_client
         from looplab.core.llm import make_llm_client_for
+        from looplab.core.prompts import PromptStore
         repo_path = self.editable_path or (self.editables[0].path if self.editables else "")
         return LLMOnboarder(make_llm_client_for(
             settings, role="developer", factory=make_llm_client), repo_path, self.goal,
-                            self.direction, self.onboard_command, self.onboard_timeout)
+                            self.direction, self.onboard_command, self.onboard_timeout,
+                            prompts=(PromptStore(settings.prompt_dir)
+                                     if getattr(settings, "prompt_dir", None) else None))
 
     @staticmethod
     def _normp(p: str) -> str:
@@ -730,8 +808,56 @@ class RepoTask(BaseModel):
 
     def build_roles(self):                     # offline: no edits (baseline / param search)
         if self.params:                        # cli_overrides hyperparameter search
-            return (RepoParamResearcher(self._bounds(), seed=self.seed), NoOpRepoDeveloper())
+            profile_names = self.eval.profiles.keys() if self.eval is not None else ()
+            return (RepoParamResearcher(
+                self._bounds(), seed=self.seed, eval_profiles=profile_names), NoOpRepoDeveloper())
         return (RepoResearcher(seed=self.seed), NoOpRepoDeveloper())
+
+    def _eval_profile_researcher_hint(self) -> str:
+        """Render only the named eval profiles this task can actually execute.
+
+        ``Idea.eval_profile`` is a real command-dispatch input, but the generic Researcher cannot
+        advertise it: most task adapters do not have named eval profiles at all.  Keep the contract
+        task-local and derive every selectable name from the operator-owned ``EvalSpec`` so a task
+        with ``preview``/``audit`` profiles is never prompted with conventional-but-absent
+        ``smoke``/``full`` names.
+
+        Unknown names remain tolerated at the durable/runtime boundary for compatibility (where
+        ``build_command`` deliberately resolves them to the base command), but they are not part of
+        the proposal action space and therefore are explicitly discouraged here.
+        """
+        if self.eval is None or not self.eval.profiles:
+            return ""
+
+        from looplab.runtime.sandbox import MAX_TIMEOUT_S, finite_timeout
+
+        rows: list[str] = []
+        for name, spec in self.eval.profiles.items():
+            details: list[str] = []
+            overrides = spec.get("overrides")
+            if overrides:
+                details.append("appends argv overrides " + json.dumps(
+                    overrides, ensure_ascii=False, separators=(",", ":"), default=str))
+            else:
+                details.append("uses the base argv")
+            # This is the same normalization/cap used by build_command, so the Researcher sees the
+            # budget it will actually receive rather than an ineffective over-cap declaration.
+            timeout = finite_timeout(spec.get("timeout", self.eval.timeout), 600.0)
+            details.append(f"effective runtime timeout {timeout:g} seconds")
+            rows.append(f"- {json.dumps(name, ensure_ascii=False)}: " + "; ".join(details))
+
+        default = (f"omitting it (or emitting null) selects the declared "
+                   f"{json.dumps('smoke')} profile"
+                   if "smoke" in self.eval.profiles
+                   else "omitting it (or emitting null) uses the base eval command and timeout")
+        return ("\nEvaluation profile contract (operator-owned): set the optional `eval_profile` "
+                "field only to one of these exact declared names:\n"
+                + "\n".join(rows)
+                + f"\nFor search, {default}. An unknown explicit name safely uses the base eval "
+                  "command and timeout, but is not a valid named profile: never invent one. A "
+                  "profile changes only the declared eval argv/timeout, not the objective or your "
+                  f"edit permissions. Reported timeouts are effective after the runtime cap of "
+                  f"{MAX_TIMEOUT_S:g} seconds.")
 
     def llm_roles(self, client: LLMClient, parser: str = "tool_call"):
         """When `params` is set: an LLM hyperparameter proposer over the bounds (framework
@@ -741,14 +867,19 @@ class RepoTask(BaseModel):
         if self.params:
             goal = "maximize" if self.direction == "max" else "minimize"
             hint = (f"Propose hyperparameters to {goal} the eval metric, within bounds: "
-                    + ", ".join(f"{k} in [{lo}, {hi}]" for k, (lo, hi) in self._bounds().items()))
+                    + ", ".join(f"{k} in [{lo}, {hi}]" for k, (lo, hi) in self._bounds().items())
+                    + self._eval_profile_researcher_hint())
             return (LLMResearcher(client, space_hint=hint, bounds=self._bounds(),
                                   parser=parser), NoOpRepoDeveloper())
         hint = ("You are improving an existing experiment repository. Propose the next "
                 "concrete change to try (as a short rationale); leave params empty unless "
-                "the experiment exposes numeric knobs.")
+                "the experiment exposes numeric knobs."
+                + self._eval_profile_researcher_hint())
         return (LLMResearcher(client, space_hint=hint, bounds=None, parser=parser),
                 NoOpRepoDeveloper())
+
+    def external_fallback_uses_llm(self) -> bool:
+        return False  # validation deliberately falls back to the unmodified repo baseline
 
 
 # Back-compat: the Developer half (RepoWriteTools, the in-house LLM developer, onboarding, the

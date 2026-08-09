@@ -859,9 +859,10 @@ class SiblingRunTools(ForeignRunReader):
 
 
 class AllRunsTools(ForeignRunReader):
-    """Read-only view over EVERY run on this machine — ACROSS ALL TASKS, not just same-task siblings —
-    so the Developer/Researcher can read the code + result of ANY past experiment anywhere when it
-    wants to reuse or learn from an approach. Where `SiblingRunTools` restricts to the current task,
+    """Read-only view over every run under ONE configured run root — ACROSS ALL TASKS, not just
+    same-task siblings — so an enabled reasoning role can read the code + result of a past experiment
+    in that workspace when it wants to reuse or learn from an approach. Where `SiblingRunTools`
+    restricts to the current task,
     this deliberately does NOT filter by task: it just gives the agent the capability, and the agent
     decides when a foreign run is relevant. Same `.specs()`/`.execute()`/`bind_state()` shape as the
     other providers; every `execute` returns a string and soft-fails (a junk call must never crash the
@@ -881,13 +882,15 @@ class AllRunsTools(ForeignRunReader):
     def specs(self) -> list[dict]:
         return [
             fn_spec("list_all_runs",
-                "List EVERY run on this machine, ACROSS ALL TASKS (not just same-task siblings), with "
-                "its task, best metric, node count and phase — so you can find a run whose code you "
-                "want to read or reuse. Broader than list_sibling_runs.", {}),
+                "List every run under this configured run root, ACROSS ALL TASKS (not just same-task "
+                "siblings), with its task, best metric, node count and phase — so you can find a run "
+                "whose code you want to read or reuse. Broader than list_sibling_runs, but not "
+                "machine-wide.", {}),
             fn_spec("read_run_code",
-                "Read the solution code (solution + files) of ONE node in ANY run on this machine — to "
-                "reuse or learn from how it was implemented. Use a run_id from list_all_runs; pair with "
-                "read_run_experiment to check that node's result first.",
+                "Read the solution code (solution + files) of ONE node in any run returned by "
+                "list_all_runs — to reuse or learn from how it was implemented. Pair with "
+                "read_run_experiment to check that node's result first. Scope is this run root, not "
+                "the whole machine.",
                 {"run_id": {"type": "string"}, "node_id": {"type": "integer"}},
                 ["run_id", "node_id"]),
             fn_spec("read_run_experiment",
@@ -927,8 +930,9 @@ class AllRunsTools(ForeignRunReader):
                          f"({st.direction}) · {len(st.nodes)} nodes · {phase}"
                          + (f" · best=#{best.id}" if best else "")
                          + self._partial_suffix(rid))
-        return (f"{len(lines)} run(s) on this machine (across all tasks):\n" + "\n".join(lines)
-                ) if lines else "(no other runs on this machine)"
+        return (f"{len(lines)} run(s) under this configured run root (across all tasks):\n"
+                + "\n".join(lines)
+                ) if lines else "(no other runs under this configured run root)"
 
     # No `_scope_denial` override: this provider deliberately does NOT filter by task — it gives the
     # agent the capability and lets the agent decide when a foreign run is relevant.
