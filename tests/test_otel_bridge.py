@@ -38,6 +38,7 @@ p, c = spans["parent"], spans["child"]
 assert p.context.trace_id != 0                        # recording provider -> valid ids
 assert c.context.trace_id == p.context.trace_id       # same trace
 assert c.parent.span_id == p.context.span_id          # child nests under parent
+assert p.attributes["looplab.run_id"] == "r" and c.attributes["looplab.run_id"] == "r"
 print("BRIDGE_OK")
 '''
 
@@ -131,13 +132,14 @@ prov.add_span_processor(SimpleSpanProcessor(exp)); trace.set_tracer_provider(pro
 from looplab.core.tracing import Tracer, JsonlSpanExporter
 
 secret = "abcdef0123456789ABCDEF0123456789"
+UnsafeError = type("Provider Authorization: Bearer " + secret, (RuntimeError,), {})
 with tempfile.TemporaryDirectory() as d:
     path = d + "/s.jsonl"
     tr = Tracer(JsonlSpanExporter(path), run_id="r")
     try:
         with tr.span("provider", new_trace=True):
-            raise RuntimeError("Authorization: Bearer " + secret)
-    except RuntimeError:
+            raise UnsafeError("Authorization: Bearer " + secret)
+    except UnsafeError:
         pass
     persisted = open(path, encoding="utf-8").read()
 prov.force_flush()
@@ -186,11 +188,20 @@ print("OTEL_TOOL_CALL_REDACT_OK")
     assert "OTEL_TOOL_CALL_REDACT_OK" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
 
 
-def test_env_auto_wires_a_real_provider():
-    # OTEL_EXPORTER_OTLP_ENDPOINT set + no provider pre-installed -> _init_otel wires a real
+@pytest.mark.parametrize(("config_key", "config_value"), [
+    ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318"),
+    ("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4318/v1/traces"),
+    ("OTEL_TRACES_EXPORTER", "otlp"),
+])
+def test_explicit_otlp_env_auto_wires_a_real_provider(config_key, config_value):
+    # Explicit OTLP selection + no provider pre-installed -> _init_otel wires a real
     # TracerProvider (so spans would ship to a collector). No collector needed for the check.
     script = (
-        "import os; os.environ['OTEL_EXPORTER_OTLP_ENDPOINT']='http://127.0.0.1:4318'\n"
+        "import os\n"
+        "for k in ('OTEL_SDK_DISABLED', 'OTEL_EXPORTER_OTLP_ENDPOINT',\n"
+        "          'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', 'OTEL_TRACES_EXPORTER'):\n"
+        "    os.environ.pop(k, None)\n"
+        f"os.environ[{config_key!r}]={config_value!r}\n"
         "from opentelemetry import trace\n"
         "from opentelemetry.sdk.trace import TracerProvider\n"
         "import looplab.core.tracing as tr\n"
@@ -200,3 +211,90 @@ def test_env_auto_wires_a_real_provider():
     r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     assert "ENV_OK" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+
+
+@pytest.mark.parametrize("exporter", ["none", "console", "zipkin", "console,zipkin"])
+def test_non_otlp_exporter_does_not_auto_wire_otlp(exporter):
+    script = (
+        "import os\n"
+        "for k in ('OTEL_SDK_DISABLED', 'OTEL_EXPORTER_OTLP_ENDPOINT',\n"
+        "          'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'):\n"
+        "    os.environ.pop(k, None)\n"
+        f"os.environ['OTEL_TRACES_EXPORTER']={exporter!r}\n"
+        "from opentelemetry import trace\n"
+        "from opentelemetry.sdk.trace import TracerProvider\n"
+        "import tempfile\n"
+        "import looplab.core.tracing as tr\n"
+        "assert tr._OTEL is None\n"
+        "assert not isinstance(trace.get_tracer_provider(), TracerProvider)\n"
+        "with tempfile.TemporaryDirectory() as d:\n"
+        "    tracer = tr.Tracer(tr.JsonlSpanExporter(d + '/s.jsonl'))\n"
+        "    assert tracer._otel is None\n"
+        "print('NON_OTLP_OK')\n")
+    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    assert "NON_OTLP_OK" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+
+
+def test_sdk_disabled_blocks_even_a_manually_configured_provider():
+    script = r'''
+import os
+for key in ("OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "OTEL_TRACES_EXPORTER"):
+    os.environ.pop(key, None)
+os.environ["OTEL_SDK_DISABLED"] = "YES"
+
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+import tempfile
+
+exp = InMemorySpanExporter(); prov = TracerProvider()
+prov.add_span_processor(SimpleSpanProcessor(exp)); trace.set_tracer_provider(prov)
+import looplab.core.tracing as tr
+assert tr._OTEL is None
+with tempfile.TemporaryDirectory() as d:
+    tracer = tr.Tracer(tr.JsonlSpanExporter(d + "/s.jsonl"))
+    assert tracer._otel is None
+    with tracer.span("local-only", new_trace=True):
+        pass
+prov.force_flush()
+assert not exp.get_finished_spans()
+print("SDK_DISABLED_OK")
+'''
+    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    assert "SDK_DISABLED_OK" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+
+
+def test_provider_configured_after_import_is_discovered_before_tracer_construction():
+    script = r'''
+import os
+for key in ("OTEL_SDK_DISABLED", "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_TRACES_EXPORTER"):
+    os.environ.pop(key, None)
+
+import looplab.core.tracing as tr
+assert tr._OTEL is None
+
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+import tempfile
+
+exp = InMemorySpanExporter(); prov = TracerProvider()
+prov.add_span_processor(SimpleSpanProcessor(exp)); trace.set_tracer_provider(prov)
+with tempfile.TemporaryDirectory() as d:
+    tracer = tr.Tracer(tr.JsonlSpanExporter(d + "/s.jsonl"))
+    assert tracer._otel is not None
+    with tracer.span("late-provider", new_trace=True):
+        pass
+prov.force_flush()
+assert [span.name for span in exp.get_finished_spans()] == ["late-provider"]
+print("LATE_PROVIDER_OK")
+'''
+    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    assert "LATE_PROVIDER_OK" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"

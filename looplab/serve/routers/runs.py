@@ -9,6 +9,7 @@ import hmac
 import json
 import os
 import re
+import stat
 import threading
 import time
 from pathlib import Path
@@ -20,11 +21,13 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from looplab.core.atomicio import atomic_write_text
+from looplab.core.atomicio import atomic_write_text, same_file_entry
 from looplab.core.config import (
     RUN_START_PINNED_FIELDS, Settings, run_start_pinned_disagreement, run_start_pinned_settings,
     settings_from_snapshot)
 from looplab.core.node_evidence import node_attempt
+from looplab.core.trace_files import (
+    TraceFileIdentity, iter_bounded_trace_jsonl_lines, open_private_trace_file)
 from looplab.core.run_deletion import (RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed)
 from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed,
@@ -203,7 +206,10 @@ def _run_config_thread_lock(snapshot_path: Path) -> threading.Lock:
     return _shared_run_config_thread_lock(snapshot_path)
 
 
-def _scan_span_tail(path: Path, sid: str, since: int) -> Optional[dict]:
+def _scan_span_tail(
+        path: Path, sid: str, since: int,
+        *, expected_identity: Optional[TraceFileIdentity] = None,
+) -> Optional[dict]:
     """Find one span row by id in the bytes AFTER `since`, bounded by `_SPAN_FALLBACK_MAX_LINES`.
 
     `since` must be a newline boundary — the span index's `covers` is exactly that (its scan reports
@@ -211,12 +217,18 @@ def _scan_span_tail(path: Path, sid: str, since: int) -> Optional[dict]:
     cannot disagree on where a damaged file stops; returns None when the id is not in the scanned
     window. The line cap is this fallback's own bound, not part of that rule."""
     try:
-        with open(path, "rb") as f:
+        # The index released its source descriptor before this compatibility scan. Bind the reopen to
+        # that same inode so a path swap cannot redirect a guessed span id into another run's trace.
+        with open_private_trace_file(
+                path, expected_identity=expected_identity, open_file=open) as f:
             if since > 0:
                 f.seek(since)
-            for seen, raw in enumerate(f):
-                if seen >= _SPAN_FALLBACK_MAX_LINES or not raw.endswith(b"\n"):
-                    break                       # cap reached, or a torn final write
+            snapshot_size = os.fstat(f.fileno()).st_size
+            remaining = max(0, snapshot_size - f.tell())
+            for seen, raw in enumerate(iter_bounded_trace_jsonl_lines(
+                    f, size=remaining, label="span detail fallback")):
+                if seen >= _SPAN_FALLBACK_MAX_LINES:
+                    break                       # this compatibility fallback's own row cap
                 try:
                     obj = decode_jsonl_line(raw)
                 except JsonlRecordInvalid:
@@ -730,6 +742,67 @@ def build_router(srv) -> APIRouter:
         """Keep every trace read-failure envelope on one truthful, versioned contract."""
         return {"schema": TRACE_PROJECTION_SCHEMA, **shape,
                 "projection": unavailable_projection()}
+
+    def _assert_trace_reset_clear(rd: Path) -> None:
+        """Refuse a trace snapshot while Replay is between archived sidecars and new events."""
+        try:
+            marker = load_run_reset_marker(rd)
+        except RunResetStorageError as exc:
+            raise HTTPException(503, {
+                "code": "reset_fence_unavailable",
+                "message": "Replay ownership cannot be inspected safely for this trace read.",
+            }) from exc
+        if marker is not None:
+            raise HTTPException(409, {
+                "code": "run_reset_in_progress",
+                "expected_generation": marker.get("expected_generation"),
+                "operation_id": marker.get("operation_id"),
+                "message": "The run is being replayed; its trace snapshot is temporarily unavailable.",
+                "remediation": "Wait for this Replay operation to settle, then reload run state.",
+            })
+
+    def _begin_trace_read(rd: Path, expected_generation: Optional[str]) -> str:
+        """Capture the run identity that owns a trace-sidecar read.
+
+        Trace files are not part of the event fold, so a reset/replacement can otherwise publish
+        generation-A bytes in a generation-B screen.  Every trace projection uses this same
+        before/after CAS in addition to the durable reset marker.
+        """
+        _assert_trace_reset_clear(rd)
+        if (expected_generation is not None
+                and _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
+            raise HTTPException(400, {
+                "code": "invalid_run_generation",
+                "message": "expected_generation must be the exact generation from run state.",
+                "remediation": "Reload the run before reading trace evidence.",
+            })
+        generation = srv.commands.run_generation(rd)
+        if expected_generation is not None and generation != expected_generation:
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected_generation,
+                "current_generation": generation or None,
+                "message": "The run was reset or replaced before its trace was read.",
+                "remediation": "Reload run state and request the current generation.",
+            })
+        return generation
+
+    def _finish_trace_read(rd: Path, before_generation: str,
+                           expected_generation: Optional[str]) -> str:
+        """Complete the trace-sidecar lifecycle CAS after the potentially slow projection."""
+        _assert_trace_reset_clear(rd)
+        generation = srv.commands.run_generation(rd)
+        if (generation != before_generation
+                or (expected_generation is not None
+                    and generation != expected_generation)):
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected_generation or before_generation or None,
+                "current_generation": generation or None,
+                "message": "The run was reset or replaced while its trace was being read.",
+                "remediation": "Reload run state and request the current generation.",
+            })
+        return generation
     _base_state_payload = srv.state_payload
 
     def _state_payload(rd: Path, upto_seq: Optional[int] = None) -> dict:
@@ -1778,6 +1851,82 @@ def build_router(srv) -> APIRouter:
         route reads too — both metric-sidecar readers must fence on the SAME attempt."""
         return node_attempt(st, nid)
 
+    def _cached_node_attempt(rd: Path, nid: int) -> Optional[int]:
+        """Current attempt from the metadata-keyed live-state projection cache.
+
+        Trace/log polls need a before+after lifecycle CAS, but four fresh full event folds every four
+        seconds defeats the point of the indexed trace path. ``_state_payload`` keys its fold by the
+        exact events-file identity and returns a copy, so an unchanged log is a stat+lookup while an
+        append/reset still changes the observation used by the second check.
+        """
+        frame = _state_payload(rd)
+        state = frame.get("state") if isinstance(frame, dict) else None
+        state = state if isinstance(state, dict) else {}
+        nodes = state.get("nodes")
+        nodes = nodes if isinstance(nodes, dict) else {}
+        node = nodes.get(str(nid), nodes.get(nid))
+        if isinstance(node, dict):
+            attempt = node.get("attempt", 0)
+            return attempt if type(attempt) is int and attempt >= 0 else 0
+        buildings = state.get("buildings")
+        marker = None
+        if isinstance(buildings, dict):
+            marker = buildings.get(str(nid), buildings.get(nid))
+        elif isinstance(buildings, list):
+            marker = next((row for row in buildings
+                           if isinstance(row, dict) and row.get("node_id") == nid), None)
+        building = state.get("building")
+        if marker is None and isinstance(building, dict) and building.get("node_id") == nid:
+            marker = building
+        if isinstance(marker, dict):
+            attempt = marker.get("generation")
+            return attempt if type(attempt) is int and attempt >= 0 else 0
+        return None
+
+    def _legacy_node_log_dir_identity(rd: Path, nid: int) -> Optional[tuple[int, int]]:
+        """Prove a legacy attempt-zero log directory is this run's exact node child.
+
+        Old runs can have durable ``nodes/node_N`` logs without a folded ``node_created`` or
+        ``node_building`` lifecycle row.  That compatibility case must not turn an arbitrary path
+        occupying the legacy spelling into node evidence: require a correlated folded run identity,
+        real (non-reparse) ``nodes`` and ``node_N`` directories, their canonical direct-child paths,
+        and a stable inode observation.  ``node_logs`` compares this receipt again after reading, in
+        addition to its run-generation/reset fences.
+        """
+        if type(nid) is not int or nid < 0:
+            return None
+        try:
+            frame = _state_payload(rd)
+            state = frame.get("state") if isinstance(frame, dict) else None
+            if not isinstance(state, dict) or state.get("run_id") != rd.name:
+                return None
+
+            run = rd.resolve(strict=True)
+            nodes = run / "nodes"
+            node_dir = nodes / f"node_{nid}"
+            reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+            nodes_info = nodes.lstat()
+            before = node_dir.lstat()
+            if (not stat.S_ISDIR(nodes_info.st_mode)
+                    or not stat.S_ISDIR(before.st_mode)
+                    or int(getattr(nodes_info, "st_file_attributes", 0) or 0) & reparse_flag
+                    or int(getattr(before, "st_file_attributes", 0) or 0) & reparse_flag
+                    or nodes.resolve(strict=True) != nodes
+                    or node_dir.resolve(strict=True) != node_dir):
+                return None
+            after = node_dir.lstat()
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+        # Type and reparse policy are validated immediately above on every call. The receipt itself
+        # answers the canonical weaker question: did this child pathname keep pointing at the same
+        # filesystem entry while logs were read?
+        identity = same_file_entry(before)
+        if not identity[1] or same_file_entry(after) != identity:
+            return None
+        return identity
+
     def _node_trace_snapshot(rd: Path, nid: int, *, attempt: int) -> tuple[dict, Optional[str]]:
         """Project one node trace only when its cheap file CAS is stable across the read."""
         before = trace_file_revision(rd / "spans.jsonl")
@@ -1867,7 +2016,9 @@ def build_router(srv) -> APIRouter:
         return rd / "nodes" / f"node_{nid}"
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/logs")
-    def node_logs(run_id: str, nid: int, tail: int = 200_000):
+    def node_logs(run_id: str, nid: int, tail: int = 200_000,
+                  attempt: Optional[int] = Query(default=None, ge=0),
+                  expected_generation: Optional[str] = Query(default=None)):
         """Live training/eval logs for a node — the streamed stdout/stderr of its eval + setup
         subprocesses. `tail` caps bytes returned (from the end) so the UI can poll cheaply. Empty
         strings when a log doesn't exist yet.
@@ -1878,6 +2029,42 @@ def build_router(srv) -> APIRouter:
         NO fallback duplication into it), and the per-stage tails come back as the ordered `stages`
         map, which the UI's log panel renders per stage."""
         rd = _run_dir(run_id)
+        _assert_trace_reset_clear(rd)
+        if (expected_generation is not None
+                and _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
+            raise HTTPException(400, {
+                "code": "invalid_run_generation",
+                "message": "expected_generation must be the exact generation from run state.",
+                "remediation": "Reload the run before reading node logs.",
+            })
+        before_generation = srv.commands.run_generation(rd)
+        if expected_generation is not None and before_generation != expected_generation:
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected_generation,
+                "current_generation": before_generation or None,
+                "message": "The run was reset or replaced before its node logs were read.",
+                "remediation": "Reload run state and request the current generation.",
+            })
+        current_attempt = _cached_node_attempt(rd, nid)
+        legacy_node_identity = None
+        if current_attempt is None:
+            # Pre-lifecycle event logs still own useful attempt-zero stdout. Accept that narrow
+            # compatibility shape only when its physical node directory is positively bound to this
+            # run; the receipt is rechecked below so a reset/path replacement cannot publish bytes.
+            legacy_node_identity = _legacy_node_log_dir_identity(rd, nid)
+            if legacy_node_identity is None:
+                raise HTTPException(404, "no such node")
+            current_attempt = 0
+        if attempt is not None and attempt != current_attempt:
+            raise HTTPException(409, {
+                "code": "node_attempt_changed",
+                "node_id": nid,
+                "expected_attempt": attempt,
+                "current_attempt": current_attempt,
+                "message": "The node was reset before its logs were read.",
+                "remediation": "Reload node state and request the current attempt.",
+            })
         nd = _node_dir(rd, nid)
         # Clamp the client-controlled tail so a hostile/large value can't force an unbounded read; and
         # seek to the tail instead of read_bytes() so we never pull a multi-GB training log into RAM.
@@ -1938,8 +2125,38 @@ def build_router(srv) -> APIRouter:
         # run_setup.log lives in the RUN dir (shared setup), not the node dir. Tail-cap it like every
         # other log here (seek-to-end, byte-bounded) instead of read_text()-ing the whole file into RAM
         # on every poll — a verbose dependency-install log would otherwise defeat the tail cap.
-        return {"eval": _tail("eval.log"), "stages": stages, "setup": _tail("setup.log"),
-                "run_setup": _tail("run_setup.log", rd)}
+        payload = {"eval": _tail("eval.log"), "stages": stages, "setup": _tail("setup.log"),
+                   "run_setup": _tail("run_setup.log", rd)}
+        _assert_trace_reset_clear(rd)
+        after_generation = srv.commands.run_generation(rd)
+        after_attempt = _cached_node_attempt(rd, nid)
+        if legacy_node_identity is not None:
+            after_legacy_identity = _legacy_node_log_dir_identity(rd, nid)
+            if after_legacy_identity != legacy_node_identity:
+                after_attempt = None
+            elif after_attempt is None:
+                after_attempt = 0
+        if (after_generation != before_generation
+                or (expected_generation is not None
+                    and after_generation != expected_generation)):
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected_generation or before_generation or None,
+                "current_generation": after_generation or None,
+                "message": "The run was reset or replaced while its node logs were being read.",
+                "remediation": "Reload run state and request the current generation.",
+            })
+        if after_attempt != current_attempt:
+            raise HTTPException(409, {
+                "code": "node_attempt_changed",
+                "node_id": nid,
+                "expected_attempt": current_attempt,
+                "current_attempt": after_attempt,
+                "message": "The node was reset while its logs were being read.",
+                "remediation": "Reload node state and request the current attempt.",
+            })
+        return {**payload, "node_id": nid, "attempt": current_attempt,
+                "run_generation": after_generation or None}
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/metrics")
     def node_metrics(run_id: str, nid: int,
@@ -1995,7 +2212,8 @@ def build_router(srv) -> APIRouter:
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/trace")
     def node_trace(run_id: str, nid: int, limit: int = Query(default=0, ge=0),
-                   attempt: Optional[int] = Query(default=None, ge=0)):
+                   attempt: Optional[int] = Query(default=None, ge=0),
+                   expected_generation: Optional[str] = Query(default=None)):
         """The LIGHT trace tree for ONE node — the hot path for expanding a node's trace card. Reads
         only that node's spans via the index (O(node)), so the UI can fetch a node's trace lazily on
         expand instead of loading (and re-rendering) the whole-run timeline for a 4000-node run.
@@ -2005,18 +2223,72 @@ def build_router(srv) -> APIRouter:
         A negative limit is refused at the boundary (422) rather than silently read as the default — the
         same wire contract as the conversation twin, so both pagers fail loudly on a client defect."""
         rd = _run_dir(run_id)
-        if attempt is None:
-            attempt = _node_attempt(srv.state(rd), nid)
-            if attempt is None:
-                attempt = 0  # setup/legacy traces have no folded Node row
+        _assert_trace_reset_clear(rd)
+        if (expected_generation is not None
+                and _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
+            raise HTTPException(400, {
+                "code": "invalid_run_generation",
+                "message": "expected_generation must be the exact generation from run state.",
+                "remediation": "Reload the run before reading its node trace.",
+            })
+        before_generation = srv.commands.run_generation(rd)
+        if expected_generation is not None and before_generation != expected_generation:
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected_generation,
+                "current_generation": before_generation or None,
+                "message": "The run was reset or replaced before its node trace was read.",
+                "remediation": "Reload run state and request the current generation.",
+            })
+        observed_attempt = _cached_node_attempt(rd, nid)
+        current_attempt = observed_attempt if observed_attempt is not None else 0
+        # Setup/pseudo-node and legacy trace rows have no folded lifecycle marker and therefore use
+        # attempt zero.  An EXPLICIT non-current attempt is never a historical selector: returning
+        # it would let an old event row commit abandoned-attempt evidence into the current run.
+        if attempt is not None and attempt != current_attempt:
+            raise HTTPException(409, {
+                "code": "node_attempt_changed",
+                "node_id": nid,
+                "expected_attempt": attempt,
+                "current_attempt": current_attempt,
+                "message": "The node was reset before its trace was read.",
+                "remediation": "Reload node state and request the current attempt.",
+            })
+        attempt = current_attempt
         # 0/absent settles to the default inside `node_trace_view` — the one settle rule owns it, so
         # this route does not get a second opinion about what an unrequested window means.
-        return _node_trace(rd, nid, cap=limit, attempt=attempt)
+        payload = _node_trace(rd, nid, cap=limit, attempt=attempt)
+        _assert_trace_reset_clear(rd)
+        after_observed_attempt = _cached_node_attempt(rd, nid)
+        after_attempt = after_observed_attempt if after_observed_attempt is not None else 0
+        if after_attempt != current_attempt:
+            raise HTTPException(409, {
+                "code": "node_attempt_changed",
+                "node_id": nid,
+                "expected_attempt": current_attempt,
+                "current_attempt": after_attempt,
+                "message": "The node was reset while its trace was being read.",
+                "remediation": "Reload node state and request the current attempt.",
+            })
+        after_generation = srv.commands.run_generation(rd)
+        if (after_generation != before_generation
+                or (expected_generation is not None
+                    and after_generation != expected_generation)):
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected_generation or before_generation or None,
+                "current_generation": after_generation or None,
+                "message": "The run was reset or replaced while its node trace was being read.",
+                "remediation": "Reload run state and request the current generation.",
+            })
+        return {**payload, "run_generation": after_generation or None}
 
     @router.get("/api/runs/{run_id}/spans/{sid}")
-    def span_io(run_id: str, sid: str):
+    def span_io(run_id: str, sid: str,
+                expected_generation: Optional[str] = Query(default=None)):
         """Bounded, redacted I/O projection for one observation; raw diagnostics stay in spans.jsonl."""
         rd = _run_dir(run_id)
+        before_generation = _begin_trace_read(rd, expected_generation)
         try:
             # Seek straight to the span's byte offset via the index instead of scanning the whole
             # (up to 1 GB) spans.jsonl for one span. Falls back to a scan if the index lacks it (a
@@ -2035,7 +2307,9 @@ def build_router(srv) -> APIRouter:
             if s is None:
                 raw_span = _scan_span_tail(
                     rd / "spans.jsonl", sid,
-                    int(getattr(idx, "covers", 0) or 0) if idx is not None else 0)
+                    int(getattr(idx, "covers", 0) or 0) if idx is not None else 0,
+                    expected_identity=(getattr(idx, "identity", None)
+                                       if idx is not None else None))
                 if raw_span is not None:
                     s = _normalize_span(raw_span)
             if s is not None:
@@ -2083,37 +2357,83 @@ def build_router(srv) -> APIRouter:
                         "siblings_elided": siblings_elided,
                         "truncated": detail_truncated or siblings_elided,
                     })
-                return {"schema": TRACE_PROJECTION_SCHEMA, "span_id": s.get("span_id"),
+                payload = {"schema": TRACE_PROJECTION_SCHEMA, "span_id": s.get("span_id"),
                         "name": s.get("name"), "kind": s.get("kind"),
                         "attributes": s.get("attributes") or {}, "events": s.get("events") or [],
                         "duration_s": s.get("duration_s"), "status": s.get("status"),
                         "projection": projection}
+                generation = _finish_trace_read(
+                    rd, before_generation, expected_generation)
+                return {**payload, "run_generation": generation or None}
+        except HTTPException:
+            raise
         except Exception:  # noqa: BLE001
             pass
         try:
             safe_sid = _cap_str(sid, 256)
         except Exception:  # noqa: BLE001
             safe_sid = ""
-        return _trace_unavailable(span_id=safe_sid, attributes={}, events=[])
+        generation = _finish_trace_read(rd, before_generation, expected_generation)
+        return {**_trace_unavailable(span_id=safe_sid, attributes={}, events=[]),
+                "run_generation": generation or None}
 
     @router.get("/api/runs/{run_id}/trace/tail")
-    def trace_tail(run_id: str, limit: int = 30):
+    def trace_tail(run_id: str, limit: int = 30,
+                   expected_generation: Optional[str] = Query(default=None)):
         """LIVE 'what is the agent doing right now' feed: the most recent generation (LLM thinking/
         output) + tool (name + args) observations, newest last. Powers the Dock's live-trace disclosure
         so a user can watch the agent reason/act during a coarse 'Thinking…'/'Planning…' status instead
         of only seeing the label. Reads just the TAIL of spans.jsonl (bounded regardless of run length);
         text is capped here; /spans/{sid} exposes a larger bounded/redacted detail projection."""
         rd = _run_dir(run_id)
+        _assert_trace_reset_clear(rd)
+        if (expected_generation is not None
+                and _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
+            raise HTTPException(400, {
+                "code": "invalid_run_generation",
+                "message": "expected_generation must be the exact generation from run state.",
+                "remediation": "Reload the run before reading its live trace.",
+            })
+        before_generation = srv.commands.run_generation(rd)
+        if expected_generation is not None and before_generation != expected_generation:
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected_generation,
+                "current_generation": before_generation or None,
+                "message": "The run was reset or replaced before its live trace was read.",
+                "remediation": "Reload run state and request the current generation.",
+            })
+
+        def _generation_bound(payload: dict) -> dict:
+            """Publish only a snapshot whose run identity stayed stable for the whole read."""
+            _assert_trace_reset_clear(rd)
+            after_generation = srv.commands.run_generation(rd)
+            if (after_generation != before_generation
+                    or (expected_generation is not None
+                        and after_generation != expected_generation)):
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "expected_generation": expected_generation or before_generation or None,
+                    "current_generation": after_generation or None,
+                    "message": "The run was reset or replaced while its live trace was being read.",
+                    "remediation": "Reload run state and request the current generation.",
+                })
+            payload["run_generation"] = after_generation or None
+            return payload
         # Default poll stays small (the Dock polls limit=40); the ceiling is raised so the UI's
         # "load earlier spans" control can page further back through history on explicit demand. The
         # backward scan below is still bounded by _MAX_TAIL (8 MiB), so a larger limit never re-reads
         # an unbounded file — it just surfaces more of the already-bounded tail window.
         limit = max(1, min(int(limit or 30), 400))
-        # Read BACKWARD from EOF until we have `limit` complete lines (or hit a hard ceiling), instead of
-        # a fixed 256KB window: a single span line can be 100KB+ (a repo-Developer generation carries the
-        # whole prompt+output on it), so a fixed window could land ENTIRELY inside one line and return an
-        # empty feed exactly during the heavy generations a user most wants to watch. Still bounded so a
-        # multi-MB spans.jsonl is never re-parsed in full every poll.
+        # Read BACKWARD from EOF until we have `limit` complete generation/tool observations (or hit a
+        # hard ceiling), instead of a fixed 256KB window. A single span line can be 100KB+ (a
+        # repo-Developer generation carries the whole prompt+output on it), so a fixed window could land
+        # ENTIRELY inside one line and return an empty feed during the heavy generations a user most
+        # wants to watch. The hard ceiling ensures a multi-MB spans.jsonl is never re-parsed in full on
+        # every poll.
+        # Collected newest -> oldest while the file is scanned backwards, then reversed for the wire.
+        # Keeping only qualifying observations means a dense tail of operation spans cannot consume the
+        # generation/tool limit and hide the activity immediately before it.
         recent: list[dict] = []
         from looplab.events.traceview import (
             _cap_str, _finite_number, _normalize_span)
@@ -2121,79 +2441,152 @@ def build_router(srv) -> APIRouter:
         _MAX_TAIL = 8 * 1024 * 1024
         source_truncated = False
         p = rd / "spans.jsonl"
+
+        def _observation(line: bytes) -> Optional[dict]:
+            """Project one complete physical line, or None when it is not a live observation."""
+            if not line.strip():
+                return None
+            try:
+                s = json.loads(line)
+            except (ValueError, TypeError):
+                return None
+            s = _normalize_span(s)
+            if s is None or s.get("kind") not in ("generation", "tool"):
+                return None
+            a = s.get("attributes") if isinstance(s.get("attributes"), dict) else {}
+            node_id = a.get("node_id")
+            if not ((isinstance(node_id, int) and not isinstance(node_id, bool)
+                     and 0 <= node_id <= (1 << 63) - 1)
+                    or (isinstance(node_id, str) and 0 < len(node_id) <= 128)):
+                node_id = None
+            elif isinstance(node_id, str):
+                node_id = _cap_str(node_id, 128)
+            it = {"span_id": s.get("span_id"), "kind": s.get("kind"),
+                  "node_id": node_id,
+                  "start": _finite_number(s.get("start"), maximum=1e15),
+                  "duration_s": _finite_number(s.get("duration_s"), nonnegative=True, maximum=1e15),
+                  "status": _cap_str(str(s.get("status") or ""), 32)}
+            if s.get("kind") == "generation":
+                it["model"] = _cap_str(str(a.get("model") or ""), 160)
+                txt = a.get("thinking") or a.get("output") or ""
+                it["text"] = _cap_str(txt, 500) if isinstance(txt, str) else ""
+            else:
+                it["tool"] = _cap_str(str(a.get("tool") or ""), 128)
+                inp = a.get("input")
+                if isinstance(inp, dict):
+                    arg = inp.get("path") or inp.get("pattern") or inp.get("query") \
+                        or inp.get("command") or inp.get("root") or ""
+                    it["arg"] = _cap_str(str(arg), 160)
+                it["output"] = _cap_str(str(a.get("output") or ""), 200)
+            return it
+
         try:
-            sz = os.path.getsize(p)
-        except FileNotFoundError:
-            # Absence established by the initial lookup is a truthful complete-empty source.
-            return {"schema": TRACE_PROJECTION_SCHEMA, "tail": [],
-                    "projection": {"schema": TRACE_PROJECTION_SCHEMA,
-                                   "truncated": False, "source_truncated": False,
-                                   "visible_spans": 0, "omitted_spans": 0}}
-        except OSError:
-            return _trace_unavailable(tail=[])
-        try:
-            with open(p, "rb") as f:
+            # Read at most the exact 8 MiB suffix. `pending` holds fragments of ONE line in reverse
+            # chunk order; it is joined only once, when the preceding newline (or BOF) is reached. This
+            # keeps a multi-chunk generation line linear instead of repeatedly prepending/copying the
+            # whole accumulated suffix (`blob = chunk + blob`).
+            # Open first and derive the snapshot size from THIS hardened descriptor.  Besides the
+            # reset-safe single-inode snapshot, nofollow+nlink/type checks keep this public polling
+            # route from becoming a cross-run/external-file reader or blocking on a crafted FIFO.
+            with open_private_trace_file(p, open_file=open) as f:
+                descriptor_stat = os.fstat(f.fileno())
+                sz = descriptor_stat.st_size
+                lower = max(0, sz - _MAX_TAIL)
+                source_truncated = lower > 0
                 start = sz
-                blob = b""
-                while start > 0 and (sz - start) < _MAX_TAIL:
-                    step = min(_CHUNK, start)
+                pending: list[bytes] = []
+                at_eof = True
+                stopped = False
+                while start > lower and not stopped:
+                    step = min(_CHUNK, start - lower)
                     start -= step
                     f.seek(start)
-                    blob = f.read(step) + blob
-                    if blob.count(b"\n") > limit:    # enough complete lines past the (partial) first
-                        break
-            lines = blob.splitlines()
-            if start > 0 and lines:
-                source_truncated = True
-                lines = lines[1:]                    # drop the partial first line (didn't reach BOF)
-            for line in lines:
-                try:
-                    s = json.loads(line)
-                except (ValueError, TypeError):
-                    continue
-                s = _normalize_span(s)
-                if s is None or s.get("kind") not in ("generation", "tool"):
-                    continue
-                a = s.get("attributes") if isinstance(s.get("attributes"), dict) else {}
-                node_id = a.get("node_id")
-                if not ((isinstance(node_id, int) and not isinstance(node_id, bool)
-                         and 0 <= node_id <= (1 << 63) - 1)
-                        or (isinstance(node_id, str) and 0 < len(node_id) <= 128)):
-                    node_id = None
-                elif isinstance(node_id, str):
-                    node_id = _cap_str(node_id, 128)
-                it = {"span_id": s.get("span_id"), "kind": s.get("kind"),
-                      "node_id": node_id,
-                      "start": _finite_number(s.get("start"), maximum=1e15),
-                      "duration_s": _finite_number(s.get("duration_s"), nonnegative=True, maximum=1e15),
-                      "status": _cap_str(str(s.get("status") or ""), 32)}
-                if s.get("kind") == "generation":
-                    it["model"] = _cap_str(str(a.get("model") or ""), 160)
-                    txt = a.get("thinking") or a.get("output") or ""
-                    it["text"] = _cap_str(txt, 500) if isinstance(txt, str) else ""
-                else:
-                    it["tool"] = _cap_str(str(a.get("tool") or ""), 128)
-                    inp = a.get("input")
-                    if isinstance(inp, dict):
-                        arg = inp.get("path") or inp.get("pattern") or inp.get("query") \
-                            or inp.get("command") or inp.get("root") or ""
-                        it["arg"] = _cap_str(str(arg), 160)
-                    it["output"] = _cap_str(str(a.get("output") or ""), 200)
-                recent.append(it)
+                    chunk = f.read(step)
+                    if len(chunk) != step:
+                        raise OSError(
+                            f"short read of trace tail: expected {step} bytes, got {len(chunk)}")
+                    right = len(chunk)
+                    while True:
+                        newline = chunk.rfind(b"\n", 0, right)
+                        if newline < 0:
+                            if right:
+                                pending.append(chunk[:right])
+                            break
+                        fragment = chunk[newline + 1:right]
+                        if fragment:
+                            pending.append(fragment)
+                        line = b"".join(reversed(pending)) if pending else b""
+                        pending.clear()
+
+                        # The bytes after the first newline seen from EOF are a torn final row unless
+                        # the snapshot ended in a newline (in that case `line` is simply empty). A span
+                        # is published only by its terminating newline, so never surface that fragment.
+                        eof_fragment = at_eof
+                        at_eof = False
+                        if eof_fragment and line:
+                            source_truncated = True
+                        elif (item := _observation(line)) is not None:
+                            recent.append(item)
+                            if len(recent) >= limit:
+                                # We stopped inside this chunk. Any bytes before the selected row are an
+                                # uninspected source prefix even when the 8 MiB byte ceiling was not hit.
+                                source_truncated = source_truncated or start > 0 or newline > 0
+                                stopped = True
+                        right = newline
+                        if stopped:
+                            break
+
+                # BOF completes the first physical line without a preceding newline. So does an exact
+                # suffix boundary whose immediately preceding byte is a newline: without that one-byte
+                # probe, a complete qualifying row of exactly _MAX_TAIL bytes is silently dropped just
+                # because its first byte happens to equal `lower`.
+                boundary_completes_line = start == 0
+                if not stopped and pending and start == lower and lower > 0:
+                    f.seek(lower - 1)
+                    boundary = f.read(1)
+                    if len(boundary) != 1:
+                        raise OSError("short read while validating trace-tail boundary")
+                    boundary_completes_line = boundary == b"\n"
+
+                # The sole exception is a one-line file with no final newline: that is the same torn
+                # EOF row handled above and remains invisible.
+                if not stopped and pending and boundary_completes_line:
+                    line = b"".join(reversed(pending))
+                    if at_eof:
+                        source_truncated = True
+                    elif (item := _observation(line)) is not None:
+                        recent.append(item)
+
+                # open_private_trace_file rechecks path↔descriptor identity, type and link ownership
+                # when this block exits. A generation check alone cannot see the reset phase where
+                # spans.jsonl was replaced before its first new event.
+        except FileNotFoundError:
+            # Only INITIAL absence reaches this branch. The helper translates disappearance after
+            # lstat/open into ESTALE, so a reset race cannot be laundered into exact-empty evidence.
+            return _generation_bound({
+                "schema": TRACE_PROJECTION_SCHEMA, "tail": [],
+                "projection": {"schema": TRACE_PROJECTION_SCHEMA,
+                               "truncated": False, "source_truncated": False,
+                               "visible_spans": 0, "omitted_spans": 0},
+            })
         except OSError:
             # The source existed at the initial lookup but became unreadable/vanished before or
             # during the snapshot read. Its cardinality is unavailable, not exact zero.
-            return _trace_unavailable(tail=[])
-        shown = recent[-limit:]
-        omitted = max(0, len(recent) - len(shown))
-        return {"schema": TRACE_PROJECTION_SCHEMA, "tail": shown,
-                "projection": {"schema": TRACE_PROJECTION_SCHEMA,
-                               "truncated": source_truncated or omitted > 0,
-                               "source_truncated": source_truncated,
-                               "visible_spans": len(shown), "omitted_spans": omitted}}
+            return _generation_bound(_trace_unavailable(tail=[]))
+        shown = list(reversed(recent))             # append/file order: oldest -> newest
+        omitted = 0                                # older qualifying rows were not inspected/countable
+        return _generation_bound({
+            "schema": TRACE_PROJECTION_SCHEMA, "tail": shown,
+            "projection": {"schema": TRACE_PROJECTION_SCHEMA,
+                           "truncated": source_truncated or omitted > 0,
+                           "source_truncated": source_truncated,
+                           "visible_spans": len(shown), "omitted_spans": omitted},
+        })
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/conversation")
-    def node_conversation(run_id: str, nid: int, limit: int = Query(default=0, ge=0)):
+    def node_conversation(run_id: str, nid: int, limit: int = Query(default=0, ge=0),
+                          attempt: Optional[int] = Query(default=None, ge=0),
+                          expected_generation: Optional[str] = Query(default=None)):
         """The node's trace as a LINEAR, de-duplicated conversation: the system+user request shown
         once per sub-loop, then each generation's delta (reasoning + text + tool calls) interleaved
         with the tool executions — so the agent's activity reads without the recorded tree's per-turn
@@ -2205,8 +2598,44 @@ def build_router(srv) -> APIRouter:
         window; anything above TRACE_NODE_SPAN_CAP_MAX clamps to it (`settle_node_span_cap`), which
         is the same ceiling the span tree pages against. A NEGATIVE limit is refused at the boundary
         (422) rather than silently read as "default": it can only be a client defect, and a paging
-        control that quietly ignores its own argument is how a dead pager looks from the outside."""
+        control that quietly ignores its own argument is how a dead pager looks from the outside.
+
+        ``attempt`` binds this CURRENT-node view to the lifecycle rendered by the Inspector. It is
+        checked before and after the read; old attempts remain available through attempt-history
+        evidence rather than being silently concatenated into the current conversation."""
         rd = _run_dir(run_id)
+        _assert_trace_reset_clear(rd)
+        if (expected_generation is not None
+                and _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
+            raise HTTPException(400, {
+                "code": "invalid_run_generation",
+                "message": "expected_generation must be the exact generation from run state.",
+                "remediation": "Reload the run before reading its node conversation.",
+            })
+        before_generation = srv.commands.run_generation(rd)
+        if expected_generation is not None and before_generation != expected_generation:
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected_generation,
+                "current_generation": before_generation or None,
+                "message": "The run was reset or replaced before its conversation was read.",
+                "remediation": "Reload run state and request the current generation.",
+            })
+        # This is the CURRENT-node Inspector, not an attempt-history endpoint. Resolve an omitted
+        # attempt for transitional/legacy callers, but reject an explicitly stale lifecycle before
+        # reading any potentially large trace window. A node-less legacy trace belongs to attempt 0,
+        # matching the per-node trace/index convention.
+        current_attempt = _cached_node_attempt(rd, nid)
+        current_attempt = current_attempt if current_attempt is not None else 0
+        if attempt is not None and attempt != current_attempt:
+            raise HTTPException(409, {
+                "code": "node_attempt_changed",
+                "node_id": nid,
+                "expected_attempt": attempt,
+                "current_attempt": current_attempt,
+                "message": "The node was reset before its conversation evidence was read.",
+                "remediation": "Reload node state and request the current attempt.",
+            })
         try:
             from looplab.events.traceview import (
                 TRACE_CONVERSATION_SPAN_CAP, build_conversation, load_spans, settle_node_span_cap)
@@ -2215,13 +2644,48 @@ def build_router(srv) -> APIRouter:
             # Read only THIS node's traces' spans (by byte offset via the index), not the whole
             # spans.jsonl — a node's conversation on a 1 GB run no longer scans the entire file.
             idx = get_index(rd / "spans.jsonl")
-            total = idx.node_span_count(nid) if idx is not None else None
-            spans = (idx.full_spans_for_node(nid, span_cap)
-                     if idx is not None else load_spans(rd / "spans.jsonl"))
-            return build_conversation(srv.trace_scalars(rd), spans, nid, total_spans=total,
-                                      span_cap=span_cap)
+            total = (idx.node_span_count(nid, generation=current_attempt)
+                     if idx is not None else None)
+            spans = (idx.full_spans_for_node(
+                nid, span_cap, generation=current_attempt)
+                if idx is not None else load_spans(rd / "spans.jsonl"))
+            conversation = build_conversation(
+                srv.trace_scalars(rd), spans, nid, total_spans=total, span_cap=span_cap,
+                # The index already fenced before its row limit. The fallback receives the whole run,
+                # so it must apply the same trace-root generation fence before its own tail cap.
+                generation=current_attempt if idx is None else None,
+                # Both branches above return normalized projections, never raw durable dictionaries.
+                _normalized=True)
         except Exception:  # noqa: BLE001
-            return _trace_unavailable(run_id=run_id, node_id=str(nid), stages=[])
+            conversation = _trace_unavailable(run_id=run_id, node_id=str(nid), stages=[])
+        # A reset can win while offsets are read / the conversation is assembled. Re-read the folded
+        # lifecycle after the slow work and refuse the whole payload rather than publishing attempt A
+        # with attempt B's sidecar bytes. The UI treats this 409 as a stale observation and reloads.
+        after_attempt = _cached_node_attempt(rd, nid)
+        after_attempt = after_attempt if after_attempt is not None else 0
+        _assert_trace_reset_clear(rd)
+        after_generation = srv.commands.run_generation(rd)
+        if (after_generation != before_generation
+                or (expected_generation is not None
+                    and after_generation != expected_generation)):
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected_generation or before_generation or None,
+                "current_generation": after_generation or None,
+                "message": "The run was reset or replaced while its conversation was being read.",
+                "remediation": "Reload run state and request the current generation.",
+            })
+        if after_attempt != current_attempt:
+            raise HTTPException(409, {
+                "code": "node_attempt_changed",
+                "node_id": nid,
+                "expected_attempt": current_attempt,
+                "current_attempt": after_attempt,
+                "message": "The node was reset while its conversation evidence was being read.",
+                "remediation": "Reload node state and request the current attempt.",
+            })
+        return {**conversation, "node_id": str(nid), "attempt": current_attempt,
+                "run_generation": after_generation or None}
 
     @router.get("/api/runs/{run_id}/log")
     def event_log(run_id: str, since: int = -1):
@@ -2478,26 +2942,32 @@ def build_router(srv) -> APIRouter:
                 "content": body.decode("utf-8", errors="replace"), **response_identity}
 
     @router.get("/api/runs/{run_id}/trace")
-    def trace(run_id: str):
+    def trace(run_id: str,
+              expected_generation: Optional[str] = Query(default=None)):
         rd = _run_dir(run_id)
+        before_generation = _begin_trace_read(rd, expected_generation)
         try:
             # light=True: strip prompt/output text — the run-level timeline needs only structure +
             # timing + token usage; a heavy run's recorded I/O can be ~50 MB and crash the browser. Served
             # via the light span index + a file-identity cache (`srv.trace_view`): reads ~20 MB of
             # structure, not the whole (up to 1 GB) spans.jsonl, so the first click is ~1 s not ~15 s.
-            return srv.trace_view(rd)
+            payload = srv.trace_view(rd)
         except Exception:  # noqa: BLE001 — a malformed/foreign spans.jsonl must degrade, not 500
-            return _trace_unavailable(
+            payload = _trace_unavailable(
                 run_id=run_id, task_id="", nodes={}, rollups={}, unscoped=[], summary={})
+        generation = _finish_trace_read(rd, before_generation, expected_generation)
+        return {**payload, "run_generation": generation or None}
 
     @router.get("/api/runs/{run_id}/trace/by_trace/{trace_id}")
-    def trace_by_trace(run_id: str, trace_id: str):
+    def trace_by_trace(run_id: str, trace_id: str,
+                       expected_generation: Optional[str] = Query(default=None)):
         """Spans of ONE operation's trace (by trace_id) as a tree, WITH capped I/O — powers the
         per-event trace expansion: a strategy_decision / hypothesis_merged event carries its own
         operation's trace_id (the engine wraps each op in a named new_trace span and appends the event
         inside, so eventstore stamps it), and the UI shows only THAT trace here, not the node's whole
         Researcher+Developer trace."""
         rd = _run_dir(run_id)
+        before_generation = _begin_trace_read(rd, expected_generation)
         from looplab.events.traceview import (
             TRACE_DETAIL_SPAN_CAP, _bounded_tail, _cap_span_io, _normalized_id,
             _projection_counter, _response_projection, _tree, hydrate_inputs, load_spans)
@@ -2524,11 +2994,16 @@ def build_router(srv) -> APIRouter:
                 total_spans=total, visible_spans=len(spans),
                 truncated_spans=sum(1 for span in spans
                                     if (span.get("_projection") or {}).get("truncated") is True))
-            return {"schema": TRACE_PROJECTION_SCHEMA, "spans": _tree(spans, _normalized=True),
+            payload = {"schema": TRACE_PROJECTION_SCHEMA,
+                    "spans": _tree(spans, _normalized=True),
                     "count": total, "visible_count": len(spans),
                     "omitted_count": projection["omitted_spans"], "projection": projection}
+        except HTTPException:
+            raise
         except Exception:  # noqa: BLE001 — malformed spans must degrade, not 500
-            return _trace_unavailable(spans=[])
+            payload = _trace_unavailable(spans=[])
+        generation = _finish_trace_read(rd, before_generation, expected_generation)
+        return {**payload, "run_generation": generation or None}
 
     @router.get("/api/runs/{run_id}/prov")
     def prov(run_id: str):

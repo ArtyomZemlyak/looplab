@@ -649,6 +649,19 @@ class RunLifecycleFns:
     run_config_write_lock: Callable
 
 
+@dataclass(frozen=True)
+class TraceRewriteFns:
+    """Injected serving-layer transaction primitives used by irreversible node purge.
+
+    ``tools`` is below ``serve`` in the package graph.  The assistant composition root supplies
+    these callables so the tool can reuse trace-clear's descriptor-first filter and durable publish
+    transaction without reaching upward into a private serving module.
+    """
+    prepare_filtered_snapshot: Callable
+    digest_snapshot: Callable
+    publish_prepared_snapshot: Callable
+
+
 class MachineRunsTools(ForeignRunReader):
     """Read-only view over ALL runs under the run-root (for the assistant).
 
@@ -816,13 +829,30 @@ class MachineRunsTools(ForeignRunReader):
         if rd is None or st is None:
             return f"(no such run: {run_id!r})"
         note = self._runs.source_note(run_id)   # a truncated log must not read as complete
-        from looplab.events.traceview import build_conversation, load_spans
+        from looplab.events.span_index import get_index
+        from looplab.events.traceview import (
+            TRACE_CONVERSATION_SPAN_CAP, build_conversation, load_spans)
         spans_path = rd / "spans.jsonl"
         if not spans_path.exists():
             return (f"(run {run_id} has no spans.jsonl — no agent trace was recorded. This run may "
                     "predate tracing, or ran with tracing off.)")
         try:
-            convo = build_conversation(st, load_spans(spans_path), nid)
+            node = st.nodes.get(nid)
+            attempt = getattr(node, "attempt", 0)
+            attempt = attempt if type(attempt) is int and attempt >= 0 else 0
+            index = get_index(spans_path)
+            if index is not None:
+                total = index.node_span_count(nid, generation=attempt)
+                spans = index.full_spans_for_node(
+                    nid, TRACE_CONVERSATION_SPAN_CAP, generation=attempt)
+                convo = build_conversation(
+                    st, spans, nid, total_spans=total,
+                    span_cap=TRACE_CONVERSATION_SPAN_CAP, _normalized=True)
+            else:
+                # Missing indexes are rare (the source existence was checked above). Preserve the
+                # compatibility path, but apply the same attempt fence before the conversation cap.
+                convo = build_conversation(
+                    st, load_spans(spans_path), nid, generation=attempt, _normalized=True)
         except Exception as e:  # noqa: BLE001 — an unexpected hand-edited/I/O failure must soft-fail
             return f"(could not read trace: {e})"  # and never terminate the agent tool loop
         return ((f"{note}\n" if note else "")
@@ -985,7 +1015,8 @@ class RunControlTools:
                  mode: str = "plan", approver: Optional[Callable] = None, *,
                  command_service=None, command_key_namespace: str = "",
                  mutation_journal_path=None, mutation_recovery: bool = False,
-                 lifecycle: "Optional[RunLifecycleFns]" = None):
+                 lifecycle: "Optional[RunLifecycleFns]" = None,
+                 trace_rewrite: "Optional[TraceRewriteFns]" = None):
         self.run_root = Path(run_root)
         self.alive_fn = alive_fn
         self.mode = mode
@@ -994,9 +1025,11 @@ class RunControlTools:
         # `serve/` in the package map, and `serve/assistant.py` constructs this class — so reaching
         # up into `serve` from here closes a tools<->serve cycle that only function-local imports
         # were keeping open. Passing them in makes the dependency an explicit argument of the one
-        # component that needs it. `None` keeps the historical lazy import, so every existing
-        # caller — and every test constructing this directly — is unchanged.
+        # component that needs it. ``None`` keeps read/lifecycle controls usable for embedders that
+        # construct this provider directly, while irreversible trace purge fails closed until the
+        # host supplies the serving-layer transaction boundary.
         self._lifecycle = lifecycle
+        self._trace_rewrite = trace_rewrite
         self._commands = _RunCommandAdapter(
             command_service, key_namespace=command_key_namespace)
         self._mutation_fence = (_TurnMutationFence(
@@ -1588,15 +1621,21 @@ class RunControlTools:
         import shutil
 
         from looplab.core.atomicio import atomic_write_text
+        from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
         from looplab.events.eventstore import EventStore, _interprocess_lock, iter_event_jsonl
         from looplab.events.replay import fold
+        from looplab.events.span_index import invalidate, span_index_write_guard
 
         evp = rd / "events.jsonl"
+        spans = rd / "spans.jsonl"
         # Lock order matches the engine (singleton first, event append second). If a resume won the
         # liveness-check race, wait for it to release engine.lock and then fail the tail CAS; if purge
-        # wins, no child can enter while the source-of-truth logs are rewritten.
+        # wins, no child can enter while the source-of-truth logs are rewritten. The span-index guard
+        # is the same third lock used by reset/archive: a cold trace read cannot publish offsets for
+        # the pre-purge inode behind this rewrite.
         with (_interprocess_lock(rd / "engine.lock"),
-              _interprocess_lock(Path(str(evp) + ".lock"))):
+              _interprocess_lock(Path(str(evp) + ".lock")),
+              span_index_write_guard(spans, required=True)):
             self._commands._reject_unresolved_reset(rd, "purge nodes")
             source_store = EventStore(evp)
             events = source_store.read_all()
@@ -1644,17 +1683,37 @@ class RunControlTools:
             for position, record in enumerate(kept):
                 record["seq"] = position
 
-            spans = rd / "spans.jsonl"
-            kept_spans = None
-            if spans.exists():
-                def _span_node(line):
-                    try:
-                        return (json.loads(line).get("attributes") or {}).get("node_id")
-                    except (ValueError, TypeError, AttributeError):
-                        return None   # torn or non-object JSON: unknown node, so retain the line
-
-                kept_spans = [line for line in spans.read_text("utf-8").splitlines()
-                              if line.strip() and _span_node(line) not in subtree]
+            # Trace rows can contain credentials, prompts and host paths. Use the same descriptor-
+            # first, root-aware streaming filter as HTTP trace-clear instead of following a link or
+            # materialising a multi-GB sidecar. Besides explicit per-span node ids, this removes
+            # unstamped children from legacy traces whose ROOT belongs to the purged subtree. Invalid
+            # complete rows and a torn EOF remain byte-for-byte, so purge never turns an uncommitted
+            # crash suffix into a committed JSONL record.
+            trace_rewrite = self._trace_rewrite
+            if trace_rewrite is None:
+                return (
+                    f"(run {rid} trace rewrite service is unavailable — refusing irreversible "
+                    "purge; retry through the owner assistant service)"
+                )
+            prepared_trace = None
+            try:
+                prepared_trace = trace_rewrite.prepare_filtered_snapshot(spans, subtree)
+                current_trace = trace_rewrite.digest_snapshot(spans)
+            except Exception as exc:  # noqa: BLE001 - soft-fail this assistant tool before writes
+                if prepared_trace is not None:
+                    prepared_trace.cleanup()
+                detail = getattr(exc, "detail", None)
+                code = detail.get("code") if isinstance(detail, dict) else type(exc).__name__
+                return (
+                    f"(run {rid} trace sidecar is unavailable or unsafe ({code}) — refusing "
+                    "irreversible purge; restore the private run-owned spans.jsonl first)"
+                )
+            if current_trace != prepared_trace.source:
+                prepared_trace.cleanup()
+                return (
+                    f"(run {rid} trace sidecar changed while purge was prepared — refusing "
+                    "irreversible purge; refresh and retry)"
+                )
 
             # APPEND-ONLY backups: the name used to be keyed only by the root node id, so a second
             # purge of the SAME nid — a scope-change retry, or an id reused after a purge on resume —
@@ -1665,12 +1724,29 @@ class RunControlTools:
             while _backup.exists():
                 _backup = rd / f"events.jsonl.bak-del{nid}.{_n}"
                 _n += 1
-            shutil.copy(evp, _backup)
-            atomic_write_text(evp, "".join(json.dumps(record) + "\n" for record in kept))
-            if kept_spans is not None:
-                atomic_write_text(spans, "".join(line + "\n" for line in kept_spans))
-            for deleted_id in subtree:
-                shutil.rmtree(rd / "nodes" / f"node_{deleted_id}", ignore_errors=True)
+
+            # Eviction is harmless if a later source write fails, while doing it first makes a
+            # conflicting directory/unremovable projection fail before the irreversible event-log
+            # rewrite. The guard prevents a reader from rebuilding either projection in this gap.
+            try:
+                invalidate(spans)
+                (rd / "spans.index.jsonl").unlink(missing_ok=True)
+                (rd / SPAN_APPEND_JOURNAL_NAME).unlink(missing_ok=True)
+            except OSError:
+                prepared_trace.cleanup()
+                return (
+                    f"(run {rid} trace projections could not be retired — refusing irreversible "
+                    "purge; repair the run-owned trace sidecars first)"
+                )
+            try:
+                shutil.copy(evp, _backup)
+                atomic_write_text(evp, "".join(json.dumps(record) + "\n" for record in kept))
+                if prepared_trace.temporary is not None:
+                    trace_rewrite.publish_prepared_snapshot(prepared_trace, spans)
+                for deleted_id in subtree:
+                    shutil.rmtree(rd / "nodes" / f"node_{deleted_id}", ignore_errors=True)
+            finally:
+                prepared_trace.cleanup()
 
         remaining = fold(EventStore(evp).read_all())
         broken = sorted({parent for node in remaining.nodes.values() for parent in node.parent_ids

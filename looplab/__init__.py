@@ -273,6 +273,8 @@ _LAYOUT = {
     "tool_loop": "agents",
     "toytask": "adapters",
     "trace_clear": "serve",      # durable write-ahead trace-clear state machine (doc 25 SR-03)
+    "trace_append": "core",      # trusted spans.jsonl append-receipt contract
+    "trace_files": "core",       # private trace-file identity + bounded physical-row boundary
     "traceview": "events",
     "tracing": "core",
     "train_monitor": "engine",   # per-eval observer + diagnostics + separately opt-in early kill

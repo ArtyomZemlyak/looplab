@@ -3,6 +3,7 @@ Mode-gated (deny in plan, inline in auto) + destructive verbs refuse a live engi
 the whole subtree so no parent link is orphaned."""
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from contextlib import contextmanager
@@ -13,7 +14,17 @@ from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.serve.run_commands import run_generation_token
 from looplab.serve.server import make_app
-from looplab.tools.machine_runs_tools import RunControlTools
+from looplab.tools.machine_runs_tools import RunControlTools, TraceRewriteFns
+
+
+def _trace_rewrite_fns() -> TraceRewriteFns:
+    """Assemble the same explicit tools<-serve dependency as the assistant composition root."""
+    from looplab.serve import trace_clear
+    return TraceRewriteFns(
+        prepare_filtered_snapshot=trace_clear._prepare_filtered_trace_snapshot,
+        digest_snapshot=trace_clear._trace_digest_snapshot,
+        publish_prepared_snapshot=trace_clear._strict_replace_prepared_trace,
+    )
 
 
 class _RecordingCommands:
@@ -234,13 +245,145 @@ def test_delete_node_purge_physically_rewrites_and_backs_up(tmp_path):
     _run(rd, nodes=(0, 1, 2)).append("pause", {})
     t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto",
                         approver=lambda _action: "allow_once",
-                        command_service=_RecordingCommands(tmp_path))
+                        command_service=_RecordingCommands(tmp_path),
+                        trace_rewrite=_trace_rewrite_fns())
     out = t.execute("delete_node", {"run_id": "r3p", "node_id": 1, "purge": True})
     assert "deleted node(s) [1, 2]" in out
     st = fold(EventStore(rd / "events.jsonl").read_all())
     assert set(st.nodes) == {0}                                     # only #0 remains
     assert not [p for n in st.nodes.values() for p in n.parent_ids if p not in st.nodes]  # no broken links
     assert (rd / "events.jsonl.bak-del1").exists()                  # recoverable backup
+
+
+def _trace_row(trace_id, span_id, *, parent_id=None, node_id=None):
+    attributes = {} if node_id is None else {"node_id": node_id}
+    return json.dumps({
+        "trace_id": trace_id, "span_id": span_id, "parent_id": parent_id,
+        "name": span_id, "kind": "operation", "start": 1.0,
+        "attributes": attributes,
+    }, separators=(",", ":")).encode("utf-8") + b"\n"
+
+
+def test_delete_node_purge_streams_root_attributed_trace_and_retires_derivatives(
+        tmp_path, monkeypatch):
+    """Physical purge shares trace-clear's attribution and publication boundary.
+
+    Legacy children carry no node_id of their own, malformed complete rows are quarantined, and a
+    torn last row is not a committed JSONL record. The old read_text/splitlines rewrite both missed
+    that legacy child and silently appended a newline to the torn suffix.
+    """
+    from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
+    from looplab.events import span_index
+
+    rd = tmp_path / "trace-purge"
+    _run(rd, nodes=(0, 1)).append("pause", {})
+    spans = rd / "spans.jsonl"
+    deleted_root = _trace_row("deleted-trace", "deleted-root", node_id=1)
+    legacy_child = _trace_row(
+        "deleted-trace", "legacy-child", parent_id="deleted-root")
+    survivor = _trace_row("survivor-trace", "survivor-root", node_id=0)
+    malformed = b"{not-json}\n"
+    torn = b'{"trace_id":"deleted-trace","span_id":"uncommitted","attributes":{"node_id":1}}'
+    spans.write_bytes(deleted_root + legacy_child + survivor + malformed + torn)
+
+    # Populate all three derived states that carry old byte offsets/append transitions.
+    span_index.get_index(spans)
+    persisted = rd / "spans.index.jsonl"
+    journal = rd / SPAN_APPEND_JOURNAL_NAME
+    assert persisted.exists()
+    journal.write_bytes(b"stale append receipt\n")
+
+    from looplab.serve import trace_clear
+
+    real_guard = span_index.span_index_write_guard
+    real_invalidate = span_index.invalidate
+    real_replace = trace_clear._strict_replace_prepared_trace
+    guard_calls = []
+    guard_active = False
+
+    @contextmanager
+    def tracked_guard(path, *, required=False):
+        nonlocal guard_active
+        guard_calls.append((path, required))
+        with real_guard(path, required=required):
+            guard_active = True
+            try:
+                yield
+            finally:
+                guard_active = False
+
+    def tracked_invalidate(path):
+        assert guard_active
+        return real_invalidate(path)
+
+    def tracked_replace(prepared, destination):
+        assert guard_active
+        return real_replace(prepared, destination)
+
+    monkeypatch.setattr(span_index, "span_index_write_guard", tracked_guard)
+    monkeypatch.setattr(span_index, "invalidate", tracked_invalidate)
+    monkeypatch.setattr(trace_clear, "_strict_replace_prepared_trace", tracked_replace)
+
+    original_read_text = type(spans).read_text
+
+    def refuse_whole_trace_read(path, *args, **kwargs):
+        if path == spans:
+            raise AssertionError("purge must not materialize spans.jsonl through Path.read_text")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(spans), "read_text", refuse_whole_trace_read)
+    tool = RunControlTools(
+        tmp_path, alive_fn=lambda _rd: False, mode="auto",
+        approver=lambda _action: "allow_once",
+        command_service=_RecordingCommands(tmp_path),
+        trace_rewrite=_trace_rewrite_fns())
+
+    out = tool.execute(
+        "delete_node", {"run_id": rd.name, "node_id": 1, "purge": True})
+
+    assert "deleted node(s) [1]" in out
+    assert spans.read_bytes() == survivor + malformed + torn
+    assert not spans.read_bytes().endswith(b"\n")
+    assert not persisted.exists()
+    assert not journal.exists()
+    assert guard_calls == [(spans, True)]
+    with span_index._CACHE_LOCK:
+        assert span_index._path_key(spans) not in span_index._CACHE
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "hardlink", "fifo"])
+def test_delete_node_purge_rejects_unsafe_trace_sidecar_without_touching_events(
+        tmp_path, unsafe_kind):
+    rd = tmp_path / f"unsafe-trace-{unsafe_kind}"
+    _run(rd, nodes=(0, 1)).append("pause", {})
+    events = rd / "events.jsonl"
+    before_events = events.read_bytes()
+    spans = rd / "spans.jsonl"
+    outside = tmp_path / f"outside-{unsafe_kind}"
+    outside.write_bytes(_trace_row("outside", "root", node_id=1))
+    try:
+        if unsafe_kind == "symlink":
+            os.symlink(outside, spans)
+        elif unsafe_kind == "hardlink":
+            os.link(outside, spans)
+        else:
+            spans.unlink(missing_ok=True)
+            os.mkfifo(spans)
+    except (AttributeError, NotImplementedError, OSError) as exc:
+        pytest.skip(f"{unsafe_kind} unavailable: {exc}")
+
+    tool = RunControlTools(
+        tmp_path, alive_fn=lambda _rd: False, mode="auto",
+        approver=lambda _action: "allow_once",
+        command_service=_RecordingCommands(tmp_path),
+        trace_rewrite=_trace_rewrite_fns())
+    out = tool.execute(
+        "delete_node", {"run_id": rd.name, "node_id": 1, "purge": True})
+
+    assert "refusing irreversible purge" in out
+    assert events.read_bytes() == before_events
+    assert outside.read_bytes() == _trace_row("outside", "root", node_id=1)
+    assert not (rd / "events.jsonl.bak-del1").exists()
 
 
 def test_a_second_purge_of_the_same_node_id_never_overwrites_the_first_backup(tmp_path):
@@ -251,7 +394,8 @@ def test_a_second_purge_of_the_same_node_id_never_overwrites_the_first_backup(tm
     _run(rd, nodes=(0, 1, 2)).append("pause", {})
     tool = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto",
                            approver=lambda _action: "allow_once",
-                           command_service=_RecordingCommands(tmp_path))
+                           command_service=_RecordingCommands(tmp_path),
+                           trace_rewrite=_trace_rewrite_fns())
     before_first = (rd / "events.jsonl").read_bytes()
     assert "deleted node(s) [2]" in tool.execute(
         "delete_node", {"run_id": "twice", "node_id": 2, "purge": True})
@@ -296,7 +440,8 @@ def test_delete_node_purge_filters_logical_members_inside_atomic_batch(tmp_path)
     assert b"__looplab_event_batch_v1__" in original
     tool = RunControlTools(
         tmp_path, alive_fn=lambda _rd: False, mode="auto",
-        approver=lambda _action: "allow_once", command_service=_RecordingCommands(tmp_path))
+        approver=lambda _action: "allow_once", command_service=_RecordingCommands(tmp_path),
+        trace_rewrite=_trace_rewrite_fns())
 
     out = tool.execute("delete_node", {"run_id": rd.name, "node_id": 1, "purge": True})
 
@@ -316,7 +461,8 @@ def test_delete_node_purge_refuses_to_turn_torn_tail_into_implicit_repair(tmp_pa
     original = path.read_bytes()
     tool = RunControlTools(
         tmp_path, alive_fn=lambda _rd: False, mode="auto",
-        approver=lambda _action: "allow_once", command_service=_RecordingCommands(tmp_path))
+        approver=lambda _action: "allow_once", command_service=_RecordingCommands(tmp_path),
+        trace_rewrite=_trace_rewrite_fns())
 
     out = tool.execute("delete_node", {"run_id": rd.name, "node_id": 1, "purge": True})
 
@@ -1071,7 +1217,8 @@ def test_a_purge_leaves_a_dense_log_that_can_still_be_appended_to(tmp_path):
     _run(rd, nodes=(0, 1, 2)).append("pause", {})
     tool = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto",
                            approver=lambda _action: "allow_once",
-                           command_service=_RecordingCommands(tmp_path))
+                           command_service=_RecordingCommands(tmp_path),
+                           trace_rewrite=_trace_rewrite_fns())
     assert "deleted node(s) [1, 2]" in tool.execute(
         "delete_node", {"run_id": "dense", "node_id": 1, "purge": True})
 

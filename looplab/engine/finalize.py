@@ -49,7 +49,8 @@ from looplab.events.finalize_protocol import (
 from looplab.events.htmlview import render_html
 from looplab.events.readmodel import build_readmodel
 from looplab.events.replay import fold, run_wall_clock_seconds
-from looplab.events.traceview import build_trace_view, hydrate_inputs, load_spans
+from looplab.events.traceview import (
+    TRACE_VIEW_SPAN_CAP, build_trace_view, hydrate_inputs, load_span_tail)
 from looplab.events.types import (
     EV_BUDGET,
     EV_CARD_ENRICHED,
@@ -905,10 +906,18 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
     # same retained diagnostic conversation. `build_trace_view` then redacts/caps that material and marks
     # omissions explicitly: trace.json is a bounded, potentially partial projection, never a raw transcript.
     try:
+        trace_spans, trace_total = load_span_tail(
+            engine.run_dir / "spans.jsonl", TRACE_VIEW_SPAN_CAP)
         trace_view = build_trace_view(
             final,
-            # load_spans already normalized every span — see hydrate_inputs' `_normalized` contract.
-        hydrate_inputs(load_spans(engine.run_dir / "spans.jsonl"), _normalized=True),
+            # load_span_tail already normalized every retained span. Hydrate ONLY that bounded window:
+            # an input_from ancestor outside it is deliberately marked input_partial rather than making
+            # finalization materialize the whole diagnostic log. build_trace_view's normalization pass
+            # remains required because reconstructed input is new material that has not crossed the
+            # projection budget yet (see hydrate_inputs' `_normalized` contract).
+            hydrate_inputs(trace_spans, _normalized=True),
+            total_spans=trace_total,
+            span_cap=TRACE_VIEW_SPAN_CAP,
         )
     except Exception:
         if modern_protocol:

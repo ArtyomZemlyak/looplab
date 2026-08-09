@@ -1597,7 +1597,18 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     """
     from looplab.agents.agent import CompositeTools
     from looplab.tools.reposcout import RepoScoutTools
-    from looplab.tools.machine_runs_tools import MachineRunsTools, RunLauncherTools, RunControlTools
+    from looplab.tools.machine_runs_tools import (
+        MachineRunsTools, RunControlTools, RunLauncherTools, TraceRewriteFns)
+
+    def trace_rewrite_fns() -> TraceRewriteFns:
+        # Composition boundary: the tool package remains below ``serve`` and receives the three
+        # serving-owned trace-clear transaction primitives explicitly instead of importing upward.
+        from looplab.serve import trace_clear
+        return TraceRewriteFns(
+            prepare_filtered_snapshot=trace_clear._prepare_filtered_trace_snapshot,
+            digest_snapshot=trace_clear._trace_digest_snapshot,
+            publish_prepared_snapshot=trace_clear._strict_replace_prepared_trace,
+        )
     mode = normalize_mode(mode)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     providers = [RepoScoutTools(roots), MachineRunsTools(run_root, alive_fn=alive_fn)]
@@ -1622,7 +1633,8 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                 command_service=command_service,
                 command_key_namespace=command_key_namespace,
                 mutation_journal_path=mutation_journal_path,
-                mutation_recovery=True))
+                mutation_recovery=True,
+                trace_rewrite=trace_rewrite_fns()))
         providers.append(TodoTools(on_todos=on_todos))
         return CompositeTools(providers)
 
@@ -1657,7 +1669,8 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                                       command_service=command_service,
                                       command_key_namespace=command_key_namespace,
                                       mutation_journal_path=mutation_journal_path,
-                                      mutation_recovery=mutation_recovery)]
+                                      mutation_recovery=mutation_recovery,
+                                      trace_rewrite=trace_rewrite_fns())]
     providers.append(TodoTools(on_todos=on_todos))
     if subagents and client is not None:
         providers.append(SubagentTools(client, run_root, alive_fn=alive_fn, settings=settings,

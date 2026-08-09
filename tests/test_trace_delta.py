@@ -13,8 +13,10 @@ import pytest
 from looplab.core import tracing
 from looplab.core.tracing import JsonlSpanExporter, Tracer
 from looplab.core.models import RunState
+from looplab.events import traceview
 from looplab.events.eventstore import iter_jsonl
-from looplab.events.traceview import hydrate_inputs, build_conversation, load_spans
+from looplab.events.traceview import (
+    build_conversation, build_trace_view, hydrate_inputs, load_span_tail, load_spans)
 
 SYS = {"role": "system", "content": "You are a developer. " + "ctx " * 200}
 USER = {"role": "user", "content": "Write the solution. " + "spec " * 200}
@@ -49,6 +51,162 @@ def _write_toolloop(rd: Path, n_turns: int = 6):
             history = history + [{"role": "assistant", "content": f"turn {k} plan " + "out " * 50},
                                  {"role": "user", "content": "file body " + "line " * 50}]
     return sent
+
+
+def _span_row(sid: str, *, trace_id: str = "tail-trace", kind: str = "operation",
+              start: float = 0.0, attributes: dict | None = None) -> dict:
+    return {
+        "name": "generation" if kind == "generation" else sid,
+        "kind": kind,
+        "trace_id": trace_id,
+        "span_id": sid,
+        "parent_id": None,
+        "run_id": "demo",
+        "attributes": {"node_id": 0, **(attributes or {})},
+        "events": [],
+        "status": "OK",
+        "start": start,
+        "duration_s": 0.1,
+    }
+
+
+def test_load_span_tail_bounds_materialization_and_counts_admitted_rows(tmp_path):
+    """The static reader counts the accepted prefix exactly but retains only its requested tail."""
+    path = tmp_path / "spans.jsonl"
+    rows = [
+        _span_row("s0", start=0),
+        {},  # complete JSON object, but not a span: quarantine this row and keep reading
+        _span_row("s1", start=1),
+        _span_row("s2", start=2),
+        _span_row("s3", start=3),
+        _span_row("s4", start=4),
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    tail, total = load_span_tail(path, 2)
+    empty_tail, repeated_total = load_span_tail(path, 0)
+
+    assert total == repeated_total == 5
+    assert [span["span_id"] for span in tail] == ["s3", "s4"]
+    assert empty_tail == []
+
+
+def test_load_span_tail_uses_the_append_log_prefix_and_io_contract(tmp_path):
+    """Complete corruption ends the prefix; absence is empty and non-absence I/O errors propagate."""
+    path = tmp_path / "spans.jsonl"
+    first = json.dumps(_span_row("before")).encode("utf-8") + b"\n"
+    later = json.dumps(_span_row("hidden")).encode("utf-8") + b"\n"
+    path.write_bytes(first + b"{not-json}\n" + later)
+
+    tail, total = load_span_tail(path, 8)
+
+    assert total == 1 and [span["span_id"] for span in tail] == ["before"]
+    assert load_span_tail(tmp_path / "missing.jsonl", 8) == ([], 0)
+    with pytest.raises(IsADirectoryError):
+        load_span_tail(tmp_path, 8)
+
+
+def test_oversized_physical_trace_row_ends_prefix_with_bounded_reads(tmp_path, monkeypatch):
+    """One newline-free legacy/corrupt row cannot become an arbitrarily large ``bytes`` object.
+
+    The synthetic reader is an RSS-independent proof: it can represent a 1 GB row without storing
+    one, and the scanner must stop after only ceiling+one-chunk bytes. The file assertion pins the
+    append-log consequence too — a complete valid span behind that oversized envelope stays hidden.
+    """
+    ceiling, chunk = 257, 31
+
+    class GeneratedOversizedRow:
+        def __init__(self, size):
+            self.remaining = size
+            self.returned = 0
+            self.requests = []
+
+        def read(self, size=-1):
+            self.requests.append(size)
+            take = min(max(0, size), self.remaining)
+            self.remaining -= take
+            self.returned += take
+            return b"x" * take
+
+    synthetic_size = 1024 * 1024 * 1024
+    reader = GeneratedOversizedRow(synthetic_size)
+    assert list(traceview._iter_bounded_trace_jsonl_lines(
+        reader, size=synthetic_size, max_line_bytes=ceiling,
+        read_chunk_bytes=chunk)) == []
+    assert reader.returned < ceiling + chunk
+    assert max(reader.requests) == chunk
+
+    import io
+    exact = b"x" * (ceiling - 1) + b"\n"
+    over = b"x" * ceiling + b"\n"
+    assert list(traceview._iter_bounded_trace_jsonl_lines(
+        io.BytesIO(exact), max_line_bytes=ceiling,
+        read_chunk_bytes=chunk)) == [exact]
+    assert list(traceview._iter_bounded_trace_jsonl_lines(
+        io.BytesIO(over), max_line_bytes=ceiling,
+        read_chunk_bytes=chunk)) == []
+
+    before = json.dumps(_span_row("before")).encode("utf-8") + b"\n"
+    after = json.dumps(_span_row("hidden")).encode("utf-8") + b"\n"
+    file_ceiling = max(len(before), len(after)) + 16
+    oversized = json.dumps(_span_row(
+        "oversized", attributes={"output": "x" * (file_ceiling * 4)},
+    )).encode("utf-8") + b"\n"
+    assert len(oversized) > file_ceiling
+    path = tmp_path / "spans.jsonl"
+    path.write_bytes(before + oversized + after)
+    monkeypatch.setattr(traceview, "TRACE_JSONL_ROW_MAX_BYTES", file_ceiling)
+    assert [span["span_id"] for span in load_spans(path)] == ["before"]
+    tail, total = load_span_tail(path, 8)
+    assert total == 1 and [span["span_id"] for span in tail] == ["before"]
+
+
+def test_bounded_static_tail_marks_an_out_of_window_input_ancestor_partial(tmp_path):
+    """A tail can omit a delta ancestor, but hydration must say so and totals must remain exact."""
+    path = tmp_path / "spans.jsonl"
+    rows = [
+        _span_row(
+            "base", kind="generation", start=0,
+            attributes={
+                "input": [{"role": "system", "content": "retained system"}],
+                "input_carry": 0,
+                "input_from": None,
+            }),
+        _span_row("middle", trace_id="other", start=1),
+        _span_row(
+            "leaf", kind="generation", start=2,
+            attributes={
+                "input": [{"role": "user", "content": "new delta"}],
+                "input_carry": 1,
+                "input_from": "base",
+            }),
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    tail, total = load_span_tail(path, 2)
+    hydrated = hydrate_inputs(tail, _normalized=True)
+    leaf = next(span for span in hydrated if span["span_id"] == "leaf")
+    view = build_trace_view(
+        RunState(run_id="demo", task_id="t", goal="g", direction="min"),
+        hydrated,
+        total_spans=total,
+        span_cap=2,
+    )
+
+    assert leaf["attributes"]["input_partial"] is True
+    assert leaf["attributes"]["input"] == [{"role": "user", "content": "new delta"}]
+    assert view["projection"] == {
+        "schema": 2,
+        "light": False,
+        "truncated": True,
+        "total_spans": 3,
+        "visible_spans": 2,
+        "omitted_spans": 1,
+        "truncated_spans": 0,
+    }
+    projected_leaf = next(
+        span for span in view["nodes"]["0"] if span["span_id"] == "leaf")
+    assert projected_leaf["attributes"]["input_partial"] is True
 
 
 def test_generation_input_is_delta_encoded_on_disk(tmp_path):
@@ -509,3 +667,31 @@ def test_already_normalized_spans_are_not_re_redacted_by_hydrate_inputs(monkeypa
     calls.clear()
     tv.hydrate_inputs([dict(r) for r in rows])
     assert len(calls) == len(rows)
+
+
+def test_already_normalized_spans_are_not_re_redacted_by_conversation(monkeypatch):
+    """The live conversation's indexed/full readers normalize once, before the expensive projector."""
+    import looplab.events.traceview as tv
+
+    spans = [
+        {"span_id": "root", "trace_id": "trace", "parent_id": None,
+         "kind": "operation", "name": "create_node", "start": 0.0,
+         "attributes": {"node_id": 0}, "events": [], "status": "OK"},
+        {"span_id": "gen", "trace_id": "trace", "parent_id": "root",
+         "kind": "generation", "name": "generation", "start": 1.0,
+         "attributes": {"node_id": 0, "phase": "implement", "phase_span": "root",
+                        "output": "done"}, "events": [], "status": "OK"},
+    ]
+    calls = []
+    real = tv._normalize_span
+    monkeypatch.setattr(tv, "_normalize_span", lambda value: (calls.append(1), real(value))[1])
+    state = RunState(run_id="demo", task_id="t", goal="g", direction="min")
+
+    conversation = tv.build_conversation(state, spans, 0, _normalized=True)
+
+    assert calls == []
+    assert conversation["node_id"] == "0"
+    assert conversation["stages"]
+
+    tv.build_conversation(state, spans, 0)
+    assert len(calls) >= len(spans)

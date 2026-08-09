@@ -908,9 +908,9 @@ Every step emits a trace **span** to `spans.jsonl` (files-as-truth, zero-dep). W
 on (default), each LLM call records a bounded, canonicalized, heuristically redacted diagnostic
 representation of its input/output. The provider still receives the original input; trace capture is not
 byte-exact, short unlabeled secrets can evade heuristics, and existing JSONL is not retroactively rewritten.
-Installing the `[otel]` extra and setting `OTEL_*` sends the same
-spans to any OTLP collector (Jaeger / Tempo / Honeycomb) with no code change. Spans are diagnostics
-only — `replay` never reads them.
+Installing the `[otel]` extra and explicitly selecting OTLP (`OTEL_TRACES_EXPORTER=otlp` or an
+`OTEL_EXPORTER_OTLP(_TRACES)_ENDPOINT`) sends the same spans to any OTLP collector (Jaeger / Tempo /
+Honeycomb) with no code change. Spans are diagnostics only — `replay` never reads them.
 
 **Per-operation traces.** A node's own work (propose → implement → repair, then evaluate/training)
 is one trace, shown under the node. But every OTHER LLM sub-operation runs in its **own** named trace

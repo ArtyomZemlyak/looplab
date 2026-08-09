@@ -219,8 +219,11 @@ an OTLP collector (Jaeger / Tempo / Honeycomb), install the extra and set the st
 
 ```bash
 pip install -e ".[otel]"
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4317
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://collector:4318/v1/traces
 ```
 
-No code change is needed — the exporter bridges automatically when the packages and `OTEL_*` env are
-present.
+The generic `OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` is supported too. No code change is
+needed: LoopLab auto-wires its HTTP OTLP exporter only when OTLP (or an OTLP endpoint) is explicitly
+selected. Other exporter selections such as `console`, `zipkin`, or `none` are left to the deployment's
+OpenTelemetry configuration, and `OTEL_SDK_DISABLED=true` keeps the optional bridge off.

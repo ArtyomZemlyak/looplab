@@ -83,17 +83,21 @@ test('Dock uses around paging, local-only drag preview, native event controls, a
 })
 
 test('expanded node trace polls only its exact live lifecycle and refreshes once after settle', async () => {
-  const dock = await source('Dock.jsx')
-  assert.match(dock, /`\/trace\?attempt=\$\{traceGeneration\}&limit=\$\{nodeTraceLimit\}`/)
-  assert.match(dock, /d\?\.node_id !== traceNid \|\| d\?\.attempt !== traceGeneration/)
+  const [dock, api] = await Promise.all([source('Dock.jsx'), source('api.js')])
+  assert.match(dock,
+    /traceDeadlineGet\(runNodeApiPath\(runId, traceNid, '\/trace'\),[\s\S]*?expectedTraceGeneration, traceGeneration, nodeTraceLimit\)/)
+  assert.match(api,
+    /export const traceReadQuery = \(expectedGeneration, attempt, limit\) => \{[\s\S]*?query\.set\('attempt', attempt\)[\s\S]*?query\.set\('limit', limit\)[\s\S]*?query\.set\('expected_generation', expectedGeneration\)/)
+  assert.match(dock,
+    /d\?\.node_id !== traceNid \|\| d\?\.attempt !== traceGeneration[\s\S]*?!traceGenerationMatches\(d, expectedTraceGeneration\)/)
   // liveBuilding maps nodeId to generation for EVERY concurrent build (parallel_build>1), so each
   // in-flight build's row polls its own exact lifecycle — not just the singular last-appended one.
   assert.match(dock, /timeline\.generation !== expectedGeneration[\s\S]*?buildingGenerations\(live\)/)
   assert.match(dock, /const exactBuilding =[\s\S]*?liveBuilding\[traceNid\] === traceGeneration/)
-  assert.match(dock, /usePoll\([\s\S]*?4000,[\s\S]*?enabled: open && !readOnly && traceNid != null[\s\S]*?traceGeneration != null && exactBuilding/)
-  assert.match(dock, /if \(!open \|\| readOnly \|\| traceNid == null \|\| traceGeneration == null \|\| exactBuilding\)[\s\S]*?\[open, readOnly, runId, traceNid, traceGeneration, exactBuilding,[\s\S]*?nodeTraceNonce, nodeTraceLimit\]/)
+  assert.match(dock, /usePoll\(\(alive\) => \{[\s\S]*?\}, exactBuilding \? 4000 : null,[\s\S]*?enabled: open && !readOnly && traceNid != null && traceGeneration != null/)
+  assert.match(dock, /\[open, readOnly, runId, expectedTraceGeneration, traceNid, traceGeneration, exactBuilding,[\s\S]*?nodeTraceNonce, nodeTraceLimit\]/)
   assert.doesNotMatch(dock, /get\(`\/api\/runs\/\$\{runId\}\/trace`\)/)
-  assert.match(dock, /const scope = `\$\{runId\}:\$\{generation \|\| 'pending'\}`[\s\S]*?tailState\.scope === scope/,
+  assert.match(dock, /const expectedGeneration = normalizeRunGeneration\(generation\)[\s\S]*?const scope = expectedGeneration \|\| runId[\s\S]*?tailState\.scope === scope/,
     'live trace rows must disappear immediately when the run generation changes')
 })
 

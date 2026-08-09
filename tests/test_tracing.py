@@ -2,7 +2,10 @@
 to OpenTelemetry when present, joined to events for the UI. fold never reads spans."""
 from __future__ import annotations
 
+import os
 import sys
+import threading
+import time
 
 import anyio
 import orjson
@@ -62,6 +65,73 @@ def test_generation_and_tool_are_first_class_observations(tmp_path):
     assert ga["input"][0]["content"] == "hi" and ga["output"] == "hey" and ga["usage"]["total"] == 7
     ta = by["tool"]["attributes"]
     assert ta["tool"] == "kb_search" and ta["input"] == {"q": "x"} and ta["output"] == "(3 hits)"
+
+
+def test_live_children_inherit_trace_generation_before_the_root_closes(tmp_path):
+    """The attempt fence must see current children while their root is still only in memory."""
+    from types import SimpleNamespace
+    from looplab.core import tracing
+    from looplab.events.span_index import get_index
+    from looplab.events.traceview import build_conversation
+
+    path = tmp_path / "spans.jsonl"
+    tracer = Tracer(JsonlSpanExporter(path), run_id="r", capture_llm_io=True)
+    state = SimpleNamespace(run_id="r", task_id="t")
+    with tracer.span("create_node", new_trace=True, node_id=7, generation=1):
+        with tracing.generation(
+                op="chat", model="m", messages=[{"role": "user", "content": "go"}]) as obs:
+            obs.output("done")
+
+        # create_node has not closed/exported.  The generation is the only durable row, so it is
+        # temporarily the structural root seen by the index.  Its inherited stamp must fence it to 1.
+        idx = get_index(path)
+        visible = idx.full_spans_for_node(7, generation=1)
+        assert len(visible) == 1
+        assert visible[0]["kind"] == "generation"
+        assert visible[0]["attributes"]["generation"] == 1
+        assert idx.full_spans_for_node(7, generation=0) == []
+        conversation = build_conversation(
+            state, visible, 7, generation=1, _normalized=True)
+        assert conversation["stages"] and conversation["stages"][0]["turns"]
+
+        # A conflicting descendant label cannot change a same-trace lifecycle.  A nested trace may
+        # explicitly establish generation 2, and closing it must restore generation 1 outside.
+        with tracer.span("same-trace-conflict", generation=99):
+            pass
+        with tracer.span("nested-root", new_trace=True, generation=2):
+            with tracer.span("nested-child"):
+                pass
+        with tracer.span("after-nested"):
+            pass
+
+        live = get_index(path)
+        generation_one = live.light_spans_for_node(7, generation=1)
+        generation_two = live.light_spans_for_node(7, generation=2)
+        assert {row["name"] for row in generation_one} == {
+            "generation", "same-trace-conflict", "after-nested"}
+        assert {row["name"] for row in generation_two} == {"nested-root", "nested-child"}
+        assert all(row["attributes"]["generation"] == 1 for row in generation_one)
+        assert all(row["attributes"]["generation"] == 2 for row in generation_two)
+
+
+def test_live_children_inherit_generation_set_after_root_preflight(tmp_path):
+    """Match evaluate's production shape: root opens first, then learns/stamps its attempt."""
+    from looplab.core import tracing
+    from looplab.events.span_index import get_index
+
+    path = tmp_path / "spans.jsonl"
+    tracer = Tracer(JsonlSpanExporter(path), run_id="r", capture_llm_io=True)
+    with tracer.span("evaluate", new_trace=True, node_id=7) as root:
+        root.set("generation", 1)
+        with tracing.generation(
+                op="chat", model="m", messages=[{"role": "user", "content": "score"}]) as obs:
+            obs.output("done")
+
+        index = get_index(path)
+        current = index.full_spans_for_node(7, generation=1)
+        assert len(current) == 1 and current[0]["kind"] == "generation"
+        assert current[0]["attributes"]["generation"] == 1
+        assert index.full_spans_for_node(7, generation=0) == []
 
 
 def test_generation_noop_without_active_tracer():
@@ -568,6 +638,483 @@ def test_generic_span_attributes_are_redacted_at_the_durable_boundary(tmp_path):
     assert "SUPERSECRET" not in str(rec["attributes"]["authorization"])
     assert rec["attributes"]["node_id"] == 3               # benign values pass through
     assert rec["events"][0]["password"] == "***" and rec["events"][0]["tool"] == "grep"
+
+
+def test_oversized_built_in_span_falls_back_and_does_not_hide_later_spans(tmp_path):
+    """Repeated instrumentation cannot make our writer emit one reader-rejected poison row."""
+    from looplab.core.trace_files import TRACE_JSONL_ROW_MAX_BYTES
+    from looplab.events.span_index import get_index
+
+    path = tmp_path / "spans.jsonl"
+    tracer = Tracer(JsonlSpanExporter(path), run_id="r")
+    payload = "x" * 64_000
+    with tracer.span(
+            "oversized", new_trace=True, node_id=7, generation=3) as span:
+        oversized_ids = current_ids()
+        for index in range(70):
+            span.set(f"diagnostic_{index}", payload)
+            span.event("diagnostic", n=index, detail=payload)
+    with tracer.span("after", new_trace=True, node_id=8):
+        pass
+
+    raw_lines = path.read_bytes().splitlines(keepends=True)
+    assert len(raw_lines) == 2
+    assert all(len(line) <= TRACE_JSONL_ROW_MAX_BYTES for line in raw_lines)
+    fallback, after = (orjson.loads(line) for line in raw_lines)
+    assert fallback["name"] == "oversized"
+    assert (fallback["trace_id"], fallback["span_id"]) == oversized_ids
+    assert fallback["attributes"]["node_id"] == 7
+    assert fallback["attributes"]["generation"] == 3
+    assert fallback["attributes"]["looplab.trace_payload_truncated"] is True
+    assert fallback["events"] == [{
+        "name": "looplab.span_payload_truncated",
+        "reason": "physical_row_limit",
+        "limit_bytes": TRACE_JSONL_ROW_MAX_BYTES,
+        "omitted_attributes": 70,
+        "omitted_events": 70,
+    }]
+    assert fallback["status"] == "OK"
+    assert isinstance(fallback["start"], float)
+    assert isinstance(fallback["duration_s"], float)
+    assert after["name"] == "after" and after["events"] == []
+
+    projected = load_spans(path)
+    assert [row["name"] for row in projected] == ["oversized", "after"]
+    assert projected[0]["events"][0] == {
+        "name": "looplab.span_payload_truncated", "reason": "physical_row_limit"}
+    indexed = get_index(path)
+    assert [row["name"] for row in indexed.light_spans()] == ["oversized", "after"]
+
+
+def test_oversized_generation_marks_every_later_delta_input_partial(tmp_path, monkeypatch):
+    """A retained back-reference cannot make an omitted over-limit prompt look complete later."""
+    from looplab.core import tracing
+    from looplab.events.traceview import hydrate_inputs
+
+    path = tmp_path / "spans.jsonl"
+    monkeypatch.setattr(tracing, "TRACE_JSONL_ROW_MAX_BYTES", 128 * 1024)
+    tracer = Tracer(JsonlSpanExporter(path), run_id="r", capture_llm_io=True)
+    base = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "request"},
+    ]
+    extended = base + [
+        {"role": "assistant", "content": "answer"},
+        {"role": "user", "content": "follow-up"},
+    ]
+    payload = "x" * 64_000
+    with tracer.span("root", new_trace=True, node_id=4):
+        with tracing.generation(op="chat", model="m", messages=base) as first:
+            first_sid = first._h._rec["span_id"]
+            for index in range(3):
+                first._h.event("diagnostic", n=index, detail=payload)
+        with tracing.generation(op="chat", model="m", messages=extended) as second:
+            second_sid = second._h._rec["span_id"]
+
+    loaded = load_spans(path)
+    by_id = {row["span_id"]: row for row in loaded}
+    assert second_sid in by_id                    # the valid row after the fallback remains readable
+    assert by_id[first_sid]["attributes"]["input_partial"] is True
+    assert by_id[second_sid]["attributes"]["input_from"] == first_sid
+    hydrated = {row["span_id"]: row for row in hydrate_inputs(loaded, _normalized=True)}
+    assert hydrated[first_sid]["attributes"]["input_partial"] is True
+    assert hydrated[second_sid]["attributes"]["input_partial"] is True
+    assert hydrated[second_sid]["attributes"]["input"] == extended[2:]
+
+
+def test_direct_exporter_fallback_never_sanitizes_huge_identity_or_structure(
+        tmp_path, monkeypatch):
+    """Cheap length gates run before redactors that could scan/copy hostile direct-export strings."""
+    from looplab.core import tracing
+
+    monkeypatch.setattr(tracing, "TRACE_JSONL_ROW_MAX_BYTES", 4096)
+    huge = "x" * 5000
+    real_label = tracing._trace_label
+    real_identity = tracing.redact_persisted_identity
+    real_attributes = tracing._sanitize_initial_attributes
+
+    def guarded_label(value, **kwargs):
+        assert value is not huge
+        return real_label(value, **kwargs)
+
+    def guarded_identity(value, **kwargs):
+        assert value is not huge
+        return real_identity(value, **kwargs)
+
+    def guarded_attributes(values):
+        assert huge not in values.values()
+        return real_attributes(values)
+
+    monkeypatch.setattr(tracing, "_trace_label", guarded_label)
+    monkeypatch.setattr(tracing, "redact_persisted_identity", guarded_identity)
+    monkeypatch.setattr(tracing, "_sanitize_initial_attributes", guarded_attributes)
+    path = tmp_path / "spans.jsonl"
+
+    JsonlSpanExporter(path).export({
+        "name": huge, "kind": "operation", "trace_id": huge, "span_id": huge,
+        "parent_id": huge, "run_id": huge, "status": "OK", "start": 1.0,
+        "duration_s": 0.1,
+        "attributes": {"node_id": huge, "generation": huge}, "events": [],
+    })
+
+    fallback = orjson.loads(path.read_bytes())
+    assert fallback["name"] == "span"
+    assert fallback["trace_id"] is fallback["span_id"] is fallback["parent_id"] is None
+    assert fallback["run_id"] is None
+    assert "node_id" not in fallback["attributes"]
+    assert "generation" not in fallback["attributes"]
+    assert fallback["attributes"]["looplab.trace_payload_truncated"] is True
+
+
+def test_initial_span_and_llm_event_metadata_share_the_durable_boundary(tmp_path):
+    """Constructor metadata is no less durable than values attached through ``SpanHandle.set``.
+
+    Initial attributes plus record_llm_call's labels are mirrored to OTLP as well as JSONL, so they
+    must be redacted, control-safe and bounded before either exporter sees them.  Ordinary topology and
+    numeric metadata must remain unchanged.
+    """
+    from looplab.core import tracing
+
+    secret = "abcdef0123456789ABCDEF"
+    path = tmp_path / "s.jsonl"
+    tracer = Tracer(JsonlSpanExporter(path), run_id="r1", capture_llm_io=True)
+    with tracer.span(
+            "install\npassword=hunter2secret " + "n" * 500,
+            new_trace=True,
+            kind="operation\x1b[2J" + "k" * 100,
+            node_id=3,
+            attempt=2,
+            api_key="sk-live-SUPERSECRET0123456789",
+            details={"authorization": f"Bearer {secret}", "safe": "kept"},
+            oversized="x" * 80_000):
+        tracing.record_llm_call(
+            op="chat\npassword=hunter2secret " + "o" * 500,
+            model=f"model\x1b[2J Authorization: Bearer {secret} " + "m" * 500,
+            messages=[], completion="")
+
+    raw = path.read_text(encoding="utf-8")
+    assert "hunter2secret" not in raw and secret not in raw and "SUPERSECRET" not in raw
+    assert "\x1b" not in raw
+    rec = orjson.loads(raw)
+    assert len(rec["name"]) <= 160 and "\n" not in rec["name"]
+    assert len(rec["kind"]) <= 32 and "\n" not in rec["kind"]
+    assert rec["attributes"]["node_id"] == 3 and rec["attributes"]["attempt"] == 2
+    assert rec["attributes"]["api_key"] == "***"
+    assert "***" in rec["attributes"]["details"]["authorization"]
+    assert rec["attributes"]["details"]["safe"] == "kept"
+    assert len(rec["attributes"]["oversized"]) <= 64_000
+    event = next(e for e in rec["events"] if e["name"] == "llm_call")
+    assert len(event["op"]) <= 160 and "\n" not in event["op"]
+    assert len(event["model"]) <= 160 and "\n" not in event["model"]
+
+
+def test_structural_attributes_survive_an_earlier_oversized_diagnostic(tmp_path):
+    """Identity/lifecycle keys cannot be starved by kwargs insertion order.
+
+    These attributes drive node attribution and attempt fencing.  The generic sanitizer used one
+    shared first-to-last text budget, so an unrelated large field placed first erased all of them.
+    """
+    path = tmp_path / "s.jsonl"
+    tracer = Tracer(JsonlSpanExporter(path), run_id="r")
+    structural = {
+        "node_id": 7, "generation": 3, "attempt": 2,
+        "phase": "implement", "phase_span": "phase-1",
+        "input_from": "gen-0", "input_carry": 4, "input_partial": True,
+    }
+    with tracer.span("payload-first", new_trace=True,
+                     **{"oversized": "x" * 80_000, **structural}):
+        pass
+    with tracer.span("structure-first", new_trace=True,
+                     **{**structural, "oversized": "x" * 80_000}):
+        pass
+
+    records = [orjson.loads(line) for line in path.read_bytes().splitlines()]
+    for record in records:
+        attrs = record["attributes"]
+        assert {key: attrs.get(key) for key in structural} == structural
+        assert "oversized" in attrs and len(attrs["oversized"]) < 64_000
+        assert len(orjson.dumps(attrs)) < 65_000
+
+
+def test_event_name_and_run_identity_are_sanitized_before_durable_egress(tmp_path):
+    """Event labels and Tracer.run_id reach JSONL/OTLP and must not bypass the boundary."""
+    secret = "abcdef0123456789ABCDEF"
+    path = tmp_path / "s.jsonl"
+    benign_identity = "run-Ａ-42"       # NFKC would change this opaque join key to run-A-42
+    with Tracer(JsonlSpanExporter(path), run_id=benign_identity).span(
+            "benign", new_trace=True) as span:
+        span.event(f"provider\x1b[2J Authorization: Bearer {secret}" + "n" * 500)
+    unsafe_identity = f"job Authorization: Bearer {secret}\x00"
+    with Tracer(JsonlSpanExporter(path), run_id=unsafe_identity).span("unsafe", new_trace=True):
+        pass
+
+    raw = path.read_text(encoding="utf-8")
+    assert secret not in raw and "\x1b" not in raw and "\x00" not in raw
+    records = {record["name"]: record
+               for record in (orjson.loads(line) for line in raw.splitlines())}
+    assert records["benign"]["run_id"] == benign_identity
+    event_name = records["benign"]["events"][0]["name"]
+    assert len(event_name) <= 160 and "\n" not in event_name and "***" in event_name
+    assert records["unsafe"]["run_id"] != unsafe_identity
+
+
+def test_dynamic_attribute_and_event_field_keys_are_sanitized_before_egress(tmp_path):
+    """A credential embedded in a dynamic key leaks even when its value is perfectly harmless."""
+    secret = "abcdef0123456789ABCDEF"
+    path = tmp_path / "s.jsonl"
+    tracer = Tracer(JsonlSpanExporter(path), run_id="r")
+    with tracer.span("keys", new_trace=True) as span:
+        span.set(f"note Authorization: Bearer {secret}\x1b[2J", "visible")
+        span.event("dynamic", **{
+            f"field Authorization: Bearer {secret}\x00": "visible",
+            "api_key": "value-must-be-masked",
+        })
+
+    raw = path.read_text(encoding="utf-8")
+    assert secret not in raw and "\x1b" not in raw and "\x00" not in raw
+    record = orjson.loads(raw)
+    dynamic_attribute = next(key for key in record["attributes"] if key.startswith("note "))
+    dynamic_field = next(key for key in record["events"][0] if key.startswith("field "))
+    assert "***" in dynamic_attribute and len(dynamic_attribute) <= 160
+    assert "***" in dynamic_field and len(dynamic_field) <= 160
+    assert record["events"][0]["api_key"] == "***"
+
+
+def test_sanitized_dynamic_keys_cannot_overwrite_lifecycle_topology(tmp_path):
+    path = tmp_path / "s.jsonl"
+    tracer = Tracer(JsonlSpanExporter(path), run_id="r")
+    with tracer.span("root", new_trace=True, node_id=7, generation=1) as root:
+        root.set("generation\n", 999)
+        root.set("node_id\n", 666)
+        root.set("generation", "invalid-provider-label")
+        root.set("node_id", {"invalid": True})
+        root.set("looplab.run_id", "forged")
+        with tracer.span("child"):
+            pass
+
+    records = {row["name"]: row for row in (
+        orjson.loads(line) for line in path.read_bytes().splitlines())}
+    root_attrs = records["root"]["attributes"]
+    assert root_attrs["generation"] == 1 and root_attrs["node_id"] == 7
+    assert root_attrs["field.generation"] == "invalid-provider-label"
+    assert root_attrs["field.node_id"] == {"invalid": True}
+    assert root_attrs["field.looplab.run_id"] == "forged"
+    assert records["child"]["attributes"]["generation"] == 1
+    assert records["child"]["attributes"]["node_id"] == 7
+
+
+def test_dynamic_exception_type_is_sanitized_before_egress(tmp_path):
+    """Provider-defined exception class names are untrusted metadata too."""
+    secret = "abcdef0123456789ABCDEF"
+    unsafe_error = type(f"Provider Authorization: Bearer {secret}", (RuntimeError,), {})
+    path = tmp_path / "s.jsonl"
+    with pytest.raises(unsafe_error):
+        with Tracer(JsonlSpanExporter(path), run_id="r").span("provider", new_trace=True):
+            raise unsafe_error("benign message")
+
+    raw = path.read_text(encoding="utf-8")
+    assert secret not in raw
+    event = orjson.loads(raw)["events"][0]
+    assert event["name"] == "exception" and "***" in event["type"]
+    assert len(event["type"]) <= 160
+
+
+@pytest.mark.parametrize("prefix", [b'{"committed":true}\n', b""])
+def test_exporter_heals_a_torn_final_record_before_resuming(tmp_path, prefix):
+    """A resumed append must not glue a new span onto a crash-torn, non-newline suffix."""
+    path = tmp_path / "s.jsonl"
+    torn = b'{"name":"crash-torn","attributes":'
+    path.write_bytes(prefix + torn)
+
+    with Tracer(JsonlSpanExporter(path), run_id="r1").span("resumed", new_trace=True):
+        pass
+
+    raw = path.read_bytes()
+    assert raw.startswith(prefix)
+    assert torn not in raw
+    rows = [orjson.loads(line) for line in raw.splitlines()]
+    assert rows[-1]["name"] == "resumed"
+    assert len(rows) == (2 if prefix else 1)
+
+
+@pytest.mark.parametrize("alias_kind", ["symlink", "hardlink"])
+def test_exporter_rejects_link_alias_without_mutating_private_victim(tmp_path, alias_kind):
+    victim = tmp_path / "private.jsonl"
+    original = b'{"private":"DO NOT TOUCH"}\n'
+    victim.write_bytes(original)
+    target = tmp_path / "spans.jsonl"
+    try:
+        if alias_kind == "symlink":
+            target.symlink_to(victim)
+        else:
+            os.link(victim, target)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"{alias_kind} unavailable: {exc}")
+
+    with pytest.raises(OSError):
+        JsonlSpanExporter(target).export({"name": "must-not-escape"})
+
+    assert victim.read_bytes() == original
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO requires POSIX")
+def test_exporter_rejects_fifo_without_waiting_for_a_peer(tmp_path):
+    target = tmp_path / "spans.jsonl"
+    os.mkfifo(target)
+
+    started = time.monotonic()
+    with pytest.raises(OSError):
+        JsonlSpanExporter(target).export({"name": "must-not-block"})
+    assert time.monotonic() - started < 2.0
+
+
+def test_exporter_revalidates_the_destination_after_its_append(tmp_path, monkeypatch):
+    """A run-root replacement during export cannot be mistaken for a current-file commit."""
+    from looplab.core import tracing
+
+    source = tmp_path / "spans.jsonl"
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_bytes(b'{"replacement":true}\n')
+    real_receipt = tracing._write_append_receipt
+
+    def replace_before_append_context_exits(source_path, receipt):
+        real_receipt(source_path, receipt)
+        os.replace(replacement, source_path)
+
+    monkeypatch.setattr(tracing, "_write_append_receipt", replace_before_append_context_exits)
+    with pytest.raises(OSError):
+        JsonlSpanExporter(source).export({"name": "detached-write"})
+
+    assert source.read_bytes() == b'{"replacement":true}\n'
+
+
+def test_append_receipt_journal_rotates_on_source_replacement(tmp_path):
+    from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
+
+    source = tmp_path / "spans.jsonl"
+    exporter = JsonlSpanExporter(source)
+    exporter.export({"name": "old"})
+    journal = tmp_path / SPAN_APPEND_JOURNAL_NAME
+    old_receipt = orjson.loads(journal.read_bytes().splitlines()[-1])
+
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_bytes(b'{"name":"replacement-base"}\n')
+    os.replace(replacement, source)
+    exporter.export({"name": "new"})
+
+    receipts = [orjson.loads(line) for line in journal.read_bytes().splitlines()]
+    assert len(receipts) == 1
+    assert (receipts[0]["dev"], receipts[0]["ino"]) != (
+        old_receipt["dev"], old_receipt["ino"])
+    assert [orjson.loads(line)["name"] for line in source.read_bytes().splitlines()] == [
+        "replacement-base", "new"]
+
+
+def test_append_receipt_journal_is_bounded_and_hardlink_safe(tmp_path, monkeypatch):
+    from looplab.core import tracing
+    from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
+
+    source = tmp_path / "spans.jsonl"
+    exporter = JsonlSpanExporter(source)
+    # One receipt fits, two do not: the second append compacts to its own checkpoint transition.
+    monkeypatch.setattr(tracing, "SPAN_APPEND_JOURNAL_MAX_BYTES", 400)
+    exporter.export({"name": "one"})
+    exporter.export({"name": "two"})
+    journal = tmp_path / SPAN_APPEND_JOURNAL_NAME
+    assert len(journal.read_bytes()) <= 400
+    assert len(journal.read_bytes().splitlines()) == 1
+
+    journal.unlink()
+    victim = tmp_path / "journal-victim"
+    original = b"PRIVATE RECEIPT TARGET\n"
+    victim.write_bytes(original)
+    try:
+        os.link(victim, journal)
+    except OSError as exc:
+        pytest.skip(f"hard links are unavailable on this filesystem: {exc}")
+    exporter.export({"name": "three"})       # span truth commits; unsafe receipt is best-effort dropped
+    assert victim.read_bytes() == original
+
+
+def test_exporters_share_a_canonical_path_lock_while_healing(tmp_path):
+    """Two exporter objects cannot let one healer truncate a row the other just committed."""
+    path = tmp_path / "s.jsonl"
+    path.write_bytes(b'{"committed":true}\n{"torn":')
+    alias_parent = tmp_path / "alias"
+    alias_parent.mkdir()
+    first = JsonlSpanExporter(path)
+    second = JsonlSpanExporter(alias_parent / ".." / "s.jsonl")
+    assert first._lock is second._lock
+
+    started = threading.Event()
+    finished = threading.Event()
+
+    def append_second():
+        started.set()
+        second.export({"name": "second"})
+        finished.set()
+
+    # Hold the shared guard, start the competing exporter, then re-enter it through the first
+    # exporter.  RLock makes the owner re-entry legal while the other thread remains fenced.
+    with first._lock:
+        worker = threading.Thread(target=append_second)
+        worker.start()
+        assert started.wait(1)
+        first.export({"name": "first"})
+        assert not finished.is_set()
+    worker.join(timeout=2)
+    assert not worker.is_alive() and finished.is_set()
+
+    rows = [orjson.loads(line) for line in path.read_bytes().splitlines()]
+    assert rows[0] == {"committed": True}
+    assert [row["name"] for row in rows[1:]] == ["first", "second"]
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "fork"), reason="POSIX fork regression")
+def test_inherited_exporter_does_not_deadlock_after_multithreaded_fork(tmp_path):
+    """A fork child must not inherit an RLock owned by a vanished parent thread."""
+    import os
+    import signal
+
+    path = tmp_path / "s.jsonl"
+    exporter = JsonlSpanExporter(path)
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_export_lock():
+        with exporter._lock:
+            held.set()
+            release.wait(5)
+
+    worker = threading.Thread(target=hold_export_lock)
+    worker.start()
+    assert held.wait(1)
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - assertions are made from the parent process
+        try:
+            exporter.export({"name": "fork-child"})
+        except BaseException:
+            os._exit(3)
+        os._exit(0)
+
+    release.set()
+    worker.join(timeout=2)
+    status = None
+    deadline = time.monotonic() + 3
+    try:
+        while time.monotonic() < deadline:
+            waited, candidate = os.waitpid(pid, os.WNOHANG)
+            if waited == pid:
+                status = candidate
+                break
+            time.sleep(0.02)
+    finally:
+        if status is None:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+    assert status is not None, "fork child deadlocked on an inherited exporter lock"
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert orjson.loads(path.read_bytes()) == {"name": "fork-child"}
 
 
 def test_new_trace_span_is_a_real_root(tmp_path):

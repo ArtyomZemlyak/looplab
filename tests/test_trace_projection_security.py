@@ -284,9 +284,12 @@ def test_trace_tail_limit_pages_further_back_up_to_the_raised_ceiling(tmp_path):
 
     # A limit past the old cap of 100 returns that many rows (pages further back than before); the feed
     # is still truncated, so the UI keeps offering "load earlier". (The backward scan stops once it has
-    # `limit` lines, so omitted_spans reflects the scan window, not the whole file — assert the window.)
+    # `limit` generation/tool observations, so omitted_spans reflects the inspected window, not the whole
+    # file — assert the window.)
     wide = client.get("/api/runs/demo/trace/tail", params={"limit": 200}).json()
-    assert 100 < wide["projection"]["visible_spans"] <= 200        # >100: cap raised, pages back further
+    assert wide["projection"]["visible_spans"] == 200              # >100: cap raised, pages back further
+    assert [span["span_id"] for span in wide["tail"]] == [
+        f"s{index}" for index in range(total - 200, total)]         # oldest -> newest
     assert wide["projection"]["truncated"] is True                 # more history remains
     assert SECRET not in json.dumps(wide)                          # redaction holds at the larger window
 
@@ -296,6 +299,362 @@ def test_trace_tail_limit_pages_further_back_up_to_the_raised_ceiling(tmp_path):
     assert maxed["projection"]["visible_spans"] == total
     assert maxed["projection"]["omitted_spans"] == 0
     assert maxed["projection"]["truncated"] is False
+
+
+def test_trace_tail_ignores_operation_density_when_filling_observation_limit(tmp_path):
+    """Operation rows are structural noise for this feed and must not consume its observation limit."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    observations = [
+        _span(0, trace_id="mixed", kind="tool"),
+        _span(1, trace_id="mixed", kind="generation"),
+    ]
+    # More than `limit` newer physical rows reproduces the old failure: the scanner stopped on line
+    # count before filtering kind, so both qualifying observations disappeared from the live feed.
+    operations = [_span(index, trace_id="mixed", kind="operation") for index in range(2, 10)]
+    (run_dir / "spans.jsonl").write_text(
+        "".join(json.dumps(span) + "\n" for span in observations + operations), encoding="utf-8")
+
+    body = TestClient(make_app(tmp_path)).get(
+        "/api/runs/demo/trace/tail", params={"limit": 2}).json()
+
+    assert [span["span_id"] for span in body["tail"]] == ["s0", "s1"]
+    assert [span["kind"] for span in body["tail"]] == ["tool", "generation"]
+    assert body["projection"] == {
+        "schema": TRACE_PROJECTION_SCHEMA,
+        "truncated": False,
+        "source_truncated": False,
+        "visible_spans": 2,
+        "omitted_spans": 0,
+    }
+
+
+def test_trace_tail_drops_a_torn_eof_row_and_marks_the_projection_partial(tmp_path):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    complete = _span(0, trace_id="torn", kind="generation")
+    torn = _span(1, trace_id="torn", kind="tool")
+    (run_dir / "spans.jsonl").write_bytes(
+        json.dumps(complete).encode() + b"\n" + json.dumps(torn).encode())
+
+    body = TestClient(make_app(tmp_path)).get(
+        "/api/runs/demo/trace/tail", params={"limit": 5}).json()
+
+    assert [span["span_id"] for span in body["tail"]] == ["s0"]
+    assert body["projection"]["visible_spans"] == 1
+    assert body["projection"]["source_truncated"] is True
+    assert body["projection"]["truncated"] is True
+
+
+@pytest.mark.parametrize(
+    ("terminator", "expected_ids", "source_truncated"),
+    [(b"\n", ["s0"], False), (b"", [], True)],
+)
+def test_trace_tail_publishes_only_newline_terminated_single_row(
+        tmp_path, terminator, expected_ids, source_truncated):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    row = json.dumps(_span(0, trace_id="single", kind="generation")).encode()
+    (run_dir / "spans.jsonl").write_bytes(row + terminator)
+
+    body = TestClient(make_app(tmp_path)).get("/api/runs/demo/trace/tail").json()
+
+    assert [span["span_id"] for span in body["tail"]] == expected_ids
+    assert body["projection"]["source_truncated"] is source_truncated
+    assert body["projection"]["truncated"] is source_truncated
+
+
+def test_trace_tail_handles_a_newline_exactly_at_a_backward_chunk_boundary(tmp_path):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    older = {
+        "trace_id": "boundary", "span_id": "older", "kind": "tool", "start": 1.0,
+        "duration_s": 0.1, "status": "OK", "attributes": {"tool": "read"},
+    }
+    recent = {
+        "trace_id": "boundary", "span_id": "recent", "kind": "generation", "start": 2.0,
+        "duration_s": 0.1, "status": "OK",
+        "attributes": {"model": "m", "output": ""},
+    }
+    chunk_size = 262_144
+    encoded_recent = json.dumps(recent, separators=(",", ":")).encode()
+    recent["attributes"]["output"] = "X" * (chunk_size - 2 - len(encoded_recent))
+    encoded_recent = json.dumps(recent, separators=(",", ":")).encode()
+    assert len(encoded_recent) == chunk_size - 2
+    encoded_older = json.dumps(older, separators=(",", ":")).encode()
+    payload = encoded_older + b"\n" + encoded_recent + b"\n"
+    # The first backward chunk begins ON the separator newline before `recent`.
+    assert len(payload) - chunk_size == len(encoded_older)
+    (run_dir / "spans.jsonl").write_bytes(payload)
+
+    body = TestClient(make_app(tmp_path)).get(
+        "/api/runs/demo/trace/tail", params={"limit": 2}).json()
+
+    assert [span["span_id"] for span in body["tail"]] == ["older", "recent"]
+    assert body["projection"]["source_truncated"] is False
+    assert body["projection"]["truncated"] is False
+
+
+def test_trace_tail_caps_scan_at_8_mib_and_drops_the_partial_first_line(tmp_path):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    old = _span(0, trace_id="bounded", kind="generation")
+    huge_operation = {
+        "trace_id": "bounded",
+        "span_id": "structural",
+        "kind": "operation",
+        "attributes": {"payload": "X" * (8 * 1024 * 1024)},
+    }
+    recent = _span(2, trace_id="bounded", kind="tool")
+    with (run_dir / "spans.jsonl").open("wb") as spans:
+        for span in (old, huge_operation, recent):
+            spans.write(json.dumps(span).encode())
+            spans.write(b"\n")
+
+    body = TestClient(make_app(tmp_path)).get(
+        "/api/runs/demo/trace/tail", params={"limit": 2}).json()
+
+    # The exact 8 MiB suffix begins inside the huge operation. Its partial first line is never parsed
+    # or exposed, and the older generation outside the bounded source is not reported as known-empty.
+    assert [span["span_id"] for span in body["tail"]] == ["s2"]
+    assert body["projection"] == {
+        "schema": TRACE_PROJECTION_SCHEMA,
+        "truncated": True,
+        "source_truncated": True,
+        "visible_spans": 1,
+        "omitted_spans": 0,
+    }
+
+
+def test_trace_tail_keeps_complete_row_starting_exactly_at_8_mib_boundary(tmp_path):
+    """The byte ceiling may mark a line boundary, not automatically a partial first row."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    max_tail = 8 * 1024 * 1024
+    recent = {
+        "trace_id": "exact-boundary", "span_id": "exact-row", "kind": "generation",
+        "start": 1.0, "duration_s": 0.1, "status": "OK",
+        "attributes": {"node_id": 0, "model": "m", "output": ""},
+    }
+    base = json.dumps(recent, separators=(",", ":")).encode()
+    recent["attributes"]["output"] = "X" * (max_tail - 1 - len(base))
+    encoded = json.dumps(recent, separators=(",", ":")).encode()
+    assert len(encoded) + 1 == max_tail
+    (run_dir / "spans.jsonl").write_bytes(b"{}\n" + encoded + b"\n")
+
+    body = TestClient(make_app(tmp_path)).get(
+        "/api/runs/demo/trace/tail", params={"limit": 2}).json()
+
+    assert [span["span_id"] for span in body["tail"]] == ["exact-row"]
+    assert body["projection"]["source_truncated"] is True
+    assert body["projection"]["visible_spans"] == 1
+
+
+def test_trace_tail_is_generation_bound_before_and_after_descriptor_read(tmp_path, monkeypatch):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    (run_dir / "spans.jsonl").write_text(
+        json.dumps(_span(0, kind="generation")) + "\n", encoding="utf-8")
+    app = make_app(tmp_path)
+    commands = app.state.looplab.commands
+    expected = commands.run_generation(run_dir)
+    client = TestClient(app)
+
+    current = client.get("/api/runs/demo/trace/tail", params={
+        "limit": 2, "expected_generation": expected,
+    })
+    assert current.status_code == 200
+    assert current.json()["run_generation"] == expected
+    invalid = client.get("/api/runs/demo/trace/tail", params={"expected_generation": "bad"})
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"]["code"] == "invalid_run_generation"
+
+    replacement = ("e" if expected.startswith("f") else "f") * 64
+    calls = 0
+
+    def generation_moves_after_read(_rd):
+        nonlocal calls
+        calls += 1
+        return expected if calls == 1 else replacement
+
+    monkeypatch.setattr(commands, "run_generation", generation_moves_after_read)
+    raced = client.get("/api/runs/demo/trace/tail", params={
+        "limit": 2, "expected_generation": expected,
+    })
+    assert raced.status_code == 409
+    detail = raced.json()["detail"]
+    assert detail["code"] == "run_generation_changed"
+    assert detail["expected_generation"] == expected
+    assert detail["current_generation"] == replacement
+
+
+@pytest.mark.parametrize(("path", "projection_seam"), [
+    ("/api/runs/demo/trace", "trace_view"),
+    ("/api/runs/demo/spans/s0", "full_span"),
+    ("/api/runs/demo/trace/by_trace/trace", "full_spans_for_trace"),
+])
+def test_trace_projections_are_generation_bound_during_slow_read(
+        tmp_path, monkeypatch, path, projection_seam):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.events import span_index
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    (run_dir / "spans.jsonl").write_text(
+        json.dumps(_span(0)) + "\n", encoding="utf-8")
+    app = make_app(tmp_path)
+    commands = app.state.looplab.commands
+    expected = commands.run_generation(run_dir)
+    client = TestClient(app)
+
+    current = client.get(path, params={"expected_generation": expected})
+    assert current.status_code == 200
+    assert current.json()["run_generation"] == expected
+    invalid = client.get(path, params={"expected_generation": "bad"})
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"]["code"] == "invalid_run_generation"
+
+    replacement = ("e" if expected.startswith("f") else "f") * 64
+    observed_generation = expected
+    monkeypatch.setattr(commands, "run_generation", lambda _rd: observed_generation)
+    if projection_seam == "trace_view":
+        original = app.state.looplab.trace_view
+
+        def projection_then_replace(*args, **kwargs):
+            nonlocal observed_generation
+            payload = original(*args, **kwargs)
+            observed_generation = replacement
+            return payload
+
+        monkeypatch.setattr(app.state.looplab, "trace_view", projection_then_replace)
+    else:
+        original = getattr(span_index.SpanIndex, projection_seam)
+
+        def projection_then_replace(index, *args, **kwargs):
+            nonlocal observed_generation
+            payload = original(index, *args, **kwargs)
+            observed_generation = replacement
+            return payload
+
+        monkeypatch.setattr(span_index.SpanIndex, projection_seam, projection_then_replace)
+
+    raced = client.get(path, params={"expected_generation": expected})
+    assert raced.status_code == 409
+    detail = raced.json()["detail"]
+    assert detail["code"] == "run_generation_changed"
+    assert detail["expected_generation"] == expected
+    assert detail["current_generation"] == replacement
+
+
+def test_trace_reads_refuse_the_reset_archive_window_before_events_move(tmp_path):
+    """Replay archives spans before events; the durable marker closes that generation-CAS gap."""
+    import uuid
+
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.core.run_reset import publish_run_reset_marker
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    (run_dir / "spans.jsonl").write_text(
+        json.dumps(_span(0, kind="generation")) + "\n", encoding="utf-8")
+    app = make_app(tmp_path)
+    generation = app.state.looplab.commands.run_generation(run_dir)
+    publish_run_reset_marker(
+        run_dir, operation_id=str(uuid.uuid4()), expected_generation=generation,
+        receipt_name="reset-receipt.json")
+    # This is the exact reset phase that generation-before/after alone cannot distinguish: the trace
+    # sidecar has moved, while events.jsonl still truthfully identifies the old generation.
+    (run_dir / "spans.jsonl").unlink()
+    client = TestClient(app)
+
+    for path, params in [
+        ("/api/runs/demo/trace", {}),
+        ("/api/runs/demo/spans/s0", {}),
+        ("/api/runs/demo/trace/by_trace/trace", {}),
+        ("/api/runs/demo/trace/tail", {"expected_generation": generation}),
+        ("/api/runs/demo/nodes/0/conversation", {
+            "attempt": 0, "expected_generation": generation,
+        }),
+        ("/api/runs/demo/nodes/0/logs", {
+            "attempt": 0, "expected_generation": generation,
+        }),
+        ("/api/runs/demo/nodes/0/trace", {
+            "attempt": 0, "expected_generation": generation,
+        }),
+    ]:
+        response = client.get(path, params=params)
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["code"] == "run_reset_in_progress"
+        assert detail["expected_generation"] == generation
 
 
 def _flatten_trace(nodes):
@@ -517,21 +876,22 @@ def test_trace_route_read_failures_are_not_reported_as_complete_empty_data(tmp_p
     assert missing["projection"].get("unavailable") is not True
     (run_dir / "spans.jsonl").write_bytes(b"")
 
-    import os
+    import builtins
     from looplab.events import span_index
 
     def unreadable_index(_path):
         raise OSError("simulated unreadable trace source")
 
-    real_getsize = os.path.getsize
+    real_open = builtins.open
 
-    def unreadable_tail(path):
-        if str(path).endswith("spans.jsonl"):
+    def unreadable_tail(path, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if str(path).endswith("spans.jsonl") and "r" in str(mode):
             raise OSError("simulated unreadable trace tail")
-        return real_getsize(path)
+        return real_open(path, *args, **kwargs)
 
     monkeypatch.setattr(span_index, "get_index", unreadable_index)
-    monkeypatch.setattr(os.path, "getsize", unreadable_tail)
+    monkeypatch.setattr(builtins, "open", unreadable_tail)
 
     failed = [
         client.get("/api/runs/demo/trace").json(),
@@ -640,11 +1000,12 @@ def test_span_scan_fallback_does_not_invent_trace_cardinality(tmp_path, monkeypa
 
 
 def test_span_index_reads_one_inode_from_open_to_scan(tmp_path, monkeypatch):
-    """`stat(path)` then `open(path)` resolves the pathname twice.
+    """A pathname replacement during open is rejected, then a clean retry reads the new inode.
 
     A rewrite in between would cache-key and validate inode A while every later read observed inode
-    B — a trace view stitched from two generations of the file. The index derives identity, size and
-    content from ONE descriptor, so a replace can only be seen as a whole, never spliced.
+    B — a trace view stitched from two generations of the file. Descriptor-first hardening now also
+    rejects the unlinked old descriptor (``st_nlink == 0``), so the raced request fails closed and a
+    later request can index generation B as one coherent snapshot.
     """
     import os
     from pathlib import Path
@@ -672,17 +1033,13 @@ def test_span_index_reads_one_inode_from_open_to_scan(tmp_path, monkeypatch):
         return handle
 
     monkeypatch.setattr("builtins.open", replacing_open)
+    with pytest.raises(OSError):
+        span_index.get_index(source)
     idx = span_index.get_index(source)
     monkeypatch.undo()
     assert idx is not None
 
-    # Whatever generation was indexed, the identity recorded for it must be the identity of the
-    # bytes that were actually parsed — never the other inode's.
-    traces = {span.get("trace_id") for span in idx.light_spans()}
     on_disk = os.stat(source)
-    if idx.identity == (on_disk.st_dev, on_disk.st_ino):
-        assert traces == {"generation-two"}
-    else:
-        assert traces == {"generation-one"}, (
-            "identity was keyed on the pre-swap inode while the content came from the post-swap one")
+    assert idx.identity == (on_disk.st_dev, on_disk.st_ino)
+    assert {span.get("trace_id") for span in idx.light_spans()} == {"generation-two"}
     span_index._CACHE.clear()

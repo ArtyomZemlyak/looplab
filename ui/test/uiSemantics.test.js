@@ -53,9 +53,9 @@ test('trace loading, partial, and unavailable states expose recovery semantics',
   assert.match(await source('traceProjection.js'),
     /export const TRACE_PARTIAL_NOTICE = 'Trace projection is partial\.'/)
   assert.match(inspector, /className="trace-live-status" role="status"/)
-  assert.match(dock, /!current\.loaded[\s\S]*?role="status">loading trace…/)
+  assert.match(dock, /const loaded = current\.projection != null[\s\S]*?!loaded[\s\S]*?role="status">loading trace…/)
   assert.match(dock, /function OpTrace[\s\S]*?className="muted trace-loading" role="status"[\s\S]*?loading trace…/)
-  assert.match(dock, /onClick=\{retryNodeTrace\}>Retry<\/button>/)
+  assert.match(dock, /nodeTraceError && <TraceUnavailable[\s\S]*?onRetry=\{retryNodeTrace\}/)
   assert.match(css, /\.trace \.stage\.stage-dynamic \{ border-left: 3px solid var\(--stage-tone\); \}/)
   assert.match(css, /\.eval-pipeline-step[\s\S]*?cursor: default;[\s\S]*?button\.eval-pipeline-step \{ cursor: pointer; \}/)
   assert.match(css, /\.conv-toggle \.trace-collapse \{ font-size: 10px; \}/)
@@ -493,16 +493,15 @@ test('live node-detail and per-node building-trace polls gate their setState on 
   // `alive` latch moved there, while the identity check — the only half that is about node detail —
   // stayed here as the resource's `validate`. `resourceMachine.test.js` drives both behaviourally.
   assert.match(inspector,
-    /validate: value => \{[\s\S]*?const valid = detailMatchesNode\(value\)[\s\S]*?if \(valid && detailMatchesGeneration\(value\) && detailMatchesAttempt\(value\)\)/)
+    /validate: value => \{[\s\S]*?const valid = detailMatchesNode\(value\)[\s\S]*?if \(valid && traceGenerationMatches\(value, expectedGeneration\)[\s\S]*?&& detailMatchesAttempt\(value\)\)/)
   assert.match(scopedResource,
     /return \(\) => \{\n\s*alive = false[\s\S]*?flight\.current\.controller\.abort\(\)/,
     'unmount/selection change must abort the in-flight detail read, not just discard its result')
-  // Dock building-trace poll: the O(node) callback receives alive, and every state write is gated.
-  // The error flag is cleared only on SUCCESS (inside the alive() guard), never eagerly per tick, so a
-  // persistent failure does not flicker the error/Retry banner every 4s.
-  assert.match(dock, /const loadNodeTrace = \(alive\) => get\(runNodeApiPath\([\s\S]*?\/trace[\s\S]*?d\?\.node_id !== traceNid \|\| d\?\.attempt !== traceGeneration[\s\S]*?if \(alive\(\)\) \{ setNodeTrace\(d\); setNodeTraceError\(false\) \}/)
-  assert.match(dock, /usePoll\(\(alive\) => loadNodeTrace\(alive\)[\s\S]*?enabled: open && !readOnly && traceNid != null[\s\S]*?traceGeneration != null && exactBuilding/)
-  assert.doesNotMatch(dock, /usePoll\(\(alive\) => \{ setNodeTraceError\(false\)/,
+  // Dock building-trace poll: the O(node) callback receives alive, and every success/failure state
+  // write is gated. A successful payload has no `failed` marker; only catch adds it, so each retry
+  // keeps the banner stable until confirmed evidence replaces it.
+  assert.match(dock, /usePoll\(\(alive\) => \{[\s\S]*?traceDeadlineGet\(runNodeApiPath\(runId, traceNid, '\/trace'\),[\s\S]*?expectedTraceGeneration, traceGeneration, nodeTraceLimit\)[\s\S]*?request\.promise\.then[\s\S]*?d\?\.node_id !== traceNid \|\| d\?\.attempt !== traceGeneration[\s\S]*?if \(alive\(\)\) setNodeTrace\(\{ scope: nodeTraceScope, payload: d \}\)[\s\S]*?\.catch\(\(\) => \{ if \(alive\(\)\) setNodeTrace\(previous =>[\s\S]*?failed: true[\s\S]*?return request[\s\S]*?exactBuilding \? 4000 : null,[\s\S]*?enabled: open && !readOnly && traceNid != null && traceGeneration != null/)
+  assert.doesNotMatch(dock, /usePoll\(\(alive\) => \{[\s\S]{0,120}failed: false/,
     'the trace error flag must clear only on a successful load, not eagerly each poll tick (no banner flicker)')
   assert.doesNotMatch(dock, /get\(`\/api\/runs\/\$\{runId\}\/trace`\)/,
     'the timeline must not regress to a whole-run trace fold/poll')

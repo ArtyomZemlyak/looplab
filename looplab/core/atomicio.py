@@ -357,11 +357,24 @@ def exchange_paths_if_supported(first: str | os.PathLike, second: str | os.PathL
     return result == 0
 
 
-def _strict_replace(source: str | os.PathLike, destination: str | os.PathLike) -> None:
+def strict_replace(source: str | os.PathLike, destination: str | os.PathLike) -> None:
+    """Atomically replace ``destination`` using the platform's strict publication primitive.
+
+    This is the public package boundary for callers that already staged and synced their payload.
+    It deliberately does not fsync either file or parent directory; higher-level transaction code
+    owns that ordering.  Windows still requests write-through publication, matching the atomic
+    writers in this module.
+    """
     if os.name == "nt":
         _windows_move_write_through(source, destination, replace=True)
     else:
         os.replace(source, destination)
+
+
+# Backward-compatible private seam for existing in-module monkeypatches/tests. New cross-package
+# callers use ``strict_replace`` so atomicio can expose the operation without exporting an
+# underscore-private implementation detail.
+_strict_replace = strict_replace
 
 
 def _strict_publish_directory(directory: Path) -> None:

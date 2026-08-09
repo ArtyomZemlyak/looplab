@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react'
-import { costPricing, deadlineGet, get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL,
+import { costPricing, deadlineGet, get, fmt, fmtInt, isSweep, CONTROL,
   commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
-  retryRunCommand, runNodeApiPath, submitCommand } from './util.js'
+  retryRunCommand, runApiPath, runNodeApiPath, submitCommand, traceDeadlineGet, traceGenerationMatches,
+  traceReadQuery } from './util.js'
 import { useNodeSpanWindow, usePoll, useScopedResource, useTraceScroll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { themeFilteredGroupAggregate } from './grouping.js'
@@ -45,7 +46,6 @@ const withoutNodeTrace = value => value && typeof value === 'object'
 // `deadlineGet`'s own default, kept as a named bound now that the detail read spells its deadline
 // rather than inheriting one from the helper it no longer calls.
 const DETAIL_REQUEST_TIMEOUT_MS = 8000
-
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
 // several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated
 // and confirmed), so we show that whole story in one place — each stage with its sub-steps, inline
@@ -156,8 +156,6 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
       && (readOnly ? value.attempt === nodeAttempt : value.attempt >= nodeAttempt))
   const detailMatchesNode = value => value != null && typeof value === 'object' && !Array.isArray(value)
     && String(value.id) === String(nodeId) && typeof value.status === 'string'
-  const detailMatchesGeneration = value => !expectedGeneration
-    || value?.run_generation === expectedGeneration
   const [traceClearedScopes, setTraceClearedScopes] = useState(() => new Set())
   const detailQuery = []
   if (readOnly && historySeq != null) detailQuery.push(`seq=${historySeq}`)
@@ -179,7 +177,8 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
         : readOnlyReason === 'review' && !evidenceAvailable ? 'restricted' : null,
       validate: value => {
         const valid = detailMatchesNode(value)
-        if (valid && detailMatchesGeneration(value) && detailMatchesAttempt(value)) return null
+        if (valid && traceGenerationMatches(value, expectedGeneration)
+            && detailMatchesAttempt(value)) return null
         return valid
           ? 'The experiment attempt changed while details were loading.'
           : 'Full node details returned an invalid response.'
@@ -1144,7 +1143,8 @@ export function TraceUnavailable({ label = 'Trace unavailable.', onRetry, pendin
   </div>
 }
 
-function SpanList({ items, depth, t0, total, runId, parentOp = null }) {
+function SpanList({ items, depth, t0, total, runId, expectedGeneration,
+  parentOp = null }) {
   const [all, setAll] = useState(false)
   const rows = []
   let genDepth = null
@@ -1155,7 +1155,10 @@ function SpanList({ items, depth, t0, total, runId, parentOp = null }) {
   })
   const shown = all ? rows : rows.slice(0, SPAN_CAP)
   return <>
-    {shown.map(({ c, d, i }) => <SpanRow key={`${runId}:${c.span_id || i}`} s={c} depth={d} t0={t0} total={total} runId={runId} parentOp={parentOp} />)}
+    {shown.map(({ c, d, i }) => <SpanRow
+      key={c.span_id || i}
+      s={c} depth={d} t0={t0} total={total} runId={runId}
+      expectedGeneration={expectedGeneration} parentOp={parentOp} />)}
     {!all && rows.length > SPAN_CAP && <button className="span-more" style={{ marginLeft: depth * 14 + 4 }}
       onClick={() => setAll(true)}>… show {rows.length - SPAN_CAP} more observations</button>}
   </>
@@ -1166,7 +1169,8 @@ function SpanList({ items, depth, t0, total, runId, parentOp = null }) {
 // Renders three observation kinds distinctly — GENERATION (an LLM call: op·model·in→out·preview, its
 // prompt/output on expand), TOOL (name·arg, its input/output on expand), and OPERATION (a phase of
 // work) — so the tree shows exactly what called what and what each bounded projection produced.
-function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
+function SpanRow({ s, depth, t0, total, runId, expectedGeneration,
+  parentOp = null }) {
   const [open, setOpen] = useState(false)
   const [io, setIo] = useState(null)
   const kind = s.kind || 'operation'
@@ -1175,18 +1179,23 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
   const wid = Math.max(1.5, (s.duration_s || 0) / total * 100)
   const barTone = err ? 'var(--fail)' : kind === 'generation' ? 'var(--accent)' : kind === 'tool' ? 'var(--working)' : stageMeta(s.name)[3]
   const bar = <span className="span-bar"><span className="span-fill" style={{ marginLeft: Math.min(98, off) + '%', width: wid + '%', background: barTone }} /></span>
-  const kids = <SpanList items={s.children} depth={depth + 1} t0={t0} total={total} runId={runId} parentOp={s.name} />
+  const kids = <SpanList items={s.children} depth={depth + 1} t0={t0} total={total}
+    runId={runId} expectedGeneration={expectedGeneration} parentOp={s.name} />
   const rowIndent = { paddingLeft: depth * 14 }
   const detailIndent = { marginLeft: depth * 14 + 16 }
   // On first expand, pull the bounded/redacted detail projection; its omission receipt is rendered.
-  useEffect(() => {
-    if (open && io === null && runId && s.span_id && (kind === 'generation' || kind === 'tool')) {
-      let on = true
-      spanDetail(runId, s.span_id).then(d => on && setIo(traceDetailState(d)))
-        .catch(() => on && setIo(unavailableTraceDetail()))
-      return () => { on = false }
-    }
-  }, [open, io, runId, s.span_id, kind])
+  usePoll((alive) => {
+    const request = traceDeadlineGet(
+      runApiPath(runId, `/spans/${encodeURIComponent(s.span_id)}`), expectedGeneration)
+    request.promise.then(d => {
+      if (!traceGenerationMatches(d, expectedGeneration)) throw 0
+      if (alive()) setIo(traceDetailState(d))
+    }).catch(() => { if (alive()) setIo(unavailableTraceDetail()) })
+    return request
+  }, null, [open, io, runId, expectedGeneration, s.span_id, kind], {
+    enabled: open && io === null && !!runId && !!s.span_id
+      && (kind === 'generation' || kind === 'tool'),
+  })
   const retryIo = () => setIo(null)
 
   if (kind === 'generation') {
@@ -1269,7 +1278,7 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
 
 // A top-level lifecycle stage (one root span = one phase of work on this node), with its sub-steps.
 // The header rolls up the stage's model-call count + token cost so the expensive phases stand out.
-function StageBlock({ s, t0, total, runId }) {
+function StageBlock({ s, t0, total, runId, expectedGeneration }) {
   const [icon, role, desc] = stageMeta(s.name)
   const roll = spanRollup(s)
   return <div className={'stage' + (s.status === 'ERROR' ? ' err' : '')}>
@@ -1282,8 +1291,10 @@ function StageBlock({ s, t0, total, runId }) {
     </div>
     <div className="spans">
       {(s.children || []).length
-        ? <SpanList items={s.children} depth={0} t0={t0} total={total} runId={runId} />
-        : <SpanRow s={s} depth={0} t0={t0} total={total} runId={runId} />}
+        ? <SpanList items={s.children} depth={0} t0={t0} total={total} runId={runId}
+          expectedGeneration={expectedGeneration} />
+        : <SpanRow s={s} depth={0} t0={t0} total={total} runId={runId}
+          expectedGeneration={expectedGeneration} />}
     </div>
   </div>
 }
@@ -1326,7 +1337,7 @@ function TraceReach({ state, notice, onReach, failed = false }) {
 // Reusable langfuse-style trace for ONE node's span forest — the lifecycle stages on a shared
 // timeline. Exported so the chat feed can show the same waterfall inline (Dock.jsx) as the Inspector.
 export function NodeTrace({ spans, runId, projection = {}, onRetry, onLoadMore,
-  spanLimit = NODE_TRACE_SPAN_WINDOW }) {
+  spanLimit = NODE_TRACE_SPAN_WINDOW, expectedGeneration }) {
   const roots = spans || []
   // The scroll affordance is a hook, so it is resolved before any early return. `unavailable` is
   // still handled FIRST below: a failed observation never gets a sentinel (see traceScrollModel).
@@ -1352,7 +1363,10 @@ export function NodeTrace({ spans, runId, projection = {}, onRetry, onLoadMore,
   const { t0, total } = traceBounds(roots)
   return <div className="trace">
     {reach}
-    {roots.map((s, i) => <StageBlock key={`${runId}:${s.span_id || i}`} s={s} t0={t0} total={total} runId={runId} />)}
+    {roots.map((s, i) => <StageBlock
+      key={`${expectedGeneration || runId}:${s.span_id || i}`}
+      s={s} t0={t0} total={total} runId={runId}
+      expectedGeneration={expectedGeneration} />)}
   </div>
 }
 
@@ -1499,14 +1513,21 @@ function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
   </div>
 }
 
-function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRetry,
-  spanLimit = NODE_TRACE_SPAN_WINDOW, onLoadMore }) {
+const matchingNodePayload = (result, nodeId, attempt, expectedGeneration) => {
+  const payload = result.value
+  return result.status === 'fulfilled' && String(payload?.node_id) === String(nodeId)
+    && payload?.attempt === attempt && traceGenerationMatches(payload, expectedGeneration)
+    ? payload : null
+}
+
+function Conversation({ n, runId, expectedGeneration, working, allOpen = true, reloadNonce = 0,
+  onRetry, spanLimit = NODE_TRACE_SPAN_WINDOW, onLoadMore }) {
+  const nodeAttempt = Number.isSafeInteger(n.attempt) && n.attempt >= 0 ? n.attempt : 0
   // The last SETTLED read, carried with the window that produced it and what that window made
   // visible. Both extra fields earn their place: the window is how "a wider read is in flight" is
   // derived without a second piece of state, and the visible count is what proves a widen actually
   // BOUGHT something — the auto-loader has to be provably terminating (traceScrollModel).
   const [read, setRead] = useState(null)
-  const [reachFailed, setReachFailed] = useState(false)
   const [logs, setLogs] = useState({})   // {eval, stages:{train,score,…}} — the live stage/eval logs
   // A ref mirror of the settled read, so the outcome below is computed OUTSIDE a setState updater.
   // `usePoll` serializes ticks (one read unsettled at a time), so this is never behind; and an
@@ -1516,18 +1537,17 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
   useEffect(() => {
     setRead(null)   // node changed → clear before the first load (poll ticks below don't clear, so no flash)
     setLogs({})     // …likewise the logs, else B's stage bands briefly render A's log text
-    setReachFailed(false)
   // `spanLimit` is deliberately NOT in this list any more. Clearing on a widen blanked the thread to
   // "loading…" for the whole read — 17 s at the ceiling on the measured stress node — so scrolling
   // for older steps took away the ones already on screen. The poll below still re-runs on it.
-  }, [runId, n.id, working, reloadNonce])
+  }, [runId, expectedGeneration, n.id, nodeAttempt, working, reloadNonce])
   usePoll((alive) => {
     // ONE settle rule for both outcomes below, so the deadline path and the rejected-response path
     // cannot disagree about what a failure costs the operator.
     const commit = (ok, payload) => {
       const previous = readRef.current
       const settled = settleTraceRead(previous?.payload, { ok, payload })
-      setReachFailed(settled.reachFailed === true)
+      const failedWiden = settled.reachFailed && spanLimit > previous.window
       if (settled.unavailable) {
         setRead({ payload: { stages: [], projection: { unavailable: true } },
           window: spanLimit, visible: 0 })
@@ -1535,27 +1555,41 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
       }
       // A kept payload keeps its OWN window: recording the window we failed to reach would read as
       // "that read landed", and the next widen would then look like no widen at all.
-      if (settled.reachFailed) return
+      if (settled.reachFailed) {
+        setRead({ ...previous, reachFailed: failedWiden,
+          stale: failedWiden ? previous.stale : true })
+        return
+      }
       const visible = settled.payload?.projection?.visible_turns
       const next = { payload: settled.payload, window: spanLimit,
         visible: Number.isSafeInteger(visible) && visible >= 0 ? visible : 0 }
       setRead({ ...next, stalled: traceWidenStalled(previous, next) })
     }
     const timed = deadlineRequest(signal => Promise.allSettled([
-        nodeConversation(runId, n.id, { signal, limit: spanLimit }),
-        get(runNodeApiPath(runId, n.id, '/logs'), { signal, cache: 'no-store' }),
+        get(runNodeApiPath(runId, n.id,
+          `/conversation${traceReadQuery(expectedGeneration, nodeAttempt, spanLimit)}`), { signal }),
+        get(runNodeApiPath(runId, n.id,
+          `/logs${traceReadQuery(expectedGeneration, nodeAttempt)}`),
+        { signal, cache: 'no-store' }),
       ]), traceReadDeadlineMs(spanLimit))
     timed.promise.then(([conversation, logs]) => {
       if (!alive()) return
-      commit(conversation.status === 'fulfilled', conversation.value || { stages: [] })
-      if (logs.status === 'fulfilled') setLogs(logs.value || {})
+      const payload = matchingNodePayload(conversation, n.id, nodeAttempt, expectedGeneration)
+      // Transport success is not enough: a delayed response for the previous lifecycle must never
+      // settle this attempt's window. The server echoes both identity fields and independently rejects
+      // an attempt change before/after its read; this client-side gate also contains proxy/schema drift.
+      commit(!!payload, payload)
+      const logPayload = matchingNodePayload(logs, n.id, nodeAttempt, expectedGeneration)
+      // The stage bands and their log text are one evidence snapshot. Never combine a retained
+      // attempt-A conversation with logs returned while A was rejected/resetting.
+      if (payload && logPayload) setLogs(logPayload)
     // `allSettled` never rejects, so this branch is the DEADLINE — which is exactly the failure a
     // widened read hits. Routing it through the same `commit` is what stops a timed-out widen from
     // silently keeping the old payload with nothing said about it.
     }).catch(() => { if (alive()) commit(false, null) })
     return timed
   }, working ? 4000 : null,   // interval only while the agent works this node (live-refresh); null = load once
-  [runId, n.id, working, reloadNonce, spanLimit])   // reloadNonce also re-runs a finished node's one-shot load
+  [runId, expectedGeneration, n.id, nodeAttempt, working, reloadNonce, spanLimit])   // reloadNonce also re-runs a finished node's one-shot load
   if (read === null) return <div className="muted trace-small" role="status">loading…</div>
   const conv = read.payload || { stages: [] }
   const stages = conv.stages || []
@@ -1566,6 +1600,11 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
   // `conversationWindow` (not `traceWindow`) because what is hidden here is STAGES and TURNS, and the
   // span counters in the same envelope describe a different quantity — see its comment.
   const convWindow = conversationWindow(conv.projection, { canPage: !!onLoadMore })
+  const staleNotice = read.stale
+    ? <div className="notice compact conversation-stale" role="alert">
+      Conversation refresh failed; showing confirmed trace while run state reloads.
+    </div>
+    : null
   const scroll = traceScrollState({
     view: convWindow,
     window: spanLimit,
@@ -1574,14 +1613,14 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
     // BEHIND the requested one forever (`settleTraceRead` deliberately does not record a window it
     // could not reach), so the window comparison alone latches a spinner that never clears — and a
     // surface stuck in `loading` never re-arms, so the failure would also be unretryable.
-    pending: !reachFailed && spanLimit > read.window,
+    pending: !read.reachFailed && spanLimit > read.window,
     stalled: read.stalled === true,
   })
-  const reach = <TraceReach state={scroll} onReach={onLoadMore} failed={reachFailed}
+  const reach = <TraceReach state={scroll} onReach={onLoadMore} failed={read.reachFailed}
     notice={conversationWindowNotice(convWindow)} />
   if (!stages.length) return convWindow.kind === 'complete'
-    ? <div className="muted">No conversation captured for this node yet.</div>
-    : <div className="conv">{reach}</div>
+    ? <>{staleNotice}<div className="muted">No conversation captured for this node yet.</div></>
+    : <div className="conv">{staleNotice}{reach}</div>
   // The live log for a stage band: a multi-stage eval logs per stage (stages[label]); a single-command
   // eval logs to eval.log ("evaluate"/"command"); the dep-install step to setup.log. Anything else
   // (propose/implement/…) has no subprocess log.
@@ -1595,7 +1634,7 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
   // the truncation boundary. Scrolling UP is therefore the gesture that means "show me earlier", and
   // the trigger has to sit where that gesture ends. (The Dock's live tail puts "load earlier" at the
   // top for the same reason.)
-  return <div className="conv">{reach}
+  return <div className="conv">{staleNotice}{reach}
     {stages.map((st, i) => <ConvStage key={`${st.trace_id || ''}:${st.label || ''}:${st.start || i}:${allOpen}`}
                                       st={st} defaultOpen={allOpen} log={logFor(st.label)} live={working} />)}
     {logs.run_setup ? <RunSetupLog text={logs.run_setup} /> : null}
@@ -1622,19 +1661,34 @@ function RunSetupLog({ text }) {
 // paging a LIVE node does not freeze its trace at the moment it was paged; `nonce` re-reads after a
 // trace clear. A failed read stays null and falls back to the detail payload rather than blanking a
 // trace the operator can still see — asking for more must never cost them what they had.
-function usePagedNodeTrace({ runId, nodeId, attempt, limit, nonce, working, enabled }) {
-  const [paged, setPaged] = useState(null)
-  useEffect(() => { if (!enabled) setPaged(null) }, [enabled, runId, nodeId, attempt])
-  usePoll((alive) => get(runNodeApiPath(
-    runId, nodeId, `/trace?attempt=${attempt ?? 0}&limit=${limit}`), { cache: 'no-store' })
-    .then(d => {
+function usePagedNodeTrace({
+  runId, nodeId, attempt, expectedGeneration, limit, nonce, working, enabled,
+}) {
+  const [settled, setSettled] = useState(null)
+  const scope = `${expectedGeneration || runId}:${nodeId}:${attempt ?? 0}:${nonce}`
+  // Identity changes (and an explicit post-clear nonce) discard evidence. A larger window does not:
+  // the narrower successful page remains the last confirmed truth until its replacement settles.
+  useEffect(() => { setSettled(null) }, [enabled, scope])
+  usePoll((alive) => {
+    const request = traceDeadlineGet(runNodeApiPath(runId, nodeId, '/trace'),
+      expectedGeneration, attempt ?? 0, limit, traceReadDeadlineMs(limit))
+    request.promise.then(d => {
       // Same fence the Dock applies: a response for another node/attempt is a stale in-flight read
       // from the previous scope, never this node's trace.
-      if (alive() && d?.node_id === nodeId && d?.attempt === (attempt ?? 0)) setPaged(d)
+      if (d?.node_id !== nodeId || d?.attempt !== (attempt ?? 0)
+          || !traceGenerationMatches(d, expectedGeneration)) throw 0
+      if (alive()) setSettled({ scope, payload: d })
     })
-    .catch(() => { if (alive()) setPaged(null) }),
-    working ? 4000 : null, [runId, nodeId, attempt, limit, nonce, working, enabled], { enabled })
-  return enabled ? paged : null
+      .catch(() => {
+        if (alive()) setSettled(previous => previous?.scope === scope
+          ? { ...previous, stale: true }
+          : { scope, payload: null, stale: true })
+      })
+    return request
+  },
+    working ? 4000 : null,
+    [runId, nodeId, attempt, expectedGeneration, limit, nonce, working, enabled], { enabled })
+  return enabled && settled?.scope === scope ? settled : null
 }
 
 // Exported ONLY so a test can mount it (test/inspectorTracePager.test.js). Nothing in the app
@@ -1667,10 +1721,12 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   // clicked "load more" in the conversation had a second 4 s poll running against this node for as
   // long as it worked, fetching a span tree whose response was thrown away (up to ~1.6 MB per tick
   // at the x8 ceiling).
-  const paged = usePagedNodeTrace({
-    runId, nodeId: n.id, attempt: nodeGeneration, limit: spanLimit, nonce, working,
+  const pagedRead = usePagedNodeTrace({
+    runId, nodeId: n.id, attempt: nodeGeneration, expectedGeneration,
+    limit: spanLimit, nonce, working,
     enabled: view !== 'conversation' && spanLimit > NODE_TRACE_SPAN_WINDOW,
   })
+  const paged = pagedRead?.payload
   const trace = paged || n.trace
   const spans = trace?.nodes || []
   // `unavailable` stays bound to the DETAIL payload, never the paged one. It feeds the trace-clear
@@ -1769,6 +1825,8 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   // scrolling off the top. collapse-all is shown only for the conversation view (it acts on the bands).
   const head = <div className="trace-head">
     {status}
+    {view !== 'conversation' && pagedRead?.stale && <TraceUnavailable
+      label="Span-tree refresh failed; showing confirmed spans." />}
     <div className="conv-toggle">
       <button aria-pressed={view === 'conversation'} className={'seg' + (view === 'conversation' ? ' on' : '')} onClick={() => setView('conversation')}
         title="Linear, de-duplicated reading: request once, then each turn's reasoning + tools">conversation</button>
@@ -1779,7 +1837,8 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
     </div>
   </div>
   if (view === 'conversation')
-    return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId} working={working} allOpen={allOpen}
+    return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId}
+      expectedGeneration={expectedGeneration} working={working} allOpen={allOpen}
       reloadNonce={nonce} onRetry={() => setNonce(value => value + 1)}
       spanLimit={spanLimit} onLoadMore={loadMore} />
       {agent && <AgentReport r={agent} />}</div>
@@ -1832,8 +1891,10 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
         {roll.cost ? ` · $${roll.cost}` : ''}
       </span> : null}
     </div>
-    {spans.map((s, i) => <React.Fragment key={`${n.attempt ?? ''}:${s.span_id || i}`}>
-      <StageBlock s={s} t0={t0} total={total} runId={runId} />
+    {spans.map((s, i) => <React.Fragment
+      key={`${expectedGeneration || runId}:${n.attempt ?? ''}:${s.span_id || i}`}>
+      <StageBlock s={s} t0={t0} total={total} runId={runId}
+        expectedGeneration={expectedGeneration} />
       {agent && i === authorIdx && <AgentReport r={agent} />}
     </React.Fragment>)}
     {agent && authorIdx < 0 && <AgentReport r={agent} />}

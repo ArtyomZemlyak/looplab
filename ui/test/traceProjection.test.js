@@ -157,9 +157,10 @@ test('neither trace surface keeps a private copy of the node span window', async
 })
 
 test('Inspector and Dock preserve projection truth through every trace surface', async () => {
-  const [inspector, dock] = await Promise.all([
+  const [inspector, dock, api] = await Promise.all([
     readFile(new URL('../src/Inspector.jsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/Dock.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/api.js', import.meta.url), 'utf8'),
   ])
   assert.match(inspector, /const unavailable = traceUnavailable\(conv\.projection\)[\s\S]*?if \(unavailable\) return <TraceUnavailable[\s\S]*?if \(!stages\.length\)/,
     'conversation unavailable must win over the ordinary empty state')
@@ -168,18 +169,25 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   // a second settle path there is how it went back to saying nothing. The behaviour itself is
   // driven in inspectorTracePager.test.js; this only holds the single-path shape.
   assert.match(inspector,
-    /const settled = settleTraceRead\(previous\?\.payload, \{ ok, payload \}\)[\s\S]*?if \(settled\.unavailable\) \{[\s\S]*?projection: \{ unavailable: true \}[\s\S]*?commit\(conversation\.status === 'fulfilled'[\s\S]*?\.catch\(\(\) => \{ if \(alive\(\)\) commit\(false, null\) \}\)/,
+    /const settled = settleTraceRead\(previous\?\.payload, \{ ok, payload \}\)[\s\S]*?if \(settled\.unavailable\) \{[\s\S]*?projection: \{ unavailable: true \}[\s\S]*?const payload = matchingNodePayload\(conversation, n\.id, nodeAttempt, expectedGeneration\)[\s\S]*?commit\(!!payload, payload\)[\s\S]*?\.catch\(\(\) => \{ if \(alive\(\)\) commit\(false, null\) \}\)/,
     'conversation failures route through the ONE settle rule: unavailable only with nothing in hand')
   assert.match(inspector, /if \(!spans\.length && !agent\)[\s\S]*?if \(unavailable\)[\s\S]*?<TraceUnavailable[\s\S]*?if \(spanWindow\.kind !== 'complete'\)[\s\S]*?TRACE_PARTIAL_EMPTY_NOTICE[\s\S]*?No execution spans/,
     'an empty node trace must check unavailable and the window before successful empty')
   assert.ok(inspector.indexOf("if (view === 'conversation')") < inspector.indexOf('if (!spans.length && !agent)'),
     'the selected conversation view must load before raw-tree empty/unavailable branches')
-  assert.match(inspector, /\[open, io, runId, s\.span_id, kind\][\s\S]*?const retryIo = \(\) => setIo\(null\)[\s\S]*?<TraceUnavailable label="Trace detail unavailable\." onRetry=\{retryIo\}/,
+  assert.match(inspector, /const request = traceDeadlineGet\([\s\S]*?runApiPath\(runId, `\/spans\/\$\{encodeURIComponent\(s\.span_id\)\}`\), expectedGeneration\)[\s\S]*?request\.promise\.then[\s\S]*?!traceGenerationMatches\(d, expectedGeneration\)[\s\S]*?\[open, io, runId, expectedGeneration, s\.span_id, kind\][\s\S]*?const retryIo = \(\) => setIo\(null\)[\s\S]*?<TraceUnavailable label="Trace detail unavailable\." onRetry=\{retryIo\}/,
     'span detail unavailable must be retryable even after the first expansion')
-  assert.match(inspector, /function Conversation\(\{[\s\S]*?onRetry[\s\S]*?\[runId, n\.id, working, reloadNonce\][\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/,
+  assert.match(inspector, /function Conversation\(\{[\s\S]*?onRetry[\s\S]*?\[runId, expectedGeneration, n\.id, nodeAttempt, working, reloadNonce, spanLimit\][\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/,
     'a finished conversation one-shot must expose an explicit retry')
-  assert.match(inspector, /nodeConversation\(runId, n\.id, \{ signal, limit: spanLimit \}\)/,
-    'the conversation must actually SEND the window it was given, or the control is decorative')
+  assert.match(inspector,
+    /get\(runNodeApiPath\(runId, n\.id,[\s\S]*?`\/conversation\$\{traceReadQuery\(expectedGeneration, nodeAttempt, spanLimit\)\}`\), \{ signal \}\)/,
+    'the conversation must send the run generation, rendered lifecycle and requested window')
+  assert.match(api,
+    /export const traceDeadlineGet = \(path, expectedGeneration, attempt, limit, timeout\) =>[\s\S]*?deadlineGet\(path \+ traceReadQuery\(expectedGeneration, attempt, limit\), timeout\)/,
+    'all bounded trace reads must retain the shared deadline and encoded query contract')
+  assert.match(inspector,
+    /const matchingNodePayload = \(result, nodeId, attempt, expectedGeneration\) => \{[\s\S]*?result\.status === 'fulfilled' && String\(payload\?\.node_id\) === String\(nodeId\)[\s\S]*?payload\?\.attempt === attempt && traceGenerationMatches\(payload, expectedGeneration\)[\s\S]*?commit\(!!payload, payload\)/,
+    'a fulfilled response for another run generation or node attempt must not settle here')
   assert.match(inspector, /export function NodeTrace\(\{ spans, runId, projection = \{\}, onRetry, onLoadMore,[\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/)
   // The pager BUTTON is gone (2026-08-07): earlier steps arrive by scrolling. What must not be lost
   // with it is the receipt — a surface that genuinely cannot reach further still owes the COUNT.
@@ -195,7 +203,7 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   // not reach, so a failed widen leaves the settled window behind the requested one forever and the
   // comparison ALONE latches a permanent spinner on a surface that then cannot be retried. Driven in
   // inspectorTracePager.test.js; pinned here because it is one token away from coming back.
-  assert.match(inspector, /const convWindow = conversationWindow\(conv\.projection, \{ canPage: !!onLoadMore \}\)[\s\S]*?const scroll = traceScrollState\(\{[\s\S]*?view: convWindow,[\s\S]*?pending: !reachFailed && spanLimit > read\.window,/,
+  assert.match(inspector, /const convWindow = conversationWindow\(conv\.projection, \{ canPage: !!onLoadMore \}\)[\s\S]*?const scroll = traceScrollState\(\{[\s\S]*?view: convWindow,[\s\S]*?pending: !read\.reachFailed && spanLimit > read\.window,/,
     'the conversation view must derive its own scroll state, not print a dead partial notice')
   assert.doesNotMatch(inspector, /load more spans|load more of this conversation|at its maximum/,
     'the removed pager text must not come back — scrolling is the only control now')
@@ -207,7 +215,7 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   assert.match(inspector, />span tree<\/button>/)
   assert.doesNotMatch(inspector, />raw spans<\/button>|every span's full I\/O|nothing is lost|WHOLE re-sent/)
 
-  assert.match(dock, /setTrace\(\{[\s\S]*?spans:[\s\S]*?projection: d\?\.projection \|\| \{\}/,
+  assert.match(dock, /setTraceState\(\{[\s\S]*?spans:[\s\S]*?projection: d\?\.projection \|\| \{\}/,
     'operation trace must retain the server projection envelope')
   assert.match(dock, /<NodeTrace spans=\{nodeSpans\}[\s\S]*?projection=\{nodeTrace\.projection\}/,
     'node trace must pass its projection metadata to the shared renderer')
@@ -215,15 +223,17 @@ test('Inspector and Dock preserve projection truth through every trace surface',
     'live tail transport/unavailable state must not look like an empty waiting feed')
   assert.match(dock, /3000, \[scope, active, open, limit\], \{ enabled: active && open \}/,
     'the open live tail must automatically recover from a transient unavailable state (limit paging keeps enabled intact)')
-  assert.match(dock, /!current\.loaded[\s\S]*?loading trace…[\s\S]*?partialControl[\s\S]*?!tail\.length && !partial[\s\S]*?waiting for the next agent step/,
+  assert.match(dock, /const loaded = current\.projection != null[\s\S]*?!loaded[\s\S]*?loading trace…[\s\S]*?partialControl[\s\S]*?!tail\.length && !partial[\s\S]*?waiting for the next agent step/,
     'an empty partial live tail must offer load-earlier / older-history, never a plain waiting feed')
   assert.match(dock, /const canLoadEarlier = partial && limit < TRACE_LIMIT_MAX[\s\S]*?setLimit\(value => Math\.min\(value \* 2, TRACE_LIMIT_MAX\)\)/,
     '"load earlier spans" must raise the tail limit toward the server ceiling')
-  assert.match(dock, /function OpTrace[\s\S]*?\[runId, traceId, retryNonce\][\s\S]*?onRetry=\{retry\}/,
-    'operation trace HTTP-200 unavailable must be retryable')
-  assert.match(dock, /const retryNodeTrace = \(\) => \{[\s\S]*?setNodeTrace\(null\)[\s\S]*?setNodeTraceError\(false\)[\s\S]*?setNodeTraceNonce/,
-    'node trace retry must enter a real loading state before issuing another request')
-  assert.match(dock, /projection=\{nodeTrace\.projection\} runId=\{runId\} onRetry=\{retryNodeTrace\}/,
+  assert.match(dock, /function OpTrace[\s\S]*?traceDeadlineGet\(runApiPath\([\s\S]*?expectedGeneration\)[\s\S]*?!traceGenerationMatches\(d, expectedGeneration\)[\s\S]*?\[scope, retryNonce\][\s\S]*?onRetry=\{retry\}/,
+    'operation trace must be generation-fenced and HTTP-200 unavailable must be retryable')
+  assert.match(dock, /const retryNodeTrace = \(\) => setNodeTraceNonce/,
+    'node trace retry must issue another request')
+  assert.doesNotMatch(dock, /const retryNodeTrace = \(\)[\s\S]{0,160}setNodeTrace\(null\)/,
+    'retry must not erase last-good spans while their replacement is in flight')
+  assert.match(dock, /projection=\{nodeTrace\.projection\} runId=\{runId\}[\s\S]*?onRetry=\{retryNodeTrace\}[\s\S]*?expectedGeneration=\{expectedTraceGeneration\}/,
     'HTTP-200 unavailable node traces must share the same retry path as transport failures')
   assert.doesNotMatch(dock, /raw <think>|full I\/O of any observation|full, UNtruncated text|FULL content/)
 })

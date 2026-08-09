@@ -23,7 +23,8 @@
 import { assertRunMutationAllowed } from './runMode.js'
 import { deadlineRequest } from './requestDeadline.js'
 import {
-  _authHeaders, _throw, apiUrl, assertNotReviewMutation, get, post, runApiPath, runNodeApiPath, send,
+  _authHeaders, _throw, apiUrl, assertNotReviewMutation, deadlineGet, get, post, runApiPath,
+  runNodeApiPath, send,
 } from './apiClient.js'
 import {
   COMMAND_REQUEST_TIMEOUT_MS, TRANSIENT_HTTP, UUID_V4_RE, createIdempotencyKey, hasOnlyKeys,
@@ -41,7 +42,7 @@ export {
   COMMAND_FAILED, COMMAND_SUCCEEDED, commandActionForEvent, commandCanRetry, commandErrorMessage,
   commandEventForAction, commandFailureRecord, commandFeedback, createIdempotencyKey,
   getObservedRunGeneration, isTransientCommandReadError, normalizeRunGeneration, observeRunGeneration,
-  submitCommand,
+  submitCommand, validRunGeneration,
 } from './commandModel.js'
 export {
   clearAssistantRunTransport, clearDamagedLaunchTransport, clearLaunchTransport, clearRunCommandLock,
@@ -1181,19 +1182,19 @@ export async function assistantMessageStream(sid, instruction, mode, cbs = {}, s
   if (!terminal) throw incompleteAssistantStream('connection closed')
   return result
 }
-// Bounded/redacted I/O projection for one observation, with explicit omission metadata.
-export const spanDetail = (runId, spanId) =>
-  get(runApiPath(runId, `/spans/${encodeURIComponent(spanId)}`))
-
-// Linear, de-duplicated conversation view of a node's trace (request once per sub-loop, then each
-// generation's delta interleaved with tool calls) — the readable alternative to the raw span tree.
-// `limit` is the Inspector's "load more" window. Sent EXPLICITLY from the first read (the same choice
-// the Dock made for /trace): it removes the special zero/default request path without changing the
-// first response window, since the shared window starts at the server's own default. A caller that
-// omits it still gets that default — the server owns it (traceview.settle_node_span_cap), never this.
-export const nodeConversation = (runId, nid, { limit, ...options } = {}) =>
-  get(runNodeApiPath(runId, nid,
-    limit ? `/conversation?limit=${encodeURIComponent(limit)}` : '/conversation'), options)
+// Shared query/deadline wiring for bounded trace reads. The optional generation names the run
+// whose sidecar bytes the caller is prepared to display.
+export const traceGenerationMatches = (payload, expectedGeneration) =>
+  !expectedGeneration || payload?.run_generation === expectedGeneration
+export const traceReadQuery = (expectedGeneration, attempt, limit) => {
+  const query = new URLSearchParams()
+  if (attempt != null) query.set('attempt', attempt)
+  if (limit) query.set('limit', limit)
+  if (expectedGeneration) query.set('expected_generation', expectedGeneration)
+  return query.size ? `?${query}` : ''
+}
+export const traceDeadlineGet = (path, expectedGeneration, attempt, limit, timeout) =>
+  deadlineGet(path + traceReadQuery(expectedGeneration, attempt, limit), timeout)
 
 // Stop an in-flight assistant turn server-side (survives a page reload, unlike aborting the local
 // stream). Also used to poll whether a turn is still running (reattach after switch/reload).

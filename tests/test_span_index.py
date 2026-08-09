@@ -10,8 +10,10 @@ from __future__ import annotations
 import json
 import os
 import random
+import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +24,7 @@ from looplab.events import span_index
 from looplab.events.span_index import get_index, invalidate
 from looplab.events.traceview import (
     _MAX_PARENT_HOPS,
+    _bounded_node_trace_tail,
     _cap_span_io,
     _iter_parent_spans,
     _normalize_span,
@@ -124,6 +127,63 @@ def test_conversation_identical_via_node_offsets(run):
         got = build_conversation(ST, idx.full_spans_for_node(nid), nid)
         assert _canon(ref) == _canon(got)
         assert got["stages"]                                     # non-empty (sanity)
+
+
+def test_full_node_spans_filter_generation_before_the_window(tmp_path):
+    """An abandoned attempt cannot consume the current conversation's bounded tail."""
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    spans = [
+        {"name": "old-root", "kind": "operation", "trace_id": "old", "span_id": "or",
+         "parent_id": None, "attributes": {"node_id": 0}, "start": 0.0},
+        {"name": "old-tail", "kind": "generation", "trace_id": "old", "span_id": "og",
+         "parent_id": "or", "attributes": {"node_id": 0}, "start": 1.0},
+        {"name": "new-root", "kind": "operation", "trace_id": "new", "span_id": "nr",
+         "parent_id": None, "attributes": {"node_id": 0, "generation": 1}, "start": 2.0},
+        {"name": "new-tail", "kind": "generation", "trace_id": "new", "span_id": "ng",
+         "parent_id": "nr", "attributes": {"node_id": 0}, "start": 3.0},
+    ]
+    idx = get_index(_write_spans(rd, spans))
+
+    assert idx.node_span_count(0, generation=0) == 2
+    assert idx.node_span_count(0, generation=1) == 2
+    assert [row["span_id"] for row in idx.full_spans_for_node(
+        0, 1, generation=0)] == ["og"]
+    assert [row["span_id"] for row in idx.full_spans_for_node(
+        0, 1, generation=1)] == ["ng"]
+
+
+def test_shared_trace_filters_effective_node_before_total_and_window(tmp_path):
+    """A newer foreign row in one shared trace cannot erase or inflate the target node."""
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    spans = [
+        {"name": "shared-root", "kind": "operation", "trace_id": "shared",
+         "span_id": "root", "parent_id": None,
+         "attributes": {"node_id": 0, "generation": 2}, "start": 0.0},
+        {"name": "node-zero", "kind": "generation", "trace_id": "shared",
+         "span_id": "n0", "parent_id": "root",
+         "attributes": {"node_id": 0, "output": "zero"}, "start": 1.0},
+        {"name": "node-one-newer", "kind": "generation", "trace_id": "shared",
+         "span_id": "n1", "parent_id": "root",
+         "attributes": {"node_id": 1, "output": "one"}, "start": 2.0},
+    ]
+    idx = get_index(_write_spans(rd, spans))
+
+    assert idx.node_span_count(0, generation=2) == 2
+    assert idx.node_span_count(1, generation=2) == 1
+    assert [row["span_id"] for row in idx.light_spans_for_node(
+        0, 1, generation=2)] == ["n0"]
+    assert [row["span_id"] for row in idx.full_spans_for_node(
+        0, 1, generation=2)] == ["n0"]
+    assert [row["span_id"] for row in idx.full_spans_for_node(
+        1, 1, generation=2)] == ["n1"]
+
+    # The no-index conversation selector must have identical count/filter/cap semantics.
+    fallback, fallback_total = _bounded_node_trace_tail(
+        spans, 0, 1, generation=2)
+    assert fallback_total == 2
+    assert [row["span_id"] for row in fallback] == ["n0"]
 
 
 def test_by_trace_identical(run):
@@ -266,17 +326,163 @@ def test_parent_walk_has_a_hard_depth_limit():
 def test_incremental_topup_matches_full_rebuild(run):
     rd, sp, spans = run
     idx = get_index(sp)
+    initial = idx
     n0 = len(idx.light_spans())
     more = _spans_for(2, "tr2")
-    with open(sp, "ab") as f:                                    # append a whole new node's spans
-        for s in more:
-            f.write(orjson.dumps(s) + b"\n")
+    from looplab.core.tracing import JsonlSpanExporter
+    exporter = JsonlSpanExporter(sp)
+    for span in more:                                          # trusted writer receipts every append
+        exporter.export(span)
     idx = get_index(sp)                                          # tops up only the appended tail
+    assert idx is initial
     assert len(idx.light_spans()) == n0 + len(more)
     assert len(idx.full_spans_for_node(2)) == len(more)
     # identical to a from-scratch parse of the grown file
     ref = build_trace_view(ST, load_spans(sp), light=True)
     assert _canon(ref) == _canon(build_trace_view(ST, idx.light_spans(), light=True))
+
+
+def test_receipted_topup_reads_only_new_tail_and_unchanged_lookup_reads_none(
+        run, monkeypatch):
+    """The trusted append proof is O(new bytes), never a re-hash of the old trace prefix."""
+    from looplab.core.tracing import JsonlSpanExporter
+
+    _rd, source, _spans = run
+    index = get_index(source)
+    before_size = source.stat().st_size
+    appended = _spans_for(9, "tail-proof")[0]
+    JsonlSpanExporter(source).export(appended)
+    appended_bytes = source.stat().st_size - before_size
+
+    hashed: list[tuple[int, int]] = []
+    scanned: list[tuple[int, int]] = []
+    real_hash = span_index._source_region_sha256
+    real_scan = span_index._scan_light_stream
+
+    def hash_spy(stream, offset, length):
+        hashed.append((offset, length))
+        return real_hash(stream, offset, length)
+
+    def scan_spy(stream, base, size, **kwargs):
+        scanned.append((base, size))
+        return real_scan(stream, base, size, **kwargs)
+
+    monkeypatch.setattr(span_index, "_source_region_sha256", hash_spy)
+    monkeypatch.setattr(span_index, "_scan_light_stream", scan_spy)
+
+    refreshed = get_index(source)
+    assert refreshed is index
+    assert hashed == [(before_size, appended_bytes)]
+    assert scanned == [(before_size, appended_bytes)]
+
+    hashed.clear()
+    scanned.clear()
+    assert get_index(source) is index
+    assert hashed == [] and scanned == []
+
+
+def test_cold_persisted_index_validates_receipts_then_scans_only_tail(run, monkeypatch):
+    from looplab.core.tracing import JsonlSpanExporter
+
+    _rd, source, _spans = run
+    persisted = get_index(source)
+    before_size = source.stat().st_size
+    JsonlSpanExporter(source).export(_spans_for(10, "cold-tail")[0])
+    appended_bytes = source.stat().st_size - before_size
+    with span_index._CACHE_LOCK:
+        span_index._CACHE.clear()
+
+    scanned: list[tuple[int, int]] = []
+    real_scan = span_index._scan_light_stream
+
+    def scan_spy(stream, base, size, **kwargs):
+        scanned.append((base, size))
+        return real_scan(stream, base, size, **kwargs)
+
+    monkeypatch.setattr(span_index, "_scan_light_stream", scan_spy)
+    refreshed = get_index(source)
+
+    assert refreshed is not persisted
+    assert scanned == [(before_size, appended_bytes)]
+    assert refreshed.full_span("root10") is not None
+
+
+def test_source_growth_without_append_receipt_rebuilds_fail_closed(run):
+    _rd, source, _spans = run
+    initial = get_index(source)
+    appended = _spans_for(8, "unreceipted")[0]
+    with open(source, "ab") as stream:
+        stream.write(orjson.dumps(appended) + b"\n")
+
+    refreshed = get_index(source)
+
+    assert refreshed is not initial
+    assert refreshed.full_span(appended["span_id"]) is not None
+
+
+def test_torn_append_receipt_forces_rebuild(run):
+    from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
+    from looplab.core.tracing import JsonlSpanExporter
+
+    rd, source, _spans = run
+    initial = get_index(source)
+    appended = _spans_for(7, "torn-receipt")[0]
+    JsonlSpanExporter(source).export(appended)
+    with open(rd / SPAN_APPEND_JOURNAL_NAME, "ab") as stream:
+        stream.write(b'{"schema":1,"crash":')
+
+    refreshed = get_index(source)
+
+    assert refreshed is not initial
+    assert refreshed.full_span(appended["span_id"]) is not None
+
+
+def test_forged_append_transition_forces_rebuild(run):
+    from looplab.core.trace_append import (
+        SPAN_APPEND_JOURNAL_NAME, SPAN_APPEND_RECEIPT_SCHEMA)
+
+    rd, source, _spans = run
+    initial = get_index(source)
+    before = source.stat()
+    appended = _spans_for(6, "forged-receipt")[0]
+    encoded = orjson.dumps(appended) + b"\n"
+    with open(source, "ab") as stream:
+        stream.write(encoded)
+    after = source.stat()
+    forged = {
+        "schema": SPAN_APPEND_RECEIPT_SCHEMA,
+        "dev": after.st_dev,
+        "ino": after.st_ino,
+        "before_size": before.st_size,
+        "before_mtime_ns": before.st_mtime_ns,
+        "before_ctime_ns": before.st_ctime_ns,
+        "after_size": after.st_size,
+        "after_mtime_ns": after.st_mtime_ns,
+        "after_ctime_ns": after.st_ctime_ns,
+        "append_sha256": "0" * 64,                 # valid shape, false byte-range proof
+    }
+    (rd / SPAN_APPEND_JOURNAL_NAME).write_bytes(orjson.dumps(forged) + b"\n")
+
+    refreshed = get_index(source)
+
+    assert refreshed is not initial
+    assert refreshed.full_span(appended["span_id"]) is not None
+
+
+def test_missing_append_journal_after_checkpoint_forces_rebuild(tmp_path):
+    from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
+    from looplab.core.tracing import JsonlSpanExporter
+
+    source = tmp_path / "spans.jsonl"
+    exporter = JsonlSpanExporter(source)
+    exporter.export(_spans_for(4, "journal-life")[0])
+    initial = get_index(source)
+    exporter.export(_spans_for(5, "journal-life-next")[0])
+    (tmp_path / SPAN_APPEND_JOURNAL_NAME).unlink()
+
+    refreshed = get_index(source)
+
+    assert refreshed is not initial
 
 
 def test_node_trace_view_is_o_node_and_identical(run):
@@ -337,10 +543,11 @@ def test_persist_rewrites_are_geometric(run, monkeypatch):
 
     monkeypatch.setattr(si, "atomic_write_bytes", spy)
     get_index(sp)                                       # initial build + persist
+    from looplab.core.tracing import JsonlSpanExporter
+    exporter = JsonlSpanExporter(sp)
     for k in range(40):                                 # 40 small appends → ~18x growth
-        with open(sp, "ab") as f:
-            for s in _spans_for(1000 + k, f"tg{k}"):
-                f.write(orjson.dumps(s) + b"\n")
+        for span in _spans_for(1000 + k, f"tg{k}"):
+            exporter.export(span)
         get_index(sp)
     assert 1 < len(covers_at_write) <= 12, covers_at_write        # logarithmic, not ~40 rewrites
     ratios = [b / a for a, b in zip(covers_at_write, covers_at_write[1:]) if a]
@@ -393,6 +600,298 @@ def test_persisted_index_with_wrong_identity_is_rejected(run):
 
 
 # --------------------------------------------------------------------------- staleness / degrade
+@pytest.mark.parametrize("cold_reload", [False, True], ids=["warm-cache", "persisted-cold"])
+def test_same_inode_non_growth_rewrite_rebuilds_when_coverage_lags(
+        tmp_path, cold_reload):
+    """covers<size (corrupt suffix) cannot hide a same-size rewrite of an indexed prefix.
+
+    The unchanged final indexed row makes the persisted index's O(1) tail spotcheck pass, so both
+    cases specifically require the observed source size/mtime fence: the warm case must discard its
+    object and the cold case must reject the otherwise-plausible persisted header.
+    """
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    source = rd / "spans.jsonl"
+
+    def row(span_id, start):
+        return {"name": "op", "kind": "operation", "trace_id": "trace",
+                "span_id": span_id, "parent_id": None, "run_id": "demo",
+                "attributes": {"node_id": 0}, "events": [], "status": "OK",
+                "start": start, "duration_s": 1.0}
+
+    old_first = orjson.dumps(row("old-a", 0.0)) + b"\n"
+    new_first = orjson.dumps(row("new-a", 0.0)) + b"\n"
+    unchanged_last = orjson.dumps(row("last-z", 1.0)) + b"\n"
+    corrupt_suffix = b'{"kind": definitely-not-json}\n'
+    assert len(old_first) == len(new_first)
+    source.write_bytes(old_first + unchanged_last + corrupt_suffix)
+    invalidate(source)
+    (rd / "spans.index.jsonl").unlink(missing_ok=True)
+
+    initial = get_index(source)
+    before = source.stat()
+    assert initial.covers == len(old_first) + len(unchanged_last) < before.st_size
+    assert initial.source_size == before.st_size
+    assert initial.full_span("old-a") is not None
+
+    replacement = new_first + unchanged_last + corrupt_suffix
+    assert len(replacement) == before.st_size
+    with open(source, "r+b") as stream:
+        stream.write(replacement)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
+    assert source.stat().st_ino == before.st_ino
+    if cold_reload:
+        with span_index._CACHE_LOCK:
+            span_index._CACHE.clear()
+
+    refreshed = get_index(source)
+
+    assert refreshed is not initial
+    assert refreshed.full_span("old-a") is None
+    assert refreshed.full_span("new-a") is not None
+    assert [span["span_id"] for span in refreshed.light_spans()] == ["new-a", "last-z"]
+
+
+def test_cold_same_size_rewrite_with_restored_mtime_is_caught_by_ctime(tmp_path):
+    source = tmp_path / "spans.jsonl"
+
+    def row(span_id, start):
+        return {"name": "op", "kind": "operation", "trace_id": "trace",
+                "span_id": span_id, "parent_id": None, "attributes": {"node_id": 0},
+                "start": start}
+
+    old = [row("head-aa", 0.0), row("old-mid", 1.0), row("tail-zz", 2.0)]
+    source.write_bytes(b"".join(orjson.dumps(item) + b"\n" for item in old))
+    invalidate(source)
+    initial = get_index(source)
+    before = source.stat()
+
+    new = [old[0], row("new-mid", 1.0), old[2]]
+    replacement = b"".join(orjson.dumps(item) + b"\n" for item in new)
+    assert len(replacement) == before.st_size
+    with open(source, "r+b") as stream:
+        stream.write(replacement)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = source.stat()
+    assert after.st_ino == before.st_ino and after.st_mtime_ns == before.st_mtime_ns
+    assert after.st_ctime_ns != before.st_ctime_ns
+    with span_index._CACHE_LOCK:
+        span_index._CACHE.clear()
+
+    refreshed = get_index(source)
+
+    assert refreshed is not initial
+    assert refreshed.full_span("old-mid") is None
+    assert refreshed.full_span("new-mid") is not None
+
+
+@pytest.mark.parametrize("cold_reload", [False, True], ids=["warm-cache", "persisted-cold"])
+def test_same_inode_prefix_rewrite_plus_growth_rebuilds_instead_of_stitching(
+        tmp_path, cold_reload):
+    """A larger same-inode file is not necessarily append-only: validate its old prefix first.
+
+    The old index's final row and byte offsets deliberately remain valid, so inode/size/mtime and
+    the historical last-row spotcheck all accept this shape. Without a prefix digest a top-up would
+    return the removed ``old-a`` light row plus the newly appended row — a projection assembled from
+    two different source generations. The complete accepted-prefix digest prevents that stitch.
+    """
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    source = rd / "spans.jsonl"
+
+    def row(span_id, start):
+        return {"name": "op", "kind": "operation", "trace_id": "trace",
+                "span_id": span_id, "parent_id": None, "run_id": "demo",
+                "attributes": {"node_id": 0}, "events": [], "status": "OK",
+                "start": start, "duration_s": 1.0}
+
+    old_first = orjson.dumps(row("old-a", 0.0)) + b"\n"
+    new_first = orjson.dumps(row("new-a", 0.0)) + b"\n"
+    unchanged_last = orjson.dumps(row("last-z", 1.0)) + b"\n"
+    appended = orjson.dumps(row("tail-n", 2.0)) + b"\n"
+    assert len(old_first) == len(new_first)
+    source.write_bytes(old_first + unchanged_last)
+    invalidate(source)
+    (rd / "spans.index.jsonl").unlink(missing_ok=True)
+
+    initial = get_index(source)
+    before = source.stat()
+    persisted_header = orjson.loads((rd / "spans.index.jsonl").read_bytes().splitlines()[0])
+    assert "append_journal_covers" in persisted_header
+    assert initial.full_span("old-a") is not None
+
+    replacement = new_first + unchanged_last + appended
+    with open(source, "r+b") as stream:
+        stream.write(replacement)
+        stream.truncate(len(replacement))
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
+    after = source.stat()
+    assert after.st_ino == before.st_ino and after.st_size > before.st_size
+    if cold_reload:
+        with span_index._CACHE_LOCK:
+            span_index._CACHE.clear()
+
+    refreshed = get_index(source)
+
+    assert refreshed is not initial
+    assert refreshed.full_span("old-a") is None
+    assert refreshed.full_span("new-a") is not None
+    assert [span["span_id"] for span in refreshed.light_spans()] == [
+        "new-a", "last-z", "tail-n"]
+
+
+def test_same_inode_gap_rewrite_plus_growth_cannot_evade_prefix_digest(tmp_path):
+    """A rewrite between bounded sample windows must still invalidate the complete prefix.
+
+    The changed span id is around byte 200 KiB of a >1 MiB accepted prefix. A head/middle/tail
+    sampling scheme misses that deterministic gap; hashing every accepted prefix byte cannot.
+    """
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    source = rd / "spans.jsonl"
+
+    def row(span_id, start):
+        return {"name": "op", "kind": "operation", "trace_id": "trace",
+                "span_id": span_id, "parent_id": None, "run_id": "demo",
+                "attributes": {"node_id": 0, "input": "x" * (96 * 1024)},
+                "events": [], "status": "OK", "start": start, "duration_s": 1.0}
+
+    old_rows = [row(f"row-{index:02d}", float(index)) for index in range(12)]
+    old_rows[2] = row("old-gap", 2.0)
+    old_blob = b"".join(orjson.dumps(item) + b"\n" for item in old_rows)
+    target_offset = old_blob.index(b'"old-gap"')
+    assert len(old_blob) > 1024 * 1024
+    assert 128 * 1024 < target_offset < 400 * 1024
+    source.write_bytes(old_blob)
+    invalidate(source)
+    (rd / "spans.index.jsonl").unlink(missing_ok=True)
+
+    initial = get_index(source)
+    before = source.stat()
+    assert initial.full_span("old-gap") is not None
+
+    new_rows = list(old_rows)
+    new_rows[2] = row("new-gap", 2.0)
+    appended = row("tail-new", 12.0)
+    replacement = b"".join(orjson.dumps(item) + b"\n" for item in [*new_rows, appended])
+    with open(source, "r+b") as stream:
+        stream.write(replacement)
+        stream.truncate(len(replacement))
+        stream.flush()
+        os.fsync(stream.fileno())
+    after = source.stat()
+    assert after.st_ino == before.st_ino and after.st_size > before.st_size
+
+    refreshed = get_index(source)
+
+    assert refreshed is not initial
+    assert refreshed.full_span("old-gap") is None
+    assert refreshed.full_span("new-gap") is not None
+    assert refreshed.full_span("tail-new") is not None
+
+
+def test_symlink_trace_source_is_rejected_by_warm_cold_and_offset_reads(tmp_path):
+    """A run-local filename is not permission to follow another run's private trace sidecar."""
+    local_run = tmp_path / "local"
+    foreign_run = tmp_path / "foreign"
+    local_run.mkdir()
+    foreign_run.mkdir()
+
+    def row(output):
+        return {"name": "generation", "kind": "generation", "trace_id": "trace",
+                "span_id": "shared", "parent_id": None, "run_id": "run",
+                "attributes": {"node_id": 0, "output": output}, "events": [],
+                "status": "OK", "start": 0.0, "duration_s": 1.0}
+
+    source = local_run / "spans.jsonl"
+    foreign = foreign_run / "spans.jsonl"
+    source.write_bytes(orjson.dumps(row("local evidence")) + b"\n")
+    foreign.write_bytes(orjson.dumps(row("FOREIGN PRIVATE EVIDENCE")) + b"\n")
+    invalidate(source)
+    index = get_index(source)                       # warm cache + persisted offset index
+    assert index.full_span("shared")["attributes"]["output"] == "local evidence"
+
+    source.unlink()
+    try:
+        source.symlink_to(foreign)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks are unavailable on this platform: {exc}")
+
+    # A cached get must inspect the path before reusing light rows; an already-returned index must
+    # also no-follow when it later seeks full-span offsets.
+    with pytest.raises(OSError):
+        get_index(source)
+    with pytest.raises(OSError):
+        index.full_span("shared")
+
+    # Clearing process memory exercises the persisted cold path. It must reject the source before
+    # trusting its otherwise-valid index header/offsets and must never project the foreign output.
+    with span_index._CACHE_LOCK:
+        span_index._CACHE.clear()
+    with pytest.raises(OSError):
+        get_index(source)
+
+
+def test_non_regular_trace_source_is_rejected_before_open(tmp_path):
+    source = tmp_path / "spans.jsonl"
+    source.mkdir()
+
+    with pytest.raises(IsADirectoryError, match="directory"):
+        get_index(source)
+
+
+def test_hard_link_trace_source_is_rejected_without_reading_victim(tmp_path):
+    victim = tmp_path / "victim-private.jsonl"
+    victim.write_bytes(orjson.dumps({
+        "name": "private", "kind": "generation", "trace_id": "foreign",
+        "span_id": "secret", "parent_id": None,
+        "attributes": {"node_id": 9, "output": "PRIVATE"}, "start": 0.0,
+    }) + b"\n")
+    source = tmp_path / "spans.jsonl"
+    try:
+        os.link(victim, source)
+    except OSError as exc:
+        pytest.skip(f"hard links are unavailable on this filesystem: {exc}")
+
+    with pytest.raises(OSError, match="hard-link"):
+        get_index(source)
+
+
+def test_unreceipted_torn_tail_completion_rebuilds_fail_closed(tmp_path):
+    """An out-of-band append has no writer receipt, so correctness wins over object reuse."""
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    source = rd / "spans.jsonl"
+    first = orjson.dumps({
+        "name": "one", "kind": "operation", "trace_id": "t", "span_id": "one",
+        "parent_id": None, "attributes": {"node_id": 0}, "start": 0.0,
+    }) + b"\n"
+    second = orjson.dumps({
+        "name": "two", "kind": "operation", "trace_id": "t", "span_id": "two",
+        "parent_id": None, "attributes": {"node_id": 0}, "start": 1.0,
+    }) + b"\n"
+    cut = len(second) - 9
+    source.write_bytes(first + second[:cut])
+    invalidate(source)
+
+    initial = get_index(source)
+    assert initial.covers == len(first) < initial.source_size
+    with open(source, "ab") as stream:
+        stream.write(second[cut:])
+
+    refreshed = get_index(source)
+
+    assert refreshed is not initial
+    assert refreshed.source_size == source.stat().st_size
+    assert [span["span_id"] for span in refreshed.light_spans()] == ["one", "two"]
+
+
 def test_rebuild_when_file_shrinks(run):
     rd, sp, spans = run
     get_index(sp)                                              # cache the full index
@@ -512,6 +1011,102 @@ def test_concurrent_topup_and_reads_are_safe(run):
     assert errors == [], f"concurrent read/topup raised: {errors[:3]}"
 
 
+def test_cold_builds_for_unrelated_runs_overlap(tmp_path, monkeypatch):
+    """A slow cold scan is serialized with reset/get for ITS run, not every run in the process."""
+    import threading
+
+    paths = []
+    for name, node_id in (("a", 10), ("b", 20)):
+        rd = tmp_path / name
+        rd.mkdir()
+        paths.append(_write_spans(rd, _spans_for(node_id, f"trace-{name}")))
+
+    rendezvous = threading.Barrier(2)
+    original = span_index._scan_light_stream
+
+    def scan_together(*args, **kwargs):
+        # With a process-global writer lock the first scan waits here while the second can never
+        # enter, and the barrier breaks. Per-path locks let both independent cold builds make
+        # progress at once.
+        rendezvous.wait(timeout=3)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(span_index, "_scan_light_stream", scan_together)
+    results = []
+    errors = []
+
+    def build(path):
+        try:
+            results.append(get_index(path))
+        except Exception as exc:  # noqa: BLE001 - collect failures from worker threads
+            errors.append(exc)
+
+    threads = [threading.Thread(target=build, args=(path,)) for path in paths]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+
+    assert not any(thread.is_alive() for thread in threads), "independent cold builds deadlocked"
+    assert errors == []
+    assert len(results) == 2 and all(result.span_count() == 7 for result in results)
+
+
+def test_process_writer_guard_remains_exclusive_for_the_same_path(tmp_path, monkeypatch):
+    """The per-path optimization must retain same-run get/reset/delete mutual exclusion."""
+    import contextlib
+    import threading
+    import time
+
+    @contextlib.contextmanager
+    def no_file_lock(*_args, **_kwargs):
+        # Isolate the process-local guarantee; an OS flock must not be what makes this test pass.
+        yield
+
+    monkeypatch.setattr(span_index, "_interprocess_lock", no_file_lock)
+    source = tmp_path / "spans.jsonl"
+    start = threading.Barrier(2)
+    state_lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def guarded_writer():
+        nonlocal active, max_active
+        start.wait(timeout=2)
+        with span_index.span_index_write_guard(source):
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.08)
+            with state_lock:
+                active -= 1
+
+    threads = [threading.Thread(target=guarded_writer) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(3)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert max_active == 1
+
+
+def test_process_cache_evicts_by_represented_source_bytes(tmp_path):
+    """Three huge sources must not survive merely because the entry-count cap is three."""
+    with span_index._CACHE_LOCK:
+        span_index._CACHE.clear()
+    try:
+        for name in ("a", "b", "c"):
+            index = span_index.SpanIndex(tmp_path / name / "spans.jsonl")
+            index.source_size = 600 * 1024 * 1024
+            span_index._cache_store(str(index.path), index)
+        with span_index._CACHE_LOCK:
+            assert list(span_index._CACHE) == [str(tmp_path / "c" / "spans.jsonl")]
+    finally:
+        with span_index._CACHE_LOCK:
+            span_index._CACHE.clear()
+
+
 def test_torn_final_line_is_ignored(run):
     rd, sp, spans = run
     with open(sp, "ab") as f:
@@ -590,7 +1185,8 @@ def test_endpoints_serve_through_the_index(tmp_path):
     assert client.get("/api/runs/demo/spans/g0_1").json()["attributes"] == {}   # node 0's span is gone
 
 
-def test_node_trace_endpoint_can_read_each_reset_attempt_exactly(tmp_path):
+def test_node_trace_endpoint_rejects_abandoned_attempt_and_reads_current_exactly(
+        tmp_path, monkeypatch):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
     from looplab.events.eventstore import EventStore
@@ -611,19 +1207,218 @@ def test_node_trace_endpoint_can_read_each_reset_attempt_exactly(tmp_path):
         {"name": "old-attempt", "kind": "operation", "trace_id": "old", "span_id": "old-root",
          "parent_id": None, "run_id": "demo", "attributes": {"node_id": 0},
          "events": [], "status": "OK", "start": 0.0, "duration_s": 1.0},
+        {"name": "generation", "kind": "generation", "trace_id": "old", "span_id": "old-gen",
+         "parent_id": "old-root", "run_id": "demo",
+         "attributes": {"node_id": 0, "phase": "implement", "phase_span": "old-root",
+                        "output": "old conversation"},
+         "events": [], "status": "OK", "start": 0.5, "duration_s": 0.1},
         {"name": "current-attempt", "kind": "operation", "trace_id": "current",
          "span_id": "current-root", "parent_id": None, "run_id": "demo",
          "attributes": {"node_id": 0, "generation": 1},
          "events": [], "status": "OK", "start": 2.0, "duration_s": 1.0},
+        {"name": "generation", "kind": "generation", "trace_id": "current",
+         "span_id": "current-gen", "parent_id": "current-root", "run_id": "demo",
+         "attributes": {"node_id": 0, "phase": "implement", "phase_span": "current-root",
+                        "output": "current conversation"},
+         "events": [], "status": "OK", "start": 2.5, "duration_s": 0.1},
     ])
     client = TestClient(make_app(tmp_path))
 
-    old = client.get("/api/runs/demo/nodes/0/trace", params={"attempt": 0}).json()
+    old = client.get("/api/runs/demo/nodes/0/trace", params={"attempt": 0})
     current = client.get("/api/runs/demo/nodes/0/trace", params={"attempt": 1}).json()
-    assert old["node_id"] == 0 and old["attempt"] == 0
+    assert old.status_code == 409
+    assert old.json()["detail"] == {
+        "code": "node_attempt_changed",
+        "node_id": 0,
+        "expected_attempt": 0,
+        "current_attempt": 1,
+        "message": "The node was reset before its trace was read.",
+        "remediation": "Reload node state and request the current attempt.",
+    }
     assert current["node_id"] == 0 and current["attempt"] == 1
-    assert "old-attempt" in json.dumps(old) and "current-attempt" not in json.dumps(old)
     assert "current-attempt" in json.dumps(current) and "old-attempt" not in json.dumps(current)
+
+    # The readable conversation is the CURRENT lifecycle only. The response echoes the exact
+    # identity the UI validates, and an explicit abandoned attempt is rejected rather than merged.
+    stale = client.get("/api/runs/demo/nodes/0/conversation", params={"attempt": 0})
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "node_attempt_changed"
+    conversation = client.get(
+        "/api/runs/demo/nodes/0/conversation", params={"attempt": 1}).json()
+    assert conversation["node_id"] == "0" and conversation["attempt"] == 1
+    assert "current conversation" in json.dumps(conversation)
+    assert "old conversation" not in json.dumps(conversation)
+
+    # Force the no-index path: it must resolve the same trace root generation before applying the
+    # span cap, not fall back to a whole-file conversation that mixes both attempts.
+    monkeypatch.setattr(span_index, "get_index", lambda _path: None)
+    fallback = client.get(
+        "/api/runs/demo/nodes/0/conversation", params={"attempt": 1}).json()
+    assert fallback["node_id"] == "0" and fallback["attempt"] == 1
+    assert "current conversation" in json.dumps(fallback)
+    assert "old conversation" not in json.dumps(fallback)
+
+
+def test_conversation_rechecks_attempt_after_its_span_read(tmp_path, monkeypatch):
+    """A reset racing the slow offset reads returns 409, never a mixed-attempt 200 envelope."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    rd = _http_run(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    original = span_index.SpanIndex.full_spans_for_node
+    reset_once = False
+
+    def reset_after_read(index, *args, **kwargs):
+        nonlocal reset_once
+        result = original(index, *args, **kwargs)
+        if not reset_once:
+            reset_once = True
+            store.append("node_reset", {
+                "node_id": 0, "generation": 0, "from_stage": "eval"})
+        return result
+
+    monkeypatch.setattr(span_index.SpanIndex, "full_spans_for_node", reset_after_read)
+    response = TestClient(make_app(tmp_path)).get(
+        "/api/runs/demo/nodes/0/conversation", params={"attempt": 0})
+
+    assert reset_once is True
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "node_attempt_changed"
+    assert detail["expected_attempt"] == 0 and detail["current_attempt"] == 1
+
+
+def test_conversation_rechecks_run_generation_when_node_attempt_is_unchanged(
+        tmp_path, monkeypatch):
+    """A whole-run replacement commonly reuses node attempt zero; that must still fail the CAS."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.serve.server import make_app
+
+    rd = _http_run(tmp_path)
+    app = make_app(tmp_path)
+    commands = app.state.looplab.commands
+    expected = commands.run_generation(rd)
+    client = TestClient(app)
+
+    current = client.get("/api/runs/demo/nodes/0/conversation", params={
+        "attempt": 0, "expected_generation": expected,
+    })
+    assert current.status_code == 200
+    assert current.json()["run_generation"] == expected
+
+    replacement = ("e" if expected.startswith("f") else "f") * 64
+    calls = 0
+
+    def generation_moves_after_read(_rd):
+        nonlocal calls
+        calls += 1
+        return expected if calls == 1 else replacement
+
+    monkeypatch.setattr(commands, "run_generation", generation_moves_after_read)
+    raced = client.get("/api/runs/demo/nodes/0/conversation", params={
+        "attempt": 0, "expected_generation": expected,
+    })
+    assert raced.status_code == 409
+    detail = raced.json()["detail"]
+    assert detail["code"] == "run_generation_changed"
+    assert detail["expected_generation"] == expected
+    assert detail["current_generation"] == replacement
+
+
+@pytest.mark.parametrize("suffix", [
+    "/nodes/0/trace?attempt=0",
+    "/nodes/0/logs?attempt=0",
+])
+def test_node_trace_sidecars_recheck_run_generation_when_attempt_is_reused(
+        tmp_path, monkeypatch, suffix):
+    """A replacement run can reuse node 0/attempt 0; trace and logs still need a run CAS."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.serve.server import make_app
+
+    rd = _http_run(tmp_path)
+    app = make_app(tmp_path)
+    commands = app.state.looplab.commands
+    expected = commands.run_generation(rd)
+    client = TestClient(app)
+    separator = "&" if "?" in suffix else "?"
+    current = client.get(
+        f"/api/runs/demo{suffix}{separator}expected_generation={expected}")
+    assert current.status_code == 200
+    assert current.json()["run_generation"] == expected
+
+    replacement = ("e" if expected.startswith("f") else "f") * 64
+    calls = 0
+
+    def generation_moves_after_read(_rd):
+        nonlocal calls
+        calls += 1
+        return expected if calls == 1 else replacement
+
+    monkeypatch.setattr(commands, "run_generation", generation_moves_after_read)
+    raced = client.get(
+        f"/api/runs/demo{suffix}{separator}expected_generation={expected}")
+    assert raced.status_code == 409
+    detail = raced.json()["detail"]
+    assert detail["code"] == "run_generation_changed"
+    assert detail["expected_generation"] == expected
+    assert detail["current_generation"] == replacement
+
+
+def test_node_trace_rechecks_attempt_after_its_projection(tmp_path, monkeypatch):
+    """A node reset racing the indexed projection must not publish abandoned-attempt spans."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    rd = _http_run(tmp_path)
+    app = make_app(tmp_path)
+    original = app.state.looplab.node_trace_view
+    reset_once = False
+
+    def trace_then_reset(*args, **kwargs):
+        nonlocal reset_once
+        result = original(*args, **kwargs)
+        if not reset_once:
+            reset_once = True
+            EventStore(rd / "events.jsonl").append(
+                "node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+        return result
+
+    monkeypatch.setattr(app.state.looplab, "node_trace_view", trace_then_reset)
+    response = TestClient(app).get(
+        "/api/runs/demo/nodes/0/trace", params={"attempt": 0})
+
+    assert reset_once is True
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "node_attempt_changed"
+    assert detail["expected_attempt"] == 0 and detail["current_attempt"] == 1
+
+
+def test_node_trace_uses_attempt_zero_for_setup_and_legacy_unfolded_rows(tmp_path):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    client = TestClient(make_app(tmp_path))
+
+    current = client.get("/api/runs/demo/nodes/-1/trace", params={"attempt": 0})
+    assert current.status_code == 200
+    assert current.json()["node_id"] == -1 and current.json()["attempt"] == 0
+    stale = client.get("/api/runs/demo/nodes/-1/trace", params={"attempt": 1})
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["current_attempt"] == 0
 
 
 def test_trace_cache_rejects_same_size_same_mtime_file_replacement(tmp_path):
@@ -691,6 +1486,53 @@ def test_persisted_index_negative_length_does_not_slurp_and_rebuilds(run):
     row = idx.by_sid[victim_id]
     assert idx.meta[row][1] >= 0
     assert (idx.full_span(victim_id) or {}).get("span_id") == victim_id
+
+
+@pytest.mark.parametrize("alias_kind", ["symlink", "hardlink", "fifo"])
+def test_persisted_index_alias_is_rejected_promptly_and_rebuilt(run, alias_kind):
+    """Derived metadata is not a capability and a FIFO must never strand a cold reader.
+
+    ``spans.index.jsonl`` is expendable, so rejecting an unsafe entry should fall back to source
+    truth and atomically publish a fresh private index.  In particular, neither a symlink nor a hard
+    link may expose/overwrite its victim, and opening a FIFO must not wait for a peer.
+    """
+    rd, source, spans = run
+    expected = get_index(source).span_count()
+    index_path = rd / "spans.index.jsonl"
+    assert index_path.exists()
+    with span_index._CACHE_LOCK:
+        span_index._CACHE.clear()
+    index_path.unlink()
+
+    victim = rd / "private-index-victim"
+    marker = b"PRIVATE INDEX TARGET\n"
+    if alias_kind == "symlink":
+        victim.write_bytes(marker)
+        try:
+            index_path.symlink_to(victim)
+        except (NotImplementedError, OSError) as exc:
+            pytest.skip(f"symlinks are unavailable on this filesystem: {exc}")
+    elif alias_kind == "hardlink":
+        victim.write_bytes(marker)
+        try:
+            os.link(victim, index_path)
+        except OSError as exc:
+            pytest.skip(f"hard links are unavailable on this filesystem: {exc}")
+    else:
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO requires POSIX")
+        os.mkfifo(index_path)
+
+    started = time.monotonic()
+    rebuilt = get_index(source)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0, f"persisted-index {alias_kind} handling blocked for {elapsed:.2f}s"
+    assert rebuilt is not None and rebuilt.span_count() == expected == len(spans)
+    info = index_path.lstat()
+    assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+    if alias_kind != "fifo":
+        assert victim.read_bytes() == marker
 
 
 def test_persisted_index_offset_drift_returns_none_not_wrong_span(run):
@@ -822,6 +1664,80 @@ def test_a_span_line_far_larger_than_one_chunk_is_scanned_linearly(tmp_path, mon
     assert sum(scanned) <= 2 * size, (
         f"scanned {sum(scanned)} bytes over {len(scanned)} calls for a {size}-byte file — the "
         "over-chunk line is being re-scanned at every chunk boundary")
+
+
+def test_oversized_physical_span_row_ends_the_index_prefix(tmp_path, monkeypatch):
+    """The light-index carry has the same hard row ceiling as direct trace projection.
+
+    A well-formed span over that ceiling is not quarantined-and-skipped: it ends the append-log
+    prefix, so rows behind it cannot become visible through the accelerator. It crosses many tiny
+    read chunks to exercise the old unbounded carry path.
+    """
+    before_obj = _spans_for(0, "before-trace")[0]
+    after_obj = _spans_for(1, "after-trace")[0]
+    before = orjson.dumps(before_obj) + b"\n"
+    after = orjson.dumps(after_obj) + b"\n"
+    ceiling = max(len(before), len(after)) + 16
+    oversized_obj = {
+        **before_obj,
+        "span_id": "oversized",
+        "trace_id": "oversized-trace",
+        "attributes": {"node_id": 0, "output": "x" * (ceiling * 6)},
+    }
+    oversized = orjson.dumps(oversized_obj) + b"\n"
+    assert len(oversized) > ceiling
+    source = tmp_path / "spans.jsonl"
+    source.write_bytes(before + oversized + after)
+
+    scanned = []
+    real_scan = span_index._scan_light
+    monkeypatch.setattr(span_index, "_scan_light",
+                        lambda raw, base: (scanned.append(len(raw)), real_scan(raw, base))[1])
+    monkeypatch.setattr(span_index, "TRACE_JSONL_ROW_MAX_BYTES", ceiling)
+    monkeypatch.setattr(span_index, "_SCAN_CHUNK_BYTES", 17)
+    span_index._CACHE.clear()
+    (tmp_path / "spans.index.jsonl").unlink(missing_ok=True)
+
+    idx = get_index(source)
+    span_index._CACHE.clear()
+
+    assert idx.covers == len(before)
+    assert [span["span_id"] for span in idx.light_spans()] == [before_obj["span_id"]]
+    assert scanned and max(scanned) <= ceiling
+
+
+def test_span_detail_fallback_stops_at_oversized_poison_row(tmp_path, monkeypatch):
+    """A guessed id cannot make the post-index fallback allocate or skip a giant physical row."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.core import trace_files
+    from looplab.serve.server import make_app
+
+    rd = _http_run(tmp_path)
+    before_obj = _spans_for(0, "before-trace")[0]
+    after_obj = {**_spans_for(0, "after-trace")[0], "span_id": "after-poison"}
+    before = orjson.dumps(before_obj) + b"\n"
+    after = orjson.dumps(after_obj) + b"\n"
+    ceiling = max(len(before), len(after)) + 32
+    poison_obj = {
+        **before_obj,
+        "span_id": "poison",
+        "attributes": {"node_id": 0, "output": "x" * (ceiling * 4)},
+    }
+    poison = orjson.dumps(poison_obj) + b"\n"
+    assert len(poison) > ceiling
+    (rd / "spans.jsonl").write_bytes(before + poison + after)
+    monkeypatch.setattr(span_index, "TRACE_JSONL_ROW_MAX_BYTES", ceiling)
+    monkeypatch.setattr(trace_files, "TRACE_JSONL_ROW_MAX_BYTES", ceiling)
+    span_index._CACHE.clear()
+    (rd / "spans.index.jsonl").unlink(missing_ok=True)
+
+    body = TestClient(make_app(tmp_path)).get(
+        "/api/runs/demo/spans/after-poison").json()
+
+    assert body["span_id"] == "after-poison"
+    assert body["attributes"] == {}
+    assert body["projection"]["unavailable"] is True
 
 
 def test_an_unknown_span_id_does_not_re_walk_the_whole_spans_file(tmp_path, monkeypatch):

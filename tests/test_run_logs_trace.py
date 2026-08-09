@@ -144,6 +144,23 @@ def test_read_run_trace_is_a_linear_conversation(tmp_path):
         "read_run_trace", {"run_id": "demo", "node_id": 0, "stage": "repair"})
 
 
+def test_read_run_trace_uses_bounded_node_offsets_not_a_whole_file_load(tmp_path, monkeypatch):
+    """The assistant's trace reader shares the web route's indexed per-node memory bound."""
+    from looplab.events import traceview
+
+    root = _make_run(tmp_path)
+
+    def whole_file_load_forbidden(_path):
+        raise AssertionError("read_run_trace must not materialize every span")
+
+    monkeypatch.setattr(traceview, "load_spans", whole_file_load_forbidden)
+    out = MachineRunsTools(root).execute(
+        "read_run_trace", {"run_id": "demo", "node_id": 0})
+
+    assert "My plan: call read_experiment" in out
+    assert "read_experiment" in out and "metric=0.3" in out
+
+
 def test_read_run_trace_without_spans_is_graceful(tmp_path):
     root = _make_run(tmp_path)
     (root / "demo" / "spans.jsonl").unlink()

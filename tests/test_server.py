@@ -3559,7 +3559,8 @@ def test_start_seeds_genesis_chat(tmp_path, monkeypatch):
 
 def test_reset_archives_chat_log(tmp_path, monkeypatch):
     """Replay (reset) starts a clean conversation: the prior chat.jsonl is archived (renamed), not
-    carried into the fresh run."""
+    carried into the fresh run. Its trace-append receipts follow the trace source lifecycle too."""
+    from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
     from looplab.serve.routers import control as control_router
     _build_run(tmp_path)                                          # a finished run (reset only runs on those)
     rd = tmp_path / "demo"
@@ -3572,10 +3573,34 @@ def test_reset_archives_chat_log(tmp_path, monkeypatch):
     client = TestClient(make_app(tmp_path))
     client.post("/api/runs/demo/chat-log", json={"role": "user", "content": "hello", "ts": 1.0, "seq": 1})
     assert (rd / "chat.jsonl").exists()
+    journal = rd / SPAN_APPEND_JOURNAL_NAME
+    journal.write_bytes(b'{"derived":"old-generation"}\n')
 
     assert client.post("/api/runs/demo/reset").status_code == 200
     assert not (rd / "chat.jsonl").exists()                       # archived out of the way
     assert any(p.name.startswith("chat.jsonl.reset-") for p in rd.iterdir())  # ...and recoverable
+    assert not journal.exists()
+    assert not list(rd.glob(f"{SPAN_APPEND_JOURNAL_NAME}.reset-*"))  # derived, not v1 receipt state
+
+
+def test_reset_retires_trace_receipts_only_after_the_old_source_is_archived(tmp_path):
+    """Never delete receipts that may already belong to a current/replacement trace source."""
+    from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
+    from looplab.serve.reset_route import _retire_archived_trace_append_journal
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    source = rd / "spans.jsonl"
+    journal = rd / SPAN_APPEND_JOURNAL_NAME
+    source.write_bytes(b'{}\n')
+    journal.write_bytes(b'{"receipt":"current"}\n')
+
+    _retire_archived_trace_append_journal(rd)
+    assert journal.read_bytes() == b'{"receipt":"current"}\n'
+
+    source.unlink()
+    _retire_archived_trace_append_journal(rd)
+    assert not journal.exists()
 
 
 def test_action_router_maps_plan_to_multiple_controls():
@@ -3744,6 +3769,45 @@ def test_node_logs_single_command_uses_eval_log(tmp_path):
     client = TestClient(make_app(tmp_path))
     body = client.get("/api/runs/demo/nodes/0/logs").json()
     assert body["eval"].strip() == "metric: 0.42" and body["stages"] == {}
+    assert body["node_id"] == 0 and body["attempt"] == 0 and body["run_generation"]
+
+
+def test_node_logs_legacy_attempt_rejects_cross_node_alias_and_replacement(
+        tmp_path, monkeypatch):
+    """Legacy attempt-zero compatibility must not make a sibling node directory readable."""
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    nodes = rd / "nodes"
+    sibling = nodes / "node_1"
+    sibling.mkdir(parents=True)
+    (sibling / "eval.log").write_text("PRIVATE-SIBLING-LOG", encoding="utf-8")
+    alias = nodes / "node_0"
+    alias.symlink_to(sibling, target_is_directory=True)
+    client = TestClient(make_app(tmp_path))
+
+    refused = client.get("/api/runs/demo/nodes/0/logs")
+    assert refused.status_code == 404
+    assert "PRIVATE-SIBLING-LOG" not in refused.text
+
+    # A direct child is initially a valid legacy node, but replacing it with the sibling while the
+    # response is assembled changes the captured inode and must fail the after-read lifecycle CAS.
+    alias.unlink()
+    alias.mkdir()
+    (alias / "eval.log").write_text("OWN-LOG", encoding="utf-8")
+    import looplab.serve.routers.runs as runs_router
+
+    def replace_node_dir(_rd):
+        alias.rename(nodes / "node_0.old")
+        sibling.rename(alias)
+        return ()
+
+    monkeypatch.setattr(runs_router, "_operator_stage_names", replace_node_dir)
+    raced = client.get("/api/runs/demo/nodes/0/logs")
+    assert raced.status_code == 409
+    assert raced.json()["detail"]["code"] == "node_attempt_changed"
+    assert "PRIVATE-SIBLING-LOG" not in raced.text
 
 
 def test_node_logs_rejects_manifest_traversal_and_bounds_aggregate_tail(tmp_path, monkeypatch):

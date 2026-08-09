@@ -22,6 +22,7 @@ from looplab.core.config import settings_from_snapshot
 from looplab.core.run_reset import (
     RUN_RESET_OPERATION_ENV, RUN_RESET_OPERATION_RE, RunResetFenceError,
     RunResetStorageError, load_run_reset_marker, publish_run_reset_marker)
+from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
 from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
 from looplab.events.span_index import (
     invalidate as invalidate_span_index, span_index_write_guard)
@@ -61,6 +62,25 @@ def _durable_archive_move(source: Path, destination: Path) -> None:
     if source.parent != destination.parent:
         raise ValueError("Replay archives must remain in the run directory")
     durable_no_replace_rename(source, destination, label="replay archive")
+
+
+def _retire_archived_trace_append_journal(rd: Path) -> None:
+    """Best-effort retirement of receipts for the generation Replay just archived.
+
+    The journal is derived metadata, not a reset artifact: adding it to
+    ``RESET_ARTIFACT_NAMES`` would silently change the v1 durable receipt cardinality/order and make
+    an already-published pending receipt unrecoverable after an upgrade.  Retire it only while the
+    reset owns every writer lock, after the manifest proves the old ``spans.jsonl`` name is absent
+    and before any replacement process may start.  ``unlink`` does not follow a link/FIFO/hard-link
+    alias.  Failure is safe to ignore: the exporter rotates a surviving journal on source-inode
+    mismatch, and readers reject any incomplete transition and rebuild.
+    """
+    if os.path.lexists(rd / "spans.jsonl"):
+        return
+    try:
+        (rd / SPAN_APPEND_JOURNAL_NAME).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 def _receipt_http_error(operation_id: str, exc: BaseException) -> HTTPException:
     return HTTPException(503, {
@@ -835,6 +855,7 @@ def _publish_and_archive(
         rd, receipt_path, receipt, operation_id=operation_id)
     if receipt["phase"] != "archived":
         _pending(receipt, "Replay has not completed its archive phase.")
+    _retire_archived_trace_append_journal(rd)
     invalidate_span_index(rd / "spans.jsonl")
     srv.invalidate_trace_view(rd)
 

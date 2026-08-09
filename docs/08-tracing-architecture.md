@@ -124,8 +124,10 @@ This IS standard OTel practice:
 - **Instrument** with one facade (`Tracer.span`) that, when `opentelemetry-api` is importable,
   opens a genuine OTel span. Code is vendor-neutral.
 - **Configure** at the edge: install the `[otel]` extra and set `OTEL_*` env
-  (`OTEL_EXPORTER_OTLP_ENDPOINT=…`) → the SAME spans flow to Jaeger / Tempo / Honeycomb / any
-  OTLP backend, **no code change**. `OTLP` is the universal protocol; this is its whole point.
+  (`OTEL_TRACES_EXPORTER=otlp` and/or `OTEL_EXPORTER_OTLP(_TRACES)_ENDPOINT=…`) → the SAME spans
+  flow to Jaeger / Tempo / Honeycomb / any OTLP backend, **no code change**. `OTLP` is the universal
+  protocol; this is its whole point. A different `OTEL_TRACES_EXPORTER` is not silently replaced with
+  OTLP, and `OTEL_SDK_DISABLED=true` is an explicit off switch.
 - **No package / no config → no-op** for the bridge, and a default **custom JSONL exporter**
   still writes `spans.jsonl`. So the local-first / zero-dependency default is preserved; OTel is
   purely additive.
@@ -154,7 +156,7 @@ Nested spans with status (OK/ERROR + recorded exception) and attributes:
 ## Consequences
 - Default run dir now also has `spans.jsonl` and `trace.json`; `tree.html` renders the per-node
   span tree, failure reason, eval time, and infeasibility.
-- `pip install LoopLab[otel]` + `OTEL_EXPORTER_OTLP_ENDPOINT` → live traces in any collector.
+- `pip install LoopLab[otel]` + explicit OTLP exporter/endpoint env → live traces in any collector.
 - The React Inspector consumes only bounded HTTP projections derived from events/spans, with no
   engine coupling and with explicit partial/unavailable states. `readmodel.sqlite`, `trace.json`, and
   `tree.html` remain rebuildable derived artifacts rather than an Inspector data dependency.

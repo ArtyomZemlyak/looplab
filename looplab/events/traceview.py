@@ -18,6 +18,10 @@ from typing import Optional
 
 from looplab.core.models import RunState
 from looplab.core.redact import is_secret_key_name, redact_persisted_text
+from looplab.core.trace_files import (
+    TRACE_JSONL_ROW_MAX_BYTES,
+    iter_bounded_trace_jsonl_lines as _iter_bounded_trace_jsonl_lines,
+    open_private_trace_file)
 
 
 _MAX_SPAN_ID_CHARS = 256
@@ -71,14 +75,18 @@ def trace_file_revision(path: str | os.PathLike) -> Optional[str]:
     gigabytes large.
     """
     try:
-        stat = os.stat(path)
+        # The revision is part of the destructive trace-clear confirmation.  It must describe the
+        # run's own regular sidecar, not the target of a symlink/hardlink (and opening a FIFO without
+        # O_NONBLOCK can strand a server worker before clear even begins).
+        with open_private_trace_file(path, open_file=open) as stream:
+            source_stat = os.fstat(stream.fileno())
     except FileNotFoundError:
         return hashlib.sha256(b"looplab:spans:missing:v1").hexdigest()
     except OSError:
         return None
     identity = (
-        int(stat.st_dev), int(stat.st_ino), int(stat.st_ctime_ns),
-        int(stat.st_size), int(stat.st_mtime_ns),
+        int(source_stat.st_dev), int(source_stat.st_ino), int(source_stat.st_ctime_ns),
+        int(source_stat.st_size), int(source_stat.st_mtime_ns),
     )
     return hashlib.sha256(
         json.dumps(identity, separators=(",", ":")).encode("ascii")).hexdigest()
@@ -525,12 +533,14 @@ def _bounded_tail(values, cap: int) -> tuple[list, int]:
     return list(tail), total
 
 
-def _bounded_node_trace_tail(values, node_id, cap: int) -> tuple[list, int]:
+def _bounded_node_trace_tail(values, node_id, cap: int, *,
+                             generation: Optional[int] = None,
+                             _normalized: bool = False) -> tuple[list, int]:
     """Cap a node conversation only after selecting the traces attributed to that node.
 
-    The no-index path receives the entire run, whereas the indexed path already receives only the
-    target node's traces.  Taking the whole-run tail first lets sufficiently busy, unrelated nodes
-    evict an older target node completely and also makes the two paths report different totals.
+    The no-index path receives the entire run, whereas the indexed path already receives only spans
+    effectively attributed to the target node. Taking the whole-run or candidate-trace tail first
+    lets sufficiently busy unrelated/shared-trace rows evict the target and falsifies its total.
     ``build_conversation`` is public but its normal inputs are concrete snapshots (``load_spans`` or
     ``SpanIndex.full_spans_for_node``); retain a bounded one-pass degradation for exotic iterables.
     """
@@ -538,20 +548,34 @@ def _bounded_node_trace_tail(values, node_id, cap: int) -> tuple[list, int]:
         return _bounded_tail(values, cap)
 
     target = str(node_id)
-    matching_trace_ids: set[str] = set()
+    records: list[tuple[dict, dict]] = []
+    by_trace: dict[str, list[dict]] = defaultdict(list)
     for raw in values:
         if not isinstance(raw, dict):
             continue
-        trace_id = _normalized_id(raw.get("trace_id"))
-        raw_node_id = _node_id_of(raw)
-        if trace_id is not None and raw_node_id is not None and str(raw_node_id) == target:
-            matching_trace_ids.add(trace_id)
+        normalized = raw if _normalized else _normalize_span(raw)
+        if normalized is None:
+            continue
+        trace_id = normalized.get("trace_id")
+        records.append((raw, normalized))
+        by_trace[trace_id].append(normalized)
 
-    # Filtering precedes the global cap.  This must stay equivalent to the index's
-    # ``node_tids -> rows -> tail`` path or an unrelated busy node can erase the requested story.
+    trace_meta = {
+        trace_id: (
+            trace_root_node_id(trace_spans, _normalized=True),
+            trace_root_generation(trace_spans, _normalized=True),
+        )
+        for trace_id, trace_spans in by_trace.items()
+    }
+    # Filtering precedes the global cap and exact total. Candidate-by-any-stamped-row is not enough:
+    # one long-lived trace can carry spans for several nodes, and its newest foreign row must not
+    # consume the target node's window. Keep this identical to SpanIndex._rows_for_node.
     matching = (
-        raw for raw in values
-        if isinstance(raw, dict) and _normalized_id(raw.get("trace_id")) in matching_trace_ids
+        raw for raw, normalized in records
+        if (meta := trace_meta.get(normalized.get("trace_id"))) is not None
+        and (generation is None or meta[1] == generation)
+        and (effective := effective_node_id(normalized, meta[0])) is not None
+        and str(effective) == target
     )
     return _bounded_tail(matching, cap)
 
@@ -576,17 +600,75 @@ def _response_projection(*, total_spans: int, visible_spans: int, light: bool = 
 
 
 def load_spans(path: str | os.PathLike) -> list[dict]:
-    """Read spans.jsonl, quarantining complete valid-JSON rows with an invalid span shape."""
-    from looplab.events.eventstore import iter_jsonl
+    """Read the bounded JSONL prefix, quarantining valid objects with an invalid span shape.
+
+    A physical row larger than :data:`TRACE_JSONL_ROW_MAX_BYTES` ends the readable prefix; it is
+    neither materialized nor silently skipped to expose later rows behind an untrusted envelope.
+    """
+    from looplab.events.eventstore import JsonlRecordInvalid, decode_jsonl_line
+
+    def records(stream):
+        for raw in _iter_bounded_trace_jsonl_lines(
+                stream, max_line_bytes=TRACE_JSONL_ROW_MAX_BYTES):
+            try:
+                value = decode_jsonl_line(raw)
+            except JsonlRecordInvalid:
+                break
+            if value is not None:
+                yield value
+
     try:
-        # `iter_jsonl` intentionally treats a missing append-only log as empty, but Path.exists() also
-        # suppresses permission/stat errors. Preflight the trace source so those errors reach the route's
-        # explicit unavailable envelope instead of masquerading as a successful empty projection.
-        with open(path, "rb"):
-            pass
+        # One hardened descriptor is both the readability proof and the bytes.  The former preflight
+        # plus `iter_jsonl(path)` resolved the pathname twice and followed links on both resolutions.
+        with open_private_trace_file(path, open_file=open) as stream:
+            return _normalize_spans(records(stream))
     except FileNotFoundError:
         return []
-    return _normalize_spans(iter_jsonl(path))
+
+
+def load_span_tail(
+        path: str | os.PathLike,
+        cap: int = TRACE_VIEW_SPAN_CAP,
+) -> tuple[list[dict], int]:
+    """Stream a normalized span-log prefix, retaining only its newest ``cap`` admitted rows.
+
+    This is the bounded reader for static/final projections.  It deliberately shares ``iter_jsonl``'s
+    append-log rule: a blank line is consumed, a complete JSON-object row with an invalid span shape is
+    quarantined individually, and a torn, invalid-JSON, or non-object row ends the readable prefix.  The
+    returned count is the exact number of normalized spans admitted in that prefix, including rows older
+    than the retained tail.  A missing sidecar is known-empty; every other open/read error propagates so
+    callers can distinguish unavailable telemetry from an exact zero.
+
+    Peak retained memory is the normalized tail plus one physical JSONL row bounded by
+    :data:`TRACE_JSONL_ROW_MAX_BYTES`. An oversized row ends this readable prefix (and the returned
+    count describes exactly the admitted prefix); it is never skipped to make unproven later bytes
+    appear valid. In particular, finalization must not materialize and hydrate a multi-gigabyte
+    ``spans.jsonl`` — or one multi-gigabyte legacy/corrupt row — merely to have
+    :func:`build_trace_view` discard everything before its bounded response window.
+    """
+    from looplab.events.eventstore import JsonlRecordInvalid, decode_jsonl_line
+
+    settled_cap = max(0, int(cap))
+    tail: deque[dict] = deque(maxlen=settled_cap)
+    total = 0
+    try:
+        with open_private_trace_file(path, open_file=open) as stream:
+            for raw in _iter_bounded_trace_jsonl_lines(
+                    stream, max_line_bytes=TRACE_JSONL_ROW_MAX_BYTES):
+                try:
+                    value = decode_jsonl_line(raw)
+                except JsonlRecordInvalid:
+                    break
+                if value is None:
+                    continue
+                normalized = _normalize_span(value)
+                if normalized is None:
+                    continue
+                total += 1
+                tail.append(normalized)
+    except FileNotFoundError:
+        return [], 0
+    return list(tail), total
 
 
 def _tree(spans: list[dict], *, _normalized: bool = False) -> list[dict]:
@@ -655,6 +737,19 @@ def trace_root_span(spans: list[dict], *, _normalized: bool = False) -> Optional
     # nominating an arbitrary span, and so does this: a caller that cannot name a root must fall
     # back explicitly, not silently read one span's attributes as if they were the trace's.
     return min(roots, key=lambda s: s.get("start", 0.0)) if roots else None
+
+
+def trace_root_generation(spans: list[dict], *, _normalized: bool = False) -> int:
+    """Lifecycle attempt stamped on a trace root; legacy/rootless traces belong to attempt zero.
+
+    Generation is a trace property, not a descendant's incidental retry ``attempt``. Keeping this
+    beside ``trace_root_span`` makes the indexed and fallback conversation readers choose the same
+    root and therefore the same lifecycle even though spans.jsonl is written in close order.
+    """
+    root = trace_root_span(spans, _normalized=_normalized)
+    attributes = root.get("attributes") if root is not None else None
+    value = attributes.get("generation") if isinstance(attributes, dict) else None
+    return value if type(value) is int and value >= 0 else 0
 
 
 def trace_root_node_id(spans: list[dict], *, _normalized: bool = False) -> Optional[int | str]:
@@ -754,7 +849,7 @@ _STRIP_IO_KEYS = ("input", "output", "thinking", "input_carry", "input_from",
                   "model_parameters", "tool_calls")
 
 
-def _strip_span_io(s: dict) -> dict:
+def strip_span_io(s: dict) -> dict:
     """Drop the heavy I/O entirely — the run-level trace (Dock timeline) needs only structure, timing,
     model + token usage, not the prompts/outputs. Keeps the whole-run payload tiny; detail endpoints
     serve a bounded/redacted diagnostic projection for the Inspector. Also drops the delta bookkeeping
@@ -764,6 +859,11 @@ def _strip_span_io(s: dict) -> dict:
     if not isinstance(a, dict) or not any(k in a for k in _STRIP_IO_KEYS):
         return s
     return {**s, "attributes": {k: v for k, v in a.items() if k not in _STRIP_IO_KEYS}}
+
+
+# Back-compatible internal seam: the span index and existing tests live in the same events package,
+# while cross-package callers use the public spelling above instead of growing private-import debt.
+_strip_span_io = strip_span_io
 
 
 # ── linear conversation projection ───────────────────────────────────────────────────────────────
@@ -952,6 +1052,11 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
                 broke = True
                 break
             a = s.get("attributes") or {}
+            # A durable exporter fallback can retain this span's delta identity while omitting its
+            # over-limit input. Once one ancestor declares that loss, every descendant is partial
+            # even though the ancestor row and back-reference are both present and well-formed.
+            if a.get("input_partial") is True:
+                broke = True
             cur = a.get("input")
             if "input_carry" not in a or not isinstance(cur, list):
                 base = cur if isinstance(cur, list) else []
@@ -959,7 +1064,7 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
             frm = a.get("input_from")
             if frm is None:                            # self-contained base: its `input` is the full ctx
                 memo[cur_sid] = list(cur)
-                partial[cur_sid] = False
+                partial[cur_sid] = broke               # an explicit exporter/projection loss survives
                 base = memo[cur_sid]
                 break
             # Coerce carry to a NON-NEGATIVE int: a malformed span (bit-rot on a network mount, or a
@@ -997,7 +1102,9 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
 
 
 def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spans=None,
-                       span_cap: int = TRACE_CONVERSATION_SPAN_CAP) -> dict:
+                       span_cap: int = TRACE_CONVERSATION_SPAN_CAP,
+                       generation: Optional[int] = None,
+                       _normalized: bool = False) -> dict:
     """Per-node linear conversation (companion to `build_trace_view`). One `stage` per trace tagged
     with this node (create_node / evaluate / …), each a de-duplicated thread of turns. Reader of
     files-as-truth; caps every string for the browser, but never re-sends the growing history.
@@ -1006,8 +1113,13 @@ def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spa
     widens the read AND, through `conversation_render_caps`, the stage/turn caps below in step — see
     that function for why moving only one of the three surfaces nothing."""
     stage_cap, turn_cap = conversation_render_caps(span_cap)
-    selected, _observed_total = _bounded_node_trace_tail(spans, node_id, span_cap)
-    spans = _normalize_spans(selected)
+    selected, _observed_total = _bounded_node_trace_tail(
+        spans, node_id, span_cap, generation=generation, _normalized=_normalized)
+    # Both production readers (`load_spans` and SpanIndex's full-offset reads) have already crossed
+    # `_normalize_span`'s security boundary. Re-running its text redaction/entropy scan over as many
+    # as 4096 prompt-heavy rows on every 4 s live poll was pure work (measured seconds at the ceiling).
+    # The default remains fail-closed for public/direct callers; only explicit trusted call sites skip.
+    spans = list(selected) if _normalized else _normalize_spans(selected)
     by_id = {s["span_id"]: s for s in spans}
     by_trace: dict[str, list[dict]] = defaultdict(list)
     for s in spans:

@@ -25,6 +25,7 @@ const conversationPage = (limit, totalStages = 200) => {
     schema: 2,
     run_id: 'demo',
     node_id: '7',
+    attempt: 0,
     stages: Array.from({ length: visibleStages }, (_, index) => ({
       trace_id: `trace-${index}`,
       label: 'inline_repair',
@@ -155,7 +156,7 @@ test('scrolling the conversation sentinel into view fetches a bigger window and 
       // FIRST read: the shared default window, sent explicitly.
       const conversationCalls = () => requests.filter(path => path.includes('/conversation'))
       assert.equal(conversationCalls().length, 1)
-      assert.match(conversationCalls()[0], /\/nodes\/7\/conversation\?limit=512$/)
+      assert.match(conversationCalls()[0], /\/nodes\/7\/conversation\?attempt=0&limit=512$/)
       assert.equal(container.querySelectorAll('.stage-dynamic').length, 64,
         'the default window renders the capped bands')
 
@@ -173,7 +174,7 @@ test('scrolling the conversation sentinel into view fetches a bigger window and 
       await act(async () => { observer.reach() })
       await settle()
       assert.equal(conversationCalls().length, 2, 'reaching the sentinel must issue a real request')
-      assert.match(conversationCalls()[1], /\/conversation\?limit=1024$/)
+      assert.match(conversationCalls()[1], /\/conversation\?attempt=0&limit=1024$/)
       assert.equal(container.querySelectorAll('.stage-dynamic').length, 128,
         'the wider response must actually reach the screen')
 
@@ -186,7 +187,7 @@ test('scrolling the conversation sentinel into view fetches a bigger window and 
       // Scroll, reach: the next rung. This fixture is 200 stages, so the 2048 window returns all of
       // them and the sentinel goes away rather than lingering as an affordance that cannot help.
       await scrollThenReach()
-      assert.match(conversationCalls().at(-1), /\/conversation\?limit=2048$/)
+      assert.match(conversationCalls().at(-1), /\/conversation\?attempt=0&limit=2048$/)
       assert.equal(container.querySelectorAll('.stage-dynamic').length, 200)
       assert.equal(container.querySelectorAll('.trace-reach-zone').length, 0,
         'a complete conversation must stop offering to load more')
@@ -237,7 +238,8 @@ test('at the ceiling the operator gets the COUNT, not another sentinel', async (
         observer.reach()
       })
       await settle()
-      assert.match(conversationCalls().at(-1), new RegExp(`/conversation\\?limit=${expected}$`))
+      assert.match(conversationCalls().at(-1),
+        new RegExp(`/conversation\\?attempt=0&limit=${expected}$`))
     }
 
     // At the ceiling the sentinel is withdrawn — an affordance that cannot do anything is exactly
@@ -259,6 +261,72 @@ test('at the ceiling the operator gets the COUNT, not another sentinel', async (
     })
     await settle()
     assert.equal(conversationCalls().length, before)
+
+    await act(async () => { root.unmount() })
+  } finally {
+    await vite.close()
+    dom.window.close()
+  }
+})
+
+test('lazy span detail sends and validates the run generation before commit', async () => {
+  const dom = installDom()
+  const generation = 'a'.repeat(64)
+  const foreignGeneration = 'b'.repeat(64)
+  const requests = []
+  const outcomes = [
+    { run_generation: foreignGeneration, span_id: 'generation-one', kind: 'generation',
+      attributes: { output: 'foreign detail must never render' }, projection: {} },
+    { run_generation: generation, span_id: 'generation-one', kind: 'generation',
+      attributes: { output: 'current detail rendered' }, projection: {} },
+  ]
+  globalThis.fetch = async url => {
+    requests.push(String(url))
+    const body = outcomes.shift()
+    return { ok: true, status: 200, json: async () => body }
+  }
+
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try {
+    const { NodeTrace } = await vite.ssrLoadModule('/src/Inspector.jsx')
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react-dom/test-utils')
+    const container = dom.window.document.getElementById('root')
+    const root = createRoot(container)
+    const spans = [{
+      span_id: 'generation-one', trace_id: 'trace-one', name: 'chat', kind: 'generation',
+      start: 0, duration_s: 1, status: 'OK', attributes: { model: 'm' }, children: [],
+    }]
+    const settle = async () => {
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+    }
+    await act(async () => {
+      root.render(React.createElement(NodeTrace, {
+        spans, runId: 'demo', expectedGeneration: generation, projection: {},
+      }))
+    })
+    await settle()
+
+    await act(async () => {
+      container.querySelector('.span-row.gen').dispatchEvent(
+        new dom.window.MouseEvent('click', { bubbles: true }))
+    })
+    await settle()
+    assert.match(requests[0], new RegExp(`expected_generation=${generation}`))
+    assert.doesNotMatch(container.textContent, /foreign detail must never render/)
+    assert.match(container.textContent, /Trace detail unavailable/i)
+
+    const retry = [...container.querySelectorAll('button')]
+      .find(node => node.textContent.trim() === 'Retry trace')
+    await act(async () => {
+      retry.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    })
+    await settle()
+    assert.match(container.textContent, /current detail rendered/)
+    assert.doesNotMatch(container.textContent, /Trace detail unavailable/i)
 
     await act(async () => { root.unmount() })
   } finally {
@@ -315,7 +383,7 @@ test('the earlier steps stay reachable without a mouse, and a failed widen keeps
       await act(async () => { reachButton.focus() })
       await settle()
       assert.equal(conversationCalls().length, 2, 'focus must issue the same widen a scroll does')
-      assert.match(conversationCalls()[1], /\/conversation\?limit=1024$/)
+      assert.match(conversationCalls()[1], /\/conversation\?attempt=0&limit=1024$/)
 
       // …and that widen FAILED. Asking for more must never cost the operator what they already had:
       // the 64 bands stay, the surface does not become "unavailable", and the failure is reported
@@ -356,13 +424,188 @@ test('the earlier steps stay reachable without a mouse, and a failed widen keeps
     }
   })
 
-test('the span-tree view pages through /trace, and only once the operator asks', async () => {
+test('a failed live refresh marks a complete last-good conversation stale until recovery', async () => {
   const dom = installDom()
-  const observer = installObserver()
+  installObserver()
+  const callbacks = new Map()
+  let nextTimer = 1
+  const previousSetInterval = globalThis.setInterval
+  const previousClearInterval = globalThis.clearInterval
+  Object.defineProperty(globalThis, 'setInterval', {
+    configurable: true, writable: true,
+    value: callback => { const id = nextTimer++; callbacks.set(id, callback); return id },
+  })
+  Object.defineProperty(globalThis, 'clearInterval', {
+    configurable: true, writable: true, value: id => callbacks.delete(id),
+  })
+  let conversationReads = 0
+  globalThis.fetch = async url => {
+    const path = String(url)
+    if (!path.includes('/conversation')) {
+      return { ok: true, status: 200, json: async () => ({}) }
+    }
+    conversationReads += 1
+    if (conversationReads === 2) {
+      return {
+        ok: false, status: 409, headers: { get: () => null },
+        json: async () => ({ detail: { code: 'run_reset_in_progress',
+          message: 'run is being replayed' } }),
+      }
+    }
+    return { ok: true, status: 200, json: async () => conversationPage(512, 1) }
+  }
+
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try {
+    const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react-dom/test-utils')
+    const container = dom.window.document.getElementById('root')
+    const root = createRoot(container)
+    const settle = async () => {
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+    }
+
+    await act(async () => {
+      root.render(React.createElement(Trace, traceProps({ working: true })))
+    })
+    await settle()
+    assert.equal(container.querySelectorAll('.stage-dynamic').length, 1)
+    assert.equal(container.querySelectorAll('.conversation-stale').length, 0)
+
+    await act(async () => { for (const callback of [...callbacks.values()]) callback() })
+    await settle()
+    assert.equal(container.querySelectorAll('.stage-dynamic').length, 1,
+      'a failed refresh retains the last confirmed evidence')
+    assert.match(container.querySelector('.conversation-stale')?.textContent || '',
+      /showing confirmed trace/i)
+    assert.equal(container.querySelectorAll('.trace-reach-failed').length, 0,
+      'a refresh failure must not masquerade as a failed request for earlier steps')
+
+    await act(async () => { for (const callback of [...callbacks.values()]) callback() })
+    await settle()
+    assert.equal(container.querySelectorAll('.conversation-stale').length, 0,
+      'a correctly scoped success clears the stale warning')
+
+    await act(async () => { root.unmount() })
+  } finally {
+    await vite.close()
+    Object.defineProperty(globalThis, 'setInterval', {
+      configurable: true, writable: true, value: previousSetInterval,
+    })
+    Object.defineProperty(globalThis, 'clearInterval', {
+      configurable: true, writable: true, value: previousClearInterval,
+    })
+    dom.window.close()
+  }
+})
+
+test('a conversation response for another attempt is rejected before it reaches the trace UI',
+  async () => {
+    const dom = installDom()
+    installObserver()
+    const requests = []
+    globalThis.fetch = async (url) => {
+      const path = String(url)
+      requests.push(path)
+      const limit = Number(new URL(path, 'http://localhost').searchParams.get('limit') || 0)
+      const body = path.includes('/conversation')
+        ? { ...conversationPage(limit), attempt: 1 }
+        : {}
+      return { ok: true, status: 200, json: async () => body }
+    }
+
+    const vite = await createServer({
+      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+      server: { middlewareMode: true },
+    })
+    try {
+      const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
+      const { createRoot } = await import('react-dom/client')
+      const { act } = await import('react-dom/test-utils')
+      const container = dom.window.document.getElementById('root')
+      const root = createRoot(container)
+
+      await act(async () => { root.render(React.createElement(Trace, traceProps())) })
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+
+      const conversationCalls = requests.filter(path => path.includes('/conversation'))
+      assert.equal(conversationCalls.length, 1)
+      assert.match(conversationCalls[0], /\/conversation\?attempt=0&limit=512$/,
+        'the request must carry the lifecycle rendered by the Inspector')
+      assert.equal(container.querySelectorAll('.stage-dynamic').length, 0,
+        'another attempt\'s fulfilled payload must not settle as this conversation')
+      assert.ok(container.querySelector('.resource-error') != null,
+        'a first observation with the wrong identity is unavailable, not a successful empty trace')
+      assert.doesNotMatch(container.textContent, /turn 0/)
+
+      await act(async () => { root.unmount() })
+    } finally {
+      await vite.close()
+      dom.window.close()
+    }
+  })
+
+test('a conversation response for another run generation is rejected before commit', async () => {
+  const dom = installDom()
+  installObserver()
+  const expectedGeneration = 'a'.repeat(64)
   const requests = []
   globalThis.fetch = async (url) => {
     const path = String(url)
     requests.push(path)
+    const limit = Number(new URL(path, 'http://localhost').searchParams.get('limit') || 0)
+    const body = path.includes('/conversation')
+      ? { ...conversationPage(limit), run_generation: 'b'.repeat(64) }
+      : {}
+    return { ok: true, status: 200, json: async () => body }
+  }
+
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try {
+    const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react-dom/test-utils')
+    const container = dom.window.document.getElementById('root')
+    const root = createRoot(container)
+
+    await act(async () => {
+      root.render(React.createElement(Trace, traceProps({ expectedGeneration })))
+    })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+
+    const call = requests.find(path => path.includes('/conversation'))
+    assert.match(call, new RegExp(
+      `/conversation\\?attempt=0&limit=512&expected_generation=${expectedGeneration}$`))
+    assert.equal(container.querySelectorAll('.stage-dynamic').length, 0)
+    assert.ok(container.querySelector('.resource-error') != null,
+      'a foreign-generation 200 is unavailable, not a successful empty conversation')
+    assert.doesNotMatch(container.textContent, /turn 0/)
+
+    await act(async () => { root.unmount() })
+  } finally {
+    await vite.close()
+    dom.window.close()
+  }
+})
+
+test('the span-tree view pages through /trace, and only once the operator asks', async () => {
+  const dom = installDom()
+  const observer = installObserver()
+  const requests = []
+  let traceReads = 0
+  globalThis.fetch = async (url) => {
+    const path = String(url)
+    requests.push(path)
+    if (/\/nodes\/7\/trace\?/.test(path) && ++traceReads === 2) {
+      return { ok: false, status: 503, json: async () => ({ detail: 'offline' }) }
+    }
     const limit = Number(new URL(path, 'http://localhost').searchParams.get('limit') || 512)
     const visible = Math.min(2000, limit)
     const body = path.includes('/trace')
@@ -402,13 +645,14 @@ test('the span-tree view pages through /trace, and only once the operator asks',
     }
     const container = dom.window.document.getElementById('root')
     const root = createRoot(container)
+    const props = traceProps({
+      n: { id: 7, attempt: 0, status: 'done', trace: detailTrace },
+    })
     const settle = async () => {
       await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
     }
     await act(async () => {
-      root.render(React.createElement(Trace, traceProps({
-        n: { id: 7, attempt: 0, status: 'done', trace: detailTrace },
-      })))
+      root.render(React.createElement(Trace, props))
     })
     await settle()
 
@@ -436,6 +680,17 @@ test('the span-tree view pages through /trace, and only once the operator asks',
     // so the sentinel is still offered rather than the surface declaring itself finished.
     assert.ok(container.querySelector('.trace-reach-zone') != null)
     assert.equal(container.querySelectorAll('.notice.compact').length, 0)
+
+    // A live refresh of the SAME 1024 window fails. The proven wider rows stay on screen and the
+    // operator is told they are stale; falling back to detailTrace would leave only one row.
+    await act(async () => {
+      root.render(React.createElement(Trace, { ...props, working: true }))
+    })
+    await settle()
+    assert.equal(traceCalls().length, 2)
+    assert.equal(container.querySelectorAll('.span-row').length, 2)
+    assert.match(container.querySelector('[role="alert"]')?.textContent || '',
+      /Span-tree refresh failed; showing confirmed spans/i)
 
     await act(async () => { root.unmount() })
   } finally {

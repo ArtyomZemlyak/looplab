@@ -710,7 +710,7 @@ test('RunView refreshes comment feeds only from comments_revision, never global 
   // only the SUCCESS branch, so a stale FAILURE could still write an error over a newer request's
   // state. Pin the fence where it lives now, and pin that it covers both outcomes.
   assert.match(inspector,
-    /if \(valid && detailMatchesGeneration\(value\) && detailMatchesAttempt\(value\)\)/,
+    /if \(valid && traceGenerationMatches\(value, expectedGeneration\)[\s\S]*?&& detailMatchesAttempt\(value\)\)/,
     'a reset racing the full-detail response must not relabel another attempt as current')
   assert.equal((scopedResource.match(/if \(flight\.current !== request\) return/g) || []).length, 2,
     'both the success and the failure path must drop a settlement the current request no longer owns')

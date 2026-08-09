@@ -244,6 +244,54 @@ def test_error_finished_pending_finalize_retry_reruns_wrap_up(tmp_path):
     assert any(event.type == "budget" for event in events)  # finalization side effects really reran
 
 
+def test_finalize_builds_static_trace_from_only_the_bounded_tail(monkeypatch, tmp_path):
+    """Finalization carries the tail loader's exact denominator through without reloading all spans."""
+    from looplab.engine import finalize as finalize_module
+
+    rd = tmp_path / "bounded-final-trace"
+    eng = _toy_engine(rd)
+    store = eng.store
+    store.append("run_started", {"run_id": rd.name, "task_id": eng.task.id,
+                                 "goal": eng.task.goal, "direction": eng.task.direction})
+    store.append("run_abort", {"reason": "finalized"})
+    store.append("run_finished", {"reason": "aborted"})
+    monkeypatch.setattr(eng, "_store_case", lambda _state: None)
+    monkeypatch.setattr(eng, "_write_reflection_note", lambda _state: None)
+
+    retained = [{"span_id": "tail-only"}]
+    calls = {}
+
+    def fake_tail(path, cap):
+        calls["load"] = (path, cap)
+        return retained, 12_345
+
+    def fake_hydrate(spans, *, _normalized=False):
+        calls["hydrate"] = (spans, _normalized)
+        return [{"span_id": "hydrated-tail"}]
+
+    def fake_build(state, spans, **kwargs):
+        calls["build"] = (state, spans, kwargs)
+        return {"schema": 2, "projection": {"total_spans": kwargs["total_spans"]}}
+
+    monkeypatch.setattr(finalize_module, "load_span_tail", fake_tail)
+    monkeypatch.setattr(finalize_module, "hydrate_inputs", fake_hydrate)
+    monkeypatch.setattr(finalize_module, "build_trace_view", fake_build)
+
+    state = finalize_module.finalize_run(eng, entry_finished=False, start_time=0.0)
+
+    assert state.finished
+    assert calls["load"] == (rd / "spans.jsonl", finalize_module.TRACE_VIEW_SPAN_CAP)
+    assert calls["hydrate"] == (retained, True)
+    built_state, built_spans, build_kwargs = calls["build"]
+    assert built_state.run_id == rd.name
+    assert built_spans == [{"span_id": "hydrated-tail"}]
+    assert build_kwargs == {
+        "total_spans": 12_345,
+        "span_cap": finalize_module.TRACE_VIEW_SPAN_CAP,
+    }
+    assert (rd / "trace.json").read_bytes()
+
+
 def test_begun_only_finalize_recovers_exact_terminal_without_reopening_setup(monkeypatch, tmp_path):
     """A kill between begun/finished resumes the same terminal scope, never setup or search."""
     import anyio

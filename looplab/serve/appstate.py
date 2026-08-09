@@ -15,6 +15,7 @@ TIME: the test suite (and any operator tooling) monkeypatches `looplab.server.ma
 the flat alias + this late binding keep that single patch point working for every router."""
 from __future__ import annotations
 
+import os
 import stat
 import threading
 from pathlib import Path
@@ -24,6 +25,7 @@ from fastapi import HTTPException
 
 from looplab.core.atomicio import file_identity
 from looplab.core.models import Event
+from looplab.core.trace_files import open_private_trace_file
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import iter_event_jsonl
 from looplab.events.replay import fold
@@ -430,16 +432,14 @@ class AppState:
         # The first durable event is the run-generation identity.  Reading only that first JSONL line
         # is cheap and adds a semantic reset fence even on filesystems with weak/reused inode metadata.
         generation = run_generation_token(iter_event_jsonl(events_path))
-        span_sig = _sig(sp, unavailable_raises=True)
-        # a derived response cache is never authority after source readability changes.
-        # A stat-only
-        # cache hit must not turn a permission loss into exact cached truth. Probe the
-        # source before returning the derived view, just as get_index does for its own warm cache.
-        # Missing tracing remains a known-empty source; disappearance after successful stat is an
-        # availability race and therefore propagates to the route's unavailable envelope.
-        if span_sig is not None:
-            with open(sp, "rb"):
-                pass
+        # One no-follow/nonblocking descriptor supplies both the cache signature and readability
+        # proof.  Path.stat()+plain open followed links, accepted hard-link aliases, and could block
+        # forever on a FIFO before the hardened SpanIndex reader got a chance to reject it.
+        try:
+            with open_private_trace_file(sp, open_file=open) as source:
+                span_sig = file_identity(os.fstat(source.fileno()))
+        except FileNotFoundError:
+            span_sig = None
         sig = (span_sig, _sig(events_path), generation)
         with self._trace_view_lock:
             hit = self._trace_view_cache.get(key)

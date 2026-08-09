@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -106,12 +109,27 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _filter_bytes(directory: Path, source: bytes, node_ids: set[int | str]) -> tuple[bytes, dict]:
+    """Test adapter around the production disk-backed streaming filter."""
+    path = directory / ".trace-clear-filter-source.jsonl"
+    path.write_bytes(source)
+    prepared = tc._prepare_filtered_trace_snapshot(path, node_ids)
+    try:
+        result = (prepared.temporary.read_bytes()
+                  if prepared.temporary is not None else path.read_bytes())
+        assert hashlib.sha256(result).hexdigest() == prepared.result_digest
+        return result, prepared.result
+    finally:
+        prepared.cleanup()
+        path.unlink(missing_ok=True)
+
+
 def _pending(srv: _StubSrv, rd: Path, *, nid: int = 0, source: str = SPANS,
              result: str | None = None, counts: dict | None = None,
              operation: str = "tc_" + "1" * 32, status: str = "pending") -> tuple[Path, dict]:
     """Write-ahead record for a clear that a previous process never finished."""
     if result is None:
-        result_bytes, computed = tc._filtered_trace_snapshot(source.encode("utf-8"), nid)
+        result_bytes, computed = _filter_bytes(rd, source.encode("utf-8"), {nid})
         result = result_bytes.decode("utf-8")
         counts = counts if counts is not None else computed
     receipt = {
@@ -142,7 +160,7 @@ def _detail(exc_info) -> dict:
 # --------------------------------------------------------------------------- the row filter
 
 def test_filter_removes_only_the_named_node_and_preserves_every_other_byte(tmp_path):
-    result, counts = tc._filtered_trace_snapshot(SPANS.encode("utf-8"), 0)
+    result, counts = _filter_bytes(tmp_path, SPANS.encode("utf-8"), {0})
     assert counts == {"removed": 1, "kept": 2}
     assert result.decode("utf-8") == (
         '{"span_id": "b", "attributes": {"node_id": 1}}\n'
@@ -164,7 +182,7 @@ def test_filter_keeps_malformed_blank_and_torn_rows_byte_for_byte(tmp_path):
         '{"span_id": "b", "attributes": {"node_id": 0}}\n'
         '{"span_id": "torn", "attributes": {"node_id": 0}'
     )
-    result, counts = tc._filtered_trace_snapshot(source.encode("utf-8"), 0)
+    result, counts = _filter_bytes(tmp_path, source.encode("utf-8"), {0})
     assert counts == {"removed": 2, "kept": 0}
     assert result.decode("utf-8") == (
         '\n'
@@ -176,16 +194,184 @@ def test_filter_keeps_malformed_blank_and_torn_rows_byte_for_byte(tmp_path):
 
 def test_filter_matches_node_id_as_text_so_a_string_row_is_not_orphaned(tmp_path):
     source = '{"span_id": "a", "attributes": {"node_id": "7"}}\n'
-    result, counts = tc._filtered_trace_snapshot(source.encode("utf-8"), 7)
+    result, counts = _filter_bytes(tmp_path, source.encode("utf-8"), {7})
     assert counts == {"removed": 1, "kept": 0} and result == b""
+
+
+def test_filter_accepts_a_node_set_for_reusable_snapshot_purge(tmp_path):
+    result, counts = _filter_bytes(tmp_path, SPANS.encode("utf-8"), {0, "1"})
+    assert counts == {"removed": 2, "kept": 1}
+    assert result == b'{"span_id": "c", "attributes": {}}\n'
+
+
+def test_filter_removes_unstamped_children_of_a_legacy_node_trace(tmp_path):
+    """Clear follows the same root fallback as the UI, so captured child I/O cannot survive it."""
+    source = (
+        '{"trace_id":"trace-a","span_id":"child","parent_id":"root",'
+        '"name":"generation","kind":"generation","start":2,'
+        '"attributes":{"input":[{"role":"user","content":"private"}]}}\n'
+        '{"trace_id":"trace-b","span_id":"other","parent_id":null,'
+        '"name":"generation","kind":"generation","start":1,'
+        '"attributes":{"node_id":1,"output":"keep"}}\n'
+        '{"trace_id":"trace-a","span_id":"root","parent_id":null,'
+        '"name":"create_node","kind":"operation","start":1,'
+        '"attributes":{"node_id":0}}\n'
+    )
+
+    result, counts = _filter_bytes(tmp_path, source.encode("utf-8"), {0})
+
+    assert counts == {"removed": 2, "kept": 1}
+    assert result.decode("utf-8") == (
+        '{"trace_id":"trace-b","span_id":"other","parent_id":null,'
+        '"name":"generation","kind":"generation","start":1,'
+        '"attributes":{"node_id":1,"output":"keep"}}\n'
+    )
+
+
+def test_prepare_replace_and_readback_stay_streamed_across_chunk_boundaries(
+        tmp_path, monkeypatch):
+    source = (
+        b'{"span_id":"a","attributes":{"node_id":0},"payload":"secret"}\n'
+        b'{"span_id":"b","attributes":{"node_id":1},"payload":"keep"}\n'
+        b'{"span_id":"torn","attributes":{"node_id":0}'
+    )
+    path = tmp_path / "spans.jsonl"
+    path.write_bytes(source)
+    monkeypatch.setattr(tc, "_TRACE_CLEAR_STREAM_CHUNK", 7)
+
+    def _whole_file_read_forbidden(self):
+        raise AssertionError("the streaming clear must not call Path.read_bytes")
+
+    monkeypatch.setattr(Path, "read_bytes", _whole_file_read_forbidden)
+    prepared = tc._prepare_filtered_trace_snapshot(path, {0})
+    expected = (
+        b'{"span_id":"b","attributes":{"node_id":1},"payload":"keep"}\n'
+        b'{"span_id":"torn","attributes":{"node_id":0}'
+    )
+    try:
+        assert prepared.result == {"removed": 1, "kept": 1}
+        assert prepared.result_size == len(expected)
+        assert prepared.result_digest == hashlib.sha256(expected).hexdigest()
+        tc._strict_replace_prepared_trace(prepared, path)
+        assert tc._trace_digest_snapshot(path).digest == hashlib.sha256(expected).hexdigest()
+        assert path.read_text(encoding="utf-8") == expected.decode("utf-8")
+    finally:
+        prepared.cleanup()
+
+
+def test_filter_refuses_an_oversized_physical_row_before_staging(tmp_path, monkeypatch):
+    """A destructive filter cannot rebuild truth behind a row trace readers refuse to admit."""
+    path = tmp_path / "spans.jsonl"
+    before = b'{"span_id":"a","attributes":{"node_id":0}}\n'
+    hidden = b'{"span_id":"b","attributes":{"node_id":1}}\n'
+    ceiling = max(len(before), len(hidden)) + 8
+    oversized = (
+        b'{"span_id":"too-large","attributes":{"node_id":0},"payload":"'
+        + b"x" * (ceiling * 5) + b'"}\n'
+    )
+    original = before + oversized + hidden
+    path.write_bytes(original)
+    monkeypatch.setattr(tc, "TRACE_JSONL_ROW_MAX_BYTES", ceiling)
+    monkeypatch.setattr(tc, "_TRACE_CLEAR_STREAM_CHUNK", 17)
+
+    with pytest.raises(HTTPException) as exc:
+        tc._prepare_filtered_trace_snapshot(path, {0})
+
+    assert exc.value.status_code == 409
+    assert _detail(exc)["code"] == "trace_row_too_large"
+    assert path.read_bytes() == original
+    assert list(tmp_path.glob(".spans.jsonl.clear.*.tmp")) == []
+
+
+def test_filter_caps_root_attribution_metadata_before_staging(tmp_path, monkeypatch):
+    """Tiny valid rows are payload-bounded yet could otherwise grow the in-memory graph forever."""
+    path = tmp_path / "spans.jsonl"
+    rows = [
+        json.dumps({
+            "span_id": f"s{index}", "trace_id": "t", "parent_id": None,
+            "attributes": {"node_id": index},
+        }, separators=(",", ":")).encode("utf-8") + b"\n"
+        for index in range(3)
+    ]
+    original = b"".join(rows)
+    path.write_bytes(original)
+    monkeypatch.setattr(tc, "_TRACE_CLEAR_METADATA_ROW_MAX", 2)
+    monkeypatch.setattr(tc, "_TRACE_CLEAR_STREAM_CHUNK", 11)
+
+    with pytest.raises(HTTPException) as exc:
+        tc._prepare_filtered_trace_snapshot(path, {0})
+
+    assert exc.value.status_code == 409
+    assert _detail(exc)["code"] == "trace_metadata_too_large"
+    assert path.read_bytes() == original
+    assert list(tmp_path.glob(".spans.jsonl.clear.*.tmp")) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="resource.getrusage is not available on Windows")
+def test_streaming_clear_peak_rss_is_bounded_below_the_source_payload(tmp_path):
+    """Source, filtered result and read-back must never coexist as in-memory byte strings."""
+    script = r'''
+import gc
+import json
+import resource
+import sys
+from pathlib import Path
+from looplab.serve import trace_clear as tc
+
+path = Path(sys.argv[1])
+payload = "x" * (512 * 1024)
+target = json.dumps(
+    {"span_id": "a", "attributes": {"node_id": 0}, "payload": payload},
+    separators=(",", ":"),
+).encode() + b"\n"
+keep = json.dumps(
+    {"span_id": "b", "attributes": {"node_id": 1}, "payload": payload},
+    separators=(",", ":"),
+).encode() + b"\n"
+with path.open("wb") as stream:
+    for _ in range(48):
+        stream.write(target)
+        stream.write(keep)
+source_size = path.stat().st_size
+del payload, target, keep
+gc.collect()
+before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+prepared = tc._prepare_filtered_trace_snapshot(path, {0})
+try:
+    result_size = prepared.result_size
+    result_digest = prepared.result_digest
+    tc._strict_replace_prepared_trace(prepared, path)
+    readback = tc._trace_digest_snapshot(path)
+    assert readback.digest == result_digest
+    assert readback.size == result_size
+finally:
+    prepared.cleanup()
+after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+unit = 1 if sys.platform == "darwin" else 1024
+print(json.dumps({
+    "source": source_size,
+    "result": result_size,
+    "peak_delta_bytes": max(0, after - before) * unit,
+}))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / "spans.jsonl")],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=120)
+    assert completed.returncode == 0, completed.stderr
+    measured = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert measured["source"] > 48 * 1024 * 1024
+    assert 23 * 1024 * 1024 < measured["result"] < 25 * 1024 * 1024
+    # The former read_bytes/split/join path retained well over one source-sized allocation.  Leave
+    # generous allocator/platform headroom while keeping the fence below even the source alone.
+    assert measured["peak_delta_bytes"] < 32 * 1024 * 1024
 
 
 # --------------------------------------------------------------------------- trace snapshots
 
 def test_snapshot_of_a_missing_trace_is_a_known_empty_not_a_failure(tmp_path):
     _srv, rd = _run(tmp_path, spans=None)
-    exists, digest, data = tc._trace_content_snapshot(rd / "spans.jsonl")
-    assert exists is False and data == b"" and digest == _digest("")
+    snapshot = tc._trace_digest_snapshot(rd / "spans.jsonl")
+    assert snapshot.exists is False and snapshot.size == 0 and snapshot.digest == _digest("")
 
 
 def test_snapshot_refuses_a_symlinked_trace(tmp_path):
@@ -197,7 +383,7 @@ def test_snapshot_refuses_a_symlinked_trace(tmp_path):
     (rd / "spans.jsonl").unlink()
     (rd / "spans.jsonl").symlink_to(target)
     with pytest.raises(HTTPException) as exc:
-        tc._trace_content_snapshot(rd / "spans.jsonl")
+        tc._trace_digest_snapshot(rd / "spans.jsonl")
     assert exc.value.status_code == 409 and _detail(exc)["code"] == "trace_path_invalid"
 
 
@@ -240,8 +426,34 @@ def test_a_directory_or_symlink_in_the_receipt_namespace_is_409(tmp_path):
     target.write_text("{}", encoding="utf-8")
     link.symlink_to(target)
     with pytest.raises(HTTPException) as exc:
-        tc._trace_clear_regular_receipt(link)
+        tc._load_trace_clear_receipt(link)
     assert _detail(exc)["code"] == "trace_clear_receipt_path_invalid"
+
+
+def test_a_hardlinked_receipt_is_rejected_without_reading_its_alias(tmp_path):
+    srv, rd = _run(tmp_path)
+    path = tc._trace_clear_receipt_path(srv, rd, "tc_" + "2" * 32)
+    target = rd / "outside-receipt.json"
+    target.write_text("{}", encoding="utf-8")
+    try:
+        os.link(target, path)
+    except (AttributeError, NotImplementedError, OSError) as exc:
+        pytest.skip(f"hard links unavailable: {exc}")
+    with pytest.raises(HTTPException) as exc:
+        tc._load_trace_clear_receipt(path)
+    assert exc.value.status_code == 409
+    assert _detail(exc)["code"] == "trace_clear_receipt_path_invalid"
+    assert target.read_text(encoding="utf-8") == "{}"
+
+
+def test_an_oversized_receipt_fails_closed_before_json_materialization(tmp_path):
+    srv, rd = _run(tmp_path)
+    path = tc._trace_clear_receipt_path(srv, rd, "tc_" + "3" * 32)
+    path.write_bytes(b"{" + b"x" * tc._TRACE_CLEAR_RECEIPT_MAX_BYTES + b"}")
+    with pytest.raises(HTTPException) as exc:
+        tc._load_trace_clear_receipt(path)
+    assert exc.value.status_code == 503
+    assert _detail(exc)["code"] == "trace_clear_receipt_unavailable"
 
 
 def test_a_receipt_that_cannot_be_re_emitted_is_a_publication_failure(tmp_path):
@@ -388,15 +600,17 @@ def test_an_unconfirmable_postcondition_keeps_the_operation_pending(tmp_path, mo
     receipt STAYS pending — a same-id retry then compares hashes instead of deleting again."""
     srv, rd = _run(tmp_path)
     path, receipt = _pending(srv, rd)
-    real = tc._trace_content_snapshot
+    real = tc._trace_digest_snapshot
     reads: list[int] = []
 
     def _lying_read_back(target: Path):
         reads.append(1)
-        # The pre-write snapshot is honest; only the confirmation read comes back wrong.
-        return real(target) if len(reads) == 1 else (True, "f" * 64, b"")
+        # Initial and pre-replace snapshots are honest; only confirmation comes back wrong.
+        if len(reads) < 3:
+            return real(target)
+        return tc._TraceDigestSnapshot(True, "f" * 64, 0)
 
-    monkeypatch.setattr(tc, "_trace_content_snapshot", _lying_read_back)
+    monkeypatch.setattr(tc, "_trace_digest_snapshot", _lying_read_back)
     with pytest.raises(HTTPException) as exc:
         tc._apply_prepared_trace_clear(srv, rd, rd / "spans.jsonl", path, receipt)
     assert exc.value.status_code == 503
@@ -404,21 +618,49 @@ def test_an_unconfirmable_postcondition_keeps_the_operation_pending(tmp_path, mo
     assert json.loads(path.read_text(encoding="utf-8"))["status"] == "pending"
 
 
+def test_parent_sync_failure_after_visible_replace_recovers_from_the_pending_wal(
+        tmp_path, monkeypatch):
+    srv, rd = _run(tmp_path)
+    path, receipt = _pending(srv, rd)
+    expected, _counts = _filter_bytes(rd, SPANS.encode("utf-8"), {0})
+
+    def _failed_parent_sync(_target):
+        raise OSError("simulated directory fsync failure after rename")
+
+    real_parent_sync = tc.strict_fsync_parent
+    monkeypatch.setattr(tc, "strict_fsync_parent", _failed_parent_sync)
+    with pytest.raises(HTTPException) as exc:
+        tc._apply_prepared_trace_clear(srv, rd, rd / "spans.jsonl", path, receipt)
+    assert _detail(exc)["code"] == "trace_clear_outcome_unknown"
+    assert (rd / "spans.jsonl").read_bytes() == expected
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "pending"
+
+    monkeypatch.setattr(tc, "strict_fsync_parent", real_parent_sync)
+    answer = tc._apply_prepared_trace_clear(
+        srv, rd, rd / "spans.jsonl", path, receipt)
+    assert answer == {"ok": True, "status": "succeeded", "operation_id": receipt["id"],
+                      "removed": 1, "kept": 2}
+    assert (rd / "spans.jsonl").read_bytes() == expected
+
+
 def test_completion_retires_the_stale_span_index_only_when_the_trace_changed(tmp_path):
     """`spans.index.jsonl` stores byte offsets into spans.jsonl, so it must die with any rewrite —
     and must NOT be dropped for a clear that removed nothing."""
     srv, rd = _run(tmp_path)
     index = rd / "spans.index.jsonl"
+    journal = rd / ".spans-append.jsonl"
 
     index.write_text("stale\n", encoding="utf-8")
+    journal.write_text("stale\n", encoding="utf-8")
     path, receipt = _pending(srv, rd)
     tc._complete_trace_clear(srv, rd, rd / "spans.jsonl", path, receipt)
-    assert not index.exists() and srv.invalidated == [rd]
+    assert not index.exists() and not journal.exists() and srv.invalidated == [rd]
 
     index.write_text("still here\n", encoding="utf-8")
+    journal.write_text("still here\n", encoding="utf-8")
     untouched = {**receipt, "result": {"removed": 0, "kept": 3}}
     tc._complete_trace_clear(srv, rd, rd / "spans.jsonl", path, untouched)
-    assert index.exists() and srv.invalidated == [rd]
+    assert index.exists() and journal.exists() and srv.invalidated == [rd]
 
 
 def test_a_sibling_pending_receipt_for_the_same_lifecycle_is_found_and_directories_are_skipped(
@@ -497,6 +739,46 @@ def test_a_fresh_clear_writes_the_record_before_the_replacement_and_settles_succ
     receipt = json.loads(
         tc._trace_clear_receipt_path(srv, rd, "tc_" + "5" * 32).read_text(encoding="utf-8"))
     assert receipt["status"] == "succeeded" and receipt["source_digest"] == _digest(SPANS)
+
+
+def test_a_fresh_clear_holds_required_span_index_ownership_through_replace_and_invalidate(
+        tmp_path, monkeypatch):
+    srv, rd = _run(tmp_path)
+    real_guard = tc.span_index_write_guard
+    real_replace = tc._strict_replace_prepared_trace
+    real_invalidate = tc._invalidate_trace_clear
+    active = False
+    calls = []
+
+    @contextmanager
+    def _tracked_guard(path, *, required=False):
+        nonlocal active
+        calls.append((Path(path), required))
+        with real_guard(path, required=required):
+            active = True
+            try:
+                yield
+            finally:
+                active = False
+
+    def _tracked_replace(prepared, destination):
+        assert active
+        return real_replace(prepared, destination)
+
+    def _tracked_invalidate(server, run_dir, spans_path):
+        assert active
+        return real_invalidate(server, run_dir, spans_path)
+
+    monkeypatch.setattr(tc, "span_index_write_guard", _tracked_guard)
+    monkeypatch.setattr(tc, "_strict_replace_prepared_trace", _tracked_replace)
+    monkeypatch.setattr(tc, "_invalidate_trace_clear", _tracked_invalidate)
+    tc.durable_clear_node_trace(srv, "demo", 0, {
+        "expected_generation": srv.commands.generation,
+        "expected_trace_revision": tc.trace_file_revision(rd / "spans.jsonl"),
+        "node_generation": 0, "operation_id": "tc_" + "d" * 32,
+    }, known_engine_liveness=lambda rd_arg, operation: False)
+
+    assert calls == [(rd / "spans.jsonl", True)]
 
 
 def test_a_stale_run_generation_refuses_before_the_writer_lock(tmp_path):

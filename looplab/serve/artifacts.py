@@ -33,7 +33,8 @@ _LOG_TAIL_MAX = 5_000_000      # hard cap on the client-controlled `tail` byte c
 
 
 _NODE_WORKDIR_RE = re.compile(r"^node_(\d+)$")
-_TRACE_INTERNAL_BASES = ("spans.jsonl", "spans.index.jsonl", "trace.json", "tree.html")
+_TRACE_INTERNAL_BASES = (
+    ".spans-append.jsonl", "spans.jsonl", "spans.index.jsonl", "trace.json", "tree.html")
 ArtifactExposure = Callable[[Path, Optional[str], Optional[os.stat_result]], bool]
 ArtifactListingTransform = Callable[[Path, dict], Optional[dict]]
 

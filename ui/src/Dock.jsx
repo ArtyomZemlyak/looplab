@@ -4,7 +4,8 @@ import { get, fmt, workingId, getRunCommand, retryRunCommand, runCommand,
   commandActionForEvent, commandRecordMatchesAction, commandEventForAction,
   loadRunTransport, saveRunTransport, clearRunTransport,
   clearRunCommandLock, loadRunCommandLock, saveRunCommandLock, subscribeRunCommandLock,
-  COMMAND_SUCCEEDED, COMMAND_FAILED, storageGet, storageSet, runApiPath, runNodeApiPath } from './util.js'
+  COMMAND_SUCCEEDED, COMMAND_FAILED, storageGet, storageSet, runApiPath, runNodeApiPath,
+  normalizeRunGeneration, traceDeadlineGet, traceGenerationMatches } from './util.js'
 import { useCommandStatusPoll, useNodeSpanWindow, usePoll } from './hooks.js'
 import {
   commandIntentPreserved, commandLockIdentity, commandLockMismatch, commandStorageUnavailableRecord,
@@ -97,10 +98,10 @@ function collectThinking(trace, nid) {
 // reading a dead "projection is partial" notice. TRACE_LIMIT_MAX matches the /trace/tail server cap.
 const TRACE_LIMIT_DEFAULT = 40
 const TRACE_LIMIT_MAX = 400
-
-function LiveTrace({ runId, generation, active }) {
-  const scope = `${runId}:${generation || 'pending'}`
-  const [tailState, setTailState] = useState({ scope, items: [], projection: {}, loaded: false })
+export function LiveTrace({ runId, generation, active }) {
+  const expectedGeneration = normalizeRunGeneration(generation)
+  const scope = expectedGeneration || runId
+  const [tailState, setTailState] = useState({ scope, items: [], projection: null })
   const [open, setOpen] = useState(false)
   const [limit, setLimit] = useState(TRACE_LIMIT_DEFAULT)
   const bodyRef = useRef(null)
@@ -112,16 +113,29 @@ function LiveTrace({ runId, generation, active }) {
   useEffect(() => {
     setLimit(TRACE_LIMIT_DEFAULT); stickRef.current = true; preserveRef.current = null
   }, [scope])
-  usePoll((alive) => get(runApiPath(runId, `/trace/tail?limit=${limit}`))
-    .then(r => { if (alive()) setTailState({
-      scope, items: Array.isArray(r?.tail) ? r.tail : [], projection: r?.projection || {}, loaded: true,
-    }) })
-    .catch(() => { if (alive()) setTailState({
-      scope, items: [], projection: { unavailable: true }, loaded: true,
-    }) }),
+  usePoll((alive) => {
+    const request = traceDeadlineGet(runApiPath(runId, '/trace/tail'),
+      expectedGeneration, null, limit)
+    request.promise.then(r => {
+      // A 200 envelope is still stale evidence when an old/proxied server serves another run
+      // generation. Refuse it before state commit just like the backend's pre/post reset fence.
+      if (!traceGenerationMatches(r, expectedGeneration)) throw 0
+      if (alive()) setTailState({
+        scope, items: Array.isArray(r?.tail) ? r.tail : [], projection: r?.projection || {},
+      })
+    }).catch(() => { if (alive()) setTailState(previous =>
+      previous.scope === scope && previous.projection != null
+        && !traceUnavailable(previous.projection)
+        ? { ...previous, stale: true }
+        : { scope, items: [], projection: { unavailable: true } }) })
+    // usePoll owns this handle: dependency changes/unmount abort the old scope, and the deadline
+    // settles even a transport that ignores AbortSignal so polling cannot remain wedged forever.
+    return request
+  },
     3000, [scope, active, open, limit], { enabled: active && open })
-  const current = tailState.scope === scope ? tailState : { items: [], projection: {}, loaded: false }
+  const current = tailState.scope === scope ? tailState : { items: [], projection: null }
   const tail = current.items
+  const loaded = current.projection != null
   const unavailable = traceUnavailable(current.projection)
   const partial = tracePartial(current.projection)
   const canLoadEarlier = partial && limit < TRACE_LIMIT_MAX
@@ -156,7 +170,9 @@ function LiveTrace({ runId, generation, active }) {
         const el = event.currentTarget
         stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 8
       }}>
-        {!current.loaded
+        {current.stale && <TraceUnavailable
+          label="Trace refresh failed; showing confirmed spans while retrying." />}
+        {!loaded
           ? <div className="muted lt-empty" role="status">loading trace…</div>
           : unavailable
           ? <TraceUnavailable label="Trace unavailable; retrying automatically." />
@@ -363,27 +379,37 @@ function GenericDetail({ e }) {
 // The trace of ONE sub-operation (strategy_consult / hypothesis_merge …), fetched lazily by the
 // event's own trace_id — so a strategy_decision row shows only the strategist's reasoning, not the
 // whole node. Rendered with the same span-tree component as a node's trace.
-function OpTrace({ runId, traceId }) {
-  const [trace, setTrace] = useState(null)
+export function OpTrace({ runId, traceId, expectedGeneration }) {
+  const scope = `${expectedGeneration || runId}:${traceId}`
+  const [traceState, setTraceState] = useState(null)
   const [retryNonce, setRetryNonce] = useState(0)
-  useEffect(() => {
-    let on = true
-    setTrace(null)
-    get(runApiPath(runId, `/trace/by_trace/${encodeURIComponent(traceId)}`))
-      .then(d => on && setTrace({
-        spans: Array.isArray(d?.spans) ? d.spans : [], projection: d?.projection || {},
-      }))
-      .catch(() => on && setTrace({ spans: [], projection: { unavailable: true } }))
-    return () => { on = false }
-  }, [runId, traceId, retryNonce])
-  const retry = () => { setTrace(null); setRetryNonce(value => value + 1) }
-  if (trace === null) return <div className="muted trace-loading" role="status">loading trace…</div>
-  return <NodeTrace spans={trace.spans} projection={trace.projection} runId={runId} onRetry={retry} />
+  usePoll((alive) => {
+    const request = traceDeadlineGet(runApiPath(
+      runId, `/trace/by_trace/${encodeURIComponent(traceId)}`), expectedGeneration)
+    request.promise.then(d => {
+      if (!traceGenerationMatches(d, expectedGeneration)) throw 0
+      if (alive()) setTraceState({
+        scope, spans: Array.isArray(d?.spans) ? d.spans : [], projection: d?.projection || {},
+      })
+    }).catch(() => { if (alive()) setTraceState(previous =>
+      previous?.scope === scope && !traceUnavailable(previous.projection)
+        ? { ...previous, stale: true }
+        : { scope, spans: [], projection: { unavailable: true } }) })
+    return request
+  }, null, [scope, retryNonce])
+  const trace = traceState?.scope === scope ? traceState : null
+  const retry = () => setRetryNonce(value => value + 1)
+  if (trace === null)
+    return <div className="muted trace-loading" role="status">loading trace…</div>
+  return <>{trace.stale && <TraceUnavailable
+    label="Trace refresh failed; showing confirmed spans." onRetry={retry} />}
+    <NodeTrace spans={trace.spans} projection={trace.projection} runId={runId}
+      expectedGeneration={expectedGeneration} onRetry={retry} /></>
 }
 
 // One feed row, chat-message styled: an icon/color by kind, the narration, an expandable "why" card.
-function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt = null, autoOpen, runId,
-  readOnly = false, liveBuilding = null, expansion = null, onExpansionChange = null }) {
+export function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt, autoOpen, runId,
+  runGeneration, readOnly, liveBuilding, expansion, onExpansionChange }) {
   const [localOpen, setLocalOpen] = useState(autoOpen)
   const localTouched = useRef(false)
   const controlled = expansion != null
@@ -412,8 +438,7 @@ function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt = null, auto
   // LAZY: fetch only THIS node's bounded/redacted trace projection (/nodes/{nid}/trace — reads just
   // the node's spans via the index, O(node)), and only when the row is expanded. Per-observation
   // bounded/redacted detail is fetched on demand via /spans/{sid}.
-  const [nodeTrace, setNodeTrace] = useState(null)
-  const [nodeTraceError, setNodeTraceError] = useState(false)
+  const [nodeTraceState, setNodeTrace] = useState(null)
   const [nodeTraceNonce, setNodeTraceNonce] = useState(0)
   // Use the server's documented default explicitly, then double to its bounded ceiling.
   // This removes the special zero/default request path without changing the first response window.
@@ -423,6 +448,11 @@ function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt = null, auto
   // Keep the inline evidence on the same attempt as the row destination. An unstamped legacy
   // node_created after a reset is ambiguous, so it keeps its rationale but does not guess a trace.
   const traceGeneration = e.type === 'node_created' ? nodeCreatedAttempt : eventNodeAttempt(e)
+  const expectedTraceGeneration = normalizeRunGeneration(runGeneration)
+  const nodeTraceScope = `${expectedTraceGeneration || runId}:${traceNid}:${traceGeneration}`
+  const currentNodeTrace = nodeTraceState?.scope === nodeTraceScope ? nodeTraceState : null
+  const nodeTrace = currentNodeTrace?.payload
+  const nodeTraceError = currentNodeTrace?.failed
   // `liveBuilding` is a plain object {nodeId: generation} of every concurrent build
   // (`buildingGenerations()` builds it with `const generations = {}`), so it is read with
   // BRACKETS, never `.get()`. This row live-polls its trace only when it IS one of those
@@ -430,32 +460,22 @@ function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt = null, auto
   const exactBuilding = liveBuilding != null && traceNid != null && traceGeneration != null
     && liveBuilding[traceNid] === traceGeneration
   // Clear the error flag only on a SUCCESSFUL exact-attempt load (not eagerly at each poll tick).
-  const loadNodeTrace = (alive) => get(runNodeApiPath(
-    runId, traceNid, `/trace?attempt=${traceGeneration}&limit=${nodeTraceLimit}`))
-    .then(d => {
-      if (d?.node_id !== traceNid || d?.attempt !== traceGeneration) throw 0
-      if (alive()) { setNodeTrace(d); setNodeTraceError(false) }
+  usePoll((alive) => {
+    const request = traceDeadlineGet(runNodeApiPath(runId, traceNid, '/trace'),
+      expectedTraceGeneration, traceGeneration, nodeTraceLimit)
+    request.promise.then(d => {
+      if (d?.node_id !== traceNid || d?.attempt !== traceGeneration
+          || !traceGenerationMatches(d, expectedTraceGeneration)) throw 0
+      if (alive()) setNodeTrace({ scope: nodeTraceScope, payload: d })
     })
-    .catch(() => { if (alive()) { setNodeTrace(null); setNodeTraceError(true) } })
-  const retryNodeTrace = () => {
-    setNodeTrace(null)
-    setNodeTraceError(false)
-    setNodeTraceNonce(value => value + 1)
-  }
-  usePoll((alive) => loadNodeTrace(alive), 4000,
-    [open, readOnly, runId, traceNid, traceGeneration, exactBuilding,
+      .catch(() => { if (alive()) setNodeTrace(previous => previous?.scope === nodeTraceScope
+        ? { ...previous, failed: true } : { scope: nodeTraceScope, failed: true }) })
+    return request
+  }, exactBuilding ? 4000 : null,
+    [open, readOnly, runId, expectedTraceGeneration, traceNid, traceGeneration, exactBuilding,
       nodeTraceNonce, nodeTraceLimit],
-    { enabled: open && !readOnly && traceNid != null
-      && traceGeneration != null && exactBuilding })
-  useEffect(() => {
-    if (!open || readOnly || traceNid == null || traceGeneration == null || exactBuilding) {
-      return undefined
-    }
-    let alive = true
-    loadNodeTrace(() => alive)
-    return () => { alive = false }
-  }, [open, readOnly, runId, traceNid, traceGeneration, exactBuilding,
-    nodeTraceNonce, nodeTraceLimit])
+    { enabled: open && !readOnly && traceNid != null && traceGeneration != null })
+  const retryNodeTrace = () => setNodeTraceNonce(value => value + 1)
   const nodeSpans = Array.isArray(nodeTrace?.nodes) ? nodeTrace.nodes : []
   const hasTrace = !readOnly && traceNid != null && traceGeneration != null
   // A sub-operation event the engine wrapped in its OWN named trace (strategy_decision, hypothesis_
@@ -495,18 +515,21 @@ function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt = null, auto
           {hasReason && reasoningDetail(e, nodeTrace)}
           {hasGeneric && <GenericDetail e={e} />}
           {hasTrace && nodeTrace == null && !nodeTraceError && <div className="muted" role="status">loading node trace…</div>}
-          {hasTrace && nodeTraceError && <div className="notice resource-error compact" role="alert">
-            <span>Could not load node trace.</span><button type="button" className="btn sm"
-              onClick={retryNodeTrace}>Retry</button>
-          </div>}
+          {hasTrace && nodeTraceError && <TraceUnavailable
+            label={nodeTrace == null ? 'Could not load node trace.'
+              : 'Node trace refresh failed; showing confirmed spans.'}
+            onRetry={retryNodeTrace} />}
           {hasTrace && nodeTrace != null && <NodeTrace spans={nodeSpans}
             projection={nodeTrace.projection} runId={runId} onRetry={retryNodeTrace}
-            onLoadMore={loadMoreNodeTrace} spanLimit={nodeTraceLimit} />}
+            onLoadMore={loadMoreNodeTrace} spanLimit={nodeTraceLimit}
+            expectedGeneration={expectedTraceGeneration} />}
           {opTraceId && (e.type === 'research_completed'
             ? <Disclosure label="research process & tool activity">
-                <OpTrace runId={runId} traceId={opTraceId} />
+                <OpTrace runId={runId} traceId={opTraceId}
+                  expectedGeneration={expectedTraceGeneration} />
               </Disclosure>
-            : <OpTrace runId={runId} traceId={opTraceId} />)}
+            : <OpTrace runId={runId} traceId={opTraceId}
+                expectedGeneration={expectedTraceGeneration} />)}
         </div>}
       </div>
     </div>
@@ -1177,6 +1200,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
                 return <EventRow e={event} onFocusEvent={focusEvent}
                   focusLabel={eventFocusLabel(event, destination)}
                   nodeCreatedAttempt={destination.nodeGeneration} runId={runId}
+                  runGeneration={timeline.generation}
                   readOnly={readOnly} liveBuilding={liveBuilding} autoOpen={false}
                   expansion={eventExpansion.get(key) || CLOSED_EXPANSION}
                   onExpansionChange={next => setEventExpansion(current => {
