@@ -450,6 +450,19 @@ ALL_EVENT_TYPES: frozenset[str] = frozenset(
     v for k, v in globals().items() if k.startswith("EV_") and isinstance(v, str)
 )
 
+
+def standing_hint_dedup_key(data) -> tuple[object, str]:
+    """Semantic identity for one standing hint without collapsing authority classes.
+
+    Deep Research still writes the legacy ``hint`` event for replay compatibility, but its model
+    output is advisory rather than operator-authored. Equal text across those two classes is not a
+    duplicate: a later human instruction must remain durable and reach the operator-authority prompt
+    block. All historical/non-deep sources retain the operator class for backward compatibility.
+    """
+    row = data if isinstance(data, dict) else {}
+    authority = "deep_research_advisory" if row.get("source") == "deep_research" else "operator"
+    return row.get("text"), authority
+
 # Engine invariant #1 states "only the main task appends" — this set is the ONE enforced
 # exception (previously a prose comment in `_spawn_research`): event types a BACKGROUND task may
 # append. Membership requires BOTH properties, and `tests/test_background_appendable.py` proves

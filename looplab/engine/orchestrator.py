@@ -24,6 +24,7 @@ from typing import NamedTuple, Optional
 
 import anyio
 
+from looplab.core.llm import BudgetExceeded
 from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.types import (
@@ -3390,8 +3391,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         so the FIRST eval admission of the run — `n=1`, the first multi-hour training — is a due
         trigger and this method starts the think beside it. Nothing about the safety argument above
         changes: the same `BACKGROUND_APPENDABLE` allow-list, the same capped `deep_research` broker
-        lane (`core/llm_broker.py::BACKGROUND_LANE_PRODUCERS`, one concurrent request), the same
-        swallow-everything containment. It just happens hours earlier."""
+        lane (`core/llm_broker.py::BACKGROUND_LANE_PRODUCERS`, one concurrent request), and the same
+        containment for ordinary failures. The global `BudgetExceeded` hard stop still propagates.
+        It just happens hours earlier."""
         if not self.concurrent_research:
             return False
         # repeat is a continuation of a research episode, not an independent timer.
@@ -3411,8 +3413,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return True
 
         async def _bg(snap=state, trig=rtrig):
-            # Best-effort: an error in the advisory research MUST NOT propagate — it shares the eval's
-            # task group, so an uncaught raise here would CANCEL the in-flight eval. Swallow everything.
+            # Best-effort ordinary errors must not disturb the in-flight eval. BudgetExceeded is the
+            # global run hard stop and therefore must escape this task-group boundary.
             try:
                 # Receipt first (the trigger gate must be spent BEFORE the provider call, or a kill
                 # between the model answering and the memo landing buys the same think twice), then
@@ -3426,6 +3428,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # the eval window closes.
                 await anyio.to_thread.run_sync(
                     functools.partial(self._research_attempt_step, snap, trig, manual=False))
+            except BudgetExceeded:
+                raise
             except Exception:  # noqa: BLE001 — never let deep research disturb the eval
                 pass
         tg.start_soon(_bg)
@@ -3554,6 +3558,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 trig = "repeat"              # subsequent passes are repeats, not the initial due trigger
             except anyio.get_cancelled_exc_class():
                 raise                        # cooperative cancellation (evals joined) — must propagate
+            except BudgetExceeded:
+                raise                        # global hard stop; never turn it into a retry tick
             except Exception:  # noqa: BLE001 — an advisory tick hiccup must not disturb the eval
                 next_sleep = base
                 continue

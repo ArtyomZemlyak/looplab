@@ -25,10 +25,11 @@ const collaboration = named('collaboration-support')
 // unactionable. Every new ceiling below is the measured acyclic graph plus narrow headroom.
 export const DEFAULT_BUDGETS = Object.freeze({
   total: {
-    // Measured 502,043 B JS / 48,411 B CSS. 491/48 KiB leave 741 B apiece; the route and forbidden
-    // closures below decide whether those bytes crossed a lazy/security boundary.
-    js: { gzip: 491 * KIB },
-    css: { gzip: 48 * KIB },
+    // Re-measured 2026-08-09 after the shared evidence-bearing ResearchMemo presentation, fail-closed
+    // claim/verifier alignment, and bounded Assistant tool disclosure: 505,980 B JS / 50,673 B CSS.
+    // 495/50 KiB leave 900/527 B; route and forbidden closures still enforce lazy/security seams.
+    js: { gzip: 495 * KIB },
+    css: { gzip: 50 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
@@ -45,7 +46,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // Keep the stable dynamic-entry name alongside the source selector so manifest-shape
       // changes cannot silently drop the owner-list CSS closure.
       roots: [entry, named('RunList'), ownerChrome],
-      limits: { js: { gzip: 210 * KIB }, css: { gzip: 37 * KIB } },
+      // Owner chrome now includes the bounded Assistant tool-activity disclosure.
+      limits: { js: { gzip: 210 * KIB }, css: { gzip: 38 * KIB } },
     },
     {
       name: 'Run compare increment',
@@ -61,7 +63,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
         entry, source('src/ResearchAtlas.jsx'),
         ownerChrome,
       ],
-      limits: { js: { gzip: 210 * KIB }, css: { gzip: 39 * KIB } },
+      limits: { js: { gzip: 210 * KIB }, css: { gzip: 40 * KIB } },
     },
     {
       name: 'owner run DAG route',
@@ -70,12 +72,15 @@ export const DEFAULT_BUDGETS = Object.freeze({
         source('src/Inspector.jsx'), source('src/ConceptChipBar.jsx'),
         ownerChrome,
       ],
-      limits: { js: { gzip: 343 * KIB }, css: { gzip: 42 * KIB } },
+      // The event memo body remains a dynamic interaction; this closure carries only its lazy seam,
+      // alignment projection, and owner Assistant disclosure (measured 352,550 B JS / 43,177 B CSS).
+      limits: { js: { gzip: 345 * KIB }, css: { gzip: 43 * KIB } },
     },
     {
       name: 'valid review DAG route',
       roots: [entry, named('RunView'), source('src/Dag.jsx'), source('src/ConceptChipBar.jsx')],
-      limits: { js: { gzip: 237 * KIB }, css: { gzip: 39 * KIB } },
+      // Measured 243,665 B after the same fail-closed memo projection; retain roughly 1 KiB headroom.
+      limits: { js: { gzip: 239 * KIB }, css: { gzip: 39 * KIB } },
     },
     {
       name: 'owner Concepts route',

@@ -35,6 +35,7 @@ test('accessibility helpers satisfy their semantic and interaction contracts', a
     const { ChartFrame, DataTable, downloadBlob, followClientRoute, nextRovingIndex, tableCsv } =
       await vite.ssrLoadModule('/src/accessibility.jsx')
     const { ParallelCoords, Scatter, Trajectory } = await vite.ssrLoadModule('/src/charts.jsx')
+    const { default: ResearchMemoCard } = await vite.ssrLoadModule('/src/ResearchMemoCard.jsx')
 
     await t.test('DataTable and ChartFrame have no serious or critical WCAG 2 A/AA violations', async () => {
       const columns = [
@@ -77,6 +78,19 @@ test('accessibility helpers satisfy their semantic and interaction contracts', a
         React.createElement(Scatter, {
           data: [{ id: 1, x: 0.1, y: 0.7, feasible: true }],
           xlab: 'Learning rate', ylab: 'Metric', onPick() {},
+        }),
+        React.createElement(ResearchMemoCard, {
+          memoNumber: 2, open: true, onToggle() {}, variant: 'report',
+          memo: {
+            summary: 'The seeded confirmation remains promising.',
+            findings: ['The robust metric improved across three seeds.'],
+            claims: [{ statement: 'The robust metric improved.', node_ids: [2], urls: [] }],
+            verification: { method: 'llm', verdicts: [{
+              statement: 'The robust metric improved.', verdict: 'supported', note: 'Node evidence matches.',
+            }] },
+            recommended_directions: ['Test the same change on the holdout split.'],
+            sources: [{ title: 'read_experiment(node 2)', snippet: 'Three seeded measurements.' }],
+          },
         }),
       )
       const markup = renderToStaticMarkup(fixture)

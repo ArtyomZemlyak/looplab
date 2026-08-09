@@ -14,8 +14,8 @@ overlooked"). This module checks a ResearchMemo's claims against their CITED evi
 Current-run selection-neutral: verdicts ride inside the memo dict on the `research_completed` event
 and never rewrite nodes or the current champion. They are not merely decorative, however: finalize
 uses an aligned `supported` verdict as the evidence gate for persisted D8 cross-run claims, which can
-inform later runs. Best-effort: model failure degrades to deterministic/unverified evidence rather
-than blocking the memo.
+inform later runs. Best-effort: ordinary model failure degrades to deterministic/unverified evidence
+rather than blocking the memo; `BudgetExceeded` remains the global hard stop.
 """
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from looplab.core.advisory_payloads import (
     research_evidence_receipt,
 )
 from looplab.core.fitness import is_usable_metric
+from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, RunState
 from looplab.core.redact import redact_persisted_text
 from looplab.core.source_identity import canonical_source_ref, valid_source_identity
@@ -449,7 +450,9 @@ def verify_memo(memo: dict, state: RunState, client=None,
                             and verdicts[i]["evidence"]["complete"] is not True):
                         verdicts[i]["note"] = "evidence set is incomplete or stale"
             method = "llm"
-        except Exception:  # noqa: BLE001 — verification degrades, never blocks the memo
+        except BudgetExceeded:
+            raise
+        except Exception:  # noqa: BLE001 — ordinary verifier failures degrade deterministically
             pass
     bad = sum(1 for v in verdicts if v["verdict"] == "unsupported")
     claim_receipt = research_claims_receipt(memo)

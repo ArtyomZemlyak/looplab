@@ -1,5 +1,7 @@
 """Shared rendering of standing operator/boss directives (`RunState.pending_hints`) into an LLM
-context. Hints are append-only events folded into `pending_hints`; a `hint` event may carry
+context. Model-generated deep-research advisories share the durable hint event for compatibility,
+but are excluded from this operator-authority block. Hints are append-only events folded into
+`pending_hints`; a human `hint` event may carry
 `replace: true` to SUPERSEDE earlier ones (mirrors the set_strategy/pending_strategy pin), so the
 boss can rewrite the single standing directive instead of piling up contradictory ones.
 
@@ -17,8 +19,14 @@ from __future__ import annotations
 def render_hint_directives(pending_hints, *, max_shown: int = 6) -> str:
     """A prompt block listing standing directives oldest→newest with explicit precedence, or ""
     when there are none. The most recent directive is flagged as authoritative on conflict; only
-    the last `max_shown` are shown (older ones are summarized as a count, not dumped)."""
-    hints = [str(h.get("text", "")).strip() for h in (pending_hints or []) if h.get("text")]
+    the last `max_shown` are shown (older ones are summarized as a count, not dumped).
+
+    `source="deep_research"` is model output, not operator authority. It remains in replay state
+    and reaches proposal planning through the research memo/open-hypothesis channels, but must not
+    be relabelled here as an instruction from the operator."""
+    rows = [h for h in (pending_hints or [])
+            if isinstance(h, dict) and h.get("source") != "deep_research"]
+    hints = [str(h.get("text", "")).strip() for h in rows if h.get("text")]
     hints = [h for h in hints if h]
     if not hints:
         return ""

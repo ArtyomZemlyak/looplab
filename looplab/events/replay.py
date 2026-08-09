@@ -94,7 +94,8 @@ from looplab.events.types import (
     EV_SET_STRATEGY,
     EV_SETUP_FINISHED, EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
     EV_SPECULATION_DEPTH_SETTLED,
-    EV_STRATEGY_DECISION, EV_TRUST_GATE_CHANGED, EV_VERIFIER_GROUP_SCORED, EV_WORKSPACE_CHANGED)
+    EV_STRATEGY_DECISION, EV_TRUST_GATE_CHANGED, EV_VERIFIER_GROUP_SCORED, EV_WORKSPACE_CHANGED,
+    standing_hint_dedup_key)
 
 
 # 9999-12-31T23:59:59Z. Past this an `Event.ts` is corruption (or a unit mix-up — a milliseconds
@@ -3236,7 +3237,7 @@ def _on_hint(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if d.get("replace"):
         st.pending_hints = [d]
     elif not any(
-        hint.get("text") == d.get("text")
+        standing_hint_dedup_key(hint) == standing_hint_dedup_key(d)
         for hint in st.pending_hints
         if isinstance(hint, dict)
     ):

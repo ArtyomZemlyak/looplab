@@ -33,21 +33,20 @@
 .report-view .agent-report-text,
 .report-view .agent-report-group,
 .report-view .memo-card,
-.report-view .memo-body,
-.report-view .memo-body .v,
-.report-view .memo-body li,
+.report-view .research-memo-body,
+.report-view .research-memo-body li,
 .report-view .think-body {
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.report-view .memo-head,
+.report-view .research-memo-toggle,
 .report-view .verdict-row,
 .agent-report-caveats-title {
   min-width: 0;
   flex-wrap: wrap;
 }
-.report-view .memo-head > *,
+.report-view .research-memo-toggle > *,
 .report-view .verdict-row > *,
 .agent-report-caveats-title > * { min-width: 0; }
 
@@ -77,11 +76,6 @@
 .agent-report-text > :first-child, .agent-report-group > :first-child { margin-top: 0; }
 .agent-report-group { margin-top: 12px; }
 .agent-report-group h3 { margin: 0 0 4px; color: var(--fg-dim); font-size: 12px; }
-.memo-verification-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-.memo-verification-incomplete { color: var(--trust-warn-ink); overflow-wrap: anywhere; }
-.memo-verification-list .bad { color: var(--trust-alarm-ink); }
-.memo-verification-list .ok { color: var(--trust-ok-ink); }
-
 .verdict-banner.neutral {
   border-left-color: var(--fg-dim);
   background: color-mix(in srgb, var(--fg-dim) 6%, var(--bg-1));

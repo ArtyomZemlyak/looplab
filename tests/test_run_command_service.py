@@ -377,6 +377,22 @@ def test_identical_standing_hint_is_a_semantic_noop_across_command_keys(tmp_path
     assert _types(rd).count("hint") == 1
 
 
+def test_operator_hint_matching_deep_research_advisory_is_not_a_noop(tmp_path):
+    rd = _seed(tmp_path)
+    EventStore(rd / "events.jsonl").append(
+        "hint", {"text": "try robust scaling", "source": "deep_research"})
+    client, _srv = _client(tmp_path, _Driver())
+
+    command = _post(client, "hint", {"text": "try robust scaling"}, key="operator-authority")
+
+    assert _terminal(client, command.json())["status"] == "succeeded"
+    events = EventStore(rd / "events.jsonl").read_all()
+    assert [event.data.get("source") for event in events if event.type == "hint"] == [
+        "deep_research", None]
+    state = fold(events)
+    assert [hint.get("source") for hint in state.pending_hints] == ["deep_research", None]
+
+
 def test_new_command_requires_a_strict_observed_generation_but_normalizes_hex_case(tmp_path):
     rd = _seed(tmp_path)
     client, _srv = _client(tmp_path, _Driver())

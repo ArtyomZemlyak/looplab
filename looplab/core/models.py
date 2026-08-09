@@ -776,8 +776,9 @@ def run_setup_key(command) -> str:
 
 
 class ResearchMemo(BaseModel):
-    """Output of the Deep-Research stage (Phase 2): the model reads across ALL results so far +
-    the literature/web and writes a strategic memo that steers the next batch. It is recorded as a
+    """Output of the Deep-Research stage (Phase 2): the model reads a bounded coverage-aware run
+    summary plus configured literature/web tools and writes a strategic memo that steers the next
+    batch. It is recorded as a
     `research_completed` event folded into `RunState.research`, NEVER as a search-DAG node and never
     directly re-ranks the current champion. Its directions feed later proposal hints, while aligned
     supported claims may feed cross-run evidence at finalization. The UI renders it as a node and

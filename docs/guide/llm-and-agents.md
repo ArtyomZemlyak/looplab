@@ -463,7 +463,7 @@ but nothing injects it into a prompt"* — the same class the hint registry
 | **Watchdog signals** (train-monitor / ASHA rank) | *not folded* — DIAGNOSTIC events read from `store.read_all()` | Researcher | a watchdog-reflection line in the proposal hint (`digest.watchdog_reflection`), naming the eval PHASE the verdict was about (`log_role`/`stage` on the alert row) rather than calling every verdict "training" |
 | **Crash-triage verdict** | `Node.triage_rationale` | Researcher | the failure line in the experiments digest + the failure-reflection hint carry the LLM's *why*, not just the error kind |
 | **Foresight calibration** | `RunState.foresight_selected` | the world model | a track-record line in `_memory_brief` — "of your last N predict-before-execute picks, K beat the parent" (closes the predict→outcome loop) |
-| **Deep-research memo** | `RunState.research` | Researcher | a one-line takeaway in the state brief **plus** a `read_research_memo` tool to pull the full findings/claims on demand |
+| **Deep-research memo** | `RunState.research` | Researcher | a one-line takeaway in the state brief **plus** a `read_research_memo` tool to pull the full findings/claims on demand; the memo itself is produced from a lifecycle-aware coverage sample with an explicit omission receipt |
 | **Operator yields** | derived from the DAG | Strategist | a per-operator gain-per-second line in the strategist brief, so it tunes the operator mix from evidence, not priors |
 | **Operator directives** | `RunState.pending_hints` | Researcher, Strategist, pilot, crash-triage, **Developer** | one `render_hint_directives` helper — the engine also folds directives into the idea handed to `implement`, so a directive steers the **code**, not only the proposal |
 | **Run states** (paused / awaiting-approval / trust-flag / stuck-build) | `RunState` | boss / assistant | an "ATTENTION" block in the boss context, surfacing the states where human intervention is most valuable |
@@ -477,6 +477,17 @@ signals, operator directives) are **push** (the engine injects them), one (deep-
 **pull** (a tool the
 agent may call for depth), and the rest ride the always-on folded-state briefs. The full rationale is
 in `docs/14-agent-framework-mega-review-2026-07-10.md` §1.
+
+Deep Research uses the shared `agent_self_plan` setting. With the shipped default enabled, the
+researcher is instructed to create a typed 2–4 item `update_plan` before investigating and can revise
+it as evidence gaps close. Its first prompt is deliberately bounded: the current champion, early
+seeds, eligible top metrics, representative genuine failure classes and recent active experiments are
+preferred. Tombstoned/aborted rows and durable pre-dispatch discards are excluded from experimental
+evidence and counted separately; constraint/trust-ineligible rows reached through another coverage
+bucket are explicitly labelled. The prompt also states how many active experimental rows were omitted.
+External, repository, memory, prior-run, and free-form current-run text (including
+rationales/errors/logs) is always covered by an immutable untrusted-data boundary, even when an
+operator hot-overrides the rest of the Deep Research system prompt.
 
 ## Knowledge, skills & prompts
 

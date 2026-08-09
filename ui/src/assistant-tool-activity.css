@@ -1,0 +1,30 @@
+/* Bounded Assistant tool activity stays with the owner-only Assistant chunk, rather than adding
+   disclosure chrome to the public shell and unrelated preview routes. */
+.asst-tool-legacy { margin-bottom: 4px; }
+.asst-tool-line, .asst-tool-toggle { display: flex; align-items: center; gap: 6px; min-width: 0;
+  color: var(--fg-mut); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.asst-tool-line { padding-block: 2px; }
+.asst-tool-icon { flex: 0 0 auto; color: var(--working-text); }
+.asst-tool-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.asst-tool-line .asst-tool-label { white-space: normal; overflow-wrap: anywhere; }
+.asst-tool-disclosure { width: min(100%, 620px); overflow: hidden; border: 1px solid var(--line);
+  border-left: 2px solid color-mix(in srgb, var(--working) 60%, var(--line)); border-radius: 7px;
+  background: color-mix(in srgb, var(--working) 4%, var(--bg-1)); }
+.asst-tool-toggle { min-height: 30px; padding: 4px 8px; list-style: none; cursor: pointer; }
+.asst-tool-toggle::-webkit-details-marker { display: none; }
+.asst-tool-chevron { flex: 0 0 auto; margin-left: auto; color: var(--fg-mut);
+  transform: rotate(-90deg); transition: transform .14s ease; }
+.asst-tool-disclosure[open] > .asst-tool-toggle { border-bottom: 1px solid var(--line); }
+.asst-tool-disclosure[open] > .asst-tool-toggle .asst-tool-chevron { transform: rotate(0deg); }
+.asst-tool-toggle:hover { background: color-mix(in srgb, var(--working) 7%, transparent); }
+.asst-tool-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.asst-tool-body { background: color-mix(in srgb, var(--bg) 55%, transparent); }
+.asst-tool-limit { margin: 0; padding: 7px 10px 0; color: var(--fg-mut); font-size: 10.5px; }
+.asst-tool-list { max-height: min(220px, 32vh); margin: 0; padding: 6px 12px 8px 34px;
+  overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; color: var(--fg-dim);
+  font-size: 11.5px; line-height: 1.45; }
+.asst-tool-list li { padding: 2px 0; overflow-wrap: anywhere; }
+
+@media (max-width: 600px) {
+  .asst-tool-toggle { min-height: 44px; }
+}

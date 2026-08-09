@@ -1511,6 +1511,17 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     revealSelectedNode(id)
     if (id != null) focusInspectorFromGroup(id)
   }
+  const selectEvidenceFromPanel = (id, nodeGeneration) => {
+    if (!Number.isSafeInteger(nodeGeneration) || nodeGeneration < 0
+        || !confirmRetainedPanelClose()) return
+    panelReturnFocusRef.current = null
+    route.update(current => ({
+      ...routeWithSelectedNode(current, id), nodeGeneration, commentId: null,
+      view: 'dag', panel: null,
+    }), { mode: 'replace' })
+    revealSelectedNode(id)
+    if (id != null) focusInspectorFromGroup(id)
+  }
   // U3 · canvas as a control surface: right-click actions + drag-to-merge + a "merge with…" arm mode.
   const [mergeIntent, setMergeIntent] = useState(null)
   const mergeFrom = mergeIntent?.sourceId ?? null
@@ -2283,6 +2294,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     if (compactWorkspace) setCompactInspectorOpen(true)
     else setSideC(false)
   }
+  const jumpToEvidence = (id, nodeGeneration) => {
+    if (!Number.isSafeInteger(nodeGeneration) || nodeGeneration < 0) return
+    route.update(current => ({ ...current, view: 'dag', nodeId: id,
+      nodeGeneration, cardId: null, commentId: null }))
+    commitGroupNavigation(null, { mode: 'replace' })
+    if (compactWorkspace) setCompactInspectorOpen(true)
+    else setSideC(false)
+  }
   // ONE spelling of the node Inspector, mounted from the graph workspace, the Card board's detail
   // pane and the concept tree's. `onOpenLineage` is the seam that lets it be hosted anywhere: the
   // Inspector must not know WHICH view is showing it, only whether "take me to the graph" is a move
@@ -2715,7 +2734,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                   setPanel(p)
                 }}
                 canOpenPanel={panelAllowed}
-                onPickNode={jumpToLineage} />
+                onPickNode={jumpToLineage} onPickEvidence={jumpToEvidence} />
             </LazyBoundary>
           </div></div>
         : view === 'cards'
@@ -2934,7 +2953,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       <>
       {panel === 'overview' && panelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval} onClose={closePanel}
         onOpenPanel={p => { if (panelAllowed(p)) setPanel(p, { mode: 'replace' }) }} />}
-      {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId} onToast={showToast} onClose={closePanel} />}
+      {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId}
+        onToast={showToast} onClose={closePanel} onSelect={selectNodeFromPanel}
+        onSelectEvidence={selectEvidenceFromPanel} />}
       {panel === 'trust' && panelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} readOnly={mutationReadOnlyMode} />}
       {panel === 'queue' && panelAllowed('queue') && <QueuePanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} />}
       {panel === 'sensitivity' && panelAllowed('sensitivity') && <SensitivityPanel state={state} onSelect={selectNodeFromPanel} onClose={closePanel} />}

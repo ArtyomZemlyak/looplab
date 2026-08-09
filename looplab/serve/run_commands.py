@@ -48,7 +48,7 @@ from looplab.events.eventstore import (
 from looplab.events.replay import fold
 from looplab.events.types import (
     EV_APPROVAL_GRANTED, EV_CARD_RESOURCE_PINNED, EV_HINT, EV_HYPOTHESIS_UPDATED, EV_PAUSE,
-    EV_RESTART, EV_RUN_ABORT, EV_SPEC_APPROVED)
+    EV_RESTART, EV_RUN_ABORT, EV_SPEC_APPROVED, standing_hint_dedup_key)
 from looplab.serve import control_validation
 from looplab.serve.command_observation import CommandObservation, CommandObservationIndex
 from looplab.serve.control_validation import (
@@ -1801,9 +1801,10 @@ class RunCommandService:
     def _standing_hint_duplicate(self, rd: Path, event_type: str, data: Optional[dict]) -> bool:
         if event_type != EV_HINT or (data or {}).get("replace"):
             return False
-        text = (data or {}).get("text")
+        incoming = standing_hint_dedup_key(data)
         return any(
-            isinstance(hint, dict) and hint.get("text") == text
+            isinstance(hint, dict)
+            and standing_hint_dedup_key(hint) == incoming
             for hint in self.srv.state(rd).pending_hints
         )
 

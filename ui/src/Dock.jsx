@@ -24,6 +24,11 @@ import { NARR, GROUPS, GROUP_GLYPH, TYPE2GROUP, kindOf, isCuratedType,
 import { buildingGenerations, buildingMarkers } from './buildingModel.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 
+// The timeline is on the hot run route; memo rendering is needed only after a research event is
+// expanded. Keep the full evidence/Markdown presentation behind that interaction boundary.
+const LazyResearchMemoBody = React.lazy(() => import('./ResearchMemoCard.jsx')
+  .then(module => ({ default: module.ResearchMemoBody })))
+
 
 // The run's EVENTS window (round-9): one scrubbable, filterable feed that renders every run event
 // as a differentiated message. The per-run "boss" chat moved to the single persistent assistant, so
@@ -314,23 +319,12 @@ function StrategyDetail({ d }) {
   )
 }
 
-function ResearchDetail({ d }) {
-  const memo = d.memo || {}
-  return (
-    <div className="ev-detail">
-      <div className="section-h">Conclusion</div>
-      <div className="v">{memo.summary || '—'}</div>
-      {(memo.findings || []).length > 0 && <>
-        <div className="section-h">Findings</div>
-        <ul className="bul">{memo.findings.map((f, i) => <li key={i}>{f}</li>)}</ul></>}
-      {(memo.recommended_directions || []).length > 0 && <>
-        <div className="section-h">Recommended directions (fed to the Researcher)</div>
-        <ul className="bul">{memo.recommended_directions.map((x, i) => <li key={i}>{x}</li>)}</ul></>}
-      {memo.reasoning && <Disclosure label="reasoning (debug)">
-        <Markdown className="think-body" text={memo.reasoning} />
-      </Disclosure>}
-    </div>
-  )
+export function ResearchDetail({ d, MemoBody = LazyResearchMemoBody }) {
+  return <div className="ev-detail research-event-detail">
+    <React.Suspense fallback={<div className="muted" role="status">Loading research memo…</div>}>
+      <MemoBody memo={d.memo} showSummary compact />
+    </React.Suspense>
+  </div>
 }
 
 function reasoningDetail(e, trace) {
@@ -508,7 +502,11 @@ function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt = null, auto
           {hasTrace && nodeTrace != null && <NodeTrace spans={nodeSpans}
             projection={nodeTrace.projection} runId={runId} onRetry={retryNodeTrace}
             onLoadMore={loadMoreNodeTrace} spanLimit={nodeTraceLimit} />}
-          {opTraceId && <OpTrace runId={runId} traceId={opTraceId} />}
+          {opTraceId && (e.type === 'research_completed'
+            ? <Disclosure label="research process & tool activity">
+                <OpTrace runId={runId} traceId={opTraceId} />
+              </Disclosure>
+            : <OpTrace runId={runId} traceId={opTraceId} />)}
         </div>}
       </div>
     </div>

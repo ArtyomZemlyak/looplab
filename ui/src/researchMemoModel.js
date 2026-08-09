@@ -22,7 +22,11 @@ export const RESEARCH_MEMO_LIMITS = Object.freeze({
   sourceTitleChars: 400,
   sourceUrlChars: 1_600,
   sourceSnippetChars: 200,
+  claims: 64,
   claimChars: 1_600,
+  claimNodeRefs: 8,
+  claimUrlRefs: 4,
+  advisoryIdChars: 160,
   verificationVerdicts: 64,
 })
 
@@ -33,12 +37,21 @@ const {
   directions: MAX_DIRECTIONS, directionChars: DIRECTION_CHARS,
   sources: MAX_SOURCES, sourceTitleChars: SOURCE_TITLE_CHARS,
   sourceUrlChars: SOURCE_URL_CHARS, sourceSnippetChars: SOURCE_SNIPPET_CHARS,
-  claimChars: CLAIM_CHARS, verificationVerdicts: MAX_VERDICTS,
+  claims: MAX_CLAIMS, claimChars: CLAIM_CHARS, claimNodeRefs: MAX_CLAIM_NODES,
+  claimUrlRefs: MAX_CLAIM_URLS, advisoryIdChars: ADVISORY_ID_CHARS,
+  verificationVerdicts: MAX_VERDICTS,
 } = RESEARCH_MEMO_LIMITS
 
 const field = (value, key) => record(value) ? value[key] : undefined
 const item = (value, index) => value[index]
 const makeBudget = remaining => ({ remaining: Math.max(0, remaining) })
+const SOURCE_IDENTITY_RE = /^http-sha256:[0-9a-f]{64}$/
+// Text is not the only retained cost: each verdict also gains a bounded evidence envelope and
+// alignment receipt. Charge that fixed shape to the shared budget so a memo full of maximum-length
+// verifier rows stays near `memoChars` instead of exceeding it by one metadata object per row.
+const VERDICT_METADATA_CHARS = 256
+const VERDICT_NODE_REF_CHARS = 64
+const VERDICT_URL_IDENTITY_CHARS = 80
 
 function textList(value, maximum, textMaximum, budget) {
   const length = Math.min(arrayLength(value), maximum)
@@ -58,8 +71,9 @@ function normalizeVerification(value, budget) {
   const declaredOmitted = field(value, 'omitted_verdicts')
   // Backend writer and replay sanitizers may already have capped the rows. Carry their omission
   // receipt only when both counters are internally consistent; otherwise derive from visible input.
-  const totalVerdicts = Number.isSafeInteger(declaredTotal) && declaredTotal >= rawTotal
-    && declaredOmitted === declaredTotal - rawTotal ? declaredTotal : rawTotal
+  const receiptKnown = Number.isSafeInteger(declaredTotal) && declaredTotal >= rawTotal
+    && declaredOmitted === declaredTotal - rawTotal
+  const totalVerdicts = receiptKnown ? declaredTotal : rawTotal
   const length = Math.min(rawTotal, MAX_VERDICTS)
   const verdicts = []
   const allowed = new Set(['supported', 'unsupported', 'unclear', 'cited'])
@@ -67,11 +81,55 @@ function normalizeVerification(value, budget) {
     const raw = item(rawVerdicts, index)
     if (!record(raw)) continue
     const candidate = text(field(raw, 'verdict'), 32, budget, true).toLowerCase()
+    const rawEvidence = field(raw, 'evidence')
+    const rawNodeRefs = field(rawEvidence, 'node_refs')
+    const rawUrlIdentities = field(rawEvidence, 'url_identities')
+    const nodeRefs = []
+    const seenNodes = new Set()
+    const rawNodeTotal = arrayLength(rawNodeRefs)
+    const nodeLength = Math.min(rawNodeTotal, MAX_CLAIM_NODES)
+    let nodeRefsValid = Array.isArray(rawNodeRefs) && rawNodeTotal <= MAX_CLAIM_NODES
+    for (let nodeIndex = 0; nodeIndex < nodeLength; nodeIndex++) {
+      const ref = item(rawNodeRefs, nodeIndex)
+      const nodeId = field(ref, 'node_id')
+      const generation = field(ref, 'generation')
+      const identity = `${nodeId}:${generation}`
+      if (!Number.isSafeInteger(nodeId) || nodeId < 0
+          || !Number.isSafeInteger(generation) || generation < 0 || seenNodes.has(identity)) {
+        nodeRefsValid = false
+        continue
+      }
+      seenNodes.add(identity)
+      nodeRefs.push({ node_id: nodeId, generation })
+    }
+    const urlIdentities = []
+    const seenUrls = new Set()
+    const rawUrlTotal = arrayLength(rawUrlIdentities)
+    const urlLength = Math.min(rawUrlTotal, MAX_CLAIM_URLS)
+    let urlIdentitiesValid = Array.isArray(rawUrlIdentities) && rawUrlTotal <= MAX_CLAIM_URLS
+    for (let urlIndex = 0; urlIndex < urlLength; urlIndex++) {
+      const identity = item(rawUrlIdentities, urlIndex)
+      if (typeof identity !== 'string' || !SOURCE_IDENTITY_RE.test(identity)
+          || seenUrls.has(identity)) {
+        urlIdentitiesValid = false
+        continue
+      }
+      seenUrls.add(identity)
+      urlIdentities.push(identity)
+    }
+    const evidenceComplete = record(rawEvidence) && field(rawEvidence, 'v') === 1
+      && field(rawEvidence, 'complete') === true
+      && nodeRefsValid && nodeRefs.length === rawNodeTotal
+      && urlIdentitiesValid && urlIdentities.length === rawUrlTotal
     verdicts.push({
       statement: text(field(raw, 'statement'), CLAIM_CHARS, budget),
       verdict: allowed.has(candidate) ? candidate : 'unclear',
       note: text(field(raw, 'note'), 200, budget),
+      evidence: { node_refs: nodeRefs, url_identities: urlIdentities, complete: evidenceComplete },
     })
+    budget.remaining = Math.max(0, budget.remaining - VERDICT_METADATA_CHARS
+      - nodeRefs.length * VERDICT_NODE_REF_CHARS
+      - urlIdentities.length * VERDICT_URL_IDENTITY_CHARS)
   }
   const omittedVerdicts = Math.max(0, totalVerdicts - verdicts.length)
   if (!verdicts.length && !omittedVerdicts) return null
@@ -82,6 +140,153 @@ function normalizeVerification(value, budget) {
     unsupported: verdicts.filter(verdict => verdict.verdict === 'unsupported').length,
     totalVerdicts,
     omittedVerdicts,
+    receiptKnown,
+  }
+}
+
+function receiptCount(value, visibleTotal, prefix = '') {
+  if (!record(value) || field(value, 'v') !== 1) {
+    return { total: visibleTotal, omitted: 0, valid: false }
+  }
+  const total = field(value, `${prefix}total`)
+  const retained = field(value, `${prefix}retained`)
+  const omitted = field(value, `${prefix}omitted`)
+  if (!Number.isSafeInteger(total) || total < visibleTotal || retained !== visibleTotal
+      || omitted !== total - retained) {
+    return { total: visibleTotal, omitted: 0, valid: false }
+  }
+  return { total, omitted, valid: true }
+}
+
+function normalizeClaims(value, receipt, budget) {
+  const rawTotal = arrayLength(value)
+  const claimsShapeKnown = value == null || Array.isArray(value)
+  const claimsReceipt = receiptCount(receipt, rawTotal)
+  const total = claimsReceipt.total
+  const length = Math.min(rawTotal, MAX_CLAIMS)
+  const claims = []
+  for (let index = 0; index < length && budget.remaining > 0; index++) {
+    const raw = item(value, index)
+    if (!record(raw)) continue
+    const statement = text(field(raw, 'statement'), CLAIM_CHARS, budget)
+    const rawNodes = field(raw, 'node_ids')
+    const nodesLength = Math.min(arrayLength(rawNodes), MAX_CLAIM_NODES)
+    const nodeIds = []
+    for (let nodeIndex = 0; nodeIndex < nodesLength; nodeIndex++) {
+      const nodeId = item(rawNodes, nodeIndex)
+      if (Number.isSafeInteger(nodeId) && nodeId >= 0) nodeIds.push(nodeId)
+    }
+    const rawUrls = field(raw, 'urls')
+    const rawUrlTotal = arrayLength(rawUrls)
+    const urlsLength = Math.min(rawUrlTotal, MAX_CLAIM_URLS)
+    const urls = []
+    for (let urlIndex = 0; urlIndex < urlsLength && budget.remaining > 0; urlIndex++) {
+      const url = text(item(rawUrls, urlIndex), SOURCE_URL_CHARS, budget, true)
+      if (url) urls.push(url)
+    }
+    const rawUrlIdentities = field(raw, 'url_identities')
+    const rawUrlIdentityTotal = arrayLength(rawUrlIdentities)
+    const urlIdentityLength = Math.min(rawUrlIdentityTotal, MAX_CLAIM_URLS)
+    const urlIdentities = []
+    let sourceIdentitiesComplete = rawUrlTotal === 0
+      ? rawUrlIdentities == null || (Array.isArray(rawUrlIdentities) && rawUrlIdentityTotal === 0)
+      : Array.isArray(rawUrlIdentities) && rawUrlIdentityTotal === rawUrlTotal
+        && rawUrlIdentityTotal <= MAX_CLAIM_URLS
+    for (let identityIndex = 0; identityIndex < urlIdentityLength; identityIndex++) {
+      const identity = item(rawUrlIdentities, identityIndex)
+      if (typeof identity !== 'string' || !SOURCE_IDENTITY_RE.test(identity)) {
+        sourceIdentitiesComplete = false
+        continue
+      }
+      urlIdentities.push(identity)
+    }
+    sourceIdentitiesComplete = sourceIdentitiesComplete
+      && urlIdentities.length === rawUrlIdentityTotal && urls.length === rawUrlTotal
+    const evidenceReceipt = field(raw, 'evidence_receipt')
+    const nodeReceipt = receiptCount(evidenceReceipt, arrayLength(rawNodes), 'node_refs_')
+    const urlReceipt = receiptCount(evidenceReceipt, arrayLength(rawUrls), 'url_refs_')
+    const nodeTotal = nodeReceipt.total
+    const urlTotal = urlReceipt.total
+    const claimId = text(field(raw, 'claim_id'), ADVISORY_ID_CHARS, budget, true)
+    if (statement || nodeIds.length || urls.length) claims.push({
+      statement,
+      node_ids: nodeIds,
+      urls,
+      url_identities: urlIdentities,
+      claim_id: claimId,
+      evidence: {
+        nodeTotal,
+        urlTotal,
+        omitted: Math.max(0, nodeTotal - nodeIds.length) + Math.max(0, urlTotal - urls.length),
+        complete: nodeReceipt.valid && urlReceipt.valid
+          && field(evidenceReceipt, 'complete') === true
+          && nodeReceipt.omitted === 0 && urlReceipt.omitted === 0
+          && nodeTotal === nodeIds.length && urlTotal === urls.length,
+        sourceIdentitiesComplete,
+      },
+    })
+  }
+  return {
+    claims,
+    total,
+    omitted: Math.max(0, total - claims.length),
+    receiptKnown: claimsReceipt.valid,
+    complete: claimsShapeKnown && claimsReceipt.valid && claimsReceipt.omitted === 0
+      && total === claims.length && field(receipt, 'complete') === true,
+  }
+}
+
+function uniqueValues(values) {
+  const seen = new Set()
+  const out = []
+  for (const value of values) {
+    if (seen.has(value)) continue
+    seen.add(value)
+    out.push(value)
+  }
+  return out
+}
+
+function sameValues(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
+function alignVerification(verification, claimProjection) {
+  if (!verification) return null
+  const claims = claimProjection.claims
+  const totalsMatch = claimProjection.receiptKnown && verification.receiptKnown
+    && claimProjection.total === verification.totalVerdicts
+  const rowsMatch = claims.length === verification.verdicts.length
+  const verdicts = verification.verdicts.map((verdict, index) => {
+    const claim = claims[index]
+    const statementMatches = !!claim && claim.statement === verdict.statement
+    const expectedNodeIds = claim ? uniqueValues(claim.node_ids) : []
+    const verifierNodeIds = verdict.evidence.node_refs.map(ref => ref.node_id)
+    const nodeIdsMatch = !!claim && sameValues(expectedNodeIds, verifierNodeIds)
+    const expectedSourceIdentities = claim?.evidence?.sourceIdentitiesComplete
+      ? uniqueValues(claim.url_identities) : null
+    const sourceIdentitiesMatch = expectedSourceIdentities != null
+      && sameValues(expectedSourceIdentities, verdict.evidence.url_identities)
+    const supportedEvidencePresent = verdict.verdict !== 'supported'
+      || verdict.evidence.node_refs.length > 0 || verdict.evidence.url_identities.length > 0
+    return {
+      ...verdict,
+      alignment: {
+        statementMatches,
+        nodeIdsMatch,
+        sourceIdentitiesMatch,
+        supportedEvidencePresent,
+        complete: statementMatches && nodeIdsMatch && sourceIdentitiesMatch
+          && supportedEvidencePresent,
+      },
+    }
+  })
+  const complete = totalsMatch && rowsMatch
+    && verdicts.every(verdict => verdict.alignment.complete)
+  return {
+    ...verification,
+    verdicts,
+    alignment: { complete, totalsMatch, rowsMatch },
   }
 }
 
@@ -110,11 +315,16 @@ function normalizeCollections(value, budget) {
     summary: '',
     reasoning: '',
     findings,
+    claims: [],
+    claimsTotal: 0,
+    claimsOmitted: 0,
+    claimsComplete: true,
     recommended_directions: directions,
     sources,
     at_node: Number.isSafeInteger(atNode) && atNode >= 0 ? atNode : null,
     trigger: '',
     verification: null,
+    memo_id: '',
   }
 }
 
@@ -125,12 +335,21 @@ function normalizeResearchMemoFrom(value, budget) {
   // Project verifier evidence before debug prose and optional collections. A saturated memo must
   // never retain recommendations while silently dropping its unsupported-claim warning.
   const verification = normalizeVerification(field(src, 'verification'), budget)
-  const reasoning = text(field(src, 'reasoning'), REASONING_CHARS, budget)
+  // Claims are the memo's evidence-bearing assertions. Retain them before ordinary narrative so the
+  // UI can connect verifier verdicts to cited experiments/sources. Debug reasoning is deliberately
+  // last: it must never erase findings, next actions, or the consulted-source ledger.
+  const claimProjection = normalizeClaims(field(src, 'claims'), field(src, 'claims_receipt'), budget)
   const normalized = normalizeCollections(src, budget)
+  const reasoning = text(field(src, 'reasoning'), REASONING_CHARS, budget)
   normalized.summary = summary
   normalized.reasoning = reasoning
   normalized.trigger = trigger
-  normalized.verification = verification
+  normalized.verification = alignVerification(verification, claimProjection)
+  normalized.claims = claimProjection.claims
+  normalized.claimsTotal = claimProjection.total
+  normalized.claimsOmitted = claimProjection.omitted
+  normalized.claimsComplete = claimProjection.complete
+  normalized.memo_id = text(field(src, 'memo_id'), ADVISORY_ID_CHARS, budget, true)
   return normalized
 }
 

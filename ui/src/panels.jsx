@@ -22,8 +22,8 @@ import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
 import Panel from './PanelShell.jsx'
 import { DataTable } from './accessibility.jsx'
-import { safeExternalHref } from './urlSafety.js'
 import { normalizeResearchMemos } from './researchMemoModel.js'
+import ResearchMemoCard from './ResearchMemoCard.jsx'
 import { deadlineRequest } from './requestDeadline.js'
 import { installNavigationLossGuard } from './navigationLossGuard.js'
 import { createInspectorDraftStore, useInspectorDraftField } from './inspectorDraftStore.js'
@@ -432,87 +432,52 @@ export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
 // Deep-research drawer: every memo in one place (instead of scrolling the timeline feed), with
 // ACTIONABLE directions — "steer →" posts a hint the Researcher folds into the next proposal. Deep
 // research is no longer a DAG node; this drawer + the Dock timeline marker are its home.
-export function ResearchPanel({ state, runId, onToast, onClose }) {
+export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSelectEvidence }) {
   const memoProjection = useMemo(() => normalizeResearchMemos(state.research), [state.research])
   const memos = [...memoProjection.memos].reverse()   // newest retained first
+  const newestMemoIndex = memos[0]?.sourceIndex ?? null
+  const [openMemo, setOpenMemo] = useState(newestMemoIndex)
+  const seenNewestMemo = useRef(newestMemoIndex)
+  const [steeringDirection, setSteeringDirection] = useState('')
+  useEffect(() => {
+    if (newestMemoIndex === seenNewestMemo.current) return
+    seenNewestMemo.current = newestMemoIndex
+    setOpenMemo(newestMemoIndex)
+  }, [newestMemoIndex])
   const steer = async (text) => {
-    await submitCommand(CONTROL.hint(runId, 'try this research direction: ' + text), {
-      success: 'Steered the next proposal', noop: 'That direction was already queued',
-      executing: 'Steer request accepted — waiting for the run', failure: 'Could not steer',
-    }, onToast)
+    if (steeringDirection) return
+    setSteeringDirection(text)
+    try {
+      await submitCommand(CONTROL.hint(runId, 'try this research direction: ' + text), {
+        success: 'Steered the next proposal', noop: 'That direction was already queued',
+        executing: 'Steer request accepted — waiting for the run', failure: 'Could not steer',
+      }, onToast)
+    } finally {
+      setSteeringDirection('')
+    }
   }
   return (
     <Panel title="Deep research" sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose} wide>
-      {/* Name only what an operator can actually DO. `/deep-research` was never a command: the chat's
-          direct vocabulary is assistantCommand.js::INTENTS (stop/pause/finalize/abort/resume/ratify/
-          approve) plus AssistantBar's /new draft, and no assistant tool maps to the deep_research
-          control either — so the old copy sent every reader who has no memos yet to a dead end. The
-          cadence IS reachable, and it is the only browser-reachable trigger today. */}
-      {!memos.length && <div className="muted">No deep-research memos yet. They arrive on the{' '}
-        <code>deep_research_every</code> cadence, which defaults to <code>0</code> — no waiting
-        window, so the first memo lands beside the run&rsquo;s first evaluation — or when the
-        Strategist asks for one. A run showing none either has no LLM backend, has the cadence set to{' '}
-        <code>-1</code> (off), or has not created its first node yet. Change it in Config, save, then
-        resume; there is no one-off trigger in the browser yet.</div>}
+      {!memos.length && <div className="research-empty-state" role="status">
+        <div><OpIcon name="search" size={16} /><strong>No research memos yet</strong></div>
+        <p>Deep research runs on the configured cadence or when the Strategist requests it.</p>
+        <details><summary>Why can this be empty?</summary>
+          <p>The run may not have created its first experiment, the LLM backend may be unavailable,
+            or <code>deep_research_every</code> may be set to <code>-1</code>.</p>
+        </details>
+      </div>}
       {memoProjection.omitted > 0 && <div className="muted">
         Showing {memos.length} of {memoProjection.total} newest valid memos; older, malformed, or over-budget entries are omitted.
       </div>}
-      {memos.map(m => (
-        // Key by the STABLE original index (research is append-only), not the reversed position:
-        // keyed by `i`, a new memo landing at index 0 reuses the prior memo's DOM node and its open
-        // <details> state bleeds onto the new one.
-        <div className="rsch-memo" key={m.sourceIndex}>
-          <div className="rsch-h">
-            <span className="rsch-ic"><OpIcon name="search" /></span>
-            <b>{m.summary || '(no summary)'}</b>
-            <span className="right" />
-            {m.trigger && <span className="pill">{m.trigger}</span>}
-            {m.at_node != null && <span className="pill">@#{m.at_node}</span>}
-          </div>
-          {(m.findings || []).length > 0 && <><div className="section-h">Findings</div>
-            <ul className="bul">{m.findings.map((f, j) => <li key={j}>{f}</li>)}</ul></>}
-          {/* D8: decoupled Verifier verdicts over the memo's claims (synthesis is the weak link) */}
-          {m.verification && ((m.verification.verdicts || []).length > 0
-            || m.verification.omittedVerdicts > 0) && <>
-            <div className="section-h">Verification
-              {m.verification.unsupported > 0 &&
-                <span className="chip warn" title="claims whose cited evidence does not support them">
-                  {m.verification.unsupported} unsupported</span>}
-              {m.verification.omittedVerdicts > 0 &&
-                <span className="chip warn">verification incomplete</span>}
-              <span className="muted"> ({m.verification.method})</span></div>
-            {m.verification.omittedVerdicts > 0 && <p className="memo-verification-incomplete" role="note">
-              Showing {m.verification.verdicts.length} of {m.verification.totalVerdicts} verifier verdicts;
-              omitted verdicts make this check incomplete.
-            </p>}
-            <ul className="bul">{m.verification.verdicts.map((v, j) => (
-              <li key={j} className={v.verdict === 'supported' ? 'ok'
-                : (v.verdict === 'unclear' || v.verdict === 'cited') ? '' : 'bad'}>
-                <span className="pill">{v.verdict}</span> {v.statement}
-                {v.note && <span className="muted"> — {v.note}</span>}</li>))}</ul></>}
-          {(m.recommended_directions || []).length > 0 && <><div className="section-h">Recommended directions</div>
-            <ul className="rsch-dirs">{m.recommended_directions.map((d, j) => (
-              <li key={j}><span>{d}</span>
-                <button className="btn sm ghost" title="steer the next proposal toward this direction (posts a hint)"
-                        onClick={() => steer(d)}>
-                  steer →
-                </button>
-              </li>))}</ul></>}
-          {(m.sources || []).length > 0 && <><div className="section-h">Sources</div>
-            <ul className="bul">{m.sources.map((source, index) => {
-              // Deep-research sources are untrusted provider output. Only credential-free HTTP(S)
-              // URLs become links; unsafe, oversized or malformed values remain bounded inert text.
-              const href = safeExternalHref(source?.url)
-              const label = String(source?.title ?? source?.url ?? 'source').slice(0, 300)
-              const snippet = source?.snippet == null ? '' : String(source.snippet).slice(0, 160)
-              return <li key={index}>{href
-                ? <a href={href} target="_blank" rel="noreferrer noopener">{label}</a> : label}
-                {snippet && <div className="muted">{snippet}</div>}</li>
-            })}</ul></>}
-          {m.reasoning && <details className="rsch-reasoning"><summary>reasoning (debug)</summary>
-            <Markdown className="think-body" text={m.reasoning} /></details>}
-        </div>
-      ))}
+      <div className="research-memo-stack">{memos.map((memo, index) => (
+        // Append-only sourceIndex is stable while the newest card is inserted at the top.
+        <ResearchMemoCard key={memo.sourceIndex} memo={memo} memoNumber={memo.sourceIndex + 1}
+          latest={index === 0} open={openMemo === memo.sourceIndex}
+          onToggle={() => setOpenMemo(current => current === memo.sourceIndex ? null : memo.sourceIndex)}
+          variant="panel" normalized
+          onSteer={steer} steeringDirection={steeringDirection} onSelectNode={onSelect}
+          onSelectEvidence={onSelectEvidence} />
+      ))}</div>
     </Panel>
   )
 }

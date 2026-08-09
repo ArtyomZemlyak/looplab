@@ -159,7 +159,8 @@ function List({ items }) {
   return <ul className="bul">{items.map((x, i) => <li key={i}>{x}</li>)}</ul>
 }
 
-export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, onToast, onPickNode, readOnly = false,
+export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, onToast,
+  onPickNode, onPickEvidence, readOnly = false,
   historySeq = null, expectedGeneration = null, observedSeq = null,
   readOnlyReason = 'history', evidenceAvailable = true }) {
   const candidate = state.best_node_id != null ? state.nodes[state.best_node_id] : null
@@ -172,7 +173,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
   const coverage = useMemo(() => reportNarrativeCoverage(rep, nodeCount), [rep, nodeCount])
   const imp = useMemo(() => hyperImportance(state).slice(0, 6), [state])
   const memoProjection = useMemo(() => normalizeResearchMemos(state.research), [state.research])
-  const memos = memoProjection.memos
+  const memos = [...memoProjection.memos].reverse()
   const solutionRunReady = typeof runId === 'string' && runId.length > 0 && state.run_id === runId
   const solutionGeneration = RUN_GENERATION_RE.test(expectedGeneration || '')
     ? expectedGeneration : null
@@ -200,7 +201,14 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
   })
   const [bestCodeNonce, setBestCodeNonce] = useState(0)
   const bestCodeRequestRef = useRef(null)
-  const [openMemo, setOpenMemo] = useState(memos.length ? memos[memos.length - 1].sourceIndex : null)
+  const [openMemo, setOpenMemo] = useState(memos.length ? memos[0].sourceIndex : null)
+  const newestMemoIndex = memos[0]?.sourceIndex ?? null
+  const seenNewestMemo = useRef(newestMemoIndex)
+  useEffect(() => {
+    if (newestMemoIndex === seenNewestMemo.current) return
+    seenNewestMemo.current = newestMemoIndex
+    setOpenMemo(newestMemoIndex)
+  }, [newestMemoIndex])
   const [refreshing, setRefreshing] = useState(false)
   const [refreshError, setRefreshError] = useState('')
   const [refreshRetryAllowed, setRefreshRetryAllowed] = useState(true)
@@ -543,7 +551,8 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
           {memoProjection.omitted > 0 && <div className="muted">
             Showing the latest {memos.length} of {memoProjection.total} research memos; older, malformed, or over-budget entries are omitted.
           </div>}
-          {memos.map(m => <MemoCard key={m.sourceIndex} memo={m} idx={m.sourceIndex}
+          {memos.map((m, index) => <MemoCard key={m.sourceIndex} memo={m} idx={m.sourceIndex}
+            latest={index === 0} onSelectNode={onPickNode} onSelectEvidence={onPickEvidence} normalized
             open={openMemo === m.sourceIndex} onToggle={(key) => setOpenMemo(current => current === key ? null : key)} />)}
         </div>}
       </> : null}

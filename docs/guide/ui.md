@@ -175,8 +175,17 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   `_CHAT_SUMMARY_GRACE_BYTES` :76, and the 413 branch at :560-570). Compact, append the returned
   recap as a `summary` turn, and carry on. Resetting the run also archives the transcript and starts a
   fresh one, but it is the destructive option, not the first one.
+- **Deep Research** — every run surface uses the same conclusion-first memo card. The newest memo is
+  open and older memos are collapsed; the takeaway, provenance, evidence/claim counts and trust state
+  remain visible in the header. Findings and next actions stay primary, while verified evidence,
+  source/tool activity and technical reasoning use nested disclosures. Unsupported or incomplete
+  evidence opens automatically. Claim citations link to safe source URLs, experiment references jump
+  to the cited node, and malformed legacy memo arrays degrade to empty sections instead of crashing a
+  historical timeline. Assistant tool activity follows the same progressive-disclosure rule: short
+  traces stay compact and longer traces are bounded and collapsed by default, without rendering raw
+  arguments or results.
 - **Reports** — an agent-authored, conclusion-first run report plus deterministic metric-improvement
-  charts.
+  charts. The same Deep Research card is reused here, including print-safe expanded content.
 - **Read-only review links** — with `LOOPLAB_UI_TOKEN` configured, **Lab → Comments & sharing** creates a
   revocable, expiring capability for one run. Summary links expose the DAG/report and derived metrics;
   an explicit evidence option adds redacted node source/results. Assistant, actions, raw

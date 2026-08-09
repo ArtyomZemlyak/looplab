@@ -32,6 +32,20 @@ def test_render_caps_old_directives():
     assert "h8" in out and "h0" not in out      # only the last 3 shown verbatim
 
 
+def test_deep_research_advisories_never_enter_operator_authority_block():
+    out = render_hint_directives([
+        {"text": "operator old"},
+        {"text": "model-generated direction", "source": "deep_research"},
+        {"text": "operator newest"},
+    ])
+    assert "model-generated direction" not in out
+    assert out.index("operator old") < out.index("operator newest")
+    assert out.rstrip().endswith("follow this when they conflict")
+    assert render_hint_directives([
+        {"text": "model-only direction", "source": "deep_research"},
+    ]) == ""
+
+
 def test_replace_hint_supersedes_prior(tmp_path):
     s = EventStore(tmp_path / "events.jsonl")
     s.append("hint", {"text": "first"})
@@ -57,6 +71,19 @@ def test_duplicate_standing_hint_is_folded_once(tmp_path):
     st = fold(s.read_all())
 
     assert [h["text"] for h in st.pending_hints] == ["try robust scaling"]
+
+
+def test_operator_hint_is_not_deduped_against_same_text_deep_research_advisory(tmp_path):
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("hint", {"text": "try robust scaling", "source": "deep_research"})
+    s.append("hint", {"text": "try robust scaling"})
+
+    st = fold(s.read_all())
+
+    assert [hint.get("source") for hint in st.pending_hints] == ["deep_research", None]
+    rendered = render_hint_directives(st.pending_hints)
+    assert rendered.count("try robust scaling") == 1
+    assert rendered.startswith("\nOperator directive")
 
 
 def test_replace_then_append(tmp_path):

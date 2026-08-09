@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.trust.harden import ExploitSuite, harden
 from looplab.trust.memo_verify import _source_map, _source_ref, check_claims, verify_memo
@@ -419,6 +420,20 @@ def test_verify_memo_llm_upgrades_cited(monkeypatch):
     assert out["method"] == "llm"
     assert out["verdicts"][0]["verdict"] == "unsupported"
     assert out["unsupported"] == 1
+
+
+def test_verify_memo_propagates_budget_hard_stop(monkeypatch):
+    st = _state([_node(0, metric=0.9)])
+    memo = {"claims": [{"statement": "node 0 reached 0.90", "node_ids": [0]}]}
+
+    def _budget_stop(*_args, **_kwargs):
+        raise BudgetExceeded("semantic verifier spent the run budget")
+
+    import looplab.trust.judge as judge_mod
+    monkeypatch.setattr(judge_mod, "structured_judge", _budget_stop)
+
+    with pytest.raises(BudgetExceeded, match="semantic verifier spent the run budget"):
+        verify_memo(memo, st, client=object())
 
 
 # --------------------------------------------------------------------------- #

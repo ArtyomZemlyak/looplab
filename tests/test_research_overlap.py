@@ -7,7 +7,9 @@ import threading
 import types
 
 import anyio
+import pytest
 
+from looplab.core.llm import BudgetExceeded
 from looplab.engine.orchestrator import Engine
 from looplab.engine.research_cadence import ResearchCadenceMixin, research_memo_sig
 
@@ -223,6 +225,18 @@ def test_a_provider_that_always_raises_still_spends_the_per_window_cap():
     anyio.run(Engine._research_overlap_loop, stub, "cadence")
     assert stub.compute_calls == 3, stub.compute_calls   # attempts are bounded, not just successes
     assert stub.recorded == []                           # and nothing was recorded from a failure
+
+
+def test_repeat_loop_propagates_budget_hard_stop_instead_of_retrying():
+    class _BudgetStops(_LoopStub):
+        def _compute_deep_research(self, state, trig, *, trace=True):
+            self.compute_calls += 1
+            raise BudgetExceeded("repeat research spent the run budget")
+
+    stub = _BudgetStops([_memo("unused")], cap=3, cadence=0.001)
+    with pytest.raises(BudgetExceeded, match="repeat research spent the run budget"):
+        anyio.run(Engine._research_overlap_loop, stub, "cadence")
+    assert stub.compute_calls == 1
 
 
 def test_loop_first_trigger_label_then_repeat():

@@ -19,6 +19,7 @@ from __future__ import annotations
 import uuid
 from typing import Optional
 
+from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import RunState, idea_proposal_ref, normalize_researcher_footprint
 from looplab.engine.cadence import deep_research_window
@@ -252,7 +253,8 @@ class ResearchCadenceMixin:
     def _compute_deep_research(self, state: RunState, trigger: str, *, trace: bool = True):
         """PURE compute: run one Deep-Research step and RETURN the memo WITHOUT writing the event log,
         so it can run in a worker thread concurrently with an eval while the engine stays the sole
-        writer. Best-effort — never raises (a crash/None model yields a stub so the gate still advances).
+        writer. Best-effort for ordinary failures (a crash/None model yields a stub so the gate still
+        advances); the global `BudgetExceeded` hard stop always propagates.
         `trace=False` skips the span: the tracer is not safe to write from the concurrent worker."""
         from looplab.core.models import ResearchMemo
         if self.deep_researcher is None:
@@ -263,7 +265,9 @@ class ResearchCadenceMixin:
                 with self.tracer.span("deep_research", new_trace=True, trigger=trigger):
                     return self.deep_researcher.research(state, trigger=trigger)
             return self.deep_researcher.research(state, trigger=trigger)
-        except Exception as exc:  # noqa: BLE001 — best-effort research must never kill the run
+        except BudgetExceeded:
+            raise
+        except Exception as exc:  # noqa: BLE001 — ordinary research failures degrade to a stub
             return ResearchMemo(at_node=len(state.nodes), trigger=trigger,
                                 summary=f"(deep research failed: {exc})")
 
@@ -309,7 +313,9 @@ class ResearchCadenceMixin:
                                   parser=getattr(self.deep_researcher, "parser", "tool_call"))
                 if ver is not None:
                     memo_d["verification"] = ver
-            except Exception:  # noqa: BLE001 — verification must never block the memo
+            except BudgetExceeded:
+                raise
+            except Exception:  # noqa: BLE001 — ordinary verifier failures do not block the memo
                 pass
         # The model, tool ledger, and verifier are all untrusted text producers. This
         # writer-side pass is the invariant: custom researchers cannot bypass redaction, control
@@ -331,8 +337,9 @@ class ResearchCadenceMixin:
             **({"memo_id": memo_id} if memo_id is not None else {}),
             "at_node": memo.at_node, "trigger": trigger, "served_manual": manual,
             **({"attempt_id": attempt_id} if attempt_id else {})})
-        # Steer the next proposals: surface the memo's directions as a standing operator hint (the
-        # same channel the Researcher already reads), so deep research actually informs planning.
+        # Steer the next proposals: retain the legacy hint projection for replay compatibility.
+        # It is explicitly model-generated advisory data, not operator authority; prompt rendering
+        # filters this source while the research memo/open-hypothesis channels carry the signal.
         directions = [d for d in memo_d.get("recommended_directions", []) if str(d).strip()]
         if directions:
             assert EV_HINT in BACKGROUND_APPENDABLE             # see the method-level note
