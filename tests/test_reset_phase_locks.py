@@ -51,7 +51,7 @@ LADDER = {
     "engine_write_lock_http": "engine_write",
     "run_config_write_lock": "config",
     "_interprocess_lock": "events",
-    "span_index_write_guard": "spans",
+    "span_destructive_write_guard": "spans",
 }
 
 # Phase -> the exact lock stack that must be held when it is ENTERED, outermost first. This is the

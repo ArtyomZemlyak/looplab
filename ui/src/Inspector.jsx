@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState, useRef } from 'react'
-import { costPricing, deadlineGet, get, fmt, fmtInt, isSweep, CONTROL,
+import React, { useEffect, useId, useMemo, useState, useRef } from 'react'
+import { conditionalGet, costPricing, deadlineGet, get, fmt, fmtInt, isSweep, CONTROL,
   commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
   retryRunCommand, runApiPath, runNodeApiPath, submitCommand, traceDeadlineGet, traceGenerationMatches,
   traceReadQuery } from './util.js'
@@ -34,6 +34,10 @@ import { buildingMarkers } from './buildingModel.js'
 import { deadlineRequest } from './requestDeadline.js'
 import { createInspectorDraftStore, useInspectorDraftField } from './inspectorDraftStore.js'
 import { useTraceClear } from './useTraceClear.js'
+import VirtualTimeline from './VirtualTimeline.jsx'
+import {
+  flattenSpanTree, spanTreeMatches,
+} from './spanTreeModel.js'
 
 // Comments are an explicit Inspector interaction. Keep their independently secured
 // review transport out of the base DAG closure, then load the same component only when this tab opens.
@@ -1005,14 +1009,15 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
 // positioned by its OFFSET from t0 (a langfuse-style waterfall) rather than just sized by duration.
 function traceBounds(spans) {
   let lo = Infinity, hi = 0
-  const walk = (arr) => (arr || []).forEach(s => {
+  const stack = [...(spans || [])]
+  while (stack.length) {
+    const s = stack.pop()
     const st = (typeof s.start === 'number') ? s.start : null
     const en = st != null ? st + (s.duration_s || 0) : (s.duration_s || 0)
     if (st != null && st < lo) lo = st
     if (en > hi) hi = en
-    walk(s.children)
-  })
-  walk(spans)
+    stack.push(...(s.children || []))
+  }
   if (!isFinite(lo)) lo = 0
   return { t0: lo, total: Math.max(1e-9, hi - lo) }
 }
@@ -1075,11 +1080,12 @@ function spanRollup(s) {
   // ctx = the PEAK single prompt = the real context-window size. out = generated tokens. The UI shows
   // ctx + out (billed tok in the tooltip) so the number reads as "context", not the re-send sum.
   let calls = 0, tok = 0, ctx = 0, out = 0
-  const walk = (x) => {
+  const stack = [s]
+  while (stack.length) {
+    const x = stack.pop()
     if (x.kind === 'generation') { calls++; const u = (x.attributes || {}).usage || {}; const p = u.prompt || 0; tok += (u.total != null ? u.total : p + (u.completion || 0)); ctx = Math.max(ctx, p); out += u.completion || 0 }
-    ;(x.children || []).forEach(walk)
+    stack.push(...(x.children || []))
   }
-  walk(s)
   return { calls, tok, ctx, out }
 }
 
@@ -1101,8 +1107,8 @@ const asText = (v) => v == null ? '' : (typeof v === 'string' ? v : JSON.stringi
 // plus a collapsed reasoning disclosure. Tool CALLS are NOT shown here — they render as their own
 // indented tool observations directly beneath this chat (no duplication); when a turn produced only
 // tool calls, its output is empty and we say so, pointing at the tools below.
-function GenBody({ c }) {
-  const [think, setThink] = useState(false)
+function GenBody({ c, thinkOpen, onThink }) {
+  const think = thinkOpen === true
   const nTools = (c.tool_calls || []).length
   return <div className="llm-io">
     {(c.model || c.model_parameters || c.cost != null) && <div className="kv">
@@ -1120,19 +1126,39 @@ function GenBody({ c }) {
           {nTools ? `→ called ${nTools} tool${nTools > 1 ? 's' : ''} (shown below)` : '(no text output)'}</div>}
     {c.thinking && <div className="msg think-debug">
       <button type="button" className="msg-role role-think disclosure-button" aria-expanded={think}
-        onClick={() => setThink(v => !v)}>{think ? '▾' : '▸'} reasoning (debug)</button>
+        onClick={() => onThink(!think)}>
+        {think ? '▾' : '▸'} reasoning (debug)</button>
       {think && <Markdown className="think-body" text={c.thinking} />}</div>}
   </div>
 }
 
-// Render a list of sibling spans. Two behaviours:
-//  • INDENT each tool observation one level under the generation before it — in the tool-loop the
-//    sequence is (chat → tool → tool → chat → …), so a tool belongs to the last chat, making "which
-//    chat called this tool" obvious without re-parenting the trace.
-//  • CAP how many are rendered at once (a heavily-repaired node can have 800+ spans — rendering them
-//    all freezes the browser / black screen). Show the first SPAN_CAP, then a "show N more" button.
-//    This local reveal remains subject to the server's bounded/redacted projection and omission receipt.
-const SPAN_CAP = 60
+const CONVERSATION_TURN_CAP = 60
+const spanTreeKey = row => row.key
+
+const spanAttrs = span => Object.entries(span.attributes || {}).filter(([key]) => key !== 'node_id')
+const spanHasDetail = row => {
+  const kind = row.span.kind || 'operation'
+  return kind === 'generation' || kind === 'tool'
+    || spanAttrs(row.span).length > 0 || (row.span.events || []).length > 0
+}
+const pruneSpanState = (current, live) => {
+  const next = new Map([...current].filter(([key]) => live.has(key)))
+  return next.size === current.size ? current : next
+}
+
+function SpanFacts({ span }) {
+  const attrs = spanAttrs(span)
+  const events = span.events || []
+  return <>
+    {attrs.length > 0 && <div className="kv">{attrs.map(([key, value]) =>
+      <KV key={key} k={key} v={typeof value === 'object' ? JSON.stringify(value) : String(value)} />)}</div>}
+    {events.map((event, index) => <div key={index} className="span-ev">
+      <span className="ty">{event.name}</span>{event.error ? <span className="flag"> {event.error}</span> :
+        <span className="muted"> {Object.entries(event).filter(([key]) => key !== 'name')
+          .map(([key, value]) => `${key}=${typeof value === 'object' ? JSON.stringify(value) : value}`).join(' ')}</span>}
+    </div>)}
+  </>
+}
 
 export function TraceUnavailable({ label = 'Trace unavailable.', onRetry, pending = false }) {
   return <div className="notice resource-error compact" role="alert">
@@ -1143,44 +1169,20 @@ export function TraceUnavailable({ label = 'Trace unavailable.', onRetry, pendin
   </div>
 }
 
-function SpanList({ items, depth, t0, total, runId, expectedGeneration,
-  parentOp = null }) {
-  const [all, setAll] = useState(false)
-  const rows = []
-  let genDepth = null
-  ;(items || []).forEach((c, i) => {
-    const kind = c.kind || 'operation'
-    if (kind === 'tool' && genDepth != null) { rows.push({ c, d: genDepth + 1, i }) }
-    else { rows.push({ c, d: depth, i }); genDepth = (kind === 'generation') ? depth : null }
-  })
-  const shown = all ? rows : rows.slice(0, SPAN_CAP)
-  return <>
-    {shown.map(({ c, d, i }) => <SpanRow
-      key={c.span_id || i}
-      s={c} depth={d} t0={t0} total={total} runId={runId}
-      expectedGeneration={expectedGeneration} parentOp={parentOp} />)}
-    {!all && rows.length > SPAN_CAP && <button className="span-more" style={{ marginLeft: depth * 14 + 4 }}
-      onClick={() => setAll(true)}>… show {rows.length - SPAN_CAP} more observations</button>}
-  </>
-}
-
 // One span and its subtree, drawn as a langfuse-style waterfall row: the bar is positioned by the
 // span's OFFSET from the trace start (t0) and sized by its duration, so sequence reads at a glance.
 // Renders three observation kinds distinctly — GENERATION (an LLM call: op·model·in→out·preview, its
 // prompt/output on expand), TOOL (name·arg, its input/output on expand), and OPERATION (a phase of
 // work) — so the tree shows exactly what called what and what each bounded projection produced.
-function SpanRow({ s, depth, t0, total, runId, expectedGeneration,
-  parentOp = null }) {
-  const [open, setOpen] = useState(false)
-  const [io, setIo] = useState(null)
+function SpanRow({ row, t0, total, runId, expectedGeneration, open, io,
+  onToggle, onActivate, onIo, detailId, thinkOpen, onThink, parentOp }) {
+  const s = row.span, depth = Math.max(0, row.level - 2)
   const kind = s.kind || 'operation'
   const err = s.status === 'ERROR'
   const off = (typeof s.start === 'number') ? Math.max(0, (s.start - t0) / total * 100) : 0
   const wid = Math.max(1.5, (s.duration_s || 0) / total * 100)
   const barTone = err ? 'var(--fail)' : kind === 'generation' ? 'var(--accent)' : kind === 'tool' ? 'var(--working)' : stageMeta(s.name)[3]
   const bar = <span className="span-bar"><span className="span-fill" style={{ marginLeft: Math.min(98, off) + '%', width: wid + '%', background: barTone }} /></span>
-  const kids = <SpanList items={s.children} depth={depth + 1} t0={t0} total={total}
-    runId={runId} expectedGeneration={expectedGeneration} parentOp={s.name} />
   const rowIndent = { paddingLeft: depth * 14 }
   const detailIndent = { marginLeft: depth * 14 + 16 }
   // On first expand, pull the bounded/redacted detail projection; its omission receipt is rendered.
@@ -1189,22 +1191,24 @@ function SpanRow({ s, depth, t0, total, runId, expectedGeneration,
       runApiPath(runId, `/spans/${encodeURIComponent(s.span_id)}`), expectedGeneration)
     request.promise.then(d => {
       if (!traceGenerationMatches(d, expectedGeneration)) throw 0
-      if (alive()) setIo(traceDetailState(d))
-    }).catch(() => { if (alive()) setIo(unavailableTraceDetail()) })
+      if (alive()) onIo(traceDetailState(d))
+    }).catch(() => { if (alive()) onIo(unavailableTraceDetail()) })
     return request
   }, null, [open, io, runId, expectedGeneration, s.span_id, kind], {
     enabled: open && io === null && !!runId && !!s.span_id
       && (kind === 'generation' || kind === 'tool'),
   })
-  const retryIo = () => setIo(null)
+  const retryIo = () => onIo(null)
+  const toggle = () => { onActivate(); onToggle() }
 
   if (kind === 'generation') {
     // Row header from the LIGHT span (op·model·tokens); the prompt/output come from the fetched `io`.
     const a = { ...(s.attributes || {}), ...(io?.attributes || {}) }
     const c = genToCall({ ...s, attributes: a }), t = c.tokens
     return <>
-      <button type="button" aria-expanded={open} className={'span-row gen disclosure-button' + (err ? ' err' : '')}
-        style={rowIndent} onClick={() => setOpen(o => !o)} title="expand for prompt & output">
+      <button type="button" tabIndex={-1} aria-expanded={open} aria-controls={detailId}
+        className={'span-row gen disclosure-button' + (err ? ' err' : '')}
+        style={rowIndent} onClick={toggle} title="expand for prompt & output">
         <span className="span-tw">{open ? '▾' : '▸'}</span>
         {(() => {   // name the call by ROLE so "who writes code" is unmistakable: the Developer's LLM
           // call (under implement/repair) is "writing code"; the Researcher's (under propose) is "reasoning".
@@ -1217,26 +1221,27 @@ function SpanRow({ s, depth, t0, total, runId, expectedGeneration,
         {(t.prompt != null || t.completion != null) && <span className="badge" title={`${t.prompt || 0} prompt → ${t.completion || 0} completion tokens`}>{ktok(t.prompt)}→{ktok(t.completion)}</span>}
         {err && <span className="badge reason">ERROR</span>}
       </button>
-      {open && <div className="span-detail" style={detailIndent}>
+      {open && <div className="span-detail" id={detailId} style={detailIndent}>
         {io === null ? <div className="muted trace-small" role="status">loading…</div> : io.status === 'unavailable'
           ? <TraceUnavailable label="Trace detail unavailable." onRetry={retryIo} />
-          : <>{io.partial && <div className="notice compact" role="status">Trace detail truncated.</div>}<GenBody c={c} /></>}</div>}
-      {kids}
+          : <>{io.partial && <div className="notice compact" role="status">Trace detail truncated.</div>}
+            <GenBody c={c} thinkOpen={thinkOpen} onThink={onThink} /></>}</div>}
     </>
   }
   if (kind === 'tool') {
     const a = { ...(s.attributes || {}), ...(io?.attributes || {}) }
     const inp = asText(a.input), outp = asText(a.output), name = (s.attributes || {}).tool || a.tool || 'tool'
     return <>
-      <button type="button" aria-expanded={open} className={'span-row tool disclosure-button' + (err ? ' err' : '')}
-        style={rowIndent} onClick={() => setOpen(o => !o)} title="expand for input & output">
+      <button type="button" tabIndex={-1} aria-expanded={open} aria-controls={detailId}
+        className={'span-row tool disclosure-button' + (err ? ' err' : '')}
+        style={rowIndent} onClick={toggle} title="expand for input & output">
         <span className="span-tw">{open ? '▾' : '▸'}</span>
         <span className="span-name tool"><OpIcon name="gear" className="t-ic" /> <b className="tool-name">{name}</b></span>
         {bar}
         <span className="t">{fmt(s.duration_s, 3)}s</span>
         {err && <span className="badge reason">ERROR</span>}
       </button>
-      {open && <div className="span-detail" style={detailIndent}>
+      {open && <div className="span-detail" id={detailId} style={detailIndent}>
         {io === null ? <div className="muted trace-small" role="status">loading…</div> : io.status === 'unavailable'
           ? <TraceUnavailable label="Trace detail unavailable." onRetry={retryIo} /> : <>
           {io.partial && <div className="notice compact" role="status">Trace detail truncated.</div>}
@@ -1244,58 +1249,132 @@ function SpanRow({ s, depth, t0, total, runId, expectedGeneration,
           {outp && <div className="msg"><div className="msg-role role-completion">output</div><pre className="code">{outp}</pre></div>}
           {!inp && !outp && <div className="muted trace-small">(no input/output recorded)</div>}</>}
       </div>}
-      {kids}
     </>
   }
   // OPERATION span (a phase of work): bounded attributes and events.
-  const attrs = Object.entries(s.attributes || {}).filter(([k]) => k !== 'node_id')
-  const events = s.events || []
   const [icon, role, desc] = stageMeta(s.name)
-  const detail = attrs.length || events.length
-  const OperationHeader = detail ? 'button' : 'div'
-  return <>
-    <OperationHeader type={detail ? 'button' : undefined} aria-expanded={detail ? open : undefined}
-         className={'span-row' + (detail ? ' disclosure-button' : '') + (err ? ' err' : '')}
-         style={rowIndent} onClick={detail ? () => setOpen(o => !o) : undefined}
-         title={detail ? 'click for step detail' : ''}>
-      <span className="span-tw">{detail ? (open ? '▾' : '▸') : '·'}</span>
-      <span className="span-name" title={desc}><OpIcon name={icon} className="t-ic" /> {role !== s.name ? role : s.name}</span>
-      {bar}
+  const detail = spanHasDetail(row)
+  const Header = detail ? 'button' : 'div'
+  const stage = row.parent < 0
+  const roll = stage ? spanRollup(s) : null
+  return <div className={stage
+    ? 'stage span-stage-row' + (err ? ' err' : '') : undefined}>
+    <Header type={detail ? 'button' : undefined} tabIndex={detail ? -1 : undefined}
+         aria-expanded={detail ? open : undefined} aria-controls={detail ? detailId : undefined}
+         className={(stage ? 'stage-h ' : '') + 'span-row'
+           + (detail ? ' disclosure-button' : '') + (err && !stage ? ' err' : '')}
+         style={rowIndent} onClick={detail ? toggle : onActivate}
+         title={detail ? `${desc} — expand detail` : desc}>
+      <span className={stage ? 'stage-caret' : 'span-tw'}>
+        {detail ? (open ? '▾' : '▸') : '·'}</span>
+      {stage ? <><span className="stage-ic"><OpIcon name={icon} /></span><b>{role}</b>
+        {roll.calls > 0 && <span className="stage-roll" title={`${roll.tok} billed tokens`}>
+          {roll.calls} call{roll.calls > 1 ? 's' : ''}
+          {roll.ctx ? ` · ${ktok(roll.ctx)} ctx` : ''}{roll.out ? ` · ${ktok(roll.out)} out` : ''}</span>}
+        <span className="spacer" /></>
+        : <span className="span-name" title={desc}><OpIcon name={icon} className="t-ic" />
+          {role !== s.name ? role : s.name}</span>}
+      {!stage && bar}
       <span className="t">{fmt(s.duration_s, 3)}s</span>
       {err && <span className="badge reason">ERROR</span>}
-    </OperationHeader>
-    {open && detail && <div className="span-detail" style={detailIndent}>
-      {attrs.length > 0 && <div className="kv">{attrs.map(([k, v]) =>
-        <KV key={k} k={k} v={typeof v === 'object' ? JSON.stringify(v) : String(v)} />)}</div>}
-      {events.map((e, i) => <div key={i} className="span-ev">
-        <span className="ty">{e.name}</span>{e.error ? <span className="flag"> {e.error}</span> :
-          <span className="muted"> {Object.entries(e).filter(([k]) => k !== 'name').map(([k, v]) => `${k}=${v}`).join(' ')}</span>}
-      </div>)}
+    </Header>
+    {open && detail && <div className={'span-detail' + (stage ? ' stage-root-detail' : '')}
+      id={detailId} style={stage ? undefined : detailIndent}>
+      <SpanFacts span={s} />
     </div>}
-    {kids}
-  </>
+  </div>
 }
 
-// A top-level lifecycle stage (one root span = one phase of work on this node), with its sub-steps.
-// The header rolls up the stage's model-call count + token cost so the expensive phases stand out.
-function StageBlock({ s, t0, total, runId, expectedGeneration }) {
-  const [icon, role, desc] = stageMeta(s.name)
-  const roll = spanRollup(s)
-  return <div className={'stage' + (s.status === 'ERROR' ? ' err' : '')}>
-    <div className="stage-h" title={desc}>
-      <span className="stage-ic"><OpIcon name={icon} /></span>
-      <b>{role}</b>
-      {roll.calls > 0 && <span className="stage-roll" title={`${roll.tok} billed tokens`}>{roll.calls} call{roll.calls > 1 ? 's' : ''}{roll.ctx ? ` · ${ktok(roll.ctx)} ctx` : ''}{roll.out ? ` · ${ktok(roll.out)} out` : ''}</span>}
-      <span className="spacer" />
-      <span className="t">{fmt(s.duration_s, 3)}s</span>
+// One dependency-free, variable-height window over the ENTIRE forest. Unlike the old per-sibling
+// cap, it cannot multiply at every depth and has no "show all" escape hatch. All rows remain in the
+// logical/ARIA tree and search index; only the viewport plus overscan is mounted in the DOM.
+function VirtualSpanTree({ roots, t0, total, runId, expectedGeneration, identity }) {
+  const rows = useMemo(() => flattenSpanTree(roots), [roots])
+  const byKey = useMemo(() => new Map(rows.map((row, index) => [row.key, index])), [rows])
+  const [activeKey, setActiveKey] = useState(() => rows[0]?.key || null)
+  const [spanState, setSpanState] = useState(() => new Map())
+  const [query, setQuery] = useState('')
+  const matches = useMemo(() => spanTreeMatches(rows, query), [rows, query])
+  const treeId = useId()
+  const activeIndex = byKey.get(activeKey) ?? (rows.length ? 0 : -1)
+  const activeId = activeIndex >= 0 ? `${treeId}-item-${activeIndex}` : null
+  const matchAt = matches.indexOf(activeIndex)
+  useEffect(() => {
+    if (!rows.length) setActiveKey(null)
+    else if (!byKey.has(activeKey)) setActiveKey(rows[0].key)
+  }, [activeKey, byKey, rows])
+  // A live fixed window can evict old span ids while this component stays mounted. Keep useful
+  // disclosure/detail state for retained ids, but release heavy fetched I/O as soon as its row leaves
+  // the logical projection; reusing an id after eviction must fetch and disclose afresh.
+  useEffect(() => setSpanState(current => pruneSpanState(current, byKey)), [byKey])
+  const updateSpan = (key, patch) => setSpanState(current => {
+    const previous = current.get(key) || {}
+    const next = new Map(current)
+    next.set(key, { ...previous, ...(typeof patch === 'function' ? patch(previous) : patch) })
+    return next
+  })
+  const toggle = key => updateSpan(key, state => ({ open: !state.open }))
+  const find = step => {
+    if (!matches.length) return
+    const current = matchAt < 0 ? (step < 0 ? 0 : -1) : matchAt
+    const next = (current + step + matches.length) % matches.length
+    setActiveKey(rows[matches[next]].key)
+  }
+  const onTreeKey = event => {
+    if (event.target !== event.currentTarget || activeIndex < 0) return
+    const row = rows[activeIndex]
+    if ((event.key === 'Enter' || event.key === ' ') && spanHasDetail(row)) {
+      event.preventDefault(); toggle(row.key); return
+    }
+    if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+    event.preventDefault()
+    let next = activeIndex
+    if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = rows.length - 1
+    else if (event.key === 'ArrowDown') next = Math.min(rows.length - 1, next + 1)
+    else if (event.key === 'ArrowUp') next = Math.max(0, next - 1)
+    else if (event.key === 'ArrowRight' && rows[next + 1]?.parent === next) next += 1
+    else if (event.key === 'ArrowLeft' && row.parent >= 0) next = row.parent
+    setActiveKey(rows[next].key)
+  }
+  return <div className="span-tree-shell">
+    <div className="span-tree-tools">
+      <label className="sr-only" htmlFor={`${treeId}-search`}>Find an observation in this span tree</label>
+      <input id={`${treeId}-search`} className="span-tree-search" type="search" value={query}
+        placeholder="Find span…" onChange={event => {
+          const value = event.target.value
+          const next = spanTreeMatches(rows, value)
+          setQuery(value)
+          if (next.length) setActiveKey(rows[next[0]].key)
+        }} onKeyDown={event => {
+          if (event.key === 'Enter') { event.preventDefault(); find(event.shiftKey ? -1 : 1) }
+        }} />
+      <button type="button" className="seg" disabled={!matches.length} aria-label="Previous span match"
+        onClick={() => find(-1)}>↑</button>
+      <button type="button" className="seg" disabled={!matches.length} aria-label="Next span match"
+        onClick={() => find(1)}>↓</button>
+      <span className="muted span-tree-count" role="status" aria-live="polite">
+        {query ? (matches.length ? (matchAt < 0 ? `${matches.length} matches`
+          : `${matchAt + 1} of ${matches.length}`) : 'No matches')
+          : `${rows.length} span${rows.length === 1 ? '' : 's'}`}</span>
     </div>
-    <div className="spans">
-      {(s.children || []).length
-        ? <SpanList items={s.children} depth={0} t0={t0} total={total} runId={runId}
-          expectedGeneration={expectedGeneration} />
-        : <SpanRow s={s} depth={0} t0={t0} total={total} runId={runId}
-          expectedGeneration={expectedGeneration} />}
-    </div>
+    <VirtualTimeline rows={rows} getKey={spanTreeKey} renderRow={row => {
+      const state = spanState.get(row.key) || {}
+      return <SpanRow row={row} open={!!state.open} onToggle={() => toggle(row.key)}
+        onActivate={() => setActiveKey(row.key)} detailId={`${treeId}-detail-${byKey.get(row.key)}`}
+        t0={t0} total={total} runId={runId} expectedGeneration={expectedGeneration}
+        parentOp={row.parent < 0 ? null : rows[row.parent].span.name}
+        io={state.io ?? null} onIo={io => updateSpan(row.key, { io })}
+        thinkOpen={state.think} onThink={think => updateSpan(row.key, { think })} />
+    }} identity={identity} className="span-tree-virtual" estimateSize={32} overscan={10}
+      activeIndex={activeIndex} viewportProps={{ role: 'tree',
+        'aria-label': `Span tree with ${rows.length} observations`,
+        'aria-activedescendant': activeId || undefined, onKeyDown: onTreeKey }}
+      getItemProps={(row, index) => ({ id: `${treeId}-item-${index}`,
+        role: 'treeitem',
+        'aria-level': row.level, 'aria-posinset': row.pos, 'aria-setsize': row.size,
+        'aria-selected': index === activeIndex, 'data-active': index === activeIndex ? '' : undefined,
+        onClick: () => setActiveKey(row.key) })} />
   </div>
 }
 
@@ -1337,7 +1416,7 @@ function TraceReach({ state, notice, onReach, failed = false }) {
 // Reusable langfuse-style trace for ONE node's span forest — the lifecycle stages on a shared
 // timeline. Exported so the chat feed can show the same waterfall inline (Dock.jsx) as the Inspector.
 export function NodeTrace({ spans, runId, projection = {}, onRetry, onLoadMore,
-  spanLimit = NODE_TRACE_SPAN_WINDOW, expectedGeneration }) {
+  spanLimit = NODE_TRACE_SPAN_WINDOW, expectedGeneration, treeKey = expectedGeneration || runId }) {
   const roots = spans || []
   // The scroll affordance is a hook, so it is resolved before any early return. `unavailable` is
   // still handled FIRST below: a failed observation never gets a sentinel (see traceScrollModel).
@@ -1363,10 +1442,8 @@ export function NodeTrace({ spans, runId, projection = {}, onRetry, onLoadMore,
   const { t0, total } = traceBounds(roots)
   return <div className="trace">
     {reach}
-    {roots.map((s, i) => <StageBlock
-      key={`${expectedGeneration || runId}:${s.span_id || i}`}
-      s={s} t0={t0} total={total} runId={runId}
-      expectedGeneration={expectedGeneration} />)}
+    <VirtualSpanTree key={treeKey} roots={roots} t0={t0} total={total} runId={runId}
+      expectedGeneration={expectedGeneration} identity={String(treeKey)} />
   </div>
 }
 
@@ -1500,14 +1577,14 @@ function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
       {!open && nTurns ? <span className="muted stage-hidden-count">· {nTurns} step{nTurns === 1 ? '' : 's'} hidden</span> : null}
     </button>
     {open && <div className="conv-turns">
-      {/* Cap the mounted turns like the span-tree view (SPAN_CAP): a heavily-repaired / tool-looping stage
+      {/* Conversation Markdown is not part of the span-tree virtual window. Keep a local turn cap: a heavily-repaired / tool-looping stage
           can carry hundreds of turns, and ConvGen eagerly renders each turn's Markdown — mounting them all
-          froze the browser. Show the first SPAN_CAP, then reveal the rest of this server projection. */}
-      {(allTurns ? (st.turns || []) : (st.turns || []).slice(0, SPAN_CAP)).map((t, j) =>
+          froze the browser. Show one bounded tranche, then reveal the rest of this server projection. */}
+      {(allTurns ? (st.turns || []) : (st.turns || []).slice(0, CONVERSATION_TURN_CAP)).map((t, j) =>
         t.type === 'request' ? <ConvRequest key={j} t={t} />
           : t.type === 'tool' ? <ConvTool key={j} t={t} /> : <ConvGen key={j} t={t} />)}
-      {!allTurns && (st.turns || []).length > SPAN_CAP && <button className="span-more"
-        onClick={() => setAllTurns(true)}>… show {(st.turns || []).length - SPAN_CAP} more turns</button>}
+      {!allTurns && (st.turns || []).length > CONVERSATION_TURN_CAP && <button className="span-more"
+        onClick={() => setAllTurns(true)}>… show {(st.turns || []).length - CONVERSATION_TURN_CAP} more turns</button>}
       {log ? <StageLog text={log} live={live} /> : null}
     </div>}
   </div>
@@ -1520,9 +1597,13 @@ const matchingNodePayload = (result, nodeId, attempt, expectedGeneration) => {
     ? payload : null
 }
 
-function Conversation({ n, runId, expectedGeneration, working, allOpen = true, reloadNonce = 0,
+export function Conversation({ n, runId, expectedGeneration, working, allOpen = true, reloadNonce = 0,
   onRetry, spanLimit = NODE_TRACE_SPAN_WINDOW, onLoadMore }) {
   const nodeAttempt = Number.isSafeInteger(n.attempt) && n.attempt >= 0 ? n.attempt : 0
+  // This is the evidence lifecycle, deliberately NOT the request representation: widening the span
+  // window may retain last-good evidence on failure, while a reset/clear nonce may not. Gate during
+  // render as well as commit so correctness never depends on a passive clearing effect winning a race.
+  const lifecycleScope = [runId, expectedGeneration || '', n.id, nodeAttempt, reloadNonce].join('\0')
   // The last SETTLED read, carried with the window that produced it and what that window made
   // visible. Both extra fields earn their place: the window is how "a wider read is in flight" is
   // derived without a second piece of state, and the visible count is what proves a widen actually
@@ -1533,23 +1614,32 @@ function Conversation({ n, runId, expectedGeneration, working, allOpen = true, r
   // `usePoll` serializes ticks (one read unsettled at a time), so this is never behind; and an
   // updater that calls another setState is impure — React may invoke it twice.
   const readRef = useRef(null)
-  readRef.current = read
+  const currentRead = read?.lifecycleScope === lifecycleScope ? read : null
+  readRef.current = currentRead
   useEffect(() => {
-    setRead(null)   // node changed → clear before the first load (poll ticks below don't clear, so no flash)
+    setRead(null)   // release the prior lifecycle after the render-time scope gate already hid it
     setLogs({})     // …likewise the logs, else B's stage bands briefly render A's log text
   // `spanLimit` is deliberately NOT in this list any more. Clearing on a widen blanked the thread to
   // "loading…" for the whole read — 17 s at the ceiling on the measured stress node — so scrolling
   // for older steps took away the ones already on screen. The poll below still re-runs on it.
-  }, [runId, expectedGeneration, n.id, nodeAttempt, working, reloadNonce])
+  }, [lifecycleScope])
   usePoll((alive) => {
+    // A validator is reusable only for the exact selected representation. The server independently
+    // mixes all five identities into its ETag; keeping the same scope key here prevents even a
+    // broken intermediary's 304 from carrying a prior node/window across this client boundary.
+    const scope = [runId, expectedGeneration || '', n.id, nodeAttempt, spanLimit].join('\0')
+    const prior = readRef.current
+    const validator = prior?.scope === scope && prior.etag
+    const conversationPath = runNodeApiPath(runId, n.id,
+      `/conversation${traceReadQuery(expectedGeneration, nodeAttempt, spanLimit)}`)
     // ONE settle rule for both outcomes below, so the deadline path and the rejected-response path
     // cannot disagree about what a failure costs the operator.
-    const commit = (ok, payload) => {
+    const commit = (ok, payload, etag = null) => {
       const previous = readRef.current
       const settled = settleTraceRead(previous?.payload, { ok, payload })
       const failedWiden = settled.reachFailed && spanLimit > previous.window
       if (settled.unavailable) {
-        setRead({ payload: { stages: [], projection: { unavailable: true } },
+        setRead({ lifecycleScope, payload: { stages: [], projection: { unavailable: true } },
           window: spanLimit, visible: 0 })
         return
       }
@@ -1561,24 +1651,41 @@ function Conversation({ n, runId, expectedGeneration, working, allOpen = true, r
         return
       }
       const visible = settled.payload?.projection?.visible_turns
-      const next = { payload: settled.payload, window: spanLimit,
-        visible: Number.isSafeInteger(visible) && visible >= 0 ? visible : 0 }
+      const next = { lifecycleScope, payload: settled.payload, window: spanLimit,
+        visible: Number.isSafeInteger(visible) && visible >= 0 ? visible : 0,
+        scope, etag }
       setRead({ ...next, stalled: traceWidenStalled(previous, next) })
     }
+    const readConversation = async signal => {
+      const read = etag => conditionalGet(conversationPath, etag, { signal, cache: 'no-store' })
+      let observation = await read(validator)
+      // Defensive protocol recovery: a 304 with no exact same-scope payload is not an empty
+      // conversation and not permission to borrow another scope. Retry this tick unconditionally.
+      if (observation.unchanged
+          && (!prior?.payload || observation.etag !== validator)) observation = await read(null)
+      return observation
+    }
     const timed = deadlineRequest(signal => Promise.allSettled([
-        get(runNodeApiPath(runId, n.id,
-          `/conversation${traceReadQuery(expectedGeneration, nodeAttempt, spanLimit)}`), { signal }),
+        readConversation(signal),
         get(runNodeApiPath(runId, n.id,
           `/logs${traceReadQuery(expectedGeneration, nodeAttempt)}`),
         { signal, cache: 'no-store' }),
       ]), traceReadDeadlineMs(spanLimit))
     timed.promise.then(([conversation, logs]) => {
       if (!alive()) return
-      const payload = matchingNodePayload(conversation, n.id, nodeAttempt, expectedGeneration)
+      const observation = conversation.status === 'fulfilled' ? conversation.value : null
+      const candidate = observation?.unchanged ? prior?.payload : observation?.data
+      const payload = matchingNodePayload(
+        { status: observation ? 'fulfilled' : 'rejected', value: candidate },
+        n.id, nodeAttempt, expectedGeneration)
+      // A 200's cursor and ETag must agree before either is sent back. A 304 already matched the
+      // exact validator this scope supplied. A proxy/header anomaly costs only the optimization.
+      const etag = payload && (observation.unchanged || payload.cursor === observation.etag)
+        ? observation.etag : null
       // Transport success is not enough: a delayed response for the previous lifecycle must never
       // settle this attempt's window. The server echoes both identity fields and independently rejects
       // an attempt change before/after its read; this client-side gate also contains proxy/schema drift.
-      commit(!!payload, payload)
+      commit(!!payload, payload, etag)
       const logPayload = matchingNodePayload(logs, n.id, nodeAttempt, expectedGeneration)
       // The stage bands and their log text are one evidence snapshot. Never combine a retained
       // attempt-A conversation with logs returned while A was rejected/resetting.
@@ -1590,8 +1697,8 @@ function Conversation({ n, runId, expectedGeneration, working, allOpen = true, r
     return timed
   }, working ? 4000 : null,   // interval only while the agent works this node (live-refresh); null = load once
   [runId, expectedGeneration, n.id, nodeAttempt, working, reloadNonce, spanLimit])   // reloadNonce also re-runs a finished node's one-shot load
-  if (read === null) return <div className="muted trace-small" role="status">loading…</div>
-  const conv = read.payload || { stages: [] }
+  if (currentRead === null) return <div className="muted trace-small" role="status">loading…</div>
+  const conv = currentRead.payload || { stages: [] }
   const stages = conv.stages || []
   const unavailable = traceUnavailable(conv.projection)
   if (unavailable) return <TraceUnavailable onRetry={onRetry} />
@@ -1600,7 +1707,7 @@ function Conversation({ n, runId, expectedGeneration, working, allOpen = true, r
   // `conversationWindow` (not `traceWindow`) because what is hidden here is STAGES and TURNS, and the
   // span counters in the same envelope describe a different quantity — see its comment.
   const convWindow = conversationWindow(conv.projection, { canPage: !!onLoadMore })
-  const staleNotice = read.stale
+  const staleNotice = currentRead.stale
     ? <div className="notice compact conversation-stale" role="alert">
       Conversation refresh failed; showing confirmed trace while run state reloads.
     </div>
@@ -1613,10 +1720,10 @@ function Conversation({ n, runId, expectedGeneration, working, allOpen = true, r
     // BEHIND the requested one forever (`settleTraceRead` deliberately does not record a window it
     // could not reach), so the window comparison alone latches a spinner that never clears — and a
     // surface stuck in `loading` never re-arms, so the failure would also be unretryable.
-    pending: !read.reachFailed && spanLimit > read.window,
-    stalled: read.stalled === true,
+    pending: !currentRead.reachFailed && spanLimit > currentRead.window,
+    stalled: currentRead.stalled === true,
   })
-  const reach = <TraceReach state={scroll} onReach={onLoadMore} failed={read.reachFailed}
+  const reach = <TraceReach state={scroll} onReach={onLoadMore} failed={currentRead.reachFailed}
     notice={conversationWindowNotice(convWindow)} />
   if (!stages.length) return convWindow.kind === 'complete'
     ? <>{staleNotice}<div className="muted">No conversation captured for this node yet.</div></>
@@ -1868,9 +1975,6 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
     return <div className="trace" ref={bodyRef}>{head}<div className="notice compact" role="status">{TRACE_PARTIAL_EMPTY_NOTICE}</div>{spanPager}
       {agent && <AgentReport r={agent} />}</div>
   const { t0, total } = traceBounds(spans)
-  // create_node already nests propose→implement; if an agent wrote the node, the report belongs
-  // right after that authoring stage (placed by index), otherwise it trails the whole lifecycle.
-  const authorIdx = spans.findIndex(s => ['create_node', 'implement', 'repair'].includes(s.name))
   // Rollup from the RENDERED payload, not always the detail one: after paging, the totals below
   // describe the spans on screen, so reading them off the narrower window would caption a widened
   // tree with the old window's generation/token counts.
@@ -1891,13 +1995,12 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
         {roll.cost ? ` · $${roll.cost}` : ''}
       </span> : null}
     </div>
-    {spans.map((s, i) => <React.Fragment
-      key={`${expectedGeneration || runId}:${n.attempt ?? ''}:${s.span_id || i}`}>
-      <StageBlock s={s} t0={t0} total={total} runId={runId}
-        expectedGeneration={expectedGeneration} />
-      {agent && i === authorIdx && <AgentReport r={agent} />}
-    </React.Fragment>)}
-    {agent && authorIdx < 0 && <AgentReport r={agent} />}
+    <VirtualSpanTree key={`${expectedGeneration || runId}:${n.id}:${n.attempt ?? 0}`}
+      roots={spans} t0={t0} total={total} runId={runId} expectedGeneration={expectedGeneration}
+      identity={`${expectedGeneration || runId}:${n.id}:${n.attempt ?? 0}`} />
+    {/* Validation is node-level evidence, not a span-tree item. Keeping it after the bounded tree
+        avoids lying about its ARIA parent or pinning a large non-span card inside the virtual list. */}
+    {agent && <AgentReport r={agent} />}
   </div>
 }
 

@@ -111,6 +111,9 @@
   - [ ] 🧱 cost-budget abort (local model cost is 0; meaningful only for paid API backends)
 - [x] **I14 — Observability** ✅ (custom JSONL spans wired; OTel/MLflow = seam)
   - [x] custom JSONL span exporter + `span()` + **wired into the orchestrator** (per-evaluation spans → `spans.jsonl`) — `tracing.py`, `orchestrator.py`; tested `test_partials_wired.py`
+  - [x] bounded count+byte async local queue, non-blocking backpressure, durable loss receipts,
+    fork ownership, pre-projection flush and destructive-writer lifecycle fence — ADR-08;
+    tested `test_async_trace_exporter.py`, `test_tracing.py`
   - [ ] 🧱 OTel-SDK wrapping + MLflow optional exporter
 - [x] **I15 — Terminal control plane (`looplab tui`)** — the Textual TUI was originally **CUT** (2026-06-22) to avoid a heavy widget dependency. Shipped instead as a **dependency-free, chat-first TUI** (`looplab/serve/tui.py`): a thin HTTP client of the existing UI server (ADR-18), built on stdlib `urllib` + `rich` (already shipped with Typer) — no Textual, no curses. It is deliberately the *control* slice, not a graph explorer: a run dashboard (status · nodes · best · age), the genesis flow (describe a goal → the boss proposes a spec → the operator explicitly types `launch`), and a per-run boss chat that proposes actions for operator confirmation before the control service applies the chosen subset (the same action-router the web Dock uses). The dashboard and run view **auto-refresh live** (poll-on-idle via `select`, redraw only on change), action plans + destructive controls ask for **confirmation** (apply all / pick a subset / cancel), and **bare `looplab`** opens it. Auto-launches an API-only server when none is found. Tested `test_tui.py` (pure render/gate helpers, the live-refresh loop over a real pipe, + the client contract via TestClient).
 

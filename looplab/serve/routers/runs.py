@@ -32,13 +32,14 @@ from looplab.core.run_deletion import (RunDeletionFenceError, RunDeletionStorage
 from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed,
     load_run_reset_marker)
-from looplab.serve.http import json_object, json_object_bytes, request_body_contract
+from looplab.serve.http import if_none_match, json_object, json_object_bytes, request_body_contract
 from looplab.events.eventstore import (
     EventStore, EventStoreConcurrencyError, EventStoreLockError, JsonlRecordInvalid,
     _interprocess_lock, decode_jsonl_line, iter_event_jsonl)
 from looplab.events.replay import FoldCursor, fold
 from looplab.events.traceview import (
-    TRACE_PROJECTION_SCHEMA, trace_file_revision, unavailable_projection)
+    TRACE_PROJECTION_SCHEMA, trace_file_revision, trace_projection_json_bytes,
+    unavailable_projection)
 from looplab.events.types import (
     EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED, EV_CONCEPT_LENS_STARTED,
     EV_TRUST_GATE_CHANGED,
@@ -100,6 +101,7 @@ _RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CONCEPT_LENS_KEY_RE = re.compile(r"^[\x21-\x7e]{16,512}$")
 _CONCEPT_LENS_RECOVERY_SCHEMA = 1
+_CONVERSATION_ETAG_SCHEMA = 1
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 # `GET /api/runs/{id}/spans/{sid}` falls back to a scan when the light span index cannot resolve
 # `sid`. That fallback exists for a span appended PAST the indexed tail, which is a handful of lines
@@ -121,6 +123,32 @@ _CONCEPT_LENS_SAFE_ERROR_KINDS = frozenset({
     "accounting_pending", "credentials", "rate_limit", "unavailable", "provider_error",
     "capacity", "internal",
 })
+
+
+def _conversation_etag(run_id: str, node_id: int, run_generation: Optional[str],
+                       attempt: int, span_cap: int, source_revision: str, *,
+                       trace_run_id: str, task_id: str) -> str:
+    """Opaque validator for one exact conversation representation.
+
+    `source_revision` comes from SpanIndex's node/generation/window-specific full-row digests, so a
+    parallel append for another node does not invalidate this node. The route identities still live
+    here: the same rows requested under another run generation, attempt or settled window are a
+    different selected representation and must never validate a cached payload from this one.
+    """
+    material = orjson.dumps({
+        "schema": _CONVERSATION_ETAG_SCHEMA,
+        "projection_schema": TRACE_PROJECTION_SCHEMA,
+        "run_id": run_id,
+        "trace_run_id": trace_run_id,
+        "task_id": task_id,
+        "node_id": node_id,
+        "run_generation": run_generation,
+        "attempt": attempt,
+        "span_cap": span_cap,
+        "source_revision": source_revision,
+    }, option=orjson.OPT_SORT_KEYS)
+    digest = hashlib.sha256(b"looplab:conversation-etag:v1\0" + material).hexdigest()
+    return f'W/"llconv1-{digest}"'
 
 
 class RunConfigMetadata(BaseModel):
@@ -742,6 +770,10 @@ def build_router(srv) -> APIRouter:
         """Keep every trace read-failure envelope on one truthful, versioned contract."""
         return {"schema": TRACE_PROJECTION_SCHEMA, **shape,
                 "projection": unavailable_projection()}
+
+    def _trace_response(payload: dict) -> Response:
+        """Bypass recursive framework encoding for topology-preserving trace projections."""
+        return Response(trace_projection_json_bytes(payload), media_type="application/json")
 
     def _assert_trace_reset_clear(rd: Path) -> None:
         """Refuse a trace snapshot while Replay is between archived sidecars and new events."""
@@ -2288,7 +2320,7 @@ def build_router(srv) -> APIRouter:
                 "message": "The run was reset or replaced while its node trace was being read.",
                 "remediation": "Reload run state and request the current generation.",
             })
-        return {**payload, "run_generation": after_generation or None}
+        return _trace_response({**payload, "run_generation": after_generation or None})
 
     @router.get("/api/runs/{run_id}/spans/{sid}")
     def span_io(run_id: str, sid: str,
@@ -2591,7 +2623,8 @@ def build_router(srv) -> APIRouter:
         })
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/conversation")
-    def node_conversation(run_id: str, nid: int, limit: int = Query(default=0, ge=0),
+    def node_conversation(run_id: str, nid: int, request: Request, response: Response,
+                          limit: int = Query(default=0, ge=0),
                           attempt: Optional[int] = Query(default=None, ge=0),
                           expected_generation: Optional[str] = Query(default=None)):
         """The node's trace as a LINEAR, de-duplicated conversation: the system+user request shown
@@ -2609,7 +2642,12 @@ def build_router(srv) -> APIRouter:
 
         ``attempt`` binds this CURRENT-node view to the lifecycle rendered by the Inspector. It is
         checked before and after the read; old attempts remain available through attempt-history
-        evidence rather than being silently concatenated into the current conversation."""
+        evidence rather than being silently concatenated into the current conversation.
+
+        Successful stable snapshots carry an opaque ``cursor`` equal to their ETag. A caller may
+        return it as ``If-None-Match``; an unchanged node/generation/window then answers 304 before
+        the full rows are read or the conversation is rebuilt. Legacy unconditional callers keep
+        receiving the same 200 JSON envelope (with one additive cursor field)."""
         rd = _run_dir(run_id)
         _assert_trace_reset_clear(rd)
         if (expected_generation is not None
@@ -2643,21 +2681,99 @@ def build_router(srv) -> APIRouter:
                 "message": "The node was reset before its conversation evidence was read.",
                 "remediation": "Reload node state and request the current attempt.",
             })
+
+        from looplab.events.traceview import (
+            TRACE_CONVERSATION_SPAN_CAP, build_conversation, load_spans, settle_node_span_cap)
+        from looplab.events.span_index import get_index
+        span_cap = settle_node_span_cap(limit, default=TRACE_CONVERSATION_SPAN_CAP)
+        missing_revision = hashlib.sha256(b"looplab:conversation-source:missing:v1").hexdigest()
+        trace_scalars = srv.trace_scalars(rd)
+
+        def source_snapshot():
+            """Cheap selected-row identity plus whether it may authorize a bodyless response."""
+            observed = get_index(rd / "spans.jsonl")
+            if observed is None:
+                # `load_spans` below may observe a file created after this stat. Unknown lets its
+                # projector derive the honest count instead of pinning that raced body to zero.
+                return None, missing_revision, None, True
+            revision, count, conditional_ok = observed.node_window_snapshot(
+                nid, span_cap, generation=current_attempt)
+            return observed, revision, count, conditional_ok
+
+        def recheck_lifecycle() -> str | None:
+            """The same post-read CAS also fences a bodyless conditional hit."""
+            after_attempt = _cached_node_attempt(rd, nid)
+            after_attempt = after_attempt if after_attempt is not None else 0
+            _assert_trace_reset_clear(rd)
+            after_generation = srv.commands.run_generation(rd)
+            if (after_generation != before_generation
+                    or (expected_generation is not None
+                        and after_generation != expected_generation)):
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "expected_generation": expected_generation or before_generation or None,
+                    "current_generation": after_generation or None,
+                    "message": "The run was reset or replaced while its conversation was being read.",
+                    "remediation": "Reload run state and request the current generation.",
+                })
+            if after_attempt != current_attempt:
+                raise HTTPException(409, {
+                    "code": "node_attempt_changed",
+                    "node_id": nid,
+                    "expected_attempt": current_attempt,
+                    "current_attempt": after_attempt,
+                    "message": "The node was reset while its conversation evidence was being read.",
+                    "remediation": "Reload node state and request the current attempt.",
+                })
+            return after_generation
+
+        idx = None
+        total = None
+        source_revision = None
+        source_conditional_ok = False
         try:
-            from looplab.events.traceview import (
-                TRACE_CONVERSATION_SPAN_CAP, build_conversation, load_spans, settle_node_span_cap)
-            from looplab.events.span_index import get_index
-            span_cap = settle_node_span_cap(limit, default=TRACE_CONVERSATION_SPAN_CAP)
+            idx, source_revision, total, source_conditional_ok = source_snapshot()
+        except Exception:  # noqa: BLE001 - the projection below reports the unavailable source
+            pass
+        candidate_etag = (_conversation_etag(
+            run_id, nid, before_generation, current_attempt, span_cap, source_revision,
+            trace_run_id=trace_scalars.run_id, task_id=trace_scalars.task_id)
+            if source_revision is not None else None)
+        if source_conditional_ok and candidate_etag is not None and if_none_match(
+                request.headers.get("if-none-match"), candidate_etag):
+            # Re-observe both the selected content and lifecycle BEFORE deciding 304. The second
+            # source read catches a relevant append/rewrite during the first comparison; the
+            # lifecycle read catches even a very short reset that already removed its marker.
+            try:
+                idx, source_revision, total, source_conditional_ok = source_snapshot()
+            except Exception:  # noqa: BLE001 - fall through to the unavailable 200 projection
+                idx, source_revision, total, source_conditional_ok = None, None, None, False
+            after_generation = recheck_lifecycle()
+            trace_scalars = srv.trace_scalars(rd)
+            refreshed_etag = (_conversation_etag(
+                run_id, nid, after_generation, current_attempt, span_cap, source_revision,
+                trace_run_id=trace_scalars.run_id, task_id=trace_scalars.task_id)
+                if source_revision is not None else None)
+            if source_conditional_ok and refreshed_etag is not None and if_none_match(
+                    request.headers.get("if-none-match"), refreshed_etag):
+                return Response(status_code=304, headers={
+                    "Cache-Control": "no-store",
+                    "ETag": refreshed_etag,
+                })
+            candidate_etag = refreshed_etag
+        try:
             # Read only THIS node's traces' spans (by byte offset via the index), not the whole
             # spans.jsonl — a node's conversation on a 1 GB run no longer scans the entire file.
-            idx = get_index(rd / "spans.jsonl")
-            total = (idx.node_span_count(nid, generation=current_attempt)
-                     if idx is not None else None)
+            if source_revision is None:
+                idx, source_revision, total, source_conditional_ok = source_snapshot()
+                candidate_etag = _conversation_etag(
+                    run_id, nid, before_generation, current_attempt, span_cap, source_revision,
+                    trace_run_id=trace_scalars.run_id, task_id=trace_scalars.task_id)
             spans = (idx.full_spans_for_node(
                 nid, span_cap, generation=current_attempt)
                 if idx is not None else load_spans(rd / "spans.jsonl"))
             conversation = build_conversation(
-                srv.trace_scalars(rd), spans, nid, total_spans=total, span_cap=span_cap,
+                trace_scalars, spans, nid, total_spans=total, span_cap=span_cap,
                 # The index already fenced before its row limit. The fallback receives the whole run,
                 # so it must apply the same trace-root generation fence before its own tail cap.
                 generation=current_attempt if idx is None else None,
@@ -2668,31 +2784,27 @@ def build_router(srv) -> APIRouter:
         # A reset can win while offsets are read / the conversation is assembled. Re-read the folded
         # lifecycle after the slow work and refuse the whole payload rather than publishing attempt A
         # with attempt B's sidecar bytes. The UI treats this 409 as a stale observation and reloads.
-        after_attempt = _cached_node_attempt(rd, nid)
-        after_attempt = after_attempt if after_attempt is not None else 0
-        _assert_trace_reset_clear(rd)
-        after_generation = srv.commands.run_generation(rd)
-        if (after_generation != before_generation
-                or (expected_generation is not None
-                    and after_generation != expected_generation)):
-            raise HTTPException(409, {
-                "code": "run_generation_changed",
-                "expected_generation": expected_generation or before_generation or None,
-                "current_generation": after_generation or None,
-                "message": "The run was reset or replaced while its conversation was being read.",
-                "remediation": "Reload run state and request the current generation.",
-            })
-        if after_attempt != current_attempt:
-            raise HTTPException(409, {
-                "code": "node_attempt_changed",
-                "node_id": nid,
-                "expected_attempt": current_attempt,
-                "current_attempt": after_attempt,
-                "message": "The node was reset while its conversation evidence was being read.",
-                "remediation": "Reload node state and request the current attempt.",
-            })
+        after_generation = recheck_lifecycle()
+        stable_etag = None
+        if not (conversation.get("projection") or {}).get("unavailable"):
+            try:
+                (_after_idx, after_source_revision, _after_total,
+                 after_conditional_ok) = source_snapshot()
+                after_trace_scalars = srv.trace_scalars(rd)
+                after_etag = _conversation_etag(
+                    run_id, nid, after_generation, current_attempt, span_cap,
+                    after_source_revision, trace_run_id=after_trace_scalars.run_id,
+                    task_id=after_trace_scalars.task_id)
+                if (after_conditional_ok and candidate_etag is not None
+                        and hmac.compare_digest(candidate_etag, after_etag)):
+                    stable_etag = candidate_etag
+            except Exception:  # noqa: BLE001 - a raced source gets a non-cacheable successful body
+                pass
+        response.headers["Cache-Control"] = "no-store"
+        if stable_etag is not None:
+            response.headers["ETag"] = stable_etag
         return {**conversation, "node_id": str(nid), "attempt": current_attempt,
-                "run_generation": after_generation or None}
+                "run_generation": after_generation or None, "cursor": stable_etag}
 
     @router.get("/api/runs/{run_id}/log")
     def event_log(run_id: str, since: int = -1):
@@ -2963,7 +3075,7 @@ def build_router(srv) -> APIRouter:
             payload = _trace_unavailable(
                 run_id=run_id, task_id="", nodes={}, rollups={}, unscoped=[], summary={})
         generation = _finish_trace_read(rd, before_generation, expected_generation)
-        return {**payload, "run_generation": generation or None}
+        return _trace_response({**payload, "run_generation": generation or None})
 
     @router.get("/api/runs/{run_id}/trace/by_trace/{trace_id}")
     def trace_by_trace(run_id: str, trace_id: str,
@@ -3010,7 +3122,7 @@ def build_router(srv) -> APIRouter:
         except Exception:  # noqa: BLE001 — malformed spans must degrade, not 500
             payload = _trace_unavailable(spans=[])
         generation = _finish_trace_read(rd, before_generation, expected_generation)
-        return {**payload, "run_generation": generation or None}
+        return _trace_response({**payload, "run_generation": generation or None})
 
     @router.get("/api/runs/{run_id}/prov")
     def prov(run_id: str):

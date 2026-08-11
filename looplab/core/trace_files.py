@@ -27,6 +27,11 @@ TraceFileIdentity = tuple[int, int]
 # individual diagnostics around 64 KiB, so 8 MiB leaves substantial historical/custom-exporter
 # headroom while keeping a corrupt legacy row from becoming a multi-GB Python allocation.
 TRACE_JSONL_ROW_MAX_BYTES = 8 * 1024 * 1024
+# Shared only by the canonical exporter and destructive trace reset/clear/archive.  Normal span-index
+# refresh keeps its independent ``.spans-index.lock``: a cold multi-GB diagnostic read must never
+# backpressure the hot exporter queue.  A late async writer still serializes with every source rewrite
+# after the engine lifecycle lock changes hands.
+TRACE_WRITER_LOCK_NAME = ".spans-writer.lock"
 _TRACE_JSONL_READ_CHUNK_BYTES = 64 * 1024
 
 
@@ -97,6 +102,63 @@ def iter_bounded_trace_jsonl_lines(
 def trace_file_identity(info: os.stat_result) -> TraceFileIdentity:
     """Return the canonical replacement-only identity shared by ``lstat`` and ``fstat``."""
     return same_file_entry(info)
+
+
+def windows_file_change_time(fd: int) -> Optional[int]:
+    """Return ``FILE_BASIC_INFO.ChangeTime`` for one already-open CRT descriptor.
+
+    CPython exposes Windows creation time as ``st_ctime_ns``.  It therefore cannot prove that a
+    same-file rewrite happened when size and last-write time were restored.  ``ChangeTime`` is the
+    filesystem-maintained mutation stamp needed by trace cache/CAS callers; unsupported filesystems
+    and API failures return ``None`` so those callers can fail closed rather than guess.
+    """
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+    except (AttributeError, ImportError):
+        return None
+
+    class _FileBasicInfo(ctypes.Structure):
+        _fields_ = [
+            ("CreationTime", ctypes.c_longlong),
+            ("LastAccessTime", ctypes.c_longlong),
+            ("LastWriteTime", ctypes.c_longlong),
+            ("ChangeTime", ctypes.c_longlong),
+            ("FileAttributes", wintypes.DWORD),
+        ]
+
+    try:
+        raw_handle = msvcrt.get_osfhandle(fd)
+        if raw_handle == -1:
+            return None
+        get_info = ctypes.WinDLL("kernel32", use_last_error=True).GetFileInformationByHandleEx
+        get_info.argtypes = (
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+        get_info.restype = wintypes.BOOL
+        info = _FileBasicInfo()
+        if not get_info(
+                wintypes.HANDLE(raw_handle), 0, ctypes.byref(info), ctypes.sizeof(info)):
+            return None
+        token = int(info.ChangeTime)
+        return token if token > 0 else None
+    except (AttributeError, OSError, OverflowError, TypeError, ValueError, ctypes.ArgumentError):
+        return None
+
+
+def trace_file_change_token(
+        fd: int, info: Optional[os.stat_result] = None) -> Optional[int]:
+    """Return a descriptor-bound trace mutation token, or ``None`` when it is unavailable.
+
+    POSIX ``ctime`` is a change timestamp.  Windows ``ctime`` is creation time, so the native
+    descriptor query above is the only safe authority for same-file rewrites there.  Callers that
+    use this token for cache reuse or destructive compare-and-swap must treat ``None`` as untrusted.
+    """
+    if os.name == "nt":
+        return windows_file_change_time(fd)
+    status = os.fstat(fd) if info is None else info
+    token = int(status.st_ctime_ns)
+    return token if token > 0 else None
 
 
 def _is_reparse_point(info: os.stat_result) -> bool:
@@ -222,6 +284,8 @@ def open_private_trace_file(
 
 
 __all__ = [
-    "TRACE_JSONL_ROW_MAX_BYTES", "TraceFileIdentity", "assert_private_trace_file",
-    "iter_bounded_trace_jsonl_lines", "open_private_trace_file", "trace_file_identity",
+    "TRACE_JSONL_ROW_MAX_BYTES", "TRACE_WRITER_LOCK_NAME", "TraceFileIdentity",
+    "assert_private_trace_file", "iter_bounded_trace_jsonl_lines",
+    "open_private_trace_file", "trace_file_change_token", "trace_file_identity",
+    "windows_file_change_time",
 ]

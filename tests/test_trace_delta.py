@@ -638,6 +638,19 @@ def test_trace_tree_tolerates_a_deep_span_chain_without_recursionerror():
     assert len(roots) == 1 and roots[0]["span_id"] == "s0"
 
 
+def test_trace_projection_json_encoder_has_an_explicit_aggregate_bound():
+    from looplab.events.traceview import trace_projection_json_bytes
+
+    assert json.loads(trace_projection_json_bytes({"ok": [True, "μ"]})) == {
+        "ok": [True, "μ"]}
+    with pytest.raises(ValueError, match="byte limit"):
+        trace_projection_json_bytes({"too_large": "value"}, max_bytes=8)
+    cyclic = []
+    cyclic.append(cyclic)
+    with pytest.raises(ValueError, match="circular"):
+        trace_projection_json_bytes(cyclic)
+
+
 def test_already_normalized_spans_are_not_re_redacted_by_hydrate_inputs(monkeypatch, tmp_path):
     """`_normalize_span` runs redaction and entropy analysis over every text field. The finalize path
     is load_spans -> hydrate_inputs -> build_trace_view, and each of those normalized independently,

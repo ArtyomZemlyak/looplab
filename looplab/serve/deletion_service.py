@@ -21,7 +21,8 @@ from looplab.core.run_deletion import (
 from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
 from looplab.events.eventstore import (
     EventStoreLockError, InterprocessLockContended, _interprocess_lock)
-from looplab.events.span_index import invalidate as invalidate_span_index, span_index_write_guard
+from looplab.events.span_index import (
+    invalidate as invalidate_span_index, span_destructive_write_guard)
 from looplab.serve.appstate import (
     _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
@@ -481,7 +482,8 @@ def begin_or_resume_run_deletion(
                                       snap, deletion_operation_id=operation_id),
                                   _interprocess_lock(
                                       Path(str(rd / "events.jsonl") + ".lock"), required=True),
-                                  span_index_write_guard(rd / "spans.jsonl", required=True)):
+                                  span_destructive_write_guard(
+                                      rd / "spans.jsonl", required=True)):
                                 current_fence = load_run_deletion_fence(rd)
                                 if current_fence is not None:
                                     if receipt is None:

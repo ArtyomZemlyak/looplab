@@ -34,7 +34,7 @@ import { commandJson, commandRead, jobAwait, runCommand } from './commandProtoco
 import { createEventStreamParser } from './eventStream.js'
 
 export {
-  apiPrefix, apiUrl, authStatus, clearOwnerToken, deadlineGet, deadlineSharedAssistant, get,
+  apiPrefix, apiUrl, authStatus, clearOwnerToken, conditionalGet, deadlineGet, deadlineSharedAssistant, get,
   isReviewLocation, post, putText, reviewReadPath, reviewTokenFromLocation, runApiPath,
   runNodeApiPath, setOwnerToken, verifyOwnerToken,
 } from './apiClient.js'

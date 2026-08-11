@@ -44,9 +44,10 @@ from looplab.core.trace_append import (
     SPAN_APPEND_JOURNAL_MAX_BYTES, SPAN_APPEND_JOURNAL_NAME,
     SPAN_APPEND_RECEIPT_SCHEMA)
 from looplab.core.trace_files import (
-    TRACE_JSONL_ROW_MAX_BYTES, assert_private_trace_file,
+    TRACE_JSONL_ROW_MAX_BYTES, TRACE_WRITER_LOCK_NAME, assert_private_trace_file,
     iter_bounded_trace_jsonl_lines as _iter_bounded_trace_jsonl_lines,
-    open_private_trace_file, trace_file_identity)
+    open_private_trace_file, trace_file_change_token, trace_file_identity,
+    windows_file_change_time)
 from looplab.events.eventstore import (
     JsonlRecordInvalid, _interprocess_lock, decode_jsonl_line, scan_jsonl_region)
 from looplab.events.traceview import (
@@ -55,7 +56,7 @@ from looplab.events.traceview import (
 
 # Bump when the persisted record shape changes so an old `spans.index.jsonl` is ignored (rebuilt),
 # never mis-read. The index is a cache — a version skew simply triggers one rebuild.
-_SCHEMA = 9
+_SCHEMA = 11
 _INDEX_NAME = "spans.index.jsonl"
 _INDEX_LOCK_NAME = ".spans-index.lock"
 # Geometric re-persist factor (see `_persist`): re-write the persisted index only when the indexed
@@ -68,6 +69,9 @@ _PERSIST_GROWTH = 1.5
 # represented source (or one oversize active index); eviction reloads the persisted accelerator.
 _CACHE_MAX = 3
 _CACHE_SOURCE_BYTES_MAX = 1024 * 1024 * 1024
+# Process-local cold-index windows promoted after an exact source-row read. A client can vary
+# ``limit`` across thousands of values, so keep this proof cache bounded independently of the index.
+_VERIFIED_WINDOW_MAX = 256
 # Bytes read per scan step. The OS readahead does the sequential-throughput work, so this only needs
 # to be large enough to amortize the per-chunk scan; keeping it small is what bounds peak RSS to the
 # derived index instead of the source file. The shared trace JSONL reader additionally caps a single
@@ -166,8 +170,25 @@ def span_index_write_guard(
             manager.__exit__(None, None, None)
 
 
+@contextmanager
+def span_destructive_write_guard(
+        spans_path: str | os.PathLike, *, required: bool = False):
+    """Fence canonical trace appends, then own the derived-index writer for a source rewrite.
+
+    Exporters never take the index lock: a live/cold index rebuild can be proportional to the whole
+    trace and must not stall the bounded hot queue.  Destructive reset/clear/archive/delete paths take
+    this combined guard in the one order ``lifecycle -> trace writer -> span index`` so they cannot
+    publish old-source derived offsets or accept a late attempt-A append behind their replacement.
+    """
+    path = Path(_path_key(spans_path))
+    with (_interprocess_lock(
+              path.with_name(TRACE_WRITER_LOCK_NAME), required=required),
+          span_index_write_guard(path, required=required)):
+        yield
+
+
 def _scan_light_stream(stream, base: int, size: int, *,
-                       label: str) -> tuple[list[tuple[dict, int, int]], int]:
+                       label: str) -> tuple[list[tuple[dict, int, int, str]], int]:
     """`_scan_light` over a descriptor snapshot with bounded chunks *and* bounded rows.
 
     Complete invalid JSON/non-object rows and rows above TRACE_JSONL_ROW_MAX_BYTES both end the
@@ -175,7 +196,7 @@ def _scan_light_stream(stream, base: int, size: int, *,
     still quarantined individually and consumed. A short read before the snapshotted ``size`` is an
     I/O failure unless iteration deliberately stopped at an oversized row.
     """
-    records: list[tuple[dict, int, int]] = []
+    records: list[tuple[dict, int, int, str]] = []
     consumed = base
     for raw in _iter_bounded_trace_jsonl_lines(
             stream, size=size, label=label,
@@ -235,6 +256,36 @@ def _decode_sha256(value) -> Optional[str]:
     if len(raw) != hashlib.sha256().digest_size:
         return None
     return value.lower()
+
+
+_IS_WINDOWS = os.name == "nt"
+_windows_change_time = windows_file_change_time
+
+
+def _source_change_token(handle, stt) -> Optional[int]:
+    """Descriptor-bound mutation token, or ``None`` when correctness cannot be proven."""
+    if not _IS_WINDOWS:
+        return trace_file_change_token(handle.fileno(), stt)
+    token = _windows_change_time(handle.fileno())
+    return token if isinstance(token, int) and not isinstance(token, bool) and token > 0 else None
+
+
+def _source_epoch(identity: tuple, size: int, mtime_ns: int,
+                  change_token: Optional[int]) -> Optional[str]:
+    """Rewrite epoch that stays fixed across receipt-proven appends.
+
+    Per-row digests make node cursors insensitive to foreign appends on the trusted incremental path.
+    They are not, by themselves, an ABA fence for an in-place rewrite that changes a selected row and
+    restores its bytes before the route's second observation. This epoch rotates on every rebuild or
+    replacement (POSIX ctime or Windows ChangeTime is the descriptor-bound mutation token) but is
+    retained across a validated POSIX append chain. An unavailable token has no safe persisted
+    identity, so its caller uses only a
+    per-rebuild volatile revision and refuses cache reuse.
+    """
+    if change_token is None:
+        return None
+    material = orjson.dumps([*identity, size, mtime_ns, change_token])
+    return hashlib.sha256(b"looplab:span-source-epoch:v2\0" + material).hexdigest()
 
 
 def _assert_source_descriptor(handle, path: Path, *, expected_identity=None):
@@ -386,21 +437,25 @@ def _reading(path: Path, handle, offset: int, *, expected_identity=None):
     yield handle
 
 
-def _scan_light(buf: bytes, base: int) -> tuple[list[tuple[dict, int, int]], int]:
+def _scan_light(buf: bytes, base: int) -> tuple[list[tuple[dict, int, int, str]], int]:
     """Parse complete JSONL lines from `buf` (a slice of spans.jsonl starting at file offset `base`),
     applying `iter_jsonl`'s durability rules (stop at the first torn/corrupt line). Yields
-    `(light_span, off, length)` where `off` is the line-start offset IN THE FILE and `length` is the
-    line length WITHOUT the trailing newline — so a reader can `seek(off); read(length)` to recover
-    the FULL span line verbatim. Returns `(records, consumed)`; `consumed` lands on a newline boundary
-    (the exact prefix `iter_jsonl` would have accepted), so it is the index's coverage watermark."""
-    records: list[tuple[dict, int, int]] = []
+    `(light_span, off, length, digest)` where `off` is the line-start offset IN THE FILE, `length` is
+    the line length WITHOUT the trailing newline, and `digest` identifies those exact full bytes.
+    The digest lets a node-specific conditional reader prove that its heavy I/O rows did not change
+    without re-reading them on every unchanged poll. Returns `(records, consumed)`; `consumed` lands
+    on a newline boundary (the exact prefix `iter_jsonl` would have accepted), so it is the index's
+    coverage watermark."""
+    records: list[tuple[dict, int, int, str]] = []
     parsed, consumed = scan_jsonl_region(buf)
     for obj, start, end in parsed:
         # A span that does not normalize is DROPPED but still CONSUMED: it is a well-formed record
         # this projection has no use for, not damage, so it must not stall the watermark.
         normalized = _normalize_span(obj)
         if normalized is not None:
-            records.append((_strip_span_io(normalized), base + start, end - start))
+            raw = buf[start:end]
+            records.append((_strip_span_io(normalized), base + start, end - start,
+                            hashlib.sha256(raw).hexdigest()))
     # `consumed` is the offset of the last complete-newline boundary within buf (a torn/corrupt tail
     # is NOT consumed — it is left for a later top-up once completed). Absolute coverage = base+consumed.
     return records, base + consumed
@@ -413,19 +468,36 @@ class SpanIndex:
         self.path = Path(path)
         self.light: list[dict] = []               # light spans, file order (fed to build_trace_view)
         self.meta: list[tuple[int, int]] = []     # (offset, length) in spans.jsonl, parallel to light
+        # SHA-256 of each exact FULL source row, parallel to ``light``/``meta``. This is derived
+        # metadata, not trace authority: cold loads validate it structurally and every source
+        # rewrite still passes through get_index's identity/mtime/mutation-token rebuild fences.
+        self.row_digests: list[str] = []
         self.by_sid: dict[str, int] = {}          # span_id -> row
         self.by_tid: dict[str, list[int]] = defaultdict(list)   # trace_id -> rows
         self.node_tids: dict[str, set] = defaultdict(set)       # str(node_id) -> {trace_id}
         self.covers: int = 0
         self.identity: Optional[tuple] = None
+        self.source_epoch: Optional[str] = None
+        # Used only when the platform cannot supply a proven mutation token. ``get_index`` rebuilds
+        # on every such observation and never persists it, so consecutive source snapshots cannot
+        # accidentally validate each other even if inode/size/restored-mtime form an ABA.
+        self._volatile_source_epoch = os.urandom(32).hex()
         # The complete source size observed by the last successful refresh. It is deliberately
         # separate from ``covers``: a torn/corrupt suffix leaves covers at the last good newline,
         # so comparing a later stat only with covers mistakes an in-place, same-size rewrite for an
-        # append. source_size + mtime/ctime identify non-growing mutations while true appends use the
-        # receipt chain below (ctime catches a rewrite whose mtime was deliberately restored).
+        # append. source_size + mtime + the descriptor mutation token identify non-growing mutations
+        # while true appends use the receipt chain below. ``ctime_ns`` separately mirrors the writer's
+        # append-receipt boundary; on Windows it is creation time and is not the mutation authority.
         self.source_size: Optional[int] = None
         self.mtime_ns: Optional[int] = None
         self.ctime_ns: Optional[int] = None
+        self.source_change_token: Optional[int] = None
+        # A persisted index is untrusted derived metadata. Its header epoch and row digests may be
+        # well-formed yet stale or locally altered, so they cannot authorize a bodyless response
+        # until this process has served/verified that exact node window from source bytes. A full
+        # source rebuild is already authoritative; cold-loaded windows are promoted individually.
+        self._source_derived = False
+        self._verified_window_revisions: "OrderedDict[str, None]" = OrderedDict()
         # Cursor/identity of the append receipt journal at the same source snapshot. Growth may top
         # up only through a contiguous chain after this boundary; otherwise source truth is rebuilt.
         self.append_journal_identity: Optional[tuple[int, int]] = None
@@ -442,7 +514,7 @@ class SpanIndex:
         self._rlock = threading.Lock()
 
     # -- construction --------------------------------------------------------------------------
-    def _append(self, light: dict, off: int, length: int) -> bool:
+    def _append(self, light: dict, off: int, length: int, digest: str) -> bool:
         # Normalizes UNCONDITIONALLY, including records `_extend` already normalized during
         # `_scan_light`. That second pass is deliberate: this is the ONE gate every row passes
         # through, and `_load_persisted` feeds it untrusted on-disk records that must be validated
@@ -451,12 +523,14 @@ class SpanIndex:
         # repeat runs only over the small light record. A pre-validated flag would save that pass at
         # the cost of making the trust boundary opt-in, which is the wrong default for a parser.
         normalized = _normalize_span(light)
-        if normalized is None:
+        digest = _decode_sha256(digest)
+        if normalized is None or digest is None:
             return False
         light = normalized
         row = len(self.light)
         self.light.append(light)
         self.meta.append((off, length))
+        self.row_digests.append(digest)
         sid = light.get("span_id")
         if sid is not None:
             self.by_sid[sid] = row
@@ -469,9 +543,9 @@ class SpanIndex:
                 self.node_tids[str(nid)].add(tid)
         return True
 
-    def _extend(self, records: list[tuple[dict, int, int]]) -> None:
-        for light, off, length in records:
-            self._append(light, off, length)
+    def _extend(self, records: list[tuple[dict, int, int, str]]) -> None:
+        for light, off, length, digest in records:
+            self._append(light, off, length, digest)
 
     def _rebuild(self, size: int, handle=None) -> None:
         # unavailable trace bytes must propagate as unavailable; publishing an empty
@@ -489,6 +563,7 @@ class SpanIndex:
         with self._rlock:                            # publish the new maps atomically vs a lock-free read
             self.light.clear()
             self.meta.clear()
+            self.row_digests.clear()
             self.by_sid.clear()
             self.by_tid.clear()
             self.node_tids.clear()
@@ -496,6 +571,8 @@ class SpanIndex:
             self.covers = consumed
             self.append_journal_identity = journal_identity
             self.append_journal_covers = journal_covers
+            self._source_derived = True
+            self._verified_window_revisions.clear()
 
     def _topup(self, size: int, handle=None) -> None:
         """Parse only receipt-validated newly appended bytes.
@@ -546,12 +623,20 @@ class SpanIndex:
                 off, length = self.meta[r]
                 f.seek(off)
                 data = _read_exact(f, length, label="indexed trace span")
+                if hashlib.sha256(data).hexdigest() != self.row_digests[r]:
+                    raise OSError(
+                        getattr(errno, "ESTALE", errno.EIO),
+                        "indexed trace row no longer matches its source digest", self.path)
                 try:
                     obj = orjson.loads(data)
-                except orjson.JSONDecodeError:
-                    continue                       # offset drift on a span — skip it, don't crash
+                except orjson.JSONDecodeError as exc:
+                    raise OSError(
+                        getattr(errno, "ESTALE", errno.EIO),
+                        "indexed trace row is no longer valid JSON", self.path) from exc
                 if not isinstance(obj, dict):
-                    continue
+                    raise OSError(
+                        getattr(errno, "ESTALE", errno.EIO),
+                        "indexed trace row is no longer an object", self.path)
                 # An offset that drifted onto a DIFFERENT but still-valid span line (bit-rot on a
                 # network mount, or a same-size in-place rewrite the single-span spotcheck missed)
                 # would otherwise be returned as if it were this row's span. Cross-check the read
@@ -559,11 +644,16 @@ class SpanIndex:
                 # accelerator returns None/less — never WRONG data — as its docstring promises.
                 normalized = _normalize_span(obj)
                 if normalized is None:
-                    continue
-                expected = self.light[r].get("span_id")
-                got_id = normalized.get("span_id")
-                if expected is not None and got_id is not None and got_id != expected:
-                    continue
+                    raise OSError(
+                        getattr(errno, "ESTALE", errno.EIO),
+                        "indexed trace row is no longer a valid span", self.path)
+                # The persisted light row is also untrusted. Its node/trace/generation fields select
+                # membership before this read, so matching only span_id would let a crafted index
+                # validate source bytes while retaining attacker-chosen attribution metadata.
+                if _strip_span_io(normalized) != self.light[r]:
+                    raise OSError(
+                        getattr(errno, "ESTALE", errno.EIO),
+                        "indexed trace row metadata no longer matches its source", self.path)
                 out.append(normalized)
         return out
 
@@ -664,6 +754,65 @@ class SpanIndex:
         with self._rlock:
             return len(self._rows_for_node(node_id, generation))
 
+    def _node_window_snapshot(self, node_id, limit: Optional[int], *,
+                              generation: Optional[int]) -> tuple[list[int], int, str]:
+        """Return selected rows, total and their raw revision while ``_rlock`` is held."""
+        rows = self._rows_for_node(node_id, generation)
+        total = len(rows)
+        if limit is not None:
+            cap = max(0, int(limit))
+            rows = rows[-cap:] if cap else []
+        identity = self.identity
+        source_epoch = self.source_epoch or self._volatile_source_epoch
+        source_epoch_proven = self.source_epoch is not None
+        digests = [self.row_digests[row] for row in rows]
+        material = orjson.dumps({
+            "schema": _SCHEMA,
+            "identity": list(identity) if identity is not None else None,
+            "source_epoch": source_epoch,
+            "source_epoch_proven": source_epoch_proven,
+            "node_id": str(node_id),
+            "generation": generation,
+            "total": total,
+            "rows": digests,
+        }, option=orjson.OPT_SORT_KEYS)
+        revision = hashlib.sha256(
+            b"looplab:node-span-window:v1\0" + material).hexdigest()
+        return rows, total, revision
+
+    def node_window_snapshot(self, node_id, limit: Optional[int] = None, *,
+                             generation: Optional[int] = None) -> tuple[str, int, bool]:
+        """Opaque exact-content revision for one node's bounded FULL-row window.
+
+        A global source size/mtime token changes when *another* concurrently executing node appends,
+        forcing this node's expensive conversation projector to run even though none of its selected
+        rows moved. The index already knows the exact selected rows and their full-byte digests, so
+        hash that node/generation/window snapshot instead. Relevant append/rewrite changes a row
+        digest, membership, total or file identity; a foreign append changes none of them on the
+        receipt-proven incremental path. A conservative full rebuild may rotate the source epoch.
+
+        HTTP lifecycle and projection-schema identities live at the route boundary and are mixed
+        into the revision there. ``conditional_ok`` is deliberately separate from the digest: a cold
+        persisted index may derive a candidate but it cannot authorize 304 until
+        ``full_spans_for_node`` verifies that exact window against source bytes. This forces the first
+        conditional request through a 200 body read while still letting its post-body CAS attach the
+        same stable validator for subsequent polls.
+        """
+        with self._rlock:
+            _rows, total, revision = self._node_window_snapshot(
+                node_id, limit, generation=generation)
+            verified = self._source_derived or revision in self._verified_window_revisions
+            if revision in self._verified_window_revisions:
+                self._verified_window_revisions.move_to_end(revision)
+        return revision, total, verified
+
+    def node_window_revision(self, node_id, limit: Optional[int] = None, *,
+                             generation: Optional[int] = None) -> tuple[str, int]:
+        """Backward-compatible revision/count view; HTTP conditionals use eligibility above."""
+        revision, total, _conditional_ok = self.node_window_snapshot(
+            node_id, limit, generation=generation)
+        return revision, total
+
     def full_spans_for_node(self, node_id, limit: Optional[int] = None, *,
                             generation: Optional[int] = None) -> list[dict]:
         """Every FULL span in the traces attributed to this node (a node's create_node + evaluate +
@@ -672,11 +821,21 @@ class SpanIndex:
         optional trace-root lifecycle fence) precedes totals and the row limit, so neither another
         node sharing the trace nor an abandoned attempt can consume the conversation window."""
         with self._rlock:                              # snapshot rows — never iterate the live set/lists
-            rows = self._rows_for_node(node_id, generation)
-            if limit is not None:
-                cap = max(0, int(limit))
-                rows = rows[-cap:] if cap else []
-        return self._read_full(rows)
+            rows, _total, revision = self._node_window_snapshot(
+                node_id, limit, generation=generation)
+        spans = self._read_full(rows)
+        # Promotion is process-local and happens only after every selected source row passed both its
+        # exact-byte digest and normalized-light comparison. If a concurrent relevant append changed
+        # the window, the route's post-read snapshot computes a different unverified revision.
+        with self._rlock:
+            current_rows, _current_total, current_revision = self._node_window_snapshot(
+                node_id, limit, generation=generation)
+            if current_rows == rows and current_revision == revision:
+                self._verified_window_revisions[revision] = None
+                self._verified_window_revisions.move_to_end(revision)
+                while len(self._verified_window_revisions) > _VERIFIED_WINDOW_MAX:
+                    self._verified_window_revisions.popitem(last=False)
+        return spans
 
     # -- persistence ---------------------------------------------------------------------------
     def _persist(self) -> None:
@@ -689,8 +848,14 @@ class SpanIndex:
         Trade: the persisted index may lag the in-memory one by up to (1 − 1/g); a fresh process
         cold-loads it then re-parses that bounded tail delta from spans.jsonl — still far cheaper than a
         full rebuild, and the in-memory index (the primary accelerator) is always current."""
-        if self.identity is None or not self.light:
-            return  # nothing to persist (no identity yet, or an empty/traceless spans.jsonl)
+        if (self.identity is None or not self.light or self.source_epoch is None
+                or self.source_size is None or self.mtime_ns is None
+                or self.source_change_token is None):
+            return  # nothing/proven-safe to persist (empty source or unavailable mutation token)
+        persisted_source_epoch = _source_epoch(
+            self.identity, self.source_size, self.mtime_ns, self.source_change_token)
+        if persisted_source_epoch is None:
+            return
         if self._persisted_covers > 0 and self.covers < self._persisted_covers * _PERSIST_GROWTH:
             return
         # ``get_index`` holds ``span_index_write_guard`` here. Reset publishes its marker while
@@ -705,8 +870,13 @@ class SpanIndex:
             return
         header = {"_idx": _SCHEMA, "covers": self.covers,
                   "dev": self.identity[0], "ino": self.identity[1],
+                  # Bind the COLD validator to this exact persisted source boundary. The live index
+                  # deliberately retains its epoch across receipt-proven appends so foreign-node
+                  # appends do not churn warm ETags; a restart may conservatively rotate once.
+                  "source_epoch": persisted_source_epoch,
                   "source_size": self.source_size, "mtime_ns": self.mtime_ns,
                   "ctime_ns": self.ctime_ns,
+                  "source_change_token": self.source_change_token,
                   "append_journal_dev": (
                       self.append_journal_identity[0]
                       if self.append_journal_identity is not None else None),
@@ -718,8 +888,8 @@ class SpanIndex:
         # The old shape temporarily retained ~2x the serialized index on top of its Python dicts.
         payload = bytearray(orjson.dumps(header))
         payload.append(0x0A)
-        for light, (off, length) in zip(self.light, self.meta):
-            payload.extend(orjson.dumps({**light, "_o": off, "_l": length}))
+        for light, (off, length), digest in zip(self.light, self.meta, self.row_digests):
+            payload.extend(orjson.dumps({**light, "_o": off, "_l": length, "_h": digest}))
             payload.append(0x0A)
         try:
             atomic_write_bytes(self.path.with_name(_INDEX_NAME), payload)
@@ -729,14 +899,12 @@ class SpanIndex:
 
 
 def _spotcheck(idx: SpanIndex) -> bool:
-    """Cheap O(1) sanity check that the persisted offsets still address spans.jsonl: re-read the LAST
-    indexed span at its recorded (offset,length) and confirm the span_id matches. This catches the
-    invalidations that actually occur — a truncation/rewrite that changed the tail — but, being a
-    single-span check, does NOT detect a mid-file byte shift that left the last span in place. That
-    pathological case can't arise here: spans.jsonl is append-only, and the only rewriters (clear_trace,
-    reset) go through atomic temp+rename → a NEW inode, which the dev/ino identity guard already rejects
-    before we get here. Full integrity is not the goal — the index is a rebuildable accelerator, so any
-    missed drift degrades to a wrong-offset read that `_read_full` skips, never wrong data."""
+    """Cheap O(1) persisted-tail sanity check against the exact indexed source-row digest.
+
+    The descriptor mutation token is the whole-source rewrite fence; this spotcheck additionally
+    rejects a damaged derived tail. Any digest mismatch propagates as unavailable here and makes the
+    cold loader rebuild rather than silently accepting less or different trace evidence.
+    """
     if not idx.light:
         return True
     last = idx.light[-1]
@@ -745,7 +913,8 @@ def _spotcheck(idx: SpanIndex) -> bool:
 
 
 def _load_persisted(spans_path: Path, identity: tuple, size: int,
-                    mtime_ns: int, ctime_ns: int, source_handle=None) -> Optional[SpanIndex]:
+                    mtime_ns: int, ctime_ns: int, source_change_token: int,
+                    source_handle=None) -> Optional[SpanIndex]:
     """Load `spans.index.jsonl` if it is a valid, current index for this spans.jsonl (fast cold path:
     read ~16 MB instead of re-parsing 1 GB). Returns None on any mismatch → caller rebuilds. Coverage
     is DERIVED from the records actually read (not trusted from the header), so a torn index tail just
@@ -775,14 +944,19 @@ def _load_persisted(spans_path: Path, identity: tuple, size: int,
             observed_size = header.get("source_size")
             observed_mtime = header.get("mtime_ns")
             observed_ctime = header.get("ctime_ns")
+            observed_change_token = header.get("source_change_token")
+            source_epoch = _decode_sha256(header.get("source_epoch"))
             observed_covers = header.get("covers")
             journal_dev = header.get("append_journal_dev")
             journal_ino = header.get("append_journal_ino")
             journal_covers = header.get("append_journal_covers")
-            if (not isinstance(observed_size, int) or isinstance(observed_size, bool)
+            if (source_epoch is None
+                    or not isinstance(observed_size, int) or isinstance(observed_size, bool)
                     or observed_size < 0
                     or not isinstance(observed_mtime, int) or isinstance(observed_mtime, bool)
                     or not isinstance(observed_ctime, int) or isinstance(observed_ctime, bool)
+                    or not isinstance(observed_change_token, int)
+                    or isinstance(observed_change_token, bool) or observed_change_token <= 0
                     or not isinstance(observed_covers, int) or isinstance(observed_covers, bool)
                     or observed_covers < 0 or observed_covers > observed_size
                     or observed_covers > size
@@ -796,12 +970,22 @@ def _load_persisted(spans_path: Path, identity: tuple, size: int,
                         or journal_ino < 0))
                     or (journal_dev is None and journal_covers != 0)):
                 return None
-            # A larger current source is the normal append-only path and can top up from coverage.
+            # A valid-looking header is still untrusted. Binding its epoch to the descriptor-backed
+            # mutation boundary prevents an attacker from updating size/mtime/ChangeTime after an
+            # in-place source rewrite while retaining the old ETag epoch and row digests.
+            if source_epoch != _source_epoch(
+                    identity, observed_size, observed_mtime, observed_change_token):
+                return None
+            # A larger POSIX source is the normal append-only path and can top up from coverage.
+            # Windows receipts expose creation time rather than ChangeTime, so a lagged persisted
+            # source must rebuild; otherwise prefix-rewrite + append can masquerade as pure growth.
             # A non-growing source whose mtime moved was mutated in-place, even when a corrupt suffix
             # made ``covers < size``. None of its cached light rows/offsets remain authoritative.
-            if (size < observed_size
+            if ((_IS_WINDOWS and size > observed_size)
+                    or size < observed_size
                     or (size == observed_size
-                        and (mtime_ns != observed_mtime or ctime_ns != observed_ctime))):
+                        and (mtime_ns != observed_mtime
+                             or source_change_token != observed_change_token))):
                 return None
             last_end = 0
             for raw in lines:
@@ -815,8 +999,10 @@ def _load_persisted(spans_path: Path, identity: tuple, size: int,
                     continue
                 off = rec.pop("_o", None)
                 length = rec.pop("_l", None)
+                digest = rec.pop("_h", None)
                 if (not isinstance(off, int) or isinstance(off, bool)
                         or not isinstance(length, int) or isinstance(length, bool)
+                        or _decode_sha256(digest) is None
                         or off < 0 or length < 0
                         or length + 1 > TRACE_JSONL_ROW_MAX_BYTES
                         or off + length + 1 > observed_covers):
@@ -824,7 +1010,7 @@ def _load_persisted(spans_path: Path, identity: tuple, size: int,
                     # `f.read(length)` (a negative length reads the whole file into memory). Treat it
                     # like a torn tail: keep the valid prefix, rebuild the rest from spans.jsonl.
                     break
-                if not idx._append(rec, off, length):
+                if not idx._append(rec, off, length, digest):
                     break
                 last_end = off + length + 1  # +1 for the newline that follows the line in spans.jsonl
     except OSError:
@@ -833,17 +1019,22 @@ def _load_persisted(spans_path: Path, identity: tuple, size: int,
     if idx.covers > size:
         return None  # spans.jsonl is smaller than the index claims — stale (shrank/rewritten)
     idx.identity = identity
+    idx.source_epoch = source_epoch
     # Retain the PERSISTED source boundary until `_index_from_handle` validates every receipt from it
     # to the current descriptor. Assigning current size/mtime here would let the first receipt gap
     # disappear before validation.
     idx.source_size = observed_size
     idx.mtime_ns = observed_mtime
     idx.ctime_ns = observed_ctime
+    idx.source_change_token = observed_change_token
     idx.append_journal_identity = (
         (journal_dev, journal_ino) if journal_dev is not None else None)
     idx.append_journal_covers = journal_covers
     idx._persisted_covers = idx.covers   # it IS persisted at this coverage — don't rewrite it unchanged
-    if not _spotcheck(idx):
+    try:
+        if not _spotcheck(idx):
+            return None
+    except OSError:
         return None
     return idx
 
@@ -887,9 +1078,12 @@ def _index_from_handle(p: Path, key: str, handle) -> SpanIndex:
     """
     stt = os.fstat(handle.fileno())
     size, mtime_ns, ctime_ns = stt.st_size, stt.st_mtime_ns, stt.st_ctime_ns
+    source_change_token = _source_change_token(handle, stt)
     identity = trace_file_identity(stt)
     idx = _cache_get(key)
-    force_rebuild = False
+    # No Windows ChangeTime means inode/size/restored-mtime can form an undetectable ABA. Keep reads
+    # available, but rebuild every observation and never consult/publish a persisted validator.
+    force_rebuild = source_change_token is None
     if idx is not None:
         # Reuse the cached index only when spans.jsonl is the SAME file grown by pure appends —
         # mirrors EventStore.read_all's guard so a network/FUSE mount can't feed the trace view a
@@ -905,15 +1099,23 @@ def _index_from_handle(p: Path, key: str, handle) -> SpanIndex:
         shrank = size < prior_size
         non_growth_rewrite = (not replaced and size <= prior_size
                               and ((idx.mtime_ns is not None and mtime_ns != idx.mtime_ns)
-                                   or (idx.ctime_ns is not None and ctime_ns != idx.ctime_ns)))
-        force_rebuild = shrank or non_growth_rewrite
+                                   or idx.source_change_token is None
+                                   or source_change_token != idx.source_change_token))
+        force_rebuild = force_rebuild or shrank or non_growth_rewrite
         if not (replaced or force_rebuild):
             transition = None
             if size > prior_size:
-                transition = _validated_append_transition(
-                    idx, handle, size, mtime_ns, ctime_ns)
-                if transition is None:
-                    force_rebuild = True   # growth without a complete writer chain is a rewrite
+                if _IS_WINDOWS:
+                    # Receipts currently carry Python's Windows ``st_ctime_ns`` (creation time), not
+                    # FILE_BASIC_INFO.ChangeTime. They cannot distinguish a prefix rewrite followed
+                    # by a legitimate append, so Windows growth must rebuild until that durable wire
+                    # contract itself carries before/after ChangeTime.
+                    force_rebuild = True
+                else:
+                    transition = _validated_append_transition(
+                        idx, handle, size, mtime_ns, ctime_ns)
+                    if transition is None:
+                        force_rebuild = True   # growth without a complete writer chain is a rewrite
             if not force_rebuild:
                 if idx.covers < size:
                     idx._topup(size, handle)
@@ -922,23 +1124,30 @@ def _index_from_handle(p: Path, key: str, handle) -> SpanIndex:
                 idx.source_size = size
                 idx.mtime_ns = mtime_ns
                 idx.ctime_ns = ctime_ns
+                idx.source_change_token = source_change_token
                 # Another run's concurrent insertion may have evicted this entry while its slow
                 # top-up ran. Re-publish it; the same-path guard prevents a competing instance.
                 _cache_store(key, idx)
                 idx._persist()
                 return idx
     # Cold miss (not cached, replaced, or shrank): load the persisted index if valid, else rebuild.
-    idx = None if force_rebuild else _load_persisted(
-        p, identity, size, mtime_ns, ctime_ns, handle)
+    idx = None
+    if not force_rebuild:
+        assert source_change_token is not None
+        idx = _load_persisted(
+            p, identity, size, mtime_ns, ctime_ns, source_change_token, handle)
     if idx is None:
         idx = SpanIndex(p)
         idx.identity = identity
+        idx.source_epoch = _source_epoch(identity, size, mtime_ns, source_change_token)
         idx._rebuild(size, handle)
     elif idx.source_size is not None and size > idx.source_size:
-        transition = _validated_append_transition(idx, handle, size, mtime_ns, ctime_ns)
+        transition = None if _IS_WINDOWS else _validated_append_transition(
+            idx, handle, size, mtime_ns, ctime_ns)
         if transition is None:
             idx = SpanIndex(p)
             idx.identity = identity
+            idx.source_epoch = _source_epoch(identity, size, mtime_ns, source_change_token)
             idx._rebuild(size, handle)
         else:
             if idx.covers < size:
@@ -951,6 +1160,7 @@ def _index_from_handle(p: Path, key: str, handle) -> SpanIndex:
     idx.source_size = size
     idx.mtime_ns = mtime_ns
     idx.ctime_ns = ctime_ns
+    idx.source_change_token = source_change_token
     _cache_store(key, idx)
     idx._persist()
     return idx

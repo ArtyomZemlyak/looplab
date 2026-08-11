@@ -424,6 +424,69 @@ test('the earlier steps stay reachable without a mouse, and a failed widen keeps
     }
   })
 
+test('conversation fallback is lifecycle-scoped while a same-lifecycle widen keeps last-good evidence',
+  async () => {
+    const dom = installDom()
+    let fail = false
+    const response = body => ({ ok: true, status: 200, headers: { get: () => null },
+      json: async () => body })
+    globalThis.fetch = async url => {
+      const path = String(url)
+      if (path.includes('/logs')) return response({})
+      if (fail) throw new Error('offline')
+      return response(conversationPage(512, 1))
+    }
+
+    const vite = await createServer({
+      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+      server: { middlewareMode: true },
+    })
+    try {
+      const { Conversation } = await vite.ssrLoadModule('/src/Inspector.jsx')
+      const { createRoot } = await import('react-dom/client')
+      const { act } = await import('react-dom/test-utils')
+      const container = dom.window.document.getElementById('root')
+      const root = createRoot(container)
+      const props = { n: { id: 7, attempt: 0 }, runId: 'demo', working: false,
+        spanLimit: 512, reloadNonce: 0 }
+      const settle = async () => {
+        await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+      }
+
+      await act(async () => { root.render(React.createElement(Conversation, props)) })
+      await settle()
+      assert.match(container.textContent, /turn 0/)
+
+      fail = true
+      await act(async () => { root.render(React.createElement(
+        Conversation, { ...props, spanLimit: 1024 })) })
+      await settle()
+      assert.match(container.textContent, /turn 0/,
+        'a failed wider representation may retain evidence from the same lifecycle')
+
+      await act(async () => { root.render(React.createElement(
+        Conversation, { ...props, spanLimit: 1024, reloadNonce: 1 })) })
+      assert.doesNotMatch(container.textContent, /turn 0/,
+        'a post-clear epoch must hide prior evidence during the render that changes scope')
+      await settle()
+      assert.doesNotMatch(container.textContent, /turn 0/)
+      assert.ok(container.querySelector('.resource-error') != null,
+        'a failed first observation in the new lifecycle is unavailable')
+
+      await act(async () => { root.render(React.createElement(Conversation, {
+        ...props, n: { id: 8, attempt: 1 }, spanLimit: 1024, reloadNonce: 1,
+      })) })
+      assert.doesNotMatch(container.textContent, /turn 0/,
+        'node/attempt replacement may not borrow another lifecycle while its read fails')
+      await settle()
+      assert.doesNotMatch(container.textContent, /turn 0/)
+      await act(async () => { root.unmount() })
+    } finally {
+      await vite.close()
+      dom.window.close()
+    }
+  })
+
 test('a failed live refresh marks a complete last-good conversation stale until recovery', async () => {
   const dom = installDom()
   installObserver()
@@ -491,6 +554,123 @@ test('a failed live refresh marks a complete last-good conversation stale until 
       'a correctly scoped success clears the stale warning')
 
     await act(async () => { root.unmount() })
+  } finally {
+    await vite.close()
+    Object.defineProperty(globalThis, 'setInterval', {
+      configurable: true, writable: true, value: previousSetInterval,
+    })
+    Object.defineProperty(globalThis, 'clearInterval', {
+      configurable: true, writable: true, value: previousClearInterval,
+    })
+    dom.window.close()
+  }
+})
+
+test('live conversation reuses only an exact ETag and aborts an unsettled conditional poll', async () => {
+  const dom = installDom()
+  installObserver()
+  const callbacks = new Map()
+  let nextTimer = 1
+  const previousSetInterval = globalThis.setInterval
+  const previousClearInterval = globalThis.clearInterval
+  Object.defineProperty(globalThis, 'setInterval', {
+    configurable: true, writable: true,
+    value: callback => { const id = nextTimer++; callbacks.set(id, callback); return id },
+  })
+  Object.defineProperty(globalThis, 'clearInterval', {
+    configurable: true, writable: true, value: id => callbacks.delete(id),
+  })
+  const firstTag = 'W/"llconv1-' + 'a'.repeat(64) + '"'
+  const nextTag = 'W/"llconv1-' + 'b'.repeat(64) + '"'
+  const conversationCalls = []
+  let conversationReads = 0
+  let abortedSignal = null
+  const response = (status, etag, body, json = async () => body) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: name => name.toLowerCase() === 'etag' ? etag : null },
+    json,
+  })
+  globalThis.fetch = async (url, options = {}) => {
+    const path = String(url)
+    if (!path.includes('/conversation')) return response(200, null, {})
+    conversationCalls.push({ path, options })
+    conversationReads += 1
+    if (conversationReads === 1) {
+      return response(200, firstTag, { ...conversationPage(512, 1), cursor: firstTag })
+    }
+    if (conversationReads === 2) {
+      return response(304, firstTag, null,
+        async () => { throw new Error('the bodyless hit must not be parsed') })
+    }
+    if (conversationReads === 3) {
+      return response(304, nextTag, null,
+        async () => { throw new Error('the mismatched hit must not be parsed') })
+    }
+    if (conversationReads === 4) {
+      const updated = conversationPage(512, 1)
+      updated.stages[0].turns[0].output = 'updated after unconditional retry'
+      return response(200, nextTag, { ...updated, cursor: nextTag })
+    }
+    return new Promise((resolve, reject) => {
+      abortedSignal = options.signal
+      const abort = () => reject(new DOMException('aborted', 'AbortError'))
+      if (options.signal?.aborted) abort()
+      else options.signal?.addEventListener('abort', abort, { once: true })
+    })
+  }
+
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try {
+    const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react-dom/test-utils')
+    const container = dom.window.document.getElementById('root')
+    const root = createRoot(container)
+    const settle = async () => {
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+    }
+    const tick = async () => {
+      await act(async () => { for (const callback of [...callbacks.values()]) callback() })
+      await settle()
+    }
+
+    await act(async () => {
+      root.render(React.createElement(Trace, traceProps({ working: true })))
+    })
+    await settle()
+    await act(async () => {
+      container.querySelector('.trace-collapse')?.dispatchEvent(
+        new dom.window.MouseEvent('click', { bubbles: true }))
+    })
+    assert.match(container.textContent, /turn 0/)
+
+    await tick()
+    assert.equal(conversationReads, 2)
+    assert.equal(new Headers(conversationCalls[1].options.headers).get('If-None-Match'), firstTag)
+    assert.match(container.textContent, /turn 0/,
+      'a matching 304 must retain the exact same-scope last-good payload')
+    assert.equal(container.querySelectorAll('.conversation-stale').length, 0)
+
+    await tick()
+    assert.equal(conversationReads, 4,
+      'a mismatched 304 must trigger one unconditional recovery read in the same tick')
+    assert.equal(new Headers(conversationCalls[2].options.headers).get('If-None-Match'), firstTag)
+    assert.equal(new Headers(conversationCalls[3].options.headers).get('If-None-Match'), null)
+    assert.match(container.textContent, /updated after unconditional retry/)
+
+    // Start one more serialized live tick and unmount before it settles. usePoll owns the deadline
+    // handle, so cleanup must abort the very signal conditionalGet passed through to fetch.
+    await act(async () => {
+      for (const callback of [...callbacks.values()]) callback()
+      await Promise.resolve()
+    })
+    assert.ok(abortedSignal != null && !abortedSignal.aborted)
+    await act(async () => { root.unmount() })
+    assert.equal(abortedSignal.aborted, true)
   } finally {
     await vite.close()
     Object.defineProperty(globalThis, 'setInterval', {
