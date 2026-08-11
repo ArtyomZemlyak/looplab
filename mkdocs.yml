@@ -153,6 +153,7 @@ nav:
       - MLE-bench runbook: MLEBENCH.md
   - Design records:
       - Index: 00-INDEX.md
+      - Deep Research SOTA roadmap (2026-08-10): 28-deep-research-sota-roadmap-2026-08-10.md
       - Agent-system mega-review & SOTA (2026-08-09): 27-agent-system-mega-review-2026-08-09.md
       - Structural-debt ledger (2026-08-01): 25-architecture-modularity-review-2026-08-01.md
       - Current finding ledger (2026-07-11): 16-architecture-code-review-2026-07-11.md
