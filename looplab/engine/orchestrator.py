@@ -357,6 +357,57 @@ class CreationRunawayCounters:
             self.prev_terminal = terminal_now
 
 
+# Failures that are not evidence about the run. `superseded` is a node RESET (the operator or the
+# engine replaced the node's generation) and an aborted node is an operator cancellation: charging
+# either to a no-progress bound would let ordinary steering end the run.
+_NON_EVIDENCE_FAILURE_REASONS = frozenset({"superseded"})
+
+
+def systemic_failure_stop_reason(state, threshold: int) -> Optional[str]:
+    """Should the whole run stop because nothing has EVER worked? The reason, or None.
+
+    `CreationRunawayCounters` is the loop's only run-level no-progress bound and it resets on any
+    TERMINAL — but `node_failed` is a terminal, so a run in which every node fails reads as
+    progress and grinds on unbounded. Measured on `runs/rubertlite-dr-unified-v2` (2026-08-11):
+    26 hours, 1,705 provider calls, 6 failed nodes, 0 evaluated, no stop. Every one of those
+    failures was the SAME environment defect, re-diagnosed from scratch by a fresh Developer each
+    time, because nothing in the loop was allowed to conclude "this is not about the idea".
+
+    The distinction that matters is not how many nodes failed but WHETHER ANYTHING HAS EVER
+    WORKED:
+
+      * At least one evaluated node — the environment, the libraries and the data are PROVEN. A
+        later failure is about that one idea, so only that node and its direction stop and the
+        search continues. This bound is off entirely, whatever the failure count.
+      * No evaluated node, ever — nothing is proven, and the N-th failure is evidence about the
+        RUN rather than about the N-th idea. That is the systemic case ("we only ever start node
+        zero and the environment/library/data is broken"), and the run should stop and say so
+        instead of buying the same diagnosis N more times.
+
+    Counted in DISTINCT nodes that ended failed, not in attempts: a node repaired five times and
+    failed is one failed idea, and the inline-repair limit is what bounds that. Resets and
+    operator aborts are excluded — see `_NON_EVIDENCE_FAILURE_REASONS`.
+
+    `threshold <= 0` disables the bound, matching every other interval knob in the engine.
+    """
+    if not isinstance(threshold, int) or isinstance(threshold, bool) or threshold <= 0:
+        return None
+    if state.evaluated_nodes():
+        return None
+    aborted = set(getattr(state, "aborted_nodes", None) or [])
+    failed = [n for n in state.nodes.values()
+              if n.status is NodeStatus.failed and not n.tombstoned and n.id not in aborted
+              and str(getattr(n, "error_reason", "") or "") not in _NON_EVIDENCE_FAILURE_REASONS]
+    if len(failed) < threshold:
+        return None
+    # Name the shape so the operator can act. The reasons are what the triage already recorded, so
+    # this adds a diagnosis rather than a new opinion.
+    reasons = sorted({str(getattr(n, "error_reason", "") or "unknown") for n in failed})
+    return ("systemic failure: {n} node(s) failed and none has ever produced a metric — "
+            "the environment, dependencies or data are the likely cause rather than any one idea "
+            "({why})").format(n=len(failed), why=", ".join(reasons[:4]))
+
+
 class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
              ConceptCadenceMixin, VerifierTiebreakMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
@@ -577,6 +628,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._invalid_pin_verdict: Optional[tuple] = None
         self.strategist_every = max(1, strategist_every)
         self.concept_retag_every = max(1, concept_retag_every)
+        # STORED RAW: 0 is OFF here (every other interval knob reads 0 that way too), so a clamp
+        # would turn "never stop the run for me" into "stop after one failure".
+        self.systemic_failure_stop = _opt("systemic_failure_stop")
         self.deep_researcher = deep_researcher
         # STORED RAW, deliberately — this was `max(0, deep_research_every)` until 2026-08-07, and
         # under the new spelling that clamp is exactly backwards: `0` now means "start immediately"
@@ -1419,6 +1473,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 terminal_now=sum(1 for _n in state.nodes.values()
                                  if _n.status is not NodeStatus.pending),
             )
+            # …and the bound the charge above cannot express: `node_failed` IS a terminal, so a run
+            # where every node fails resets that guard every time and never stops. This one asks
+            # whether anything has EVER worked — see `systemic_failure_stop_reason` for why that is
+            # the line between "the environment is broken, stop the run" and "this idea is broken,
+            # stop the node". Off once any node has been evaluated, and off entirely at threshold 0.
+            _systemic = systemic_failure_stop_reason(state, self.systemic_failure_stop)
+            if _systemic is not None:
+                if self._finish_with_report_if_quiescent(
+                        state, {"reason": _systemic}, after_seq=decision_seq):
+                    break
+                continue
             _signal = self._run_spec_gates(state)
             if _signal == "break":
                 break

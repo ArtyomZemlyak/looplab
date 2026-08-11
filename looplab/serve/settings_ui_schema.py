@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 164
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 165
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -35,9 +35,10 @@ SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 164
 # tests/test_config_docs_sync.py, which keeps configuration.md's "N of the M direct Settings
 # fields" sentence honest.
 SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
-# 164 rows since `task_facets_finalize` separated the paid-but-behaviorally-inert facet call from
-# the concept/claim curation umbrella. It carries a warning row and pins `default: false`.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "0b316078b589871cd5dd7dc75e685aeebd380fdf9532de4dc0e349296faa3c4e"
+# 165 rows since `systemic_failure_stop` joined the Resilience group — the run-level companion to
+# `inline_repair_attempts`, which bounds one node's retries and says nothing about a run whose every
+# node fails for the same reason. It pins `default: 3` and states that 0 disables it.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "cdcf3a8d7ad8e097780bb7ec434103e8953cb18726551121f341abaca04173de"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")
