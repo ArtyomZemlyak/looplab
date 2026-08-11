@@ -26,6 +26,46 @@ different response contract, not another copy of this one.
 from __future__ import annotations
 
 import json
+import re
+
+
+_ETAG_TOKEN = re.compile(r'(?:W/)?"[!#-~\x80-\xff]*"')
+
+
+def if_none_match(value: str | None, current: str) -> bool:
+    """RFC 9110 weak comparison for one current validator against an ETag list.
+
+    Conditional trace reads and the settings-schema endpoint share this grammar. Invalid list
+    syntax is a cache miss, never permission to return a bodyless 304 for a validator we could not
+    parse exactly.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return False
+    value = value.strip()
+    if value == "*":
+        return True
+    target = current[2:] if current.startswith("W/") else current
+    matched = False
+    position = 0
+    while position < len(value):
+        while position < len(value) and value[position] in " \t,":
+            position += 1
+        if position == len(value):
+            break
+        match = _ETAG_TOKEN.match(value, position)
+        if match is None:
+            return False
+        candidate = match.group(0)
+        if candidate.startswith("W/"):
+            candidate = candidate[2:]
+        if candidate == target:
+            matched = True
+        position = match.end()
+        while position < len(value) and value[position] in " \t":
+            position += 1
+        if position < len(value) and value[position] != ",":
+            return False
+    return matched
 
 
 def _bad_request(message: str):

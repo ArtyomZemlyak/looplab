@@ -144,6 +144,79 @@ test('one credential decision serves every transport that left api.js', async ()
   })
 })
 
+test('conditional reads keep the review/auth boundary and make every 304 explicit', async () => {
+  const { conditionalGet } = await import('../src/api.js')
+  const previous = {
+    location: globalThis.location, sessionStorage: globalThis.sessionStorage,
+    fetch: globalThis.fetch,
+  }
+  const current = 'W/"llconv1-' + 'a'.repeat(64) + '"'
+  const foreign = 'W/"llconv1-' + 'b'.repeat(64) + '"'
+  const calls = []
+  let responses = []
+  globalThis.location = { pathname: '/user/a/proxy/8765/review', hash: `#/${REVIEW_TOKEN}` }
+  globalThis.sessionStorage = { getItem: () => OWNER_SECRET }
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, ...options })
+    return responses.shift()
+  }
+  const response = (status, etag, data, json = async () => data) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: name => name.toLowerCase() === 'etag' ? etag : null },
+    json,
+  })
+  try {
+    const controller = new AbortController()
+    responses = [response(304, current, null,
+      async () => { throw new Error('a 304 body must never be parsed') })]
+    const unchanged = await conditionalGet('/api/runs/demo/nodes/7/conversation', current, {
+      signal: controller.signal,
+      // A caller cannot smuggle a differently-cased second validator into the exact-scope read.
+      headers: { 'IF-NONE-MATCH': foreign, 'X-Probe': 'kept' },
+    })
+    assert.deepEqual(unchanged, { unchanged: true, etag: current, data: null })
+    assert.equal(calls[0].url, '/user/a/proxy/8765/api/review/nodes/7/conversation')
+    const sent = new Headers(calls[0].headers)
+    assert.equal(sent.get('If-None-Match'), current)
+    assert.equal(sent.get('X-Probe'), 'kept')
+    assert.equal(sent.get('X-LoopLab-Review'), REVIEW_TOKEN)
+    assert.equal(sent.get('X-LoopLab-Token'), null)
+    assert.equal(calls[0].signal, controller.signal)
+
+    // A mismatched/missing response tag is exposed to the exact-scope caller, never silently
+    // replaced with the tag it sent. Conversation retries either anomaly unconditionally.
+    responses = [response(304, foreign)]
+    const mismatched = await conditionalGet('/api/runs/demo/nodes/7/conversation', current)
+    assert.deepEqual(mismatched, { unchanged: true, etag: foreign, data: null })
+    responses = [response(304, null), response(200, current, { fresh: true })]
+    const recovered = await conditionalGet('/api/runs/demo/nodes/7/conversation', null)
+    assert.deepEqual(recovered, { unchanged: false, etag: current, data: { fresh: true } })
+    const retryHeaders = new Headers(calls.at(-1).headers)
+    assert.equal(retryHeaders.get('If-None-Match'), null,
+      'a first 304 without reusable state must retry without any validator')
+
+    // AbortSignal reaches the underlying fetch unchanged; deadline/unmount aborts therefore reject
+    // the conditional read just like every other Inspector transport.
+    const aborter = new AbortController()
+    globalThis.fetch = (_url, options = {}) => new Promise((resolve, reject) => {
+      const abort = () => reject(new DOMException('aborted', 'AbortError'))
+      if (options.signal?.aborted) abort()
+      else options.signal?.addEventListener('abort', abort, { once: true })
+    })
+    const pending = conditionalGet('/api/runs/demo/nodes/7/conversation', current,
+      { signal: aborter.signal })
+    await Promise.resolve()
+    aborter.abort()
+    await assert.rejects(pending, error => error?.name === 'AbortError')
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[name]
+      else globalThis[name] = value
+    }
+  }
+})
+
 test('the review read-only refusal still fires before a command reaches the wire', async () => {
   const { submitRunCommand } = await import('../src/api.js')
   await withReviewTab(async calls => {

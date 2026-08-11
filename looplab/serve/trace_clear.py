@@ -37,7 +37,7 @@ from looplab.core.trace_files import (
     TRACE_JSONL_ROW_MAX_BYTES, assert_private_trace_file, open_private_trace_file,
     trace_file_identity)
 from looplab.events.eventstore import EventStoreLockError
-from looplab.events.span_index import span_index_write_guard
+from looplab.events.span_index import span_destructive_write_guard
 from looplab.events.traceview import (
     _normalize_span, effective_node_id, trace_file_revision, trace_root_node_id)
 from looplab.serve.appstate import _TRACE_CLEAR_RECEIPT_PREFIX
@@ -876,7 +876,7 @@ def durable_clear_node_trace(
         writer_lock_entered = False
         try:
             with (engine_write_lock_http(rd),
-                  span_index_write_guard(rd / "spans.jsonl", required=True)):
+                  span_destructive_write_guard(rd / "spans.jsonl", required=True)):
                 writer_lock_entered = True
                 current_generation = srv.commands.run_generation(rd)
                 if expected_generation != current_generation:

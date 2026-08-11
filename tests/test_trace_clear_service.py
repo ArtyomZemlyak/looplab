@@ -741,10 +741,10 @@ def test_a_fresh_clear_writes_the_record_before_the_replacement_and_settles_succ
     assert receipt["status"] == "succeeded" and receipt["source_digest"] == _digest(SPANS)
 
 
-def test_a_fresh_clear_holds_required_span_index_ownership_through_replace_and_invalidate(
+def test_a_fresh_clear_holds_required_trace_writer_ownership_through_replace_and_invalidate(
         tmp_path, monkeypatch):
     srv, rd = _run(tmp_path)
-    real_guard = tc.span_index_write_guard
+    real_guard = tc.span_destructive_write_guard
     real_replace = tc._strict_replace_prepared_trace
     real_invalidate = tc._invalidate_trace_clear
     active = False
@@ -769,7 +769,7 @@ def test_a_fresh_clear_holds_required_span_index_ownership_through_replace_and_i
         assert active
         return real_invalidate(server, run_dir, spans_path)
 
-    monkeypatch.setattr(tc, "span_index_write_guard", _tracked_guard)
+    monkeypatch.setattr(tc, "span_destructive_write_guard", _tracked_guard)
     monkeypatch.setattr(tc, "_strict_replace_prepared_trace", _tracked_replace)
     monkeypatch.setattr(tc, "_invalidate_trace_clear", _tracked_invalidate)
     tc.durable_clear_node_trace(srv, "demo", 0, {

@@ -298,7 +298,8 @@ _PIPELINE_PLAN = _tm.eval_log_plan([{"name": "data_prep", "command": ["python", 
 
 
 def _run_verdict_monitor(tmp_path, *, workdir, developer, hold_s=0.22, redact=None,
-                         kill=False, kill_confidence=0.8, prior_events=(), until=None, plan=None):
+                         kill=False, kill_confidence=0.8, prior_events=(), until=None,
+                         after_until_s=0.0, plan=None):
     tracer = Tracer(JsonlSpanExporter(tmp_path / "spans.jsonl"))
     host = _VerdictHost(tracer, developer, interval=0.05, redact=redact,
                         kill=kill, kill_confidence=kill_confidence)
@@ -314,6 +315,8 @@ def _run_verdict_monitor(tmp_path, *, workdir, developer, hold_s=0.22, redact=No
                 deadline = time.monotonic() + _MONITOR_SETTLE_TIMEOUT_S
                 while not until(host) and time.monotonic() < deadline:
                     await anyio.sleep(0.005)
+                if until(host) and after_until_s > 0:
+                    await anyio.sleep(after_until_s)
             tg.cancel_scope.cancel()
 
     anyio.run(drive)
@@ -328,7 +331,9 @@ def test_broken_verdict_appends_alert_event_and_stamps_span(tmp_path):
     (wd / "train.log").write_text("loss: nan\nRuntimeError: CUDA error: device-side assert\n")
     client = _FakeClient({"status": "broken", "reason": "loss is nan and a CUDA assert fired",
                           "confidence": 0.95})
-    host, spans = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client))
+    host, spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client),
+        until=lambda h: any(t == EV_TRAIN_MONITOR_ALERT for t, _d in h.store.events))
 
     alerts = [d for (t, d) in host.store.events if t == EV_TRAIN_MONITOR_ALERT]
     assert alerts, "a broken verdict must append an alert event"
@@ -343,7 +348,9 @@ def test_healthy_verdict_stays_trace_only_no_event(tmp_path):
     wd.mkdir()
     (wd / "train.log").write_text("step 1 loss: 0.5\nstep 2 loss: 0.4\nstep 3 loss: 0.3\n")
     client = _FakeClient({"status": "healthy", "reason": "loss steadily decreasing", "confidence": 0.8})
-    host, spans = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client))
+    host, spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client),
+        until=lambda _h: (tmp_path / "spans.jsonl").exists())
 
     assert [d for (t, d) in host.store.events if t == EV_TRAIN_MONITOR_ALERT] == []   # clean event log
     tm = [s for s in spans if s.get("name") == "train_monitor"]
@@ -390,6 +397,9 @@ def test_resumed_monitor_closes_pre_crash_alert_in_same_generation(tmp_path):
             "node_id": 0, "generation": 0, "status": "broken", "reason": "pre-crash",
             "confidence": 0.9,
         })],
+        until=lambda h: sum(
+            1 for event_type, _data in h.store.events
+            if event_type == EV_TRAIN_MONITOR_ALERT) >= 2,
     )
     alerts = [data for event_type, data in host.store.events
               if event_type == EV_TRAIN_MONITOR_ALERT]
@@ -401,7 +411,9 @@ def test_unchanged_digest_does_not_re_call_the_llm(tmp_path):
     wd.mkdir()
     (wd / "train.log").write_text("step 1 loss: 0.5\n")     # static log across every tick
     client = _FakeClient({"status": "healthy", "reason": "ok", "confidence": 0.7})
-    host, spans = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), hold_s=0.3)
+    host, spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client),
+        until=lambda _h: (tmp_path / "spans.jsonl").exists(), after_until_s=0.3)
     # The invariant is "NOT re-called per tick": at most once for an unchanged digest. `<=` (not `==`)
     # so a slow CI runner that fits fewer ticks in the window never flakes; the span proves it did tick.
     assert client.calls <= 1, f"static digest must not re-call the LLM per tick (fired {client.calls})"
@@ -416,7 +428,10 @@ def test_verdict_recheck_after_s_flows_through_the_loop(tmp_path):
     (wd / "train.log").write_text("epoch 2 val steady\n")
     client = _FakeClient({"status": "watch", "reason": "keeping an eye on it",
                           "confidence": 0.6, "recheck_after_s": 0.2})   # base here is the 0.05 config
-    _host, spans = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), hold_s=0.3)
+    _host, spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client),
+        until=lambda h: any(t == EV_TRAIN_MONITOR_ALERT for t, _d in h.store.events),
+    )
     tm = [s for s in spans if s.get("name") == "train_monitor"]
     assert tm and any(s["attributes"].get("next_check_s") == 0.2 for s in tm), \
         "the loop must honor the verdict's recheck_after_s and stamp it on the span"
@@ -426,7 +441,9 @@ def test_no_client_degrades_to_trace_only_observation(tmp_path):
     wd = tmp_path / "node_0"
     wd.mkdir()
     (wd / "train.log").write_text("step 1 loss: 0.5\nstep 2 loss: 0.4\n")
-    host, spans = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(None))
+    host, spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(None),
+        until=lambda _h: (tmp_path / "spans.jsonl").exists())
 
     assert [e for e in host.store.events if e[0] == EV_TRAIN_MONITOR_ALERT] == []
     tm = [s for s in spans if s.get("name") == "train_monitor"]
@@ -439,7 +456,9 @@ def test_watch_verdict_alerts_and_confidence_is_clamped(tmp_path):
     wd.mkdir()
     (wd / "train.log").write_text("epoch 3 val_loss rising\n")
     client = _FakeClient({"status": "watch", "reason": "val loss ticking up", "confidence": 1.7})
-    host, spans = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client))
+    host, spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client),
+        until=lambda h: any(t == EV_TRAIN_MONITOR_ALERT for t, _d in h.store.events))
 
     alerts = [d for (t, d) in host.store.events if t == EV_TRAIN_MONITOR_ALERT]
     assert alerts and alerts[0]["status"] == "watch"       # non-healthy that isn't 'broken' still alerts
@@ -464,6 +483,7 @@ def test_non_finite_broken_confidence_stays_observable_but_cannot_kill(tmp_path,
         kill=True,
         kill_confidence=0.0,
         plan=_TRAIN_PLAN,          # an identified training stage: nothing but the confidence blocks it
+        until=lambda h: any(t == EV_TRAIN_MONITOR_ALERT for t, _d in h.store.events),
     )
 
     # A zero action threshold proves invalid confidence is rejected by validity, not merely mapped below
@@ -487,7 +507,8 @@ def test_reason_is_redacted_before_storage(tmp_path):
                           "confidence": 0.9})
     host, spans = _run_verdict_monitor(
         tmp_path, workdir=wd, developer=_FakeDeveloper(client),
-        redact=lambda s: s.replace("SECRET-TOKEN", "[redacted]"))
+        redact=lambda s: s.replace("SECRET-TOKEN", "[redacted]"),
+        until=lambda h: any(t == EV_TRAIN_MONITOR_ALERT for t, _d in h.store.events))
 
     alerts = [d for (t, d) in host.store.events if t == EV_TRAIN_MONITOR_ALERT]
     assert alerts and "SECRET-TOKEN" not in alerts[0]["reason"] and "[redacted]" in alerts[0]["reason"]
@@ -509,7 +530,9 @@ def test_llm_error_skips_verdict_but_keeps_watching(tmp_path):
     wd.mkdir()
     (wd / "train.log").write_text("step 1 loss: 0.5\n")
     client = _RaisingClient()
-    host, spans = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), hold_s=0.3)
+    host, spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client),
+        until=lambda _h: (tmp_path / "spans.jsonl").exists())
 
     assert client.calls >= 1                                # the LLM WAS attempted...
     assert [e for e in host.store.events if e[0] == EV_TRAIN_MONITOR_ALERT] == []   # ...and its failure
@@ -653,8 +676,10 @@ def test_broken_verdict_does_not_kill_when_disabled(tmp_path):
     wd.mkdir()
     (wd / "train.log").write_text("loss: nan\n")
     client = _FakeClient({"status": "broken", "reason": "nan", "confidence": 0.99})
-    host, _ = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), kill=False,
-                                   plan=_TRAIN_PLAN)   # only the opt-in is missing
+    host, _ = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client), kill=False,
+        plan=_TRAIN_PLAN,  # only the opt-in is missing
+        until=lambda h: any(t == EV_TRAIN_MONITOR_ALERT for t, _d in h.store.events))
 
     assert host.kill_signal.get("kill") is None and not host.cancel.is_set()   # observe-only default
     assert any(t == EV_TRAIN_MONITOR_ALERT for (t, _d) in host.store.events)    # but still flagged
@@ -682,7 +707,10 @@ def test_llm_call_cap_stops_spending_but_keeps_observing(tmp_path, monkeypatch):
 
     client = _AppendingClient()
     _host, spans = _run_verdict_monitor(
-        tmp_path, workdir=wd, developer=_FakeDeveloper(client), hold_s=0.5)
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client),
+        until=lambda _h: (
+            (tmp_path / "spans.jsonl").exists()
+            and '"llm_capped":true' in (tmp_path / "spans.jsonl").read_text()))
     assert client.calls <= 2, f"LLM must never EXCEED the cap (fired {client.calls})"   # `<=` = robust
     tm_spans = [s for s in spans if s.get("name") == "train_monitor"]
     assert any(s["attributes"].get("llm_capped") for s in tm_spans)   # cap was REACHED + surfaced (not silent)
@@ -823,7 +851,8 @@ def test_the_train_resume_recovery_really_calls_the_shared_scan(tmp_path, monkey
     _run_verdict_monitor(
         tmp_path, workdir=wd, developer=_FakeDeveloper(client),
         prior_events=[(EV_TRAIN_MONITOR_ALERT,
-                       {"node_id": 0, "generation": 0, "status": "watch"})])
+                       {"node_id": 0, "generation": 0, "status": "watch"})],
+        until=lambda _h: bool(calls))
 
     assert (EV_TRAIN_MONITOR_ALERT, 0, 0) in calls, (
         f"the train resume recovery never asked the shared scan: {calls}")

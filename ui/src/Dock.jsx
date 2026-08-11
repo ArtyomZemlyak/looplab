@@ -404,7 +404,7 @@ export function OpTrace({ runId, traceId, expectedGeneration }) {
   return <>{trace.stale && <TraceUnavailable
     label="Trace refresh failed; showing confirmed spans." onRetry={retry} />}
     <NodeTrace spans={trace.spans} projection={trace.projection} runId={runId}
-      expectedGeneration={expectedGeneration} onRetry={retry} /></>
+      expectedGeneration={expectedGeneration} treeKey={scope} onRetry={retry} /></>
 }
 
 // One feed row, chat-message styled: an icon/color by kind, the narration, an expandable "why" card.
@@ -522,7 +522,7 @@ export function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt, auto
           {hasTrace && nodeTrace != null && <NodeTrace spans={nodeSpans}
             projection={nodeTrace.projection} runId={runId} onRetry={retryNodeTrace}
             onLoadMore={loadMoreNodeTrace} spanLimit={nodeTraceLimit}
-            expectedGeneration={expectedTraceGeneration} />}
+            expectedGeneration={expectedTraceGeneration} treeKey={nodeTraceScope} />}
           {opTraceId && (e.type === 'research_completed'
             ? <Disclosure label="research process & tool activity">
                 <OpTrace runId={runId} traceId={opTraceId}

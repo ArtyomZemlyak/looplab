@@ -103,7 +103,7 @@ test('expanded node trace polls only its exact live lifecycle and refreshes once
 
 test('virtual timeline is bounded, variable-height, generation-scoped, and politely announces unread events', async () => {
   const [virtual, css] = await Promise.all([source('VirtualTimeline.jsx'), source('styles.css')])
-  assert.match(virtual, /data-event-row role="listitem"/)
+  assert.match(virtual, /data-event-row=\{props\.role \? undefined : ''\} role=\{props\.role \|\| 'listitem'\}/)
   assert.match(virtual, /ResizeObserver/)
   assert.match(virtual, /`\$\{identity\}:\$\{getKey\(row, index\)\}`/)
   assert.match(virtual, /setProgrammaticScroll\(tailScrollTop\(element\.scrollHeight, element\.clientHeight\)\)/)

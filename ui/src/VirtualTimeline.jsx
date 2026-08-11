@@ -6,7 +6,7 @@ import {
 
 const defaultKey = row => row.seq
 
-function MeasuredRow({ itemKey, top, position, setSize, onMeasure, children }) {
+function MeasuredRow({ itemKey, top, position, setSize, onMeasure, itemProps, children }) {
   const ref = useRef(null)
   useLayoutEffect(() => {
     const element = ref.current
@@ -18,9 +18,13 @@ function MeasuredRow({ itemKey, top, position, setSize, onMeasure, children }) {
     observer.observe(element)
     return () => observer.disconnect()
   }, [itemKey, onMeasure])
-  return <div ref={ref} className="timeline-virtual-row" data-event-row role="listitem"
-    aria-posinset={position} aria-setsize={setSize}
-    style={{ transform: `translateY(${top}px)` }}>{children}</div>
+  const props = itemProps || {}
+  return <div {...props} ref={ref}
+    className={`timeline-virtual-row ${props.className || ''}`.trim()}
+    data-event-row={props.role ? undefined : ''} role={props.role || 'listitem'}
+    aria-posinset={props['aria-posinset'] ?? position}
+    aria-setsize={props['aria-setsize'] ?? setSize}
+    style={{ ...(props.style || {}), transform: `translateY(${top}px)` }}>{children}</div>
 }
 
 // Dependency-free variable-height windowing. The visible anchor is captured under the PREVIOUS
@@ -42,6 +46,9 @@ export default function VirtualTimeline({
   estimateSize = DEFAULT_TIMELINE_ROW_HEIGHT,
   overscan = DEFAULT_TIMELINE_OVERSCAN,
   ariaLabel = 'Event timeline',
+  viewportProps = null,
+  getItemProps = null,
+  activeIndex = null,
 }) {
   const scrollRef = useRef(null)
   const measurements = useRef(new Map())
@@ -218,6 +225,21 @@ export default function VirtualTimeline({
     } else readViewport(false)
   }, [followingTail, identity, layout, pinFollowingTail, readViewport, rows, setProgrammaticScroll, windowAtTail])
 
+  // A roving virtual collection keeps focus on the viewport and points at its active descendant.
+  // When keyboard/search navigation selects an unmounted row, bring that logical row into view; the
+  // next range calculation mounts it without ever mounting the thousands of rows between old/new.
+  useLayoutEffect(() => {
+    const element = scrollRef.current
+    if (!element || !Number.isSafeInteger(activeIndex)
+        || activeIndex < 0 || activeIndex >= layout.count) return
+    const top = layout.offsets[activeIndex]
+    const bottom = layout.offsets[activeIndex + 1]
+    if (top < element.scrollTop) setProgrammaticScroll(top)
+    else if (bottom > element.scrollTop + element.clientHeight) {
+      setProgrammaticScroll(bottom - element.clientHeight)
+    }
+  }, [activeIndex, layout, setProgrammaticScroll])
+
   useLayoutEffect(() => {
     if (!followingTail) {
       tailPinTokenRef.current += 1
@@ -264,18 +286,29 @@ export default function VirtualTimeline({
     })
   }, [])
 
+  const indices = []
+  for (let index = range.start; index < range.end; index += 1) indices.push(index)
+  // Keep the active descendant mounted during a far keyboard/search jump. Mount exactly that one
+  // extra row (not the gap to it), so aria-activedescendant never points at a missing element while
+  // the layout effect scrolls the viewport to its new logical position.
+  if (Number.isSafeInteger(activeIndex) && activeIndex >= 0 && activeIndex < rows.length
+      && (activeIndex < range.start || activeIndex >= range.end)) indices.push(activeIndex)
+  indices.sort((left, right) => left - right)
   const visible = []
-  for (let index = range.start; index < range.end; index += 1) {
+  for (const index of indices) {
     const row = rows[index]
     const key = layout.keys[index]
     visible.push(<MeasuredRow key={key} itemKey={key} top={layout.offsets[index]}
-      position={index + 1} setSize={rows.length} onMeasure={measure}>
+      position={index + 1} setSize={rows.length} onMeasure={measure}
+      itemProps={getItemProps?.(row, index)}>
       {renderRow(row, index)}
     </MeasuredRow>)
   }
   return <div className="timeline-virtual-wrap">
-    <div ref={scrollRef} className={`timeline-virtual ${className}`.trim()} onScroll={onScroll}
-         role="list" aria-label={ariaLabel} aria-busy={busy} tabIndex={0}>
+    <div {...viewportProps} ref={scrollRef} className={`timeline-virtual ${className}`.trim()}
+         onScroll={onScroll} role={viewportProps?.role || 'list'}
+         aria-label={viewportProps?.['aria-label'] || ariaLabel} aria-busy={busy}
+         tabIndex={viewportProps?.tabIndex ?? 0}>
       <div className="timeline-virtual-space" style={{ height: layout.totalHeight }}>{visible}</div>
     </div>
     {!followingTail && (unreadUnknown || unread > 0) && <div className="timeline-unread-status" role="status"

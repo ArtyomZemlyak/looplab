@@ -2,6 +2,7 @@
 to OpenTelemetry when present, joined to events for the UI. fold never reads spans."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -386,6 +387,132 @@ def test_trace_json_written_and_grouped_by_node(tmp_path):
     # rebuilding from files gives the same shape (pure reader)
     tv2 = build_trace_view(state, load_spans(run_dir / "spans.jsonl"))
     assert tv2["summary"]["spans"] == tv["summary"]["spans"]
+
+
+def test_finalizer_flushes_the_local_queue_before_building_trace_json(tmp_path):
+    """A queued row must be present in derived trace artifacts before Engine.run returns."""
+    engine = _engine(tmp_path)
+    exporter = engine.tracer.exporter
+    real_export_line = exporter._writer._export_line
+    real_force_flush = engine.tracer.force_flush
+    started = threading.Event()
+    release = threading.Event()
+    flush_calls = 0
+
+    def blocked_export(line, **kwargs):
+        started.set()
+        assert release.wait(5)
+        return real_export_line(line, **kwargs)
+
+    def releasing_flush(*, timeout_millis):
+        nonlocal flush_calls
+        flush_calls += 1
+        release.set()
+        return real_force_flush(timeout_millis=timeout_millis)
+
+    exporter._writer._export_line = blocked_export
+    engine.tracer.force_flush = releasing_flush
+    with engine.tracer.span("queued-before-finalize", new_trace=True):
+        pass
+    assert started.wait(1)
+
+    anyio.run(engine.run)
+
+    assert flush_calls >= 1
+    trace_view = orjson.loads((tmp_path / "run" / "trace.json").read_bytes())
+    assert b'"name":"queued-before-finalize"' in orjson.dumps(trace_view)
+
+
+def test_finalizer_does_not_swallow_a_deep_trace_json_artifact(tmp_path, monkeypatch):
+    """A deep but valid projection replaces the artifact instead of tripping orjson's depth limit."""
+    from looplab.engine import finalize as finalizer
+
+    engine = _engine(tmp_path)
+    anyio.run(engine.run)
+    depth = 600  # above recursive framework encoders and orjson's nested-container limit
+    spans = [{
+        "name": "deep", "kind": "operation", "trace_id": "deep-trace",
+        "span_id": f"deep-{index}",
+        "parent_id": f"deep-{index - 1}" if index else None,
+        "run_id": "demo", "attributes": {"node_id": 0}, "events": [],
+        "status": "OK", "start": float(index), "duration_s": 0.1,
+    } for index in range(depth)]
+    monkeypatch.setattr(finalizer, "_flush_trace_exporter", lambda _engine: True)
+    monkeypatch.setattr(finalizer, "load_span_tail", lambda *_args: (spans, len(spans)))
+    artifact = engine.run_dir / "trace.json"
+    artifact.write_bytes(b"stale artifact that must be replaced")
+
+    finalizer.finalize_run(engine, entry_finished=True, start_time=time.monotonic())
+
+    encoded = artifact.read_bytes()
+    assert encoded != b"stale artifact that must be replaced"
+    old_recursion_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(old_recursion_limit, depth * 4))
+    try:
+        projection = json.loads(encoded)
+    finally:
+        sys.setrecursionlimit(old_recursion_limit)
+    cursor, seen = projection["nodes"]["0"][0], 0
+    while cursor is not None:
+        seen += 1
+        children = cursor.get("children") or []
+        cursor = children[0] if children else None
+    assert seen == depth
+
+
+def test_engine_run_terminally_drops_a_background_span_closed_after_return(tmp_path):
+    engine = _engine(tmp_path)
+    exporter = engine.tracer.exporter
+    assert exporter._lifecycle_fence is True
+    opened = threading.Event()
+    release = threading.Event()
+
+    def close_after_owner_returns():
+        with engine.tracer.span("late-background", new_trace=True):
+            opened.set()
+            assert release.wait(30)
+
+    background = threading.Thread(target=close_after_owner_returns)
+    background.start()
+    assert opened.wait(1)
+    try:
+        anyio.run(engine.run)
+        source = tmp_path / "run" / "spans.jsonl"
+        at_return = source.read_bytes()
+    finally:
+        release.set()
+        background.join(timeout=2)
+
+    assert not background.is_alive()
+    assert source.read_bytes() == at_return
+    metrics = exporter.metrics()
+    assert metrics["shutdown"] is True
+    assert metrics["dropped_shutdown"] == 1
+
+
+def test_engine_run_calls_one_bounded_terminal_shutdown_on_error():
+    from looplab.core.tracing import TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS
+
+    calls = []
+
+    class ShutdownProbe:
+        def shutdown(self, *, timeout_millis):
+            calls.append(timeout_millis)
+            return True
+
+    class RunFailure(Exception):
+        pass
+
+    async def fail_run():
+        raise RunFailure("domain failure")
+
+    engine = Engine.__new__(Engine)
+    engine._llm_broker = None
+    engine.tracer = ShutdownProbe()
+    engine._run_with_llm_broker = fail_run
+    with pytest.raises(RunFailure, match="domain failure"):
+        anyio.run(engine.run)
+    assert calls == [TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS]
 
 
 def test_conversation_dedups_resent_history():

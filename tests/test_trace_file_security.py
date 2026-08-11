@@ -97,6 +97,42 @@ def test_trace_append_mode_creates_and_reopens_private_regular_file(tmp_path):
         assert stream.read() == b"{}\n"
 
 
+def test_windows_change_time_controls_destructive_trace_revision(tmp_path, monkeypatch):
+    """The clear CAS follows native descriptor ChangeTime and fails closed without it."""
+    from looplab.events import traceview
+
+    source = tmp_path / "spans.jsonl"
+    _write_span(source, sid="old-a")
+    state = {"token": 101}
+    descriptors = []
+
+    def change_token(fd, _status=None):
+        descriptors.append(fd)
+        return state["token"]
+
+    monkeypatch.setattr(traceview, "trace_file_change_token", change_token)
+    initial = traceview.trace_file_revision(source)
+    before = source.stat()
+    replacement = source.read_bytes().replace(b'"old-a"', b'"new-a"')
+    assert len(replacement) == before.st_size
+    with open(source, "r+b") as stream:
+        stream.write(replacement)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = source.stat()
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_ino, before.st_size, before.st_mtime_ns)
+    state["token"] = 102
+
+    changed = traceview.trace_file_revision(source)
+
+    assert changed is not None and changed != initial
+    assert descriptors and all(isinstance(fd, int) for fd in descriptors)
+    state["token"] = None
+    assert traceview.trace_file_revision(source) is None
+
+
 @pytest.mark.parametrize("alias", ["symlink", "hardlink", "fifo"])
 def test_public_trace_routes_fail_closed_for_non_private_source(tmp_path, alias):
     pytest.importorskip("fastapi")

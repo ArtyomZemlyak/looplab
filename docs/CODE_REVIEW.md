@@ -295,7 +295,7 @@ the UI derive from `fold`, not stale SQLite).
 | 🟡 | panels.jsx:226 | `RegistryPanel` sorts `runs` **in place** (mutates state) and always descending — ranks `direction:"min"` runs upside-down. |
 | 🟡 | panels.jsx:313 / Dock.jsx:83 | `EventExplorer`/feed render the entire unbounded log un-virtualized (re-rendered per filter keystroke). |
 | 🟡 | RunView.jsx:50 | Window-level drag listeners not cleaned up on unmount-mid-drag → setState-after-unmount + leaked listener. |
-| 🟡 | Inspector.jsx (StageBlock) | A root span with children renders only its children; `llm_call` events recorded directly on a parent span are dropped (regression vs old `collectLlm`). |
+| ✅ | Inspector.jsx (virtual span tree) | Resolved: the stage treeitem is the root span itself, so its bounded attrs/events remain disclosable with children; event names and safe scalar metadata (including legacy `llm_call`) are searchable. The extreme-tree mounted regression covers this path. |
 | 🟡 | server.py:218 | `rename_run` does unguarded `await request.json()` → unhandled 500 on empty/bad body. |
 | ⚪ | charts.jsx:14 | `Trajectory`/`Scatter`/`Bars` pin an all-equal series to the floor (implies "worst") instead of centering; `fmt` renders `Infinity` literally (no `Number.isFinite` guard). |
 

@@ -426,6 +426,10 @@ def test_the_card_build_producer_is_traced_so_its_llm_calls_reach_spans_jsonl(tm
         {"card_id": "card-0", "generation": 0}, (object(), developer))
 
     assert result.success is True
+    # Engine tracing is intentionally asynchronous.  A direct internal-method test does not cross
+    # the Engine.run shutdown barrier, so establish the same owner/read boundary explicitly before
+    # inspecting the sidecar.
+    assert engine.tracer.force_flush()
     spans = _spans_of(tmp_path / "run")
     build = [s for s in spans if s["name"] == "card_build"]
     assert len(build) == 1, spans
@@ -450,6 +454,7 @@ def test_the_traced_producer_lands_in_the_run_level_bucket(tmp_path):
         None,
     )
     engine._build_requested_card({"card_id": "card-0", "generation": 0}, (object(), developer))
+    assert engine.tracer.force_flush()
     engine.store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g",
                                         "direction": "min"})
 

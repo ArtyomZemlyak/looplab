@@ -169,24 +169,27 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   // a second settle path there is how it went back to saying nothing. The behaviour itself is
   // driven in inspectorTracePager.test.js; this only holds the single-path shape.
   assert.match(inspector,
-    /const settled = settleTraceRead\(previous\?\.payload, \{ ok, payload \}\)[\s\S]*?if \(settled\.unavailable\) \{[\s\S]*?projection: \{ unavailable: true \}[\s\S]*?const payload = matchingNodePayload\(conversation, n\.id, nodeAttempt, expectedGeneration\)[\s\S]*?commit\(!!payload, payload\)[\s\S]*?\.catch\(\(\) => \{ if \(alive\(\)\) commit\(false, null\) \}\)/,
+    /const settled = settleTraceRead\(previous\?\.payload, \{ ok, payload \}\)[\s\S]*?if \(settled\.unavailable\) \{[\s\S]*?projection: \{ unavailable: true \}[\s\S]*?const candidate = observation\?\.unchanged \? prior\?\.payload : observation\?\.data[\s\S]*?const payload = matchingNodePayload\([\s\S]*?commit\(!!payload, payload, etag\)[\s\S]*?\.catch\(\(\) => \{ if \(alive\(\)\) commit\(false, null\) \}\)/,
     'conversation failures route through the ONE settle rule: unavailable only with nothing in hand')
   assert.match(inspector, /if \(!spans\.length && !agent\)[\s\S]*?if \(unavailable\)[\s\S]*?<TraceUnavailable[\s\S]*?if \(spanWindow\.kind !== 'complete'\)[\s\S]*?TRACE_PARTIAL_EMPTY_NOTICE[\s\S]*?No execution spans/,
     'an empty node trace must check unavailable and the window before successful empty')
   assert.ok(inspector.indexOf("if (view === 'conversation')") < inspector.indexOf('if (!spans.length && !agent)'),
     'the selected conversation view must load before raw-tree empty/unavailable branches')
-  assert.match(inspector, /const request = traceDeadlineGet\([\s\S]*?runApiPath\(runId, `\/spans\/\$\{encodeURIComponent\(s\.span_id\)\}`\), expectedGeneration\)[\s\S]*?request\.promise\.then[\s\S]*?!traceGenerationMatches\(d, expectedGeneration\)[\s\S]*?\[open, io, runId, expectedGeneration, s\.span_id, kind\][\s\S]*?const retryIo = \(\) => setIo\(null\)[\s\S]*?<TraceUnavailable label="Trace detail unavailable\." onRetry=\{retryIo\}/,
+  assert.match(inspector, /const request = traceDeadlineGet\([\s\S]*?runApiPath\(runId, `\/spans\/\$\{encodeURIComponent\(s\.span_id\)\}`\), expectedGeneration\)[\s\S]*?request\.promise\.then[\s\S]*?!traceGenerationMatches\(d, expectedGeneration\)[\s\S]*?onIo\(traceDetailState\(d\)\)[\s\S]*?\[open, io, runId, expectedGeneration, s\.span_id, kind\][\s\S]*?const retryIo = \(\) => onIo\(null\)[\s\S]*?<TraceUnavailable label="Trace detail unavailable\." onRetry=\{retryIo\}/,
     'span detail unavailable must be retryable even after the first expansion')
   assert.match(inspector, /function Conversation\(\{[\s\S]*?onRetry[\s\S]*?\[runId, expectedGeneration, n\.id, nodeAttempt, working, reloadNonce, spanLimit\][\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/,
     'a finished conversation one-shot must expose an explicit retry')
   assert.match(inspector,
-    /get\(runNodeApiPath\(runId, n\.id,[\s\S]*?`\/conversation\$\{traceReadQuery\(expectedGeneration, nodeAttempt, spanLimit\)\}`\), \{ signal \}\)/,
-    'the conversation must send the run generation, rendered lifecycle and requested window')
+    /const scope = \[runId, expectedGeneration \|\| '', n\.id, nodeAttempt, spanLimit\][\s\S]*?const validator = prior\?\.scope === scope && prior\.etag[\s\S]*?`\/conversation\$\{traceReadQuery\(expectedGeneration, nodeAttempt, spanLimit\)\}`[\s\S]*?conditionalGet\(conversationPath, etag, \{ signal, cache: 'no-store' \}\)/,
+    'the conversation must conditionally read only its exact generation/lifecycle/window scope')
+  assert.match(inspector,
+    /const lifecycleScope = \[runId, expectedGeneration \|\| '', n\.id, nodeAttempt, reloadNonce\][\s\S]*?const currentRead = read\?\.lifecycleScope === lifecycleScope \? read : null[\s\S]*?const prior = readRef\.current/,
+    'fallback evidence must be gated by lifecycle, independently of the requested span window')
   assert.match(api,
     /export const traceDeadlineGet = \(path, expectedGeneration, attempt, limit, timeout\) =>[\s\S]*?deadlineGet\(path \+ traceReadQuery\(expectedGeneration, attempt, limit\), timeout\)/,
     'all bounded trace reads must retain the shared deadline and encoded query contract')
   assert.match(inspector,
-    /const matchingNodePayload = \(result, nodeId, attempt, expectedGeneration\) => \{[\s\S]*?result\.status === 'fulfilled' && String\(payload\?\.node_id\) === String\(nodeId\)[\s\S]*?payload\?\.attempt === attempt && traceGenerationMatches\(payload, expectedGeneration\)[\s\S]*?commit\(!!payload, payload\)/,
+    /const matchingNodePayload = \(result, nodeId, attempt, expectedGeneration\) => \{[\s\S]*?result\.status === 'fulfilled' && String\(payload\?\.node_id\) === String\(nodeId\)[\s\S]*?payload\?\.attempt === attempt && traceGenerationMatches\(payload, expectedGeneration\)[\s\S]*?observation\.etag !== validator[\s\S]*?payload\.cursor === observation\.etag[\s\S]*?commit\(!!payload, payload, etag\)/,
     'a fulfilled response for another run generation or node attempt must not settle here')
   assert.match(inspector, /export function NodeTrace\(\{ spans, runId, projection = \{\}, onRetry, onLoadMore,[\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/)
   // The pager BUTTON is gone (2026-08-07): earlier steps arrive by scrolling. What must not be lost
@@ -203,7 +206,7 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   // not reach, so a failed widen leaves the settled window behind the requested one forever and the
   // comparison ALONE latches a permanent spinner on a surface that then cannot be retried. Driven in
   // inspectorTracePager.test.js; pinned here because it is one token away from coming back.
-  assert.match(inspector, /const convWindow = conversationWindow\(conv\.projection, \{ canPage: !!onLoadMore \}\)[\s\S]*?const scroll = traceScrollState\(\{[\s\S]*?view: convWindow,[\s\S]*?pending: !read\.reachFailed && spanLimit > read\.window,/,
+  assert.match(inspector, /const convWindow = conversationWindow\(conv\.projection, \{ canPage: !!onLoadMore \}\)[\s\S]*?const scroll = traceScrollState\(\{[\s\S]*?view: convWindow,[\s\S]*?pending: !currentRead\.reachFailed && spanLimit > currentRead\.window,/,
     'the conversation view must derive its own scroll state, not print a dead partial notice')
   assert.doesNotMatch(inspector, /load more spans|load more of this conversation|at its maximum/,
     'the removed pager text must not come back — scrolling is the only control now')
