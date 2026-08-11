@@ -164,6 +164,56 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `max_seconds` | `LOOPLAB_MAX_SECONDS` | — | Hard wall-clock ceiling for the whole run |
 | `max_eval_seconds` | `LOOPLAB_MAX_EVAL_SECONDS` | — | Hard ceiling on cumulative time *inside* evals (survives resume) |
 
+### One experiment per GPU — who decides, and what happens when two runs want the same cards
+
+The three facts above are spread across four table rows and are asked about often enough to be worth
+stating together.
+
+**Who decides the width.** Two independent knobs, both defaulting to `0` = AUTO, both settled ONCE at
+run start and then pinned into `run_started` (engine invariant #6, so a resume on a differently sized
+box continues the run's own width rather than re-deriving one):
+
+| axis | what it bounds | AUTO resolves to |
+|---|---|---|
+| `eval_parallel` | concurrent EVALUATIONS — the GPU/experiment consumer | **one experiment per detected GPU** (at least 1) |
+| `llm_parallel` | concurrent node BUILDS (and the shared provider budget) | the settled `eval_parallel`, so a build fan-out never outruns what can be evaluated |
+| `speculation_depth` (`-1` = AUTO) | speculative prefetch backlog | the settled `eval_parallel` |
+
+So on a two-GPU box, the shipped defaults already run **two experiments side by side, one per card**,
+and `engine/evaluate.py::_evaluate` pins each concurrent eval to a DISTINCT GPU through
+`CUDA_VISIBLE_DEVICES` — a framework left to see both cards typically pins itself to one and leaves
+the other idle, which is why the width alone would not parallelize anything.
+
+**One exception, deliberately.** AUTO means "let the BOX decide", so it only reads a GPU count where
+the box is the constraint: a task adapter that declares itself CPU-locked (`gpu_capable() -> False`)
+settles AUTO to serial `1`. Deriving a width from hardware that cannot serve the work is a category
+error, and it cost determinism — two concurrent toy evals finish in wall-clock order, so the offline
+smoke produced a different `node_evaluated` order run to run. An explicitly spelled number is always
+honoured, CPU-parallel evals included.
+
+**The width is NOT derived from the proposal.** It is settled from hardware at run start, once, for
+the whole run. A per-Card *footprint* (`{"gpus": N}` on the idea/Card) does affect that node's device
+reservation and admission, but nothing lets a Researcher proposal widen or narrow the run. Making the
+width follow what the proposals actually ask for is an open item — see
+[the operator backlog](../28-operator-backlog-2026-08-11.md).
+
+**Two runs, one box: the second one WAITS.** GPU admission is serialized by a single pool-wide lease,
+`/tmp/looplab-gpu-pool-<uid>.lock` — one file per OS user, exclusive across processes
+(`engine/resources.py`). So if run A is resumed while run B is mid-experiment:
+
+* run A **waits**, it does not fail, and it does not time out. `_wait_for_gpu_change` re-polls every
+  0.5 s for as long as B holds the pool — potentially hours.
+* The wait is announced at WARNING every 30 s, naming the lease path, the holding PID and how long it
+  has waited. Before that notice existed this was completely silent and was repeatedly misdiagnosed
+  as a deadlock: the run appends `setup_finished`, creates its nodes, and then nothing happens.
+* **`eval_parallel=1` does not keep you out of the queue.** A serial run still claims the whole pool
+  for a `gpu_capable` task. What keeps work out of it is declaring `{"gpus": 0}` on the idea/Card, or
+  fencing the whole run with `CUDA_VISIBLE_DEVICES=`.
+* The lease is per OS user and per filesystem namespace. Other users, containers and hosts need an
+  external scheduler — LoopLab does not coordinate across them.
+
+A plain repair/resume that needs no GPU is unaffected: a CPU-locked adapter never takes the lease.
+
 ### What blocked speculation from being the default (fixed 2026-08-05)
 
 `card_driven_selection` has shipped `true` since 2026-08-04, but speculation needs **both** that and a
