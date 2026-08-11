@@ -261,6 +261,16 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   written* — consolidation keeps no redirect to a descendant — and a truncated read window degrades
   to *standing unknown* rather than claiming absence. Run-end reflection lessons carry no
   per-experiment evidence and are named as out of scope instead of being silently omitted.
+- **Operations** (Progress hub) — every ROOT operation the run performed, listed from the light span
+  index: name, the node it belongs to *or* `run-level`, timing, status, and the size of its trace.
+  This is the only surface on which a **run-level agent** is reachable. Every other trace view
+  projects by node, and the Researcher has none — its `propose` span is a root with no `node_id`,
+  because the idea exists before the node built from it does. Measured on `rubert-dr-0807`: 15
+  Researcher operations holding 493 generations and 944 tool calls, previously reachable from nowhere
+  (`GET /api/runs/{id}/operations`; opening a row reads `GET /api/runs/{id}/trace/by_trace/{trace_id}`).
+  The listing enumerates *all* roots rather than a span tail, so it can state what it dropped:
+  `projection.omitted_operations`. "Agent work only" is on by default and hides bookkeeping
+  operations (`lessons_*` and friends were 99 of that run's 176) while reporting how many it hid.
 - **Per-node trace** — when `trace_llm_io` is on, inspect the bounded, canonicalized and heuristically
   redacted diagnostic representation recorded for each call. It is not byte-exact provider I/O. Complete
   object rows with an invalid span shape are quarantined one by one; invalid required IDs are skipped and
@@ -326,7 +336,7 @@ about *that run's event log*, and every panel behind it reads `/api/runs/<id>/�
 
 | Hub | Panels |
 |---|---|
-| **Progress** | Queue · Cards · Research · Failures |
+| **Progress** | Queue · Cards · Research · Operations · Failures |
 | **Trust** | Trust · Pareto / diversity · Data quality |
 | **Analysis** | Compare · Sensitivity · Importance · Cross-run |
 | **Lab** | Files · Registry · Comments & sharing · Events |

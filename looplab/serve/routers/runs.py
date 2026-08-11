@@ -3077,6 +3077,33 @@ def build_router(srv) -> APIRouter:
         generation = _finish_trace_read(rd, before_generation, expected_generation)
         return _trace_response({**payload, "run_generation": generation or None})
 
+    @router.get("/api/runs/{run_id}/operations")
+    def operations(run_id: str, limit: int = Query(default=0, ge=0),
+                   expected_generation: Optional[str] = Query(default=None)):
+        """Every ROOT operation the run performed — the index the run-level agents were missing.
+
+        A node's Developer work is reachable through `/nodes/{n}/trace`; a RUN-level agent's is not,
+        because it has no node to be projected under. The Researcher is the case that matters: its
+        `propose` span is a root with no `node_id` (the idea exists before the node does), so it
+        cannot appear on any per-node surface, and the one bucket that did hold it — `trace_view`'s
+        `unscoped` — is both tail-capped and unread by the UI. Measured on `rubert-dr-0807`: 15
+        `propose` operations carrying 493 generations and 944 tool calls, none of them reachable.
+
+        Rows are a LISTING, not a trace: name, node (or null for run-level), timing, status and the
+        size of the operation's trace. Open one with `/trace/by_trace/{trace_id}`, which already
+        bounds its own I/O. `limit` lowers the row cap; it can never raise it past
+        `traceview.OPERATIONS_CAP`, and what it drops is stated in `projection.omitted_operations`.
+        """
+        rd = _run_dir(run_id)
+        _assert_trace_reset_clear(rd)
+        before_generation = _begin_trace_read(rd, expected_generation)
+        try:
+            payload = srv.operations_view(rd, cap=limit)
+        except Exception:  # noqa: BLE001 — a malformed/foreign spans.jsonl must degrade, not 500
+            payload = _trace_unavailable(operations=[])
+        generation = _finish_trace_read(rd, before_generation, expected_generation)
+        return {**payload, "run_id": run_id, "run_generation": generation or None}
+
     @router.get("/api/runs/{run_id}/trace/by_trace/{trace_id}")
     def trace_by_trace(run_id: str, trace_id: str,
                        expected_generation: Optional[str] = Query(default=None)):
