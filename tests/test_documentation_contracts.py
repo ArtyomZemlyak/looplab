@@ -41,7 +41,7 @@ def test_index_mentions_every_numbered_document():
     index = (DOCS / "00-INDEX.md").read_text(encoding="utf-8")
     numbered = sorted(path for path in DOCS.glob("[0-9][0-9]-*.md")
                       if path.name != "00-INDEX.md")
-    assert len(numbered) == 27, "the derived numbered-document inventory changed"
+    assert len(numbered) == 28, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
@@ -122,6 +122,7 @@ def test_current_user_docs_have_no_hidden_review_handoffs():
         DOCS / "23-hypothesis-card-kanban-2026-07-20.md",
         DOCS / "24-ui-phase3-validation.md",
         DOCS / "27-agent-system-mega-review-2026-08-09.md",
+        DOCS / "28-deep-research-sota-roadmap-2026-08-10.md",
         *sorted((DOCS / "guide").glob("*.md")),
     ]
     stale = []

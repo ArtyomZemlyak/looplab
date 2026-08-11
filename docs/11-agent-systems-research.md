@@ -2,7 +2,8 @@
 
 > **Historical research snapshot.** “Current,” default, missing-feature and line-number claims below are
 > pinned to 2026-07-02. Use current source/tests plus the README and user guide for shipped behavior; this
-> document remains evidence and design input, not a live status board.
+> document remains evidence and design input, not a live status board. The current Deep Research
+> shipped/proposed split is maintained in [doc 28](28-deep-research-sota-roadmap-2026-08-10.md).
 
 **Method.** Three inputs, cross-checked against everything already shipped or planned so nothing
 below re-proposes known work: (1) a fresh 106-agent web deep-research pass over three streams —
