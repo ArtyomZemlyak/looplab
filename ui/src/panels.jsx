@@ -22,6 +22,7 @@ import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
 import Panel from './PanelShell.jsx'
 import { DataTable } from './accessibility.jsx'
+import { groupOperations, operationRows, operationsNotice } from './operationsModel.js'
 import { normalizeResearchMemos } from './researchMemoModel.js'
 import ResearchMemoCard from './ResearchMemoCard.jsx'
 import { deadlineRequest } from './requestDeadline.js'
@@ -639,6 +640,82 @@ export function FailuresPanel({ state, onClose, onSelect }) {
           <td><button type="button" className="btn xs ghost" onClick={() => { onSelect?.(n.id); onClose?.() }}>#{n.id}</button></td>
           <td className="flag">{n.error_reason}</td><td className="muted">{(n.error || '').slice(0, 80)}</td></tr>)}
       </tbody></table></DataTable>
+    </Panel>
+  )
+}
+
+// The RUN-LEVEL agents' only reachable surface. Every other trace view in this app projects by node,
+// and the Researcher has no node — its `propose` span is a root with no `node_id`, because the idea
+// exists before the node built from it. Measured on `rubert-dr-0807`: 15 Researcher operations
+// holding 493 generations and 944 tool calls, reachable from nowhere in the product until this panel.
+//
+// The listing is light by construction (server reads the span INDEX, one row per root), so it can
+// enumerate ALL operations rather than a tail — which is what `trace/`'s `unscoped` bucket could not
+// do (3 of those 15 survived its 1,024-span tail). Opening a row reuses `Dock.jsx::OpTrace`, the same
+// per-operation tree the event feed uses, lazily so this panel does not pull Dock into the eager
+// bundle. The decisions live in `operationsModel.js`; this is wiring + markup.
+const LazyOpTrace = React.lazy(
+  () => import('./Dock.jsx').then(module => ({ default: module.OpTrace })))
+
+export function OperationsPanel({ runId, expectedGeneration, onClose, onSelect }) {
+  const [agenticOnly, setAgenticOnly] = useState(true)
+  const [open, setOpen] = useState(null)          // trace_id of the expanded operation
+  const [payload, setPayload] = useState(null)
+  usePoll((alive) => {
+    const request = deadlineRequest(deadlineGet(runApiPath(runId, '/operations')))
+    request.promise
+      .then(d => { if (alive()) setPayload(d || {}) })
+      .catch(() => { if (alive()) setPayload(previous => previous || { projection: { unavailable: true } }) })
+    return request
+  }, 5000, [runId])
+  const { rows, hiddenByFilter, total } = useMemo(
+    () => operationRows(payload, { agenticOnly }), [payload, agenticOnly])
+  const { runLevel, nodes } = useMemo(() => groupOperations(rows), [rows])
+  const notice = operationsNotice(payload, hiddenByFilter)
+
+  const Row = ({ op }) => (
+    <div className="op-row">
+      <div className="op-head">
+        <button type="button" className="btn xs ghost" disabled={!op.openable}
+          aria-expanded={open === op.trace_id}
+          title={op.openable ? 'Show this operation’s trace' : 'This operation recorded no sub-spans'}
+          onClick={() => setOpen(current => (current === op.trace_id ? null : op.trace_id))}>
+          {open === op.trace_id ? '▾' : '▸'} {op.label}
+        </button>
+        {op.runLevel
+          ? <span className="chip xs" title="Run-level work: it belongs to the run, not to any one node">run-level</span>
+          : <button type="button" className="chip xs" onClick={() => onSelect?.(op.node_id)}>#{op.node_id}</button>}
+        {op.status === 'ERROR' && <span className="chip xs warn">error</span>}
+        <span className="muted">{fmtInt(op.generations)} gen · {fmtInt(op.tools)} tools
+          · {fmtInt(op.tokens?.total)} tok · {fmtElapsedSeconds(op.duration_s)}</span>
+      </div>
+      {open === op.trace_id && <div className="op-body">
+        <React.Suspense fallback={<div className="muted" role="status">loading trace…</div>}>
+          <LazyOpTrace runId={runId} traceId={op.trace_id} expectedGeneration={expectedGeneration} />
+        </React.Suspense>
+      </div>}
+    </div>
+  )
+
+  return (
+    <Panel title="Operations" onClose={onClose} wide
+      sub={payload === null ? 'loading…' : `${rows.length} of ${total}`}>
+      <div style={{ marginBottom: 8 }}>
+        <label className="muted"><input type="checkbox" checked={agenticOnly}
+          onChange={e => setAgenticOnly(e.target.checked)} /> agent work only</label>
+        {notice && <span className="muted" role="status" style={{ marginLeft: 10 }}>{notice}</span>}
+      </div>
+      {payload === null && <div className="muted" role="status">loading operations…</div>}
+      {payload !== null && !rows.length && <div className="muted" role="status">
+        No operations recorded for this run yet.</div>}
+      {!!runLevel.length && <>
+        <div className="section-h">Run-level agents</div>
+        {runLevel.map(op => <Row key={op.span_id} op={op} />)}
+      </>}
+      {nodes.map(({ node_id, ops }) => <React.Fragment key={node_id}>
+        <div className="section-h">Node #{node_id}</div>
+        {ops.map(op => <Row key={op.span_id} op={op} />)}
+      </React.Fragment>)}
     </Panel>
   )
 }

@@ -1326,3 +1326,88 @@ def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False,
             "total_eval_seconds": round(state.total_eval_seconds, 3),
         },
     }
+
+
+# The run's ROOT operations — the ONLY surface on which a run-level agent is reachable.
+#
+# Why this exists (measured 2026-08-11 on `runs/rubert-dr-0807`, 7,289 spans): the Researcher's work
+# is a root span named `propose`, and it carries NO `node_id` — it produces the idea a node is later
+# built FROM, so at propose time no node exists to stamp. Every per-node surface projects by node
+# (`/nodes/{n}/trace`, `/nodes/{n}/conversation`), so `propose` cannot appear on any of them. The one
+# place it did land, `build_trace_view`'s `unscoped` bucket, was never read by the UI at all — and
+# `build_trace_view` keeps only a `TRACE_VIEW_SPAN_CAP`-sized TAIL, which on that run left 3 of 15
+# proposals visible and dropped 6,265 of 7,289 spans. Net effect: 15 Researcher operations holding
+# ~490 generations and ~950 tool calls were unreachable from the product. Same for `plan`,
+# `strategist_consult`, `deep_research`, `hypothesis_merge`, `foresight_rank`, `card_build` and the
+# `lessons_*` family — 65% of this run's generation spans hang off a root with no node.
+#
+# So the listing is deliberately built from the LIGHT INDEX and keyed on ROOTS, not on a span tail:
+# one row per operation, cheap enough to enumerate them ALL, with the counts needed to decide which
+# one to open. The drill-down already exists and is already bounded — `/trace/by_trace/{trace_id}`.
+OPERATIONS_CAP = 500
+
+
+def project_operations(spans: list[dict], *, cap: int = OPERATIONS_CAP,
+                       _normalized: bool = False) -> dict:
+    """One row per ROOT span: what the run did, when, for how long, and how big its trace is.
+
+    `spans` is the LIGHT span list (`SpanIndex.light_spans()`), so this is O(spans) over an in-memory
+    index rather than a read of `spans.jsonl`. Counts are per TRACE, because that is the unit
+    `/trace/by_trace/{trace_id}` opens: a root's row answers "is this worth opening" before the
+    expensive read. A trace with several roots (an orphan plus a real root, which corrupt/partial logs
+    do produce) yields a row per root and attributes the trace's counts to the FIRST by start time —
+    the alternative, silently dropping the extra roots, is how an operation goes missing, which is the
+    exact defect this function exists to fix.
+
+    Newest first, because the operator's question is almost always about what just happened. The cap
+    is an omission RECEIPT, not a silent truncation: `projection.omitted_operations` states what the
+    caller did not get.
+    """
+    spans = spans if _normalized else _normalize_spans(spans)
+    by_trace: dict[str, list[dict]] = defaultdict(list)
+    for s in spans:
+        by_trace[s.get("trace_id")].append(s)
+
+    rows: list[dict] = []
+    for tid, trace_spans in by_trace.items():
+        roots = [s for s in trace_spans if not s.get("parent_id")]
+        if not roots:
+            continue
+        roots.sort(key=lambda s: _finite_number(s.get("start"), nonnegative=True))
+        roll = _rollup(trace_spans)
+        errors = sum(1 for s in trace_spans if s.get("status") == "ERROR")
+        root_nid = trace_root_node_id(trace_spans, _normalized=True)
+        for position, root in enumerate(roots):
+            # Only the first root owns the trace's counts. Repeating them on every root would make a
+            # two-root trace read as twice the work, and a UI that sums rows would double-count it.
+            owns = position == 0
+            rows.append({
+                "name": root.get("name"),
+                "kind": root.get("kind"),
+                "trace_id": tid,
+                "span_id": root.get("span_id"),
+                "start": _finite_number(root.get("start"), nonnegative=True),
+                "duration_s": _finite_number(root.get("duration_s"), nonnegative=True),
+                "status": root.get("status"),
+                # The node this operation belongs to, or None for a run-level agent. `None` is the
+                # answer the Researcher gives, and it is a FACT about the operation rather than
+                # missing data — the UI must label it "run-level", never hide the row.
+                "node_id": effective_node_id(root, root_nid),
+                "spans": len(trace_spans) if owns else 0,
+                "generations": roll["generations"] if owns else 0,
+                "tools": roll["tools"] if owns else 0,
+                "tokens": roll["tokens"] if owns else _rollup([])["tokens"],
+                "errors": errors if owns else 0,
+                "trace_roots": len(roots),
+            })
+
+    rows.sort(key=lambda r: (-(r["start"] or 0.0), str(r["name"] or "")))
+    visible = rows[:max(0, int(cap))]
+    return {
+        "schema": TRACE_PROJECTION_SCHEMA,
+        "operations": visible,
+        "projection": _response_projection(
+            total_spans=len(spans), visible_spans=len(spans), light=True,
+            total_operations=len(rows), visible_operations=len(visible),
+            omitted_operations=max(0, len(rows) - len(visible))),
+    }
