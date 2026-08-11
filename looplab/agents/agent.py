@@ -24,7 +24,8 @@ from looplab.agents.roles import (
     _CONCEPT_AUTHORING_GUIDANCE, _OPERATOR_NOTE, _UNTRUSTED_MEMORY_RULE,
     _attention_points, _clamp_fill,
     _hypothesis_system_suffix,
-    _researcher_capability_suffix, _state_brief, collect_hint_cues,
+    _researcher_capability_suffix, _state_brief, bind_idea_to_board_card,
+    collect_hint_cues, next_board_prompt_cards,
     researcher_fallback_rationale,
     RESEARCHER_PROMPT_CUES)
 # The tool-loop machinery was split into `agents.tool_loop`. The moved names below are RE-IMPORTED
@@ -224,7 +225,9 @@ class ToolUsingResearcher:
         # then fall back to a rationale-preserving draft if validation still fails.
         try:
             emitted = IdeaEmission.model_validate(self._sanitize(args))
-            return _clamp_fill(emitted.to_idea(), self.bounds)
+            idea = bind_idea_to_board_card(
+                emitted.to_idea(), getattr(self, "_visible_board_cards", []))
+            return _clamp_fill(idea, self.bounds)
         except Exception:  # noqa: BLE001 - resilience: the run must survive a junk proposal
             rationale = str((args or {}).get("rationale", "") or "")[:500]
             operator = str((args or {}).get("operator") or "draft")
@@ -276,6 +279,10 @@ class ToolUsingResearcher:
         # config) — ask for the per-experiment `hypothesis` so the ledger of tested beliefs fills in.
         # Shared `_hypothesis_system_suffix` splices `_HYPOTHESIS_INSTRUCTION` identically to LLMResearcher.
         hyp = _hypothesis_system_suffix(getattr(self, "track_hypotheses", True))
+        prompt_attempt = int(getattr(self, "_board_prompt_attempt", 0))
+        self._board_prompt_attempt = prompt_attempt + 1
+        self._visible_board_cards = next_board_prompt_cards(
+            state, getattr(self, "_hyp_order", None), attempt=prompt_attempt)
         messages = [
             {"role": "system",
              # Part V/P6/P8: the shared concept-mode contract, capability suffix (sweep offer — gated
@@ -293,7 +300,8 @@ class ToolUsingResearcher:
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent,
                                                      digest_cap=getattr(self, "_digest_cap", 0),
-                                                     hyp_order=getattr(self, "_hyp_order", None))
+                                                     hyp_order=getattr(self, "_hyp_order", None),
+                                                     board_cards=self._visible_board_cards)
                 + hint_block + cue +
                 "\nDecide the next experiment — a parameter change OR a structural one (architecture, "
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},
@@ -307,7 +315,7 @@ class ToolUsingResearcher:
             # P25: `handoff` is True only when a run_phase-based (repo) Developer follows — its
             # stages/plan/implement phases read the brief; the single-shot developers never do,
             # so no summary call is spent there and the label names the developer that ACTUALLY runs.
-            return run_phase(
+            result = run_phase(
                 self.client, self.tools, messages, self._emit_spec(),
                 label="Researcher·propose",
                 next_label=("the Developer (stages → plan → implement)"
@@ -316,6 +324,7 @@ class ToolUsingResearcher:
                 handoff=getattr(self, "handoff", True),
                 finalize=self._finalize, fallback=self._fallback,
                 validate=self._validate_emit, **self.loop_opts)
+            return bind_idea_to_board_card(result, self._visible_board_cards)
         except BudgetExceeded:      # hard budget stop -> propagate and end the run
             raise
         except Exception as e:  # noqa: BLE001 - a transport/endpoint failure (LLMError after retries)

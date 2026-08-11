@@ -304,6 +304,17 @@ def test_public_cards_are_count_size_total_and_deterministic():
             assert omission["total"] == omission["returned"] + omission["omitted"]
 
 
+def test_public_cards_publish_belief_and_retry_work_item_identity():
+    projected = public_cards({
+        "card-1": {
+            "status": "proposed", "statement": "retry the experiment",
+            "belief_id": "sha256-belief", "retry_of": "card-0",
+        },
+    })
+    assert projected["card-1"]["belief_id"] == "sha256-belief"
+    assert projected["card-1"]["retry_of"] == "card-0"
+
+
 def test_per_card_receipts_count_bounded_text_lists_action_and_concepts_exactly():
     rows = {
         "card-bounded": {
@@ -334,7 +345,7 @@ def test_per_card_receipts_count_bounded_text_lists_action_and_concepts_exactly(
 
     bounded = metadata["items"]["card-bounded"]
     assert bounded["omissions"]["evidence"] == {
-        "unit": "items", "total": 40, "returned": 32, "omitted": 8, "complete": False,
+        "unit": "node_ids", "total": 40, "returned": 32, "omitted": 8, "complete": False,
     }
     assert bounded["omissions"]["concept_tags"] == {
         "unit": "items", "total": 40, "returned": 32, "omitted": 8, "complete": False,
@@ -357,10 +368,10 @@ def test_per_card_receipts_count_bounded_text_lists_action_and_concepts_exactly(
 
     text = metadata["items"]["card-text"]
     assert text["omissions"]["statement"] == {
-        "unit": "characters", "total": 10_000, "returned": 2_048,
-        "omitted": 7_952, "complete": False,
+        "unit": "characters", "total": 10_000, "returned": 4_000,
+        "omitted": 6_000, "complete": False,
     }
-    assert len(envelope["cards"]["card-text"]["statement"].encode("utf-8")) == 2_048
+    assert len(envelope["cards"]["card-text"]["statement"]) == 4_000
 
 
 def test_matched_concept_outcome_receipt_uses_its_own_closed_field_vocabulary():

@@ -2876,6 +2876,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 
   .side.compact-drawer { width: 100% !important; max-width: none; border-left: 0; }
   .workspace-scrim { display: none; }
+  .card-workspace .workspace-scrim { display: block; }
   .asst-side-panel { width: 100vw !important; max-width: 100vw; }
   .dock-foot > .muted { display: none; }
   .dock-foot { align-items: stretch; }

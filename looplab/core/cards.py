@@ -394,6 +394,12 @@ CARD_ACTION_DIGEST_V2_FIELDS = (
 )
 _CARD_ACTION_DIGEST_VERSIONS = frozenset({1, 2})
 
+# One semantic boundary for every Card producer, replay path, identity digest, and public projection.
+# The UTF-8 cap is deliberately the worst-case encoding size of the character cap, so valid Unicode
+# statements are never accepted by one layer and rejected by another.
+CARD_STATEMENT_MAX_CHARS = 4_000
+CARD_STATEMENT_MAX_UTF8_BYTES = 16_000
+
 
 def _card_action_digest(
         card_id: str, statement: str, action: dict, *, version: int,
@@ -406,12 +412,17 @@ def _card_action_digest(
     Concept membership is metadata with its own completeness receipt and is intentionally not a
     prerequisite for execution.
     """
+    try:
+        statement_bytes = len(statement.encode("utf-8")) if isinstance(statement, str) else 0
+    except UnicodeError:
+        return None
     if (version not in _CARD_ACTION_DIGEST_VERSIONS
             or (expanded_v1 and version != 1)
             or not isinstance(card_id, str) or not card_id or card_id != card_id.strip()
             or len(card_id) > 256 or not card_id.isprintable()
             or not isinstance(statement, str) or not statement.strip()
-            or statement != statement.strip() or len(statement) > 2_048
+            or statement != statement.strip() or len(statement) > CARD_STATEMENT_MAX_CHARS
+            or statement_bytes > CARD_STATEMENT_MAX_UTF8_BYTES
             or not isinstance(action, dict)):
         return None
 

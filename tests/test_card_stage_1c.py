@@ -95,19 +95,9 @@ def test_intra_batch_duplicate_is_journaled_after_accepted_reservations(tmp_path
     assert accepted_id != rejected_id
     assert lifecycle[3].data["reason"] == "intra_batch_duplicate"
 
-    # Crash-prefix safety: the rejected proposal must never become executable in the gap between its
-    # registration and terminal receipt. A node-less rejection needs an intrinsically non-selectable
-    # registration (or an equivalent atomic terminal-at-mint proof), because there is no build marker
-    # from which recovery could reconstruct the missing card_auto_dropped event.
-    all_events = engine.store.read_all()
-    rejected_drop_index = next(
-        index for index, event in enumerate(all_events)
-        if event.type == "card_auto_dropped" and event.data.get("id") == rejected_id
-    )
-    rejected_prefix = fold(all_events[:rejected_drop_index])
-    assert rejected_prefix.cards[rejected_id].selection_ready is False
-
-    projected = fold(all_events)
+    # Registration and terminal receipt are one append_many transaction. A physical crash can expose
+    # neither or both; slicing the successfully committed batch between its rows is not a store prefix.
+    projected = fold(engine.store.read_all())
     assert projected.cards[accepted_id].status == "building"
     assert projected.cards[rejected_id].status == "dropped"
     assert projected.cards[rejected_id].selection_ready is False
@@ -220,10 +210,42 @@ def test_drop_and_merge_exclusions_are_order_tolerant_and_preserve_legacy_action
     })]
     dropped_before = fold(_events(prefix + drop + merge + registrations))
     dropped_after = fold(_events(prefix + registrations + merge + drop))
-    for state in (dropped_before, dropped_after):
-        card = state.cards["card-canonical"]
-        assert card.status == "dropped"
-        assert card.dropped_reason == "superseded duplicate"
-        assert card.actionable is False
-        assert card.selection_ready is False
-        assert "card_terminal" in card.selection_blockers
+    # A drop targets the alias graph durable at that physical point. A later merge must not rewrite
+    # history and terminalize a previously healthy survivor.
+    assert dropped_before.cards["card-canonical"].status == "proposed"
+    card = dropped_after.cards["card-canonical"]
+    assert card.status == "dropped"
+    assert card.dropped_reason == "superseded duplicate"
+    assert card.actionable is False
+    assert card.selection_ready is False
+    assert "card_terminal" in card.selection_blockers
+
+
+def test_drop_uses_only_merge_edges_durable_at_that_point():
+    registrations = [
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "A", "statement": "alias"}),
+        ("card_added", {"id": "Z", "statement": "first survivor"}),
+        ("card_added", {"id": "B", "statement": "later survivor"}),
+        ("card_merged", {"canonical": "Z", "aliases": ["A"]}),
+        ("card_dropped", {"id": "A", "reason": "operator choice", "dropped_by": "operator"}),
+        ("card_merged", {"canonical": "B", "aliases": ["A"]}),
+    ]
+    state = fold(_events(registrations))
+    assert state.cards["Z"].status == "dropped"
+    assert state.cards["B"].status == "proposed"
+
+
+def test_legacy_merge_receipt_uses_trusted_event_index_and_ignores_spoof():
+    rows = [
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "A", "statement": "alias"}),
+        ("card_added", {"id": "B", "statement": "survivor"}),
+        ("hypothesis_merged", {
+            "canonical": "B", "aliases": ["A"], "_event_index": 999999,
+        }),
+        ("card_dropped", {"id": "A", "reason": "after merge"}),
+    ]
+    state = fold(_events(rows))
+    assert state.cards["B"].status == "dropped"
+    assert state.hypotheses_merged[0]["_event_index"] < 999999

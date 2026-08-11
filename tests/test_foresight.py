@@ -3,7 +3,9 @@ model predicts which candidate / hypothesis scores best BEFORE any eval — over
 over structural/text ideas (the hypothesis panel the numeric surrogate is blind to)."""
 from __future__ import annotations
 
-from looplab.agents.roles import _state_brief
+from looplab.agents.roles import (
+    _state_brief, bind_idea_to_board_card, next_board_prompt_cards,
+)
 from looplab.core.models import (Card, Event, Idea, Node, NodeStatus, RunState,
                                  hypothesis_id)
 from looplab.events.replay import fold
@@ -251,9 +253,8 @@ def test_prioritize_board_orders_open_hypotheses():
 
 
 def test_board_rank_input_matches_the_receipt_after_a_card_edit():
-    # Peer review: foresight ranks the CURRENT display `statement` — the SAME text the receipt records —
-    # not the immutable seed. After an operator edit/merge (statement != seed_statement) the old code
-    # ranked the seed while recording the statement, so telemetry claimed the model saw text it never got.
+    # Display edits are presentation-only. Ranking and execution must use the same immutable semantic
+    # seed; changing experiment meaning requires minting a new Card identity.
     st = RunState(direction="min", goal="minimize loss")
     seed, edited = "ZZZ immutable seed wording", "AAA operator-edited direction"
     cid = hypothesis_id(seed)
@@ -272,9 +273,9 @@ def test_board_rank_input_matches_the_receipt_after_a_card_edit():
     panel = ForesightPanelResearcher(_SeqResearcher([Idea(operator="draft")], _CapClient([0, 1])), k=2)
     panel._prioritize_board(st, None)
 
-    assert edited in captured["blob"] and seed not in captured["blob"]   # ranked the display statement
+    assert seed in captured["blob"] and edited not in captured["blob"]
     ranked = {c["id"]: c["statement"] for c in panel.last_hyp_priority["ranked"]}
-    assert ranked[cid] == edited                        # receipt records the SAME text that was ranked
+    assert ranked[cid] == seed
 
 
 def test_board_and_idea_ranks_trace_under_distinct_spans():
@@ -336,6 +337,26 @@ def test_state_brief_default_insertion_order():
     brief = _state_brief(st, None)                                 # no ranking
     assert "ordered by predicted payoff" not in brief
     assert brief.index("alpha belief") < brief.index("beta belief")
+
+
+def test_board_prompt_preserves_and_binds_full_four_thousand_character_seed():
+    seed = "x" * 4_000
+    st = _state_with_open_hyps([seed])
+    card = next(iter(st.cards.values()))
+    brief = _state_brief(st, None, board_cards=[card])
+    assert seed in brief
+    idea = bind_idea_to_board_card(Idea(operator="draft", card_id=card.id), [card])
+    assert idea.card_id == card.id and idea.hypothesis == seed
+
+
+def test_board_prompt_window_rotates_without_new_nodes():
+    st = _state_with_open_hyps([f"belief-{index}" for index in range(7)])
+    first = next_board_prompt_cards(st, attempt=0)
+    second = next_board_prompt_cards(st, attempt=1)
+    third = next_board_prompt_cards(st, attempt=2)
+    assert len(first) == len(second) == 5
+    assert first[0].id != second[0].id
+    assert {card.id for card in first + second + third} == set(st.cards)
 
 
 def test_propose_prioritizes_board_and_ranks_ideas():

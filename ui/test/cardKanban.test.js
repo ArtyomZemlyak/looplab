@@ -79,9 +79,10 @@ test('HypothesisBoard renders the bounded Card DTO as lifecycle lanes in priorit
   assert.match(markup, /role="region" aria-label="Card lifecycle kanban"/)
   assert.match(markup, /aria-labelledby="card-lane-proposed"/)
   assert.match(markup, /<h3 id="card-lane-proposed"/)
-  for (const lane of ['Proposed', 'Building', 'Coded', 'Running', 'Evaluated', 'Gated', 'Dropped']) {
+  for (const lane of ['Proposed', 'Building', 'Running', 'Evaluated', 'Gated', 'Dropped']) {
     assert.match(markup, new RegExp(`>${lane} <`))
   }
+  assert.doesNotMatch(markup, />Coded </)
   assert.match(markup, />Speculating </)
   assert.match(markup, />Awaiting Audit </)
   assert.ok(markup.indexOf('First priority') < markup.indexOf('Later priority'))
@@ -217,9 +218,9 @@ test('Card optimistic controls retain uncertain commands and roll back only the 
 test('An uncertain (confirmation-unknown) command does not freeze controls on the whole board', async () => {
   const source = await readFile(new URL('../src/CardBoard.jsx', import.meta.url), 'utf8')
   const board = source.slice(source.indexOf('function _CardKanban('), source.indexOf('function _HypothesisFallback'))
-  // globalPending — which drives controlsLocked on every OTHER card — must exclude the never-clearing
-  // 'confirmation-unknown' pending, or one lost submission disables the entire board until reload.
-  assert.match(board, /const globalPending = [\s\S]*?pending\.phase !== 'confirmation-unknown'/)
+  // Only active transport work may lock another Card. Unknown outcomes and successful commands
+  // waiting for a delayed fold remain locally recoverable without freezing the board.
+  assert.match(board, /\['submitting', 'checking', 'retrying'\]\.includes\(entry\.pending\.phase\)/)
 })
 
 test('Edit reflection prefers the durable event receipt and safely falls back for legacy folds', async () => {

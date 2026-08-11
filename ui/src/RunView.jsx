@@ -2740,7 +2740,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         : view === 'cards'
         ? <LazyBoundary label="card board" resetKey={`${runId}:${generation || 'pending'}`}>
             <CardWorkspace state={state} runId={runId} runGeneration={generation}
-              onToast={showToast}
+              onToast={showToast} readOnly={mutationReadOnlyMode}
               selectedCardId={selectedCardId} onSelectCard={selectCard}
               selectedNodeId={selectedId} onSelectNode={selectCardNode}
               renderInspector={renderNodeInspector}

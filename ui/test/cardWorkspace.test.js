@@ -18,6 +18,8 @@ const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 let vite
 let CardWorkspace
 let cardAttempts
+let cardAttemptIndex
+let cardAttemptCoverage
 let cardAttemptSummary
 let nodeCardId
 let route
@@ -30,6 +32,8 @@ test.before(async () => {
   ;({ CardWorkspace } = await vite.ssrLoadModule('/src/CardBoard.jsx'))
   ;({ cardAttempts, cardAttemptSummary, nodeCardId } =
     await vite.ssrLoadModule('/src/cardBoardModel.js'))
+  ;({ cardAttemptIndex, cardAttemptCoverage } =
+    await vite.ssrLoadModule('/src/cardBoardViewModel.js'))
   route = await vite.ssrLoadModule('/src/runRouteState.js')
 })
 
@@ -86,6 +90,30 @@ test('a Card holds a LIST of nodes: the join reports every attempt, not one', ()
   assert.ok(many.every(entry => entry.evidence && entry.present))
   // ...and the nodes really are different experiments, not one repeated.
   assert.deepEqual(many.map(entry => entry.node.status), ['evaluated', 'failed', 'evaluated'])
+})
+
+test('the board indexes every Card-to-Node edge in one node scan', () => {
+  const cards = Array.from({ length: 256 }, (_, id) => ({ id: `card-${id}`, evidence: [] }))
+  let reads = 0
+  const nodes = {}
+  for (let id = 0; id < 4096; id += 1) {
+    const idea = {}
+    Object.defineProperty(idea, 'card_id', { enumerable: true, get() { reads += 1; return `card-${id % 256}` } })
+    nodes[id] = { idea }
+  }
+  const index = cardAttemptIndex({ nodes }, cards)
+  assert.equal(reads, 4096)
+  assert.equal(index.get('card-0').length, 16)
+})
+
+test('attempt lower bounds trust only a validated node-id receipt', () => {
+  const attempts = [{ nodeId: 1 }, { nodeId: 3 }]
+  assert.equal(cardAttemptCoverage(attempts, {
+    omissions: { evidence: { unit: 'node_ids', total: 40 } },
+  }).label, '≥40')
+  assert.equal(cardAttemptCoverage(attempts, {
+    omissions: { evidence: { unit: 'items', total: 3 } },
+  }).label, '≥2')
 })
 
 test('a Card can own zero nodes, and that is a state rather than a missing value', () => {
@@ -170,6 +198,15 @@ test('the view layout renders the board without a modal dialog wrapper', () => {
   assert.doesNotMatch(html, /aria-modal/)
   assert.match(html, /class="card-board"/)
   assert.match(html, /card-detail/)
+})
+
+test('compact workspace leaves the board reachable until a Card is opened', () => {
+  const closed = render({ pane: { compact: true, width: 420 } })
+  assert.match(closed, /class="card-board"/)
+  assert.doesNotMatch(closed, /card-detail-side/)
+  const open = render({ pane: { compact: true, width: 420 }, selectedCardId: 'card-many' })
+  assert.match(open, /workspace-scrim/)
+  assert.match(open, /card-detail-side compact-drawer/)
 })
 
 test('the pane hosts the node Inspector for the picked attempt instead of reimplementing it', () => {
