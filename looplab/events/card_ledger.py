@@ -36,6 +36,7 @@ from looplab.core.concepts import (
 )
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGEST_V2_FIELDS,
+                     CARD_STATEMENT_MAX_CHARS,
                      INHERITABLE_CONCEPT_PROVENANCE as _INHERITABLE_CONCEPT_PROVENANCE,
                      NODE_CONCEPT_PROVENANCE_UNTRUSTED,
                      Card, CardConceptSource, CardIdentityProvenance, CardSelectionProvenance,
@@ -60,7 +61,7 @@ _MISSING = object()
 
 
 _CARD_REPLAY_ID_MAX = 256
-_CARD_REPLAY_STATEMENT_MAX = 4_000
+_CARD_REPLAY_STATEMENT_MAX = CARD_STATEMENT_MAX_CHARS
 _CARD_REPLAY_SOURCE_MAX = 64
 _CARD_REPLAY_RATIONALE_MAX = 400
 _CARD_REPLAY_ACTION_MAP_MAX = 64
@@ -1268,12 +1269,35 @@ class _CardAliases:
     alias: dict[str, str]
     identity_bridge_ids: frozenset[str]
     merged_stmt: dict[str, str]
+    identity_alias: dict[str, str]
+    merge_edges: dict[str, dict[str, int | None]]
 
     def canon(self, x: str) -> str:                 # resolve alias chains a->b->c, cycle-safe
         seen: set[str] = set()
         while x in self.alias and x not in seen:
             seen.add(x)
             x = self.alias[x]
+        return x
+
+    def canon_at(self, x: str, event_index: int | None) -> str:
+        """Resolve only explicit merge edges durable at ``event_index``.
+
+        Identity bridges are timeless because they are derived from the materialized Card set. A
+        legacy receipt with no trusted physical index retains historical full-canonical behavior.
+        """
+        if event_index is None:
+            return self.canon(x)
+        seen: set[str] = set()
+        while x not in seen:
+            seen.add(x)
+            active = [
+                target for target, index in self.merge_edges.get(x, {}).items()
+                if index is None or index <= event_index
+            ]
+            target = min(active) if active else self.identity_alias.get(x)
+            if target is None:
+                break
+            x = target
         return x
 
 
@@ -1542,14 +1566,17 @@ def _card_merge_aliases(st: RunState, identity: _CardIdentity) -> _CardAliases:
     #     DETERMINISTIC (no LLM; the decision was recorded by the engine), order-tolerant, cycle-safe.
     #     Mirrors `_derive_hypotheses` 2b exactly, reusing the same `_canon` alias-chain resolution.
     alias: dict[str, str] = {}
+    identity_alias: dict[str, str] = {}
     for seed_id, owner in seed_owner.items():
         if seed_id != owner:
             alias[seed_id] = owner
+            identity_alias[seed_id] = owner
     identity_bridge_ids = frozenset(alias)
     # Edges written by the merge loop below, kept apart from the hash->native bridge seeding above so
     # a conflict can be resolved WITHOUT changing what a bridge means. See the `min()` note at the
     # write site: last-write-wins there made `fold(perm(events))` differ, breaking invariant 5.
     merge_alias: dict[str, str] = {}
+    merge_edges: dict[str, dict[str, int | None]] = {}
     merged_stmt: dict[str, str] = {}
     for native_merge, d in _native_first(st.cards_merged, st.hypotheses_merged):
         try:
@@ -1586,10 +1613,20 @@ def _card_merge_aliases(st: RunState, identity: _CardIdentity) -> _CardAliases:
                     prior = merge_alias.get(resolved_alias)
                     merge_alias[resolved_alias] = canon if prior is None else min(prior, canon)
                     alias[resolved_alias] = merge_alias[resolved_alias]
+                    raw_index = d.get("_event_index")
+                    edge_index = raw_index if type(raw_index) is int and raw_index >= 0 else None
+                    targets = merge_edges.setdefault(resolved_alias, {})
+                    if canon not in targets:
+                        targets[canon] = edge_index
+                    elif edge_index is None or targets[canon] is None:
+                        targets[canon] = None
+                    else:
+                        targets[canon] = min(targets[canon], edge_index)
         except Exception:  # noqa: BLE001 — one bad merge record must not brick the fold
             continue
     return _CardAliases(
-        alias=alias, identity_bridge_ids=identity_bridge_ids, merged_stmt=merged_stmt)
+        alias=alias, identity_bridge_ids=identity_bridge_ids, merged_stmt=merged_stmt,
+        identity_alias=identity_alias, merge_edges=merge_edges)
 
 
 def _card_control_ids(identity: _CardIdentity, ledger: _CardLedger) -> dict[str, set[str]]:
@@ -1621,7 +1658,6 @@ def _fold_merged_cards(identity: _CardIdentity, ledger: _CardLedger, aliases: _C
     identity_bridge_ids = aliases.identity_bridge_ids
     merged_stmt = aliases.merged_stmt
     _canon = aliases.canon
-
     if alias:
         folded: dict[str, Card] = {}
         folded_control_ids: dict[str, set[str]] = {}
@@ -1724,7 +1760,6 @@ def _apply_card_verdicts(
 
 def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) -> dict[str, dict]:
     cards = ledger.cards
-    _canon = aliases.canon
 
     # 5) apply `card_auto_dropped` engine effects and `card_dropped` operator overrides. The card STAYS
     #    visible (like an abandoned hypothesis) — lifecycle `status` shows the 'dropped' lane. Historical
@@ -1735,10 +1770,9 @@ def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) 
         bounded_id = _card_id(raw_id)
         if bounded_id is None:
             continue
-        # CODEX AGENT: canonicalizing historical drop receipts through a later merge transfers one
-        # member's terminal lifecycle onto the healthy survivor. Bind closure to merge generation/member
-        # identity, or merge evidence without rewriting per-Card lifecycle provenance.
-        cid = _canon(bounded_id)
+        raw_index = d.get("_event_index")
+        drop_index = raw_index if type(raw_index) is int and raw_index >= 0 else None
+        cid = aliases.canon_at(bounded_id, drop_index)
         if cid:
             dropped[cid] = d
     for cid, d in dropped.items():

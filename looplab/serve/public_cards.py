@@ -9,7 +9,10 @@ from typing import Callable, Literal, NamedTuple
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from looplab.core.concepts import normalized_concept_materialization_receipt
-from looplab.core.models import hypothesis_id, valid_card_action_digest
+from looplab.core.models import (
+    CARD_STATEMENT_MAX_CHARS, CARD_STATEMENT_MAX_UTF8_BYTES,
+    hypothesis_id, valid_card_action_digest,
+)
 
 
 # these are replay inputs/override journals, not a public read model. Excluding them before
@@ -21,18 +24,18 @@ INTERNAL_CARD_STATE_FIELDS = frozenset({
 })
 
 PUBLIC_CARD_MAX_COUNT = 256
-PUBLIC_CARD_MAX_BYTES = 8_192
+PUBLIC_CARD_MAX_BYTES = 64 * 1_024
 PUBLIC_CARDS_MAX_BYTES = 512 * 1_024
 PUBLIC_CARDS_PROJECTION_MAX_BYTES = 512 * 1_024
 _MAX_ITEMS = 32
-_MAX_TEXT_BYTES = 2_048
+_MAX_TEXT_BYTES = CARD_STATEMENT_MAX_UTF8_BYTES
 _MAX_REF_BYTES = 256
 _SKIP = object()
 
 # this is the explicit wire DTO. Adding a Card or event field does not publish it until this
 # boundary is reviewed; fixed order also makes byte output deterministic across event/mapping order.
 _FIELDS = (
-    "id", "status", "verdict", "actionable", "identity", "selection_provenance",
+    "id", "belief_id", "retry_of", "status", "verdict", "actionable", "identity", "selection_provenance",
     "selection_blockers", "selection_ready", "concept_source", "statement", "statement_edit_seq",
     "seed_statement", "source",
     "created_at_node", "rationale", "evidence", "best_delta", "merged_into", "aliases",
@@ -59,7 +62,7 @@ _TEXT_LIMITS = {
     "dropped_reason": 800,
 }
 _REF_FIELDS = {
-    "id", "source", "status", "verdict", "merged_into", "dropped_by", "operator",
+    "id", "belief_id", "retry_of", "source", "status", "verdict", "merged_into", "dropped_by", "operator",
     "eval_profile", "research_origin", "provenance_tier",
 }
 _INT_FIELDS = {"created_at_node", "parent_id", "scored_against", "priority", "foresight_rank"}
@@ -154,7 +157,7 @@ class PublicProjectionCount(BaseModel):
 class PublicProjectionSlice(PublicProjectionCount):
     """Loss receipt for content units inside one public Card field."""
 
-    unit: Literal["characters", "items", "entries", "fields", "values"]
+    unit: Literal["characters", "items", "node_ids", "entries", "fields", "values"]
 
 
 class PublicCardProjectionReceipt(BaseModel):
@@ -858,6 +861,20 @@ def _text_kind(limit: int) -> _FieldKind:
     return _FieldKind(lambda value: _text(value, limit, free_text=True), _plain_lossless)
 
 
+def _statement_kind() -> _FieldKind:
+    def project(value):
+        if not isinstance(value, str):
+            return _SKIP
+        return _text(value[:CARD_STATEMENT_MAX_CHARS], CARD_STATEMENT_MAX_UTF8_BYTES, free_text=True)
+
+    return _FieldKind(
+        project,
+        lambda raw, bounded: (
+            isinstance(raw, str) and len(raw) <= CARD_STATEMENT_MAX_CHARS and bounded == raw
+        ),
+    )
+
+
 def _ref_kind() -> _FieldKind:
     return _FieldKind(
         lambda value: None if value is None else _text(value, _MAX_REF_BYTES), _plain_lossless)
@@ -950,6 +967,8 @@ _FIELD_KINDS: dict[str, _FieldKind] = {
     **{name: _int_list_kind() for name in _INT_LIST_FIELDS},
     **{name: _bool_kind()
        for name in ("actionable", "selection_ready", "scored_against_empty", "pinned")},
+    "statement": _statement_kind(),
+    "seed_statement": _statement_kind(),
     "identity": _FieldKind(_card_identity, _card_identity_lossless),
     "selection_provenance": _FieldKind(
         _card_selection_provenance, _card_selection_provenance_lossless),
@@ -1005,7 +1024,12 @@ def _field_slice(name: str, raw, projected, *, exact: bool) -> PublicProjectionS
         else:
             returned = 0
     elif isinstance(raw, (list, tuple)):
-        unit = "items"
+        evidence_ids = (
+            name == "evidence" and len(raw) <= 4_096
+            and all(type(item) is int and 0 <= item <= (1 << 53) - 1 for item in raw)
+            and len(set(raw)) == len(raw)
+        )
+        unit = "node_ids" if evidence_ids else "items"
         total = len(raw)
         if exact:
             returned = total

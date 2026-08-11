@@ -734,7 +734,9 @@ def test_card_enriched_order_comes_only_from_envelope_and_never_payload_seq():
     ]
     st = _fold_with_cursor(events)
     assert st.cards[cid].research_origin == "newer"
-    assert [row["_seq"] for row in st.cards_enriched] == [10, 11]
+    # Replay retains only the newest value for a semantic field inside one exact Card lifecycle
+    # fence. The authoritative envelope sequence wins; the caller-owned payload `_seq` never does.
+    assert [row["_seq"] for row in st.cards_enriched] == [11]
 
 
 def test_card_ranked_malformed_order_is_bounded_deduplicated_and_owns_rank():
