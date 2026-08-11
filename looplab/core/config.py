@@ -833,7 +833,15 @@ class Settings(BaseSettings):
     # LLM concept map is heavier and slower-moving than a strategy consult, so it refreshes on its own
     # (sparser) interval. Researcher-authored idea.concepts still fold immediately at node_created — this
     # only paces the classifier-evidence + consolidation refresh (and the concept-coverage pivot snapshot).
-    concept_retag_every: int = Field(default=30, ge=1)
+    #
+    # 30 -> 5 (2026-08-11). The old default was LONGER THAN EVERY REAL RUN ON THIS CORPUS, so after the
+    # seed-boundary firing there was never a second one: `rubert-dr-0807` finished 14 nodes with tags on
+    # exactly ONE of them, which is why every concept surface reported `count: 1, best_metric: null`.
+    # A re-tag pass is also much cheaper than "heavier and slower-moving" suggests — it skips nodes it
+    # has already tagged and is bounded by `_RETAG_CAP`/`_HYP_TAG_CAP` per pass — so the cost scales with
+    # NEW nodes, not with run length. 5 gives a 14-node run three passes; raise it if the enrichment lane
+    # is the bottleneck, and note that the SEED boundary fires regardless of this value.
+    concept_retag_every: int = Field(default=5, ge=1)
     # === Confirmation & holdout ===========================================================
     # Multi-seed confirmation (I12, ADR-15): confirm the top-k under N seeds before
     # finishing. 0 disables (default). Only meaningful when eval has variance.
@@ -898,7 +906,7 @@ class Settings(BaseSettings):
     coverage_context: bool = True
     # PART IV Phase 2a live steering (§21.11/§21.13). When on, the `concept_retag_every` cadence (NOT
     # `strategist_every` — the producer gates on `_should_consult_concepts`, which uses the seed boundary
-    # + `concept_retag_every`, default 30) records a
+    # + `concept_retag_every`, default 5) records a
     # concept-graph coverage + uncovered-region snapshot (deterministic heuristic tagger over the
     # task-type skeleton) and, on an `explore` stance, the Researcher's novelty hint names the exact
     # uncovered regions ("0 coverage in {negatives/external-mining, distillation} — go there") instead

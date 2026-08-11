@@ -6,7 +6,7 @@ What lives here is one subsystem with one cadence of its own: the classifier RE-
 consolidation / edge-assertion / hypothesis-tagging pass, the concept-coverage snapshot it feeds,
 and the once-per-run concept-base seed. It shared a file with the Strategist consult only because
 both are cadence work; they share no state, and the gate they run on is deliberately DIFFERENT —
-`_should_consult_concepts` paces on `concept_retag_every` (default 30) because the LLM concept map
+`_should_consult_concepts` paces on `concept_retag_every` (default 5) because the LLM concept map
 is heavier and slower-moving than a strategy consult, while the Strategist runs on
 `strategist_every`. Keeping them in one file made that decoupling read as an accident.
 
@@ -32,7 +32,7 @@ from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, RunState,
                                   node_concept_event_provenance)
-from looplab.engine.cadence import cadence_due, cadence_marks
+from looplab.engine.cadence import cadence_due, cadence_marks, seed_boundary_due
 from looplab.events.replay import fold
 from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
                                   EV_CONCEPT_EDGE, EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
@@ -56,7 +56,7 @@ class ConceptCadenceMixin:
     def _should_consult_concepts(self, state: RunState, *, marks=None) -> bool:
         """PART V (F1): the concept CLASSIFIER re-tag / consolidation cadence — DECOUPLED from
         `strategist_every`. The LLM concept map is heavier and slower-moving than a strategy consult, so it
-        refreshes on its OWN `concept_retag_every` interval (default 30) rather than every consult.
+        refreshes on its OWN `concept_retag_every` interval (default 5) rather than every consult.
         Researcher-authored `idea.concepts` still fold into node_concepts at node_created (immediate UI
         freshness); this only paces the classifier-EVIDENCE + consolidation refresh and the concept-coverage
         pivot snapshot. Same shape/guards as `_should_consult` (creation decision point, seed boundary, then
@@ -66,10 +66,16 @@ class ConceptCadenceMixin:
         n = len(state.nodes)
         if n == 0:
             return False
-        if n == self.n_seeds:
+        last = cadence_marks(marks)
+        # `>=`, not `== self.n_seeds`. The equality is the striding defect `cadence.py`'s header
+        # describes, and this consumer is where it actually bit: with `concept_retag_every` longer
+        # than the run, the seed boundary is the ONLY firing there will ever be, so stepping over it
+        # once means the whole Part IV/V subsystem never runs. Measured on three 2026-08 runs — see
+        # `seed_boundary_due` for the table.
+        if seed_boundary_due(n, last, self.n_seeds):
             return True
         every = getattr(self, "concept_retag_every", 0) or self.strategist_every
-        return cadence_due(n, cadence_marks(marks), every)
+        return cadence_due(n, last, every)
 
     @in_llm_lane("enrichment")
     def _maybe_snapshot_concept_coverage(self, state: RunState) -> RunState:
