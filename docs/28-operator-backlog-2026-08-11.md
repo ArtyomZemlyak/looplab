@@ -107,13 +107,28 @@ new Operations panel.
 
 Kept here so they are not lost; each is a fix, not a feature.
 
-* **A timed-out control command makes a run uncontrollable.** Reproduced live 2026-08-11: a `pause`
-  from the previous day sat at `status: timed_out`, and `reject_if_active` then refused *every*
-  subsequent control with `command_retry_required`. The documented remedy (`POST
-  /commands/{id}/retry`) works, but nothing in the UI surfaces it, so the run reads as wedged. The
-  deeper cause is that the pause postcondition is `paused_and_stopped` — it requires the engine
-  PROCESS to exit, which a pause cannot deliver while a multi-hour evaluation is in flight, so on
-  exactly the runs where pausing matters it can only ever time out.
+* **A timed-out control command makes a run PERMANENTLY uncontrollable.** Reproduced end to end on
+  `rubertlite-dr-unified-v2`, 2026-08-11, and it is worse than a dead chip in the timeline. Three
+  compounding faults:
+
+  1. The pause postcondition is `paused_and_stopped` — it requires the engine PROCESS to exit, which
+     a pause cannot deliver while a multi-hour evaluation is in flight. On exactly the runs where
+     pausing matters it can only ever time out. Here it did, on 2026-08-10, ~20 minutes after a pause
+     that had actually landed within one second.
+  2. From then on `reject_if_active` refused **every** later control with `command_retry_required`.
+     The run could not be paused, stopped or steered at all.
+  3. The documented remedy — `POST /commands/{id}/retry` — returned `accepted`, then `executing`,
+     then `timed_out` again, and **no `pause` event was ever appended**. The retry re-drives the
+     ORIGINAL command, whose `event_seq` points at an intent that a later `resume` already consumed,
+     so it re-observes a superseded event instead of issuing a new pause. The run stayed in phase
+     `search` throughout.
+
+  Net effect: after 30 hours, 8 failed nodes, 0 evaluated and 2,323 provider calls, the only way to
+  stop the run was `kill` on the engine PID. A control plane that fails closed must still leave one
+  path forward; this one leaves none. Fixing it means at minimum: a pause postcondition that observes
+  the PAUSE (the effect the operator asked for) separately from process exit, a retry that mints a
+  FRESH intent when the old one has been superseded, and a UI that surfaces the remedy instead of a
+  frozen "Stop requested…" chip.
 * **Node build and resume are silent.** Long waits with nothing on screen; the operator asked for
   "maximum transparency". The pieces exist (`ui/src/buildingModel.js`, the `node_building` event) but
   nothing streams what phase the build is in.
