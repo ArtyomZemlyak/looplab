@@ -2456,6 +2456,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         EV_RUN_STARTED,
                         {
                             "run_id": self.run_dir.name,
+                            # Display ids are only unique inside a run root. Cross-run memory uses this
+                            # persisted incarnation id so roots named ``run_local`` cannot overwrite or
+                            # self-exclude one another.
+                            "run_uid": secrets.token_hex(16),
                             "task_id": self.task.id,
                             "goal": self.task.goal,
                             "direction": self.task.direction,
@@ -2951,6 +2955,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # scan builds both — the two role pools share every untagged lesson, so re-reading/re-embedding
         # the store per role is wasted work.
         _rid = _entry.run_id or None
+        _ruid = _entry.run_uid or None
         # BEST-EFFORT, exactly like the refresh path (`lessons.maybe_refresh_lessons`) this mirrors.
         # `_load_reflection_priors_both` reads the SHARED store through `read_jsonl_lenient`, which
         # RAISES OSError on an unreadable lessons.jsonl / meta_notes.jsonl (permissions, a transient
@@ -2961,7 +2966,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # retries the store instead of reading the pre-read stamp as "already seen, unchanged".
         try:
             self._prior_note_text, self._dev_prior_note_text = \
-                self._load_reflection_priors_both(exclude_run_id=_rid)
+                self._load_reflection_priors_both(
+                    exclude_run_id=_rid, exclude_run_uid=_ruid)
         except (OSError, ValueError) as e:  # noqa: BLE001 - an advisory prior cannot fail the run
             self._lessons_seen_stamp = None
             self.store.append(EV_LESSONS_STORE_UNAVAILABLE, {
@@ -4030,11 +4036,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.lessons.dev_prior_note_text = value
 
     def _load_reflection_priors(self, exclude_run_id: Optional[str] = None,
+                                exclude_run_uid: Optional[str] = None,
                                 role: Optional[str] = None) -> str:
-        return self.lessons.load_reflection_priors(exclude_run_id=exclude_run_id, role=role)
+        return self.lessons.load_reflection_priors(
+            exclude_run_id=exclude_run_id, exclude_run_uid=exclude_run_uid, role=role)
 
-    def _load_reflection_priors_both(self, exclude_run_id: Optional[str] = None) -> tuple[str, str]:
-        return self.lessons.load_reflection_priors_both(exclude_run_id=exclude_run_id)
+    def _load_reflection_priors_both(self, exclude_run_id: Optional[str] = None,
+                                     exclude_run_uid: Optional[str] = None) -> tuple[str, str]:
+        return self.lessons.load_reflection_priors_both(
+            exclude_run_id=exclude_run_id, exclude_run_uid=exclude_run_uid)
 
     def _empty_state_for_fp(self) -> RunState:
         return self.lessons.empty_state_for_fp()
@@ -4654,8 +4664,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if kind == "draft":
                 parents: list[int] = []        # not whatever label the LLM returns
                 with self.tracer.span("implement"):
-                    code = developer.implement(
-                        self._directed_idea(idea.model_copy(deep=True), state))
+                    code = self._implement(
+                        self._directed_idea(idea.model_copy(deep=True), state),
+                        developer=developer, state=state)
             elif kind == "merge":
                 parents = list(action["parent_ids"])
                 # A0b: real ensembling (code recombination) when configured/Strategist-selected;
@@ -4668,12 +4679,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # ("can't open file test_looplab.py" — live node 63, 3 repairs couldn't recover). Now
                     # parent[0]'s working code + entrypoint carry over and the idea directs blending in
                     # the other parent. Mean-param merges (numeric tasks, no files) stay from-scratch.
-                    _impl_from = getattr(developer, "implement_from", None)
                     _didea = self._directed_idea(
                         idea.model_copy(deep=True), state)   # §1: directives steer the merge code too
-                    code = (_impl_from(_didea, pnodes[0])
-                            if (self._merge_mode == "ensemble" and _impl_from and pnodes)
-                            else developer.implement(_didea))
+                    code = self._implement(
+                        _didea,
+                        pnodes[0] if self._merge_mode == "ensemble" and pnodes else None,
+                        developer=developer, state=state)
             elif kind == "debug":
                 parent = state.nodes[action["parent_id"]]
                 parents = [parent.id]
@@ -4702,14 +4713,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     with self.tracer.span("implement"):
                         code = self._implement(
                             self._directed_idea(idea.model_copy(deep=True), state), parent,
-                            developer=developer)
+                            developer=developer, state=state)
             else:  # improve
                 parent = state.nodes[action["parent_id"]]
                 parents = [parent.id]
                 with self.tracer.span("implement"):
                     code = self._implement(
                         self._directed_idea(idea.model_copy(deep=True), state), parent,
-                        developer=developer)
+                        developer=developer, state=state)
             idea, footprint_finalized = self._finalize_developer_footprint(
                 idea, developer, code)
             # 💡 deep-research provenance: tag the first couple of nodes created right after a research
@@ -4992,7 +5003,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # §1: a reset RE-BUILDS the node from scratch, so standing operator directives must
                 # steer its code too — same as the four _create_node build sites.
                 code = self._implement(
-                    self._directed_idea(idea.model_copy(deep=True), state), parent)
+                    self._directed_idea(idea.model_copy(deep=True), state), parent, state=state)
             idea, footprint_finalized = self._finalize_developer_footprint(
                 idea, self.developer, code)
             latest = fold(self.store.read_all())
@@ -5165,7 +5176,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         # base) — hand the parent's solution to a parent-aware developer. Preserve the
                         # receipt-bound Idea by handing the plugin a deep working copy.
                         _pnode = state.nodes.get(parents[0]) if parents else None
-                        code = self._implement(idea.model_copy(deep=True), _pnode)
+                        code = self._implement(idea.model_copy(deep=True), _pnode, state=state)
                 except Exception:
                     self._fail_reserved_build(
                         node_id=node_id, card_id=reservation.card_id, generation=0,

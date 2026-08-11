@@ -44,6 +44,8 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #   2026-08-06  + concept_tidy               (cross-run concept ratification; see below)
 #   2026-08-09  + task_facets_finalize       (separate paid facet-steward schedule; see below)
 #   2026-08-11  + systemic_failure_stop      (run-level 'nothing has ever worked' stop; see below)
+#   2026-08-11  concept_retag_every 30 -> 5  (intentional cadence-default change; field set unchanged,
+#               but the complete settings envelope and therefore old receipts genuinely changed)
 # A LITERAL, measured on the tree. Both halves must stay literals: an earlier attempt at this guard
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string

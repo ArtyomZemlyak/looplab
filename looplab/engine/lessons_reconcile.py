@@ -53,9 +53,11 @@ class LessonReconcileMixin:
                  "kind": getattr(self._e.task, "kind", ""), "statement": statement,
                  "outcome": outcome, "delta": pr.get("delta") if pr else None,
                  "claim_stance": distilled_claim_stance(outcome),
-                 "confidence": conf, "run_id": state.run_id,
+                 "confidence": conf, "run_id": state.run_id, "direction": state.direction,
                  "evidence": ev, "evidence_sig": self._evidence_sig_map(state, ev),
                  "source": "comparative"}
+            if getattr(state, "run_uid", ""):
+                d["run_uid"] = state.run_uid
             if pr is not None:
                 d["role"] = (LESSON_ROLE_DEVELOPER if pr.get("kind") == "debug"
                              else LESSON_ROLE_RESEARCHER)

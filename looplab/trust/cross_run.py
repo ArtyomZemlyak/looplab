@@ -71,11 +71,12 @@ class LessonScope:
     than from an agent.
     """
 
-    __slots__ = ("bound", "run_id", "task_id", "direction", "goal_terms")
+    __slots__ = ("bound", "run_uid", "run_id", "task_id", "direction", "goal_terms")
 
-    def __init__(self, *, bound: bool = False, run_id: str = "", task_id: str = "",
+    def __init__(self, *, bound: bool = False, run_uid: str = "", run_id: str = "", task_id: str = "",
                  direction: str = "", goal_terms=frozenset()):
         self.bound = bound
+        self.run_uid = run_uid
         self.run_id = run_id
         self.task_id = task_id
         self.direction = direction if valid_live_direction(direction) else ""
@@ -88,6 +89,7 @@ class LessonScope:
             return cls()
         return cls(
             bound=True,
+            run_uid=str(getattr(state, "run_uid", "") or ""),
             run_id=str(getattr(state, "run_id", "") or ""),
             task_id=str(getattr(state, "task_id", "") or getattr(state, "id", "") or ""),
             direction=str(getattr(state, "direction", "") or ""),
@@ -96,6 +98,12 @@ class LessonScope:
 
     def is_current_run(self, row: dict) -> bool:
         """Whether a persisted cross-run row belongs to the bound live run."""
+        # New rows use the globally unique incarnation id.  Fall back to the display/local run id
+        # only when either side is legacy: two modern independent roots named ``run_local`` must not
+        # exclude each other's evidence merely because their display labels collide.
+        row_uid = str(row.get("run_uid") or "")
+        if self.bound and self.run_uid and row_uid:
+            return row_uid == self.run_uid
         return bool(self.bound and self.run_id and str(row.get("run_id") or "") == self.run_id)
 
     def exact_task(self, row: dict) -> bool:

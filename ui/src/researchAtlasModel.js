@@ -307,6 +307,14 @@ const normalizeClaim = (value, source = unknownClaimSource()) => {
   const epistemic = ['supported', 'refuted'].includes(evidenceEpistemic)
     && source.status !== 'complete'
     ? 'inconclusive' : evidenceEpistemic
+  const decision = record(row.decision)
+  const normalizedDecision = ['ratified', 'rejected', 'pinned', 'clear'].includes(decision.decision)
+    ? {
+        action: decision.decision,
+        note: boundedAtlasText(decision.note, 500),
+        by: boundedAtlasText(decision.by, 160),
+        at: boundedAtlasText(decision.at, 160),
+      } : null
   return {
     uid: boundedAtlasText(row.claim_uid, 180),
     statement,
@@ -321,6 +329,12 @@ const normalizeClaim = (value, source = unknownClaimSource()) => {
     oppose,
     unverified,
     contradicts,
+    sources: textList(row.sources, ATLAS_RENDER_LIMITS.evidence, 2000),
+    verification: textList(row.verification, ATLAS_RENDER_LIMITS.evidence, 500),
+    polarity: row.polarity === -1 || row.polarity === 1 ? row.polarity : null,
+    metric: boundedAtlasText(row.metric, 200),
+    evidenceDigest: boundedAtlasText(row.evidence_digest, 180),
+    decision: normalizedDecision,
     scopes: textList(row.scopes, ATLAS_RENDER_LIMITS.evidence),
     runs: textList(row.runs, ATLAS_RENDER_LIMITS.evidence, 160),
   }

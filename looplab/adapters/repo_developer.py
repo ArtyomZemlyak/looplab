@@ -296,6 +296,7 @@ class LLMRepoDeveloper:
         # PART V §22: read-only cross-run knowledge, ROLE-SCOPED to the developer (repair/impl lessons).
         self._cross_run_read_tools = bool(cross_run_read_tools)
         self._cross_run_memory_dir = memory_dir
+        self._memory_state = None
         # Coerced at the BOUNDARY (doc 25 AG-01) so an unknown option name raises here, in the
         # ctor, rather than surviving as dead weight in a dict until the drive call swallows it.
         from looplab.agents.loop_options import LoopOptions
@@ -325,6 +326,14 @@ class LLMRepoDeveloper:
         # rename here would not fail — it would silently mean "no rollback was ever requested", i.e.
         # the feature quietly ceasing to exist with every test still green.
         self.last_rollback_stage: str = ""
+
+    def bind_state(self, state, parent=None) -> None:
+        """Bind cross-run developer tools to the full live run identity.
+
+        Binding the provider to ``Task`` looked scoped but omitted ``run_id``/``run_uid``, disabling
+        the self-run fence and letting cadence lessons come back as purported prior evidence.
+        """
+        self._memory_state = state
 
     # Files most useful to PRELOAD verbatim so the agent authors the entrypoint without fumbling with
     # a (truncating) read tool. Order = priority; the rest of the surface is appended within budget.
@@ -642,13 +651,13 @@ class LLMRepoDeveloper:
         if getattr(self, "_cross_run_read_tools", False) and getattr(self, "_cross_run_memory_dir", None):
             from looplab.tools.cross_run_tools import CrossRunTools
             tool = CrossRunTools(self._cross_run_memory_dir, role="developer", audience="run")
-            task = getattr(self, "task", None)
-            if task is not None:
+            state = getattr(self, "_memory_state", None)
+            if state is not None:
                 # Agent-facing providers are task-bound before use. Unbound reads remain an explicit
                 # human/CLI portfolio capability, never an accidental agent default — `audience="run"`
                 # is what enforces that: with no task to bind, this provider answers nothing rather
                 # than falling back to the whole portfolio.
-                tool.bind_state(task)
+                tool.bind_state(state)
             extra.append(tool)
         roots = [e["path"] for e in (getattr(self, "_editables", None) or []) if e.get("path")]
         if not roots:

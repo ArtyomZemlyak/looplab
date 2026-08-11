@@ -172,15 +172,27 @@ def test_the_empty_result_says_whether_a_scope_was_applied(tmp_path):
     assert "visible to this run" not in unbound.execute("search_lessons", {"query": "nothingmatches"})
 
 
-def test_recall_notes_is_deliberately_left_alone(tmp_path):
-    """`meta_notes.jsonl` is a different ledger with no direction/task-family provenance to scope on.
-    Filtering it through this predicate would hide every note, which is not what the finding asks."""
+def test_recall_notes_uses_the_same_scope_as_lessons(tmp_path):
+    """Meta-note writers now persist direction/fingerprint provenance, so the adjacent tool may no
+    longer reopen the foreign-task/self-run rows its sibling deliberately hides."""
     (tmp_path / "meta_notes.jsonl").write_text(
-        json.dumps({"task_id": "task-z", "note": "winners used bigger batches"}) + "\n",
+        "".join(json.dumps(row) + "\n" for row in [
+            {"run_id": "run-old", "task_id": "task-a", "direction": "min",
+             "note": "visible winners used smaller batches"},
+            {"run_id": "run-old", "task_id": "task-z", "direction": "min",
+             "note": "foreign winners used bigger batches"},
+            {"run_id": "run-live", "task_id": "task-a", "direction": "min",
+             "note": "this run echoed batches"},
+            {"run_id": "run-old", "task_id": "task-a", "direction": "max",
+             "note": "opposite direction batches"},
+        ]),
         encoding="utf-8")
     memory = MemoryTools(str(tmp_path))
     memory.bind_state(_State())
-    assert "bigger batches" in memory.execute("recall_notes", {"query": "batches"})
+    out = memory.execute("recall_notes", {"query": "batches"})
+    assert "visible winners" in out
+    for hidden in ("foreign winners", "this run echoed", "opposite direction"):
+        assert hidden not in out
 
 
 def test_the_sibling_delegates_to_the_same_object(tmp_path):

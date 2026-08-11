@@ -284,22 +284,25 @@ function memoryPayload(value) {
   const cases = value.cases.map(row => {
     if (!isRecord(row) || !row.task_id || typeof row.task_id !== 'string' || typeof row.goal !== 'string'
         || !nullableNumber(row.metric) || !Object.hasOwn(row, 'params')
+        || (row.direction != null && !['min', 'max'].includes(row.direction))
+        || ['rationale', 'run_id'].some(key => row[key] != null && typeof row[key] !== 'string')
         || !validRowConcepts(row)
         || (row.params_truncated != null && typeof row.params_truncated !== 'boolean')) invalidPanelPayload()
     return { ...row, params_truncated: row.params_truncated === true }
   })
-  const lessonText = ['role', 'kind', 'outcome', 'task_id']
+  const lessonText = ['role', 'kind', 'outcome', 'claim_stance', 'task_id', 'run_id', 'run_uid']
   for (const row of value.lessons) {
     if (!isRecord(row) || !row.statement || typeof row.statement !== 'string'
         || lessonText.some(key => row[key] != null && typeof row[key] !== 'string')
         || ['delta', 'confidence'].some(key => row[key] != null && !nullableNumber(row[key]))
         || !validRowConcepts(row)
-        || (row.evidence_count != null && (!Number.isSafeInteger(row.evidence_count) || row.evidence_count < 0))) invalidPanelPayload()
+        || ['evidence_count', 'evidence_traceable_count', 'evidence_untraceable_count'].some(
+          key => row[key] != null && (!Number.isSafeInteger(row[key]) || row[key] < 0))) invalidPanelPayload()
   }
   const notes = value.notes.map(row => {
     const note = isRecord(row) && (row.note || row.statement)
     if (typeof note !== 'string' || !note || !validRowConcepts(row)
-        || (row.task_id != null && typeof row.task_id !== 'string')) invalidPanelPayload()
+        || ['task_id', 'run_id', 'at'].some(key => row[key] != null && typeof row[key] !== 'string')) invalidPanelPayload()
     return { ...row, note }
   })
   if (value.dir == null) {
@@ -319,6 +322,8 @@ function memoryPayload(value) {
         || !Number.isSafeInteger(receipt.returned) || receipt.returned < 0 || receipt.returned > receipt.limit
         || receipt.returned !== value[key].length
         || !Number.isSafeInteger(receipt.skipped) || receipt.skipped < 0
+        || !Number.isSafeInteger(receipt.filtered) || receipt.filtered < 0
+        || !Number.isSafeInteger(receipt.superseded) || receipt.superseded < 0
         || typeof receipt.source_window_truncated !== 'boolean'
         || typeof receipt.unavailable !== 'boolean'
         || (receipt.unavailable && receipt.returned !== 0)) invalidPanelPayload()
@@ -326,14 +331,23 @@ function memoryPayload(value) {
       limit: receipt.limit,
       returned: receipt.returned,
       skipped: receipt.skipped,
+      filtered: receipt.filtered,
+      superseded: receipt.superseded,
+      sourceRows: Number.isSafeInteger(receipt.source_rows) && receipt.source_rows >= 0
+        ? receipt.source_rows : null,
+      sourceSize: Number.isSafeInteger(receipt.source_size) && receipt.source_size >= 0
+        ? receipt.source_size : null,
+      windowDigest: typeof receipt.window_digest === 'string'
+        && /^[a-f0-9]{64}$/.test(receipt.window_digest) ? receipt.window_digest : '',
       sourceWindowTruncated: receipt.source_window_truncated,
       unavailable: receipt.unavailable,
     }
   }
   const truncated = Object.values(tiers).some(receipt => receipt.sourceWindowTruncated)
   const unavailable = Object.values(tiers).some(receipt => receipt.unavailable)
-  const partial = Object.values(tiers).some(receipt => receipt.sourceWindowTruncated
-    || receipt.skipped > 0 || receipt.unavailable)
+  if (typeof value.concept_index_available !== 'boolean') invalidPanelPayload()
+  const partial = !value.concept_index_available || Object.values(tiers).some(
+    receipt => receipt.sourceWindowTruncated || receipt.skipped > 0 || receipt.unavailable)
   if (value.page.truncated !== truncated || value.page.unavailable !== unavailable
       || value.page.partial !== partial) invalidPanelPayload()
   return {
@@ -344,6 +358,7 @@ function memoryPayload(value) {
     projection: value.projection,
     page: { tiers, truncated, unavailable, partial },
     conceptIndex: conceptIndexPayload(value.concept_index),
+    conceptIndexAvailable: value.concept_index_available,
   }
 }
 
@@ -2120,15 +2135,23 @@ export function MemoryPanel({ onClose }) {
           each other, so each one says what the OTHER two are: this panel is what the RUNS wrote,
           Authoring is what YOU write, the Atlas is the portfolio roll-up over several runs. */}
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
-        Written <b>by the runs</b>, at run end — read-only here. What <b>you</b> give a run before it
-        starts (role prompts, skills, knowledge notes) is Lab → <b>Authoring</b>. Concepts and claims
-        rolled up across the whole portfolio are the <b>Research Atlas</b> (Runs → Atlas preview).
+        {tab === 'knowledge'
+          ? <>Written by <b>operators or agents</b> through the Knowledge authoring tools; no run
+              provenance is inferred for legacy notes. Edit these in Lab → <b>Authoring</b>.</>
+          : <>Written <b>by runs</b> during cadence/finalization and read-only here. Concepts and claims
+              rolled up across the portfolio are the <b>Research Atlas</b> (Runs → Atlas preview).</>}
       </div>
       {/* Per-tab purpose: the four tiers differ in who reads them back, which is the only difference
           an operator can act on. */}
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
         {MEMORY_TAB_PURPOSE[tab]}
       </div>
+      {tab !== 'knowledge' && selectedReceipt?.windowDigest && <div className="muted"
+        style={{ fontSize: 11, marginBottom: 10 }}>
+        Snapshot <code>{selectedReceipt.windowDigest.slice(0, 16)}</code>
+        {selectedReceipt.sourceRows != null && <> · {selectedReceipt.sourceRows} source rows</>}
+        {selectedReceipt.sourceSize != null && <> · {selectedReceipt.sourceSize} bytes total</>}
+      </div>}
       {tab === 'lessons' && <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
         Split by role (§role-split): the <b>Researcher</b> gets R&D / “what technique to try” lessons;
         the <b>Developer</b> gets only its own “what code change fixed a crash” lessons
@@ -2154,7 +2177,11 @@ export function MemoryPanel({ onClose }) {
             {l.delta != null && <span className={'chip xs' + (l.delta > 0 ? ' ok' : '')}>Δ{fmt(l.delta)}</span>}
             {l.confidence != null && <span className="muted" style={{ fontSize: 11 }}>conf {Math.round(l.confidence * 100)}%</span>}
             {l.evidence_count ? <span className="muted" style={{ fontSize: 11 }}>· {l.evidence_count} evidence</span> : null}
+            {l.evidence_traceable_count != null && <span className="muted" style={{ fontSize: 11 }}>
+              · {l.evidence_traceable_count}/{l.evidence_count || 0} sources traceable</span>}
+            {l.claim_stance && <span className="chip xs">stance {l.claim_stance}</span>}
             {l.task_id && <span className="muted" style={{ fontSize: 11 }}>· {l.task_id}</span>}
+            {l.run_id && <span className="muted" style={{ fontSize: 11 }}>· run {l.run_id}</span>}
             <ConceptChips row={l} selected={concept} onSelect={setConcept} />
           </div>
         </div>
@@ -2177,13 +2204,14 @@ export function MemoryPanel({ onClose }) {
       {tab === 'cases' && conceptBar('cases')}
       {tab === 'cases' && (() => {
         const result = applyConcept(mem.cases || [])
-        const rows = list => list.map((c, i) => <tr key={i}><td>{c.task_id}</td><td className="muted">{c.goal}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}
+        const rows = list => list.map((c, i) => <tr key={i}><td>{c.task_id}<div className="muted">{c.direction || 'direction unknown'}</div></td><td className="muted">{c.goal}{c.rationale && <div>{c.rationale}</div>}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}
           {c.params_truncated && <span title="Only a bounded parameter projection was returned"
             aria-label="parameters truncated"> · partial</span>}</td>
+          <td className="muted">{c.run_id || 'legacy / unknown'}</td>
           <td><div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
             <ConceptChips row={c} selected={concept} onSelect={setConcept} /></div></td></tr>)
         const table = list => <DataTable caption="Stored memory cases" card={false}><table className="tbl">
-          <thead><tr><th>task</th><th>goal</th><th>metric</th><th>params</th><th>concepts</th></tr></thead>
+          <thead><tr><th>task / objective</th><th>goal / rationale</th><th>metric</th><th>params</th><th>run</th><th>concepts</th></tr></thead>
           <tbody>{rows(list)}</tbody></table></DataTable>
         return <>
           {conceptOn && filterNotice(result, result.hidden === 1 ? 'case' : 'cases')}
@@ -2200,7 +2228,8 @@ export function MemoryPanel({ onClose }) {
       {tab === 'notes' && (() => {
         const result = applyConcept(mem.notes || [])
         const card = (n, key) => <div key={key} className="mem-card">
-          {n.task_id && <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>{n.task_id}</div>}
+          {(n.task_id || n.run_id || n.at) && <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>
+            {[n.task_id, n.run_id && `run ${n.run_id}`, n.at].filter(Boolean).join(' · ')}</div>}
           <Markdown text={n.note || n.statement || JSON.stringify(n)} />
           <div className="mem-meta" style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             <ConceptChips row={n} selected={concept} onSelect={setConcept} /></div>

@@ -9,16 +9,19 @@ import hashlib
 import json
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
+from looplab.core.atomicio import atomic_write_text
+from looplab.core.memory_window import read_memory_jsonl_window
 from looplab.core.redact import redact_persisted_text
 from looplab.core import _pathsafe
-from looplab.events.eventstore import read_jsonl_lenient
 from looplab.tools._base import fn_spec
 from looplab.tools.perm_modes import (
     DEFAULT_MODE, authorize, default_approver)
 from looplab.tools.retrieval import glob_files, grep, read_file
 from looplab.tools.vectorstore import InMemoryVectorStore, Item, cosine, hash_embed
+from looplab.trust.cross_run import LessonScope
 
 
 def _abstraction_of(payload: dict):
@@ -239,10 +242,17 @@ class KnowledgeWriteTools:
             # content-hash id: re-saving the same note overwrites (idempotent) instead of piling duplicates.
             sid = hashlib.sha1((title + "\n" + note).encode("utf-8")).hexdigest()[:8]
             path = self.dir / f"{slug}-{sid}.md"
-            body = f"# {title}\n\n{note}\n"
+            body = ("---\n"
+                    "v: 1\n"
+                    "actor: owner-assistant\n"
+                    "surface: remember\n"
+                    f"created_at: {datetime.now(timezone.utc).isoformat()}\n"
+                    "source_refs: unknown\n"
+                    "---\n\n"
+                    f"# {title}\n\n{note}\n")
             if tags:
                 body += "\n_tags: " + ", ".join(tags) + "_\n"
-            path.write_text(body, encoding="utf-8")
+            atomic_write_text(path, body)
             return (f"saved to the knowledge base as {path.name} — future runs will find it via "
                     f"kb_search (KB: {self.dir}).")
         except Exception as e:  # noqa: BLE001 - a full/read-only KB disk must not kill the whole turn
@@ -265,27 +275,67 @@ class KnowledgeTools:
         self.abstract = abstract
         self.expand = expand
         self.consolidate_threshold = consolidate_threshold
+        self._scope = LessonScope()
         self._index = InMemoryVectorStore()
+        self._index_revision = ""
+        self._case_window_health = None
         self._build_index()
+
+    def bind_state(self, state, parent=None) -> None:
+        """Bind case retrieval to the same live scope as lessons and cross-run tools.
+
+        Knowledge Markdown remains operator-authored portfolio knowledge.  Cases are run-authored
+        outcome memory and must be authorized/scoped *before* embedding or Memora consolidation;
+        filtering after a lossy merge cannot recover a compatible member that was discarded.
+        """
+        next_scope = LessonScope.of(state)
+        current = (self._scope.bound, self._scope.run_uid, self._scope.run_id,
+                   self._scope.task_id, self._scope.direction, self._scope.goal_terms)
+        updated = (next_scope.bound, next_scope.run_uid, next_scope.run_id,
+                   next_scope.task_id, next_scope.direction, next_scope.goal_terms)
+        self._scope = next_scope
+        if current != updated:
+            self._build_index()
+
+    def _source_revision(self) -> str:
+        """Stable identity of the files feeding the in-memory index; unavailable files stay explicit."""
+        identities: list[tuple[str, int, int]] = []
+        paths = [Path(p) for p in glob_files("*.md", str(self.dir))] if self.dir else []
+        if self.cases_path:
+            paths.append(self.cases_path)
+        for path in sorted(set(paths), key=lambda item: str(item)):
+            try:
+                stat = path.stat()
+                identities.append((str(path), int(stat.st_size), int(stat.st_mtime_ns)))
+            except OSError:
+                identities.append((str(path), -1, -1))
+        return hashlib.sha256(
+            json.dumps(identities, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
 
     def _records(self):
         """(id, index_source, payload) triples for every note + case, before embedding — so the raw
         vs. harmonic build paths share one collection pass."""
         recs = []
+        self._case_window_health = None
         if self.dir:
             for p in glob_files("*.md", str(self.dir)):
                 text = read_file(p)
                 recs.append((p, Path(p).name + " " + text, {"path": p, "text": text}))
         # Cross-run memory (I19): past best solutions become searchable knowledge.
-        if self.cases_path and self.cases_path.exists():
+        if self.cases_path:
             from looplab.engine.memory import valid_case_record
 
-            # keep_bad=True: `i` is the RAW line number — the stable "case:<i>" record id.
-            for i, c in enumerate(read_jsonl_lenient(self.cases_path, loads=json.loads,
-                                                     keep_bad=True)):
+            case_rows, self._case_window_health = read_memory_jsonl_window(self.cases_path)
+            for i, c in case_rows:
                 # valid JSON is not necessarily a valid case. Apply the writer/search schema
                 # fence here too so a poisoned goal/params/metric cannot crash or enter agent retrieval.
                 if c is None or not valid_case_record(c):
+                    self._case_window_health["skipped"] += 1
+                    continue
+                if c.get("active") is False:
+                    continue
+                if not self._scope.allows(c):
                     continue
                 goal = c.get("goal") if isinstance(c.get("goal"), str) else ""
                 rationale = c.get("rationale") if isinstance(c.get("rationale"), str) else ""
@@ -295,19 +345,23 @@ class KnowledgeTools:
                 # it raw therefore shipped whatever a past solution happened to put in its params
                 # (credentials, injected instructions, unbounded blobs) across that boundary. Route it
                 # through the same always-on persisted-boundary sanitizer the memo/trace writers use.
-                # KNOWN GAP (deeper, tracked separately): retrieval still drops objective DIRECTION and
-                # metric identity, so identical goals with opposite min/max objectives rank as equal
-                # semantic hits. Closing that needs the provider bound to the live run, which this
-                # class has no `bind_state` for yet.
+                # Preserve objective identity in both the scope gate and rendered evidence.  This
+                # prevents identical goals with opposite min/max objectives from becoming equivalent
+                # semantic hits after consolidation.
                 params = redact_persisted_text(c.get("params"), max_chars=2000, single_line=True)
-                text = (f"PAST CASE — task {c.get('task_id')}: {goal}\n"
+                text = (f"PAST CASE — task {c.get('task_id')}; objective={c.get('direction')}: {goal}\n"
                         f"best params={params} metric={c.get('metric')}\n"
                         f"{rationale}")
                 recs.append((f"case:{i}", goal + " " + text,
-                             {"path": f"case:{c.get('task_id')}", "text": text}))
+                             {"path": f"case:{c.get('task_id')}", "text": text,
+                              "source_kind": "case", "task_id": c.get("task_id"),
+                              "direction": c.get("direction"), "run_id": c.get("run_id"),
+                              "run_uid": c.get("run_uid"), "member_ids": [f"case:{i}"]}))
         return recs
 
     def _build_index(self) -> None:
+        self._index = InMemoryVectorStore()
+        self._index_revision = self._source_revision()
         recs = self._records()
         if not recs:
             return
@@ -324,6 +378,15 @@ class KnowledgeTools:
             vec = self.embed(ab.index_text())
             merged = False
             for it in kept:
+                # Scope/authorization has already run.  Keep unlike source/semantic partitions
+                # separate anyway: a richer operator note must never replace a case, and two task
+                # contracts must not collapse merely because their prose is similar.
+                partition = (pl.get("source_kind", "knowledge"), pl.get("direction"),
+                             pl.get("task_id"))
+                prior_partition = (it.payload.get("source_kind", "knowledge"),
+                                   it.payload.get("direction"), it.payload.get("task_id"))
+                if partition != prior_partition:
+                    continue
                 if cosine(vec, it.vector) >= self.consolidate_threshold:
                     prev = _abstraction_of(it.payload)
                     m = prev.merge(ab)
@@ -333,6 +396,11 @@ class KnowledgeTools:
                     it.payload["abstraction"] = m.primary
                     it.payload["anchors"] = list(m.anchors)
                     it.payload["merged"] = int(it.payload.get("merged", 1)) + 1
+                    members = list(it.payload.get("member_ids") or [it.id])
+                    for member in pl.get("member_ids") or [rid]:
+                        if member not in members:
+                            members.append(member)
+                    it.payload["member_ids"] = members
                     it.vector = self.embed(m.index_text())
                     merged = True
                     break
@@ -357,6 +425,9 @@ class KnowledgeTools:
     def execute(self, name: str, args: dict) -> str:
         try:
             if name == "kb_search":
+                revision = self._source_revision()
+                if revision != self._index_revision:
+                    self._build_index()
                 q = args.get("query", "")
                 # Embed the query in the SAME space as the index. When a HARMONIC (abstraction-keyed)
                 # index is in use (self.abstract set — _build_index keys each entry by
@@ -366,7 +437,10 @@ class KnowledgeTools:
                 qvec = (self.embed(self.abstract(q).index_text())
                         if self.abstract is not None else self.embed(q))
                 hits = self._index.search("kb", qvec, self.k)
-                out = [f"{Path(h.payload['path']).name}:\n{h.payload['text'][:600]}" for h in hits]
+                out = [f"{Path(h.payload['path']).name}"
+                       + (f" [members={','.join(h.payload.get('member_ids') or [h.id])}]"
+                          if h.payload.get("member_ids") else "")
+                       + f":\n{h.payload['text'][:600]}" for h in hits]
                 # Anchor-expansion (Memora): follow the top hits' cue anchors to related-but-not-
                 # similar notes the plain query missed. No-op on a legacy (no-anchor) index.
                 if self.expand and self.abstract is not None:
@@ -374,7 +448,17 @@ class KnowledgeTools:
                     for h in expand_by_anchors(self._index, "kb", hits, self.embed, k=self.k):
                         out.append(f"[related via anchors] {Path(h.payload['path']).name}:\n"
                                    f"{h.payload['text'][:600]}")
-                return "\n---\n".join(out) or "(no notes)"
+                mode = ("hash" if self.embed is hash_embed else "semantic")
+                header = (f"[KB_INDEX: revision={self._index_revision[:16]}; mode={mode}; "
+                          f"scope={'run' if self._scope.bound else 'portfolio'}]")
+                if self._case_window_health is not None:
+                    health = self._case_window_health
+                    header += (f"\n[CASE_SOURCE_SNAPSHOT: sha256={health['window_digest']}; "
+                               f"rows={health['source_rows']}; "
+                               f"truncated={'true' if health['source_window_truncated'] else 'false'}; "
+                               f"skipped={health['skipped']}; "
+                               f"unavailable={'true' if health['unavailable'] else 'false'}.]")
+                return header + "\n" + ("\n---\n".join(out) or "(no notes in this index scope)")
             if name == "grep":
                 if not self.dir:
                     return "(no notes directory)"

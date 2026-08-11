@@ -403,10 +403,12 @@ def test_midrun_refresh_picks_up_concurrent_runs_lessons(tmp_path):
     # a CONCURRENT run (different run_id) appends to the shared store mid-flight...
     fp = task_fingerprint("quadratic", "min", eng.task.goal, param_names=["x", "y"])
     _seed_lessons(mem, [
-        {"task_id": eng.task.id, "fingerprint": fp, "kind": "quadratic", "run_id": "other_run",
+            {"task_id": eng.task.id, "fingerprint": fp, "kind": "quadratic", "run_id": "other_run",
+             "direction": "min",
          "statement": "a coarse-to-fine step schedule converges faster", "outcome": "supported",
          "delta": 0.3, "confidence": 0.7, "source": "comparative"},
-        {"task_id": eng.task.id, "fingerprint": fp, "kind": "quadratic", "run_id": "run_me",
+            {"task_id": eng.task.id, "fingerprint": fp, "kind": "quadratic", "run_id": "run_me",
+             "direction": "min",
          "statement": "my own echo must not come back", "outcome": "supported",
          "delta": 0.1, "confidence": 0.7, "source": "comparative"},
     ])
@@ -644,7 +646,7 @@ def test_an_unreadable_shared_store_does_not_crash_loop_the_run_at_startup(tmp_p
     _seed_lessons(mem, [{"task_id": eng.task.id, "statement": "unreachable", "run_id": "other"}])
     # The stamp is taken (and committed) BEFORE the read, so it is the value the first refresh
     # cadence would compare against — it must NOT survive a failed load.
-    monkeypatch.setattr("looplab.engine.lessons_priors.read_jsonl_lenient",
+    monkeypatch.setattr("looplab.engine.lessons_priors.read_memory_jsonl_window",
                         lambda *a, **kw: (_ for _ in ()).throw(OSError(13, "Permission denied")))
 
     eng._reentry_repin()                                    # was: OSError out of run() setup

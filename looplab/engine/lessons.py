@@ -239,6 +239,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             return fold(self._e.store.read_all())
         before = (self.prior_note_text, self.dev_prior_note_text)
         rid = state.run_id or None
+        ruid = state.run_uid or None
         # BEST-EFFORT, like every sibling advisory path here — priors are a hint, never a
         # correctness input. `_load_reflection_priors_both` reads the shared store through
         # `read_jsonl_lenient`, which RAISES OSError on an unreadable lessons.jsonl/meta_notes.jsonl
@@ -252,7 +253,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         # unchanged. `chars` sums both priors so the size delta is likewise visible for either role.
         try:
             self.prior_note_text, self.dev_prior_note_text = \
-                self._e._load_reflection_priors_both(exclude_run_id=rid)
+                self._e._load_reflection_priors_both(
+                    exclude_run_id=rid, exclude_run_uid=ruid)
         except (OSError, ValueError) as e:  # noqa: BLE001 - an advisory refresh cannot fail the run
             # The stamp is NOT advanced: the next cadence retries the same (still-changed) store
             # instead of treating an unread store as read. The skip is disclosed, not silent.
@@ -373,6 +375,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             "task_id": final.task_id,
             "goal": final.goal,
             "direction": final.direction,
+            "fingerprint": self.task_fingerprint(final, best),
             "params": best.idea.params,
             "metric": best.robust_metric,
             "rationale": best.idea.rationale,
@@ -382,6 +385,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             # `run_id` is what makes a case joinable AT ALL — a case is the one memory tier whose
             # historical rows carry no run reference, so run-level inheritance could never reach them.
             "run_id": final.run_id or "",
+            "run_uid": getattr(final, "run_uid", "") or "",
             # The WINNER's concepts, not the run's: a case IS the winning configuration, so recording
             # everything the run touched would over-claim exactly the way `state_concepts` refuses to.
             "concepts": state_concepts(final, [best.id]),
@@ -389,7 +393,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         # An empty value is dropped rather than persisted: absence is the wire shape the shelf reads as
         # "not tagged", and `""`/`[]` would pin the row as durably-untagged and block the run fallback.
         lib.add({key: value for key, value in case.items()
-                 if value or key not in ("run_id", "concepts")})
+                 if value or key not in ("run_id", "run_uid", "concepts")})
 
     def store_concept_capsule(self, final: RunState) -> None:
         """PART IV cross-run Step 2 (§21.20): persist this run's CONCEPT capsule to the shared
@@ -484,7 +488,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
                 and (not classifier_observed or evidence_nodes_total == 0))
             best = final.best()
             capsule = build_concept_capsule(
-                run_id=run_id, task_id=final.task_id, direction=direction,
+                run_id=run_id, run_uid=getattr(final, "run_uid", ""),
+                task_id=final.task_id, direction=direction,
                 concepts=concepts, fingerprint=self.task_fingerprint(final, best),
                 best_metric=(best.robust_metric if best is not None else None),
                 concept_outcomes=outcomes,
@@ -507,7 +512,10 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             # That supersede row is deliberately `observed=true` with empty collections — the
             # SAME-RUN TOMBSTONE `build_concept_capsule` documents (engine/memory.py): this run really
             # does carry no concepts now, and readers must retire the old ones rather than keep them.
-            if not any(c.get("run_id") == run_id for c in capsule_store.all()):
+            run_uid = getattr(final, "run_uid", "")
+            if not any(
+                    (c.get("run_uid") == run_uid if run_uid else c.get("run_id") == run_id)
+                    for c in capsule_store.all()):
                 return
         # `add` returns False WITHOUT raising when the row fails validation (an empty run_id, a
         # concepts/outcomes key-set mismatch). Discarding it dropped the capsule forever while
@@ -630,6 +638,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             return
         from looplab.engine.claims import record_research_claims
         record_research_claims(self._e.memory_dir, run_id=final.run_id or final.task_id,
+                               run_uid=getattr(final, "run_uid", ""),
                                task_id=final.task_id, claims=claims,
                                direction=final.direction, claims_total=claims_total,
                                claims_receipt_known=claims_receipt_known,

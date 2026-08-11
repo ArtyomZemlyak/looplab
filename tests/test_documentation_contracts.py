@@ -41,7 +41,7 @@ def test_index_mentions_every_numbered_document():
     index = (DOCS / "00-INDEX.md").read_text(encoding="utf-8")
     numbered = sorted(path for path in DOCS.glob("[0-9][0-9]-*.md")
                       if path.name != "00-INDEX.md")
-    assert len(numbered) == 27, "the derived numbered-document inventory changed"
+    assert len(numbered) == 28, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index

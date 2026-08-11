@@ -136,6 +136,14 @@ export function ClaimCard({ claim, compact = false }) {
   ]
   const epistemicCopy = EPISTEMIC_COPY[claim.epistemic] || EPISTEMIC_COPY.inconclusive
   const decisionWarning = claim.maturity !== 'machine-proposed' && claim.decisionFresh !== true
+  const safeSource = value => {
+    try {
+      if (typeof value !== 'string' || value.length > 2_000) return ''
+      const url = new URL(value)
+      return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password
+        ? url.href : ''
+    } catch { return '' }
+  }
   return <article className={`atlas-claim atlas-state-${claim.epistemic}`}>
     <div className="atlas-claim-head">
       <span className={`chip xs atlas-epistemic ${claim.epistemic}`}>
@@ -147,6 +155,17 @@ export function ClaimCard({ claim, compact = false }) {
       </span>
     </div>
     <p>{claim.statement}</p>
+    {(claim.metric || claim.polarity != null) && <div className="muted">
+      {claim.metric && <>metric · {claim.metric}</>}
+      {claim.metric && claim.polarity != null && <> · </>}
+      {claim.polarity != null && <>polarity · {claim.polarity > 0 ? 'supporting' : 'opposing'}</>}
+    </div>}
+    {claim.decision && <div className="muted">
+      Decision {claim.decision.action}
+      {claim.decision.by && <> by {claim.decision.by}</>}
+      {claim.decision.at && <> at {claim.decision.at}</>}
+      {claim.decision.note && <> · {claim.decision.note}</>}
+    </div>}
     <div className="atlas-claim-counts" aria-label="Claim evidence counts">
       {groups.map(([kind, , total], index) => (index < 2 || total > 0)
         && <span key={kind}>{kind}{kind === 'contradiction' ? 's' : ' refs'} <b>{total}</b></span>)}
@@ -168,6 +187,17 @@ export function ClaimCard({ claim, compact = false }) {
         {hiddenEvidence > 0 && <span className="atlas-evidence-boundary">
           {countLabel(hiddenEvidence, 'additional reference')} not shown (claim limit).
         </span>}
+      </div>
+    </details>}
+    {!compact && (claim.sources.length > 0 || claim.verification.length > 0) && <details>
+      <summary>Sources and verification</summary>
+      <div className="atlas-evidence">
+        {claim.sources.map((value, index) => safeSource(value)
+          ? <a key={`source-${index}`} href={safeSource(value)} target="_blank" rel="noreferrer">{value}</a>
+          : <code key={`source-${index}`}>{value}</code>)}
+        {claim.verification.map((value, index) => <code key={`verification-${index}`}>
+          verification · {value}</code>)}
+        {claim.evidenceDigest && <code>evidence digest · {claim.evidenceDigest}</code>}
       </div>
     </details>}
   </article>
@@ -385,7 +415,7 @@ export default function ResearchAtlas({ onBack }) {
                 claims are a projection over the same lessons the Memory panel lists plus the
                 deep-research memo claims — so an operator who reads a claim and then cannot find it
                 in Memory is not looking at a bug. */}
-            <p>Rolled up across <b>every</b> run in the shared memory dir, where Lab → Memory shows the
+            <p>Rolled up across the <b>retained, readable run rows</b> in the shared memory dir, where Lab → Memory shows the
               stores themselves. <b>Concepts</b> are the per-run capsules of what was tried;{' '}
               <b>claims</b> are a derived view that groups the same lessons by statement and records
               what supports and what opposes each one.</p>

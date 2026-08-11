@@ -74,13 +74,78 @@ def _accumulated_evidence(rows_newest_last: list[dict], base: dict) -> int:
         if o.get("outcome") != base.get("outcome"):
             continue
         ev = int(o.get("evidence_count", 1) or 1)
-        rid = o.get("run_id")
+        rid = o.get("run_uid") or o.get("run_id")
         if rid is not None and rid in seen_runs and ev == 1:
             continue
         total += ev
         if rid is not None:
             seen_runs.add(rid)
     return total
+
+
+_EVIDENCE_ATTEMPT = re.compile(r"\Av[0-9]+:a=(\d{1,9}):")
+_MAX_EVIDENCE_REFS = 64
+
+
+def _evidence_lineage(rows_newest_last: list[dict], base: dict,
+                      evidence_count: int) -> tuple[list[dict], int, int]:
+    """Preserve bounded node/run lineage for agreeing members of a consolidated lesson.
+
+    Older rows have only local node ids; pairing them with their durable run identity makes those ids
+    globally meaningful. Already-consolidated refs are carried forward. Counts explicitly disclose
+    support whose lineage predates this field or was omitted by the bound.
+    """
+    refs: list[dict] = []
+    seen: set[tuple] = set()
+    traceable_sources: set[str] = set()
+    for row in rows_newest_last:
+        if row.get("outcome") != base.get("outcome"):
+            continue
+        run_uid = str(row.get("run_uid") or "")
+        run_id = str(row.get("run_id") or "")
+        source_id = run_uid or run_id
+        inherited = row.get("evidence_refs")
+        candidates = inherited if isinstance(inherited, list) else []
+        if not candidates:
+            signatures = row.get("evidence_sig") if isinstance(row.get("evidence_sig"), dict) else {}
+            candidates = []
+            for node_id in row.get("evidence") or []:
+                if isinstance(node_id, bool) or not isinstance(node_id, int) or node_id < 0:
+                    continue
+                ref = {"node_id": node_id}
+                match = _EVIDENCE_ATTEMPT.match(str(signatures.get(str(node_id), "")))
+                if match is not None:
+                    ref["generation"] = int(match.group(1))
+                candidates.append(ref)
+        for raw in candidates:
+            if not isinstance(raw, dict):
+                continue
+            node_id = raw.get("node_id")
+            if isinstance(node_id, bool) or not isinstance(node_id, int) or node_id < 0:
+                continue
+            ref_uid = str(raw.get("run_uid") or run_uid)
+            ref_rid = str(raw.get("run_id") or run_id)
+            identity = ref_uid or ref_rid
+            if not identity:
+                continue
+            generation = raw.get("generation")
+            key = (ref_uid, ref_rid, node_id,
+                   generation if isinstance(generation, int) and not isinstance(generation, bool) else None)
+            if key in seen:
+                continue
+            seen.add(key)
+            traceable_sources.add(identity)
+            if len(refs) < _MAX_EVIDENCE_REFS:
+                ref = {"node_id": node_id, "run_id": ref_rid}
+                if ref_uid:
+                    ref["run_uid"] = ref_uid
+                if key[-1] is not None:
+                    ref["generation"] = key[-1]
+                refs.append(ref)
+        if source_id and candidates:
+            traceable_sources.add(source_id)
+    traceable = min(evidence_count, len(traceable_sources))
+    return refs, traceable, max(0, evidence_count - traceable)
 
 def normalize_statement(s: str) -> str:
     """Identity of a lesson claim: collapsed whitespace, lowercased, capped."""
@@ -158,6 +223,10 @@ def consolidate_lessons(lessons: list[dict], *, client=None, embed=None,
         # only, fresh same-run rows deduped). The paraphrase pass below applies the SAME function, so
         # the two passes cannot drift the way they had.
         merged["evidence_count"] = _accumulated_evidence(grp, newest)
+        refs, traceable, omitted = _evidence_lineage(grp, newest, merged["evidence_count"])
+        merged["evidence_refs"] = refs
+        merged["evidence_traceable_count"] = traceable
+        merged["evidence_untraceable_count"] = omitted
         out.append(merged)
     if client is None or len(out) < 2:
         return out
@@ -196,7 +265,13 @@ def _agentic_merge_lessons(rows: list[dict], *, client, embed=None,
                     # Same accounting rule as the exact pass — `_accumulated_evidence`, not a raw sum.
                     # The raw sum double-counted a run whose two WORDINGS of one finding the exact key
                     # missed and the agent merged, which is the population this pass exists for.
-                    row["evidence_count"] = _accumulated_evidence([rows[m] for m in members], base)
+                    member_rows = [rows[m] for m in members]
+                    row["evidence_count"] = _accumulated_evidence(member_rows, base)
+                    refs, traceable, omitted = _evidence_lineage(
+                        member_rows, base, row["evidence_count"])
+                    row["evidence_refs"] = refs
+                    row["evidence_traceable_count"] = traceable
+                    row["evidence_untraceable_count"] = omitted
                 keep.append((min(members), row))
         keep.sort(key=lambda t: t[0])
         return [row for _i, row in keep]

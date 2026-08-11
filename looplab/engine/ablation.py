@@ -203,7 +203,7 @@ class AblationMixin:
         # consumer, so skipping it here would silently drop the directive for every ablation child).
         self._reset_developer_footprint(self.developer)
         code = self._implement(
-            self._directed_idea(idea.model_copy(deep=True), state), parent)
+            self._directed_idea(idea.model_copy(deep=True), state), parent, state=state)
         idea, footprint_finalized = self._finalize_developer_footprint(
             idea, self.developer, code)
         if not self._ablation_parent_current(parent_id, generation):

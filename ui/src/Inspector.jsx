@@ -900,7 +900,8 @@ function DerivedMemory({ n, state, runId }) {
   const store = ['ready', 'stale'].includes(storeResource.status) ? storeResource.data : null
   const rows = useMemo(() => nodeLessons(state, n.id, n.attempt, store),
     [state?.lessons_distilled, n.id, n.attempt, store])
-  const live = useMemo(() => liveLessonsForNode(store, n.id, n.attempt), [store, n.id, n.attempt])
+  const live = useMemo(
+    () => liveLessonsForNode(store, n.id, n.attempt, runId), [store, n.id, n.attempt, runId])
   if (!history.length && !live.length) return null
   return <>
     {live.length > 0 && <>

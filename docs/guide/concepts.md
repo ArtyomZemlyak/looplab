@@ -811,7 +811,7 @@ paid identities.
 
 Cross-run memory is **on by default** — `memory_dir` / `knowledge_dir` default to
 `~/.looplab/memory` and `~/.looplab/knowledge` (set `LOOPLAB_MEMORY_DIR=""` to disable). The best
-result of each run is retained as a **case** (retain-on-improvement); at run end `reflection_priors`
+result of each run is retained as a source contribution to a direction-scoped **case** champion; at run end `reflection_priors`
 (also on by default) distills a causal **meta-note** ("why the winner won"), generalizable
 **lessons** (good *and* bad, with a verdict + evidence count), and reusable **skills** — all stamped
 with a task fingerprint and matched into the next similar run's proposal prompt. Duplicate lessons

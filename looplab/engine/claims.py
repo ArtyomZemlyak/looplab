@@ -558,7 +558,7 @@ def load_claim_decisions(memory_dir) -> dict:
 # --------------------------------------------------------------------------- #
 
 def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
-                           direction: str, claims_total: Optional[int] = None,
+                           direction: str, run_uid: str = "", claims_total: Optional[int] = None,
                            claims_receipt_known: Optional[bool] = None,
                            evidence_complete: Optional[bool] = None) -> int:
     """Replace one run's v3 D8 claims in ``research_claims.jsonl`` under the required store lock.
@@ -575,6 +575,7 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
     if not memory_dir:
         return 0
     rid = _identity_text(run_id, 500)
+    ruid = _identity_text(run_uid, 500)
     if not rid:
         return 0
     rows = []
@@ -615,6 +616,8 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
                "node_ids": node_ids,
                "urls": urls,
                "verification": {"verdict": verdict, "method": method, "note": note}}
+        if ruid:
+            row["run_uid"] = ruid
         raw_refs = c.get("node_refs")
         if _valid_research_node_refs(raw_refs, node_ids) and raw_refs is not None:
             row["node_refs"] = [
@@ -660,6 +663,7 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
             "v": _RESEARCH_CLAIM_VERSION,
             "record_kind": "source_receipt",
             "run_id": rid,
+            **({"run_uid": ruid} if ruid else {}),
             "task_id": _identity_text(task_id, 500),
             "direction": direction,
             "source_receipt": receipt,
@@ -686,7 +690,11 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
             # re-finalized keeps its claims — they are the latest for THAT run, not superseded.
             replace_if=lambda row: (
                 _valid_claim_source_row(row, research=True)
-                and _identity_text(row.get("run_id"), _MAX_SOURCE_ID) == rid
+                and (
+                    (_identity_text(row.get("run_uid"), _MAX_SOURCE_ID) == ruid if ruid
+                     else (not row.get("run_uid")
+                           and _identity_text(row.get("run_id"), _MAX_SOURCE_ID) == rid))
+                )
             ),
             loads=json.loads,
             dumps=json.dumps,

@@ -1022,6 +1022,7 @@ class NoveltyGateMixin:
             caps = [(s, c) for s, c in store.prior_capsules(
                         fp, min_sim=self._CROSS_RUN_MIN_SIM,
                         exclude_run_id=getattr(state, "run_id", "") or "",
+                        exclude_run_uid=getattr(state, "run_uid", "") or "",
                         task_id=getattr(state, "task_id", "") or "")
                     if str(c.get("direction") or "min") == my_dir]
             aliases = load_concept_aliases(self.memory_dir)

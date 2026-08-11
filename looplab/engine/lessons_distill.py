@@ -15,6 +15,7 @@ engine.memory, events, core and stdlib/orjson (the agent/tool deps stay lazy, me
 imports)."""
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Optional
 
@@ -41,17 +42,33 @@ class LessonDistillMixin:
         # Run-end reflection re-spends LLM calls and appends to cross-run memory, so it must not run
         # redundantly. But a REOPENED run (EV_RESUME + EV_BUDGET_EXTEND) that added nodes and found a
         # BETTER winner MUST re-reflect — else cross-run memory keeps the stale first-finalize conclusion
-        # forever (the extension's winner/hypotheses never distilled). So gate on NODE COUNT, not mere
-        # presence: skip only when a prior reflection already covered at least this many nodes (a plain
-        # re-finalize with nothing new). A grown re-reflection re-appends the run's lessons, but that no
+        # forever (the extension's winner/hypotheses never distilled). Gate on a materialized lifecycle
+        coverage_rows = [{
+            "id": node.id, "attempt": node.attempt, "status": str(node.status),
+            "tombstoned": bool(node.tombstoned),
+            "aborted": node.id in set(getattr(final, "aborted_nodes", None) or []),
+            "metric": node.metric, "robust_metric": node.robust_metric,
+            "operator": node.operator, "params": node.idea.params,
+            "code": hashlib.sha256((node.code or "").encode("utf-8")).hexdigest(),
+        } for node in sorted(final.nodes.values(), key=lambda item: item.id)]
+        coverage_digest = hashlib.sha256(orjson.dumps(
+            coverage_rows, option=orjson.OPT_SORT_KEYS)).hexdigest()
+        # presence: skip only when a prior reflection covered this exact materialized node lifecycle.
+        # digest (a true re-finalize with nothing new skips). A changed re-reflection re-appends the
+        # run's lessons, but that no
         # longer inflates `evidence_count` — `consolidate_lessons` now counts DISTINCT run_ids, so a run
         # re-appending its own lesson still counts once. `reflection_note` (a diagnostic sidecar the fold
-        # ignores) carries `at_nodes`; the highest prior value is the coverage watermark.
+        # ignores) carries `coverage_digest`; `at_nodes` remains the legacy coverage watermark.
         _reflection_notes = [e.data for e in self._e.store.read_all()
                              if e.type == EV_REFLECTION_NOTE]
+        if any(d.get("coverage_digest") == coverage_digest for d in _reflection_notes):
+            return
         _reflected_at = [parsed for d in _reflection_notes
                          if (parsed := safe_lesson_node_count(d.get("at_nodes"))) is not None]
-        if _reflected_at and len(final.nodes) <= max(_reflected_at):
+        # Legacy markers have only a count. Preserve their old skip rule until the first digest-bearing
+        # reflection; after that, equal node counts cannot hide reset/replay material changes.
+        if (not any(d.get("coverage_digest") for d in _reflection_notes)
+                and _reflected_at and len(final.nodes) <= max(_reflected_at)):
             return
         # Crash-idempotency (#3): finalization is RETRIED after a crash. If this EXACT finish already
         # committed a reflection marker, re-running would re-spend the reflection LLM (and, below, risk
@@ -65,6 +82,10 @@ class LessonDistillMixin:
         if _has_finish_seq and any(d.get("finish_seq") == finish_seq for d in _reflection_notes):
             return
         best = final.best()
+        # The same scope passport is persisted on notes and lessons.  Bound agent readers fail closed
+        # on missing direction/fingerprint provenance; computing it before the note write prevents the
+        # passive and explicit paths from seeing different universes of the same reflection.
+        fp = self._e._task_fingerprint(final, best)
         base = Path(self._e.memory_dir)
         base.mkdir(parents=True, exist_ok=True)
         note = ""            # the causal "why the winner won" summary (set below when there's a winner)
@@ -82,10 +103,11 @@ class LessonDistillMixin:
             # would, on the finalization retry, blindly append a SECOND identical note (polluting a
             # later run's warm-start prior + wasting the LLM call). The file itself is the durable
             # de-dup record, so it closes the crash window the event-log marker cannot (the marker isn't
-            # written yet on that crash). De-dup key is (run_id, finish_seq): meta_notes.jsonl is a
+            # written yet on that crash). Modern de-dup key is (run_uid, finish_seq), with
+            # (run_id, finish_seq) retained only for legacy rows: meta_notes.jsonl is a
             # CROSS-RUN file and finish_seq is only a per-run event-log sequence, so two different runs
-            # can share one — run_id makes the key unique to THIS run's finish. A real reopen has a NEW
-            # finish_seq, so its updated note still appends (gated by the node-count watermark above);
+            # can share one — run_uid makes the key unique to THIS run incarnation. A real reopen has a NEW
+            # finish_seq, so its updated note still appends (gated by the lifecycle digest above);
             # only a crash-retry of the SAME finish is skipped. Legacy/off-finalize-path notes (no
             # finish_seq, or -1) fall through to the historical blind append.
             npath = base / "meta_notes.jsonl"
@@ -93,19 +115,29 @@ class LessonDistillMixin:
             # otherwise both observe absence and append the same note, while a crash-torn last line
             # can swallow the next valid record for every line-oriented reader.
             with _interprocess_lock(Path(str(npath) + ".lock")):
+                run_uid = getattr(final, "run_uid", "")
                 _dup = _has_finish_seq and any(
-                    o.get("run_id") == final.run_id and o.get("finish_seq") == finish_seq
+                    o.get("finish_seq") == finish_seq and (
+                        o.get("run_uid") == run_uid if run_uid
+                        else (not o.get("run_uid") and o.get("run_id") == final.run_id))
                     for o in read_jsonl_lenient(npath))
                 if not _dup:
-                    rec = {"task_id": final.task_id, "note": note}
+                    rec = {
+                        "task_id": final.task_id,
+                        "note": note,
+                        "direction": final.direction,
+                        "fingerprint": fp,
+                        "run_id": final.run_id,
+                    }
+                    if run_uid:
+                        rec["run_uid"] = run_uid
                     if _has_finish_seq:
-                        rec["run_id"] = final.run_id
                         rec["finish_seq"] = finish_seq
                     # Concept shelf, additive + reader-defaulted (invariant 5). Run-WIDE on purpose,
                     # unlike a lesson's or a case's: a meta-note summarizes the whole run ("what won,
                     # and why"), so the run's whole concept set is the honest scope of the claim.
                     # Dropped when empty — absence is what the reader treats as untagged, and it keeps
-                    # the de-dup key (run_id, finish_seq) and the legacy row shape untouched.
+                    # the de-dup key (run_uid, finish_seq), while keeping legacy rows readable.
                     from looplab.engine.concept_shelf import state_concepts
                     if (concepts := state_concepts(final)):
                         rec["concepts"] = concepts
@@ -115,7 +147,6 @@ class LessonDistillMixin:
         # valuable as what did (DS-Agent / MARS / ML-Master): it stops a later run re-treading a dead
         # end. Sources: the winner, each resolved hypothesis (the P1 ledger gives negative results for
         # free), and the dominant failure reason.
-        fp = self._e._task_fingerprint(final, best)
         lessons: list[dict] = []
         # A lesson should be a GENERALIZABLE finding (DS-Agent / MARS reflective memory), not the raw
         # winning config (that's the case) — so instead of a templated "op X params Y reached Z" line we
@@ -175,6 +206,7 @@ class LessonDistillMixin:
             "task_id": final.task_id, "fingerprint": fp, "note": note,
             "finish_seq": finish_seq,          # #3: crash-idempotency key for a finalization retry
             "at_nodes": len(final.nodes),      # coverage watermark: re-reflect only if a reopen grows past it
+            "coverage_digest": coverage_digest,
             "n_lessons": len(lessons), "n_skills": len(skills),
             "lessons": [{"statement": lz.get("statement", ""), "outcome": lz.get("outcome", ""),
                          "claim_stance": lz.get("claim_stance")}
@@ -226,7 +258,7 @@ class LessonDistillMixin:
             # fingerprint-keyed store still captures this run for retrieval + consolidation.
             if best is None:
                 return []
-            return [{"task_id": final.task_id, "fingerprint": fp, "kind": getattr(self._e.task, "kind", ""),
+            lesson = {"task_id": final.task_id, "fingerprint": fp, "kind": getattr(self._e.task, "kind", ""),
                      "statement": (f"op '{best.operator}' with params {best.idea.params} "
                                    f"reached {best.metric:.4g}"),
                      "outcome": "supported", "claim_stance": "support",
@@ -238,7 +270,10 @@ class LessonDistillMixin:
                      # cases worked and lessons did not). Same field, same meaning as lessons.py's case row.
                      "direction": final.direction,
                      "run_id": final.run_id, "evidence": [best.id], "role": LESSON_ROLE_RESEARCHER,
-                     "evidence_sig": self._evidence_sig_map(final, [best.id])}]
+                     "evidence_sig": self._evidence_sig_map(final, [best.id])}
+            if getattr(final, "run_uid", ""):
+                lesson["run_uid"] = final.run_uid
+            return [lesson]
         client = self._e._reflect_client()
         # `_winner_lesson` is the OFFLINE/toy safety net ONLY (no LLM at all). In a real run — an LLM
         # IS wired — lessons are ALWAYS LLM-authored: on error or empty output we write NOTHING rather
@@ -333,7 +368,9 @@ class LessonDistillMixin:
                 # on a missing `direction`, so without this the LLM-authored lessons (the ONLY lessons a
                 # real run writes) never reach agent-facing cross-run memory.
                 "direction": final.direction,
-                "run_id": final.run_id, "evidence": list(ev_ids), "evidence_sig": ev_sig,
+                "run_id": final.run_id,
+                **({"run_uid": final.run_uid} if getattr(final, "run_uid", "") else {}),
+                "evidence": list(ev_ids), "evidence_sig": ev_sig,
                 **role_tag}
                for _, stmt, outcome in parse_credit_lessons(out, 0, limit=8)]
         return res      # LLM gave nothing usable → [] (a real run never writes a templated lesson)
@@ -348,8 +385,10 @@ class LessonDistillMixin:
                 f"Evidence:\n{ev_txt}\n\nApply when the task matches this technique's preconditions; "
                 "re-validate with the eval before trusting it.")
         client = self._e._reflect_client()
-        code_node = max((n for n in ev if getattr(n, "code", None)),
-                        key=lambda n: (n.metric if n.metric is not None else -1e18), default=None)
+        measured_code = [n for n in ev if getattr(n, "code", None) and n.metric is not None]
+        code_node = (max(measured_code, key=lambda n: n.metric)
+                     if final.direction == "max" and measured_code
+                     else min(measured_code, key=lambda n: n.metric) if measured_code else None)
         if client is None or code_node is None or not code_node.code:
             return base
         # The technique belief is the DISPLAY `statement` (== the skill title the

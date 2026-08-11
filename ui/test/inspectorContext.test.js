@@ -228,6 +228,17 @@ test('a live lesson recorded against a DIFFERENT attempt is excluded; an unrecor
   assert.equal(liveLessonsForNode(null, 7, 0).length, 0)
 })
 
+test('a consolidated survivor never lends another run its local numeric node ids', () => {
+  const { liveLessonsForNode } = derivedMemory
+  const survivor = {
+    statement: 'shared finding', run_id: 'run-a', evidence: [7],
+    evidence_generations: { 7: 0 }, evidence_count: 2,
+    evidence_refs: [{ run_id: 'run-a', node_id: 7, generation: 0 }],
+  }
+  assert.equal(liveLessonsForNode({ lessons: [survivor] }, 7, 0, 'run-b').length, 0)
+  assert.equal(liveLessonsForNode({ lessons: [survivor] }, 7, 0, 'run-a').length, 1)
+})
+
 test('run-level memory reports the lessons NO event-log entry attributes to a node', () => {
   const { runMemory } = derivedMemory
   const store = {

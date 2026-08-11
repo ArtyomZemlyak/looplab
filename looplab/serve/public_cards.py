@@ -32,7 +32,7 @@ _SKIP = object()
 # this is the explicit wire DTO. Adding a Card or event field does not publish it until this
 # boundary is reviewed; fixed order also makes byte output deterministic across event/mapping order.
 _FIELDS = (
-    "id", "status", "verdict", "actionable", "identity", "selection_provenance",
+    "id", "belief_id", "retry_of", "status", "verdict", "actionable", "identity", "selection_provenance",
     "selection_blockers", "selection_ready", "concept_source", "statement", "statement_edit_seq",
     "seed_statement", "source",
     "created_at_node", "rationale", "evidence", "best_delta", "merged_into", "aliases",
@@ -59,7 +59,7 @@ _TEXT_LIMITS = {
     "dropped_reason": 800,
 }
 _REF_FIELDS = {
-    "id", "source", "status", "verdict", "merged_into", "dropped_by", "operator",
+    "id", "belief_id", "retry_of", "source", "status", "verdict", "merged_into", "dropped_by", "operator",
     "eval_profile", "research_origin", "provenance_tier",
 }
 _INT_FIELDS = {"created_at_node", "parent_id", "scored_against", "priority", "foresight_rank"}

@@ -70,6 +70,7 @@ _LAYOUT = {
     "crash_repair": "engine",
     "calibration": "agents",   # the CUDA probe the speculation calibration runs (doc 25 AG-02)
     "loop_options": "agents",  # the typed drive_tool_loop options bundle (doc 25 AG-01)
+    "memory_window": "core",   # one bounded JSONL snapshot/receipt for human and agent memory readers
     "cadence": "engine",     # the shared since-last node-count gate (doc 25 EC-07)
     "claims": "engine",
     "claims_health": "engine",  # ...its source-row/read-health leaf (doc 25 EM-01 split)          # PART IV cross-run Step 4: evidence-grounded claim assessments (read-model)

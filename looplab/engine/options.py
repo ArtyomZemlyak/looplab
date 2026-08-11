@@ -91,7 +91,7 @@ class EngineOptions:
     policy_name: str = "greedy"          # Settings.policy (renamed: the Engine keeps the policy OBJECT under .policy)
     ablate_every: int = 0
     strategist_every: int = 3
-    concept_retag_every: int = 5    # PART V (F1): concept classifier re-tag cadence, decoupled from strategist_every
+    concept_retag_every: int = 5    # PART V (F1): matches Settings; decoupled from strategist_every
     # Stop the whole RUN when nothing has ever worked: N distinct nodes ended failed and not one
     # has ever produced a metric. 0 = off, which is the bare-library default — a direct
     # `Engine(...)` gains no new terminal. See `orchestrator.systemic_failure_stop_reason`.

@@ -85,10 +85,12 @@ def _memory_dir_with_one_of_each(tmp_path, task_id: str, fingerprint: list[str])
     }) + "\n", encoding="utf-8")
     (mem / "meta_notes.jsonl").write_text(json.dumps({
         "task_id": task_id, "run_id": "earlier",
+        "direction": "min",
         "note": "NOTEMARKER best metric 0 via op 'draft' params {'x': 3.0, 'y': -1.0}",
     }) + "\n", encoding="utf-8")
     (mem / "lessons.jsonl").write_text(json.dumps({
         "task_id": task_id, "fingerprint": fingerprint, "run_id": "earlier",
+        "direction": "min",
         "statement": "LESSONMARKER moving x toward 3 improves the metric",
         "outcome": "supported", "confidence": 0.7, "delta": 1.0, "role": "researcher",
     }) + "\n", encoding="utf-8")
@@ -144,3 +146,41 @@ def test_a_case_is_still_reachable_through_kb_search(tmp_path):
     out = tools.execute("kb_search", {"query": "minimize the toy quadratic"})
 
     assert "CASEMARKER" in out and "PAST CASE" in out
+
+
+def test_bound_kb_search_scopes_cases_before_indexing(tmp_path):
+    from types import SimpleNamespace
+    from looplab.tools.knowledge_tools import KnowledgeTools
+
+    path = tmp_path / "cases.jsonl"
+    rows = [
+        {"task_id": "same", "goal": "optimize shared objective", "direction": "min",
+         "params": {"x": 1}, "metric": 1.0, "rationale": "MIN_CASE"},
+        {"task_id": "same", "goal": "optimize shared objective", "direction": "max",
+         "params": {"x": 9}, "metric": 9.0, "rationale": "MAX_CASE"},
+        {"task_id": "foreign", "goal": "optimize shared objective", "direction": "max",
+         "params": {"x": 7}, "metric": 7.0, "rationale": "FOREIGN_CASE"},
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    tools = KnowledgeTools(None, cases_path=str(path))
+    tools.bind_state(SimpleNamespace(run_id="live", task_id="same", direction="max",
+                                     goal="optimize shared objective"))
+
+    out = tools.execute("kb_search", {"query": "shared objective"})
+    assert "MAX_CASE" in out
+    assert "MIN_CASE" not in out and "FOREIGN_CASE" not in out
+    assert "scope=run" in out and "objective=max" in out
+
+
+def test_kb_search_refreshes_when_a_source_file_changes(tmp_path):
+    from looplab.tools.knowledge_tools import KnowledgeTools
+
+    note = tmp_path / "first.md"
+    note.write_text("# First\n\nalpha-only memory", encoding="utf-8")
+    tools = KnowledgeTools(str(tmp_path))
+    assert "alpha-only" in tools.execute("kb_search", {"query": "alpha-only"})
+
+    note.write_text("# First\n\nbeta-only refreshed memory", encoding="utf-8")
+    out = tools.execute("kb_search", {"query": "beta-only"})
+    assert "beta-only refreshed" in out
+    assert "KB_INDEX: revision=" in out

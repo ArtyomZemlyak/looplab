@@ -244,6 +244,7 @@ def _valid_capsule_record(capsule) -> bool:
     # would silently bless old proposer-authored labels after a schema bump.
     version = capsule.get("v", _LEGACY_CONCEPT_CAPSULE_VERSION)
     run_id = capsule.get("run_id")
+    run_uid = capsule.get("run_uid", "")
     task_id = capsule.get("task_id", "")
     fingerprint = capsule.get("fingerprint")
     concepts = capsule.get("concepts")
@@ -254,6 +255,7 @@ def _valid_capsule_record(capsule) -> bool:
     if (version != CONCEPT_CAPSULE_VERSION
             or capsule.get("concept_evidence") != NODE_CONCEPT_PROVENANCE_CLASSIFIER
             or not isinstance(run_id, str) or not run_id or len(run_id) > _MAX_CAPSULE_ID_CHARS
+            or not isinstance(run_uid, str) or len(run_uid) > _MAX_CAPSULE_ID_CHARS
             or not isinstance(task_id, str) or len(task_id) > _MAX_CAPSULE_ID_CHARS
             # every v2 producer wrote an explicit direction.  Treat a missing field as
             # quarantine evidence instead of silently inventing ``min`` and potentially reversing the
@@ -401,7 +403,8 @@ def concept_profit_tendencies(concept_rows, *, limit: Optional[int] = None) -> d
 
 def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str,
                           concepts, best_metric=None, concept_outcomes: Optional[dict] = None,
-                          task_id: str = "", concept_evidence_nodes_total: Optional[int] = None,
+                          task_id: str = "", run_uid: str = "",
+                          concept_evidence_nodes_total: Optional[int] = None,
                           concept_evidence_nodes_incomplete: int = 0,
                           concept_evidence_observed: Optional[bool] = None) -> dict:
     """A compact per-run CONCEPT capsule — the cross-run bridge (§21.20 Step 2). It records WHICH
@@ -486,6 +489,7 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
         "concept_evidence_nodes_incomplete": concept_evidence_nodes_incomplete,
         "concept_evidence_complete": concept_evidence_complete,
         "run_id": str(run_id or ""),
+        **({"run_uid": str(run_uid)} if isinstance(run_uid, str) and run_uid else {}),
         "task_id": str(task_id or ""),
         "fingerprint": bounded_fingerprint,
         "fingerprint_total": fingerprint_total,
@@ -512,8 +516,8 @@ class ConceptCapsuleStore:
 
     Upsert uses a required interprocess lock and quarantine-preserving atomic replacement. Exact task id
     takes precedence on read; related-task transfer is allowed only when a complete fingerprint receipt
-    passes the bounded similarity rule. ``run_id`` is not yet a portfolio-wide incarnation id, so two
-    independent run roots sharing one global memory directory can collide on the same display id.
+    passes the bounded similarity rule. Modern rows key replacement/exclusion on global ``run_uid``;
+    ``run_id`` remains a display id and the fallback identity for legacy rows.
     The store performs no tagging and holds no engine state.
     """
 
@@ -539,7 +543,11 @@ class ConceptCapsuleStore:
             self.path, loads=json.loads, dicts_only=True)
         self.capsules = [c for c in rows if self._valid_capsule(c)]   # drop poisoned rows, keep the rest
         invalid_capsules = int(read_health["invalid_shape_lines"]) + len(rows) - len(self.capsules)
-        duplicate_runs = len(self.capsules) - len({c["run_id"] for c in self.capsules})
+        duplicate_runs = len(self.capsules) - len({
+            (("uid", c["run_uid"]) if isinstance(c.get("run_uid"), str) and c.get("run_uid")
+             else ("legacy", c["run_id"]))
+            for c in self.capsules
+        })
         malformed = int(read_health["malformed_lines"])
         quarantined = malformed + invalid_capsules + duplicate_runs
         self.source_health = {
@@ -562,6 +570,7 @@ class ConceptCapsuleStore:
         # and current-run exclusion hides the older row first. Key upsert/exclusion by a persisted
         # globally unique run-incarnation UID; retain run_id only for display.
         rid = str(capsule.get("run_id") or "")
+        ruid = str(capsule.get("run_uid") or "")
         with _interprocess_lock(Path(str(self.path) + ".lock"), required=True):
             # quarantine is a read policy, not permission to erase old/future durable data.
             # Preserve raw malformed AND decoded future rows; supersede only the exact run id.
@@ -570,15 +579,20 @@ class ConceptCapsuleStore:
                 # matching an opaque key is not permission to delete a future/invalid schema.
                 # Supersede only a row this reader fully understands; keep an unknown same-run record for
                 # explicit repair/migration alongside the new current-schema capsule.
-                replace_if=lambda row: (self._valid_capsule(row)
-                                        and str(row.get("run_id") or "") == rid),
+                replace_if=lambda row: (
+                    self._valid_capsule(row) and (
+                        (bool(ruid) and str(row.get("run_uid") or "") == ruid)
+                        or (not ruid and not row.get("run_uid")
+                            and str(row.get("run_id") or "") == rid)
+                    )),
                 loads=json.loads, dumps=json.dumps,
             )
             self._reload()
         return True
 
     def prior_capsules(self, fingerprint: list[str], *, min_sim: float = 0.3,
-                       exclude_run_id: str = "", task_id: str = "") -> list[tuple[float, dict]]:
+                       exclude_run_id: str = "", exclude_run_uid: str = "",
+                       task_id: str = "") -> list[tuple[float, dict]]:
         """Prior-run capsules in an exact task or with an exact fingerprint clearing ``min_sim``.
 
         Fingerprint matching is Jaccard/universal-aware because the fingerprint itself already is.  Exact
@@ -591,7 +605,11 @@ class ConceptCapsuleStore:
         # runs, replaced by a bounded scope/version-keyed index snapshot at portfolio scale.
         out = []
         for c in self.capsules:
-            if exclude_run_id and str(c.get("run_id") or "") == str(exclude_run_id):
+            if (exclude_run_uid and c.get("run_uid")
+                    and str(c.get("run_uid")) == str(exclude_run_uid)):
+                continue
+            if (not exclude_run_uid and exclude_run_id
+                    and str(c.get("run_id") or "") == str(exclude_run_id)):
                 continue
             exact_task = bool(task_id) and str(c.get("task_id") or "") == str(task_id)
             # the writer bounds fingerprints.  A retained prefix (or a pre-receipt v2 row)
@@ -606,12 +624,14 @@ class ConceptCapsuleStore:
         return out
 
     def prior_concepts(self, fingerprint: list[str], *, min_sim: float = 0.3,
-                       exclude_run_id: str = "", task_id: str = "") -> set[str]:
+                       exclude_run_id: str = "", exclude_run_uid: str = "",
+                       task_id: str = "") -> set[str]:
         """The UNION of concepts explored by similar prior runs — exactly the `set[str]` shape
         `grade_novelty(prior_concepts=…)` consumes to fire D3 level 3 ("tried across runs")."""
         acc: set[str] = set()
         for _sim, c in self.prior_capsules(
-                fingerprint, min_sim=min_sim, exclude_run_id=exclude_run_id, task_id=task_id):
+                fingerprint, min_sim=min_sim, exclude_run_id=exclude_run_id,
+                exclude_run_uid=exclude_run_uid, task_id=task_id):
             acc.update(str(x) for x in (c.get("concepts") or []))
         return acc
 

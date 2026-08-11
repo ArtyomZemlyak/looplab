@@ -18,8 +18,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from looplab.events.eventstore import read_jsonl_lenient
-from looplab.trust.cross_run import cross_run_text
+from looplab.core.memory_window import read_memory_jsonl_window
+from looplab.trust.cross_run import LessonScope, cross_run_text, scope_terms
 
 # Which ROLE a cross-run lesson is for, so the two contexts stay separate (the Researcher gets only
 # R&D / "what technique to try" lessons, the Developer only its own "what code change fixed a crash"
@@ -52,6 +52,7 @@ class LessonPriorsMixin:
     the mixin convention (`self` is the LessonMemory)."""
 
     def load_reflection_priors(self, exclude_run_id: Optional[str] = None,
+                               exclude_run_uid: Optional[str] = None,
                                role: Optional[str] = None) -> str:
         """E4 + M2/M3: build the cross-run prior injected into a role's prompt. Two parts:
         (1) exact-task "what won" notes (meta_notes.jsonl — unchanged E4 warm-start), and
@@ -67,25 +68,41 @@ class LessonPriorsMixin:
         research-flavoured meta-notes (part 1) are skipped for the Developer. role=None -> everything."""
         if not (self._e._reflection_priors and self._e.memory_dir):
             return ""
-        return self._render_role_prior(self._scan_prior_context(exclude_run_id), role)
+        return self._render_role_prior(
+            self._scan_prior_context(exclude_run_id, exclude_run_uid), role)
 
-    def load_reflection_priors_both(self, exclude_run_id: Optional[str] = None) -> tuple[str, str]:
+    def load_reflection_priors_both(self, exclude_run_id: Optional[str] = None,
+                                    exclude_run_uid: Optional[str] = None) -> tuple[str, str]:
         """Build BOTH role priors off ONE scan of the store — the run-start load and every refresh
         need the Researcher AND the Developer prior, and calling `load_reflection_priors` twice would
         re-read + re-fingerprint + re-embed the whole lessons store a second time. Returns
         `(researcher_text, developer_text)`; each is byte-identical to the standalone call."""
         if not (self._e._reflection_priors and self._e.memory_dir):
             return "", ""
-        ctx = self._scan_prior_context(exclude_run_id)
+        ctx = self._scan_prior_context(exclude_run_id, exclude_run_uid)
         return (self._render_role_prior(ctx, LESSON_ROLE_RESEARCHER),
                 self._render_role_prior(ctx, LESSON_ROLE_DEVELOPER))
 
-    def _scan_prior_context(self, exclude_run_id: Optional[str]):
+    def _scan_prior_context(self, exclude_run_id: Optional[str],
+                            exclude_run_uid: Optional[str] = None):
         """Read the cross-run stores ONCE for a prior build and return everything the per-role render
         needs: the exact-task meta-notes, the parsed lessons (role-agnostic — filtered per role in
         `_render_role_prior`), the current task fingerprint, and a per-build memoized embedder shared
         across the role renders. Nothing here is role-aware, so both role priors reuse this one scan."""
         base = Path(self._e.memory_dir)
+        # Passive prompt injection is a reader just like MemoryTools/CrossRunTools.  It used to have
+        # a separate, weaker contract (exact task id manufactured similarity=1, notes ignored polarity,
+        # and only lessons honored self-run exclusion).  Build the same fail-closed scope passport once
+        # and apply it before either ledger can enter a prompt.
+        task = self._e.task
+        scope = LessonScope(
+            bound=True,
+            run_uid=str(exclude_run_uid or ""),
+            run_id=str(exclude_run_id or ""),
+            task_id=str(getattr(task, "id", "") or ""),
+            direction=str(getattr(task, "direction", "") or ""),
+            goal_terms=scope_terms(getattr(task, "goal", "") or ""),
+        )
         # (1) exact-task meta notes (E4) — research-flavoured "what won" config (rendered for the
         # Researcher only; the Developer render drops them below).
         notes: list[str] = []
@@ -96,10 +113,12 @@ class LessonPriorsMixin:
         # callers guard it — the mid-run refresh has always, and the RUN-START loader
         # (`orchestrator._reentry_repin`) now does too, which is what stopped an unreadable memory_dir
         # from failing the run during deterministic setup on every start and resume.
-        for o in read_jsonl_lenient(npath):
+        note_rows, note_health = read_memory_jsonl_window(npath)
+        for _index, o in note_rows:
             if not isinstance(o, dict):
+                note_health["skipped"] += 1
                 continue
-            if o.get("task_id") == self._e.task.id and o.get("note"):
+            if o.get("task_id") == self._e.task.id and o.get("note") and scope.allows(o):
                 notes.append(cross_run_text(
                     o["note"], max_chars=1_200, single_line=True, entropy=True))
         # (2) fingerprint-matched lessons (M2/M3), incl. negatives — parsed once; the role filter and
@@ -107,25 +126,51 @@ class LessonPriorsMixin:
         parsed: list[tuple[int, dict]] = []
         lpath = base / "lessons.jsonl"
         # keep_bad=True: idx must stay the RAW on-disk line number (stable lesson identity).
-        for idx, o in enumerate(read_jsonl_lenient(lpath, keep_bad=True)):
+        lesson_rows, lesson_health = read_memory_jsonl_window(lpath)
+        if note_health["unavailable"] or lesson_health["unavailable"]:
+            # Run-start/cadence callers already own a durable unavailable event and deliberately leave
+            # their source stamp uncommitted so the next cadence retries. Preserve that recovery
+            # contract; partial-but-readable windows continue through with an in-prompt receipt.
+            raise OSError("cross-run memory source unavailable")
+        for idx, o in lesson_rows:
             if not isinstance(o, dict) or not o.get("statement"):
+                if not isinstance(o, dict):
+                    lesson_health["skipped"] += 1
                 continue
-            if exclude_run_id and o.get("run_id") == exclude_run_id:
-                continue                     # M6: never echo this run's own lessons back
+            if not scope.allows(o):
+                continue                     # one polarity/task/self-run predicate for every reader
             parsed.append((idx, o))
         # Compare WITHOUT param: tokens: the writer stamps the winner's param names, but at read
         # time no winner exists yet, so those tokens only dilute the Jaccard overlap.
         fp = [t for t in self._e._task_fingerprint(self._e._empty_state_for_fp())
               if not t.startswith("param:")]
-        return notes, parsed, fp, _memoized_embed(self._e._embedder)
+        health = {
+            "complete": not any(
+                row["source_window_truncated"] or row["skipped"] or row["unavailable"]
+                for row in (note_health, lesson_health)),
+            "invalid": int(note_health["skipped"]) + int(lesson_health["skipped"]),
+            "source": int(note_health["source_rows"]) + int(lesson_health["source_rows"]),
+            "truncated": bool(note_health["source_window_truncated"]
+                              or lesson_health["source_window_truncated"]),
+            "unavailable": bool(note_health["unavailable"] or lesson_health["unavailable"]),
+            "notes_digest": note_health["window_digest"],
+            "lessons_digest": lesson_health["window_digest"],
+        }
+        return notes, parsed, fp, _memoized_embed(self._e._embedder), health
 
     def _render_role_prior(self, ctx, role: Optional[str]) -> str:
         """Render ONE role's prior text from a shared `_scan_prior_context` scan: filter the parsed
         lessons to that role (untagged = shared), score by fingerprint similarity, splice in Memora
         harmonic recall, apply D2 read-time hygiene + ranking, and pick the top 5 with a role label."""
         from looplab.engine.memory import prompt_slot_key      # both slot budgets below key on it
-        notes, parsed, fp, embed = ctx
-        out = ""
+        notes, parsed, fp, embed, health = ctx
+        out = (f"\n[MEMORY_SOURCE: canonical recent snapshot; rows={health['source']}; "
+               f"notes_sha256={health['notes_digest']}; lessons_sha256={health['lessons_digest']}; "
+               f"complete={'true' if health['complete'] else 'false'}.]"
+               + (("\n[MEMORY_SOURCE_PARTIAL: "
+                   f"unreadable={health['invalid']}; truncated={'true' if health['truncated'] else 'false'}; "
+                   f"unavailable={'true' if health['unavailable'] else 'false'}; "
+                   "retained priors are incomplete.]") if not health["complete"] else ""))
         # (1) meta-notes — research-flavoured, so the Developer never sees them.
         # DE-DUPE FIRST, then take the last 3. These notes are a `write_reflection_note` f-string
         # ("best metric {m} via op '{op}' params {p}; N nodes, M evaluated"), and `meta_notes.jsonl`
@@ -176,14 +221,20 @@ class LessonPriorsMixin:
         # No-op unless a Memora abstractor is wired (memora on); then it uses the T5 embedder.
         if self._e._lesson_abstractor is not None and all_lessons:
             from looplab.engine.memory import retrieve_lessons_harmonic
+            from looplab.tools.vectorstore import hash_embed
             by_idx = {i: o for i, o in all_lessons}
             already = {i for _, i, _ in scored}
             query = " ".join(fp) + " " + (getattr(self._e.task, "goal", "") or "")
-            for hsim, hidx in retrieve_lessons_harmonic(
-                    all_lessons, query, self._e._lesson_abstractor, embed):
-                if hidx not in already and hidx in by_idx:
-                    scored.append((hsim, hidx, by_idx[hidx]))
-                    already.add(hidx)
+            # Hash buckets are deterministic offline test machinery, not semantic evidence.  On the
+            # shipped no-embed-model default they admitted unrelated harmonic rows at high cosine and
+            # saturated the five-slot prior.  Retain lexical/Jaccard retrieval, but require a real
+            # configured embedder before harmonic expansion can add a row the lexical gate rejected.
+            if self._e._embedder is not hash_embed:
+                for hsim, hidx in retrieve_lessons_harmonic(
+                        all_lessons, query, self._e._lesson_abstractor, embed):
+                    if hidx not in already and hidx in by_idx:
+                        scored.append((hsim, hidx, by_idx[hidx]))
+                        already.add(hidx)
         # D2 hygiene at read time: quarantine any lesson whose claim a NEWER run reversed
         # (an old "supported" vs a later "tested/abandoned" of the same statement) — the
         # misevolution guard: memory must not keep pushing a refuted correlation.

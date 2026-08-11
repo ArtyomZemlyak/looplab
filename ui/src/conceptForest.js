@@ -36,6 +36,67 @@ const MAX_VISIBLE_ROWS = 2_000
 const isRecord = value => !!value && typeof value === 'object' && !Array.isArray(value)
 const finiteOrNull = value => (typeof value === 'number' && Number.isFinite(value) ? value : null)
 
+// Apply the versioned cross-run governance lookup before ANY lossy forest/co-occurrence fold. Splits
+// depend on each run's sibling concepts and are therefore retained as raw ids with an explicit
+// unapplied count; aliases/purges are exact lookup operations. The returned runs preserve the caller's
+// population and every non-concept field.
+export function applyConceptPolicy(runs = [], policy = null) {
+  const source = Array.isArray(runs) ? runs : []
+  if (!isRecord(policy) || !isRecord(policy.canonical) || !Array.isArray(policy.split_sources)) {
+    return {
+      runs: source, applied: false, complete: false, unappliedSplits: 0, invalidTargets: 0,
+      capsuleCoverageKnown: false, unrepresentedRuns: 0, capsuleIdsOmitted: 0,
+    }
+  }
+  const splitSources = new Set(policy.split_sources.map(normalizeConceptId).filter(Boolean))
+  let unappliedSplits = 0
+  let invalidTargets = 0
+  const governed = source.map(run => {
+    if (!isRecord(run) || !isRecord(run.concepts)) return run
+    const concepts = conceptMap()
+    for (const [rawId, rawValue] of Object.entries(run.concepts)) {
+      const id = normalizeConceptId(rawId)
+      if (!id) { invalidTargets += 1; continue }
+      let target = id
+      if (splitSources.has(id)) unappliedSplits += 1
+      else if (Object.prototype.hasOwnProperty.call(policy.canonical, id)) {
+        if (policy.canonical[id] == null) continue
+        target = normalizeConceptId(policy.canonical[id])
+        if (!target) { invalidTargets += 1; continue }
+      }
+      const value = isRecord(rawValue) ? rawValue : {}
+      const previous = concepts[target]
+      if (!previous) concepts[target] = { ...value }
+      else {
+        const a = Number.isSafeInteger(previous.count) && previous.count > 0 ? previous.count : 0
+        const b = Number.isSafeInteger(value.count) && value.count > 0 ? value.count : 0
+        const priorMetric = finiteOrNull(previous.best_metric)
+        const nextMetric = finiteOrNull(value.best_metric)
+        concepts[target] = {
+          ...previous, count: a + b,
+          best_metric: nextMetric == null ? priorMetric : priorMetric == null
+            ? nextMetric : pickBetter(priorMetric, nextMetric, run.direction),
+        }
+      }
+    }
+    return { ...run, concepts }
+  })
+  const omitted = Number(policy.canonical_omitted || 0) + Number(policy.split_sources_omitted || 0)
+  const capsuleCoverageKnown = Array.isArray(policy.capsule_run_ids)
+  const capsuleIds = new Set(capsuleCoverageKnown
+    ? policy.capsule_run_ids.filter(value => typeof value === 'string') : [])
+  const unrepresentedRuns = capsuleCoverageKnown
+    ? source.filter(run => isRecord(run) && typeof run.run_id === 'string'
+      && !capsuleIds.has(run.run_id)).length : 0
+  const capsuleIdsOmitted = Number.isSafeInteger(policy.capsule_run_ids_omitted)
+    && policy.capsule_run_ids_omitted > 0 ? policy.capsule_run_ids_omitted : 0
+  return {
+    runs: governed, applied: true,
+    complete: omitted === 0 && unappliedSplits === 0 && invalidTargets === 0,
+    unappliedSplits, invalidTargets, capsuleCoverageKnown, unrepresentedRuns, capsuleIdsOmitted,
+  }
+}
+
 // The `concepts` rollup of ONE run, canonicalized: `[{id, count, bestMetric}]` sorted by id, plus the
 // number of entries that could not be canonicalized. `dropped` is not cosmetic — without it a run whose
 // tags were all malformed reads as "never tagged", which blames the operator for a producer's bug.

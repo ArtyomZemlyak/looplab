@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { OpIcon } from './icons.jsx'
 import {
-  buildConceptCooccurrence, buildConceptForest, conceptScopeClaim, forestCoverage, forestPathTo,
+  applyConceptPolicy, buildConceptCooccurrence, buildConceptForest, conceptScopeClaim,
+  forestCoverage, forestPathTo,
   partnersOf, visibleForestRows,
 } from './conceptForest.js'
 import './portfolio-concepts.css'
@@ -159,14 +160,29 @@ export default function PortfolioConcepts({
   const [selected, setSelected] = useState('')
   const [query, setQuery] = useState('')
   const [pairFloor, setPairFloor] = useState(PAIR_FLOORS[0].value)
+  const [policyState, setPolicyState] = useState({ status: 'loading', policy: null })
   const rowRefs = useRef(new Map())
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch('/api/cross-run/concept-policy', { signal: controller.signal })
+      .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then(policy => setPolicyState({ status: 'ready', policy }))
+      .catch(error => {
+        if (error?.name !== 'AbortError') setPolicyState({ status: 'unavailable', policy: null })
+      })
+    return () => controller.abort()
+  }, [])
 
   const selectedIds = useMemo(() => new Set(selectedRuns.map(run => run.run_id)), [selectedRuns])
   // The selection restriction can only ever NARROW what the list is already showing. A checked run
   // that has since left the scope must not reappear here, or the two surfaces disagree about the
   // population while claiming the same scope.
-  const active = useMemo(() => restrictToSelection && selectedIds.size
+  const activeRaw = useMemo(() => restrictToSelection && selectedIds.size
     ? runs.filter(run => selectedIds.has(run.run_id)) : runs, [restrictToSelection, selectedIds, runs])
+  const governance = useMemo(
+    () => applyConceptPolicy(activeRaw, policyState.policy), [activeRaw, policyState.policy])
+  const active = governance.runs
   useEffect(() => { if (!selectedIds.size) setRestrictToSelection(false) }, [selectedIds])
 
   const runsById = useMemo(() => new Map(active.map(run => [run.run_id, run])), [active])
@@ -267,6 +283,25 @@ export default function PortfolioConcepts({
       {selectedOutOfScope} checked run(s) are outside the current list scope and are not in this
       tree. Clear the list filters to include them.</p>}
 
+    {policyState.status !== 'ready' && <div className="notice resource-warning" role="status">
+      Concept governance is {policyState.status === 'loading' ? 'loading' : 'unavailable'}; this tree
+      is temporarily showing raw run-authored ids, so governed merges and purges may be unapplied.
+    </div>}
+    {policyState.status === 'ready' && !governance.complete
+      && <div className="notice resource-warning" role="status">
+        Concept governance is partially applied.
+        {governance.unappliedSplits > 0 && <> {governance.unappliedSplits} split-dependent tag(s) remain raw.</>}
+        {governance.invalidTargets > 0 && <> {governance.invalidTargets} invalid policy/tag target(s) were omitted.</>}
+      </div>}
+    {policyState.status === 'ready' && governance.capsuleCoverageKnown
+      && (governance.unrepresentedRuns > 0 || governance.capsuleIdsOmitted > 0)
+      && <div className="notice resource-warning" role="status">
+        Durable cross-run concept memory does not cover this whole list: {governance.unrepresentedRuns}
+        visible run(s) have no retained capsule
+        {governance.capsuleIdsOmitted > 0 && <>; {governance.capsuleIdsOmitted} capsule id(s) were omitted from the policy receipt</>}.
+        The tree still shows their run-authored tags, but Atlas and agent priors may use a smaller population.
+      </div>}
+
     {forest.truncated && <div className="notice resource-warning" role="status">
       This scope carries more concepts than the tree renders. Narrow the scope to see the rest.
     </div>}
@@ -283,26 +318,12 @@ export default function PortfolioConcepts({
           {group.ids.map(id => <code key={id}>{id}</code>)}
         </li>)}
       </ul>
-      {/* The old sentence sent the operator to "the Atlas, where it is recorded" for a merge. The
-          Atlas has no such control — the governed merge is `looplab concept-merge` and
-          `POST /api/cross-run/concept-merge`, neither of which is reachable from any screen. (Both
-          spellings were wrong until 2026-08-07: this notice named a "governance" command GROUP that
-          the flat Typer app has never had — Typer answered "No such command" at exit 2 — and an
-          /api/cross-run/concept-alias route that does not exist either; the alias writes are
-          `/concept-merge`, `/concept-purge`, `/concept-alias-clear`. A UI string naming a command an
-          operator cannot run is the same defect class as a count nobody measured, so
-          `tests/test_ui_named_commands.py` now drives every code-formatted `looplab <cmd>` in
-          `ui/src/` against the real registry.) Worse,
-          performing it changes NOTHING here: the canonicalization lives behind
-          `GET /api/cross-run/concept-policy`, whose whole purpose is to be applied by the browser
-          (`concept_lens.py::project_concept_map` takes concept SETS and no governance, so the CALLER
-          canonicalizes — every server-side caller does, this one has nothing to do it with), and
-          nothing in `ui/` reads that route. So a merged pair still draws two roots and this very
-          notice still calls it drift. Say that, rather than describing a loop that does not close. */}
+      {/* Remaining variants are the residue after the governed alias/purge lookup. Split-dependent
+          ids stay raw and are disclosed above because resolving them needs a server-side sibling-aware
+          projection, not a browser guess. */}
       <p className="muted">These differ only in <code>-</code> versus <code>_</code>. LoopLab does not
-        infer a taxonomy, so it keeps them apart rather than choosing one for you. A governed merge
-        (<code>looplab concept-merge</code>) is recorded in cross-run memory, but this view
-        does not read that registry yet — a merged pair will still appear here as two.</p>
+        infer a taxonomy, so it keeps ungoverned variants apart. A governed merge
+        (<code>looplab concept-merge</code>) is applied here once the revisioned policy is available.</p>
     </details>}
 
     <div className="pc-body">
