@@ -1,7 +1,7 @@
 import React, { useId, useMemo, useState } from 'react'
 import Markdown from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
-import { normalizeResearchMemo } from './researchMemoModel.js'
+import { memoLead, memoLeadIsPartial, normalizeResearchMemo } from './researchMemoModel.js'
 import { safeExternalHref } from './urlSafety.js'
 import './research-memo.css'
 
@@ -279,7 +279,14 @@ export default function ResearchMemoCard({ memo, memoNumber = 1, open, onToggle,
             {value.trigger && <span>{triggerLabel(value.trigger)}</span>}
             {value.at_node != null && <span>after {plural(value.at_node, 'experiment')}</span>}
           </span>
-          <span className="research-memo-summary">{value.summary || 'No conclusion was recorded.'}</span>
+          {/* A LEAD, not the paragraph. A real memo's summary is ~1,600 characters, and rendering
+              it verbatim here made a list of memos a stack of walls — the "wall of text" report.
+              The full text is the body's Conclusion section, where a paragraph belongs. */}
+          <span className="research-memo-summary" title={value.summary || undefined}>
+            {memoLead(value.summary) || 'No conclusion was recorded.'}
+            {memoLeadIsPartial(value.summary)
+              && <span className="research-memo-more"> — full conclusion below</span>}
+          </span>
         </span>
         <span className="research-memo-overview">
           <TrustBadge trust={trust} />
@@ -290,7 +297,9 @@ export default function ResearchMemoCard({ memo, memoNumber = 1, open, onToggle,
     </h3>
     {(expanded || keepMounted) && <div id={bodyId} role="region" aria-labelledby={headingId}
       className="research-memo-region" hidden={!expanded}>
-      <ResearchMemoBody memo={value} normalized onSteer={onSteer}
+      {/* `showSummary` because the header now shows only a lead: without it the full conclusion
+          would exist nowhere on this card. */}
+      <ResearchMemoBody memo={value} normalized showSummary onSteer={onSteer}
         steeringDirection={steeringDirection} onSelectNode={onSelectNode}
         onSelectEvidence={onSelectEvidence} />
     </div>}

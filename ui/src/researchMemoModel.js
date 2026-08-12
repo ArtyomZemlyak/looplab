@@ -376,3 +376,35 @@ export function normalizeResearchMemos(value) {
   const memos = newestFirst.reverse()
   return { memos, total, omitted: Math.max(0, total - memos.length) }
 }
+
+
+// "Format the deep research properly, it's a wall of text." It is — and precisely one element is
+// responsible. The memo card's COLLAPSED header renders `summary` verbatim in a single span, and a
+// real memo's summary is ~1,600 characters (measured on the live run, 2026-08-12). So the list of
+// memos is a stack of paragraphs with no scannable line, while everything else on the card is
+// already structured: findings as a list, claims with verdicts, next actions with steer buttons,
+// sources and reasoning behind disclosures.
+//
+// The header gets a LEAD — the first sentence, bounded — and the full text moves into the body's
+// Conclusion section, where a paragraph belongs. Nothing is dropped; it stops being the headline.
+export const MEMO_LEAD_CHARS = 180
+
+export function memoLead(summary, { limit = MEMO_LEAD_CHARS } = {}) {
+  const text = String(summary || '').replace(/\s+/g, ' ').trim()
+  if (!text) return ''
+  // First sentence, when there is one worth calling a sentence. `.` followed by a space and a
+  // capital — not any period, or "0.8835 recall" and "vs. the baseline" each end the headline.
+  const sentence = /^(.{20,}?[.!?])\s+[A-Z(“"']/.exec(text)
+  const lead = sentence ? sentence[1] : text
+  if (lead.length <= limit) return lead
+  // Cut on a word boundary so the ellipsis never lands mid-token.
+  const cut = lead.slice(0, limit)
+  const space = cut.lastIndexOf(' ')
+  return `${(space > limit * 0.6 ? cut.slice(0, space) : cut).trimEnd()}…`
+}
+
+/** Did the header have to shorten anything? Drives the "full conclusion below" affordance. */
+export const memoLeadIsPartial = (summary) => {
+  const text = String(summary || '').replace(/\s+/g, ' ').trim()
+  return !!text && memoLead(text) !== text
+}

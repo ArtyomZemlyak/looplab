@@ -261,6 +261,13 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   written* — consolidation keeps no redirect to a descendant — and a truncated read window degrades
   to *standing unknown* rather than claiming absence. Run-end reflection lessons carry no
   per-experiment evidence and are named as out of scope instead of being silently omitted.
+- **A research memo reads as a memo, not a wall** — the collapsed header carries a scannable LEAD
+  (its first sentence, bounded), and the full conclusion lives in the body's Conclusion section where
+  a paragraph belongs. A real memo's summary is ~1,600 characters, so rendering it verbatim in the
+  header made a list of memos a stack of paragraphs with no scannable line — while everything else on
+  the card was already structured. The header says "full conclusion below" whenever it shortened
+  anything, so a truncation never reads as the whole answer, and the untouched text stays in the
+  element's title.
 - **From a concept into what the lab learned** — picking a concept in the global Concepts view now
   shows the lessons, cases and notes that carry it, beside the runs that are evidence for it. Subtree
   matching is shared with the Memory panel's own filter, so selecting `loss` answers with everything

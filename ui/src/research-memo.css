@@ -118,3 +118,7 @@ button.research-evidence-chip { cursor: pointer; }
   .report-view .research-memo-card { break-inside: avoid; box-shadow: none; }
   .report-view .research-memo-chevron { display: none; }
 }
+
+/* The header carries a LEAD; the full conclusion lives in the body. This hint is what stops the
+   truncation reading as the whole answer. */
+.research-memo-more { opacity: .65; font-style: italic; }
