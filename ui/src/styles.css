@@ -1665,16 +1665,17 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
    to whatever positioned ancestor the surrounding layout happens to provide. */
 .trace-reach-zone { position: relative; min-height: 12px; margin: 0 0 4px; }
 .trace-reach-status { min-height: 14px; text-align: center; }
-/* Visually hidden until focused: a pointer user reaches the earlier steps by scrolling and must not
-   be shown a control that announces a limit, but a screen-reader user driving a virtual cursor never
-   scrolls this container, so the keyboard path has to exist and has to be visible once taken. */
-.trace-reach { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
-  clip: rect(0 0 0 0); white-space: nowrap; border: 0; background: none; color: inherit;
-  font: inherit; cursor: pointer; }
-.trace-reach:focus-visible { position: static; width: auto; height: auto; margin: 0; overflow: visible;
-  clip: auto; padding: 6px 8px; display: block; text-align: center; font-size: 12px;
+/* VISIBLE. It used to be sr-only until focused, on the reasoning that a pointer user reaches the
+   earlier steps by scrolling and should not be shown a control announcing a limit. Measured against
+   the operator instead of against the theory: they reported "the button to load the whole trace is
+   gone again" — twice — because a control that only exists once you tab to it is, to a pointer user,
+   a control that does not exist. Scrolling still works and still loads; this only stops the keyboard
+   path from being the ONLY discoverable one. */
+.trace-reach { display: block; width: 100%; padding: 6px 8px; text-align: center; font-size: 12px;
   color: var(--accent); background: var(--bg-1); border: 1px dashed var(--line-2); border-radius: 8px;
-  outline: 2px solid var(--accent); outline-offset: 2px; }
+  font: inherit; cursor: pointer; opacity: .8; }
+.trace-reach:hover { opacity: 1; }
+.trace-reach:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .trace-loading { padding: 4px 2px; font-size: 12px; }
 .stage-log { margin: 4px 0 2px; }
 .stage-log-label { margin-bottom: 2px; font-size: 10px; }

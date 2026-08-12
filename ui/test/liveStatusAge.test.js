@@ -85,3 +85,18 @@ test('Dock renders the age beside the phase label', () => {
   // One definition of the noise filter, shared by the label and the clock.
   assert.ok(!src.includes('const STATUS_NOISE = new Set('), 'the second copy came back')
 })
+
+
+test('the trace reach control is VISIBLE, not sr-only until focused', () => {
+  // It was `position:absolute; width:1px; clip:rect(0 0 0 0)` until it took focus, on the reasoning
+  // that a pointer user reaches earlier steps by scrolling. The operator reported "the button to
+  // load the whole trace is gone again" twice — because to a pointer user, a control that only
+  // exists once you tab to it does not exist. Scrolling still works; this stops the keyboard path
+  // from being the only discoverable one.
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'styles.css'), 'utf8')
+  const rule = css.slice(css.indexOf('.trace-reach {'), css.indexOf('.trace-reach:hover'))
+  assert.ok(rule.includes('display: block'), 'the reach control must render')
+  assert.ok(!/clip:\s*rect\(0 0 0 0\)/.test(rule), 'the sr-only clip came back')
+  assert.ok(!/width:\s*1px/.test(rule), 'the sr-only size came back')
+})
