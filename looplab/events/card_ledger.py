@@ -2200,8 +2200,16 @@ def _apply_card_belief_lineage(
     Why this phase exists at all is recorded on the two fields in ``core/cards.py``; the short version
     is that ``id`` names the work item, ``identity.action_digest`` binds the executable action, and
     NEITHER can say "these two work items ask the same question".  A debug retry reuses its parent's
-    Idea verbatim and only flips ``operator``, so it is a different action (correctly) and therefore a
-    different card (correctly) — and the board had no way left to show it as the same hypothesis.
+    Idea verbatim and only flips ``operator``, so it is a different action (correctly) — and the board
+    had no way left to show it as the same hypothesis.
+
+    It no longer NEEDS a card of its own to record that action: since
+    ``engine/card_reservation.py::_retry_attach_card`` the retry claims the card it retries and the
+    node row carries the debug action, so a same-belief retry produces no second row for this phase to
+    join.  These derivations stay exactly as they are.  ``belief_id`` is read BY that attach rule (it
+    is the "same question?" test), so removing it would silently un-fix the mint; and ``retry_of``
+    still has live work — every pre-fix log folds through here unchanged, and a retry whose statement
+    was genuinely re-scoped still mints its own card and still earns the edge.
 
     Strictly ADDITIVE and derived: this writes only the two new fields.  It never touches a receipt, a
     digest, an action field, evidence, a verdict or a selection blocker, which is why it can run here

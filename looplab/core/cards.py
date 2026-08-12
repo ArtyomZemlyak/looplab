@@ -835,6 +835,14 @@ class Card(BaseModel):
     # `runs/rubert-dr-0807`: card-0 (draft) and card-1 (debug) byte-identical in statement, rationale, all
     # six params and footprint, differing only in `idea.operator`.
     #
+    # THAT WAS ONLY THE VIEW, and the operator said so after it happened AGAIN, identically, in
+    # `runs/rubertlite-dr-unified-v5` (card-0 / card-3). Naming the duplicate does not stop it. The
+    # engine now ATTACHES a retry to the card it retries instead of minting a twin —
+    # `engine/card_reservation.py::_retry_attach_card`, the `attach` disposition — which is what the
+    # card/node split was always for: one card, several nodes. These two fields keep their jobs
+    # unchanged (a retry that legitimately re-scopes its statement still mints, and a pre-fix log
+    # still folds to the same board), so the paragraph below stands as written.
+    #
     # Both are DERIVED overlays exactly like `verdict`/`status`/`selection_ready`: no event carries them,
     # no digest covers them, and no receipt is minted from them. That is the whole point of putting the
     # belief facet HERE instead of widening the action digest — the digest must keep binding the

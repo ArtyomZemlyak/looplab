@@ -47,8 +47,8 @@ from looplab.agents.roles import is_researcher_fallback
 from looplab.core.advisory_payloads import bounded_cross_run_advisory_receipt
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (Idea, RunState, card_action_digest, card_ownership_receipt,
-                                 durable_idea_payload, idea_proposal_ref,
-                                 normalize_researcher_footprint)
+                                 durable_idea_payload, hypothesis_statement_digest,
+                                 idea_proposal_ref, normalize_researcher_footprint)
 from looplab.engine.proposal_cues import normalize_steering_context
 from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.types import (EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED,
@@ -88,9 +88,15 @@ class _BuildReservation(NamedTuple):
 
 
 class _CardReservationPlan(NamedTuple):
-    """Pure result of resolving one exact native Card identity against the journal."""
+    """Pure result of resolving one exact native Card identity against the journal.
 
-    disposition: str  # mint | reuse | duplicate | invalid
+    ``attach`` is the ONE disposition that names an existing Card without an exact action match:
+    a repair re-attempt of the SAME research question becomes another node under the card that
+    already asks it, instead of a byte-identical twin work item (see ``_retry_attach_card``).
+    Like ``reuse`` it carries no payload — nothing is minted, only the ``node_building`` claim.
+    """
+
+    disposition: str  # mint | reuse | attach | duplicate | invalid
     card_id: Optional[str]
     idea: Optional[Idea]
     payload: Optional[dict]
@@ -580,13 +586,89 @@ class CardReservationMixin:
         return f"card-{number}"
 
     @classmethod
+    def _retry_attach_card(cls, state: RunState, idea: Idea, statement: str, parents: list[int],
+                           *, superseded_card_id: Optional[str] = None,
+                           excluded=()) -> Optional[str]:
+        """The EXISTING Card a repair re-attempt belongs under, or None to mint a fresh work item.
+
+        THE DEFECT THIS CLOSES, measured in `runs/rubertlite-dr-unified-v5`: node 0 was built for
+        card-0 and failed (`no_metric`); the policy then planned `{"kind": "debug", "parent_id": 0}`;
+        `orchestrator.py::_prepare_node_idea` answered it with the PARENT'S OWN IDEA, verbatim, with
+        only `operator` flipped to "debug" — no Researcher call at all (the run's `spans.jsonl` has
+        three `propose` spans, one per draft, and none for this) — and `_plan_native_card` saw a
+        different action digest and minted card-3 with a statement BYTE-IDENTICAL to card-0's. Two
+        rows, one research question. `runs/rubert-dr-0807` is the same defect a run earlier.
+
+        `belief_id`/`retry_of` (see `core/cards.py`) made that visible on the board and stopped
+        there, deliberately: the action digest must keep binding the executable action EXACTLY, and a
+        debug build genuinely IS a different action. What that reasoning missed is that a Card is a
+        WORK ITEM carrying several NODES — the card/node split is exactly the room a re-attempt
+        needs — so the second row was never required to record the second action. The node's own
+        `idea` records it; the Card records the question. So the repair now claims card-0 and the
+        board reads "card-0: two attempts", which is what the operator asked to see.
+
+        Fail-closed and NARROW. Only `debug` attaches: `improve`/`merge` also name parent nodes but
+        propose a NEW point in the space, and folding those in would claim every child re-runs its
+        parent's question. Only ONE parent, matching the shape `_card_action_has_live_anchors` admits
+        for `debug`. The owner is resolved through the parent NODE ROW's own `idea.card_id` — its
+        work item, never `Card.evidence`, which can name a node attached by the legacy statement-hash
+        join — and only a live, singly-registered NATIVE card qualifies. Finally the seed statements
+        must be the SAME BELIEF: `Card.belief_id` is the digest the fold publishes
+        (`card_ledger.py::_apply_card_belief_lineage`), read here rather than re-derived so the mint
+        and the board provably group on one spelling. That last check is what keeps this from
+        collapsing a genuine re-scope: a repair whose statement was rewritten is a different question
+        and still mints. It is also why "same wording" alone is never enough to attach anything else —
+        the toy adapter's "random seed point" names three DIFFERENT param points in
+        `runs/spec-live-0804`, and only the retry EDGE distinguishes them.
+        """
+        if idea.operator != "debug" or len(parents) != 1:
+            return None
+        parent = state.nodes.get(parents[0])
+        parent_idea = getattr(parent, "idea", None) if parent is not None else None
+        owner_id = cls._canonical_card_id(getattr(parent_idea, "card_id", None))
+        if owner_id is None or owner_id == superseded_card_id:
+            return None
+        if any(owner_id == cls._canonical_card_id(value) for value in excluded):
+            return None
+        owner = state.cards.get(owner_id)
+        # `state.cards` is keyed canonically, so a merged-away alias simply is not here; the
+        # `merged_into`/`merged_work_items` checks cover a lingering row and a surviving canonical
+        # whose own work items were consolidated. Attaching into either would put a fresh node under
+        # an identity consolidation already closed.
+        if owner is None or owner.id != owner_id or owner.merged_into:
+            return None
+        if owner.identity.kind != "native" or not owner.identity.receipt_valid:
+            return None
+        if "merged_work_items" in owner.selection_blockers:
+            return None
+        if (owner.status in {"dropped", "gated"} or owner.verdict == "abandoned"
+                or owner.dropped_reason is not None):
+            return None
+        if not statement or owner.belief_id != hypothesis_statement_digest(statement):
+            return None
+        return owner_id
+
+    @classmethod
     def _plan_native_card(cls, events, state: RunState, idea: Idea, *, parents: list[int],
                           parent_generations: dict[str, int], scored_against: Optional[int],
                           source: str, at_node: int,
                           implementation_ref: Optional[str] = None, excluded=(),
                           steering_context=(), cross_run_receipt=None,
-                          superseded_card_id: Optional[str] = None) -> _CardReservationPlan:
-        """Resolve exact live dedupe, crash-prefix reuse, or a fresh engine id without appending."""
+                          superseded_card_id: Optional[str] = None,
+                          retry_attach: bool = False) -> _CardReservationPlan:
+        """Resolve exact live dedupe, crash-prefix reuse, a retry attach, or a fresh engine id.
+
+        `retry_attach` is OPT-IN per call site, not a global policy, because only a caller that can
+        COMMIT an attach may ask for one — an `attach` plan mints nothing, so a site that appends
+        `card_added` for `mint` and nothing otherwise would silently reserve a node under a card it
+        never wrote. The three sites that opt in are `_reserve_node_build` (which appends the claim
+        alone, exactly as it already does for `reuse`), `_prepare_node_idea._link` (which must agree
+        with it, or the reservation's `idea.card_id != plan.card_id` fence refuses the build), and
+        `_stage_prepared_card` (which REFUSES the attach — see there). The re-proposal reset path in
+        `orchestrator.py` deliberately does NOT: it `_drop_card_once`s the card it supersedes, and
+        an attach there would hand it the PARENT's card to drop, taking the parent node's own
+        evidence row down with it.
+        """
         # The funnel every native mint passes through, and therefore the place to heal a proposal that
         # reached it un-revalidated (see `_fixed_point_idea`). Doing it HERE rather than at the two
         # `_link`/`_link_card` callers covers all five call sites at once, and covers the ones that
@@ -665,6 +747,21 @@ class CardReservationMixin:
 
         if unsafe_match or len(set(reusable)) > 1:
             return _CardReservationPlan("duplicate", None, None, None)
+        if retry_attach and not reusable:
+            # AFTER the exact-match resolution, never before it: an exact crash-prefix twin of THIS
+            # very reservation is the idempotent retry of the same commit and must keep winning, and
+            # a `duplicate`/`unsafe_match` verdict must keep refusing. Only when nothing exact
+            # applies is the question "is this a re-attempt of a question already on the board?".
+            attach_card_id = cls._retry_attach_card(
+                state, idea, statement, parents,
+                superseded_card_id=superseded_card_id, excluded=excluded)
+            if attach_card_id is not None:
+                # No payload, by construction: the durable `card_added` receipt already exists and is
+                # IMMUTABLE. Re-minting one under this card's id would be a second registration and
+                # would make the fold refuse the very card it is attaching to.
+                return _CardReservationPlan(
+                    "attach", attach_card_id,
+                    idea.model_copy(deep=True, update={"card_id": attach_card_id}), None)
         card_id = reusable[0] if reusable else cls._next_available_card_id(
             events, state, excluded)
         reserved_idea = idea.model_copy(deep=True, update={"card_id": card_id})
@@ -732,6 +829,10 @@ class CardReservationMixin:
                     scored_against=scored_against, source=source, at_node=node_id,
                     implementation_ref=implementation_ref, steering_context=steering_context,
                     cross_run_receipt=cross_run_receipt,
+                    # This is the site that COMMITS an attach: the append below already writes the
+                    # claim alone for `reuse`, so `attach` needs no new write path — only the same
+                    # `node_building{card_id}` under an id the log already registered.
+                    retry_attach=True,
                 )
                 if plan.disposition == "invalid":
                     self._append_proposal_event(EV_NOVELTY_REJECTED, {
@@ -742,7 +843,7 @@ class CardReservationMixin:
                     return None
                 if plan.disposition == "duplicate":
                     return None
-                if plan.disposition not in {"mint", "reuse"} \
+                if plan.disposition not in {"mint", "reuse", "attach"} \
                         or plan.card_id is None or plan.idea is None:
                     return None
                 # A proposal-bound sidecar may already name this Card. Main-task-only minting means
@@ -763,6 +864,11 @@ class CardReservationMixin:
                         expected_last_seq=tail,
                     )
                 else:
+                    # `reuse` and `attach` both name a card the log already registered, so the claim
+                    # alone is the whole commit. For `attach` that claim is the ENTIRE fix: the fold
+                    # links this node to the existing card through `node_created.idea.card_id`
+                    # (`card_ledger.py::_link_cards_to_nodes`), giving one card two evidence rows
+                    # instead of two cards one each.
                     self.store.append(*claim, expected_last_seq=tail)
                 return _BuildReservation(
                     state, node_id, kind, parents, parent_generations,
@@ -864,7 +970,24 @@ class CardReservationMixin:
                 at_node=at_node,
                 steering_context=bounded_steering,
                 cross_run_receipt=cross_run_receipt,
+                # ASKED FOR, then REFUSED below — and the pair is the point. Without it this staging
+                # lane plans with attach OFF, mints the duplicate itself, and the fix in
+                # `_reserve_node_build` never runs: `_stage_card_creates` is the ONLY writer of Card
+                # INVENTORY, and in `runs/rubertlite-dr-unified-v5` it is the lane that wrote card-3
+                # (a `card_added` with no `node_building` beside it, then `card_build_requested`).
+                retry_attach=True,
             )
+            if plan.disposition == "attach":
+                # A re-attempt is not INVENTORY. Staging exists to publish a selection-ready Card the
+                # next fold can elect, and the attach target never can be: it already owns a terminal
+                # work item, so the fold gives it `work_terminal` and `selection_ready=False` forever
+                # (`card_ledger.py::_apply_card_selection_readiness`). Returning its id here would
+                # stage a Card that no turn can ever select — the free-spin `_note_card_claim_refusal`
+                # exists to bound. Returning None instead retires the staging attempt, and
+                # `_handle_create_actions` gives the lane "one ordinary serial compatibility try":
+                # `_create_node` -> `_prepare_node_idea` -> `_reserve_node_build`, which is exactly
+                # where the attach is committed. The node still gets built; only the twin is gone.
+                return None
             if plan.disposition == "reuse":
                 # Reuse mutates nothing.  Its eventual request/claim always re-folds and revalidates
                 # the Card, so it needs no writer lock or synthetic event merely to stabilize the tail.

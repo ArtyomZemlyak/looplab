@@ -652,6 +652,47 @@ def next_board_prompt_cards(
     return selected
 
 
+def attempted_board_prompt_cards(state: RunState, shown=(), *, limit: int = 5) -> list:
+    """The board rows a proposer must CHECK AGAINST: research questions that already have work.
+
+    `next_board_prompt_cards` above shows only `open_research_beliefs()` — open, **untested** cards,
+    i.e. the ones with NO evidence (`core/models.py`). So the moment a card gets a node, the question
+    it asks vanishes from the proposal prompt entirely, and the model is asked what to try next while
+    unable to see what the board already asks. Measured in `runs/rubertlite-dr-unified-v5`: at node
+    2's `propose` the board held card-0 and card-1, both with a node in flight, both therefore
+    filtered out — the rendered user turn contains no board section at all, and its only trace of two
+    hours of running work is the headline "Search so far — 2 experiment(s), 0 failed:" with nothing
+    under it (`experiments_digest` lists winners and failures, and a PENDING node is neither).
+
+    This is the other half of the same window and it is deliberately a SEPARATE list, not a widening
+    of the untested one: that list carries the contract "return its CARD_ID in `card_id`", which
+    binds the proposal to the card and restores its seed (`bind_idea_to_board_card`). These rows must
+    never be claimable that way — their work item is already owned, and a claim would either be
+    refused at the reservation fence or, worse, re-seed a fresh proposal with a statement someone
+    else's node is already testing. They are here to be READ.
+
+    Bounded like its sibling and by the same rule (whole items only, never a truncated statement), at
+    half the character budget because this half is context rather than the actionable queue. Most
+    RECENT first-shown-last: the tail is what the model reads closest to its instruction, and the
+    newest work is the likeliest thing it is about to repeat.
+    """
+    already = {getattr(card, "id", None) for card in (shown or ())}
+    rows = [c for c in state.research_cards()
+            if c.id not in already and (c.seed_statement or "").strip()
+            and (c.evidence or c.status in {"building", "running", "evaluated"})]
+    selected: list = []
+    used = 0
+    for card in reversed(rows):
+        seed = card.seed_statement or ""
+        if len(seed) > 4_000 or used + len(seed) > 8_000:
+            continue
+        selected.append(card)
+        used += len(seed)
+        if len(selected) == limit:
+            break
+    return list(reversed(selected))
+
+
 def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
     """Resolve a model claim to a visible Card and restore its immutable semantic seed."""
     by_id = {card.id: card for card in cards}
@@ -756,6 +797,25 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
         lines.append("If your next experiment tests one of these, return its CARD_ID in `card_id`. "
                      "The engine restores the complete immutable seed; do not use display edits as "
                      "semantic identity.")
+    # …and the OTHER half of the board, which nothing showed until now: the questions that already
+    # have an experiment against them. See `attempted_board_prompt_cards` for what it cost that a
+    # card disappeared from this prompt the instant it got a node — including a node still RUNNING,
+    # which no other part of this brief renders either. This block is advisory context, NOT a
+    # claimable queue: it deliberately does not carry the "return its CARD_ID" contract above,
+    # because these work items are owned. A NODES list with no verdict yet is work IN FLIGHT.
+    attempted = attempted_board_prompt_cards(state, open_hyps)
+    if attempted:
+        lines.append("Research questions ALREADY on the board (each already has an experiment — "
+                     "do NOT propose one of these again as if it were new):")
+        for card in attempted:
+            lines.append(
+                f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
+                f"STATUS={card.status} VERDICT={card.verdict} "
+                f"NODES={sorted(card.evidence)} "
+                f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
+        lines.append("Propose a DIFFERENT question. If one of these genuinely needs another "
+                     "attempt, say so in `rationale` and name the CARD_ID — the engine decides "
+                     "whether that becomes a repair under the same card.")
     return "\n".join(line for line in lines if line)
 
 
