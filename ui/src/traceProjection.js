@@ -144,3 +144,31 @@ export const traceDetailState = detail => {
 // Transport failure is not evidence that a span recorded no I/O. Keep this state distinct from a
 // successful empty projection and never carry network/provider text into UI state.
 export const unavailableTraceDetail = () => ({ status: 'unavailable', attributes: {}, partial: false })
+
+// EARLIER ATTEMPTS OF A NODE. A repaired node has several generations, and until now only the last
+// one was reachable: the routes have taken `?attempt=` all along, the Inspector just always sent the
+// current number and REJECTED any response carrying an older one as stale. So the trace of the
+// attempt that actually crashed — the one an operator opens the trace to read — was unreachable.
+//
+// Attempts are `0..current`, derivable with no extra request: `node.attempt` is the current
+// generation and generations are dense (each inline repair bumps it by one).
+export const nodeAttemptOptions = (currentAttempt) => {
+  const current = Number.isSafeInteger(currentAttempt) && currentAttempt >= 0 ? currentAttempt : 0
+  return Array.from({ length: current + 1 }, (_, attempt) => ({
+    attempt,
+    label: attempt === current ? `attempt ${attempt} (current)` : `attempt ${attempt}`,
+    current: attempt === current,
+  }))
+}
+
+// Which payload may render for the selected attempt. The node-DETAIL payload always describes the
+// CURRENT attempt, so it is a valid fallback only while the current attempt is what is being shown;
+// falling back to it for a historical selection would silently show the newest trace under an older
+// attempt's label — the one failure mode that is worse than showing nothing.
+export const traceForAttempt = ({ selected, current, paged, detail }) =>
+  (selected === current ? (paged || detail || null) : (paged || null))
+
+// A historical attempt has no detail payload to render, so its read is not optional the way the
+// current attempt's pager is.
+export const attemptReadRequired = ({ selected, current, canPageFurther }) =>
+  selected !== current || canPageFurther

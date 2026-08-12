@@ -3263,3 +3263,8 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .cv-resource-note { padding-inline: 12px; flex-wrap: wrap; }
   .cv-resource-note.stale .btn { margin-left: auto; }
 }
+
+/* The node trace's attempt picker. Only appears on a REPAIRED node, so it sits inline with the
+   view toggle rather than claiming a row of its own. */
+.trace-attempt { display: inline-flex; align-items: center; gap: 4px; }
+.trace-attempt select { max-width: 15em; }

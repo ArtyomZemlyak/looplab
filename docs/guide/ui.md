@@ -271,6 +271,15 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   The listing enumerates *all* roots rather than a span tail, so it can state what it dropped:
   `projection.omitted_operations`. "Agent work only" is on by default and hides bookkeeping
   operations (`lessons_*` and friends were 99 of that run's 176) while reporting how many it hid.
+- **Earlier attempts of a repaired node** — the node trace carries an `attempt` picker whenever the
+  node has more than one generation. Each inline repair bumps the generation and each keeps its own
+  trace, so the attempt that actually CRASHED — usually the one worth reading — is selectable
+  instead of only the last. The routes have always taken `?attempt=`; until 2026-08-12 the UI sent
+  the current generation and rejected any older response as stale. Selecting an earlier attempt is
+  a read: the destructive **clear trace** stays bound to the CURRENT generation, so browsing history
+  can never erase it, and a historical selection never falls back to the node-detail payload (which
+  always describes the current attempt) — showing the newest trace under an older label would be
+  worse than showing nothing.
 - **Per-node trace** — when `trace_llm_io` is on, inspect the bounded, canonicalized and heuristically
   redacted diagnostic representation recorded for each call. It is not byte-exact provider I/O. Complete
   object rows with an invalid span shape are quarantined one by one; invalid required IDs are skipped and

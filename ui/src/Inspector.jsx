@@ -15,9 +15,9 @@ import { nodeFeasibilityStatus } from './trustSemantics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import {
-  NODE_TRACE_SPAN_WINDOW, TRACE_PARTIAL_EMPTY_NOTICE, conversationWindow,
-  conversationWindowNotice,
-  traceDetailState, traceUnavailable, traceWindow, traceWindowNotice, unavailableTraceDetail,
+  NODE_TRACE_SPAN_WINDOW, TRACE_PARTIAL_EMPTY_NOTICE, attemptReadRequired, conversationWindow,
+  conversationWindowNotice, nodeAttemptOptions, traceDetailState, traceForAttempt, traceUnavailable,
+  traceWindow, traceWindowNotice, unavailableTraceDetail,
 } from './traceProjection.js'
 import {
   TRACE_SCROLL_BOUNDED, TRACE_SCROLL_LOADING, TRACE_SCROLL_LOADING_LABEL, TRACE_SCROLL_REACH_LABEL,
@@ -1829,13 +1829,30 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   // clicked "load more" in the conversation had a second 4 s poll running against this node for as
   // long as it worked, fetching a span tree whose response was thrown away (up to ~1.6 MB per tick
   // at the x8 ceiling).
+  // Which ATTEMPT of this node to show. A repaired node has several generations and only the last
+  // was ever reachable — the routes have taken `?attempt=` all along, this component just always
+  // sent the current number. So the trace of the attempt that actually crashed, which is the one an
+  // operator opens the trace to read, could not be opened at all.
+  const [viewAttempt, setViewAttempt] = useState(null)
+  const attemptOptions = useMemo(
+    () => nodeAttemptOptions(nodeGeneration), [nodeGeneration])
+  // `null` follows the node forward: a live node that repairs mid-read must not pin the operator to
+  // the generation that happened to be current when they opened the tab.
+  const selectedAttempt = viewAttempt == null ? (nodeGeneration ?? 0) : viewAttempt
+  const historicalAttempt = selectedAttempt !== (nodeGeneration ?? 0)
+  useEffect(() => { setViewAttempt(null) }, [n.id, expectedGeneration])
   const pagedRead = usePagedNodeTrace({
-    runId, nodeId: n.id, attempt: nodeGeneration, expectedGeneration,
+    runId, nodeId: n.id, attempt: selectedAttempt, expectedGeneration,
     limit: spanLimit, nonce, working,
-    enabled: view !== 'conversation' && spanLimit > NODE_TRACE_SPAN_WINDOW,
+    enabled: view !== 'conversation' && attemptReadRequired({
+      selected: selectedAttempt, current: nodeGeneration ?? 0,
+      canPageFurther: spanLimit > NODE_TRACE_SPAN_WINDOW,
+    }),
   })
   const paged = pagedRead?.payload
-  const trace = paged || n.trace
+  const trace = traceForAttempt({
+    selected: selectedAttempt, current: nodeGeneration ?? 0, paged, detail: n.trace,
+  })
   const spans = trace?.nodes || []
   // `unavailable` stays bound to the DETAIL payload, never the paged one. It feeds the trace-clear
   // fence below, and a failed paging request is not evidence that this node's telemetry is
@@ -1878,6 +1895,20 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
     <span className="muted trace-live-note">live · auto-updates</span></div>
   const retryParentTrace = () => onReload?.('retry')
   const scrollTo = (where) => { const c = bodyRef.current?.closest('.insp-body'); if (c) c.scrollTop = where === 'top' ? 0 : c.scrollHeight }
+  // The attempt picker. Only rendered when there IS an earlier generation — a node that never got
+  // repaired has nothing to choose between, and an always-present control implies history that does
+  // not exist. Selecting an older attempt is a READ; the destructive clear below stays bound to
+  // `nodeGeneration` (the current one) on purpose, so browsing history can never erase it.
+  const attemptPicker = attemptOptions.length > 1 && <span className="trace-attempt">
+    <label className="muted" htmlFor={`attempt-${n.id}`}>attempt </label>
+    <select id={`attempt-${n.id}`} className="seg" value={selectedAttempt}
+      title="This node was repaired. Earlier attempts keep their own trace — including the one that crashed."
+      onChange={e => setViewAttempt(Number(e.target.value))}>
+      {attemptOptions.map(o => <option key={o.attempt} value={o.attempt}>{o.label}</option>)}
+    </select>
+    {historicalAttempt && <button type="button" className="seg"
+      onClick={() => setViewAttempt(null)}>back to current</button>}
+  </span>
   const clearBtn = <span className="trace-clear">
     <button type="button" ref={clearing === '' ? clearTriggerRef : clearConfirmRef}
       className={'seg' + (clearing ? ' on' : '')}
@@ -1941,7 +1972,7 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
       <button aria-pressed={view === 'raw'} className={'seg' + (view === 'raw' ? ' on' : '')} onClick={() => setView('raw')}>span tree</button>
       {view === 'conversation' && <button className="seg trace-collapse" aria-pressed={allOpen} title="collapse or expand every stage"
         onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>}
-      <span className="spacer" />{clearBtn}{nav}
+      {attemptPicker}<span className="spacer" />{clearBtn}{nav}
     </div>
   </div>
   if (view === 'conversation')
