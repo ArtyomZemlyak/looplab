@@ -1533,8 +1533,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # stop the node". Off once any node has been evaluated, and off entirely at threshold 0.
             _systemic = systemic_failure_stop_reason(state, self.systemic_failure_stop)
             if _systemic is not None:
-                if self._finish_with_report_if_quiescent(
-                        state, {"reason": _systemic}, after_seq=decision_seq):
+                # Through the SAME ladder as every other terminal gate, not a bare finish. This gate
+                # sits BEFORE the speculation block below, so unlike the `_finish_with_report_if_
+                # quiescent` call sites further down it has no structural guarantee that no Card
+                # build head is open — and finishing over an open head leaves the run's own durable
+                # request unacknowledged. See `_settle_terminal_gate`: the order IS the rule.
+                if self._settle_terminal_gate(state, _systemic, decision_seq=decision_seq) == "break":
                     break
                 continue
             _signal = self._run_spec_gates(state)
