@@ -227,6 +227,35 @@ def _drive_gate(probe, reason="aborted", **kwargs):
     return Engine._settle_terminal_gate(probe, object(), reason, decision_seq=7, **kwargs)
 
 
+def test_every_run_loop_gate_that_finishes_the_run_goes_through_the_settle_ladder():
+    """The ladder is only a rule if every gate is ON it.
+
+    `_settle_terminal_gate` is well covered as a unit below, but that proves the helper, not that a
+    gate uses it. The systemic-failure stop shipped calling `_finish_with_report_if_quiescent`
+    directly, and it sits BEFORE the speculation block — so unlike the bare call sites further down
+    it has no structural guarantee that no Card build head is open, and finishing over one leaves the
+    run's own durable request unacknowledged. Resolved as real `ast.Call` nodes inside the gate's own
+    branch: a comment naming the helper is not an AST node.
+    """
+    import ast
+
+    from _source_scan import function_tree
+    from looplab.engine.orchestrator import Engine
+
+    tree = function_tree(Engine._run_with_llm_broker)          # the loop spine, not the `run` wrapper
+    gates = [node for node in ast.walk(tree)
+             if isinstance(node, ast.If) and "_systemic" in ast.unparse(node.test)]
+    assert gates, "the systemic-failure gate is no longer in the run loop"
+    for gate in gates:
+        called = {node.func.attr for node in ast.walk(gate)
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
+        assert "_settle_terminal_gate" in called, (
+            "the systemic-failure gate must settle in-flight work through the shared ladder")
+        assert "_finish_with_report_if_quiescent" not in called, (
+            "finishing directly skips `_close_card_build_before_terminal_gate`, which is the whole "
+            "point of the ladder — route the reason through `_settle_terminal_gate` instead")
+
+
 def test_a_terminal_gate_never_attempts_finalization_while_a_build_head_is_open():
     probe = _GateProbe(head=True, finished=True)
     assert _drive_gate(probe, drain_forced_request=True) == "continue"
