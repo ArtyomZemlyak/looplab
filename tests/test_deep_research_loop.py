@@ -774,3 +774,194 @@ def test_spawn_research_propagates_budget_hard_stop_from_task_group():
                 and any(_contains_budget(child) for child in exc.exceptions))
 
     assert _contains_budget(raised.value)
+
+
+# =================================================================================================
+# THE BOARD THE MEMO STAGE ITSELF FILLS
+#
+# Measured on `runs/rubertlite-dr-unified-v6` (live, Card mode, one 90-minute evaluation): four
+# deep-research memos appended 18 `hypothesis_added` events for about five distinct ideas, and the
+# board reached eleven cards — three of them re-wordings of the idea that was RUNNING at the time.
+# The user turn recovered from that run's `spans.jsonl` is reproduced by the first test below: goal,
+# node counts, coverage receipt, `experiments:` — and no board at all.
+# =================================================================================================
+
+_LIVE_REWORDINGS = [
+    # The first sentence of four of that run's `hypothesis_added` rows. One idea, four memos.
+    "OPERATIONAL FIRST (highest priority): Land a clean single-GPU baseline in the unified repo.",
+    "LAND A CLEAN SINGLE-GPU BASELINE FIRST (highest priority, operational). Run experiment #0's"
+    " plain in-batch `mnr` InfoNCE.",
+    "LAND A CLEAN SINGLE-GPU BASELINE FIRST (operational priority): reproduce rubert-dr-0807 #9's"
+    " proven recipe.",
+    "Land the clean single-GPU baseline FIRST and prove the artifact contract.",
+]
+
+
+def _board_events(running_seed: str, open_seeds: tuple[str, ...] = ()):
+    """A folded board: one question with a node still RUNNING, plus untested open beliefs."""
+    from looplab.events.eventstore import Event
+
+    def ev(seq, event_type, data):
+        return Event(seq=seq, ts=0.0, type=event_type, data=data)
+
+    events = [ev(0, "run_started", {"goal": "g", "direction": "max"}),
+              ev(1, "hypothesis_added",
+                 {"statement": running_seed, "source": "deep_research", "at_node": 0})]
+    for index, seed in enumerate(open_seeds):
+        events.append(ev(2 + index, "hypothesis_added",
+                         {"statement": seed, "source": "deep_research", "at_node": 0}))
+    events.append(ev(2 + len(open_seeds), "node_created",
+                     {"node_id": 0, "parent_ids": [], "operator": "draft",
+                      "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                               "hypothesis": running_seed},
+                      "code": "c", "files": {}}))
+    return events
+
+
+def test_the_memo_prompt_shows_the_board_its_own_directions_filled():
+    """The memo prompt must carry BOTH board halves, in the proposal prompt's exact vocabulary.
+
+    Drives the real `research()` so the assertion is about the user turn that actually reaches the
+    provider, not about a helper. Without the board block this brief mentions neither the question
+    whose experiment is running (a pending node is neither a winner nor a failure, so
+    `experiments:` shows it as a bare status) nor the untested belief the previous memo registered."""
+    from looplab.events.replay import fold
+
+    running = "Land a clean single-GPU baseline first and prove the artifact contract."
+    untested = "Distil from a frozen stronger teacher with listwise KL."
+    state = fold(_board_events(running, (untested,)))
+    client = _FakeChatClient([_tool_call("emit", {"summary": "s"})])
+
+    DeepResearcher(client).research(state, trigger="cadence")
+    user_turn = client.turns[0][1]["content"]
+
+    # The untested belief — claimable by the PROPOSER, context here.
+    assert "Untested hypotheses on the board" in user_turn
+    assert untested in user_turn
+    # …and the question that already has an experiment, with its live work item named.
+    assert "ALREADY on the board" in user_turn
+    assert running in user_turn and "STATUS=running" in user_turn and "NODES=[0]" in user_turn
+    # One vocabulary with the proposal brief: same row spelling, resolved from that brief.
+    from looplab.agents.roles import _state_brief
+    for row in _state_brief(state, None).splitlines():
+        if row.startswith("- CARD_ID="):
+            assert row in user_turn
+    # No claim contract: a memo has no `card_id` field to return one in.
+    assert "return its CARD_ID in `card_id`" not in user_turn
+    assert "registered as OPEN BELIEFS" in user_turn
+
+
+def test_the_memo_prompt_promises_only_what_the_append_site_enforces():
+    """The neighbouring proposal block carries a comment about what an unimplemented "the engine
+    decides" promise cost. This block's promises are the two `admit_research_beliefs` rules and
+    nothing else — in particular it never offers to retire an existing belief on the memo's say-so."""
+    from looplab.events.replay import fold
+    from looplab.engine.research_cadence import admit_research_beliefs
+
+    state = fold(_board_events("a running question", ("an open belief",)))
+    brief = state_brief(state)
+    assert "the engine drops a direction that duplicates an open belief" in brief
+    assert "past its cap" in brief
+    # Driven, not read: both promises hold at the append site.
+    assert admit_research_beliefs(["an open belief"], ["an open belief"]) == []
+    assert admit_research_beliefs([f"b{i}" for i in range(5)], ["genuinely new"]) == []
+    # And the thing it does NOT promise: nothing retires a belief for the memo.
+    assert "retiring a belief is the operator's call" in brief
+
+
+# ------------------------------------------------------------------ the append-site bound
+
+def test_admit_research_beliefs_truth_table():
+    from looplab.engine.research_cadence import (DEEP_RESEARCH_OPEN_BELIEF_CAP,
+                                                 admit_research_beliefs)
+
+    assert DEEP_RESEARCH_OPEN_BELIEF_CAP == 5
+    # empty board: the memo's historical five all land, in order
+    assert admit_research_beliefs([], ["a", "b", "c", "d", "e"]) == ["a", "b", "c", "d", "e"]
+    # a sixth does not, and the drop is a TRUNCATION at the cap, not a filter that reorders
+    assert admit_research_beliefs([], ["a", "b", "c", "d", "e", "f"]) == ["a", "b", "c", "d", "e"]
+    # case and whitespace are not semantics
+    assert admit_research_beliefs(["Raise The LR"], ["  raise the   lr  "]) == []
+    # the memo's own repeats collapse against each other, so re-running one memo is idempotent
+    assert admit_research_beliefs([], ["x", "X", " x "]) == ["x"]
+    # blank/None directions are not beliefs and do not spend room
+    assert admit_research_beliefs(["p", "q", "r", "s"], ["", None, "  ", "new"]) == ["new"]
+    # a full board admits nothing at all
+    assert admit_research_beliefs(["p", "q", "r", "s", "t"], ["new"]) == []
+
+
+def test_the_exact_key_does_not_catch_the_live_rewordings_and_the_cap_does():
+    """Stated because it decides the SHAPE of this fix: no cheap lexical rule separates that run's
+    five ideas. Token-set Jaccard over its 18 statements scores its best pair at 0.489 —
+    distillation-from-a-teacher against hard-negative-mining, two DIFFERENT experiments — while true
+    re-wordings of one idea run down to 0.118. So the deterministic guard stays exact, near-duplicate
+    belief identity stays the consolidator's job, and what actually holds the board is the cap."""
+    from looplab.engine.research_cadence import admit_research_beliefs, normalized_belief_key
+
+    keys = {normalized_belief_key(text) for text in _LIVE_REWORDINGS}
+    assert len(keys) == len(_LIVE_REWORDINGS)          # four distinct keys: the guard cannot see it
+    board: list[str] = []
+    for reworded in _LIVE_REWORDINGS:                  # the live run's four memos, ONE idea between them
+        board.extend(admit_research_beliefs(board, [reworded]))
+    assert len(board) == 4                             # four rows for one idea — the guard is blind
+    # What stops it is the cap, and it stops it whatever the fifth wording is.
+    assert admit_research_beliefs(board, ["a fifth wording of the same baseline idea"]) == [
+        "a fifth wording of the same baseline idea"]
+    board.append("a fifth wording of the same baseline idea")
+    assert admit_research_beliefs(board, ["a sixth wording", "and a seventh"]) == []
+
+
+def test_four_memos_of_rewordings_no_longer_fill_the_board():
+    """End to end through the durable writer: four memos, five directions each, against a live board.
+
+    The shape of `runs/rubertlite-dr-unified-v6` — including the memo that re-words the question
+    whose node is RUNNING. Without the bound this appends 20 `hypothesis_added` rows and the board
+    ends with a card per distinct wording; the operator's complaint was eleven cards for five ideas."""
+    from looplab.core.models import ResearchMemo
+    from looplab.engine.orchestrator import Engine
+    from looplab.events.eventstore import Event
+    from looplab.events.replay import fold
+
+    running = _LIVE_REWORDINGS[0]
+
+    class _Store:
+        def __init__(self, events):
+            self.events = list(events)
+
+        def append(self, event_type, data):
+            self.events.append(Event(seq=len(self.events), ts=0.0, type=event_type, data=data))
+
+        def read_all(self):
+            return list(self.events)
+
+    store = _Store(_board_events(running))
+    eng = Engine.__new__(Engine)
+    eng.store = store
+    eng._research_verify = False
+    eng._track_hypotheses = True
+    eng.deep_researcher = None
+
+    for memo_index, reworded in enumerate(_LIVE_REWORDINGS):
+        eng._record_deep_research(
+            ResearchMemo(summary=f"memo {memo_index}", at_node=1, trigger="repeat",
+                         recommended_directions=[
+                             reworded,
+                             f"R-Drop on the in-batch contrastive loss, wording {memo_index}",
+                             f"hard-negative mining with FN filtering, wording {memo_index}",
+                             f"distillation from a frozen teacher, wording {memo_index}",
+                             f"a temperature sweep, wording {memo_index}"]),
+            trigger="repeat", manual=False)
+
+    board = fold(store.read_all())
+    beliefs = [card for card in board.open_research_beliefs()
+               if card.selection_provenance.action_source == "none"]
+    assert len(beliefs) <= 5
+    # the question with a node in flight keeps its own card and gains no twin
+    running_cards = [c for c in board.research_cards() if c.seed_statement == running]
+    assert len(running_cards) == 1 and running_cards[0].evidence == [0]
+    # every direction is still recorded — the memo body and the hint row carry all twenty
+    appended = [event.type for event in store.read_all()]
+    assert appended.count("research_completed") == 4 and appended.count("hint") == 4
+    hint_texts = " ".join(event.data["text"] for event in store.read_all()
+                          if event.type == "hint")
+    assert all(f"wording {index}" in hint_texts for index in range(4))

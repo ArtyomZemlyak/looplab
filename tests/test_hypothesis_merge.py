@@ -190,3 +190,80 @@ def test_belief_merge_excludes_native_work_item_cards(tmp_path, monkeypatch):
     # only the 4 pure beliefs are merge candidates; the native work item is excluded by identity
     assert "native work item" not in seen.get("texts", [])
     assert len(seen.get("texts", [])) == 4
+
+
+# =================================================================================================
+# WHY THIS MERGE STILL MAY NOT RUN FROM THE BACKGROUND LOOP IN CARD MODE
+#
+# `runs/rubertlite-dr-unified-v6` is the case for lifting the restriction: research ran concurrently
+# four times during one 90-minute evaluation, `_maybe_merge_hypotheses`'s gate (>=4 open, +2 since
+# the last pass) was satisfied many times over, and `hypothesis_merged` fired ZERO times, because in
+# Card mode the consolidator runs only on the joined main-task cadence the run never reached. The
+# board finished with eleven cards for five ideas.
+#
+# It is not lifted, and these two tests are the reason rather than the registry comment. Invariant #1
+# asks "does any reader key on this event's POSITION?" — for `hypothesis_merged`, two do.
+# =================================================================================================
+
+def _ev(seq, event_type, data):
+    from looplab.events.eventstore import Event
+    return Event(seq=seq, ts=0.0, type=event_type, data=data)
+
+
+def _merge_and_drop_log(order):
+    """One belief merged into another, and an operator drop naming the ALIAS — in both orders."""
+    alpha, beta = "belief alpha", "belief beta"
+    a, b = hypothesis_id(alpha), hypothesis_id(beta)
+    base = [_ev(0, "run_started", {"goal": "g", "direction": "max"}),
+            _ev(1, "hypothesis_added", {"statement": alpha, "source": "deep_research", "at_node": 0}),
+            _ev(2, "hypothesis_added", {"statement": beta, "source": "deep_research", "at_node": 0})]
+    merge = _ev(3, "hypothesis_merged",
+                {"canonical": a, "aliases": [b], "statement": "one belief", "at_node": 0})
+    drop = _ev(4, "card_dropped",
+               {"id": b, "reason": "operator abandoned the direction", "dropped_by": "operator"})
+    return base + ([merge, drop] if order == "merge_first" else [drop, merge]), a
+
+
+def test_a_background_merge_could_land_either_side_of_an_operator_drop():
+    """`hypothesis_merged` is NOT splice-neutral: the FOLD ITSELF keys on its position.
+
+    `replay._on_hypothesis_merged` stamps `_event_index` onto the receipt and
+    `card_ledger._CardAliases.canon_at` resolves a control through only the merge edges durable AT
+    that index. So the same three facts — two beliefs, one merge, one operator drop of the alias —
+    fold to a DIFFERENT board depending on which side of the drop the merge landed on. A background
+    writer's position against an operator control event is thread schedule, which is why this event
+    is in `NON_CARD_SELECTION_BACKGROUND_APPENDABLE` and not in `BACKGROUND_APPENDABLE`."""
+    from looplab.events.replay import fold
+
+    merge_first, canonical = _merge_and_drop_log("merge_first")
+    drop_first, _ = _merge_and_drop_log("drop_first")
+    after_merge_first = fold(merge_first)
+    after_drop_first = fold(drop_first)
+
+    # Same surviving card either way — and opposite verdicts on the operator's drop.
+    assert list(after_merge_first.cards) == [canonical] == list(after_drop_first.cards)
+    assert after_merge_first.cards[canonical].status == "dropped"
+    assert after_merge_first.cards[canonical].dropped_reason == "operator abandoned the direction"
+    assert after_drop_first.cards[canonical].status != "dropped"
+    assert after_drop_first.cards[canonical].dropped_reason is None
+
+
+def test_a_background_merge_would_move_the_paid_proposal_fence():
+    """The second position-keyed reader: `speculation._proposal_authority_seq`.
+
+    It is captured before the slow paid `_prepare_node_idea` and compared for EQUALITY at commit, and
+    it excludes `DIAGNOSTIC_EVENTS` plus the two LLM-accounting rows — nothing else.
+    `hypothesis_merged` is FOLDED, so it is none of those, and a merge appended from the concurrent
+    loop while the Developer call is in flight discards a proposal the run has already paid for."""
+    from looplab.engine.orchestrator import Engine
+    from looplab.events.types import EV_HYPOTHESIS_MERGED
+
+    before = [_ev(0, "run_started", {"goal": "g", "direction": "max"})]
+    assert Engine._proposal_authority_seq(before) == 0
+    merged = before + [_ev(1, EV_HYPOTHESIS_MERGED,
+                           {"canonical": "a", "aliases": ["b"], "statement": "m"})]
+    assert Engine._proposal_authority_seq(merged) == 1        # the fence moved: the CAS now fails
+    # …whereas a diagnostic row in the same window does not, which is the property that made the
+    # background research task legal in the first place.
+    diagnostic = before + [_ev(1, "train_monitor_alert", {"node_id": 0, "verdict": "healthy"})]
+    assert Engine._proposal_authority_seq(diagnostic) == 0

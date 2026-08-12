@@ -684,6 +684,20 @@ and an index; they see the board's content without either claim contract. Until 
 first list existed, so a card disappeared from the Researcher's view the moment it got a node,
 including a node still running.
 
+**So does the deep-research memo prompt**, which is the stage that fills the board: both halves render
+from one shared block (`agents/roles.py::board_prompt_lines`), in the same `CARD_ID`/`BELIEF_ID`/
+`SEED_STATEMENT_JSON` spelling, without the claim contract (a memo has no `card_id` field). Until
+2026-08-12 it saw none of it — four memos in one 90-minute evaluation registered 18 belief rows for
+about five ideas, three of them re-wordings of the question whose experiment was running while they
+were written. The prompt half is paired with an engine-side bound at the append site
+(`engine/research_cadence.py::admit_research_beliefs`): a direction whose case- and
+whitespace-normalized statement already names an open belief is not registered, and the open belief
+board is capped at five distinct rows — the same window the prompts can show. Everything refused is
+still recorded in the memo body and in the standing `hint`; what is refused is only the board row.
+Near-duplicate *wording* is not caught here on purpose: over that run's statements a token-overlap
+rule scores its best pair across two genuinely different experiments, so paraphrase identity stays
+the agentic consolidation cadence's job.
+
 Replay normalizes ids (case, surrounding whitespace/slashes, spaces to hyphens) and resolves the bounded
 `concept_consolidation` rename chain (at most 16 hops) on the base, inherited values, removals and additions
 **before** set subtraction/union. Thus `Model/Transformer` can be removed by `model/transformer`, and

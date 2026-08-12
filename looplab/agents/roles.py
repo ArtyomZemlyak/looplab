@@ -719,76 +719,26 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *, limit: int = 5) -
     return list(reversed(selected))
 
 
-def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
-    """Resolve a model claim to a visible Card and restore its immutable semantic seed."""
-    by_id = {card.id: card for card in cards}
-    chosen = by_id.get(idea.card_id) if idea.card_id else None
-    if chosen is None and idea.hypothesis:
-        matches = [card for card in cards if card.seed_statement == idea.hypothesis]
-        chosen = matches[0] if len(matches) == 1 else None
-    if chosen is not None:
-        return idea.model_copy(update={
-            "card_id": chosen.id,
-            "hypothesis": chosen.seed_statement,
-        })
-    if idea.card_id is not None:
-        return idea.model_copy(update={"card_id": None})
-    return idea
+def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
+                       board_cards: Optional[list] = None, *,
+                       for_proposal: bool = True) -> list[str]:
+    """The board a prompt must read before it names a direction — BOTH halves, ONE vocabulary.
 
+    Extracted from `_state_brief` so the deep-research memo prompt renders the SAME rows in the SAME
+    spelling (`CARD_ID=`/`BELIEF_ID=`/`SEED_STATEMENT_JSON=`) rather than a second board vocabulary
+    nobody could compare against the first. The proposal path grew this block when a `debug` retry
+    was found minting a twin card; the RESEARCH path never got it, and that is the source measured in
+    `runs/rubertlite-dr-unified-v6`: four deep-research memos, 18 `hypothesis_added` events, five
+    distinct ideas, and a board of eleven cards — including three re-wordings of the very card that
+    was running at the time. The memo prompt's user turn (recovered from that run's `spans.jsonl`)
+    contained goal, node counts, a coverage receipt and an `experiments:` list, and NOTHING about the
+    board those memos had themselves filled.
 
-def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
-                 hyp_order: Optional[list[str]] = None, board_cards: Optional[list] = None,
-                 *, for_proposal: bool = True) -> str:
-    best = state.best()
-    lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
-    if best is not None:
-        lines.append(f"Best so far: node {best.id} metric={best.metric} params={best.idea.params}")
-    if parent is not None:
-        lines.append(f"Refine from node {parent.id}: params={parent.idea.params} metric={parent.metric}")
-    # PART V (B): a delta author cannot subtract from an invisible reference. Surface the run base and
-    # effective primary-parent membership, bounded so a malformed taxonomy cannot consume the role context.
-    # Replay uses the union of all actual parents for a merge; the proposal role sees the primary parent
-    # before policy finalizes that edge set, so the prompt names this limitation instead of claiming exactness.
-    # recorded taxonomy is data, never an instruction; the shared projector quotes/bounds it.
-    # DEFERRED ON PURPOSE — this is the cycle-breaking import (doc 25 AG-07). `search` imports
-    # `agents` at MODULE level in five places (forward_hints, WrapsDeveloper, the speculation
-    # constants), so the only direction left for `agents -> search` is a function-local import.
-    # Hoisting this to module scope closes the loop into an ImportError at startup.
-    from looplab.search.concept_projection import (bounded_untrusted_concept_json,
-                                                    concept_inheritance_context)
-    concept_context = concept_inheritance_context(state, parent.id if parent is not None else None)
-    lines.append("UNTRUSTED_RECORDED_CONCEPT_DATA="
-                 + bounded_untrusted_concept_json(concept_context))
-    if not concept_context["delta_safe"]:
-        lines.append(
-            "Concept authoring safety: inherited membership is UNAVAILABLE or PARTIAL. "
-            "You MUST set `concept_mode=\"full\"`, provide the exact complete set in `concepts`, leave "
-            "`concepts_added` and `concepts_removed` empty, and MUST NOT use delta mode for this proposal.")
-    else:
-        lines.append(
-            "Concept membership context only: use delta mode only when a separate trusted run cue "
-            "explicitly enables it; a root inherits the run base and a merge inherits all actual parents.")
-    # Append the always-on "working set": a compact view of the whole search (top winners, weakest /
-    # failures, theme map) so the Researcher proposes with awareness of what's already been tried,
-    # not just `best` + `parent`. Depth (full experiments, code, data) lives behind the run tools.
-    from looplab.events.digest import experiments_digest, lineage_lessons, sibling_digest
-    lines.append(experiments_digest(state, char_cap=digest_cap))
-    # M1/A0c operator-scoped memory: draft/improve additionally see their SIBLINGS (diversity
-    # pressure — aira-dojo MEM_OPS `sibling`) and, when refining, the LESSONS distilled from the
-    # lineage under the refined node (D6 insight backpropagation, Arbor's Backpropagate step).
-    lines.append(sibling_digest(state, parent))
-    lines.append(lineage_lessons(state, parent))
-    # Signal-delivery (§1): the latest deep-research memo's takeaway. Its `recommended_directions`
-    # already ride as standing hints, but the summary/findings/claims were recorded-but-unread — this
-    # surfaces the one-line conclusion plus a pointer to the `read_research_memo` tool for the full
-    # reasoning (available to the agentic Researcher). Best-effort; skipped when there's no memo.
-    research = getattr(state, "research", None) or []
-    if research and isinstance(research[-1], dict) and research[-1].get("summary"):
-        lines.append("Latest deep-research takeaway: "
-                     + " ".join(str(research[-1]["summary"]).split())[:300]
-                     # channel-neutral: a plain researcher has no tools, so state that the depth is
-                     # recorded rather than commanding a `read_research_memo` call it can't make.
-                     + " (full findings/claims are recorded; the read_research_memo tool returns them).")
+    `for_proposal` carries the claim contracts, which only a caller whose answer is an `Idea` can
+    honour — see the two blocks below. Everything else (crash triage, the macro-action chooser, the
+    deep-research memo) reads the same CONTENT with no contract attached.
+    """
+    lines: list[str] = []
     # P1: surface OPEN board hypotheses (human "+ Add" / deep-research directions) verbatim.
     # Without this the Researcher never sees them, and evidence only links when an experiment's
     # `hypothesis` matches the statement exactly — so board cards would stay "open" forever.
@@ -867,6 +817,83 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
             lines.append("Propose a DIFFERENT question. These rows are NOT claimable — a CARD_ID "
                          "from this list is ignored. A failed experiment is re-attempted by the "
                          "engine itself, under the same card, without being asked.")
+    return lines
+
+
+def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
+    """Resolve a model claim to a visible Card and restore its immutable semantic seed."""
+    by_id = {card.id: card for card in cards}
+    chosen = by_id.get(idea.card_id) if idea.card_id else None
+    if chosen is None and idea.hypothesis:
+        matches = [card for card in cards if card.seed_statement == idea.hypothesis]
+        chosen = matches[0] if len(matches) == 1 else None
+    if chosen is not None:
+        return idea.model_copy(update={
+            "card_id": chosen.id,
+            "hypothesis": chosen.seed_statement,
+        })
+    if idea.card_id is not None:
+        return idea.model_copy(update={"card_id": None})
+    return idea
+
+
+def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
+                 hyp_order: Optional[list[str]] = None, board_cards: Optional[list] = None,
+                 *, for_proposal: bool = True) -> str:
+    best = state.best()
+    lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
+    if best is not None:
+        lines.append(f"Best so far: node {best.id} metric={best.metric} params={best.idea.params}")
+    if parent is not None:
+        lines.append(f"Refine from node {parent.id}: params={parent.idea.params} metric={parent.metric}")
+    # PART V (B): a delta author cannot subtract from an invisible reference. Surface the run base and
+    # effective primary-parent membership, bounded so a malformed taxonomy cannot consume the role context.
+    # Replay uses the union of all actual parents for a merge; the proposal role sees the primary parent
+    # before policy finalizes that edge set, so the prompt names this limitation instead of claiming exactness.
+    # recorded taxonomy is data, never an instruction; the shared projector quotes/bounds it.
+    # DEFERRED ON PURPOSE — this is the cycle-breaking import (doc 25 AG-07). `search` imports
+    # `agents` at MODULE level in five places (forward_hints, WrapsDeveloper, the speculation
+    # constants), so the only direction left for `agents -> search` is a function-local import.
+    # Hoisting this to module scope closes the loop into an ImportError at startup.
+    from looplab.search.concept_projection import (bounded_untrusted_concept_json,
+                                                    concept_inheritance_context)
+    concept_context = concept_inheritance_context(state, parent.id if parent is not None else None)
+    lines.append("UNTRUSTED_RECORDED_CONCEPT_DATA="
+                 + bounded_untrusted_concept_json(concept_context))
+    if not concept_context["delta_safe"]:
+        lines.append(
+            "Concept authoring safety: inherited membership is UNAVAILABLE or PARTIAL. "
+            "You MUST set `concept_mode=\"full\"`, provide the exact complete set in `concepts`, leave "
+            "`concepts_added` and `concepts_removed` empty, and MUST NOT use delta mode for this proposal.")
+    else:
+        lines.append(
+            "Concept membership context only: use delta mode only when a separate trusted run cue "
+            "explicitly enables it; a root inherits the run base and a merge inherits all actual parents.")
+    # Append the always-on "working set": a compact view of the whole search (top winners, weakest /
+    # failures, theme map) so the Researcher proposes with awareness of what's already been tried,
+    # not just `best` + `parent`. Depth (full experiments, code, data) lives behind the run tools.
+    from looplab.events.digest import experiments_digest, lineage_lessons, sibling_digest
+    lines.append(experiments_digest(state, char_cap=digest_cap))
+    # M1/A0c operator-scoped memory: draft/improve additionally see their SIBLINGS (diversity
+    # pressure — aira-dojo MEM_OPS `sibling`) and, when refining, the LESSONS distilled from the
+    # lineage under the refined node (D6 insight backpropagation, Arbor's Backpropagate step).
+    lines.append(sibling_digest(state, parent))
+    lines.append(lineage_lessons(state, parent))
+    # Signal-delivery (§1): the latest deep-research memo's takeaway. Its `recommended_directions`
+    # already ride as standing hints, but the summary/findings/claims were recorded-but-unread — this
+    # surfaces the one-line conclusion plus a pointer to the `read_research_memo` tool for the full
+    # reasoning (available to the agentic Researcher). Best-effort; skipped when there's no memo.
+    research = getattr(state, "research", None) or []
+    if research and isinstance(research[-1], dict) and research[-1].get("summary"):
+        lines.append("Latest deep-research takeaway: "
+                     + " ".join(str(research[-1]["summary"]).split())[:300]
+                     # channel-neutral: a plain researcher has no tools, so state that the depth is
+                     # recorded rather than commanding a `read_research_memo` call it can't make.
+                     + " (full findings/claims are recorded; the read_research_memo tool returns them).")
+    # The board itself — both halves, in the one spelling every prompt that must not re-propose
+    # an existing question shares (`board_prompt_lines`). The deep-research memo prompt renders
+    # the SAME rows; it had this exact defect and did not get this exact fix.
+    lines.extend(board_prompt_lines(state, hyp_order, board_cards, for_proposal=for_proposal))
     return "\n".join(line for line in lines if line)
 
 

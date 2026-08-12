@@ -16,8 +16,9 @@ Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never s
 events and stdlib (the trust/search deps are lazy, method-local imports)."""
 from __future__ import annotations
 
+import logging
 import uuid
-from typing import Optional
+from typing import Iterable, Optional
 
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
@@ -29,6 +30,86 @@ from looplab.events.types import (EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_ME
                                   EV_RESEARCH_COMPLETED,
                                   BACKGROUND_APPENDABLE,
                                   NON_CARD_SELECTION_BACKGROUND_APPENDABLE)
+
+
+_LOG = logging.getLogger(__name__)
+
+
+# The open belief board is a QUEUE the search spends, not a scratchpad the research stage fills.
+# Sized to the window every prompt that reads the board can actually SHOW — `next_board_prompt_cards`
+# and `attempted_board_prompt_cards` both stop at five whole rows — because a belief the model cannot
+# see is a belief it re-proposes in new words, which is precisely how the measured board reached
+# eleven cards for five ideas. Untested beliefs leave this population as soon as they get evidence,
+# so the cap throttles the WRITER, it does not close the board.
+DEEP_RESEARCH_OPEN_BELIEF_CAP = 5
+
+
+def normalized_belief_key(statement) -> str:
+    """The append-site duplicate key: case-folded, whitespace-collapsed statement text.
+
+    The fold already collapses BYTE-IDENTICAL statements (one card per `hypothesis_id(statement)`),
+    so an append-site copy of only that rule would buy nothing. This is the smallest widening that
+    stays deterministic and cannot fuse two different ideas: case and spacing are not semantics.
+
+    It is deliberately NOT a similarity threshold, and that is a measurement rather than a taste.
+    Over the 18 `hypothesis_added` statements of `runs/rubertlite-dr-unified-v6`, token-set Jaccard
+    does not separate the five real ideas at ANY threshold: the highest-scoring pair in the whole
+    corpus (0.489) is distillation-from-a-teacher against hard-negative-mining — two different
+    experiments — while true re-wordings of one idea run down to 0.118. A cheap lexical guard set
+    anywhere in that range fuses distinct directions before it catches the duplicates. Near-duplicate
+    BELIEF identity needs the model (`_maybe_merge_hypotheses`), so the deterministic half of this
+    fix does what determinism can do — exact restatements and a hard bound — and says so.
+    """
+    return " ".join(str(statement or "").split()).casefold()
+
+
+def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[str], *,
+                           cap: int = DEEP_RESEARCH_OPEN_BELIEF_CAP) -> list[str]:
+    """Which of a memo's directions may become OPEN BELIEFS, given the board already open.
+
+    PURE and stateable on purpose (CLAUDE.md tier 2): the rule used to be "all five, every memo,
+    forever", buried in an append loop no caller could reach, and over one 90-minute evaluation that
+    is 18 board rows for five ideas. Two rules, both deterministic:
+
+      1. a direction whose `normalized_belief_key` already names an open belief is DROPPED — the
+         fold's own exact-statement rule, applied one step earlier so the duplicate never becomes a
+         card at all rather than becoming one the consolidator may or may not get to;
+      2. the open board is capped at `cap` DISTINCT beliefs; a memo may fill the remaining room and
+         no more.
+
+    Order is preserved and the memo's own repeats collapse against each other, so `admit(open, ds)`
+    is idempotent under re-running the same memo. Everything dropped is still recorded — the memo
+    body and the `hint` row carry the full `recommended_directions` list — so nothing is LOST here;
+    what is refused is the board row, which is the resource that was overflowing.
+    """
+    seen = {normalized_belief_key(s) for s in open_statements if str(s or "").strip()}
+    admitted: list[str] = []
+    for direction in directions:
+        text = str(direction or "").strip()
+        if not text:
+            continue
+        key = normalized_belief_key(text)
+        if key in seen:
+            continue
+        if len(seen) >= max(0, int(cap)):
+            break
+        seen.add(key)
+        admitted.append(text)
+    return admitted
+
+
+def is_pure_belief(card) -> bool:
+    """A board row that owns no ACTION — the Card equivalent of the old open hypothesis.
+
+    Identity, not readiness (peer review): `selection_ready` is transient (a native card is not-ready
+    while stale/incomplete/in-flight/terminal), so a `not selection_ready` filter admits a native
+    work item whenever it is blocked. A native card OWNS an action
+    (`selection_provenance.action_source` != "none", i.e. action_owner_count > 0 — the model enforces
+    the equivalence); a pure belief owns none. Shared by the consolidation cadence and the
+    append-site bound so both mean the same board.
+    """
+    provenance = getattr(card, "selection_provenance", None)
+    return getattr(provenance, "action_source", "none") == "none"
 
 
 def research_memo_sig(memo) -> str:
@@ -409,10 +490,47 @@ class ResearchCadenceMixin:
             # runs, and shows on the board as an open question the search should resolve.
             if self._track_hypotheses:
                 assert EV_HYPOTHESIS_ADDED in BACKGROUND_APPENDABLE   # see the method-level note
-                for direction in directions[:5]:
+                for direction in self._admissible_beliefs(directions[:5]):
                     self.store.append(EV_HYPOTHESIS_ADDED, {
-                        "statement": str(direction).strip(), "source": "deep_research",
+                        "statement": direction, "source": "deep_research",
                         "at_node": memo.at_node})
+
+    def _admissible_beliefs(self, directions: list) -> list[str]:
+        """Read the open belief board and apply `admit_research_beliefs` to this memo's directions.
+
+        THE WRITE-SIDE HALF of the duplicate fix, and deliberately a REFUSAL TO APPEND rather than a
+        merge after the fact. That distinction is what makes it legal from here: this method runs on
+        the CONCURRENT research task, and engine invariant #1 admits it only because
+        `EV_HYPOTHESIS_ADDED` is in `BACKGROUND_APPENDABLE`. Not writing an event moves no reader's
+        position — not the fold, not `speculation._proposal_authority_seq` — so a bound expressed as
+        "append fewer rows" is safe from a background task in a way that `hypothesis_merged` is not.
+        See `_maybe_merge_hypotheses` for why the consolidator itself still may not run here.
+
+        Best-effort by construction: if the board cannot be read the memo falls back to the historical
+        behaviour (at most five rows for THIS memo), because refusing to register a research direction
+        because a fold hiccuped would silently drop the stage's only durable output.
+
+        The count can be stale by a race — an operator `add_hypothesis` may land between this fold and
+        the caller's appends. That is accepted and is why the cap is not a fence: it bounds a writer that
+        would otherwise add five rows per memo forever, and one extra row from a concurrent human is
+        exactly the case where the human's intent should win.
+        """
+        try:
+            board = fold(self.store.read_all())
+            open_statements = [c.seed_statement for c in board.open_research_beliefs()
+                               if is_pure_belief(c)]
+        except Exception:  # noqa: BLE001 — see the docstring: degrade to the pre-bound behaviour
+            open_statements = []
+        admitted = admit_research_beliefs(open_statements, directions)
+        dropped = len(directions) - len(admitted)
+        if dropped:
+            # Not silent: the operator reading the log sees a memo whose directions did not all
+            # become cards, and the memo body + `hint` row still carry every one of them.
+            _LOG.info("deep research: %d of %d recommended direction(s) not registered as beliefs "
+                      "(%d already open, cap %d) — the memo and its hint still carry them",
+                      dropped, len(directions), len(open_statements),
+                      DEEP_RESEARCH_OPEN_BELIEF_CAP)
+        return admitted
 
     @staticmethod
     def _card_enrichment_subject(state: RunState, node_id: int):
@@ -636,7 +754,29 @@ class ResearchCadenceMixin:
         non-Card conditional background registry. Card mode invokes this method only from the joined
         main-task cadence, where ownership/readiness changes are serialized before selection. The
         background loop is cancelled before that serial pass, so the two never race on
-        `_last_hyp_merge_n`."""
+        `_last_hyp_merge_n`.
+
+        THAT ASYMMETRY IS THE STRUCTURAL HALF of the duplicate-board defect and it was re-examined
+        rather than lifted (`runs/rubertlite-dr-unified-v6`: research ran concurrently four times, the
+        gate below was satisfied many times over, and `hypothesis_merged` fired zero times while the
+        main task sat in a 90-minute evaluation). Invariant #1's real question is not "does the fold
+        read it?" but "does any reader key on its POSITION?", and for this event the answer is yes,
+        twice:
+
+          * the FOLD itself does. `replay._on_hypothesis_merged` stamps `_event_index` onto the
+            receipt and `card_ledger._CardAliases.canon_at` resolves a control through only the merge
+            edges durable AT that index — so a merge spliced before rather than after a `card_dropped`
+            row decides whether the operator's drop lands on the alias or on the surviving canonical
+            card. `tests/test_hypothesis_merge.py` drives exactly that splice.
+          * `speculation._proposal_authority_seq` does. It excludes `DIAGNOSTIC_EVENTS` wholesale and
+            the two LLM-accounting rows; `hypothesis_merged` is FOLDED, so it is none of those. A
+            background merge landing in the window where `_prepare_node_idea` makes the Developer call
+            moves the fence and discards a proposal the run has already paid for.
+
+        So the answer to a board that fills faster than it drains is NOT to let this run in the
+        background. It is to stop the background writer overfilling it: `_admissible_beliefs` bounds
+        what one memo may register, which is a refusal to append and therefore moves no reader's
+        position at all."""
         if not self._track_hypotheses:
             return state
         client = self._reflect_client()
@@ -646,16 +786,11 @@ class ResearchCadenceMixin:
         # (verdict 'open' == the old status 'open'). Native work-item cards may share one belief, but are
         # excluded below because this cadence merges near-duplicate
         # research BELIEFS; collapsing a receipt-backed WORK ITEM's action identity is not its job.
-        # Exclude native work-item cards by IDENTITY, not readiness (peer review): `selection_ready` is
-        # transient (a native card is not-ready while stale/incomplete/in-flight/terminal), so the old
-        # `not selection_ready` filter admitted a native card whenever it was blocked and could merge
-        # distinct action identities. A native card OWNS an action (`selection_provenance.action_source`
-        # != "none", i.e. action_owner_count > 0 — the model enforces the equivalence); a pure belief
-        # owns none. Keep only the pure beliefs. Merges emit `hypothesis_merged` with card ids, which
-        # `_derive_cards` applies unchanged.
-        def _pure_belief(card) -> bool:
-            provenance = getattr(card, "selection_provenance", None)
-            return getattr(provenance, "action_source", "none") == "none"
+        # Exclude native work-item cards by IDENTITY, not readiness — the rule, and what a readiness
+        # filter cost, are now stated once at module level (`is_pure_belief`), because the append-site
+        # bound `_admissible_beliefs` has to mean the SAME board this cadence merges. Merges emit
+        # `hypothesis_merged` with card ids, which `_derive_cards` applies unchanged.
+        _pure_belief = is_pure_belief
         open_hyps = [c for c in state.open_research_cards()
                      if not c.selection_ready and _pure_belief(c)]
         n = len(open_hyps)

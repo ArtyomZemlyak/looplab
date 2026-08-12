@@ -99,7 +99,7 @@ _UNTRUSTED_RESEARCH_DATA_RULE = (
 
 
 def state_brief(state: RunState, max_nodes: int = 40) -> str:
-    """Coverage-aware bounded view for deep research.
+    """Coverage-aware bounded view for deep research, plus THE BOARD THIS STAGE ITSELF FILLS.
 
     The prompt always receives the current champion, then samples early seeds, eligible top metrics,
     representative genuine failure classes, and the most recent active work. Tombstoned/aborted rows
@@ -107,6 +107,20 @@ def state_brief(state: RunState, max_nodes: int = 40) -> str:
     evidence. Both the row count and the aggregate rendered text are hard-bounded. The omission
     receipt is computed from the rows that actually fit, so the model cannot mistake either bound
     for a complete transcript.
+
+    The board block (`roles.board_prompt_lines`) is the memo half of the fix the PROPOSAL prompt got
+    when a retry was found minting a twin card. Every `recommended_directions` entry this stage emits
+    is registered as an open belief on that board (`research_cadence._record_deep_research`), and
+    until now the next memo could not see one of them: measured on `runs/rubertlite-dr-unified-v6`,
+    four memos produced 18 `hypothesis_added` events for five distinct ideas — three of them
+    re-wordings of the card that was running while they were written. The recovered user turn held
+    goal, node counts, a coverage receipt and `experiments:`, and no board at all.
+
+    Budget: the board rows go in the PREFIX, i.e. inside the same `_STATE_BRIEF_MAX_CHARS` trial the
+    experiment rows are fitted against, so they cost experiment rows rather than the bound. That
+    order is deliberate — an experiment row omitted from this brief is disclosed by the coverage
+    receipt below, while a board row omitted is silently re-proposed as a new belief. The block's own
+    ceiling is its two selectors' (5 whole rows / 20k chars untested + 5 / 8k attempted).
     """
     limit = min(max(0, int(max_nodes)), _STATE_BRIEF_MAX_NODES)
     all_nodes = sorted(state.nodes.values(), key=lambda node: node.id)
@@ -260,6 +274,34 @@ def state_brief(state: RunState, max_nodes: int = 40) -> str:
         prefix_lines.append(
             f"pre-dispatch audit: {len(predispatch_discards)} discarded before evaluation "
             f"(not experimental evidence); reasons: {reason_summary}.")
+    # The open belief board + the questions that already have an experiment, in the proposal
+    # prompt's exact vocabulary. `for_proposal=False`: this stage answers with a memo, which has no
+    # `card_id` field to return a claim in — the same reason crash triage and the macro-action
+    # chooser read the rows without the claim contract.
+    #
+    # DEFERRED IMPORT, and not for a cycle: `roles` is a heavy module and `state_brief` is also
+    # called by tests and tools that hold no roles. Resolving `roles.board_prompt_lines` through the
+    # module object at call time also keeps it a live patch seam.
+    # Seed statements ride VERBATIM (`json.dumps`), unredacted, exactly as the proposal prompt sends
+    # them to the same provider — one text, one trust class, covered by the immutable untrusted-data
+    # rule in the system turn. Bounding them a second way here would make the two boards disagree
+    # about what a card says, which is the confusion this shared block exists to end.
+    from looplab.agents import roles as _roles
+    board_lines = _roles.board_prompt_lines(state, for_proposal=False)
+    if board_lines:
+        prefix_lines.extend(board_lines)
+        # The promise here is the engine's, and it is kept by `research_cadence.admit_research_beliefs`
+        # — a direction that restates an open belief is DROPPED at the append site, and so is one that
+        # would push the board past its cap. Nothing offers to retire an existing belief on the
+        # model's say-so, so nothing here says it will: the proposal prompt's neighbouring block
+        # carries a comment about exactly what an unimplemented "the engine decides" promise cost.
+        prefix_lines.append(
+            "Your `recommended_directions` are registered as OPEN BELIEFS on that same board. "
+            "Propose only directions that are genuinely NEW — a re-worded restatement of a row "
+            "above is not a new experiment, and the engine drops a direction that duplicates an "
+            "open belief or that would push the open board past its cap. If a row above is wrong, "
+            "superseded, or already answered, say so in `findings` and name its CARD_ID instead of "
+            "restating it as a direction; retiring a belief is the operator's call, not the memo's.")
 
     def experiment_line(n) -> str:
         if n.status is NodeStatus.failed:
